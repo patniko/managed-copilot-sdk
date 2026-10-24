@@ -5,7 +5,11 @@ specialized Copilot agents on **Managed Copilot**. Each station is an environmen
 its own custom agent, skills, isolation, and network policy. The app itself is ordinary Node code built on the stock
 `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-<!-- screenshots: floor (hero), station panel, artifacts, deliverable -->
+![The factory floor mid-run: two builders in their own sandboxes while a second model reviews the first finished task](docs/screenshots/floor-building.png)
+
+*A live run of the featured work order: the planner split it into two tasks; one builder is still working in its
+sandbox while the other's work is already under review by a different model. The panel streams the selected
+station's activity: skills, commands, file edits, and test runs.*
 
 ```mermaid
 flowchart LR
@@ -39,6 +43,21 @@ Managed Copilot features in play (see the [developer experience spec](../../docs
 - **Coming back later** (section 11). Work orders survive restarts; in-flight sandbox turns are resumed with `managed.resumeSession`.
 - **Open in Copilot CLI** (section 14). Any station's live session can be attached from a terminal.
 
+### A tour
+
+| | |
+| --- | --- |
+| ![Review station sending work back with a blocker finding](docs/screenshots/review.png) | ![Deliverable: release notes, tests, and the bundle](docs/screenshots/deliverable.png) |
+| **Review sends work back.** The reviewer runs on another model family and returns findings with file and line; the builder fixes them in the same sandbox, and the next round is approved. | **The deliverable.** The release station integrates the tasks, adds integration tests and a README, and publishes the bundle, a patch, a test report, and release notes. |
+| ![Artifacts: the release patch in the diff viewer](docs/screenshots/artifacts-patch.png) | ![Home: templates and the new work order form](docs/screenshots/home.png) |
+| **Every artifact, every version.** Each station's published files, per round, with code, diff, Markdown, and test report viewers. | **Start from a template** or describe your own work order; history survives restarts. |
+
+<img src="docs/screenshots/mobile-floor.png" alt="The floor on a phone-sized screen" width="260" align="right">
+
+The floor adapts down to phone widths: stations stack top to bottom and the work order list becomes a drawer.
+
+<br clear="right">
+
 ## Run it
 
 Everything runs locally against real models. You need the repository's prerequisites (see [AGENTS.md](../../AGENTS.md))
@@ -51,8 +70,8 @@ aspire run          # the platform, sandboxes, and the factory; open the "softwa
 ```
 
 The factory floor opens at <http://localhost:7480>. Pick the **CSV ⇄ JSON toolkit** template and press
-**Start work order**: two builders work side by side, the reviewer usually sends one of them back once, and the release
-lands in about eight minutes.
+**Start work order**: two builders work side by side, the reviewer usually sends work back once, and the release
+lands in four to nine minutes. Measured live runs: 8m 32s (38 tests), 4m 27s (44 tests), and 3m 55s (51 tests).
 
 ### Scripted happy path
 
