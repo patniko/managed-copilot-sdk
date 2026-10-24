@@ -160,6 +160,9 @@ denies configuration RPCs it does not understand.
      Copilot API hosts (the identity's `endpoints.api` plus `api[.individual|.business|.enterprise].githubcopilot.com`):
      it swaps the placeholder for the owner's current token (`resolveToken`) and streams the response back with
      `llmInference.httpResponseStart`/`httpResponseChunk`. Anything else is refused.
+  5. When GitHub rejects that token (HTTP 401 from the Copilot API, including a refused WebSocket upgrade, or from
+     `copilot_internal/user`), the gateway calls core's `auth.invalidate(token)` and drops the token's cached Copilot
+     identity, so the next `resolveToken` verifies the token with GitHub again rather than reusing it.
 
   Evidence (2026-10-23, Windows ARM64, both the SDK's `copilot-runtime` and the `@github/copilot` CLI binary, 1.0.103,
   with all direct network egress blocked): session creation without a token succeeded, `GET <endpoints.api>/models` and
@@ -236,9 +239,19 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   derived image layer at environment preparation, never installed per session.
 - **Images.** The gateway builds the base image from `platform/sandbox/image/Dockerfile` (content-hash tag
   `managed-copilot-sandbox:<hash>`, also tagged `ghcr.io/patniko/managed-copilot-sandbox:0.1.0` for customer `FROM`
-  lines) with the operator's npm registry and pip index baked in as session defaults. Environment images are built
-  FROM it, must carry the base label, and are pinned by image ID per sandbox, so a resume never changes the toolchain.
-  `warm > 0` fails gateway start: this backend cannot keep warm sandboxes safely.
+  lines) with the operator's npm registry and pip index baked in as session defaults. Those URLs reach every
+  workload's npm and pip configuration and are recorded as build arguments in the image history, so they must not
+  carry credentials: user info (`user:password@`, `token@`), extra slashes before the host (URL parsers skip them,
+  so `https:///user:token@host/` still carries user info), query strings, fragments, and spaces, backslashes, or
+  control characters (which could smuggle in a configuration line such as an `_authToken`) are refused, both by the
+  gateway before any build (a clear `capability_unavailable` naming the setting, and a startup warning when an
+  explicit setting is refused) and by the image's own guard for builds outside the gateway; a test runs the guard on
+  every URL the gateway accepts. Credentials hidden in a
+  URL's path cannot be detected and must not be used; error messages show only the scheme and host. Authenticated
+  registries are not supported yet; they need build secrets for image preparation and vault-scoped credentials for
+  session-time installs. Environment images are built FROM the base, must carry the base label, and are pinned by
+  image ID per sandbox, so a resume never changes the toolchain. `warm > 0` fails gateway start: this backend cannot
+  keep warm sandboxes safely.
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
   tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
   no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
@@ -273,10 +286,19 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   storage under `<dataDir>/artifacts/<sessionId>/`, and records versions, digests, and a per-turn manifest. Rejections,
   cancelled turns, and turns that ended in errors are recorded as `failed` publications, never empty successes.
   Publications run one at a time per session. If a later root turn started before a turn's outputs manifest was
-  captured, that publication fails ("cannot be attributed to this turn") rather than label the later turn's bytes;
-  the current outputs publish when the later turn completes. Publications still pending at gateway start are failed
-  with an explicit reason. `artifact.published` (through core's events) lists only new versions; a turn that changed
-  nothing under `outputs/` emits no event.
+  captured, that publication fails ("cannot be attributed to this turn", logged at info since nothing is lost) rather
+  than label the later turn's bytes; the current outputs publish when the later turn completes, so callers that need
+  each turn's outputs wait for its publication before sending the next prompt. Publications still pending at gateway
+  start are failed with an explicit reason. A publication interrupted by the session's deletion is recorded as
+  "deleted" (logged at info), wherever the race lands: the session counts as deleted once core marks it `deleting`, a
+  delete of its sandbox is queued, its sandbox is `deleting`/`deleted`, or the deletion removed the turn's records; a
+  failure is classified only after sandbox operations already queued for the session (such as the delete) have run.
+  Gateway shutdown lets publications under way finish (up to 10 s) before it stops sandboxes. Only a publication
+  whose failure surfaced once shutdown had started stopping sandboxes is recorded as interrupted by the shutdown (at
+  info; judged when the failure surfaces, not after waiting out queued sandbox work); one that fails during the drain,
+  while compute is still up, or for reasons of its own at any time (rejected or changing files) keeps its reason and
+  warns. `artifact.published` (through core's events) lists only new
+  versions; a turn that changed nothing under `outputs/` emits no event.
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the
   placeholder); turn attribution relies on the runtime's `user.message` reaching the gateway before the next turn's
@@ -806,8 +828,8 @@ sequenceDiagram
 | `MANAGED_COPILOT_MCP_ADAPTER_URL` | `http://127.0.0.1:<port>` | Base URL the shared runtime uses for the MCP adapter |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix and `managed-copilot.instance` label for Docker networks, containers, and volumes (use a unique value per parallel gateway) |
-| `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs |
-| `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images |
+| `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs; must not contain credentials, a query, a fragment, or spaces, backslashes, or control characters (refused) |
+| `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images (empty: pip's default index); same restrictions as the npm registry |
 | `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `platform/sandbox` | Use a prebuilt base image instead (must carry the base label) |
 | `MANAGED_COPILOT_SANDBOX_PROVIDER` | `docker` | Sandbox backend: `docker` (local) or `azure` |
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
