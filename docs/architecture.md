@@ -62,6 +62,10 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
   (the experimental public request-handler hook), `sessionFs.*`, `workflow.*`, `tasks.cancel`, and `host.*` (AHP).
 - AHP: the runtime exposes `host.start`, `host.publishSession`, `host.unpublishSession`, `host.setSessionCreationPolicy`;
   the SDK exposes `AhpHost`. Copilot CLI attaches with `copilot --ahp <url>` (interactive only).
+- `systemMessage` is per-resume configuration, not session state (verified live on 1.0.103): a runtime that resumes a
+  session from copied session state without one uses its default prompt, although earlier prompts remain in history
+  as `system.message` events; an explicit `systemMessage` on `session.resume` applies. So shared admission sends its locked
+  prompt on every resume, and a promoted session's destination only gets what `open()` sends.
 
 ## Components
 
