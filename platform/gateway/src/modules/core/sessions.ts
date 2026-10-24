@@ -98,6 +98,8 @@ interface ToolsRegistration {
   before?: { readonly tools: Set<string>; readonly declarations: Record<string, unknown>[] };
   set?: Record<string, unknown>[];
   change?: InventoryChange;
+  /** The runtime it was last written to. */
+  upstream?: RuntimeUpstream;
   /** The runtime applied it and the inventory stored it. */
   stored: boolean;
 }
@@ -156,10 +158,10 @@ interface LiveSession {
   /** Owner principals present without a `/v1/connect` attachment (an attached Copilot CLI). */
   readonly presences: Map<symbol, Principal>;
   /**
-   * Registrations sent to the runtime and not stored yet: they count already, so a concurrent registration never
-   * undoes them upstream (and is dropped again if they fail).
+   * The session's registration changes (client resumes, tools updates) run one at a time: each starts from the one
+   * committed before it, so a change that fails never leaks into another's registration upstream.
    */
-  readonly registering: Set<InventoryChange>;
+  registrations: Promise<void>;
   /** Ensures events of one session are processed in order even when routing awaits the actions hook. */
   queue: Promise<void>;
   /** In-flight create, resume, or restore; concurrent callers wait for it. */
@@ -1031,6 +1033,12 @@ export class SessionManager implements SessionsService {
     const live = this.#liveFor(sessionId);
     // Taken before admission, which rewrites nested values (remote MCP servers point at the gateway adapter).
     const requested = requestedParams(params);
+    return this.#registering(live, () => this.#resumeRegistered(peer, params, record, live, requested));
+  }
+
+  /** A client resume, as the session's only registration change in progress. */
+  async #resumeRegistered(peer: ClientPeer, params: Record<string, unknown>, record: SessionRecord, live: LiveSession, requested: Record<string, unknown>): Promise<{ result: unknown; after: () => Promise<void> }> {
+    const sessionId = record.id;
     for (;;) {
       // An open placement cutover decides where the session lives next, and so which admission rules apply.
       if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
@@ -1096,29 +1104,26 @@ export class SessionManager implements SessionsService {
       const change = present ? this.#inventoryChange(live, peer.id, previous, registrationOf(prepared, this.#options.platformTools)) : undefined;
       if (present) this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared, change);
-      if (change) live.registering.add(change);
+      let result: unknown;
       try {
-        let result: unknown;
-        try {
-          result = await this.#resumeUpstream(live, upstream, forwarded);
-          await this.#opened(live, upstream, optionsPatch);
-        } catch (error) {
-          this.#unattach(live, peer.id, previous);
-          if (live.moves !== moves) return MOVED;
-          throw error;
-        }
-        if (live.resumeExtras === extras) live.resumeExtras = undefined;
-        if (live.moves !== moves) {
-          // Fenced during the resume: the client attaches where the session lives after the cutover, with what it had.
-          this.#unattach(live, peer.id, previous);
-          return MOVED;
-        }
-        if (change) this.#persistInventory(live, peer.id, change);
-        live.ready = true;
-        return { result };
-      } finally {
-        if (change) live.registering.delete(change);
+        result = await this.#resumeUpstream(live, upstream, forwarded);
+        await this.#opened(live, upstream, optionsPatch);
+      } catch (error) {
+        this.#unattach(live, peer.id, previous);
+        if (live.moves !== moves) return MOVED;
+        // The runtime may have applied what this resume registered before failing.
+        this.#reconcile(live, upstream);
+        throw error;
       }
+      if (live.resumeExtras === extras) live.resumeExtras = undefined;
+      if (live.moves !== moves) {
+        // Fenced during the resume: the client attaches where the session lives after the cutover, with what it had.
+        this.#unattach(live, peer.id, previous);
+        return MOVED;
+      }
+      if (change) this.#persistInventory(live, peer.id, change);
+      live.ready = true;
+      return { result };
     };
     await live.residency?.catch(() => undefined);
     if (live.moves !== moves) return MOVED;
@@ -1136,15 +1141,22 @@ export class SessionManager implements SessionsService {
 
   forwardForClient(peer: ClientPeer, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     const registration: ToolsRegistration = { stored: false };
-    return this.#forwardForClient(peer, method, params, signal, registration).finally(() => {
-      const { live, attachment, before, change } = registration;
-      if (live && change) live.registering.delete(change);
-      // A `tools.set` that did not apply leaves the client's registration as it was (unless it registered again since).
-      if (!registration.stored && attachment && before && attachment.declarations === registration.set) {
-        attachment.tools = before.tools;
-        attachment.declarations = before.declarations;
-      }
-    });
+    const forward = () =>
+      this.#forwardForClient(peer, method, params, signal, registration).finally(() => {
+        const { live, attachment, before, change, upstream } = registration;
+        if (registration.stored || !live || !change) return;
+        // A `tools.set` that did not apply leaves the client's registration as it was (unless it registered again
+        // since), and the runtime, which may have applied it, gets the registrations in effect again.
+        if (attachment && before && attachment.declarations === registration.set) {
+          attachment.tools = before.tools;
+          attachment.declarations = before.declarations;
+        }
+        if (upstream) this.#reconcile(live, upstream);
+      });
+    // A tools update is a registration change: one at a time per session, like client resumes.
+    const sessionId = params["sessionId"];
+    const live = method === "session.tools.set" && typeof sessionId === "string" ? this.#live.get(sessionId) : undefined;
+    return live ? this.#registering(live, forward) : forward();
   }
 
   async #forwardForClient(peer: ClientPeer, method: string, params: Record<string, unknown>, signal: AbortSignal, registration: ToolsRegistration): Promise<unknown> {
@@ -1188,7 +1200,6 @@ export class SessionManager implements SessionsService {
         case "session.tools.set": {
           const admitted = admitToolsSet(params, context());
           const attachment = live.attachments.get(peer.id);
-          if (registration.change) live.registering.delete(registration.change);
           registration.change = undefined;
           if (attachment) {
             // What it withdraws is decided against the client's registration before this call (also on a retry).
@@ -1201,7 +1212,6 @@ export class SessionManager implements SessionsService {
             registration.set = declarations;
             attachment.tools = new Set(admitted.names);
             attachment.declarations = declarations;
-            live.registering.add(registration.change);
           }
           const change = registration.change;
           build = () => ({ ...admitted.params, tools: [...this.#registrations(live, change).tools, ...this.#platformToolDeclarations(live, placement)], sessionId });
@@ -1224,9 +1234,10 @@ export class SessionManager implements SessionsService {
       }
       let result: unknown;
       try {
-        result = await this.#onOwner(live, placement, (upstream) =>
-          method === "session.sendAndWait" ? this.#sendAndWait(live, upstream, forwarded, signal, placement) : upstream.request(method, build ? build() : forwarded, { signal }),
-        );
+        result = await this.#onOwner(live, placement, (upstream) => {
+          if (build) registration.upstream = upstream;
+          return method === "session.sendAndWait" ? this.#sendAndWait(live, upstream, forwarded, signal, placement) : upstream.request(method, build ? build() : forwarded, { signal });
+        });
       } catch (error) {
         // A cutover moved the session after this call was admitted: admit it again where the session lives now.
         if (error === MOVED) continue;
@@ -1692,7 +1703,7 @@ export class SessionManager implements SessionsService {
       attachments: new Map(),
       creator: undefined,
       presences: new Map(),
-      registering: new Set(),
+      registrations: Promise.resolve(),
       queue: Promise.resolve(),
       residency: undefined,
       deleting: false,
@@ -1727,6 +1738,35 @@ export class SessionManager implements SessionsService {
     const record = this.get(sessionId);
     if (!record || record.ownerId !== peer.principal.accountId || record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
     throw new ManagedCopilotError("invalid_request", `Resume session ${sessionId} on this client before calling ${method}`);
+  }
+
+  /**
+   * Runs one registration change of a session (a client resume, a tools update) at a time. Taken before residency
+   * (`#serialize`), never inside it, so it cannot deadlock with a restore.
+   */
+  async #registering<T>(live: LiveSession, work: () => Promise<T>): Promise<T> {
+    const previous = live.registrations;
+    let release!: () => void;
+    live.registrations = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await previous;
+      return await work();
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * After a registration that did not commit: the runtime may have applied it, so the session is resumed there again
+   * with the registrations in effect, and nothing else runs on it until that finishes. A restore or cutover already
+   * under way applies them anyway.
+   */
+  #reconcile(live: LiveSession, upstream: RuntimeUpstream): void {
+    if (live.upstream !== upstream || upstream.closed || live.deleting || live.cutover || live.residency) return;
+    live.ready = false;
+    this.#restore(live, upstream).catch((error: unknown) => this.#log.warn("Resuming a session again after a failed registration failed; its next request retries", { sessionId: live.id, error: (error as Error).message }));
   }
 
   /**
@@ -1779,10 +1819,17 @@ export class SessionManager implements SessionsService {
     return residency.then((upstream) => (live.moves !== moves || live.cutover?.fenced ? this.#resident(live) : upstream));
   }
 
-  #restore(live: LiveSession): Promise<RuntimeUpstream> {
+  /** Resumes the session upstream with its stored configuration and registrations (on `existing`, if still its runtime). */
+  #restore(live: LiveSession, existing?: RuntimeUpstream): Promise<RuntimeUpstream> {
     const moves = live.moves;
     return this.#serialize(live, async () => {
-      const upstream = await this.#connect(live, moves);
+      let upstream: RuntimeUpstream;
+      if (existing && live.upstream === existing && !existing.closed) {
+        live.ready = false;
+        upstream = existing;
+      } else {
+        upstream = await this.#connect(live, moves);
+      }
       if (live.moves !== moves) return upstream;
       const admitted = this.#ledger.admitted(live.id);
       if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
@@ -1932,7 +1979,7 @@ export class SessionManager implements SessionsService {
     return providers.length === 1 ? providers[0] : undefined;
   }
 
-  /** Whether the session has hooks registered (now, on their way to the runtime, or by a client that is away). */
+  /** Whether the session has hooks registered (by a connected client, or by one that is away). */
   #hooksRequired(live: LiveSession): boolean {
     return this.#inventory(live).flags["hooks"] === true || [...live.attachments.values()].some((attachment) => attachment.hooks && !attachment.peer.closed);
   }
@@ -2080,12 +2127,10 @@ export class SessionManager implements SessionsService {
     return { tools: [...byName.values()], flags };
   }
 
-  /** The session's callback inventory as the runtime has it: stored, plus registrations on their way, plus `pending`. */
+  /** The session's callback inventory: stored, plus `pending` (a registration being made now). */
   #inventory(live: LiveSession, pending?: InventoryChange): CallbackInventory {
     const stored = this.#ledger.admitted(live.id);
-    let inventory: CallbackInventory | undefined = stored ? inventoryOf(stored) : undefined;
-    for (const change of live.registering) if (change !== pending) inventory = applyInventory(inventory, change);
-    return applyInventory(inventory, pending);
+    return applyInventory(stored ? inventoryOf(stored) : undefined, pending);
   }
 
   /** Upstream create/resume/tools params: the aggregate registrations plus the environment's platform tools. */
@@ -2097,7 +2142,7 @@ export class SessionManager implements SessionsService {
   /**
    * What a client's registration changes in the inventory: it adds what the client registers, and withdraws only what
    * this connection itself had registered before and no other attached client registers. What others still register
-   * is handed over to them (when the registration in effect is this connection's), so the last of them can withdraw it.
+   * is handed over to them once the change is stored (registration changes of a session run one at a time).
    */
   #inventoryChange(live: LiveSession, peerId: string, previous: Attachment | undefined, next: { readonly tools: readonly Record<string, unknown>[]; readonly flags: Readonly<Record<string, unknown>> }, scope: "all" | "tools" = "all"): InventoryChange {
     const others = [...live.attachments.values()].filter((attachment) => attachment.peer.id !== peerId && !attachment.peer.closed);
@@ -2117,16 +2162,6 @@ export class SessionManager implements SessionsService {
         return revision === undefined ? [] : [{ key, revision }];
       });
     const handover = { tools: toolRevisions(withdrawnTools.filter(otherTool)), flags: flagRevisions(withdrawnFlags.filter(otherFlag)) };
-    // Handed over now, not once the change is stored: a concurrent withdrawal by one of those clients must see it.
-    const effective = this.#inventory(live).revisions;
-    for (const { name, revision } of handover.tools) {
-      if (effective?.tools[name] !== revision) continue;
-      for (const other of others) if (other.declarations.some((tool) => tool["name"] === name)) other.registered.tools[name] = revision;
-    }
-    for (const { key, revision } of handover.flags) {
-      if (effective?.flags[key] !== revision) continue;
-      for (const other of others) if (other.flags[key] === true) other.registered.flags[key] = revision;
-    }
     return {
       tools: next.tools,
       flags: scope === "all" ? next.flags : {},
@@ -2501,6 +2536,9 @@ export class SessionManager implements SessionsService {
       // The gateway's own verification decides too: a token GitHub rejected since (an invalidated 401) is never used.
       const verified = await auth.authenticate(principal.token, { background: true });
       if (principal.accountId !== live.ownerId || verified.accountId !== live.ownerId) throw new ManagedCopilotError("authentication_required", "The stored credential belongs to another account");
+      // The sign-in must still be the owner's current one once that finishes (a logout meanwhile ends it).
+      const current = await credentials.principalFor(live.ownerId);
+      if (current.token !== principal.token) throw new ManagedCopilotError("authentication_required", "The owner's background sign-in changed while it was being checked");
       if (live.deleting) throw new ManagedCopilotError("not_found", `Session ${live.id} is being deleted`, { sessionId: live.id });
       const expiresAt = auth.tokenExpiration(principal.token);
       return { token: principal.token, ...(expiresAt !== undefined ? { expiresAt } : {}) };

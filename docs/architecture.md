@@ -650,9 +650,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   the owner, re-verified: one attached to the session, or one present on it (`sessions.presence(id, principal)`, held
   by an attached Copilot CLI while it attaches and by service `create`/`send` while they run). Without one, only the
   owner's current background sign-in (`credentials.principalFor`, then re-verified by `auth` too, so a token GitHub
-  rejected since is never used) serves the session, never a token remembered from an earlier connection; otherwise the
-  answer is `cancelled` (fail closed). A registration answers only while its session is on shared placement and not
-  being deleted. Answers expire 300 s past the runtime's one-hour
+  rejected since is never used, and still the owner's sign-in once that finishes) serves the session, never a token
+  remembered from an earlier connection; otherwise the answer is `cancelled` (fail closed). A registration answers only
+  while its session is on shared placement and not being deleted. Answers expire 300 s past the runtime's one-hour
   refresh threshold (or with the token): the runtime asks again only when a token is within an hour of expiry, and a
   cancelled refresh fails its next model call rather than reusing the old token (verified on 1.0.103), so a departed
   client's token stops serving the session within five minutes. `auth.liveCredential` only remembers tokens attached
@@ -749,9 +749,11 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   flag records the revision it was registered at, so a withdrawal never removes what another client registered since.
   A withdrawal of something other attached clients still register passes the stored registration to them, so the last
   of them can withdraw it. Every handler flag is sent explicitly (`false` once nobody registers it), so a withdrawn
-  handler is turned off on the runtime. A registration on its way to the runtime counts for concurrent ones (they never
-  undo it upstream); one that fails leaves the client's registration as it was. A client that disconnects while its
-  create or resume is in flight is never attached (what it registered stays in the inventory).
+  handler is turned off on the runtime. A session's registration changes (client resumes, tools updates) run one at a
+  time, each from the last one committed; one that fails leaves the client's registration as it was, and the session is
+  resumed again with the registrations in effect (the runtime may have applied the failed one) before anything else
+  runs on it. A client that disconnects while its create or resume is in flight is never attached (what it registered
+  stays in the inventory).
   Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, and user-input
   requests go to the newest connected client that registered that handler, else fail with
   `background_callback_unsupported` (no fabricated answer).
@@ -799,11 +801,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - **Known limitations** (each fails closed): a registration's owner is the client that registered it last, so when the
   clients that registered the same tool or handler include one that is away, a withdrawal by the newest registrant also
   removes it for the away client until that client resumes (the session then lacks the tool rather than calling an
-  unanswered one). A registration that fails upstream after a concurrent registration already carried it leaves the
-  runtime without it until the session's next registration or restore (the inventory still has it). Hooks other than
-  `preToolUse`, `userPromptSubmitted`, and `postToolUse` have no closing answer on the stock wire; turns that would
-  need them are refused while no handler is connected, but a turn already running when the handler leaves runs them
-  without it.
+  unanswered one). Hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` have no closing answer on
+  the stock wire; turns that would need them are refused while no handler is connected, but a turn already running
+  when the handler leaves runs them without it.
 
 ## Devloop: AppHost, CLI, and Copilot CLI attach
 

@@ -328,9 +328,9 @@ describe("callback obligations and runtime credentials", () => {
     const withdrawing = first.request("session.resume", { sessionId, requestPermission: true });
     await hold.held;
     const second = await connect((method) => (method === "hooks.invoke" ? { output: {} } : {}));
-    await second.request("session.resume", { sessionId, hooks: true, requestPermission: true });
+    const registering = second.request("session.resume", { sessionId, hooks: true, requestPermission: true });
     hold.release();
-    await withdrawing;
+    await Promise.all([withdrawing, registering]);
     const stored = JSON.parse((gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string }).admitted) as { callbacks: { flags: Record<string, boolean> } };
     expect(stored.callbacks.flags["hooks"]).toBe(true);
     // The second client's hooks stay required after it leaves.
@@ -575,7 +575,7 @@ describe("callback obligations and runtime credentials", () => {
     expect(sent.map((tool) => tool.name)).not.toContain("lookup_order");
   });
 
-  it("sends each registration with those still on their way, so a concurrent one never undoes a withdrawal", async () => {
+  it("runs a session's registration changes one at a time, each from the last one committed", async () => {
     const first = await connect();
     const sessionId = crypto.randomUUID();
     await first.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true });
@@ -583,14 +583,120 @@ describe("callback obligations and runtime credentials", () => {
     const hold = runtime.holdNext("session.tools.set", sessionId);
     const withdrawing = first.request("session.tools.set", { sessionId, tools: [] });
     await hold.held;
+    const resumes = () => runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).length;
+    const before = resumes();
     const second = await connect();
-    await second.request("session.resume", { sessionId, tools: [{ name: "ship_order" }], requestPermission: true });
+    const joining = second.request("session.resume", { sessionId, tools: [{ name: "ship_order" }], requestPermission: true });
+    await sleep(50);
+    expect(resumes()).toBe(before);
+    hold.release();
+    await withdrawing;
+    await joining;
     const names = (lastResume(sessionId)!["tools"] as { name: string }[]).map((tool) => tool.name);
     expect(names).toContain("ship_order");
     expect(names).not.toContain("lookup_order");
-    hold.release();
-    await withdrawing;
     expect(storedCallbacks(sessionId).tools.map((tool) => tool.name)).toEqual(["ship_order"]);
+  });
+
+  it("keeps a session's hooks on the runtime when their withdrawal fails while another client resumes", async () => {
+    const guard = await connect((method) => (method === "hooks.invoke" ? { output: { permissionDecision: "deny", permissionDecisionReason: "guarded" } } : {}));
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const resumes = () => runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId);
+    const before = resumes().length;
+    // The guard's withdrawal fails at the runtime; another client resumes meanwhile.
+    runtime.failNext("session.resume", sessionId);
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const withdrawing = guard.request("session.resume", { sessionId, requestPermission: true });
+    withdrawing.catch(() => undefined);
+    await hold.held;
+    const other = await connect();
+    const joining = other.request("session.resume", { sessionId, requestPermission: true });
+    await sleep(50);
+    expect(resumes().length).toBe(before + 1);
+    hold.release();
+    await expect(withdrawing).rejects.toBeDefined();
+    await joining;
+    // Everything sent after the failed withdrawal keeps the hooks the session still has, and the guard still answers.
+    const after = resumes().slice(before + 1);
+    expect(after.length).toBeGreaterThan(0);
+    for (const call of after) expect(call.params).toMatchObject({ hooks: true });
+    await expect(invokeHook(sessionId, "preToolUse")).resolves.toEqual({ output: { permissionDecision: "deny", permissionDecisionReason: "guarded" } });
+  });
+
+  it("rolls a failed tools update back to the registration in effect, even with another update behind it", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "original" }], requestPermission: true });
+    runtime.failNext("session.tools.set", sessionId);
+    const hold = runtime.holdNext("session.tools.set", sessionId);
+    const first = client.request("session.tools.set", { sessionId, tools: [{ name: "failed_first" }] });
+    first.catch(() => undefined);
+    await hold.held;
+    runtime.failNext("session.tools.set", sessionId);
+    const second = client.request("session.tools.set", { sessionId, tools: [{ name: "failed_second" }] });
+    second.catch(() => undefined);
+    hold.release();
+    await expect(first).rejects.toBeDefined();
+    await expect(second).rejects.toBeDefined();
+    // Another client's resume carries what the first client last registered successfully.
+    const other = await connect();
+    await other.request("session.resume", { sessionId, requestPermission: true });
+    const names = (lastResume(sessionId)!["tools"] as { name: string }[]).map((tool) => tool.name);
+    expect(names).toContain("original");
+    expect(names).not.toContain("failed_first");
+    expect(names).not.toContain("failed_second");
+  });
+
+  it("gives no token for a background sign-in that ends while it is being checked", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    const registrationId = runtime.sessions.get(sessionId)!.createParams["gitHubTokenProviderRegistrationId"] as string;
+    await client.close();
+    await waitUntil(() => sessions().attached(sessionId).length === 0);
+    const credentials = gateway.gateway.app.service("credentials");
+    credentials.store(alice);
+    const auth = gateway.gateway.app.service("auth") as unknown as { authenticate: (token: string, options?: { background?: boolean }) => Promise<Principal> };
+    const original = auth.authenticate;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let checking = false;
+    auth.authenticate = async (token: string, options?: { background?: boolean }) => {
+      if (options?.background) {
+        checking = true;
+        await gate;
+      }
+      return original.call(auth, token, options);
+    };
+    try {
+      const answer = runtime.requestOn(upstreamOf(sessionId), "gitHubToken.getToken", { registrationId, sessionId, host: "https://github.com", reason: "refresh" });
+      await waitUntil(() => checking);
+      credentials.revoke(alice);
+      release();
+      await expect(answer).resolves.toEqual({ kind: "cancelled" });
+    } finally {
+      delete (auth as { authenticate?: unknown }).authenticate;
+    }
+  });
+
+  it("lets clients withdraw a registration they share in either order, even concurrently", async () => {
+    const a = await connect();
+    const sessionId = crypto.randomUUID();
+    await a.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true, requestUserInput: true });
+    const b = await connect();
+    await b.request("session.resume", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true, requestUserInput: true });
+    // B, whose registration is in effect, withdraws; A withdraws while that is on its way.
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const first = b.request("session.resume", { sessionId, tools: [], requestPermission: true });
+    await hold.held;
+    const second = a.request("session.resume", { sessionId, tools: [], requestPermission: true });
+    hold.release();
+    await Promise.all([first, second]);
+    const stored = storedCallbacks(sessionId);
+    expect(stored.tools.map((tool) => tool.name)).not.toContain("lookup_order");
+    expect(stored.flags["requestUserInput"]).toBeUndefined();
+    expect(lastResume(sessionId)).toMatchObject({ requestUserInput: false });
   });
 
   it("lets the last client that registered a tool or handler withdraw it", async () => {
@@ -620,9 +726,9 @@ describe("callback obligations and runtime credentials", () => {
     const hold = runtime.holdNext("session.tools.set", sessionId);
     const first = a.request("session.tools.set", { sessionId, tools: [] });
     await hold.held;
-    await b.request("session.tools.set", { sessionId, tools: [] });
+    const second = b.request("session.tools.set", { sessionId, tools: [] });
     hold.release();
-    await first;
+    await Promise.all([first, second]);
     expect(storedCallbacks(sessionId).tools.map((tool) => tool.name)).not.toContain("lookup_order");
     const sent = runtime.calls("session.tools.set").filter((call) => call.params["sessionId"] === sessionId).at(-1)!.params["tools"] as { name: string }[];
     expect(sent.map((tool) => tool.name)).not.toContain("lookup_order");
