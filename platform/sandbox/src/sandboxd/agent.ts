@@ -183,6 +183,21 @@ export class SandboxAgent {
     return JSON.parse(await this.#worker(["list", "workspace", relative, recursive ? "1" : "0", String(LIMITS.listEntries)])) as FileEntry[];
   }
 
+  /** Writes one file of a runtime-state import into its staging directory under COPILOT_HOME (promotion). */
+  async writeImport(staging: string, relative: string, body: Readable, options: { expectedBytes?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
+    const args = ["write", "runtime-import", `${staging}/${relative}`, "1", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
+    return JSON.parse(await this.#worker(args, body, options.signal)) as FileEntry & { sha256: string };
+  }
+
+  /** Replaces `session-state/<sessionId>` with a staged import. */
+  async commitImport(staging: string, sessionId: string): Promise<void> {
+    await this.#worker(["import-commit", "runtime-import", staging, sessionId]);
+  }
+
+  async abortImport(staging: string): Promise<void> {
+    await this.#worker(["import-abort", "runtime-import", staging]);
+  }
+
   /** Hashes the publishable files under /workspace/outputs as the workload identity. */
   async outputsManifest(): Promise<SandboxOutputsManifest> {
     const { count, fileBytes, totalBytes } = LIMITS.artifacts;

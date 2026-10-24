@@ -169,6 +169,23 @@ export class SandboxAgentClient {
     return this.#send("GET", SANDBOXD_ROUTES.outputsContent, { query: { path } });
   }
 
+  /** Writes one file of a runtime-state import into a staging directory (see `SandboxService.importRuntimeState`). */
+  writeRuntimeImport(staging: string, path: string, body: Readable, size: number): Promise<FileEntry> {
+    return this.#json("PUT", SANDBOXD_ROUTES.runtimeImportContent, {
+      query: { staging, path },
+      body,
+      headers: { "content-type": "application/octet-stream", "content-length": String(size) },
+    });
+  }
+
+  async commitRuntimeImport(staging: string, sessionId: string): Promise<void> {
+    await this.#json("POST", SANDBOXD_ROUTES.runtimeImportCommit, { query: { staging, sessionId } });
+  }
+
+  async abortRuntimeImport(staging: string): Promise<void> {
+    await this.#json("POST", SANDBOXD_ROUTES.runtimeImportAbort, { query: { staging } });
+  }
+
   /** Opens a WebSocket to `route` and returns a byte stream (binary frames). */
   async openStream(route: string, query?: Record<string, string>): Promise<Duplex> {
     const { base, headers } = await this.#headers();

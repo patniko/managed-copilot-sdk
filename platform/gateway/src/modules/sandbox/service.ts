@@ -1,7 +1,9 @@
-// The `sandboxes` service (spec sections 4 and 5): per-session sandboxes on the local Docker backend, created only
-// when setup and the runtime are ready, stopped when idle after work drains, resumed without replaying setup, and
+// The `sandboxes` service (spec sections 4 and 5): per-session sandboxes on a pluggable backend (providers/), created
+// only when setup and the runtime are ready, stopped when idle after work drains, resumed without replaying setup, and
 // deleted with crash-safe reconciliation.
 import { randomBytes } from "node:crypto";
+import { createReadStream, promises as fs, type Stats } from "node:fs";
+import { join } from "node:path";
 import type { Duplex, Readable } from "node:stream";
 import {
   isReservedSandboxEnv,
@@ -27,6 +29,7 @@ import type {
   FileDownload,
   FileWriteOptions,
   OpenRuntimeOptions,
+  RuntimeStateImport,
   SandboxesService,
   SandboxHandle,
   SandboxPolicyPort,
@@ -90,6 +93,40 @@ function base64Size(value: string): number | undefined {
   if (compact.length % 4 !== 0 || !BASE64.test(compact)) return undefined;
   const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
   return (compact.length / 4) * 3 - padding;
+}
+
+const IMPORT_LIMITS = { files: 10_000, bytes: 1024 * 1024 * 1024 } as const;
+
+/** Regular files of a runtime-state export (relative POSIX paths), skipping lock files; anything else is refused. */
+async function collectRuntimeState(directory: string): Promise<{ relative: string; absolute: string; size: number }[]> {
+  let root: Stats;
+  try {
+    root = await fs.lstat(directory);
+  } catch {
+    throw new ManagedCopilotError("invalid_request", `The runtime state directory ${directory} does not exist.`);
+  }
+  if (!root.isDirectory()) throw new ManagedCopilotError("invalid_request", `The runtime state path ${directory} is not a directory.`);
+  const files: { relative: string; absolute: string; size: number }[] = [];
+  let total = 0;
+  const walk = async (absolute: string, relative: string): Promise<void> => {
+    for (const entry of await fs.readdir(absolute, { withFileTypes: true })) {
+      const childAbsolute = join(absolute, entry.name);
+      const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
+      const stat = await fs.lstat(childAbsolute);
+      if (stat.isDirectory()) {
+        await walk(childAbsolute, childRelative);
+        continue;
+      }
+      if (!stat.isFile()) throw new ManagedCopilotError("invalid_request", `"${childRelative}" in the runtime state is a symbolic link or special file; only regular files can be imported.`);
+      if (entry.name.endsWith(".lock")) continue;
+      total += stat.size;
+      if (files.length >= IMPORT_LIMITS.files) throw new ManagedCopilotError("invalid_request", `The runtime state has more than ${IMPORT_LIMITS.files} files.`);
+      if (total > IMPORT_LIMITS.bytes) throw new ManagedCopilotError("invalid_request", "The runtime state is larger than 1 GiB.");
+      files.push({ relative: childRelative, absolute: childAbsolute, size: stat.size });
+    }
+  };
+  await walk(directory, "");
+  return files;
 }
 
 export class SandboxService implements SandboxesService {
@@ -517,6 +554,47 @@ export class SandboxService implements SandboxesService {
     const row = this.#row(sessionId);
     this.touch(sessionId);
     return this.#agent(row).openStream(SANDBOXD_ROUTES.tunnel, { port: String(port) });
+  }
+
+  importRuntimeState(sessionId: string, options: RuntimeStateImport): Promise<{ files: number; bytes: number }> {
+    return this.#withLock(sessionId, () => this.#importRuntimeState(sessionId, options));
+  }
+
+  async #importRuntimeState(sessionId: string, options: RuntimeStateImport): Promise<{ files: number; bytes: number }> {
+    const row = this.#row(sessionId);
+    if (row.state !== "running") {
+      throw new ManagedCopilotError("capability_unavailable", `The session's sandbox is ${row.state}; runtime state can only be imported into a running sandbox.`, { sandboxId: row.id });
+    }
+    const files = await collectRuntimeState(options.sessionStateDir);
+    const agent = this.#agent(row);
+    const status = await agent.health();
+    if (status.state !== "ready" || status.runtime.state !== "running") {
+      throw new ManagedCopilotError("capability_unavailable", `The sandbox runtime is ${status.runtime.state}; runtime state can only be imported once it is ready.`, { sandboxId: row.id });
+    }
+    const staging = randomBytes(8).toString("hex");
+    let bytes = 0;
+    const done = this.track(sessionId, Promise.resolve());
+    try {
+      for (const file of files) {
+        await agent.writeRuntimeImport(staging, file.relative, createReadStream(file.absolute), file.size);
+        bytes += file.size;
+      }
+      await agent.commitRuntimeImport(staging, sessionId);
+    } catch (error) {
+      await agent.abortRuntimeImport(staging).catch(() => undefined);
+      throw toManaged(error);
+    } finally {
+      await done;
+    }
+    if (options.activeTurnId) {
+      this.#artifacts?.turnStarted(sessionId, options.activeTurnId);
+      const live = this.#liveFor(sessionId);
+      live.turnRunning = true;
+      live.turnFailed = false;
+    }
+    this.touch(sessionId);
+    this.#log.info("Imported runtime state", { sessionId, sandboxId: row.id, files: files.length, bytes, activeTurn: options.activeTurnId !== undefined });
+    return { files: files.length, bytes };
   }
 
   async get(sessionId: string): Promise<SandboxInfo | undefined> {
