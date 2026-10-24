@@ -13,12 +13,12 @@ import { WebSocket, WebSocketServer } from "ws";
 import { GatewayApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { openDatabase } from "../src/db.js";
-import { createLogger } from "../src/log.js";
+import { createLogger, type Logger } from "../src/log.js";
 import { attachModule, type AttachSessions, type SessionLifecycleEvent, type SessionRuntime } from "../src/modules/attach/index.js";
 import { CREDENTIAL_REFUSAL, filterAhpClientFrame as filterClientFrame } from "@managed-copilot/protocol";
 import { AttachTickets } from "../src/modules/attach/tickets.js";
 import { AhpHosts } from "../src/modules/attach/hosts.js";
-import { LISTENER_LOSS_GRACE_MS } from "../src/modules/attach/proxy.js";
+import { AhpBridge, LISTENER_LOSS_GRACE_MS } from "../src/modules/attach/proxy.js";
 import type { AttachActions, CliAttachment, CliAttachOptions, CliOperation, PromptVisibility, PromptVisibilityInput } from "../src/modules/attach/types.js";
 import type { PromotionParticipant } from "../src/modules/promotion/contract.js";
 
@@ -120,6 +120,8 @@ class FakeAttachment implements CliAttachment {
   readonly answers: { method: string; params: Record<string, unknown> }[] = [];
   closed = false;
   writeError: ManagedCopilotError | undefined;
+  /** Refuses only some operations (as core refuses a turn while hooks are unanswered, or a model outside the environment). */
+  refuse: ((operation: CliOperation) => ManagedCopilotError | undefined) | undefined;
   answerError: ManagedCopilotError | undefined;
   constructor(
     readonly connectionId: string,
@@ -129,6 +131,8 @@ class FakeAttachment implements CliAttachment {
   write(operation: CliOperation, send: () => void): void {
     if (this.closed) throw new ManagedCopilotError("conflict", "This Copilot CLI attachment was closed. Attach again.");
     if (this.writeError) throw this.writeError;
+    const refusal = this.refuse?.(operation);
+    if (refusal) throw refusal;
     this.writes.push(operation);
     send();
   }
@@ -450,10 +454,76 @@ describe("attach module", () => {
     await waitFor(() => listener.dispatched("chat/turnCancelled").length === 1);
     expect(attachment.writes.at(-1)).toEqual({ kind: "abort" });
 
-    // A model on the message is admitted by core before the turn.
+    // A model on the message is checked by core only inside the admitted turn's write.
     dispatch(ws, 4, CHAT, { type: "chat/turnStarted", turnId: "t2", startedAt: "2026-10-24T00:00:01Z", message: { text: "Again", origin: { kind: "user" }, model: { id: "gpt-5" } } });
     await waitFor(() => listener.dispatched("chat/turnStarted").length === 2);
-    expect(attachment.writes.slice(-2)).toEqual([{ kind: "model", modelId: "gpt-5" }, { kind: "turn", text: "Again" }]);
+    expect(attachment.writes.slice(-2)).toEqual([{ kind: "turn", text: "Again" }, { kind: "model", modelId: "gpt-5" }]);
+  });
+
+  it("records a message's model only when core admits its turn, and sends no turn with a model core refuses (Argon)", async () => {
+    await fresh();
+    const { ws, attachment } = await connect();
+    const withModel = (turnId: string, model: string) => ({ type: "chat/turnStarted", turnId, startedAt: "2026-10-24T00:00:00Z", message: { text: "Hello", origin: { kind: "user" }, model: { id: model } } });
+    // The turn is refused (an app's hooks have no connected handler): the model is never recorded.
+    attachment.refuse = (operation) => (operation.kind === "turn" ? new ManagedCopilotError("background_callback_unsupported", "Hooks are not connected.") : undefined);
+    dispatch(ws, 2, CHAT, withModel("t1", "gpt-5"));
+    expect(await answerTo(ws, 2)).toMatchObject({ rejectionReason: "Hooks are not connected." });
+    expect(attachment.writes).toEqual([]);
+    // The model is outside the environment: the admitted turn is still never sent.
+    attachment.refuse = (operation) => (operation.kind === "model" ? new ManagedCopilotError("invalid_request", "Model gpt-x is not available.") : undefined);
+    dispatch(ws, 3, CHAT, withModel("t2", "gpt-x"));
+    expect(await answerTo(ws, 3)).toMatchObject({ rejectionReason: "Model gpt-x is not available." });
+    expect(listener.dispatched("chat/turnStarted")).toHaveLength(0);
+    expect(attachment.writes.some((operation) => operation.kind === "model")).toBe(false);
+  });
+
+  it("refuses fields that aren't what they claim to be, and ends only the attachment whose message nests too deeply (Astra)", async () => {
+    await fresh();
+    const { ws } = await connect();
+    // Values that don't convert to strings are refused, never coerced (coercing one threw out of the socket handler).
+    dispatch(ws, 2, CHAT, { type: { toString: null, valueOf: null } });
+    expect(await answerTo(ws, 2)).toMatchObject({ rejectionReason: "Malformed action." });
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: { toString: null }, method: "ping" }));
+    expect(await received(ws, (message) => message.id === null)).toMatchObject({ error: { code: -32600 } });
+    const closed = once(ws, "close") as Promise<[number, Buffer]>;
+    ws.send(`{"jsonrpc":"2.0","id":9,"method":"ping","params":${"[".repeat(10_000)}${"]".repeat(10_000)}}`);
+    expect((await closed)[0]).toBe(1008);
+    // Nothing reached the runtime, and the gateway still serves the next attachment.
+    expect(listener.received.some((message: any) => message.id === 9)).toBe(false);
+    const again = await connect();
+    again.ws.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }));
+    expect(await received(again.ws, (message) => message.id === 2)).toMatchObject({ result: {} });
+  });
+
+  it("answers each request ID once, keeps the client's identity, and unsubscribes only the session's channels (Argon)", async () => {
+    await fresh();
+    listener.results.set("initialize", { protocolVersion: "0.9.0", terminalCommandPrefix: "!", defaultDirectory: "file:///C:/Users/someone" });
+    const ws = await open("s1", (await material()).token);
+    // A request reusing an ID in flight is refused, so the runtime's initialize result is still filtered as one.
+    ws.send(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { channel: "ahp-root://", protocolVersions: ["0.9.0"], clientId: "cli-test" } },
+        { jsonrpc: "2.0", id: 1, method: "ping" },
+      ]),
+    );
+    expect(await received(ws, (message) => message.id === 1 && message.error)).toMatchObject({ error: { code: -32600 } });
+    expect((await received(ws, (message) => message.id === 1 && message.result)).result).toEqual({ protocolVersion: "0.9.0" });
+    expect(listener.received.filter((message: any) => message.method === "ping")).toHaveLength(0);
+    // Any result loses the host's shell prefix and directory.
+    listener.results.set("ping", { terminalCommandPrefix: "!", defaultDirectory: "file:///C:/Users/someone" });
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "ping" }));
+    expect((await received(ws, (message) => message.id === 2)).result).toEqual({});
+    // A connection can't take on another client's identity, so it can't remove that client.
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "reconnect", params: { channel: "ahp-root://", clientId: "someone-else", lastSeenServerSeq: 0, subscriptions: [] } }));
+    expect(await received(ws, (message) => message.id === 3)).toMatchObject({ error: { code: -32602 } });
+    dispatch(ws, 4, "ahp-session:/s1", { type: "session/activeClientRemoved", clientId: "someone-else" });
+    expect(await answerTo(ws, 4)).toMatchObject({ rejectionReason: "A client can only remove itself." });
+    // Unsubscribing reaches the runtime for the session's own channels only, and carries nothing else.
+    ws.send(JSON.stringify({ jsonrpc: "2.0", method: "unsubscribe", params: { channel: "ahp-terminal:/t1" } }));
+    ws.send(JSON.stringify({ jsonrpc: "2.0", method: "unsubscribe", params: { channel: CHAT, extra: true } }));
+    await waitFor(() => listener.received.some((message: any) => message.method === "unsubscribe"));
+    await sleep(20);
+    expect(listener.received.filter((message: any) => message.method === "unsubscribe")).toEqual([{ jsonrpc: "2.0", method: "unsubscribe", params: { channel: CHAT } }]);
   });
 
   it("answers a permission prompt through the actions ledger by the runtime's request ID and never forwards the CLI's decision", async () => {
@@ -944,15 +1014,160 @@ describe("AhpHosts", () => {
     // A CLI reconnects: its attach resolves the source again and waits for the stalled disposal.
     const reconnect = hosts.ensure("s1", async () => source);
     await sleep(20);
-    // A second move fences: no host and nothing starting, so it resolves at once.
-    await hosts.fence("s1", new AbortController().signal);
+    // A second move fences: it waits for the first fence's disposal, which the runtime hasn't confirmed (Astra).
+    let fenced = false;
+    const second = hosts.fence("s1", new AbortController().signal).then(() => (fenced = true));
+    await sleep(20);
+    expect(fenced).toBe(false);
     const startsBefore = source.count("host.start");
     unstall();
+    await second;
     await expect(reconnect).rejects.toMatchObject({ code: "session_busy" });
     await sleep(20);
     expect(source.count("host.start")).toBe(startsBefore);
     expect(source.count("host.publishSession")).toBe(1);
     hosts.unfence("s1");
+  });
+
+  it("waits for a disposal that a release started before the fence (Argon)", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    let unstall!: () => void;
+    const stalled = new Promise<void>((resolve) => (unstall = resolve));
+    class StallingRuntime extends FakeRuntime {
+      override async request<T>(method: string, params: any): Promise<T> {
+        if (method === "host.dispose") {
+          this.requests.push({ method, params });
+          await stalled;
+          return {} as T;
+        }
+        return super.request<T>(method, params);
+      }
+    }
+    const source = new StallingRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
+    await hosts.ensure("s1", async () => source);
+    // An idle release (or a lifecycle event) began stopping the host; the runtime hasn't confirmed it.
+    const releasing = hosts.release("s1", "idle");
+    await sleep(10);
+    let fenced = false;
+    const fencing = hosts.fence("s1", new AbortController().signal).then(() => (fenced = true));
+    await sleep(20);
+    expect(fenced).toBe(false);
+    unstall();
+    await fencing;
+    await releasing;
+    expect(source.count("host.dispose")).toBe(1);
+    hosts.unfence("s1");
+  });
+
+  it("sends host.dispose again at the next fence when the runtime refused it before (Astra)", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    const source = new FakeRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
+    await hosts.ensure("s1", async () => source);
+    source.disposeError = new Error("busy");
+    await expect(hosts.fence("s1", new AbortController().signal)).rejects.toMatchObject({ code: "upstream_unavailable" });
+    hosts.unfence("s1");
+    // Its listener may still be open: the next move's fence stops it (stock `host.dispose` is idempotent) first.
+    source.disposeError = undefined;
+    await hosts.fence("s1", new AbortController().signal);
+    expect(source.count("host.dispose")).toBe(2);
+    hosts.unfence("s1");
+    // Confirmed: a later fence has nothing left to stop.
+    await hosts.fence("s1", new AbortController().signal);
+    expect(source.count("host.dispose")).toBe(2);
+    hosts.unfence("s1");
+  });
+
+  it("forgets a host whose disposal failed once its runtime connection closes (the host stopped with it)", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    const source = new FakeRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
+    await hosts.ensure("s1", async () => source);
+    source.disposeError = new Error("busy");
+    await expect(hosts.fence("s1", new AbortController().signal)).rejects.toMatchObject({ code: "upstream_unavailable" });
+    hosts.unfence("s1");
+    source.close();
+    await sleep(5);
+    await hosts.fence("s1", new AbortController().signal);
+    expect(source.count("host.dispose")).toBe(1);
+    hosts.unfence("s1");
+  });
+
+  it("starts nothing on a runtime looked up across a fence, even one already lifted (Argon)", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    const source = new FakeRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
+    let answer!: (runtime: SessionRuntime) => void;
+    const lookup = new Promise<SessionRuntime>((resolve) => (answer = resolve));
+    const attaching = hosts.ensure("s1", () => lookup);
+    await sleep(5);
+    // A whole move happens while core is still answering the lookup (after a sealed abort the connection ID is the same).
+    await hosts.fence("s1", new AbortController().signal);
+    hosts.unfence("s1");
+    answer(source);
+    await expect(attaching).rejects.toMatchObject({ code: "session_busy" });
+    expect(source.count("host.start")).toBe(0);
+    // The next attach looks the runtime up afresh and starts as usual.
+    await hosts.ensure("s1", async () => source);
+    expect(source.count("host.start")).toBe(1);
+    await hosts.disposeAll("done");
+  });
+});
+
+describe("AhpBridge", () => {
+  it("ends only its own attachment when it can't handle a message, in either direction (Astra)", async () => {
+    const listener = new FakeListener();
+    await listener.start();
+    const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await once(wss, "listening");
+    const port = (wss.address() as AddressInfo).port;
+    const quiet = () => undefined;
+    const bridged = async (options: { log?: Logger; scrub?: (value: unknown) => unknown }) => {
+      const accepted = once(wss, "connection") as Promise<[WebSocket]>;
+      const cli = new WebSocket(`ws://127.0.0.1:${port}/`);
+      await once(cli, "open");
+      const [client] = await accepted;
+      const upstream = new WebSocket(`ws://127.0.0.1:${listener.port}/?tkn=${LISTENER_TOKEN}`);
+      await once(upstream, "open");
+      const attachment = new FakeAttachment("cli_1", "inc-s1", 0);
+      const log = options.log ?? createLogger("test", "error");
+      new AhpBridge(client, upstream, { log, sessionId: "s1", maxLifetimeMs: 60_000, placement: "shared", attachment, actions: new FakeActions(), gate: quiet, scrub: options.scrub ?? ((value) => value) });
+      return { cli, attachment, closed: once(cli, "close") as Promise<[number, Buffer]> };
+    };
+    try {
+      // Runtime → client: an update that can't be relayed.
+      const fromRuntime = await bridged({
+        scrub: (value) => {
+          if (JSON.stringify(value).includes("unrelayable")) throw new Error("scrub failed");
+          return value;
+        },
+      });
+      listener.push({ jsonrpc: "2.0", method: "action", params: { channel: CHAT, serverSeq: 1, action: { type: "chat/responsePart", text: "unrelayable" } } });
+      expect((await fromRuntime.closed)[0]).toBe(1011);
+      expect(fromRuntime.attachment.closed).toBe(true);
+      // Client → runtime: a message whose handling fails.
+      const failing: Logger = {
+        debug: quiet,
+        info: () => {
+          throw new Error("log failed");
+        },
+        warn: quiet,
+        error: quiet,
+        child: () => failing,
+      };
+      const fromClient = await bridged({ log: failing });
+      fromClient.cli.send(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "createTerminal", params: {} }));
+      expect((await fromClient.closed)[0]).toBe(1008);
+      expect(fromClient.attachment.closed).toBe(true);
+    } finally {
+      wss.close();
+      await listener.stop();
+    }
   });
 });
 

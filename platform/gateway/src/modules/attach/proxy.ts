@@ -6,7 +6,7 @@ import { WebSocket, type RawData } from "ws";
 import type { Logger } from "../../log.js";
 import { ANSWER_METHODS } from "../durable/contract.js";
 import type { AhpHost, AttachedBridge } from "./hosts.js";
-import { AHP_ERRORS, AhpObserver, decideAction, decideRequest, elicitationResult, filterResult, isDict, type AttachPlacement, type Dict, type JsonRpcMessage } from "./policy.js";
+import { AHP_ERRORS, AhpObserver, channelAllowed, decideAction, decideRequest, elicitationResult, filterResult, isDict, withinNesting, type AttachPlacement, type Dict, type JsonRpcMessage } from "./policy.js";
 import type { AttachActions, CliAttachment } from "./types.js";
 
 /** `ws` treats its transport as a net.Socket; tunnels from the sandbox relay are plain duplex streams. */
@@ -44,6 +44,8 @@ export async function openUpstream(host: AhpHost, protocols: readonly string[]):
     };
     upstream.once("open", () => {
       upstream.off("error", fail);
+      // Until a bridge owns it, an error while an attach is refused or abandoned must not go unhandled.
+      upstream.on("error", () => undefined);
       resolve(upstream);
     });
     upstream.once("error", fail);
@@ -69,6 +71,8 @@ export const LISTENER_LOSS_GRACE_MS = 500;
 export const LEDGER_WAIT_MS = 5_000;
 
 const MAX_PENDING_REQUESTS = 1_000;
+/** How deeply a client message may nest (stock CLI messages stay under 10). */
+const MAX_CLIENT_NESTING = 64;
 
 export interface BridgeOptions {
   readonly log: Logger;
@@ -91,6 +95,11 @@ export interface BridgeOptions {
 function reasonOf(error: unknown): string {
   if (error instanceof ManagedCopilotError) return error.message;
   return "Managed Copilot couldn't apply this from Copilot CLI.";
+}
+
+/** For logs: never coerces a thrown value (it may not convert to a string). */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : typeof error;
 }
 
 function idKey(id: unknown): string {
@@ -167,7 +176,11 @@ export class AhpBridge implements AttachedBridge {
     clearTimeout(this.#lifetime);
     clearTimeout(this.#lossTimer);
     this.#upstream.terminate();
-    this.#options.attachment.close();
+    try {
+      this.#options.attachment.close();
+    } catch (error) {
+      this.#options.log.warn("Could not detach an attached Copilot CLI", { sessionId: this.#options.sessionId, error: describeError(error) });
+    }
   }
 
   #listenerLost(reason: string): void {
@@ -183,12 +196,27 @@ export class AhpBridge implements AttachedBridge {
 
   #onClientFrame(data: RawData, isBinary: boolean): void {
     if (this.#stopped) return;
+    try {
+      this.#clientFrame(data, isBinary);
+    } catch (error) {
+      // Whatever a message holds, handling it can end only this attachment.
+      this.#options.log.warn("Ended a Copilot CLI attachment: a message it sent could not be handled", { sessionId: this.#options.sessionId, error: describeError(error) });
+      this.close(1008, "Copilot CLI attach could not handle a message. Attach again.");
+    }
+  }
+
+  #clientFrame(data: RawData, isBinary: boolean): void {
     if (isBinary) {
       this.close(1003, "Copilot CLI attach carries JSON text frames only.");
       return;
     }
+    const text = data.toString();
+    if (!withinNesting(text, MAX_CLIENT_NESTING)) {
+      this.close(1008, "Copilot CLI attach messages can't nest this deeply.");
+      return;
+    }
     // Credentials first: the CLI's GitHub token never reaches a runtime, whatever else the frame holds.
-    const filtered = filterAhpClientFrame(data.toString());
+    const filtered = filterAhpClientFrame(text);
     if (filtered.invalid) {
       this.close(1007, "Copilot CLI attach carries JSON-RPC messages only.");
       return;
@@ -205,24 +233,41 @@ export class AhpBridge implements AttachedBridge {
     const hasId = message["id"] !== undefined && message["id"] !== null;
     if (hasId) return this.#onRequest(message);
     if (message["method"] === "dispatchAction") return this.#onDispatch(isDict(message["params"]) ? message["params"] : {});
-    if (message["method"] === "unsubscribe") return this.#sendUpstream(message);
+    if (message["method"] === "unsubscribe") {
+      const channel = isDict(message["params"]) ? message["params"]["channel"] : undefined;
+      if (channelAllowed(channel, this.#options.sessionId)) this.#sendUpstream({ jsonrpc: "2.0", method: "unsubscribe", params: { channel } });
+      return;
+    }
     this.#options.log.debug("Dropped a notification from an attached client", { sessionId: this.#options.sessionId, method: message["method"] });
   }
 
   #onRequest(message: Dict): void {
-    const method = String(message["method"]);
+    const id = message["id"];
+    if (typeof id !== "string" && typeof id !== "number") {
+      this.#toClient({ jsonrpc: "2.0", id: null, error: { code: AHP_ERRORS.invalidRequest, message: "A request ID must be a string or a number." } });
+      return;
+    }
+    const refuse = (code: number, text: string) => this.#toClient({ jsonrpc: "2.0", id, error: { code, message: text } });
+    const method = message["method"] as string;
     const verdict = decideRequest(message, this.#options.sessionId);
     if (verdict.kind === "refuse") {
       this.#options.log.info("Refused a request from an attached Copilot CLI", { sessionId: this.#options.sessionId, method });
-      this.#toClient({ jsonrpc: "2.0", id: message["id"], error: { code: verdict.code, message: verdict.message } });
-      return;
+      return refuse(verdict.code, verdict.message);
     }
+    // Each response is filtered for the request it answers, so an ID in use (or a request past the limit) is refused,
+    // never paired with another request's response.
+    const key = idKey(id);
+    if (this.#pending.has(key)) return refuse(AHP_ERRORS.invalidRequest, "This request ID is already in use.");
+    if (this.#pending.size >= MAX_PENDING_REQUESTS) return refuse(AHP_ERRORS.invalidRequest, "Too many requests are waiting for the session.");
     if (method === "initialize" || method === "reconnect") {
       const clientId = isDict(message["params"]) ? message["params"]["clientId"] : undefined;
-      if (typeof clientId === "string" && clientId) this.#clientId = clientId;
+      if (typeof clientId === "string" && clientId) {
+        // A connection is one client: it can't take another client's identity later.
+        if (this.#clientId !== undefined && clientId !== this.#clientId) return refuse(AHP_ERRORS.invalidParams, "This connection already has a different client ID.");
+        this.#clientId = clientId;
+      }
     }
-    this.#pending.set(idKey(message["id"]), method);
-    if (this.#pending.size > MAX_PENDING_REQUESTS) this.#pending.delete(this.#pending.keys().next().value!);
+    this.#pending.set(key, method);
     this.#sendUpstream(verdict.message);
   }
 
@@ -237,21 +282,29 @@ export class AhpBridge implements AttachedBridge {
           this.#options.gate();
           send();
         });
-      case "turn":
-        return this.#write(params, verdict.action, (send) => {
-          // A model on the message is checked against the environment (and recorded for restores) before the turn.
-          if (verdict.modelId) attachment.write({ kind: "model", modelId: verdict.modelId }, () => undefined);
-          attachment.write({ kind: "turn", text: verdict.text }, send);
-        });
+      case "turn": {
+        const { modelId, text } = verdict;
+        // A model on the message is checked against the environment (and recorded for restores) only inside the
+        // admitted turn's write, so a refused turn changes nothing.
+        return this.#write(params, verdict.action, (send) => attachment.write({ kind: "turn", text }, modelId ? () => attachment.write({ kind: "model", modelId }, send) : send));
+      }
       case "abort":
         return this.#write(params, verdict.action, (send) => attachment.write({ kind: "abort" }, send));
       case "confirm":
-        void this.#confirm(params, verdict);
+        this.#settle(this.#confirm(params, verdict));
         return;
       case "input":
-        void this.#input(params, verdict);
+        this.#settle(this.#input(params, verdict));
         return;
     }
+  }
+
+  /** An answer in flight: a failure it didn't turn into a rejection ends only this attachment. */
+  #settle(work: Promise<void>): void {
+    work.catch((error: unknown) => {
+      this.#options.log.warn("Ended a Copilot CLI attachment: an answer it sent could not be handled", { sessionId: this.#options.sessionId, error: describeError(error) });
+      this.close(1011, "Copilot CLI attach could not handle an answer. Attach again.");
+    });
   }
 
   /**
@@ -377,6 +430,15 @@ export class AhpBridge implements AttachedBridge {
 
   #onUpstreamFrame(data: RawData, isBinary: boolean): void {
     if (this.#stopped || isBinary) return;
+    try {
+      this.#upstreamFrame(data);
+    } catch (error) {
+      this.#options.log.warn("Ended a Copilot CLI attachment: an update from the session could not be relayed", { sessionId: this.#options.sessionId, error: describeError(error) });
+      this.close(1011, "Managed Copilot couldn't relay an update from the session. Attach again.");
+    }
+  }
+
+  #upstreamFrame(data: RawData): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(data.toString());

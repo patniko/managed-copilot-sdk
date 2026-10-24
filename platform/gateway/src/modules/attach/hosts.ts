@@ -25,7 +25,7 @@ export interface AhpHost {
   readonly resolvedAt: number;
   closed: boolean;
   idleTimer: NodeJS.Timeout | undefined;
-  /** `host.dispose` on the runtime that started the host, once disposal began (shared by every caller). */
+  /** The `host.dispose` attempt in flight on the runtime that started the host (shared by its callers; cleared if it fails). */
   disposal: Promise<void> | undefined;
 }
 
@@ -101,6 +101,11 @@ export class AhpHosts {
   readonly #epochs = new Map<string, number>();
   /** The latest disposal per session: a runtime refuses a second host for a catalog whose host is still stopping. */
   readonly #disposals = new Map<string, Promise<void>>();
+  /**
+   * Hosts whose runtime hasn't confirmed `host.dispose` (still in flight, or failed) and whose runtime connection is
+   * still open: a fence waits for them, or disposes them again, before it resolves.
+   */
+  readonly #undisposed = new Map<string, Set<AhpHost>>();
   /** Counts runtime resolutions, so a lifecycle event can release exactly the hosts resolved before it. */
   #resolutions = 0;
   readonly #log: Logger;
@@ -138,12 +143,14 @@ export class AhpHosts {
   ensure(sessionId: string, currentRuntime: () => Promise<SessionRuntime>): Promise<AhpHost> {
     if (this.#fenced.has(sessionId)) return Promise.reject(moving(sessionId));
     return this.#serialize(sessionId, async () => {
+      if (this.#fenced.has(sessionId)) throw moving(sessionId);
+      // A lookup that spans a fence (even one already lifted) may return the runtime the session left, or a source core
+      // resumed after a sealed abort with the same connection ID: nothing is started on what it returns.
+      const epoch = this.epoch(sessionId);
       // Ordered when the lookup starts: `sessions.runtime()` may pick the runtime before an event and return after it.
       const resolvedAt = ++this.#resolutions;
       const runtime = await currentRuntime();
-      // A runtime resolved before a fence is the one the session is leaving.
-      if (this.#fenced.has(sessionId)) throw moving(sessionId);
-      const epoch = this.epoch(sessionId);
+      if (this.#fenced.has(sessionId) || this.epoch(sessionId) !== epoch) throw moving(sessionId);
       let host = this.#hosts.get(sessionId);
       if (!host || host.closed || host.runtime.connectionId !== runtime.connectionId) {
         if (host) await this.#dispose(host, "The session moved to a new runtime. Reconnecting.", ATTACH_CLOSE_CODES.moved).catch(() => undefined);
@@ -183,17 +190,20 @@ export class AhpHosts {
 
   /**
    * Promotion participant fence: from now on nothing from attach reaches the session's runtime. Relays stop at once
-   * (clients are told the session moved and reconnect through the SDK relay), then the host, including one still
-   * starting, is disposed on the runtime that started it. Resolves once that runtime confirmed: its listener is gone,
-   * so nothing relayed earlier can still arrive. A failed `host.dispose` rejects, failing the move before the checkpoint.
-   * Never waits on core's session routing (the session's queue may be waiting on it).
+   * (clients are told the session moved and reconnect through the SDK relay), then every host of the session the
+   * runtime hasn't confirmed stopping is disposed on the runtime that started it: the current one, one still starting,
+   * and one whose disposal is still in flight or failed earlier (`host.dispose` is idempotent, so it is simply sent
+   * again). Resolves once each runtime confirmed: its listener is gone, so nothing relayed earlier can still arrive. A
+   * failed `host.dispose` rejects, failing the move before the checkpoint. Never waits on core's session routing (the
+   * session's queue may be waiting on it).
    */
   async fence(sessionId: string, signal: AbortSignal): Promise<void> {
     this.#fenced.add(sessionId);
     this.#bump(sessionId);
-    const disposals: Promise<void>[] = [];
-    const host = this.#hosts.get(sessionId);
-    if (host) disposals.push(this.#dispose(host, MOVING, ATTACH_CLOSE_CODES.moved));
+    const hosts = new Set(this.#undisposed.get(sessionId));
+    const current = this.#hosts.get(sessionId);
+    if (current) hosts.add(current);
+    const disposals = [...hosts].map((host) => this.#dispose(host, MOVING, ATTACH_CLOSE_CODES.moved));
     for (const starting of this.#starting.get(sessionId) ?? []) {
       disposals.push(starting.then((started) => (started ? this.#dispose(started, MOVING, ATTACH_CLOSE_CODES.moved) : undefined)));
     }
@@ -318,6 +328,7 @@ export class AhpHosts {
       disposal: undefined,
     };
     void runtime.closed.then(() => {
+      this.#stopped(host);
       if (host.closed) return;
       this.#log.info("Session runtime connection closed; ending its Copilot CLI attachments", { sessionId, hostId });
       void this.release(sessionId, "The session's runtime stopped. Attach again to resume it.", { only: host });
@@ -327,8 +338,9 @@ export class AhpHosts {
   }
 
   /**
-   * Closes the host's clients and disposes it on the runtime that started it, once (concurrent callers share the
-   * outcome). Rejects when the runtime refuses `host.dispose` while still connected; the listener may still be open.
+   * Closes the host's clients and disposes it on the runtime that started it (concurrent callers share an attempt).
+   * Rejects when the runtime refuses `host.dispose` while still connected; the listener may still be open, so the host
+   * stays recorded and the next caller (a fence) sends `host.dispose` again.
    */
   #dispose(host: AhpHost, reason: string, code: number = CLOSE_SESSION_GONE): Promise<void> {
     if (host.disposal) return host.disposal;
@@ -337,7 +349,10 @@ export class AhpHosts {
     if (host.idleTimer) clearTimeout(host.idleTimer);
     for (const bridge of host.bridges) bridge.close(code, reason.slice(0, 120));
     host.bridges.clear();
-    host.disposal = (async () => {
+    let undisposed = this.#undisposed.get(host.sessionId);
+    if (!undisposed) this.#undisposed.set(host.sessionId, (undisposed = new Set()));
+    undisposed.add(host);
+    const disposal = (async () => {
       const failure = await Promise.race([
         host.runtime.request("host.dispose", { hostId: host.hostId }).then(
           () => undefined,
@@ -352,13 +367,26 @@ export class AhpHosts {
       }
       this.#log.info("Stopped Copilot CLI hosting for session", { sessionId: host.sessionId, hostId: host.hostId, reason });
     })();
-    const disposal = host.disposal;
+    host.disposal = disposal;
     this.#disposals.set(host.sessionId, disposal);
     void disposal.then(
-      () => this.#forgetDisposal(host.sessionId, disposal),
-      () => this.#forgetDisposal(host.sessionId, disposal),
+      () => {
+        this.#stopped(host);
+        this.#forgetDisposal(host.sessionId, disposal);
+      },
+      () => {
+        if (host.disposal === disposal) host.disposal = undefined;
+        this.#forgetDisposal(host.sessionId, disposal);
+      },
     );
     return disposal;
+  }
+
+  /** The host's runtime confirmed it stopped, or closed (which stops its hosts). */
+  #stopped(host: AhpHost): void {
+    const undisposed = this.#undisposed.get(host.sessionId);
+    if (!undisposed?.delete(host)) return;
+    if (undisposed.size === 0) this.#undisposed.delete(host.sessionId);
   }
 
   #forgetDisposal(sessionId: string, disposal: Promise<void>): void {

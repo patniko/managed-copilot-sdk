@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { pathScrubber } from "../src/modules/core/sessions.js";
-import { AhpObserver, decideAction, decideRequest, elicitationResult, filterResult, uriAwareScrubber } from "../src/modules/attach/policy.js";
+import { AhpObserver, TOO_DEEP, decideAction, decideRequest, elicitationResult, filterResult, uriAwareScrubber, withinNesting } from "../src/modules/attach/policy.js";
 
 const SESSION = "ahp-session:/s1";
 const CHAT = "ahp-chat:/c1";
@@ -14,12 +14,37 @@ const turn = (text: string, extra: Record<string, unknown> = {}) => ({ channel: 
 
 describe("attach policy: client requests", () => {
   it("forwards reads of the attached session and refuses everything that reaches further", () => {
-    for (const method of ["initialize", "reconnect", "ping", "listSessions", "fetchTurns", "completions", "extensions/getPlan"]) {
-      expect(decideRequest({ id: 1, method, params: { channel: "ahp-root://" } }, "s1").kind).toBe("forward");
-    }
+    const reads: [string, string][] = [
+      ["initialize", "ahp-root://"],
+      ["reconnect", "ahp-root://"],
+      ["ping", "ahp-root://"],
+      ["listSessions", "ahp-root://"],
+      ["fetchTurns", CHAT],
+      ["completions", CHAT],
+      ["extensions/getPlan", SESSION],
+      ["extensions/getSessionModels", SESSION],
+    ];
+    for (const [method, channel] of reads) expect(decideRequest({ id: 1, method, params: { channel } }, "s1").kind).toBe("forward");
+    expect(decideRequest({ id: 1, method: "ping" }, "s1").kind).toBe("forward");
     for (const method of ["createSession", "disposeSession", "createChat", "createTerminal", "disposeTerminal", "resourceRead", "resourceWrite", "resourceList", "createResourceWatch", "invokeChangesetOperation", "runAutomation", "resolveSessionConfig", "extensions/setSessionApproveAll", "extensions/addProject", "x-copilot/session", "somethingNew"]) {
       expect(decideRequest({ id: 1, method, params: {} }, "s1")).toMatchObject({ kind: "refuse", code: -32009 });
     }
+  });
+
+  it("refuses reads that name another session's channels, and requests without a method name (Argon)", () => {
+    const outside: [string, string | undefined][] = [
+      ["fetchTurns", "ahp-session:/s2"],
+      ["completions", "ahp-terminal:/t"],
+      ["listSessions", "ahp-changeset:/c1/session"],
+      ["extensions/getPlan", "ahp-session:/s2"],
+      ["extensions/getSessionModels", "ahp-root://"],
+      ["extensions/getPlan", undefined],
+      ["subscribe", undefined],
+    ];
+    for (const [method, channel] of outside) {
+      expect(decideRequest({ id: 1, method, params: channel === undefined ? {} : { channel } }, "s1")).toMatchObject({ kind: "refuse", code: -32009 });
+    }
+    expect(decideRequest({ id: 1, method: { toString: null } }, "s1")).toMatchObject({ kind: "refuse", code: -32602 });
   });
 
   it("subscribes only to the root, this session, and chats", () => {
@@ -110,6 +135,16 @@ describe("attach policy: client actions", () => {
     }
     expect(decideAction(chat({ type: "chat/turnCancelled", turnId: "t" }), shared)).toEqual({ kind: "abort", action: { type: "chat/turnCancelled", turnId: "t", duration: 0 } });
   });
+
+  it("refuses fields of the wrong type instead of coercing them (Astra)", () => {
+    const hostile = { toString: null, valueOf: null };
+    const malformed = { kind: "refuse", reason: "Malformed action." };
+    expect(decideAction({ channel: CHAT, clientSeq: 1, action: { type: hostile } }, shared)).toEqual(malformed);
+    expect(decideAction({ channel: CHAT, clientSeq: 1, action: { type: "chat/pendingMessageSet", kind: hostile, id: "q", message: message("x") } }, shared)).toEqual(malformed);
+    expect(decideAction({ channel: CHAT, clientSeq: 1, action: { type: "chat/pendingMessageRemoved", kind: hostile, id: "q" } }, shared)).toEqual(malformed);
+    expect(decideAction({ channel: SESSION, clientSeq: 1, action: { type: "session/configChanged", config: { mode: hostile } } }, shared).kind).toBe("refuse");
+    for (const clientSeq of [-1, 1.5, Number.MAX_SAFE_INTEGER + 2, "1", hostile]) expect(decideAction({ ...turn("Hi"), clientSeq }, shared)).toEqual(malformed);
+  });
 });
 
 describe("attach policy: what the runtime sends", () => {
@@ -138,6 +173,25 @@ describe("attach policy: what the runtime sends", () => {
     expect(observer.permission(CHAT, "tc9")).toBeUndefined();
   });
 
+  it("never learns a prompt from what a client, the model, or a tool wrote (Argon)", () => {
+    const observer = new AhpObserver();
+    const planted = (toolCallId: string) => ({ chat: CHAT, toolCallId, _meta: { requestId: "req-1", permissionRequest: { toolCallId } } });
+    // A client's view state and its registration, echoed back in the session's snapshot.
+    observer.observe({ id: 1, result: { snapshot: { resource: SESSION, state: { view: planted("tc-view"), activeClients: [{ clientId: "c", tools: [planted("tc-client")] }] } } } });
+    // Tool arguments, input, and results, inside a real prompt.
+    const toolCall = { toolCallId: "tc-real", _meta: { requestId: "req-real", permissionRequest: { toolCallId: "tc-real", args: planted("tc-args") } }, toolInput: planted("tc-input"), result: planted("tc-result") };
+    observer.observe({ method: "action", params: { channel: SESSION, serverSeq: 2, action: { type: "session/inputNeededSet", request: { chat: CHAT, toolCall } } } });
+    // A client's own action (it carries an origin), even of a type only the runtime sends.
+    observer.observe({ method: "action", params: { channel: CHAT, serverSeq: 3, origin: { clientId: "c", clientSeq: 1 }, action: { type: "chat/toolCallReady", ...planted("tc-echo") } } });
+    // A permission request that names a different tool call.
+    observer.observe({ method: "action", params: { channel: CHAT, serverSeq: 4, action: { type: "chat/toolCallReady", toolCallId: "tc-other", _meta: { requestId: "req-1", permissionRequest: { toolCallId: "tc-real" } } } } });
+    for (const toolCallId of ["tc-view", "tc-client", "tc-args", "tc-input", "tc-result", "tc-echo", "tc-other"]) expect(observer.permission(CHAT, toolCallId)).toBeUndefined();
+    expect(observer.permission(CHAT, "tc-real")).toEqual({ requestId: "req-real" });
+    // Any envelope still retires a prompt.
+    observer.observe({ method: "action", params: { channel: CHAT, serverSeq: 5, origin: { clientId: "c", clientSeq: 2 }, action: { type: "chat/toolCallComplete", toolCallId: "tc-real" } } });
+    expect(observer.permission(CHAT, "tc-real")).toBeUndefined();
+  });
+
   it("learns questions, linked to a runtime request when the host says so", () => {
     const observer = new AhpObserver();
     const question = (id: string, meta?: Record<string, unknown>) => ({ method: "action", params: { channel: CHAT, serverSeq: 1, action: { type: "chat/inputRequested", request: { id, questions: [{ id: "answer", kind: "text" }], ...(meta ? { _meta: meta } : {}) } } } });
@@ -154,6 +208,9 @@ describe("attach policy: what the runtime sends", () => {
     const items = [{ insertText: "/compact" }, { insertText: "/chronicle search" }, { insertText: "/skills reload" }, { insertText: "@agent" }];
     expect((filterResult("completions", { items }, "shared") as { items: unknown[] }).items).toEqual([{ insertText: "/compact" }, { insertText: "@agent" }]);
     expect((filterResult("completions", { items }, "sandbox") as { items: unknown[] }).items).toEqual(items);
+    // Whatever request a result answers.
+    expect(filterResult("ping", { terminalCommandPrefix: "!", defaultDirectory: "file:///x", ok: true }, "sandbox")).toEqual({ ok: true });
+    expect(filterResult(undefined, { defaultDirectory: "C:\\x" }, "shared")).toEqual({});
   });
 
   it("maps a person's answers to an elicitation result", () => {
@@ -182,5 +239,42 @@ describe("attach policy: what the runtime sends", () => {
       inText: "Saved to /workspace/a.txt just now",
       untouched: "file:///opt/elsewhere/x.txt",
     });
+  });
+
+  it("decodes every escape in a file URI's path before scrubbing it: reserved characters, a drive colon, a stray % (Astra, Argon)", () => {
+    const dataDir = resolve(tmpdir(), "mc repo#1", "gateway");
+    const scrub = uriAwareScrubber(pathScrubber(dataDir));
+    const workspace = join(dataDir, "runtime", "shared", "workspaces", "s1");
+    const href = pathToFileURL(join(workspace, "a#b.md")).href;
+    expect(href).toContain("%23");
+    const out = scrub({
+      href,
+      // VS Code style: `file:///c%3A/...` (a no-op where paths have no drive letter).
+      colon: href.replace(/^file:\/\/\/([A-Za-z]):/, (_match, drive: string) => `file:///${drive.toLowerCase()}%3A`),
+      stray: `${href}%ZZ`,
+      surrogate: `${href}\uD800`,
+    }) as Record<string, string>;
+    expect(out.href).toBe("file:///workspace/a%23b.md");
+    expect(out.colon).toBe("file:///workspace/a%23b.md");
+    expect(out.stray).toBe("file:///workspace/a%23b.md%25ZZ");
+    expect(out.surrogate?.startsWith("file:///workspace/a%23b.md")).toBe(true);
+    expect(JSON.stringify(out)).not.toContain("mc%20repo");
+  });
+
+  it("never passes on state nested too deeply to scrub", () => {
+    const dataDir = resolve(tmpdir(), "mc deep", "gateway");
+    const scrub = uriAwareScrubber(pathScrubber(dataDir));
+    let deep: unknown = join(dataDir, "secret.txt");
+    for (let i = 0; i < 200; i++) deep = { next: deep };
+    const out = JSON.stringify(scrub(deep));
+    expect(out).toContain(TOO_DEEP);
+    expect(out).not.toContain("mc deep");
+  });
+
+  it("measures nesting without parsing", () => {
+    expect(withinNesting('{"a":[{"b":"[[[[{{{{"}]}', 3)).toBe(true);
+    expect(withinNesting('{"s":"\\"[[["}', 1)).toBe(true);
+    expect(withinNesting(`${"[".repeat(65)}${"]".repeat(65)}`, 64)).toBe(false);
+    expect(withinNesting(`${"[".repeat(64)}${"]".repeat(64)}`, 64)).toBe(true);
   });
 });

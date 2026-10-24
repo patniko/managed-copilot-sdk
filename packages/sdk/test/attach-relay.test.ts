@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import type { AttachMaterial } from "@managed-copilot/protocol";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
@@ -22,6 +23,9 @@ const revoked = new Set<string>();
 let offeredConversation = "ahp-session:/s1";
 /** How many more ticket requests and socket upgrades the fake deployment answers with `session_busy` (a move in progress). */
 const busy = { tickets: 0, upgrades: 0 };
+/** How many more socket upgrades the fake deployment leaves unanswered (a handshake in flight), and those sockets. */
+const stall = { upgrades: 0 };
+const stalled: Duplex[] = [];
 const BUSY_BODY = JSON.stringify({ error: { code: "session_busy", message: "This session is moving into a sandbox. Attach again when the move finishes." } });
 
 async function listen(server: Server): Promise<string> {
@@ -62,6 +66,11 @@ beforeAll(async () => {
       return;
     }
     used.add(ticket);
+    if (stall.upgrades > 0) {
+      stall.upgrades--;
+      stalled.push(socket);
+      return;
+    }
     if (busy.upgrades > 0) {
       busy.upgrades--;
       socket.end(`HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(BUSY_BODY)}\r\nconnection: close\r\n\r\n${BUSY_BODY}`);
@@ -94,12 +103,12 @@ describe("Copilot CLI attach relay", () => {
     received.length = 0;
   });
 
-  async function startRelay() {
+  async function startRelay(extra: { busyRetryMs?: number } = {}) {
     // Imported after the fake GitHub API URL is set, as the launcher reads it at load.
     const { AttachRelay } = await import("../src/features/cli.js");
     const http = new HttpClient(gatewayUrl, "user-token");
     const first = await http.post<AttachMaterial>("/v1/sessions/s1/attach");
-    const relay = new AttachRelay({ sessionId: "s1", owner: OWNER, deploymentUrl: gatewayUrl, http, first });
+    const relay = new AttachRelay({ sessionId: "s1", owner: OWNER, deploymentUrl: gatewayUrl, http, first, ...extra });
     relays.push(relay);
     return { relay, url: await relay.listen() };
   }
@@ -341,5 +350,43 @@ describe("Copilot CLI attach relay", () => {
     // The abandoned dial ended quietly: it neither took over nor recorded an outcome for the attachment.
     expect(relay.outcome).toBeUndefined();
     again.close();
+  });
+
+  it("ends a dial at once when the CLI hangs up during the deployment's handshake (Argon)", async () => {
+    const { relay, url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    expect(await platformCloses(cli, 4307, "The session is moving into a sandbox. Reconnecting.")).toBe(1012);
+    stall.upgrades = 1;
+    const abandoned = new WebSocket(url, { headers: { authorization: ["Bearer", "gho_owner"].join(" ") } });
+    abandoned.on("error", () => undefined);
+    const deadline = Date.now() + 2_000;
+    while (stalled.length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    const held = stalled.shift()!;
+    held.on("error", () => undefined);
+    // The deployment's side is half-open (an HTTP server's socket): the relay hanging up shows as `end`.
+    const dropped = Promise.race([once(held, "end"), once(held, "close")]);
+    abandoned.terminate();
+    // Dropped now, not at the relay's 15 s handshake timeout: the deployment never registers a responder for a dial
+    // the CLI gave up on, and the CLI's next dial is the attachment.
+    await dropped;
+    held.destroy();
+    const again = await connect(url, "gho_owner");
+    again.send(JSON.stringify({ jsonrpc: "2.0", id: 7, method: "initialize", params: {} }));
+    expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
+    expect(relay.outcome).toBeUndefined();
+    again.close();
+  });
+
+  it("reports that the session is still moving when the reconnect window ends (Argon)", async () => {
+    const { relay, url } = await startRelay({ busyRetryMs: 300 });
+    const cli = await connect(url, "gho_owner");
+    expect(await platformCloses(cli, 4307, "The session is moving into a sandbox. Reconnecting.")).toBe(1012);
+    busy.upgrades = 1_000;
+    try {
+      await expect(connect(url, "gho_owner")).rejects.toMatchObject({ status: 409 });
+      expect(relay.outcome).toMatchObject({ code: "session_busy" });
+    } finally {
+      busy.upgrades = 0;
+    }
   });
 });

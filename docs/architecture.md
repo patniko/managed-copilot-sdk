@@ -812,11 +812,15 @@ sequenceDiagram
 - **What the CLI may send** (deny by default, `modules/attach/policy.ts`):
   - Reads: `initialize`, `reconnect`, `ping`, `listSessions`, `subscribe` (root, this session, its chats; the stock
     host refuses other sessions' chats too), `fetchTurns`, `completions`, `extensions/getPlan`,
-    `extensions/getSessionModels`, and `unsubscribe`.
+    `extensions/getSessionModels`, and `unsubscribe`. A read that names a channel must name one of these (session
+    extensions name the session itself). A request ID already in flight is refused (each response is filtered for the
+    request it answers), and a connection keeps the client ID it initialized with.
   - Turns and steering (`chat/turnStarted`, `chat/pendingMessageSet`): text from `origin.kind: "user"` only, without
-    attachments or an agent; a model on the message is admitted by core first. The AHP write runs inside
+    attachments or an agent. The AHP write runs inside
     `CliAttachment.write({ kind: "turn" })`, in the same synchronous step as core's admission, ownership, fence, and
-    placement checks, so input never reaches a fenced or former runtime. Cancels (`chat/turnCancelled`) go through
+    placement checks, so input never reaches a fenced or former runtime. A model on the message is checked by core
+    (and recorded for restores) inside that admitted write, so a refused turn records nothing. Cancels
+    (`chat/turnCancelled`) go through
     `write({ kind: "abort" })`, and `ask_user` answers (`chat/inputCompleted` for a question with no runtime request
     ID) through `write({ kind: "userInput" })`, refused while a connected app answers questions.
   - State that starts no work (drafts, queue edits, the title, the read flag, `copilot/viewState`, its own
@@ -824,7 +828,9 @@ sequenceDiagram
     a synchronous check that the session is not fenced, moved, or replaced.
   - Approvals (`chat/toolCallConfirmed`) and elicitation answers are never forwarded. The runtime's request ID comes
     only from the runtime's own frames (`_meta.requestId` on `chat/toolCallReady`, `session/inputNeededSet`, and
-    snapshots), never from the client. The ledger must have recorded the request: durable's
+    snapshots), never from the client: not from a client's echoed actions, nor from what clients, the model, or tools
+    wrote into state (messages, drafts, answers, view state, client registrations, tool arguments, inputs, results),
+    and only when the permission request names the same tool call. The ledger must have recorded the request: durable's
     `actions.promptVisibility` when it is available, otherwise its open actions, waited for up to 5 s
     (`MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS`), because the runtime reports a prompt to the gateway and to the CLI on
     different connections. `CliAttachment.answer` then records the decision as `responderKind: "cli"`
@@ -839,25 +845,32 @@ sequenceDiagram
     disposal, approval-mode changes (`allow-all` would bypass the ledger), tool results, history truncation, turn
     resume, working directories, customizations and MCP servers, automations, host configuration, unknown extensions,
     and on shared placement host slash commands other than `/compact` (`/chronicle` reads every session on the runtime).
-- **What the CLI sees.** Runtime frames go through core's `pathScrubber` (with `file:` URIs decoded first and
-  re-encoded), so working directories, plan paths, and context read `/workspace`, `/platform/...`, or
-  `/opt/managed-copilot/customizations/...`. The `initialize` result loses the host's `terminalCommandPrefix` and
+- **What the CLI sees.** Runtime frames go through core's `pathScrubber` (with every escape in a `file:` URI decoded
+  first, `%3A` and `%23` included, and the URI re-encoded), so working directories, plan paths, and context read
+  `/workspace`, `/platform/...`, or `/opt/managed-copilot/customizations/...`; state nested deeper than 128 levels is
+  replaced rather than passed on unscrubbed. Every result loses the host's `terminalCommandPrefix` and
   `defaultDirectory`, shared sessions' completions lose host commands they can't run, the host's requests to the
-  client (its resources) are answered with an error, and OTLP telemetry is not forwarded.
+  client (its resources) are answered with an error, and OTLP telemetry is not forwarded. A message the relay can't
+  handle ends only its own attachment (1008 for the client's, including messages nested deeper than 64 levels; 1011
+  for the runtime's); fields of the wrong type are refused, never coerced.
 - **Promotion.** Attach is a promotion participant ("Copilot CLI attach"). Its `fence` marks the session fenced and
   bumps the session's epoch, stops every relay at once (clients close with 4307, "The session is moving into a
-  sandbox. Reconnecting."), disposes the host, including one still starting, with `host.dispose` on the runtime that
-  started it (never through core's session routing, which waits for the cutover), and resolves once that runtime
-  confirmed. A failed `host.dispose` rejects, failing the move before the checkpoint. Until `release`, `POST /attach`
+  sandbox. Reconnecting."), and disposes every host of the session its runtime hasn't confirmed stopping (the current
+  one, one still starting, and one whose earlier disposal is still in flight or failed; stock `host.dispose` is
+  idempotent, so it is sent again) with `host.dispose` on the runtime that started it (never through core's session
+  routing, which waits for the cutover). It resolves once each runtime confirmed. A failed `host.dispose` rejects,
+  failing the move before the checkpoint. Until `release`, `POST /attach`
   and upgrades answer `session_busy`, and an attach, host start, or upgrade that straddled the fence is refused when
-  it completes. After `release` (a commit, or a sealed or unsealed abort) the next attach starts a fresh host through a
+  it completes, as is a runtime lookup that spanned a fence already lifted. After `release` (a commit, or a sealed or
+  unsealed abort) the next attach starts a fresh host through a
   fresh `sessions.runtime()`, even when the runtime connection is the same. Lifecycle releases (`promoted`,
   `stopped`) end only hosts whose runtime lookup started before the event, so a host already on the new runtime stays.
 - **Reconnects.** The stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
   1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
   into 1012 and reconnects the CLI with a fresh ticket to the same session wherever it now runs; while a move is under
-  way it retries `session_busy` (ticket or socket) with backoff for up to 2 minutes as long as the CLI waits, and a
-  redial takes over from a dial the CLI abandoned. The relay refuses a reconnect whose material names a different
+  way it retries `session_busy` (ticket or socket) with backoff for up to 2 minutes as long as the CLI waits (then
+  reports `session_busy`). A dial the CLI abandons ends at once, even mid-handshake, and its redial takes over. The
+  relay refuses a reconnect whose material names a different
   conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
   attach again with new material.
 - **Verified live** (stock Copilot CLI 1.0.92, runtime 1.0.103, real model, captured between the relay and the

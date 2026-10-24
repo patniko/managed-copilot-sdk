@@ -161,6 +161,8 @@ interface RelayOptions {
   readonly deploymentUrl: string;
   readonly http: Pick<HttpClient, "post">;
   readonly first: AttachMaterial;
+  /** How long a reconnect keeps trying through `session_busy` (default `BUSY_RETRY_MS`). */
+  readonly busyRetryMs?: number;
 }
 
 /** The loopback relay between the stock CLI and the deployment's attach socket. Exported for tests. */
@@ -263,7 +265,7 @@ export class AttachRelay {
    * the CLI waits on `cliSocket`, bounded by `BUSY_RETRY_MS`.
    */
   async #connectUpstream(protocols: string[], cliSocket: Duplex): Promise<WebSocket> {
-    const deadline = Date.now() + BUSY_RETRY_MS;
+    const deadline = Date.now() + (this.#options.busyRetryMs ?? BUSY_RETRY_MS);
     let waits = 0;
     let renewed = false;
     const mayWait = () => !this.#closed && !cliSocket.destroyed && Date.now() < deadline;
@@ -298,6 +300,7 @@ export class AttachRelay {
       }
       // The ticket only ever goes to the deployment this process connected to, whatever host the material names.
       const { pathname, search } = new URL(material.url);
+      if (cliSocket.destroyed) throw new ManagedCopilotError("conflict", "Copilot CLI stopped waiting for this connection.");
       const upstream = new WebSocket(`${socketOrigin(this.#options.deploymentUrl)}${pathname}${search}`, protocols, {
         headers: { authorization: `Bearer ${material.token}` },
         perMessageDeflate: false,
@@ -306,8 +309,21 @@ export class AttachRelay {
       });
       this.#upstreams.add(upstream);
       upstream.once("close", () => this.#upstreams.delete(upstream));
+      // Errors after the outcome below (a terminated handshake) have nothing left to report.
+      upstream.on("error", () => undefined);
       const refusal = await new Promise<{ status: number; code?: string } | undefined>((resolve) => {
-        upstream.once("open", () => resolve(undefined));
+        // The CLI hung up while this dial was in flight: it ends here, before the deployment registers a responder for
+        // it (the CLI's next dial, if any, takes over).
+        const abandon = () => {
+          upstream.terminate();
+          resolve({ status: 499 });
+        };
+        cliSocket.once("close", abandon);
+        upstream.once("close", () => cliSocket.off("close", abandon));
+        upstream.once("open", () => {
+          cliSocket.off("close", abandon);
+          resolve(undefined);
+        });
         upstream.once("unexpected-response", (_request, response) => {
           const chunks: Buffer[] = [];
           let size = 0;
@@ -325,10 +341,18 @@ export class AttachRelay {
         });
         upstream.once("error", () => resolve({ status: 502 }));
       });
-      if (refusal === undefined) return upstream;
-      if (refusal.code === "session_busy" && mayWait()) {
-        await pause();
-        continue;
+      if (refusal === undefined) {
+        if (!cliSocket.destroyed) return upstream;
+        upstream.terminate();
+        throw new ManagedCopilotError("conflict", "Copilot CLI stopped waiting for this connection.");
+      }
+      if (cliSocket.destroyed) throw new ManagedCopilotError("conflict", "Copilot CLI stopped waiting for this connection.");
+      if (refusal.code === "session_busy") {
+        if (mayWait()) {
+          await pause();
+          continue;
+        }
+        throw new ManagedCopilotError("session_busy", "The session is still moving into a sandbox. Attach again in a moment.");
       }
       // An expired or already used ticket: one fresh one.
       if (refusal.status === 401 && !renewed) {
@@ -357,6 +381,8 @@ export class AttachRelay {
     try {
       const refusal = await this.#verify(req);
       if (refusal) {
+        // An abandoned dial says nothing about the attachment (another dial may already be attached).
+        if (socket.destroyed) return;
         this.outcome = refusal;
         return reject(socket, refusal.code === "forbidden" ? 403 : 401, refusal.code as ErrorCode, refusal.message);
       }

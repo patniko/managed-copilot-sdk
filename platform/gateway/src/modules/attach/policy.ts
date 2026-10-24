@@ -15,6 +15,7 @@
 
 /** AHP JSON-RPC error codes (AHP 0.9). */
 export const AHP_ERRORS = {
+  invalidRequest: -32600,
   methodNotFound: -32601,
   invalidParams: -32602,
   permissionDenied: -32009,
@@ -73,12 +74,18 @@ export function channelAllowed(channel: unknown, sessionId: string): boolean {
 
 /** Decides a client request (a message with `method` and `id`). */
 export function decideRequest(message: JsonRpcMessage, sessionId: string): RequestVerdict {
-  const method = String(message.method);
+  if (typeof message.method !== "string") return { kind: "refuse", code: AHP_ERRORS.invalidParams, message: "Malformed request." };
+  const method = message.method;
   if (!READ_REQUESTS.has(method)) return { kind: "refuse", code: AHP_ERRORS.permissionDenied, message: refusalFor(method) };
   const params = isDict(message.params) ? message.params : {};
-  if (method === "subscribe" && !channelAllowed(params["channel"], sessionId)) {
-    return { kind: "refuse", code: AHP_ERRORS.permissionDenied, message: "Copilot CLI attach shows this session's conversation only." };
-  }
+  const channel = params["channel"];
+  // A read names this session's channels or none; session extensions name the session itself. The stock host serves
+  // only the session it published, and this keeps that true whatever the host would answer.
+  const outside =
+    (channel !== undefined && !channelAllowed(channel, sessionId)) ||
+    (method === "subscribe" && channel === undefined) ||
+    (method.startsWith("extensions/") && channel !== sessionChannel(sessionId));
+  if (outside) return { kind: "refuse", code: AHP_ERRORS.permissionDenied, message: "Copilot CLI attach shows this session's conversation only." };
   if (method === "reconnect" && Array.isArray(params["subscriptions"])) {
     // Channels outside the session are dropped; the host replays or snapshots the rest.
     const subscriptions = params["subscriptions"].filter((channel) => channelAllowed(channel, sessionId));
@@ -152,16 +159,18 @@ const PENDING_KINDS: ReadonlySet<string> = new Set(["steering", "queued"]);
  * the policy checked (`action` in the verdict), never the client's action as sent.
  */
 export function decideAction(params: unknown, context: { readonly sessionId: string; readonly placement: AttachPlacement; readonly clientId: string | undefined }): ActionVerdict {
-  if (!isDict(params) || !isDict(params["action"])) return { kind: "refuse", reason: "Malformed action." };
+  const malformed = { kind: "refuse", reason: "Malformed action." } as const;
+  if (!isDict(params) || !isDict(params["action"])) return malformed;
   const channel = params["channel"];
   const action = params["action"];
-  const type = String(action["type"]);
+  const type = action["type"];
+  if (typeof type !== "string") return malformed;
   const onSession = channel === sessionChannel(context.sessionId);
   const onChat = typeof channel === "string" && CHAT_CHANNEL.test(channel);
   if (type.startsWith("chat/") && !onChat) return { kind: "refuse", reason: "Chat actions must target a chat of this session." };
   if ((type.startsWith("session/") || type.startsWith("copilot/")) && !onSession) return { kind: "refuse", reason: "Session actions must target this session." };
-  if (typeof params["clientSeq"] !== "number") return { kind: "refuse", reason: "Malformed action." };
-  const malformed = { kind: "refuse", reason: "Malformed action." } as const;
+  const clientSeq = params["clientSeq"];
+  if (typeof clientSeq !== "number" || !Number.isSafeInteger(clientSeq) || clientSeq < 0) return malformed;
   switch (type) {
     case "chat/turnStarted": {
       const turnId = str(action["turnId"]);
@@ -174,8 +183,8 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
     }
     case "chat/pendingMessageSet": {
       const id = str(action["id"]);
-      const kind = String(action["kind"]);
-      if (!id || !PENDING_KINDS.has(kind)) return malformed;
+      const kind = str(action["kind"]);
+      if (!id || !kind || !PENDING_KINDS.has(kind)) return malformed;
       const checked = checkMessage(action["message"], context.placement);
       if (checked.kind === "refuse") return checked;
       return { kind: "turn", text: checked.text, ...(checked.modelId ? { modelId: checked.modelId } : {}), action: { type, kind, id, message: checked.message } };
@@ -187,8 +196,8 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
     }
     case "chat/pendingMessageRemoved": {
       const id = str(action["id"]);
-      const kind = String(action["kind"]);
-      if (!id || !PENDING_KINDS.has(kind)) return malformed;
+      const kind = str(action["kind"]);
+      if (!id || !kind || !PENDING_KINDS.has(kind)) return malformed;
       return { kind: "gated", action: { type, kind, id } };
     }
     case "chat/queuedMessagesReordered": {
@@ -234,7 +243,8 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
       if (!isDict(config) || action["replace"] === true) return { kind: "refuse", reason: "Only the session mode can be changed from Copilot CLI." };
       const keys = Object.keys(config);
       // The approval mode stays with the platform: "allow-all" would run tools without the actions ledger.
-      if (keys.length !== 1 || keys[0] !== "mode" || !SESSION_MODES.has(String(config["mode"]))) {
+      const mode = config["mode"];
+      if (keys.length !== 1 || keys[0] !== "mode" || typeof mode !== "string" || !SESSION_MODES.has(mode)) {
         return { kind: "refuse", reason: "Only the session mode can be changed from Copilot CLI; approvals stay as configured." };
       }
       return { kind: "gated", action: { type, config: { mode: config["mode"] } } };
@@ -317,7 +327,8 @@ export class AhpObserver {
     if (message.method === "action" && isDict(message.params)) {
       const envelope = message.params;
       if (typeof envelope["serverSeq"] === "number") this.lastServerSeq = Math.max(this.lastServerSeq, envelope["serverSeq"]);
-      if (typeof envelope["channel"] === "string" && isDict(envelope["action"])) this.#action(envelope["channel"], envelope["action"]);
+      // A client's own action (echoed with its `origin`) never teaches a prompt; it can still retire one.
+      if (typeof envelope["channel"] === "string" && isDict(envelope["action"])) this.#action(envelope["channel"], envelope["action"], envelope["origin"] === undefined);
       return;
     }
     if (isDict(message.result)) {
@@ -328,20 +339,34 @@ export class AhpObserver {
     }
   }
 
-  #action(channel: string, action: Dict): void {
+  #action(channel: string, action: Dict, fromRuntime: boolean): void {
     const type = action["type"];
-    if (type === "chat/toolCallReady") this.#toolCall(channel, action);
-    else if (type === "chat/toolCallComplete") this.#permissions.delete(key(channel, String(action["toolCallId"])));
-    else if (type === "chat/inputRequested" && isDict(action["request"])) this.#question(channel, action["request"]);
-    else if (type === "chat/inputCompleted") this.#inputs.delete(key(channel, String(action["requestId"])));
-    else if (type === "session/inputNeededSet" && isDict(action["request"])) this.#walk(action["request"], undefined, 0);
+    if (type === "chat/toolCallComplete") {
+      const toolCallId = str(action["toolCallId"]);
+      if (toolCallId) this.#permissions.delete(key(channel, toolCallId));
+    } else if (type === "chat/inputCompleted") {
+      const requestId = str(action["requestId"]);
+      if (requestId) this.#inputs.delete(key(channel, requestId));
+    } else if (!fromRuntime) {
+      return;
+    } else if (type === "chat/toolCallReady") {
+      this.#toolCall(channel, action);
+    } else if (type === "chat/inputRequested" && isDict(action["request"])) {
+      this.#question(channel, action["request"]);
+    } else if (type === "session/inputNeededSet" && isDict(action["request"])) {
+      this.#walk(action["request"], undefined, 0);
+    }
   }
 
   #toolCall(channel: string, toolCall: Dict): void {
     const toolCallId = str(toolCall["toolCallId"]);
     const meta = isDict(toolCall["_meta"]) ? toolCall["_meta"] : undefined;
     const requestId = str(meta?.["requestId"]);
-    if (toolCallId && requestId && isDict(meta?.["permissionRequest"])) remember(this.#permissions, key(channel, toolCallId), { requestId });
+    const permission = meta?.["permissionRequest"];
+    if (!toolCallId || !requestId || !isDict(permission)) return;
+    // The runtime's permission request names the tool call it is for: a mismatch is not a prompt the runtime authored.
+    if (permission["toolCallId"] !== undefined && permission["toolCallId"] !== toolCallId) return;
+    remember(this.#permissions, key(channel, toolCallId), { requestId });
   }
 
   #question(channel: string, request: Dict): void {
@@ -353,7 +378,9 @@ export class AhpObserver {
 
   /**
    * Snapshots (`subscribe`, `reconnect`) and `inputNeeded` entries: tool calls and questions waiting for a person.
-   * Messages, drafts, queued messages, and answers are what clients wrote, so they are never read for prompts.
+   * Only the runtime's own state is read: what clients wrote (messages, drafts, answers, view state, client
+   * registrations) and what the model or tools produced (inputs, arguments, results, content) is skipped, as is `_meta`
+   * (a tool call's own `_meta` is read where the tool call is found).
    */
   #walk(node: unknown, chat: string | undefined, depth: number): void {
     if (depth > 24) return;
@@ -370,55 +397,92 @@ export class AhpObserver {
     if (scope && typeof node["toolCallId"] === "string") this.#toolCall(scope, node);
     if (scope && Array.isArray(node["questions"]) && typeof node["id"] === "string") this.#question(scope, node);
     for (const [field, value] of Object.entries(node)) {
-      if (CLIENT_AUTHORED.has(field)) continue;
+      if (NOT_RUNTIME_STATE.has(field)) continue;
       if (typeof value === "object" && value !== null) this.#walk(value, scope, depth + 1);
     }
   }
 }
 
-/** State fields whose content a client wrote (and the host stores as sent). */
-const CLIENT_AUTHORED: ReadonlySet<string> = new Set(["message", "draft", "queuedMessages", "answers"]);
+/** State fields the runtime stores as a client, the model, or a tool wrote them (and `_meta`, read in place). */
+const NOT_RUNTIME_STATE: ReadonlySet<string> = new Set([
+  "message",
+  "draft",
+  "queuedMessages",
+  "answers",
+  "answer",
+  "view",
+  "activeClient",
+  "activeClients",
+  "config",
+  "customizations",
+  "toolInput",
+  "args",
+  "arguments",
+  "result",
+  "content",
+  "_meta",
+]);
 
 /**
- * Filters a runtime response for the request that asked for it: `initialize` loses the host's shell prefix and its
- * host directory (neither shells nor files are reachable), and a shared session's completions lose host commands it
- * may not run.
+ * Filters a runtime response for the request that asked for it. Every result loses the host's shell prefix and its host
+ * directory (neither shells nor files are reachable; `initialize` carries them), and a shared session's completions
+ * lose host commands it may not run.
  */
 export function filterResult(method: string | undefined, result: unknown, placement: AttachPlacement): unknown {
   if (!isDict(result)) return result;
-  if (method === "initialize") {
-    const { terminalCommandPrefix: _prefix, defaultDirectory: _directory, ...rest } = result;
-    return rest;
-  }
-  if (method === "completions" && placement === "shared" && Array.isArray(result["items"])) {
-    const items = result["items"].filter((item) => {
+  const { terminalCommandPrefix: _prefix, defaultDirectory: _directory, ...rest } = result;
+  if (method === "completions" && placement === "shared" && Array.isArray(rest["items"])) {
+    const items = rest["items"].filter((item) => {
       const command = isDict(item) && typeof item["insertText"] === "string" ? SLASH_COMMAND.exec(item["insertText"])?.[1] : undefined;
       return !command || SHARED_HOST_COMMANDS.has(command.toLowerCase());
     });
-    return { ...result, items };
+    return { ...rest, items };
   }
-  return result;
+  return rest;
+}
+
+/** What replaces runtime state nested too deeply to scrub (no AHP frame comes close). */
+export const TOO_DEEP = "[omitted: nested too deeply]";
+const MAX_SCRUB_DEPTH = 128;
+
+/**
+ * A `file:` URI's path, percent-decoded (`%3A`, `%23`, ... included). Runs of valid escapes are decoded together (a
+ * multi-byte character spans several); a malformed one stays as written.
+ */
+function fileUriPath(uri: string): string {
+  return uri.slice("file://".length).replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
+
+/** Percent-encodes a scrubbed path for a `file:` URI (a lone surrogate, which `encodeURI` refuses, stays as is). */
+function encodePath(path: string): string {
+  try {
+    return encodeURI(path).replace(/[?#]/g, encodeURIComponent);
+  } catch {
+    return path.replace(/[ \t\n\r\f\v%?#]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+  }
 }
 
 /**
  * Deep scrubber for platform host paths: core's `pathScrubber` (data directory, its resolved form, and the session
  * workspace), applied to `file:` URIs by their decoded path, which AHP uses for working directories. A URI whose path
- * is rewritten is rebuilt around the sandbox-style path (`file:///workspace`), percent-encoded again.
+ * is rewritten is rebuilt around the sandbox-style path (`file:///workspace`), percent-encoded again. State nested
+ * deeper than any AHP frame is replaced, never passed on unscrubbed.
  */
 export function uriAwareScrubber(scrub: (value: unknown) => unknown): (value: unknown) => unknown {
   const FILE_URI = /file:\/\/[^\s"'<>]*/gi;
   const scrubUri = (uri: string): string => {
-    let path: string;
-    try {
-      path = decodeURI(uri.slice("file://".length));
-    } catch {
-      return uri;
-    }
+    const path = fileUriPath(uri);
     // `file:///C:/x` names `C:/x`; `file:///home/x` names `/home/x`.
     const local = /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
     const scrubbed = scrub(local) as string;
     if (scrubbed === local) return uri;
-    return `file://${scrubbed.startsWith("/") ? "" : "/"}${encodeURI(scrubbed)}`;
+    return `file://${scrubbed.startsWith("/") ? "" : "/"}${encodePath(scrubbed)}`;
   };
   const scrubText = (text: string): string => {
     const out = scrub(/file:/i.test(text) ? text.replace(FILE_URI, scrubUri) : text) as string;
@@ -427,11 +491,34 @@ export function uriAwareScrubber(scrub: (value: unknown) => unknown): (value: un
   };
   const walk = (value: unknown, depth: number): unknown => {
     if (typeof value === "string") return scrubText(value);
-    if (depth > 64 || value === null || typeof value !== "object") return value;
+    if (value === null || typeof value !== "object") return value;
+    if (depth > MAX_SCRUB_DEPTH) return TOO_DEEP;
     if (Array.isArray(value)) return value.map((item) => walk(item, depth + 1));
     const out: Dict = {};
     for (const [field, item] of Object.entries(value as Dict)) out[field] = walk(item, depth + 1);
     return out;
   };
   return (value) => walk(value, 0);
+}
+
+/**
+ * Whether JSON `text` nests arrays and objects no deeper than `limit`, measured without parsing (so a hostile frame
+ * can't exhaust the stack in a parser, a serializer, or a walk).
+ */
+export function withinNesting(text: string, limit: number): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x5c) i++;
+      else if (c === 0x22) inString = false;
+      continue;
+    }
+    if (c === 0x22) inString = true;
+    else if (c === 0x7b || c === 0x5b) {
+      if (++depth > limit) return false;
+    } else if (c === 0x7d || c === 0x5d) depth--;
+  }
+  return true;
 }
