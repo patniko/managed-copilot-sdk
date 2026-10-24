@@ -381,7 +381,7 @@ export class SessionManager implements SessionsService {
     if (live) {
       for (const attachment of live.attachments.values()) {
         attachment.peer.notify("session.lifecycle", { type: "session.deleted", sessionId });
-        this.#actions?.onDetached(attachment.peer.id);
+        this.#actions?.onDetached(attachment.peer.id, sessionId);
       }
       live.attachments.clear();
       this.#live.delete(sessionId);
@@ -758,7 +758,7 @@ export class SessionManager implements SessionsService {
     } catch (error) {
       if (live) {
         this.#live.delete(sessionId);
-        for (const attachment of live.attachments.values()) this.#actions?.onDetached(attachment.peer.id);
+        for (const attachment of live.attachments.values()) this.#actions?.onDetached(attachment.peer.id, sessionId);
         live.attachments.clear();
       }
       this.#ledger.remove(sessionId);
@@ -1053,10 +1053,11 @@ export class SessionManager implements SessionsService {
     return { ...params, ...registrations.flags, tools: [...registrations.tools, ...this.#platformToolDeclarations(live)] };
   }
 
+  /** Detaches one connection from one session; durable releases only that session's live claims of the connection. */
   #detach(live: LiveSession, peerId: string, notifyActions = true): void {
     live.attachments.delete(peerId);
     if (live.creator === peerId) live.creator = live.attachments.keys().next().value;
-    if (notifyActions) this.#actions?.onDetached(peerId);
+    if (notifyActions) this.#actions?.onDetached(peerId, live.id);
   }
 
   async #afterAttach(peer: ClientPeer, sessionId: string): Promise<void> {

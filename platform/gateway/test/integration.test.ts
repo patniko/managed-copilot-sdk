@@ -94,6 +94,29 @@ describe("cross-module integration through the core router", () => {
       expect(actions.list(sessionId).find((action) => action.tool === "lookup_order")?.state).toBe("completed");
     });
 
+    it("detaching one session keeps the connection's in-flight tools in its other sessions", async (ctx) => {
+      const actions = service<Actions>("actions");
+      if (!actions) return ctx.skip();
+      const client = await connect(ALICE);
+      const first = crypto.randomUUID();
+      const second = crypto.randomUUID();
+      await client.request("session.create", { sessionId: first, tools: [{ name: "slow_tool" }] });
+      await client.request("session.create", { sessionId: second, tools: [{ name: "slow_tool" }] });
+      await client.request("session.send", { sessionId: first, prompt: "tool:slow_tool" });
+      await client.request("session.send", { sessionId: second, prompt: "tool:slow_tool" });
+      await waitUntil(() => client.events("external_tool.requested").length === 2);
+      const stateOf = (sessionId: string) => actions.list(sessionId).find((action) => action.tool === "slow_tool")?.state;
+      expect([stateOf(first), stateOf(second)]).toEqual(["executing", "executing"]);
+
+      await client.request("session.detach", { sessionId: first });
+      expect(stateOf(first)).not.toBe("executing");
+      expect(stateOf(second)).toBe("executing");
+      const requested = client.events("external_tool.requested").find((event) => (event["data"] as Record<string, unknown>)["sessionId"] === second)!;
+      await client.request("session.tools.handlePendingToolCall", { sessionId: second, requestId: (requested["data"] as Record<string, unknown>)["requestId"], result: "still running" });
+      await waitUntil(() => assistantText(second).includes("tool said: still running"));
+      expect(stateOf(second)).toBe("completed");
+    });
+
     it("lets the owner answer a waiting action over REST, and nobody else", async (ctx) => {
       if (!service("actions")) return ctx.skip();
       const client = await connect(ALICE);
