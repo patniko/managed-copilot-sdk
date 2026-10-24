@@ -5,11 +5,12 @@ specialized Copilot agents on **Managed Copilot**. Each station is an environmen
 its own custom agent, skills, isolation, and network policy. The app itself is ordinary Node code built on the stock
 `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-![The factory floor mid-run: two builders in their own sandboxes while a second model reviews the first finished task](docs/screenshots/floor-building.png)
+![The factory floor mid-run: one builder streaming its work in a sandbox while the other task goes to review on a second model](docs/screenshots/floor-building.png)
 
 *A live run of the featured work order: the planner split it into two tasks; one builder is still working in its
-sandbox while the other's work is already under review by a different model. The panel streams the selected
-station's activity: skills, commands, file edits, and test runs.*
+sandbox while the other's finished work goes to review on a different model. The panel streams the selected
+station's activity (skills, commands, file edits, and the agent's text as it's written) and can open the session in
+Copilot CLI.*
 
 ```mermaid
 flowchart LR
@@ -73,8 +74,8 @@ aspire run          # the platform, sandboxes, and the factory; open the "softwa
 
 The factory floor opens at <http://localhost:7480>. Pick the **CSV ⇄ JSON toolkit** template and press
 **Start work order**: two builders work side by side, the reviewer usually sends work back once, and the release
-lands in three to nine minutes. Measured live runs: 2m 52s (51 tests) and 4m 25s (36 tests) from `main`, and
-3m 55s to 8m 32s while the platform was coming together.
+lands in three to nine minutes. Measured live runs: 2m 52s (51 tests), 3m 34s (44 tests), and 4m 25s (36 tests)
+from `main`, and 3m 55s to 8m 32s while the platform was coming together.
 
 ### Scripted happy path
 
