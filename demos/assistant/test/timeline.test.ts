@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
-import { describeApproval, describeTool, scheduleIdFrom } from "../src/server/describe.js";
+import { describeApproval, describeTool, humanizeName, scheduleIdFrom } from "../src/server/describe.js";
 import { Timeline } from "../src/server/timeline.js";
 
 let seq = 0;
@@ -108,6 +108,13 @@ describe("Timeline", () => {
 });
 
 describe("descriptions", () => {
+  it("humanizes schedule names", () => {
+    expect(humanizeName("stretch-water-reminder")).toBe("Stretch water reminder");
+    expect(humanizeName("stretch-water-reminder-2QQq")).toBe("Stretch water reminder");
+    expect(humanizeName("q3-launch-plan")).toBe("Q3 launch plan");
+    expect(humanizeName("Weekday morning briefing")).toBe("Weekday morning briefing");
+  });
+
   it("describes scheduling tools and extracts schedule IDs", () => {
     const at = new Date("2026-10-23T23:00:00Z");
     const oneShot = describeTool("schedule_task", { name: "Call Sam", runAt: "2026-10-23T16:00:00-07:00" }, "succeeded", "Scheduled sch_abc123 for 4:00 PM", "America/Los_Angeles", at);

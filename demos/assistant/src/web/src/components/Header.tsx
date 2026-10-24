@@ -41,7 +41,7 @@ export function Header(props: {
           <h1 className="font-display text-[15px] font-semibold tracking-tight">Assistant</h1>
           {props.unread > 0 && <span className="chip bg-violet-600 text-white">{props.unread} new</span>}
         </div>
-        <div className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400">
+        <div className="flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400" data-testid="status" data-status={status.tone}>
           <span className={`size-1.5 rounded-full ${DOT[status.tone]}`} aria-hidden />
           <span className="truncate">{status.text}</span>
         </div>
