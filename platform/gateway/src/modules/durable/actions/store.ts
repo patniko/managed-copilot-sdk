@@ -5,6 +5,8 @@ import { parseJson, toIso } from "../ids.js";
 /** States in which an action still needs (or may still receive) an answer. */
 export const OPEN_STATES: readonly ActionState[] = ["pending", "claimed", "executing", "needs_reconciliation"];
 export const OWNED_STATES: readonly ActionState[] = ["claimed", "executing"];
+/** States with an answer the runtime must receive (an expiry is delivered as an error, refusal, or cancel). */
+export const ANSWERED_STATES: readonly ActionState[] = ["completed", "failed", "expired"];
 
 export interface ActionRow {
   readonly id: string;
@@ -39,6 +41,8 @@ export interface ActionRow {
   readonly next_forward_at: number | null;
   /** When the action was first included in a `session.action_required` notification. */
   readonly notified_at: number | null;
+  /** JSON `{ connectionId: generation }`: live connections that held this action, and the placement they held it in. */
+  readonly live_claimants: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -74,6 +78,8 @@ export interface ClaimChange {
   readonly liveConnection: string | null;
   /** Null for live claims. */
   readonly leaseExpiresAt: number | null;
+  /** Live claims: the action's claimant history including this connection (see `ActionRow.live_claimants`). */
+  readonly liveClaimants?: string;
   readonly now: number;
 }
 
@@ -194,7 +200,7 @@ export class ActionStore {
       this.#db
         .prepare(
           `UPDATE durable_actions SET state = ?, claim_seq = claim_seq + 1, claim_token_hash = ?, claimed_by = ?, responder_type = ?,
-             live_connection = ?, lease_expires_at = ?, reason = NULL, updated_at = ?
+             live_connection = ?, lease_expires_at = ?, live_claimants = COALESCE(?, live_claimants), reason = NULL, updated_at = ?
            WHERE id = ? AND claim_seq = ? AND state IN (${placeholders(expected.states)})`,
         )
         .run(
@@ -204,6 +210,7 @@ export class ActionStore {
           change.responderType,
           change.liveConnection,
           change.leaseExpiresAt,
+          n(change.liveClaimants),
           change.now,
           id,
           expected.seq,
@@ -258,7 +265,7 @@ export class ActionStore {
   /** Moves an action between states without an answer (release, reconciliation, expiry, cancellation). */
   transition(
     id: string,
-    expected: { readonly states: readonly ActionState[]; readonly seq?: number },
+    expected: { readonly states: readonly ActionState[]; readonly seq?: number; readonly generation?: number },
     to: { readonly state: ActionState; readonly reason?: string | null; readonly clearClaim?: boolean; readonly forwarded?: boolean; readonly now: number },
   ): boolean {
     const sets = ["state = ?", "reason = ?", "updated_at = ?", "lease_expires_at = NULL"];
@@ -278,40 +285,94 @@ export class ActionStore {
       conditions.push("claim_seq = ?");
       params.push(expected.seq);
     }
+    if (expected.generation !== undefined) {
+      conditions.push("generation = ?");
+      params.push(expected.generation);
+    }
     return changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params));
   }
 
-  /** Moves an open action to a new placement generation; voiding its claim bumps the claim sequence (fencing). */
+  /**
+   * Moves an open action to a newer placement generation (never back); voiding its claim bumps the claim sequence,
+   * so tokens and live connections from before the move can no longer commit (fencing).
+   */
   moveToGeneration(
     id: string,
     seq: number,
-    change: { readonly generation: number; readonly state: ActionState; readonly clearClaim: boolean; readonly reason: string | null; readonly now: number },
+    change: {
+      readonly generation: number;
+      readonly state: ActionState;
+      readonly clearClaim: boolean;
+      readonly reason: string | null;
+      /** Updated claimant history (a live claim carried into the new placement is held there). */
+      readonly liveClaimants?: string;
+      readonly now: number;
+    },
   ): boolean {
     const claim = change.clearClaim
       ? ", claim_seq = claim_seq + 1, claim_token_hash = NULL, claimed_by = NULL, responder_type = NULL, live_connection = NULL, lease_expires_at = NULL"
       : "";
     return changed(
       this.#db
-        .prepare(`UPDATE durable_actions SET generation = ?, state = ?, reason = ?, updated_at = ?${claim} WHERE id = ? AND claim_seq = ? AND state IN (${placeholders(OPEN_STATES)})`)
-        .run(change.generation, change.state, change.reason, change.now, id, seq, ...OPEN_STATES),
+        .prepare(
+          `UPDATE durable_actions SET generation = ?, state = ?, reason = ?, live_claimants = COALESCE(?, live_claimants), updated_at = ?${claim}
+           WHERE id = ? AND claim_seq = ? AND generation < ? AND state IN (${placeholders(OPEN_STATES)})`,
+        )
+        .run(change.generation, change.state, change.reason, n(change.liveClaimants), change.now, id, seq, change.generation, ...OPEN_STATES),
     );
   }
 
-  markForwarded(id: string, now: number, reason?: string): void {
-    if (reason === undefined) {
-      this.#db.prepare("UPDATE durable_actions SET forwarded = 1, next_forward_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
-    } else {
-      this.#db.prepare("UPDATE durable_actions SET forwarded = 1, next_forward_at = NULL, reason = ?, updated_at = ? WHERE id = ?").run(reason, now, id);
-    }
+  /**
+   * A newer placement still waits for a request answered under an older one (it was carried across promotion): the
+   * recorded answer moves to that generation and is delivered again from a fresh retry budget.
+   */
+  adoptAnswer(id: string, fromGeneration: number, toGeneration: number, now: number): boolean {
+    return changed(
+      this.#db
+        .prepare(
+          `UPDATE durable_actions SET generation = ?, forwarded = 0, next_forward_at = NULL, forward_attempts = 0,
+             reason = CASE WHEN state = 'expired' THEN reason ELSE NULL END, updated_at = ?
+           WHERE id = ? AND generation = ? AND generation < ? AND state IN (${placeholders(ANSWERED_STATES)})`,
+        )
+        .run(toGeneration, now, id, fromGeneration, toGeneration, ...ANSWERED_STATES),
+    );
   }
 
-  deferForward(id: string, nextAt: number, now: number): void {
-    this.#db.prepare("UPDATE durable_actions SET forward_attempts = forward_attempts + 1, next_forward_at = ?, updated_at = ? WHERE id = ?").run(nextAt, now, id);
+  /**
+   * Marks an undelivered answer as delivered (or as never deliverable, with a reason). `generation` scopes it to the
+   * placement that was attempted, so a late acknowledgment from an older placement never covers a newer one.
+   */
+  markForwarded(id: string, now: number, reason?: string, generation?: number): void {
+    const sets = ["forwarded = 1", "next_forward_at = NULL", "updated_at = ?"];
+    const params: Bindable[] = [now];
+    if (reason !== undefined) {
+      sets.push("reason = ?");
+      params.push(reason);
+    }
+    const conditions = ["id = ?", "forwarded = 0"];
+    params.push(id);
+    if (generation !== undefined) {
+      conditions.push("generation = ?");
+      params.push(generation);
+    }
+    this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params);
+  }
+
+  deferForward(id: string, nextAt: number, now: number, generation?: number): void {
+    const scope = generation === undefined ? "" : " AND generation = ?";
+    this.#db
+      .prepare(`UPDATE durable_actions SET forward_attempts = forward_attempts + 1, next_forward_at = ?, updated_at = ? WHERE id = ? AND forwarded = 0${scope}`)
+      .run(nextAt, now, id, ...(generation === undefined ? [] : [generation]));
   }
 
   markNotified(ids: readonly string[], now: number): void {
     if (ids.length === 0) return;
     this.#db.prepare(`UPDATE durable_actions SET notified_at = ? WHERE notified_at IS NULL AND id IN (${placeholders(ids)})`).run(now, ...ids);
+  }
+
+  /** The action is offered again and needs a fresh announcement; until one is published, the sweeper repairs it. */
+  clearNotified(id: string): void {
+    this.#db.prepare("UPDATE durable_actions SET notified_at = NULL WHERE id = ? AND notified_at IS NOT NULL").run(id);
   }
 
   /** Pending actions created before `createdBefore` that no `session.action_required` announced yet. */
