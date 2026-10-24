@@ -31,9 +31,15 @@ function load(certPath: string, keyPath: string): CertificateAuthority {
 }
 
 function writeFlushed(path: string, data: string, mode: number): void {
+  const bytes = Buffer.from(data, "utf8");
   const fd = openSync(path, "wx", mode);
   try {
-    writeSync(fd, data);
+    // A write may accept only part of the data: keep going until all of it is on disk, never publish a short file.
+    for (let offset = 0; offset < bytes.length; ) {
+      const written = writeSync(fd, bytes, offset, bytes.length - offset);
+      if (!(written > 0)) throw new Error(`Could not write ${path}: the file system accepted no data`);
+      offset += written;
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);
@@ -76,7 +82,8 @@ export function loadOrCreateCa(options: CaOptions, internals: { readonly rename?
     flushDirectory(staging);
     (internals.rename ?? renameSync)(staging, directory);
     flushDirectory(options.dataDir);
-    return { ca: new CertificateAuthority(material), created: true };
+    // Use what was published, as every other proxy will, so damage fails here rather than on the next start.
+    return { ca: persisted(), created: true };
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
     if (existsSync(directory)) return { ca: persisted(), created: false };
