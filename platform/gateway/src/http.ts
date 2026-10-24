@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import { ZodError } from "zod";
@@ -45,7 +46,15 @@ export interface RequestContext {
 
 /** A handler returns a JSON-serializable value (sent with the chosen status), or writes `res` itself. */
 export type Handler = (ctx: RequestContext) => unknown | Promise<unknown>;
-export type UpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer, principal: Principal | undefined) => void | Promise<void>;
+
+/** Route details passed to upgrade handlers. */
+export interface UpgradeContext {
+  readonly url: URL;
+  readonly params: Readonly<Record<string, string>>;
+  readonly query: URLSearchParams;
+}
+
+export type UpgradeHandler = (req: IncomingMessage, socket: Duplex, head: Buffer, principal: Principal | undefined, context: UpgradeContext) => void | Promise<void>;
 
 interface Route<T> {
   readonly method: string;
@@ -67,10 +76,32 @@ function matchSegments(pattern: readonly string[], actual: readonly string[]): R
   for (let i = 0; i < pattern.length; i++) {
     const expected = pattern[i]!;
     const value = actual[i]!;
-    if (expected.startsWith(":")) params[expected.slice(1)] = decodeURIComponent(value);
-    else if (expected !== value) return undefined;
+    if (expected.startsWith(":")) {
+      try {
+        params[expected.slice(1)] = decodeURIComponent(value);
+      } catch {
+        throw new ManagedCopilotError("invalid_request", "The request path is not valid URL encoding");
+      }
+    } else if (expected !== value) return undefined;
   }
   return params;
+}
+
+/** Parses a request target; malformed targets are client errors, never unhandled rejections. */
+function parseUrl(req: IncomingMessage): URL {
+  try {
+    return new URL(req.url ?? "/", "http://gateway.local");
+  } catch {
+    throw new ManagedCopilotError("invalid_request", "The request URL is malformed");
+  }
+}
+
+/** Timing-safe comparison of the internal platform key. Empty keys and repeated headers never match. */
+export function platformKeyMatches(header: string | string[] | undefined, expected: string): boolean {
+  if (typeof header !== "string" || !header || !expected) return false;
+  const actual = Buffer.from(header, "utf8");
+  const wanted = Buffer.from(expected, "utf8");
+  return actual.length === wanted.length && timingSafeEqual(actual, wanted);
 }
 
 export function bearerToken(req: IncomingMessage): string | undefined {
@@ -108,7 +139,7 @@ export function toManagedError(error: unknown): ManagedCopilotError {
 async function resolvePrincipal(app: GatewayApp, req: IncomingMessage, auth: RouteAuth): Promise<Principal | undefined> {
   if (auth === "none") return undefined;
   if (auth === "platform") {
-    if (req.headers[PLATFORM_KEY_HEADER] !== app.config.platformKey) throw new ManagedCopilotError("forbidden", "Platform credential required");
+    if (!platformKeyMatches(req.headers[PLATFORM_KEY_HEADER], app.config.platformKey)) throw new ManagedCopilotError("forbidden", "Platform credential required");
     return undefined;
   }
   const token = bearerToken(req);
@@ -139,22 +170,23 @@ export class Router {
   }
 
   async handle(app: GatewayApp, req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", "http://gateway.local");
-    const segments = splitPath(url.pathname);
-    let pathMatched = false;
-    let route: Route<Handler> | undefined;
-    let params: Record<string, string> | undefined;
-    for (const candidate of this.#routes) {
-      const matched = matchSegments(candidate.segments, segments);
-      if (!matched) continue;
-      pathMatched = true;
-      if (candidate.method === req.method) {
-        route = candidate;
-        params = matched;
-        break;
-      }
-    }
+    let url = new URL("http://gateway.local/");
     try {
+      url = parseUrl(req);
+      const segments = splitPath(url.pathname);
+      let pathMatched = false;
+      let route: Route<Handler> | undefined;
+      let params: Record<string, string> | undefined;
+      for (const candidate of this.#routes) {
+        const matched = matchSegments(candidate.segments, segments);
+        if (!matched) continue;
+        pathMatched = true;
+        if (candidate.method === req.method) {
+          route = candidate;
+          params = matched;
+          break;
+        }
+      }
       if (!route || !params) {
         throw new ManagedCopilotError(pathMatched ? "invalid_request" : "not_found", pathMatched ? `Method ${req.method} not allowed` : `No route for ${url.pathname}`);
       }
@@ -208,15 +240,26 @@ export class UpgradeRouter {
   }
 
   async handle(app: GatewayApp, req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
-    const url = new URL(req.url ?? "/", "http://gateway.local");
-    const route = this.#routes.find((candidate) => matchSegments(candidate.segments, splitPath(url.pathname)));
+    let url = new URL("http://gateway.local/");
     try {
-      if (!route) throw new ManagedCopilotError("not_found", `No upgrade route for ${url.pathname}`);
+      url = parseUrl(req);
+      const segments = splitPath(url.pathname);
+      let route: Route<UpgradeHandler> | undefined;
+      let params: Record<string, string> | undefined;
+      for (const candidate of this.#routes) {
+        params = matchSegments(candidate.segments, segments);
+        if (params) {
+          route = candidate;
+          break;
+        }
+      }
+      if (!route || !params) throw new ManagedCopilotError("not_found", `No upgrade route for ${url.pathname}`);
       const principal = await resolvePrincipal(app, req, route.auth);
-      await route.handler(req, socket, head, principal);
+      await route.handler(req, socket, head, principal, { url, params, query: url.searchParams });
     } catch (error) {
       const managed = toManagedError(error);
       if (managed.code === "internal") app.log.error("Unhandled upgrade error", { path: url.pathname, error: (error as Error)?.stack ?? String(error) });
+      if (socket.destroyed || !socket.writable) return;
       const body = JSON.stringify(managed.toBody());
       socket.end(`HTTP/1.1 ${managed.status} Error\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
     }

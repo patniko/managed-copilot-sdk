@@ -31,6 +31,8 @@ export class GatewayApp {
   readonly routes = new Router();
   readonly upgrades = new UpgradeRouter();
   readonly services: Partial<GatewayServices> = {};
+  /** Capability strings modules add to `/v1/info` (e.g. "promotion", "attach.cli"). */
+  readonly capabilities = new Set<string>();
   readonly #startHooks: Hook[] = [];
   readonly #stopHooks: Hook[] = [];
 
