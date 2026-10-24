@@ -2,6 +2,14 @@
  * SQLite schema for the durable module. Append new migrations; never edit one that has shipped.
  * Times are epoch milliseconds.
  */
+import type { Database } from "../../db.js";
+
+/** Brings data directories from pre-release branch builds (which predate `notified_at`) up to the shipped schema. */
+export function upgradeDurableSchema(db: Database): void {
+  const columns = db.prepare("PRAGMA table_info(durable_actions)").all() as { name: string }[];
+  if (!columns.some((column) => column.name === "notified_at")) db.exec("ALTER TABLE durable_actions ADD COLUMN notified_at INTEGER");
+}
+
 export const DURABLE_MIGRATIONS: readonly string[] = [
   // 1: durable action ledger (spec section 12, "One owner for each action").
   `CREATE TABLE durable_actions (

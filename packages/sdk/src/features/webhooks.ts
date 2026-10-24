@@ -68,6 +68,17 @@ async function readBody(request: ReadableRequest): Promise<Buffer> {
 
 const rejected = (message: string) => new ManagedCopilotError("authentication_required", message);
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/** Same deployment: identical URLs, or loopback aliases (localhost, 127.0.0.1, ::1) with the same scheme, port, and path. */
+function sameDeployment(a: string, b: string): boolean {
+  if (a === b) return true;
+  const left = new URL(a);
+  const right = new URL(b);
+  const loopback = (url: URL) => LOOPBACK_HOSTS.has(url.hostname) || url.hostname.endsWith(".localhost");
+  return loopback(left) && loopback(right) && left.protocol === right.protocol && left.port === right.port && left.pathname === right.pathname;
+}
+
 /**
  * Verifies a webhook delivery from Managed Copilot: the HMAC-SHA256 signature over `<t>.<raw body>` (timing-safe,
  * any `v1` entry, so secrets can rotate), the timestamp replay window, and the event ID. Throws
@@ -124,7 +135,7 @@ export async function verifyWebhook(request: WebhookRequestLike, secret: string 
       // The capability is a bearer credential: only ever send it to a valid deployment URL (HTTPS unless loopback,
       // no embedded credentials), and only to the deployment this worker expects when one is configured.
       const audience = validateDeploymentUrl(capability.audience);
-      if (expectedDeployment && audience !== validateDeploymentUrl(expectedDeployment)) {
+      if (expectedDeployment && !sameDeployment(audience, validateDeploymentUrl(expectedDeployment))) {
         throw rejected(`The action capability is for ${capability.audience}, not ${expectedDeployment}`);
       }
       if (Date.parse(capability.expiresAt) <= (options.now?.() ?? Date.now())) return [];

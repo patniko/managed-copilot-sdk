@@ -193,6 +193,20 @@ describe("SDK durable features", () => {
       const event = await verifyWebhook(request(body, { [WEBHOOK_HEADERS.signature]: sign(body) }), SECRET);
       await expectCode(event.handleActions({ tools: [] }), "invalid_request", /plain HTTP/);
     });
+
+    it("treats loopback aliases on the same port as the same local deployment", async () => {
+      gateway.actions = [];
+      const port = new URL(base).port;
+      const body = JSON.stringify({
+        ...envelope,
+        type: "session.action_required",
+        capability: { token: "mcc_local", expiresAt: new Date(Date.now() + 60_000).toISOString(), sessionId: "s1", actionIds: [], audience: base },
+      });
+      const event = await verifyWebhook(request(body, { [WEBHOOK_HEADERS.signature]: sign(body) }), SECRET, { deploymentUrl: `http://localhost:${port}` });
+      expect(await event.handleActions({ tools: [] })).toEqual([]);
+      const other = await verifyWebhook(request(body, { [WEBHOOK_HEADERS.signature]: sign(body) }), SECRET, { deploymentUrl: `http://localhost:${Number(port) + 1}` });
+      await expectCode(other.handleActions({ tools: [] }), "authentication_required");
+    });
   });
 
   describe("handleActions", () => {
