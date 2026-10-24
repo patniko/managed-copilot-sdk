@@ -1,4 +1,7 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
+import WebSocket from "ws";
 import { isManagedCopilotError } from "@managed-copilot/protocol";
 import { createLogger } from "../src/log.js";
 import { InferenceBroker } from "../src/modules/sandbox/broker.js";
@@ -13,7 +16,7 @@ interface Sent {
   params: Record<string, unknown>;
 }
 
-function setup(options: { fetch?: typeof fetch; resolveToken?: () => Promise<string> } = {}) {
+function setup(options: { fetch?: typeof fetch; resolveToken?: () => Promise<string>; invalidateToken?: (token: string) => void; webSocket?: (url: URL, options: WebSocket.ClientOptions) => WebSocket } = {}) {
   const sent: Sent[] = [];
   const fetched: { url: string; init: RequestInit }[] = [];
   const fakeFetch: typeof fetch = async (input, init) => {
@@ -28,6 +31,8 @@ function setup(options: { fetch?: typeof fetch; resolveToken?: () => Promise<str
     sessionId: SESSION,
     placeholder: PLACEHOLDER,
     resolveToken: options.resolveToken ?? (async () => TOKEN),
+    ...(options.invalidateToken ? { invalidateToken: options.invalidateToken } : {}),
+    ...(options.webSocket ? { webSocket: options.webSocket } : {}),
     githubApiUrl: "https://api.github.test",
     log,
     fetch: options.fetch ?? fakeFetch,
@@ -147,6 +152,73 @@ describe("InferenceBroker", () => {
       await request(broker, params as unknown as Record<string, unknown>);
       await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk" && entry.params["end"] === true));
       expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"]).toBe(status);
+    }
+  });
+
+  it("invalidates the owner's token when the Copilot API answers 401, and only then", async () => {
+    for (const status of [401, 403, 200]) {
+      const token = `gho_capi_${status}_token_for_tests`;
+      const invalidated: string[] = [];
+      let identities = 0;
+      const fetchImpl: typeof fetch = async (input) => {
+        if (String(input).endsWith("/copilot_internal/user")) {
+          identities++;
+          return new Response(JSON.stringify({ login: "octocat" }), { status: 200 });
+        }
+        return new Response("{}", { status, headers: { "content-type": "application/json" } });
+      };
+      const { broker, sent, send } = setup({ fetch: fetchImpl, resolveToken: async () => token, invalidateToken: (rejected) => void invalidated.push(rejected) });
+      await broker.initialize(send);
+      await broker.sessionOpened(SESSION);
+      await request(broker, { sessionId: SESSION, url: "https://api.githubcopilot.com/v1/messages", headers: { authorization: [`Bearer ${PLACEHOLDER}`] } }, "{}");
+      await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk" && entry.params["end"] === true));
+      expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"]).toBe(status);
+      expect(invalidated, String(status)).toEqual(status === 401 ? [token] : []);
+      // The rejected token's cached Copilot identity goes with it.
+      await broker.sessionOpened(SESSION);
+      expect(identities, String(status)).toBe(status === 401 ? 2 : 1);
+    }
+  });
+
+  it("invalidates the owner's token when the Copilot API refuses a WebSocket upgrade with 401", async () => {
+    const authorizations: (string | undefined)[] = [];
+    const server = createServer((_req, res) => void res.writeHead(404).end());
+    server.on("upgrade", (req, socket) => {
+      authorizations.push(req.headers["authorization"]);
+      socket.end("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as AddressInfo).port;
+    try {
+      const invalidated: string[] = [];
+      const { broker, sent, send } = setup({
+        invalidateToken: (token) => void invalidated.push(token),
+        webSocket: (url, options) => new WebSocket(`ws://127.0.0.1:${port}${url.pathname}`, options),
+      });
+      await broker.initialize(send);
+      await request(broker, { sessionId: SESSION, method: "GET", transport: "websocket", url: "wss://api.githubcopilot.com/v1/responses", headers: { authorization: [`Bearer ${PLACEHOLDER}`] } });
+      await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk" && entry.params["end"] === true));
+      expect(authorizations).toEqual([`Bearer ${TOKEN}`]);
+      expect(invalidated).toEqual([TOKEN]);
+      expect(JSON.stringify(sent)).not.toContain(TOKEN);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("invalidates the owner's token when GitHub rejects it while resolving the Copilot identity, and only then", async () => {
+    for (const [status, code] of [
+      [401, "authentication_required"],
+      [403, "inference_unavailable"],
+      [500, "inference_unavailable"],
+    ] as const) {
+      const token = `gho_identity_${status}_token_for_tests`;
+      const invalidated: string[] = [];
+      const { broker, send } = setup({ fetch: async () => new Response("{}", { status }), resolveToken: async () => token, invalidateToken: (rejected) => void invalidated.push(rejected) });
+      await broker.initialize(send);
+      await expect(broker.sessionOpened(SESSION)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, code));
+      expect(invalidated, String(status)).toEqual(status === 401 ? [token] : []);
     }
   });
 });

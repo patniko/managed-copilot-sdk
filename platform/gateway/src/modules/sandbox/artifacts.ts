@@ -50,6 +50,17 @@ export function contentTypeFor(path: string): string {
 }
 
 const DELETED = "The session was deleted before its outputs were published.";
+const STOPPED = "The gateway stopped before this turn's outputs were published. Run another turn to publish the current outputs.";
+const SUPERSEDED =
+  "Another turn started before this turn's outputs were captured, so they cannot be attributed to this turn. The current outputs are published when the later turn completes.";
+
+/** Failures decided from a manifest the sandbox did return: no interruption explains them, so they keep their reason. */
+const OWN_FAILURES = new WeakSet<Error>();
+function ownFailure(message: string): ManagedCopilotError {
+  const error = new ManagedCopilotError("publication_failed", message);
+  OWN_FAILURES.add(error);
+  return error;
+}
 
 type TurnOutcome = "completed" | "cancelled" | "failed";
 
@@ -103,8 +114,19 @@ export interface ArtifactServiceOptions {
   /** Marks the session busy while publication runs, so idle stop waits for it. */
   track<T>(sessionId: string, work: Promise<T>): Promise<T>;
   ownerOf(sessionId: string): number | undefined;
-  /** True when the session's sandbox is being deleted or is gone (publication then records that, not a transport error). */
+  /**
+   * True when the session is being deleted or is gone, as far as anyone has decided (its sandbox record, a queued
+   * delete, or core's session state). A publication then records that outcome, not the transport error it caused.
+   */
   sessionGone?(sessionId: string): boolean;
+  /** Resolves once sandbox operations already queued for the session (e.g. a delete) have run; bounded. */
+  settled?(sessionId: string): Promise<void>;
+  /**
+   * True once gateway shutdown has started stopping sandboxes (after publications under way had their chance to
+   * finish). A publication failing from then on was cut off by the shutdown, unless it failed for reasons of its own,
+   * such as rejected output files.
+   */
+  stopping?(): boolean;
   events(): SandboxEventsPort | undefined;
 }
 
@@ -226,14 +248,11 @@ export class ArtifactService implements ArtifactsService {
       // The manifest fixes the bytes (downloads are verified against it). If a later turn had already started, it may
       // have changed outputs/ first, so those bytes cannot be attributed to this turn.
       if (db.prepare("SELECT 1 FROM sandbox_turns WHERE session_id = ? AND seq > ? LIMIT 1").get(sessionId, lastSeq)) {
-        throw new ManagedCopilotError(
-          "publication_failed",
-          "Another turn started before this turn's outputs were captured, so they cannot be attributed to this turn. The current outputs are published when the later turn completes.",
-        );
+        throw ownFailure(SUPERSEDED);
       }
       if (manifest.rejected.length > 0) {
         const listed = manifest.rejected.slice(0, 5).map((entry) => `outputs/${entry.path} (${entry.reason})`).join(", ");
-        throw new ManagedCopilotError("publication_failed", `${manifest.rejected.length} output file${manifest.rejected.length === 1 ? "" : "s"} could not be published: ${listed}${manifest.rejected.length > 5 ? ", …" : ""}. Remove or fix them and run another turn.`);
+        throw ownFailure(`${manifest.rejected.length} output file${manifest.rejected.length === 1 ? "" : "s"} could not be published: ${listed}${manifest.rejected.length > 5 ? ", …" : ""}. Remove or fix them and run another turn.`);
       }
       await fs.mkdir(dir, { recursive: true });
       const planned: { path: string; size: number; digest: string; reuse?: ArtifactRow; version: number }[] = [];
@@ -262,7 +281,7 @@ export class ArtifactService implements ArtifactsService {
           const digest = hash.digest("hex");
           if (digest !== file.sha256 || size !== file.size) {
             await fs.rm(temp, { force: true });
-            throw new ManagedCopilotError("publication_failed", `outputs/${file.path} changed while it was being published. Wait for writers to finish, then run another turn.`);
+            throw ownFailure(`outputs/${file.path} changed while it was being published. Wait for writers to finish, then run another turn.`);
           }
           await fs.rename(temp, blob);
           created.push(blob);
@@ -326,23 +345,66 @@ export class ArtifactService implements ArtifactsService {
         }
       }
     } catch (error) {
+      // Whether shutdown had started stopping compute when the failure surfaced. Decided now: the cleanup and the wait
+      // for queued sandbox work below can outlast the shutdown drain, and must not turn a failure that happened while
+      // compute was still up into a shutdown interruption.
+      const stopping = this.#options.stopping?.() === true;
       // Remove only blobs this attempt stored that no committed version references.
       for (const blob of created) {
         const digest = blob.slice(blob.length - 64);
         const referenced = db.prepare("SELECT 1 FROM sandbox_artifacts WHERE session_id = ? AND digest = ? LIMIT 1").get(sessionId, digest);
         if (!referenced) await fs.rm(blob, { force: true }).catch(() => undefined);
       }
-      const message =
-        this.#options.sessionGone?.(sessionId) === true
-          ? DELETED
-          : error instanceof ManagedCopilotError
-            ? error.message
-            : `Publishing the turn's outputs failed: ${(error as Error).message}`;
-      if (message === DELETED) this.#options.log.info("Skipped publishing outputs of a session that is being deleted", { sessionId, turnId });
+      // A failure the publication decided itself (rejected or changing files, a superseding turn) keeps its reason; only
+      // a session's deletion overrides it, since the session's publication records are removed with it.
+      const own = OWN_FAILURES.has(error as Error);
+      const stopped = stopping && !own;
+      let interruption = this.#interruption(sessionId, turnId, stopped);
+      if (!interruption && !own && this.#options.settled) {
+        // A deletion queued behind the publication's own sandbox calls is decided once that queue drains.
+        await this.#options.settled(sessionId);
+        interruption = this.#interruption(sessionId, turnId, stopped);
+      }
+      const message = interruption ?? (error instanceof ManagedCopilotError ? error.message : `Publishing the turn's outputs failed: ${(error as Error).message}`);
+      if (interruption === DELETED) this.#options.log.info("Skipped publishing outputs of a session that is being deleted", { sessionId, turnId });
+      else if (interruption === STOPPED) this.#options.log.info("Did not publish a turn's outputs because the gateway is stopping", { sessionId, turnId });
+      // Expected when a caller starts its next turn right away: nothing is lost, the later turn publishes the outputs.
+      else if (message === SUPERSEDED) this.#options.log.info("A later turn started before this turn's outputs were captured; they publish with that turn", { sessionId, turnId });
       else this.#options.log.warn("Publication failed", { sessionId, turnId, error: message });
       finish("failed", message, []);
     } finally {
       for (const id of turnIds) this.#notify(sessionId, id);
+    }
+  }
+
+  /**
+   * Why a publication that failed was interrupted, if it was: the session is being deleted (its sandbox, a queued
+   * delete, core's session state, or its publication record already removed by the deletion), or `stopped`: gateway
+   * shutdown had started stopping compute when the failure surfaced (never for a failure of the publication's own).
+   * Deletion is checked at call time and wins. Undefined when nothing interrupted it.
+   */
+  #interruption(sessionId: string, turnId: string, stopped: boolean): typeof DELETED | typeof STOPPED | undefined {
+    try {
+      if (this.#options.sessionGone?.(sessionId)) return DELETED;
+      if (!this.#options.db.prepare("SELECT 1 FROM sandbox_publications WHERE session_id = ? AND turn_id = ?").get(sessionId, turnId)) return DELETED;
+    } catch {
+      // The ledger is closing with the gateway; the stop check below covers it.
+    }
+    return stopped ? STOPPED : undefined;
+  }
+
+  /** Resolves true once every publication already under way has finished, or false after `timeoutMs`. */
+  async drain(timeoutMs: number): Promise<boolean> {
+    const chains = [...this.#chains.values()];
+    if (chains.length === 0) return true;
+    let timer: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), timeoutMs);
+    });
+    try {
+      return await Promise.race([Promise.allSettled(chains).then(() => true), timedOut]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
