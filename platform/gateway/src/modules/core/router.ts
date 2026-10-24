@@ -37,6 +37,7 @@ export class ClientConnection implements ClientPeer {
   readonly #app: GatewayApp;
   readonly #log: Logger;
   readonly #ws: WebSocket;
+  #verifiedAt = Date.now();
 
   constructor(ws: WebSocket, options: { principal: Principal; environment: ResolvedEnvironment; clientName: string | undefined; manager: SessionManager; runtime: SharedRuntime | undefined; app: GatewayApp; log: Logger }) {
     this.#ws = ws;
@@ -79,6 +80,8 @@ export class ClientConnection implements ClientPeer {
 
   async #dispatch(method: string, params: unknown, context: IncomingRequestContext): Promise<unknown> {
     const body = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
+    // Every call re-checks the credential (cached, bounded): revocation stops reads, writes, and answers alike.
+    await this.#reverify();
     switch (method) {
       case "connect":
         return { ok: true, protocolVersion: this.#protocolVersion(), version: this.#runtimeVersion(), taskKinds: ["agent", "shell", "client"] };
@@ -92,12 +95,13 @@ export class ClientConnection implements ClientPeer {
         return this.#manager.listModels(this);
       case "session.create": {
         const created = await this.#manager.createForClient(this, params);
-        queueMicrotask(() => void created.after());
+        // After the response is written: replayed actions must reach a session object that already exists.
+        setImmediate(() => void created.after());
         return created.result;
       }
       case "session.resume": {
         const resumed = await this.#manager.resumeForClient(this, params);
-        queueMicrotask(() => void resumed.after());
+        setImmediate(() => void resumed.after());
         return resumed.result;
       }
       case "session.detach":
@@ -139,6 +143,24 @@ export class ClientConnection implements ClientPeer {
     }
   }
 
+  /**
+   * Long-lived connections re-verify their credential before privileged calls (cached by the authenticator), so a
+   * revoked or expired token stops new work from already-connected clients.
+   */
+  async #reverify(): Promise<void> {
+    if (Date.now() - this.#verifiedAt < REVERIFY_INTERVAL_MS) return;
+    try {
+      const principal = await this.#app.service("auth").authenticate(this.principal.token);
+      if (principal.accountId !== this.principal.accountId) throw new ManagedCopilotError("authentication_required", "The connection's credential now belongs to a different account");
+      this.#verifiedAt = Date.now();
+    } catch (error) {
+      if (error instanceof ManagedCopilotError && (error.code === "authentication_required" || error.code === "forbidden")) {
+        setTimeout(() => this.close(error.code === "forbidden" ? BRIDGE_CLOSE_CODES.forbidden : BRIDGE_CLOSE_CODES.authenticationRequired, `${error.code}: ${error.message}`.slice(0, 120)), 50);
+      }
+      throw error;
+    }
+  }
+
   #protocolVersion(): number {
     return this.#runtime?.current()?.protocolVersion ?? MAX_PROTOCOL_VERSION;
   }
@@ -161,6 +183,7 @@ export interface ConnectRouterOptions {
 }
 
 const HELLO_TIMEOUT_MS = 15_000;
+const REVERIFY_INTERVAL_MS = 60_000;
 
 function closeCode(code: ErrorCode): number {
   switch (code) {

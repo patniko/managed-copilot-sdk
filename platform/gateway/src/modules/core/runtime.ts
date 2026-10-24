@@ -300,22 +300,34 @@ export class SharedRuntime {
     } else {
       const spawned = await this.#spawn();
       token = spawned.token;
-      transport = await openTcp("127.0.0.1", spawned.port);
+      try {
+        transport = await openTcp("127.0.0.1", spawned.port);
+      } catch (error) {
+        this.#killChild();
+        throw error;
+      }
     }
     const generation = this.#generation + 1;
     const info: UpstreamInfo = { id: "shared", kind: "shared" };
-    const upstream = await RuntimeUpstream.open(info, transport, {
-      token,
-      log,
-      handlers: {
-        onNotification: this.#options.handlers.onNotification,
-        onRequest: this.#options.handlers.onRequest,
-        onClose: (closed, error) => {
-          this.#options.handlers.onClose?.(closed, error);
-          if (this.#upstream === closed) this.#onLost(`connection closed${error ? `: ${error.message}` : ""}`);
+    let upstream: RuntimeUpstream;
+    try {
+      upstream = await RuntimeUpstream.open(info, transport, {
+        token,
+        log,
+        handlers: {
+          onNotification: this.#options.handlers.onNotification,
+          onRequest: this.#options.handlers.onRequest,
+          onClose: (closed, error) => {
+            this.#options.handlers.onClose?.(closed, error);
+            if (this.#upstream === closed) this.#onLost(`connection closed${error ? `: ${error.message}` : ""}`);
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      transport.close();
+      this.#killChild();
+      throw error;
+    }
     this.#generation = generation;
     this.#upstream = upstream;
     this.#state = "running";
@@ -419,6 +431,13 @@ export class SharedRuntime {
 
   #rejectWaiters(error: Error): void {
     for (const waiter of this.#waiters.splice(0)) waiter.reject(error);
+  }
+
+  /** Stops a spawned runtime that never became usable. */
+  #killChild(): void {
+    const child = this.#child;
+    this.#child = undefined;
+    if (child && child.exitCode === null && child.signalCode === null) child.kill();
   }
 }
 
