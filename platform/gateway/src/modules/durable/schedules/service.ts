@@ -15,8 +15,8 @@ import { transaction, type Database } from "../../../db.js";
 import type { Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
 import type { ActionChange } from "../actions/service.js";
-import type { ActionsService, CredentialsService, DurableSessionsPort, PlatformEventMeta, RuntimeSessionEvent, SchedulesService } from "../contract.js";
-import { canonicalJson, deterministicUuid, newId, parseJson } from "../ids.js";
+import type { ActionsService, CredentialsService, DurableSessionView, DurableSessionsPort, PlatformEventMeta, RuntimeSessionEvent, SchedulesService } from "../contract.js";
+import { canonicalJson, deterministicUuid, incarnationOf, isGone, newId, parseJson, sameIncarnation } from "../ids.js";
 import { LOGIN_HINT } from "../credentials/service.js";
 import { assertTimeZone, minimumIntervalMinutes, nextOccurrence, occurrencesBetween, parseCron } from "./cron.js";
 import {
@@ -128,6 +128,41 @@ const TRANSIENT_CODES = new Set(["capability_unavailable", "timeout", "internal"
 const LEDGER_CHECK_INTERVAL_MS = 30_000;
 /** Tolerated clock difference between the gateway and a runtime when matching a prompt in history. */
 const INPUT_CLOCK_SKEW_MS = 5_000;
+/** How often a run whose prompt may still be queued in the runtime checks again (it never sends a second copy). */
+const ACCEPTANCE_RECHECK_MS = { max: 60_000 };
+const QUEUE_READ_TIMEOUT_MS = 15_000;
+const TARGET_GONE = "The session this schedule continues was deleted, so it cannot run again. Delete the schedule, or create a new one for another session.";
+const TARGET_DELETED = "Paused: the session this schedule continues was deleted";
+const RUN_SESSION_DELETED = "The run's session was deleted while the run was in progress";
+const NOT_THIS_RUNS_SESSION =
+  "Could not start the run: a session this schedule did not create now uses the run's session ID (the run's own session may have been deleted), so nothing was sent to it";
+/** Binding of a schedule recorded before incarnations whose session could not be proven to be the same one. */
+const RETIRED = "retired";
+
+/** Why a queued run may not start now. A person's pause still lets them run it now; a platform pause blocks every run. */
+function pausedReason(schedule: ScheduleRow, run: RunRow): string | undefined {
+  if (schedule.state === "active" || (run.trigger === "manual" && !schedule.paused_reason)) return undefined;
+  return `The schedule was paused before this run started${schedule.paused_reason ? ` (${schedule.paused_reason})` : ""}`;
+}
+
+/**
+ * Whether a session is provably the one a row from before incarnations meant: alive, the same owner's, and created
+ * within the row's window. Anything less is not proof, and the row is retired instead.
+ */
+function provenSession(view: DurableSessionView | undefined, ownerId: number, notBefore: number, notAfter: number): view is DurableSessionView {
+  if (isGone(view) || view!.ownerId !== ownerId) return false;
+  const createdAt = view!.createdAt ? Date.parse(view!.createdAt) : Number.NaN;
+  return Number.isFinite(createdAt) && createdAt >= notBefore && createdAt <= notAfter;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ManagedCopilotError("timeout", `The runtime did not answer within ${Math.round(ms / 1000)}s`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function occurrenceIdFor(scheduleId: string, trigger: RunTrigger, key: string | number): string {
   return `occ_${createHash("sha256").update(`${scheduleId}:${trigger}:${key}`).digest("base64url").slice(0, 32)}`;
@@ -158,6 +193,7 @@ export class DurableSchedules implements SchedulesService {
   #timer: NodeJS.Timeout | undefined;
   #ticking: Promise<void> | undefined;
   #lastLedgerCheck = 0;
+  #targetsRepaired = false;
 
   constructor(deps: SchedulesDeps) {
     this.#deps = deps;
@@ -176,6 +212,7 @@ export class DurableSchedules implements SchedulesService {
   // ---------------------------------------------------------------------------------------------------------
 
   start(): void {
+    this.repairTargets();
     const sessions = this.#deps.sessions();
     if (sessions) this.#disposers.push(sessions.subscribe((sessionId, event) => this.onSessionEvent(sessionId, event)));
     const actions = this.#deps.actions();
@@ -250,14 +287,19 @@ export class DurableSchedules implements SchedulesService {
     assertTimeZone(timeZone);
 
     let environment: string;
+    let targetIncarnation: string | null = null;
+    let targetView: DurableSessionView | undefined;
     if (parsed.target) {
       if (parsed.session) throw new ManagedCopilotError("invalid_request", "A schedule that continues an existing session uses that session's configuration; remove session");
-      const view = await this.#deps.sessions()?.get(parsed.target.sessionId);
-      if (!view || view.ownerId !== principal.accountId) throw new ManagedCopilotError("not_found", `Session ${parsed.target.sessionId} was not found`);
-      if (parsed.environment && parsed.environment !== view.environment) {
-        throw new ManagedCopilotError("invalid_request", `Session ${parsed.target.sessionId} runs in environment "${view.environment}", not "${parsed.environment}"`);
+      const view = this.#deps.sessions()?.get(parsed.target.sessionId);
+      if (isGone(view) || view!.ownerId !== principal.accountId) throw new ManagedCopilotError("not_found", `Session ${parsed.target.sessionId} was not found`);
+      if (parsed.environment && parsed.environment !== view!.environment) {
+        throw new ManagedCopilotError("invalid_request", `Session ${parsed.target.sessionId} runs in environment "${view!.environment}", not "${parsed.environment}"`);
       }
-      environment = view.environment;
+      environment = view!.environment;
+      // The schedule continues this session, not a later one that reuses its ID.
+      targetIncarnation = incarnationOf(view!);
+      targetView = view;
     } else {
       if (!parsed.environment) throw new ManagedCopilotError("invalid_request", "environment is required unless the schedule targets an existing session");
       environment = parsed.environment;
@@ -316,7 +358,9 @@ export class DurableSchedules implements SchedulesService {
     let name = parsed.name;
     const existing = this.#store.byName(principal.accountId, name);
     if (existing) {
-      if (existing.definition_hash === definitionHash && existing.created_by === createdBy) return this.#info(existing);
+      // The same definition for the same session (not an earlier one that had its ID) is a retry.
+      const sameTarget = existing.target_incarnation === null || sameIncarnation(existing.target_incarnation, targetView);
+      if (existing.definition_hash === definitionHash && existing.created_by === createdBy && sameTarget) return this.#info(existing);
       if (createdBy !== "agent") throw new ManagedCopilotError("conflict", `A schedule named "${name}" already exists; delete it or choose another name`);
       name = `${name.slice(0, 90)}-${newId("x", 3).slice(2)}`;
     }
@@ -336,6 +380,7 @@ export class DurableSchedules implements SchedulesService {
       paused_reason: null,
       created_by: createdBy,
       target_session_id: parsed.target?.sessionId ?? null,
+      target_incarnation: targetIncarnation,
       origin_session_id: options.originSessionId ?? null,
       session_config: session ? JSON.stringify(session) : null,
       webhook: parsed.webhook ?? null,
@@ -355,9 +400,11 @@ export class DurableSchedules implements SchedulesService {
   }
 
   listForSession(ownerId: number, sessionId: string): ScheduleInfo[] {
+    // Only schedules that continue this session, not an earlier deleted session that had the same ID.
+    const view = this.#deps.sessions()?.get(sessionId);
     return this.#store
       .listByTarget(sessionId)
-      .filter((row) => row.owner_id === ownerId)
+      .filter((row) => row.owner_id === ownerId && (row.target_incarnation === null ? !isGone(view) : sameIncarnation(row.target_incarnation, view)))
       .map((row) => this.#info(row));
   }
 
@@ -381,6 +428,7 @@ export class DurableSchedules implements SchedulesService {
   resume(ownerId: number, scheduleId: string): ScheduleInfo {
     const row = this.#owned(ownerId, scheduleId);
     if (!this.#deps.credentials().has(ownerId)) throw new ManagedCopilotError("authentication_required", `Schedules run as you while you're away. ${LOGIN_HINT}`);
+    if (this.#targetGone(row)) throw new ManagedCopilotError("conflict", TARGET_GONE);
     const problem = this.#policyProblem(row);
     if (problem) throw problem;
     const now = this.#now();
@@ -412,6 +460,7 @@ export class DurableSchedules implements SchedulesService {
     if (row.state !== "active" && row.paused_reason) {
       throw new ManagedCopilotError("conflict", `This schedule was paused by the platform: ${row.paused_reason.replace(/^Paused: /, "")} Resume it first.`);
     }
+    if (this.#targetGone(row)) throw new ManagedCopilotError("conflict", TARGET_GONE);
     const key = invocationId?.trim() || newId("inv");
     if (key.length > 200) throw new ManagedCopilotError("invalid_request", "invocationId must be at most 200 characters");
     const occurrenceId = occurrenceIdFor(row.id, "manual", key);
@@ -438,14 +487,122 @@ export class DurableSchedules implements SchedulesService {
     return Number(result.changes);
   }
 
-  /** A deleted session can no longer be continued: schedules targeting it pause and its queued runs are skipped. */
-  onSessionDeleted(sessionId: string): void {
+  /**
+   * A deleted session can no longer be continued: schedules that continue it pause, its queued runs are skipped, and
+   * runs in progress in it fail. Only what is bound to a session that is no longer current is affected: a later
+   * session reusing the ID is a different session, with its own schedules and runs.
+   */
+  onSessionDeleted(sessionId: string, incarnation?: string): void {
+    const view = this.#deps.sessions()?.get(sessionId);
+    // The ledger may still show the deleted incarnation while its deletion is announced.
+    const current = isGone(view) || (incarnation !== undefined && incarnationOf(view!) === incarnation) ? undefined : view;
     for (const schedule of this.#store.listByTarget(sessionId)) {
-      this.#pauseFor(schedule, "Paused: the session this schedule continues was deleted");
+      const bound = schedule.target_incarnation;
+      const affected = bound === null ? current === undefined : !sameIncarnation(bound, current);
+      if (affected) this.#pauseFor(schedule, TARGET_DELETED);
     }
-    for (const run of this.#deps.db.prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status = 'queued'").all(sessionId) as unknown as RunRow[]) {
-      if (!this.#inFlight.has(run.id)) this.#finishRun(run, "skipped", "The session was deleted before this run started");
+    const runs = this.#deps.db
+      .prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status IN ('queued', 'running', 'waiting')")
+      .all(sessionId) as unknown as RunRow[];
+    for (const run of runs) {
+      // A dispatch in progress rechecks the session itself before it sends anything.
+      if (this.#inFlight.has(run.id)) continue;
+      if (run.session_incarnation === null) {
+        // Unbound: whatever was deleted may be the run's own session (a create whose reply was lost), so the run ends
+        // unless the ID names a live session again (a dispatch then adopts it only if this schedule created it).
+        if (current !== undefined) continue;
+      } else if (sameIncarnation(run.session_incarnation, current)) {
+        continue;
+      }
+      if (run.status === "queued") this.#finishRun(run, "skipped", "The session was deleted before this run started");
+      else this.#finishRun(run, "failed", RUN_SESSION_DELETED);
     }
+  }
+
+  /** The session a schedule continues was deleted (or its ID now names a different session). */
+  #targetGone(schedule: ScheduleRow): boolean {
+    if (!schedule.target_session_id) return false;
+    const view = this.#deps.sessions()?.get(schedule.target_session_id);
+    if (isGone(view) || view!.ownerId !== schedule.owner_id) return true;
+    return schedule.target_incarnation !== null && !sameIncarnation(schedule.target_incarnation, view);
+  }
+
+  /**
+   * Startup repair of what schedules continue (session IDs are reusable after deletion). A target recorded before
+   * incarnations existed is bound only when provably the same session (alive, the owner's, and created no later than
+   * the schedule); otherwise it is retired and the schedule pauses. A provisional binding (the session's creation
+   * time, recorded while core reported no incarnations) is re-keyed to the incarnation core reports now, and an
+   * active schedule whose session is gone pauses. Unfinished runs from before incarnations are bound the same way, or
+   * end. Returns false (and dispatch waits) while core's sessions are unavailable.
+   */
+  repairTargets(): boolean {
+    const sessions = this.#deps.sessions();
+    if (!sessions) return false;
+    const now = this.#now();
+    for (const schedule of this.#store.listTargeted()) {
+      const view = sessions.get(schedule.target_session_id!);
+      const bound = schedule.target_incarnation;
+      if (bound === null) {
+        if (provenSession(view, schedule.owner_id, Number.NEGATIVE_INFINITY, schedule.created_at)) {
+          this.#store.updateSchedule(schedule.id, { target_incarnation: incarnationOf(view) }, now);
+        } else {
+          this.#store.updateSchedule(schedule.id, { target_incarnation: RETIRED }, now);
+          this.#pauseFor(schedule, TARGET_DELETED);
+          this.#log.warn("A schedule from before session incarnations no longer provably continues its session; paused", { scheduleId: schedule.id });
+        }
+      } else if (sameIncarnation(bound, view)) {
+        if (bound !== incarnationOf(view!)) this.#store.updateSchedule(schedule.id, { target_incarnation: incarnationOf(view!) }, now);
+      } else if (schedule.state === "active") {
+        this.#pauseFor(schedule, TARGET_DELETED);
+      }
+    }
+    for (const run of this.#store.unboundRuns()) {
+      if (this.#inFlight.has(run.id) || !run.session_id) continue;
+      // A new session's run that has not created it yet binds when it does.
+      if (run.session_mode === "new" && run.session_created === 0) continue;
+      const view = sessions.get(run.session_id);
+      let bound: string | null | undefined;
+      if (run.session_mode === "target") {
+        const schedule = this.#store.schedule(run.schedule_id) ?? this.#deletedSchedule(run.schedule_id);
+        bound = schedule?.target_incarnation ?? (schedule && provenSession(view, schedule.owner_id, Number.NEGATIVE_INFINITY, schedule.created_at) ? incarnationOf(view) : undefined);
+      } else {
+        // The run's own session (its ID derives from the occurrence, and this schedule created it): created after the
+        // run and before its prompt.
+        const notAfter = (run.input_started_at ?? now) + INPUT_CLOCK_SKEW_MS;
+        bound =
+          provenSession(view, run.owner_id, run.created_at - INPUT_CLOCK_SKEW_MS, notAfter) && view.scheduleId === run.schedule_id ? incarnationOf(view) : undefined;
+      }
+      if (bound && sameIncarnation(bound, view)) {
+        this.#store.updateRun(run.id, ["queued", "running", "waiting"], { session_incarnation: incarnationOf(view!) }, now);
+      } else if (run.status === "queued") {
+        this.#finishRun(run, "skipped", "The session was deleted before this run started");
+      } else {
+        this.#finishRun(run, "failed", RUN_SESSION_DELETED);
+      }
+    }
+    this.#targetsRepaired = true;
+    return true;
+  }
+
+  /** The incarnation a run continues, while it is still the session's current one (undefined once it is gone). */
+  #runIncarnation(sessions: DurableSessionsPort, run: RunRow): string | undefined {
+    if (!run.session_id || run.session_incarnation === null) return undefined;
+    const view = sessions.get(run.session_id);
+    return sameIncarnation(run.session_incarnation, view) ? incarnationOf(view!) : undefined;
+  }
+
+  /** The run's session was deleted (or its ID names another session now): the run ends, and a target schedule pauses. */
+  #sessionGone(run: RunRow, schedule: ScheduleRow): void {
+    if (run.session_mode === "target") this.#pauseFor(schedule, TARGET_DELETED);
+    if (run.status === "queued") return this.#finishRun(run, "skipped", "The session was deleted before this run started", schedule);
+    return this.#finishRun(run, "failed", RUN_SESSION_DELETED, schedule);
+  }
+
+  /** `#sessionGone` for a run found while tracking, whose schedule may since have been deleted. */
+  #endGoneRun(run: RunRow): void {
+    const schedule = this.#store.schedule(run.schedule_id);
+    if (schedule) this.#sessionGone(run, schedule);
+    else this.#finishRun(run, run.status === "queued" ? "skipped" : "failed", run.status === "queued" ? "The session was deleted before this run started" : RUN_SESSION_DELETED);
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -506,6 +663,7 @@ export class DurableSchedules implements SchedulesService {
           paused_reason: `Declared by this deployment's AppHost to run as ${account.login}. Resume it to allow it to run as you.`,
           created_by: "apphost",
           target_session_id: null,
+          target_incarnation: null,
           origin_session_id: null,
           apphost_key: key,
           origin_key: null,
@@ -599,6 +757,8 @@ export class DurableSchedules implements SchedulesService {
       reason: reason ?? null,
       session_mode: sessionMode,
       session_id: sessionId,
+      // A run continues the session its schedule is bound to; a new session's run binds when it creates it.
+      session_incarnation: sessionMode === "target" ? schedule.target_incarnation : null,
       completed_at: status === "skipped" ? now : null,
       created_at: now,
       updated_at: now,
@@ -615,6 +775,8 @@ export class DurableSchedules implements SchedulesService {
   // ---------------------------------------------------------------------------------------------------------
 
   #dispatchQueued(now: number): void {
+    // Nothing starts before schedule targets and older runs are bound to their sessions' incarnations.
+    if (!this.#targetsRepaired && !this.repairTargets()) return;
     for (const run of this.#store.runsByStatus(["queued"])) {
       if (this.#inFlight.has(run.id) || this.#inFlightSchedules.has(run.schedule_id)) continue;
       // One dispatch per session at a time, so input reconciliation for a shared session is never concurrent.
@@ -646,11 +808,8 @@ export class DurableSchedules implements SchedulesService {
     if (!run || run.status !== "queued") return;
     const schedule = this.#store.schedule(run.schedule_id);
     if (!schedule) return this.#finishRun(run, "skipped", "The schedule was deleted before this run started");
-    // A person's pause still lets them run it now; a platform pause (safety, revoked sign-in, awaiting approval) blocks
-    // every run, including ones queued before it.
-    if (schedule.state !== "active" && (run.trigger !== "manual" || schedule.paused_reason)) {
-      return this.#finishRun(run, "skipped", `The schedule was paused before this run started${schedule.paused_reason ? ` (${schedule.paused_reason})` : ""}`, schedule);
-    }
+    const paused = pausedReason(schedule, run);
+    if (paused) return this.#finishRun(run, "skipped", paused, schedule);
 
     // Recheck delegation, policy, and handler routes at execution time.
     const problem = this.#policyProblem(schedule);
@@ -674,7 +833,7 @@ export class DurableSchedules implements SchedulesService {
     try {
       if (run.session_mode === "new" && run.session_created === 0) {
         const config = parseJson<SessionConfig>(schedule.session_config) ?? {};
-        await sessions.create(principal, {
+        const created = await sessions.create(principal, {
           sessionId: run.session_id!,
           environment: schedule.environment,
           ...(config.model ? { model: config.model } : {}),
@@ -683,33 +842,60 @@ export class DurableSchedules implements SchedulesService {
           ...(schedule.webhook ? { webhook: schedule.webhook } : {}),
           scheduleId: schedule.id,
         });
-        this.#store.updateRun(run.id, ["queued"], { session_created: 1 }, this.#now());
-      } else if (run.session_mode === "target") {
-        const view = await sessions.get(run.session_id!);
-        if (!view || view.ownerId !== schedule.owner_id) {
-          const message = "The session this schedule continues no longer exists";
-          this.#pauseFor(schedule, `Paused: ${message}`);
-          return this.#finishRun(run, "failed", message, schedule);
+        // The run continues the session it created (or found, when retried), never a later one that reuses its ID.
+        const view = sessions.get(run.session_id!);
+        // An existing session is this run's only if this schedule created it (an earlier attempt whose reply was
+        // lost). Otherwise the run's own session may have been deleted and its ID reused: never adopt that one.
+        if (!created.created && !isGone(view) && view!.scheduleId !== schedule.id) {
+          return this.#finishRun(run, "failed", NOT_THIS_RUNS_SESSION, schedule);
         }
+        const incarnation = created.incarnation ?? (isGone(view) ? null : incarnationOf(view!));
+        this.#store.updateRun(run.id, ["queued"], { session_created: 1, session_incarnation: incarnation }, this.#now());
+      } else if (run.session_mode === "target" && this.#targetGone(schedule)) {
+        const message = "The session this schedule continues no longer exists";
+        this.#pauseFor(schedule, `Paused: ${message}`);
+        return this.#finishRun(run, "failed", message, schedule);
       }
 
       run = this.#store.run(run.id)!;
       if (run.status !== "queued") return;
+      if (this.#runIncarnation(sessions, run) === undefined) return this.#sessionGone(run, schedule);
       if (run.input_state === "submitting") {
-        // A previous attempt may have reached the runtime: its history decides, never a blind resend.
-        const found = await this.#findSubmittedInput(sessions, run, schedule);
-        if (found === undefined) return this.#retryLater(run, schedule, new ManagedCopilotError("capability_unavailable", "Could not read the session's history to confirm the prompt"));
-        if (found !== null) {
-          // The prompt is already in the session: its turn may still run, or may have ended while we were away.
-          this.#markStarted(run, schedule, found, true);
-          await this.#settleFromLedger(sessions, run.id);
-          return;
-        }
+        // A previous attempt may have reached the runtime. Its history decides, and while the runtime might still hold
+        // the prompt unrecorded (queued behind a turn, or its turn just starting), it is never sent a second time.
+        const recovering = run;
+        const unconfirmed = (what: string) =>
+          this.#runIncarnation(sessions, recovering) === undefined
+            ? this.#sessionGone(recovering, schedule)
+            : this.#retryLater(recovering, schedule, new ManagedCopilotError("capability_unavailable", what));
+        const found = await this.#findSubmittedInput(sessions, recovering, schedule);
+        if (found === undefined) return unconfirmed("Could not read the session's history to confirm the prompt");
+        if (found !== null) return this.#adoptSubmitted(sessions, recovering, schedule, found);
+        const held = await this.#runtimeMayHold(sessions, recovering);
+        if (held === undefined) return unconfirmed("Could not read the session's queue to confirm the prompt was not accepted");
+        if (held) return this.#awaitAcceptance(recovering, schedule);
+        // Nothing queued or running now. A prompt accepted meanwhile has left the queue for the history, so the
+        // history, read again after the queue, is conclusive.
+        const settled = await this.#findSubmittedInput(sessions, recovering, schedule);
+        if (settled === undefined) return unconfirmed("Could not read the session's history to confirm the prompt");
+        if (settled !== null) return this.#adoptSubmitted(sessions, recovering, schedule, settled);
       }
+
+      // Everything from here to the send is synchronous: the run, its schedule, and its session are checked as of
+      // sending (they may have changed while this dispatch waited), and core refuses the send unless the session is
+      // still this incarnation when it writes the prompt.
+      const sending = this.#store.run(run.id);
+      if (!sending || sending.status !== "queued") return;
+      const current = this.#store.schedule(sending.schedule_id);
+      if (!current) return this.#finishRun(sending, "skipped", "The schedule was deleted before this run started");
+      const pausedNow = pausedReason(current, sending);
+      if (pausedNow) return this.#finishRun(sending, "skipped", pausedNow, current);
+      const incarnation = this.#runIncarnation(sessions, sending);
+      if (incarnation === undefined) return this.#sessionGone(sending, current);
       const startedAt = this.#now();
-      this.#store.updateRun(run.id, ["queued"], { input_state: "submitting", input_started_at: startedAt }, startedAt);
-      const { messageId } = await sessions.send(principal, run.session_id!, { prompt: schedule.prompt, source: "system" });
-      this.#markStarted(this.#store.run(run.id)!, schedule, messageId);
+      this.#store.updateRun(sending.id, ["queued"], { input_state: "submitting", input_started_at: startedAt }, startedAt);
+      const { messageId } = await sessions.send(principal, sending.session_id!, { prompt: current.prompt, source: "system" }, { incarnation });
+      this.#markStarted(this.#store.run(sending.id)!, current, messageId);
     } catch (error) {
       const latest = this.#store.run(run.id) ?? run;
       if (isManagedCopilotError(error, "needs_reconciliation")) {
@@ -720,6 +906,11 @@ export class DurableSchedules implements SchedulesService {
           // The runtime refused the prompt: nothing was accepted, so the failure is certain.
           this.#store.updateRun(latest.id, ["queued"], { input_state: "none" }, this.#now());
         }
+        // The session needs a handler that is not connected (for example its SDK hooks): every run would fail the same
+        // way until it is, so the schedule pauses with the reason instead of failing on each occurrence.
+        if (error.code === "background_callback_unsupported") this.#pauseFor(schedule, `Paused: ${error.message}`);
+        // The session was deleted (or its ID reused) as the prompt was sent: core refused it, and it cannot run again.
+        if (latest.session_mode === "target" && this.#targetGone(schedule)) this.#pauseFor(schedule, TARGET_DELETED);
         return this.#finishRun(this.#store.run(run.id) ?? latest, "failed", `Could not start the run: ${error.message}`, schedule);
       }
       return this.#retryLater(latest, schedule, error);
@@ -727,13 +918,72 @@ export class DurableSchedules implements SchedulesService {
   }
 
   /**
-   * `null`: the history shows the prompt was not accepted. `undefined`: the history could not be read.
+   * Whether the runtime might hold an accepted prompt that its history does not show yet: a prompt waits in the queue
+   * until its turn starts (prompts sent as `system` are not listed individually, so any queued work counts), and a
+   * turn that just started records its message a moment later. `false` only when nothing is queued or running;
+   * `undefined` when the runtime cannot say.
+   */
+  async #runtimeMayHold(sessions: DurableSessionsPort, run: RunRow): Promise<boolean | undefined> {
+    const sessionId = run.session_id!;
+    const view = sessions.get(sessionId);
+    // Only the run's own session can hold its prompt; once that is gone the caller ends the run.
+    const incarnation = this.#runIncarnation(sessions, run);
+    if (incarnation === undefined) return undefined;
+    if (view!.state === "running" || view!.state === "waiting" || view!.lastTurn?.status === "running") return true;
+    try {
+      const fence = { incarnation };
+      const [pending, queue] = await withTimeout(
+        Promise.all([
+          sessions.request<{ hasPending?: unknown }>(sessionId, "session.queue.hasPending", { sessionId }, fence),
+          sessions.request<{ items?: unknown; steeringMessages?: unknown; withdrawableTurnMessageId?: unknown }>(sessionId, "session.queue.pendingItems", { sessionId }, fence),
+        ]),
+        QUEUE_READ_TIMEOUT_MS,
+      );
+      if (typeof pending?.hasPending !== "boolean" || !Array.isArray(queue?.items)) return undefined;
+      const steering = Array.isArray(queue.steeringMessages) ? queue.steeringMessages.length : 0;
+      return pending.hasPending || queue.items.length > 0 || steering > 0 || typeof queue.withdrawableTurnMessageId === "string";
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The prompt may still be queued in the runtime: check again later, never send it again. A run that cannot
+   * confirm it within the run lifetime ends `needs_reconciliation`.
+   */
+  #awaitAcceptance(run: RunRow, schedule: ScheduleRow): void {
+    const now = this.#now();
+    const since = run.input_started_at ?? run.created_at;
+    if (now - since >= this.#options.maxRunLifetimeMs) {
+      return this.#finishRun(
+        run,
+        "needs_reconciliation",
+        "The session still had queued or running work, so it is unknown whether it accepted this run's prompt; it was not sent again. Check the session before running it again.",
+        schedule,
+      );
+    }
+    const delay = Math.min(ACCEPTANCE_RECHECK_MS.max, Math.max(this.#options.dispatchRetryBaseMs, Math.round((now - since) / 4)));
+    this.#store.updateRun(run.id, ["queued"], { next_attempt_at: now + delay, reason: "Waiting: confirming that the session accepted this run's prompt (it has queued or running work)" }, now);
+    this.#log.info("Schedule run is confirming its prompt was accepted", { runId: run.id, sessionId: run.session_id, recheckInMs: delay });
+  }
+
+  /** The history shows the run's prompt: its turn may still run, or may have ended while no event was observed. */
+  async #adoptSubmitted(sessions: DurableSessionsPort, run: RunRow, schedule: ScheduleRow, messageId: string): Promise<void> {
+    this.#markStarted(run, schedule, messageId, true);
+    await this.#settleFromLedger(sessions, run.id);
+  }
+
+  /**
+   * `null`: the history shows the prompt was not consumed. `undefined`: the history could not be read.
    * Throws `needs_reconciliation` when the history cannot attribute a message to this occurrence unambiguously.
    */
   async #findSubmittedInput(sessions: DurableSessionsPort, run: RunRow, schedule: ScheduleRow): Promise<string | null | undefined> {
+    // Only the run's own session's history counts: a session that reuses the ID never received this prompt.
+    const incarnation = this.#runIncarnation(sessions, run);
+    if (incarnation === undefined) return undefined;
     let events: RuntimeSessionEvent[] | undefined;
     try {
-      events = (await sessions.request<{ events?: RuntimeSessionEvent[] }>(run.session_id!, "session.getMessages", { sessionId: run.session_id })).events;
+      events = (await sessions.request<{ events?: RuntimeSessionEvent[] }>(run.session_id!, "session.getMessages", { sessionId: run.session_id }, { incarnation })).events;
     } catch {
       return undefined;
     }
@@ -821,12 +1071,18 @@ export class DurableSchedules implements SchedulesService {
     for (const run of this.#store.runsByStatus(ACTIVE_RUN_STATUSES)) {
       if (run.started_at === null || now - run.started_at <= this.#options.maxRunLifetimeMs) continue;
       const sessions = this.#deps.sessions();
+      // A run whose session is gone has no turn to stop, and nothing here may stop a turn of a session that reuses its ID.
+      const incarnation = sessions ? this.#runIncarnation(sessions, run) : undefined;
+      if (sessions && incarnation === undefined) {
+        this.#endGoneRun(run);
+        continue;
+      }
       let stopped = false;
       if (sessions && run.session_id && run.consumed && run.message_id) {
         try {
-          const turn = (await sessions.get(run.session_id))?.lastTurn;
+          const turn = sessions.get(run.session_id)?.lastTurn;
           if (turn?.turnId === run.message_id && turn.status === "running") {
-            await sessions.request(run.session_id, "session.abort", { sessionId: run.session_id });
+            await sessions.request(run.session_id, "session.abort", { sessionId: run.session_id }, { incarnation });
             stopped = true;
           }
         } catch (error) {
@@ -860,9 +1116,11 @@ export class DurableSchedules implements SchedulesService {
       if (this.#recentMessages.size > 500) this.#recentMessages.delete(this.#recentMessages.keys().next().value!);
     }
     if (!["user.message", "session.idle", "session.error", "abort"].includes(event.type)) return;
-    const runs = this.#deps.db
-      .prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status IN ('running', 'waiting')")
-      .all(sessionId) as unknown as RunRow[];
+    const sessions = this.#deps.sessions();
+    // Events come from the session as it is now: runs of an earlier session that had this ID are not affected.
+    const runs = (
+      this.#deps.db.prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status IN ('running', 'waiting')").all(sessionId) as unknown as RunRow[]
+    ).filter((run) => sessions !== undefined && this.#runIncarnation(sessions, run) !== undefined);
     const now = this.#now();
     for (const run of runs) {
       switch (event.type) {
@@ -893,8 +1151,9 @@ export class DurableSchedules implements SchedulesService {
   async #settleFromLedger(sessions: DurableSessionsPort, runId: string): Promise<void> {
     const run = this.#store.run(runId);
     if (!run || !ACTIVE_RUN_STATUSES.includes(run.status) || !run.session_id) return;
-    const view = await sessions.get(run.session_id);
-    const turn = view?.lastTurn;
+    // Its session is gone: no turn of a session that reuses the ID says anything about this run.
+    if (this.#runIncarnation(sessions, run) === undefined) return this.#endGoneRun(run);
+    const turn = sessions.get(run.session_id)?.lastTurn;
     // Only the run's own turn proves its outcome: another turn's result (or timing) says nothing about it.
     if (!turn || turn.status === "running" || turn.turnId === undefined || turn.turnId !== run.message_id) return;
     if (turn.status === "completed") this.#finishRun(run, "completed", "The agent finished the run's turn");
@@ -903,11 +1162,15 @@ export class DurableSchedules implements SchedulesService {
   }
 
   #onActionChange(change: ActionChange): void {
-    const runs = this.#deps.db
-      .prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status IN ('running', 'waiting')")
-      .all(change.sessionId) as unknown as RunRow[];
+    const sessions = this.#deps.sessions();
+    if (!sessions) return;
+    // The ledger's actions are the session's current incarnation's; only runs in that incarnation follow them.
+    const runs = (
+      this.#deps.db.prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status IN ('running', 'waiting')").all(change.sessionId) as unknown as RunRow[]
+    ).filter((run) => this.#runIncarnation(sessions, run) !== undefined);
     if (runs.length === 0) return;
-    const open = this.#deps.actions()?.list(change.sessionId, { open: true }) ?? [];
+    const incarnation = this.#runIncarnation(sessions, runs[0]!)!;
+    const open = this.#deps.actions()?.list(change.sessionId, { open: true, incarnation }) ?? [];
     const waiting = open.some((action) => action.state === "pending" || action.state === "needs_reconciliation");
     const now = this.#now();
     for (const run of runs) {
@@ -916,12 +1179,12 @@ export class DurableSchedules implements SchedulesService {
     }
   }
 
-  /** After a restart (and periodically), settles runs whose turn ended while no event could be observed. */
+  /** After a restart (and periodically), settles runs whose turn ended, or whose session went away, unobserved. */
   async #recoverActiveRuns(): Promise<void> {
     const sessions = this.#deps.sessions();
     if (!sessions) return;
     for (const run of this.#store.runsByStatus(ACTIVE_RUN_STATUSES)) {
-      if (!run.consumed) continue;
+      if (!run.consumed && this.#runIncarnation(sessions, run) !== undefined) continue;
       try {
         await this.#settleFromLedger(sessions, run.id);
       } catch (error) {

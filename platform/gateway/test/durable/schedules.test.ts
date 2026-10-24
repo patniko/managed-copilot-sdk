@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isManagedCopilotError, parseConfig, type ManagedCopilotConfig, type PendingAction, type PlatformEvent } from "@managed-copilot/protocol";
+import { ManagedCopilotError, isManagedCopilotError, parseConfig, type ManagedCopilotConfig, type PendingAction, type PlatformEvent } from "@managed-copilot/protocol";
 import { migrate, openDatabase, type Database } from "../../src/db.js";
 import type { Principal } from "../../src/http.js";
 import { createLogger } from "../../src/log.js";
@@ -12,6 +12,7 @@ import type {
   PlatformToolDefinition,
   RuntimeSessionEvent,
 } from "../../src/modules/durable/contract.js";
+import { incarnationOf, isGone } from "../../src/modules/durable/ids.js";
 import { DURABLE_MIGRATIONS } from "../../src/modules/durable/migrations.js";
 import { DurableSchedules, type SchedulesOptions } from "../../src/modules/durable/schedules/service.js";
 import { scheduleToolDefinitions } from "../../src/modules/durable/schedules/tools.js";
@@ -19,16 +20,42 @@ import { scheduleToolDefinitions } from "../../src/modules/durable/schedules/too
 const OWNER: Principal = { accountId: 1, login: "octocat", token: "gho_owner" };
 const OTHER: Principal = { accountId: 2, login: "hubot", token: "gho_other" };
 const START = Date.parse("2026-10-26T15:00:00Z"); // Monday 08:00 in Los Angeles (PDT)
+/** When the tests' pre-existing sessions were created (core always reports a creation time). */
+const EARLIER = new Date(START - 60 * 60_000).toISOString();
+
+/** Core's ledger always reports when a session was created: views set without one were created `EARLIER`. */
+class Views extends Map<string, DurableSessionView> {
+  override set(sessionId: string, view: DurableSessionView): this {
+    return super.set(sessionId, view.createdAt ? view : { ...view, createdAt: EARLIER });
+  }
+}
+
+/** Like core: with an expected incarnation, a call reaches the runtime only while the session is still that one. */
+function fence(view: DurableSessionView | undefined, options: { readonly incarnation?: string } | undefined): void {
+  if (options?.incarnation !== undefined && (isGone(view) || incarnationOf(view!) !== options.incarnation)) {
+    throw new ManagedCopilotError("not_found", "Session was not found");
+  }
+}
 
 /** A runtime stand-in that remembers sessions and the user messages they received, and can fail on cue. */
 class FakeSessions implements DurableSessionsPort {
-  readonly views = new Map<string, DurableSessionView>();
+  readonly views: Map<string, DurableSessionView> = new Views();
   readonly history = new Map<string, RuntimeSessionEvent[]>();
+  /** Prompts the runtime accepted but has not started yet (queued behind a turn); `system` ones are not listed. */
+  readonly queued = new Map<string, { messageId: string; prompt: string; source?: string }[]>();
   readonly creates: DurableCreateSessionRequest[] = [];
   readonly sends: { sessionId: string; prompt: string; source?: string }[] = [];
+  /** The incarnation each send and request expected (core refuses a call for another one). */
+  readonly fences: { method: string; incarnation?: string }[] = [];
   createFailures: ("before" | "after")[] = [];
-  sendFailures: ("lost" | "refused-transient" | "refused-final")[] = [];
+  /** `lost`: consumed at once, reply lost. `queued-lost`: accepted into the queue (not started), reply lost. */
+  sendFailures: ("lost" | "queued-lost" | "refused-transient" | "refused-final" | "callback-unsupported")[] = [];
   historyUnavailable = false;
+  queueUnavailable = false;
+  /** Runs once, inside the next send, before the prompt is written (a concurrent change core's fence must catch). */
+  beforeWrite: (() => void) | undefined;
+  /** Runs after each runtime request is answered, before the gateway sees the answer. */
+  afterRequest: ((method: string) => void) | undefined;
   listeners = new Set<(sessionId: string, event: RuntimeSessionEvent) => void>();
   #messages = 0;
 
@@ -46,34 +73,84 @@ class FakeSessions implements DurableSessionsPort {
     if (existing && existing.ownerId !== principal.accountId) throw Object.assign(new Error("taken"), {});
     const created = !existing;
     if (created) {
-      this.views.set(request.sessionId, { id: request.sessionId, ownerId: principal.accountId, environment: request.environment, state: "idle", generation: 0 });
+      this.views.set(request.sessionId, {
+        id: request.sessionId,
+        ownerId: principal.accountId,
+        environment: request.environment,
+        state: "idle",
+        generation: 0,
+        createdAt: new Date(this.now()).toISOString(),
+        // Like core: only its server-side create records the schedule.
+        ...(request.scheduleId ? { scheduleId: request.scheduleId } : {}),
+      });
       this.history.set(request.sessionId, []);
     }
     if (failure === "after") throw new Error("gateway crashed after the runtime created the session");
     return { sessionId: request.sessionId, created };
   }
 
-  async send(_principal: Principal, sessionId: string, input: { prompt: string; source?: string }) {
+  async send(_principal: Principal, sessionId: string, input: { prompt: string; source?: string }, options?: { readonly incarnation?: string }) {
+    this.fences.push({ method: "send", ...(options?.incarnation !== undefined ? { incarnation: options.incarnation } : {}) });
+    fence(this.views.get(sessionId), options);
     const failure = this.sendFailures.shift();
     if (failure === "refused-transient") throw new Error("runtime unavailable");
     if (failure === "refused-final") {
-      const { ManagedCopilotError } = await import("@managed-copilot/protocol");
       throw new ManagedCopilotError("policy_violation", "The prompt was refused");
     }
+    if (failure === "callback-unsupported") {
+      throw new ManagedCopilotError("background_callback_unsupported", "This session's SDK hooks have no connected handler");
+    }
+    const hook = this.beforeWrite;
+    this.beforeWrite = undefined;
+    hook?.();
+    // Checked again where the prompt is written, like core.
+    fence(this.views.get(sessionId), options);
     const messageId = `msg-${++this.#messages}`;
     this.sends.push({ sessionId, prompt: input.prompt, ...(input.source ? { source: input.source } : {}) });
+    if (failure === "queued-lost") {
+      const queue = this.queued.get(sessionId) ?? [];
+      queue.push({ messageId, prompt: input.prompt, ...(input.source ? { source: input.source } : {}) });
+      this.queued.set(sessionId, queue);
+      throw new Error("the response was lost");
+    }
     const event: RuntimeSessionEvent = { id: `e-${messageId}`, type: "user.message", timestamp: new Date(this.now()).toISOString(), parentId: null, data: { content: input.prompt, messageId, source: input.source } };
     this.history.get(sessionId)?.push(event);
     if (failure === "lost") throw new Error("the response was lost");
     return { messageId };
   }
 
-  async request<T>(sessionId: string, method: string): Promise<T> {
+  async request<T>(sessionId: string, method: string, _params?: Record<string, unknown>, options?: { readonly incarnation?: string }): Promise<T> {
+    this.fences.push({ method, ...(options?.incarnation !== undefined ? { incarnation: options.incarnation } : {}) });
+    fence(this.views.get(sessionId), options);
+    const answer = this.#answer<T>(sessionId, method);
+    // Whatever happens while the answer travels back (the gateway awaits it).
+    this.afterRequest?.(method);
+    return answer;
+  }
+
+  #answer<T>(sessionId: string, method: string): T {
     if (method === "session.getMessages") {
       if (this.historyUnavailable) throw new Error("runtime unavailable");
       return { events: this.history.get(sessionId) ?? [] } as T;
     }
+    if (method === "session.queue.hasPending" || method === "session.queue.pendingItems") {
+      if (this.queueUnavailable) throw new Error("runtime unavailable");
+      const queue = this.queued.get(sessionId) ?? [];
+      if (method === "session.queue.hasPending") return { hasPending: queue.length > 0 } as T;
+      // Like the runtime: `system` items are not listed.
+      const visible = queue.filter((item) => item.source !== "system").map((item) => ({ id: `q-${item.messageId}`, messageId: item.messageId, kind: "message", displayText: item.prompt, agentMode: "interactive" }));
+      return { items: visible, steeringMessages: [] } as T;
+    }
     throw new Error(`unexpected ${method}`);
+  }
+
+  /** The runtime starts the queued prompts: each gets its `user.message` (and the turn then runs). */
+  drainQueue(sessionId: string) {
+    for (const item of (this.queued.get(sessionId) ?? []).splice(0)) {
+      const event: RuntimeSessionEvent = { id: `e-${item.messageId}`, type: "user.message", timestamp: new Date(this.now()).toISOString(), parentId: null, data: { content: item.prompt, messageId: item.messageId, source: item.source } };
+      this.history.get(sessionId)?.push(event);
+      for (const listener of this.listeners) listener(sessionId, event);
+    }
   }
 
   subscribe(listener: (sessionId: string, event: RuntimeSessionEvent) => void) {
@@ -322,6 +399,38 @@ describe("durable schedules", () => {
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]!.status).toBe("running");
     });
 
+    it("never adopts a session that reused the ID of the one a lost create made", async () => {
+      // The create reached core (session A) but its reply was lost: the run does not know it has a session.
+      const first = await dueOccurrence();
+      sessions.createFailures.push("after");
+      await tick();
+      const sessionId = sessions.creates[0]!.sessionId;
+      expect(schedules.runs(OWNER.accountId, first.id)[0]).toMatchObject({ status: "queued" });
+      // A is deleted: the run's own session may be what was deleted, so the run ends.
+      sessions.views.delete(sessionId);
+      schedules.onSessionDeleted(sessionId, "inc-a");
+      expect(schedules.runs(OWNER.accountId, first.id)[0]).toMatchObject({ status: "skipped", reason: "The session was deleted before this run started" });
+      now += 5_000;
+      await tick();
+      expect(sessions.creates).toHaveLength(1);
+
+      // Again, but the owner reuses the ID before the deletion is seen: the run never adopts that session.
+      db.exec("DELETE FROM durable_schedule_runs; DELETE FROM durable_schedules");
+      sessions.creates.length = 0;
+      sessions.views.clear();
+      const second = await dueOccurrence();
+      sessions.createFailures.push("after");
+      await tick();
+      const reusedId = sessions.creates[0]!.sessionId;
+      sessions.views.set(reusedId, { id: reusedId, ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-b" });
+      sessions.history.set(reusedId, []);
+      schedules.onSessionDeleted(reusedId, "inc-a"); // announced late: the ID names B now
+      now += 5_000;
+      await tick();
+      expect(sessions.sends).toEqual([]);
+      expect(schedules.runs(OWNER.accountId, second.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/did not create now uses the run's session ID/) });
+    });
+
     it("does not resend a prompt the runtime accepted before the crash", async () => {
       const schedule = await dueOccurrence();
       sessions.sendFailures.push("lost");
@@ -367,6 +476,80 @@ describe("durable schedules", () => {
       sessions.sendFailures.push("refused-final");
       await tick();
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: "Could not start the run: The prompt was refused" });
+    });
+
+    it("never sends a prompt again while the runtime may still hold it queued behind another turn", async () => {
+      sessions.views.set("s-chat", { id: "s-chat", ownerId: OWNER.accountId, environment: "chat", state: "running", generation: 0, lastTurn: { turnId: "typed-1", status: "running" } });
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", runAt: new Date(START + 60_000).toISOString(), target: { sessionId: "s-chat" }, prompt: "Check my calendar" });
+      now += 60_000;
+      // The runtime queued the prompt behind a person's turn, but the reply was lost.
+      sessions.sendFailures.push("queued-lost");
+      await tick();
+      now += 5_000;
+      await tick();
+      // That turn ends; the prompt still waits in the queue, unlisted because it was sent as `system`.
+      sessions.views.set("s-chat", { ...sessions.views.get("s-chat")!, state: "idle", lastTurn: { turnId: "typed-1", status: "completed" } });
+      for (let i = 0; i < 3; i++) {
+        now += 60_000;
+        await tick();
+      }
+      expect(sessions.sends).toHaveLength(1);
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "queued", reason: expect.stringMatching(/^Waiting: confirming/) });
+      // Its turn starts: the history shows the prompt, and the run follows that message.
+      sessions.drainQueue("s-chat");
+      now += 60_000;
+      await tick();
+      expect(sessions.sends).toHaveLength(1);
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "running", messageId: "msg-1" });
+    });
+
+    it("ends needs_reconciliation, without resending, when the session's queue cannot be read", async () => {
+      const schedule = await dueOccurrence();
+      sessions.sendFailures.push("queued-lost");
+      await tick();
+      sessions.queueUnavailable = true;
+      now += 60_000;
+      await tick();
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "queued", reason: expect.stringMatching(/^Retrying: Could not read the session's queue/) });
+      for (let i = 0; i < 12; i++) {
+        now += 60_000;
+        await tick();
+      }
+      expect(sessions.sends).toHaveLength(1);
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "needs_reconciliation", reason: expect.stringMatching(/not sent again/) });
+    });
+
+    it("never resends a prompt that left the queue for the history between the two reads", async () => {
+      const schedule = await dueOccurrence();
+      sessions.sendFailures.push("queued-lost");
+      await tick();
+      const sessionId = sessions.creates[0]!.sessionId;
+      // The runtime starts the prompt's turn right after the first history read, just before the queue is read.
+      const request = sessions.request.bind(sessions);
+      let started = false;
+      sessions.request = (async <T,>(id: string, method: string): Promise<T> => {
+        if (method === "session.queue.hasPending" && !started) {
+          started = true;
+          sessions.drainQueue(id);
+        }
+        return request<T>(id, method);
+      }) as typeof sessions.request;
+      now += 5_000;
+      await tick();
+      expect(started).toBe(true);
+      expect(sessions.sends).toHaveLength(1);
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "running", messageId: "msg-1", sessionId });
+    });
+
+    it("pauses a schedule whose session needs a handler that is not connected", async () => {
+      const schedule = await schedules.create(OWNER, { name: "daily", cron: "0 9 * * *", environment: "chat", prompt: "p" });
+      sessions.sendFailures.push("callback-unsupported");
+      await schedules.runNow(OWNER.accountId, schedule.id, "first");
+      await schedules.idle();
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/hooks have no connected handler/) });
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/^Paused: .*hooks/) });
+      await expectCode(schedules.runNow(OWNER.accountId, schedule.id, "second"), "conflict", /paused by the platform/);
     });
 
     it("settles a recovered run from the session ledger when its turn ended while the gateway was down", async () => {
@@ -671,9 +854,45 @@ describe("durable schedules", () => {
       await schedules.runNow(OWNER.accountId, schedule.id, "x");
       await schedules.idle();
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "queued", reason: expect.stringMatching(/^Retrying/) });
+      // Core removes the session before it announces the deletion.
+      sessions.views.delete("s-chat");
       schedules.onSessionDeleted("s-chat");
       expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/was deleted/) });
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "skipped", reason: "The session was deleted before this run started" });
+    });
+
+    it("binds a schedule to the session it continues, never to a later session that reuses the ID", async () => {
+      sessions.views.set("s-chat", { id: "s-chat", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-a" });
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check my calendar" });
+      expect(schedules.listForSession(OWNER.accountId, "s-chat").map((info) => info.id)).toEqual([schedule.id]);
+      // Deleted; then the same owner creates a new session with the same ID.
+      sessions.views.delete("s-chat");
+      schedules.onSessionDeleted("s-chat", "inc-a");
+      sessions.views.set("s-chat", { id: "s-chat", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-b" });
+      expect(schedules.listForSession(OWNER.accountId, "s-chat")).toEqual([]);
+      await expectCode(() => schedules.resume(OWNER.accountId, schedule.id), "conflict", /was deleted/);
+      await expectCode(schedules.runNow(OWNER.accountId, schedule.id, "x"), "conflict", /was deleted/);
+      expect(sessions.sends).toHaveLength(0);
+      // A late announcement of the old session's deletion leaves the new session's schedules alone.
+      const fresh = await schedules.create(OWNER, { name: "fresh", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "p" });
+      schedules.onSessionDeleted("s-chat", "inc-a");
+      expect(schedules.get(OWNER.accountId, fresh.id)).toMatchObject({ state: "active" });
+      expect(schedules.listForSession(OWNER.accountId, "s-chat").map((info) => info.id)).toEqual([fresh.id]);
+    });
+
+    it("fails a run in progress when its session is deleted, so a session reusing the ID never settles it", async () => {
+      const schedule = await schedules.create(OWNER, { name: "once", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "p" });
+      now += 60_000;
+      await tick();
+      const sessionId = sessions.creates[0]!.sessionId;
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "running" });
+      sessions.views.delete(sessionId);
+      schedules.onSessionDeleted(sessionId);
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/deleted while the run was in progress/) });
+      sessions.views.set(sessionId, { id: sessionId, ownerId: OTHER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "someone-else" });
+      sessions.finishTurn(sessionId, "msg-1");
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed" });
     });
 
     it("lets a message belong to only one run, and serializes dispatch per session", async () => {
@@ -753,6 +972,212 @@ describe("durable schedules", () => {
       expect(sessions.creates).toHaveLength(0);
       expect(sessions.sends).toEqual([{ sessionId: "s-chat", prompt: "Check my calendar", source: "system" }]);
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "running", sessionId: "s-chat" });
+    });
+  });
+
+  describe("session incarnations", () => {
+    const chat = (incarnation: string, extra: Partial<DurableSessionView> = {}): DurableSessionView => ({
+      id: "s-chat",
+      ownerId: OWNER.accountId,
+      environment: "chat",
+      state: "idle",
+      generation: 0,
+      incarnation,
+      ...extra,
+    });
+    const runOf = (scheduleId: string) => schedules.runs(OWNER.accountId, scheduleId)[0]!;
+
+    /** A first send whose outcome is unknown leaves the run `submitting`: the next dispatch must recover before sending. */
+    async function recovering() {
+      sessions.views.set("s-chat", chat("inc-a"));
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check my calendar" });
+      sessions.sendFailures.push("refused-transient");
+      await schedules.runNow(OWNER.accountId, schedule.id, "x");
+      await schedules.idle();
+      expect(runOf(schedule.id)).toMatchObject({ status: "queued", reason: expect.stringMatching(/^Retrying/) });
+      now += 5_000;
+      return schedule;
+    }
+
+    /** Applies `change` while the recovery's last history read is in flight, right before the prompt would be sent. */
+    function duringLastRead(change: () => void) {
+      let reads = 0;
+      sessions.afterRequest = (method) => {
+        if (method === "session.getMessages" && ++reads === 2) change();
+      };
+    }
+
+    it("rechecks the schedule and its sign-in right before sending a recovered prompt", async () => {
+      const deleted = await recovering();
+      duringLastRead(() => schedules.delete(OWNER.accountId, deleted.id));
+      await tick();
+      expect(sessions.sends).toEqual([]);
+      expect(db.prepare("SELECT status, reason FROM durable_schedule_runs").get()).toEqual({ status: "skipped", reason: "The schedule was deleted before this run started" });
+      db.exec("DELETE FROM durable_schedule_runs; DELETE FROM durable_schedules");
+      const revoked = await recovering();
+      duringLastRead(() => schedules.pauseAllForOwner(OWNER.accountId, "Paused: octocat signed out"));
+      await tick();
+      expect(sessions.sends).toEqual([]);
+      expect(runOf(revoked.id)).toMatchObject({ status: "skipped", reason: expect.stringMatching(/paused before this run started \(Paused: octocat signed out\)/) });
+    });
+
+    it("never sends a recovered prompt to a session that reused the ID meanwhile", async () => {
+      const schedule = await recovering();
+      duringLastRead(() => sessions.views.set("s-chat", chat("inc-b")));
+      await tick();
+      expect(sessions.sends).toEqual([]);
+      expect(runOf(schedule.id)).toMatchObject({ status: "skipped", reason: "The session was deleted before this run started" });
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/was deleted/) });
+      // Every read and the attempted send expected the session the schedule continues.
+      expect(new Set(sessions.fences.map((call) => call.incarnation))).toEqual(new Set(["inc-a"]));
+    });
+
+    it("lets core refuse a prompt for a session replaced as it is sent", async () => {
+      sessions.views.set("s-chat", chat("inc-a"));
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check" });
+      sessions.beforeWrite = () => sessions.views.set("s-chat", chat("inc-b"));
+      await schedules.runNow(OWNER.accountId, schedule.id, "x");
+      await schedules.idle();
+      expect(sessions.sends).toEqual([]);
+      expect(sessions.fences.filter((call) => call.method === "send")).toEqual([{ method: "send", incarnation: "inc-a" }]);
+      expect(runOf(schedule.id)).toMatchObject({ status: "failed", reason: expect.stringMatching(/was not found/) });
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/was deleted/) });
+    });
+
+    it("never lets a session that reuses the ID settle a run of the session it replaced", async () => {
+      sessions.views.set("s-chat", chat("inc-a"));
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check" });
+      await schedules.runNow(OWNER.accountId, schedule.id, "x");
+      await schedules.idle();
+      expect(runOf(schedule.id)).toMatchObject({ status: "running", messageId: "msg-1" });
+      // Deleted and the ID reused before the deletion was announced: the new session's turns say nothing about the run.
+      sessions.views.set("s-chat", chat("inc-b", { lastTurn: { turnId: "msg-1", status: "completed" } }));
+      sessions.finishTurn("s-chat", "msg-1");
+      expect(runOf(schedule.id)).toMatchObject({ status: "running" });
+      now += 60_000;
+      await tick();
+      expect(runOf(schedule.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/was deleted/) });
+    });
+
+    it("never stops a turn of a session that reuses the ID when a run of the replaced one runs too long", async () => {
+      sessions.views.set("s-chat", chat("inc-a"));
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check" });
+      await schedules.runNow(OWNER.accountId, schedule.id, "x");
+      await schedules.idle();
+      sessions.emit("s-chat", "user.message", { messageId: "msg-1" }); // its turn started
+      await tick();
+      expect(runOf(schedule.id)).toMatchObject({ status: "running" });
+      sessions.views.set("s-chat", chat("inc-b", { state: "running", lastTurn: { turnId: "msg-1", status: "running" } }));
+      now += 7 * 60 * 60_000; // past the run lifetime
+      await tick();
+      expect(runOf(schedule.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
+      expect(sessions.fences.some((call) => call.method === "session.abort")).toBe(false);
+    });
+
+    it("ends the replaced session's runs when its deletion is announced late, and leaves the new session's alone", async () => {
+      sessions.views.set("s-chat", chat("inc-a"));
+      sessions.history.set("s-chat", []);
+      const old = await schedules.create(OWNER, { name: "old", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check" });
+      await schedules.runNow(OWNER.accountId, old.id, "x");
+      await schedules.idle();
+      sessions.views.set("s-chat", chat("inc-b"));
+      const fresh = await schedules.create(OWNER, { name: "fresh", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Plan" });
+      await schedules.runNow(OWNER.accountId, fresh.id, "y");
+      await schedules.idle();
+      expect(runOf(fresh.id)).toMatchObject({ status: "running" });
+      schedules.onSessionDeleted("s-chat", "inc-a");
+      expect(runOf(old.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
+      expect(runOf(fresh.id)).toMatchObject({ status: "running" });
+      expect(schedules.get(OWNER.accountId, fresh.id)).toMatchObject({ state: "active" });
+      sessions.finishTurn("s-chat", runOf(fresh.id).messageId!);
+      expect(runOf(fresh.id)).toMatchObject({ status: "completed" });
+    });
+
+    it("binds a schedule from before incarnations only to a session that is provably the same one", async () => {
+      sessions.views.set("s-old", { id: "s-old", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-old", createdAt: new Date(START - 120_000).toISOString() });
+      sessions.views.set("s-reused", { id: "s-reused", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-r1" });
+      await schedules.create(OWNER, { name: "kept", cron: "0 9 * * *", target: { sessionId: "s-old" }, prompt: "p" });
+      const reused = await schedules.create(OWNER, { name: "reused", cron: "0 9 * * *", target: { sessionId: "s-reused" }, prompt: "p" });
+      db.exec("UPDATE durable_schedules SET target_incarnation = NULL");
+      // While the gateway was down, s-reused was deleted and its ID reused (created after the schedule).
+      sessions.views.set("s-reused", { id: "s-reused", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-r2", createdAt: new Date(START + 60_000).toISOString() });
+      await schedules.stop();
+      schedules = build();
+      expect(db.prepare("SELECT name, target_incarnation, state FROM durable_schedules ORDER BY name").all()).toEqual([
+        { name: "kept", target_incarnation: "inc-old", state: "active" },
+        { name: "reused", target_incarnation: "retired", state: "paused" },
+      ]);
+      expect(schedules.get(OWNER.accountId, reused.id)).toMatchObject({ pausedReason: expect.stringMatching(/was deleted/) });
+      await expectCode(() => schedules.resume(OWNER.accountId, reused.id), "conflict", /was deleted/);
+    });
+
+    it("re-keys a provisional binding once core reports incarnations, and pauses one whose session was replaced", async () => {
+      // Core reports no incarnations yet: bindings are provisional (the session's creation time).
+      sessions.views.set("s-a", { id: "s-a", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0 });
+      sessions.views.set("s-b", { id: "s-b", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0 });
+      sessions.history.set("s-a", []);
+      const a = await schedules.create(OWNER, { name: "a", cron: "0 9 * * *", target: { sessionId: "s-a" }, prompt: "p" });
+      const b = await schedules.create(OWNER, { name: "b", cron: "0 9 * * *", target: { sessionId: "s-b" }, prompt: "p" });
+      expect(db.prepare("SELECT target_incarnation FROM durable_schedules WHERE id = ?").get(a.id)).toEqual({ target_incarnation: `created:${EARLIER}` });
+      // Upgraded: core reports incarnations now. s-b was replaced while the gateway was down.
+      sessions.views.set("s-a", { ...sessions.views.get("s-a")!, incarnation: "inc-a" });
+      sessions.views.set("s-b", { id: "s-b", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-b2", createdAt: new Date(START + 1).toISOString() });
+      await schedules.stop();
+      schedules = build();
+      expect(db.prepare("SELECT name, target_incarnation, state FROM durable_schedules ORDER BY name").all()).toEqual([
+        { name: "a", target_incarnation: "inc-a", state: "active" },
+        { name: "b", target_incarnation: `created:${EARLIER}`, state: "paused" },
+      ]);
+      await schedules.runNow(OWNER.accountId, a.id, "x");
+      await schedules.idle();
+      expect(sessions.fences.filter((call) => call.method === "send")).toEqual([{ method: "send", incarnation: "inc-a" }]);
+      expect(schedules.get(OWNER.accountId, b.id)).toMatchObject({ pausedReason: expect.stringMatching(/was deleted/) });
+    });
+
+    it("binds runs from before incarnations to their sessions, or ends them", async () => {
+      sessions.views.set("s-chat", chat("inc-a"));
+      sessions.history.set("s-chat", []);
+      const target = await schedules.create(OWNER, { name: "t", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "p" });
+      await schedules.runNow(OWNER.accountId, target.id, "x");
+      await schedules.idle();
+      const own = await schedules.create(OWNER, { name: "own", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "q" });
+      now += 60_000;
+      await tick();
+      expect([runOf(target.id).status, runOf(own.id).status]).toEqual(["running", "running"]);
+      db.exec("UPDATE durable_schedule_runs SET session_incarnation = NULL; UPDATE durable_schedules SET target_incarnation = NULL");
+      // The run's own session was deleted while the gateway was down.
+      sessions.views.delete(runOf(own.id).sessionId!);
+      await schedules.stop();
+      schedules = build();
+      expect(runOf(target.id)).toMatchObject({ status: "running" });
+      expect(db.prepare("SELECT session_incarnation FROM durable_schedule_runs WHERE schedule_id = ?").get(target.id)).toEqual({ session_incarnation: "inc-a" });
+      expect(runOf(own.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
+      sessions.finishTurn("s-chat", runOf(target.id).messageId!);
+      expect(runOf(target.id)).toMatchObject({ status: "completed" });
+    });
+
+    it("binds a new session's run from before incarnations only to the session its schedule created", async () => {
+      const own = await schedules.create(OWNER, { name: "own", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "q" });
+      const other = await schedules.create(OWNER, { name: "other", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "r" });
+      now += 60_000;
+      await tick();
+      expect([runOf(own.id).status, runOf(other.id).status]).toEqual(["running", "running"]);
+      db.exec("UPDATE durable_schedule_runs SET session_incarnation = NULL");
+      // While the gateway was down, the second run's session was deleted and the owner reused its ID at once: the
+      // replacement falls in the run's time window, but its schedule did not create it.
+      const reusedId = runOf(other.id).sessionId!;
+      const { scheduleId: _created, ...replacement } = sessions.views.get(reusedId)!;
+      sessions.views.set(reusedId, { ...replacement, incarnation: "inc-owner" });
+      await schedules.stop();
+      schedules = build();
+      expect(runOf(own.id)).toMatchObject({ status: "running" });
+      expect(db.prepare("SELECT session_incarnation FROM durable_schedule_runs WHERE schedule_id = ?").get(own.id)).not.toEqual({ session_incarnation: null });
+      expect(runOf(other.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
     });
   });
 
