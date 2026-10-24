@@ -113,6 +113,20 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
    provider registrations (`sessionFs.setProvider`, `llmInference.setProvider`, `plugins.builtin.set`) are answered or
    rejected by the gateway, scoped to the caller.
 
+**SDK call deadlines.** The SDK's REST calls never wait indefinitely; an ingress can hold a request for minutes while
+the gateway behind it is replaced. The bounds are internal defaults (`timings` in `packages/sdk/src/http.ts`), not
+public API:
+- `ManagedCopilot.connect()` and the event stream's connection get 45 s, and other calls 60 s for their answer. Both
+  exceed the gateway's 35 s GitHub verification, so its explicit errors win.
+- `managed.promote` gets 10 minutes, since its answer includes sandbox preparation.
+- The publication long poll gets its own wait plus 60 s.
+- Streamed uploads and downloads fail after 60 s without progress, however large they are.
+- The event stream reconnects with `Last-Event-ID` after 45 s without a byte, which is three of the gateway's 15 s
+  heartbeats.
+
+An expired bound fails with `timeout`, naming the call. A caller's `AbortSignal` rejects with its own reason. Durable
+result submissions are idempotent and retried after a `timeout`.
+
 ### Client mode and safe defaults
 
 The stock `mode: "empty"` validates on the client before transmission (it requires `baseDirectory`/`sessionFs` and an

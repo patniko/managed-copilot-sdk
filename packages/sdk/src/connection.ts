@@ -12,7 +12,7 @@ import {
   type DeploymentInfo,
   type DiscoveryRecord,
 } from "@managed-copilot/protocol";
-import { HttpClient } from "./http.js";
+import { HttpClient, timings } from "./http.js";
 import type { ConnectOptions, ManagedContext } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -117,7 +117,9 @@ export async function createContext(options: ConnectOptions = {}): Promise<Manag
   const url = await resolveUrl(options.url);
   const token = await resolveToken(options.gitHubToken);
   const http = new HttpClient(url, token);
-  const [info, account] = await Promise.all([http.get<DeploymentInfo>(ROUTES.info), http.get<AccountInfo>(ROUTES.me)]);
+  // Bounded, so a deployment that never answers (a gateway being replaced behind its ingress) fails with `timeout`.
+  const bound = { timeoutMs: timings.connectMs };
+  const [info, account] = await Promise.all([http.get<DeploymentInfo>(ROUTES.info, bound), http.get<AccountInfo>(ROUTES.me, bound)]);
   const identities = new Map<string, string>();
   const httpClients = new Map<string, HttpClient>([[token, http]]);
   return {
