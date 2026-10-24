@@ -69,7 +69,7 @@ export const durableModule: GatewayModule = {
       webhooks!.start();
       schedules!.start();
       const subscriptions = webhooks!.subscriptionNames;
-      log.info("Durable actions, webhooks, and schedules ready", { webhooks: subscriptions.length > 0 ? subscriptions : undefined });
+      log.info("Durable actions, webhooks, and schedules ready", subscriptions.length > 0 ? { webhooks: subscriptions } : undefined);
     });
     app.onStop(async () => {
       for (const dispose of disposers.splice(0)) dispose();

@@ -142,7 +142,6 @@ async function submit(http: HttpClient, sessionId: string, actionId: string, bod
 }
 
 export async function handleSessionActions(ctx: ManagedContext, sessionId: string, handlers: ActionHandlers): Promise<HandleActionResult[]> {
-  // Act as the identity that created or resumed the session (core tracks it), falling back to the connect identity.
-  const http = (ctx as ManagedContext & { httpFor?: (id: string) => HttpClient }).httpFor?.(sessionId) ?? ctx.http;
-  return runActions(http, sessionId, handlers, ctx.clientName ? { responder: ctx.clientName } : {});
+  // Act as the identity that created or resumed the session, falling back to the connection's own identity.
+  return runActions(ctx.httpFor(sessionId), sessionId, handlers, ctx.clientName ? { responder: ctx.clientName } : {});
 }
