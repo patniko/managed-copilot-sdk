@@ -758,18 +758,22 @@ sequenceDiagram
 ## Azure deployment (`aspire deploy`)
 
 As built (`packages/aspire/src/publish`, `deploy/azure`, gateway `modules/sandbox/providers/azure`); operator guide and
-capability matrix in [deployment.md](deployment.md). Not yet qualified on a live deployment.
+capability matrix in [deployment.md](deployment.md). A sandbox-service probe (`deploy/azure/qualify`) and the root
+AppHost deployment ran in westus2 (2026-10-24). NFS storage checks, shared sessions, and isolated network-policy
+checks passed; remaining acceptance and demo qualification is tracked in the deployment guide.
 
 - **Publish path.** In publish mode `addManagedCopilot` calls `publishManagedCopilot`: a Container Apps environment in
-  a new VNet (`platform` and `sandboxes` /23 subnets) with an Azure Files NFS 4.1 share, and the gateway as a
+  a new VNet (`platform` and `sandboxes` /23 subnets, `egress` /24) with an Azure Files NFS 4.1 share, and the gateway as a
   Dockerfile container (`platform/gateway/Dockerfile`, stage `azure`, plus a generated stage that copies the AppHost's
   customization folders to `/opt/managed-copilot/apphost`) with external HTTPS ingress. Apps that use the platform
-  are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist). The C# integration in
+  are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist, by default the deployer's
+  public address). The C# integration in
   `deploy/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
   revision mode, IP rules). Publishing refuses an open gateway: access rules come from the AppHost or from
   `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port, by
   its HTTPS address in the environment (`https://<app>.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/...`, filled in by the
-  gateway's entrypoint at start).
+  gateway's entrypoint at start). The `push-<name>-sandbox-images` step runs after `provision-<name>-env` (the
+  registry address is an environment output) and before `provision-<name>-egress` (the gateway follows the proxy).
 - **Durable state.** The gateway's data directory is `/data` on the NFS share (SQLite needs POSIX locks; SMB failed in
   the earlier Copilot SDK Aspire deployment). One replica, Single revision mode, and a lease supervisor as the
   entrypoint (`deploy/azure/src/lease`): an exclusive SQLite lock on `/data/.lease/gateway.lease` held for the
@@ -777,14 +781,23 @@ capability matrix in [deployment.md](deployment.md). Not yet qualified on a live
   handover to strictly newer deployments (`MANAGED_COPILOT_LEASE_STAMP`). The gateway runs in its own process group;
   the lease is released only after every process in it (the shared runtime included) has exited. The demo images use
   the same supervisor.
-- **Isolated placement.** Azure Container Apps Sandboxes (`Microsoft.App/sandboxGroups`): one microVM per sandbox,
-  three data disks per sandbox that outlive compute (stop deletes the microVM; resume recreates it over the disks),
-  sandboxd reached through the sandbox's port URL with its per-sandbox key, and a deny-all platform egress policy.
-  `aspire deploy` builds and pushes content-tagged sandbox images (base, environment images, a `packages.system` layer,
-  and the `deploy/azure/sandbox` layer that runs the entrypoint as root and seeds empty disks) and creates the group, its VNet
-  connection, a registry pull identity, and the gateway's identity with only SandboxGroup Data Owner on the group.
-  The egress proxy is not deployed to Azure yet, so environments that need network access or vault credentials fail
-  with `capability_unavailable` there.
+- **Isolated placement.** Azure Container Apps Sandboxes (`Microsoft.App/sandboxGroups`, data plane
+  `https://management.<region>.azuredevcompute.io`, api-version `2026-02-01-preview`): one microVM per sandbox,
+  a root disk plus three data disks per sandbox within the service's 20 GiB-per-vCPU budget, disks that outlive
+  compute (stop deletes the microVM; resume recreates it over the disks), and sandboxd reached through the sandbox's
+  port URL with its per-sandbox key. `aspire deploy` builds and pushes content-tagged sandbox images (base, environment
+  images, a `packages.system` layer, and the `deploy/azure/sandbox` layer that runs the entrypoint as root and seeds
+  empty disks) and creates the group and its VNet connection; the gateway's identity has SandboxGroup Data Owner on
+  the group and AcrPull on the registry. Disk-image imports cannot use a managed identity, so the gateway exchanges its
+  Entra token for an ACR refresh token (`registry.ts`) and passes it as `registryCredentials`.
+- **Egress (isolated).** `platform/egress` in external mode runs as the `egress` app in an internal Container Apps
+  environment on the `egress` subnet (TCP 3128 on its internal load balancer, one replica,
+  `EGRESS_PROTECTED_CIDRS` = the VNet). The gateway runs `MANAGED_COPILOT_EGRESS=external` with a generated
+  `MANAGED_COPILOT_EGRESS_KEY` and gives each sandbox a platform egress policy that denies HTTP(S) and allows only TCP
+  to the proxy (`MANAGED_COPILOT_AZURE_EGRESS_PROXY`). The proxy sees translated source addresses, so
+  `capabilities.addressPinning` is false; the per-sandbox `Proxy-Authorization` identifies each sandbox. The proxy's CA
+  is ephemeral (a restart needs sandboxes that use vault TLS to restart). Without sandboxes the gateway runs
+  `MANAGED_COPILOT_EGRESS=off`.
 
 ## Ports and environment
 
