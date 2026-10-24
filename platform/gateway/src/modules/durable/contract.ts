@@ -54,7 +54,17 @@
  *   placement's acknowledgment never counts for a newer one, and its pending lists or completion events never close
  *   an action that has moved on.
  * - Identity: `idempotencyKey` is `${sessionId}:${toolCallId}` for tools, identical across live callbacks, webhooks,
- *   polling, resume, and restarts.
+ *   polling, resume, and restarts. A runtime that restarts without suspending may rebuild a waiting tool call under a
+ *   new request ID (same tool call ID): the action takes the new ID and keeps its owner, outcome, or uncertainty.
+ * - Incarnations: a session ID can be reused after the session is deleted, by the same or another account. Every
+ *   action belongs to the incarnation (`SessionRecord.incarnation`) that asked; listing, claiming, answering,
+ *   capabilities, replay, delivery, and deletion only ever see the current incarnation's actions.
+ * - Permission authority: decisions are checked against the responder. Webhook capabilities approve once, reject, or
+ *   report nobody available; they never attest a person or grant standing approvals. Prompts managed policy reserves
+ *   for a person (`managedApprovalRequired`) are approved only by an attached CLI or by the owner's client/poller
+ *   attesting a person (`approve-once` + `approvedInteractively`); an attached CLI gets them first.
+ * - Attach (Copilot CLI): `promptVisibility` before showing a raw-channel prompt as answerable; answers through
+ *   `onClientAnswer` with `requireRecorded: true` (unknown requests and non-holders are refused, never forwarded).
  */
 import type {
   ActionCapability,
@@ -133,6 +143,8 @@ export interface SessionEventInput {
   readonly environment: string;
   /** Placement generation of the runtime that emitted the event (fencing; 0 until promotion exists). */
   readonly generation: number;
+  /** The session incarnation the event belongs to (`SessionRecord.incarnation`); looked up when absent. */
+  readonly incarnation?: string;
   readonly event: RuntimeSessionEvent;
   /** Connections attached to the session right now, in preference order (the creating connection first, then by attach time). */
   readonly attached: readonly AttachedResponder[];
@@ -151,11 +163,19 @@ export interface SessionEventDecision {
 
 export interface ClientAnswerInput {
   readonly sessionId: string;
+  readonly incarnation?: string;
+  /** Placement generation the client saw the request in; an answer from another placement is refused as stale. */
+  readonly generation?: number;
   readonly connectionId: string;
   readonly responderKind: "sdk" | "cli";
   /** One of `ANSWER_METHODS`. */
   readonly method: string;
   readonly params: Record<string, unknown>;
+  /**
+   * Fail closed (Copilot CLI attach): refuse with `conflict` instead of forwarding a request the ledger does not track,
+   * and accept the answer only from the connection that holds the action's claim (see `promptVisibility`).
+   */
+  readonly requireRecorded?: boolean;
 }
 
 export type ClientAnswerDecision =
@@ -169,10 +189,36 @@ export interface AttachInput {
   readonly ownerId: number;
   readonly environment: string;
   readonly generation: number;
+  readonly incarnation?: string;
   readonly responder: AttachedResponder;
 }
 
 export type ResponderType = "live" | "webhook" | "poll" | "cli" | "platform";
+
+/**
+ * Copilot CLI attach: the CLI sees prompts on its raw runtime channel, which can run ahead of core's event stream.
+ * Before showing one as answerable, attach asks the ledger, which waits until core recorded and arbitrated it.
+ */
+export interface PromptVisibilityInput {
+  readonly sessionId: string;
+  /** The session incarnation and placement generation the CLI is attached to. */
+  readonly incarnation: string;
+  readonly generation: number;
+  /** The attached CLI, with the same connection ID core passes in `attached` (kind `cli`). */
+  readonly responder: AttachedResponder;
+  readonly kind: ActionKind;
+  readonly requestId: string;
+  /** How long to wait for core's event stream to record the request before reconciling with the runtime (default 5 s). */
+  readonly waitMs?: number;
+}
+
+export type PromptVisibility =
+  /** This CLI holds the action's claim (taken now if it was waiting): show it as answerable. */
+  | { readonly status: "actionable"; readonly actionId: string }
+  /** Another responder holds it (an application, a webhook worker, a poller, another CLI): show it read-only. */
+  | { readonly status: "observe"; readonly actionId: string; readonly state: ActionState; readonly claimedBy?: string }
+  /** Not answerable by this CLI: unknown, already resolved, a tool call, or from another incarnation or placement. */
+  | { readonly status: "hidden"; readonly reason: string };
 
 /** Who is asking to list, claim, or answer actions over REST. */
 export type ActionCaller =
@@ -181,6 +227,8 @@ export type ActionCaller =
 
 export interface VerifiedCapability {
   readonly sessionId: string;
+  /** The session incarnation whose actions it covers (absent on capabilities minted before incarnations existed). */
+  readonly incarnation?: string;
   readonly actionIds: readonly string[];
   readonly audience: string;
   readonly expiresAt: string;
@@ -200,8 +248,24 @@ export interface ClaimOptions {
 }
 
 export interface ActionsService extends ActionRouterHooks {
-  /** Owner-visible actions of a session (core uses this for `SessionInfo.pendingActions`). */
-  list(sessionId: string, options?: { readonly open?: boolean }): PendingAction[];
+  /**
+   * Owner-visible actions of a session's current incarnation (core uses this for `SessionInfo.pendingActions`).
+   * Pass `incarnation` to read a specific one; nothing is returned for a session that no longer exists.
+   */
+  list(sessionId: string, options?: { readonly open?: boolean; readonly incarnation?: string }): PendingAction[];
+  /**
+   * True while the session's runtime may still wait on something the ledger owns: an action that is pending,
+   * executing, or uncertain, or an answer recorded but not delivered yet. Resume such a session with
+   * `continuePendingWork: true`.
+   */
+  hasOpenActions(sessionId: string, options?: { readonly incarnation?: string }): boolean;
+  /**
+   * Copilot CLI attach: whether a prompt the CLI saw on its raw channel is answerable by it. Resolves only after the
+   * ledger recorded and arbitrated the request (waiting for core's event stream, then reconciling with the runtime);
+   * an unknown request is never answerable. A waiting prompt is claimed for the CLI. Answer with `onClientAnswer`
+   * (`responderKind: "cli"`, `requireRecorded: true`).
+   */
+  promptVisibility(input: PromptVisibilityInput): Promise<PromptVisibility>;
   /** REST: list/claim/answer as an owner, poller, or webhook capability holder. */
   listFor(caller: ActionCaller, sessionId: string, options?: { readonly open?: boolean }): Promise<PendingAction[]>;
   claim(caller: ActionCaller, sessionId: string, actionId: string, options?: ClaimOptions): Promise<ActionClaim>;
@@ -225,8 +289,12 @@ export interface ActionRouterHooks {
    */
   onDetached(connectionId: string, sessionId?: string): void;
   releaseLiveClaim(actionId: string, claimToken: string): void;
-  /** The session was deleted: its open actions are cancelled and nothing more is delivered for it. */
-  onSessionDeleted?(sessionId: string): void;
+  /**
+   * The session was deleted: its open actions are cancelled and nothing more is delivered for it. `incarnation`
+   * (from `session.deleted` `data.incarnation`) limits it to the deleted incarnation; a later reuse of the ID is a new
+   * session whose actions are recorded normally.
+   */
+  onSessionDeleted?(sessionId: string, incarnation?: string): void;
   /**
    * The session moved to a new placement generation (promotion). Call it right after the generation is committed;
    * it is idempotent (actions already at `generation` or newer are untouched), so the `session.promoted` event that
@@ -324,6 +392,12 @@ export interface DurableSessionView {
   readonly state: SessionState;
   /** Placement generation (0 until promotion exists). */
   readonly generation: number;
+  /**
+   * Immutable identity of this creation of the session ID (IDs are reusable after deletion). Durable falls back to
+   * `createdAt` when it is absent.
+   */
+  readonly incarnation?: string;
+  readonly createdAt?: string;
   readonly lastTurn?: { readonly turnId?: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
 }
 
@@ -342,7 +416,8 @@ export interface DurableCreateSessionRequest {
 }
 
 export interface DurableSessionsPort {
-  get(sessionId: string): DurableSessionView | undefined | Promise<DurableSessionView | undefined>;
+  /** Synchronous ledger read (core's `sessions.get`); undefined once the session is deleted. */
+  get(sessionId: string): DurableSessionView | undefined;
   /** Server-side create as `principal` with a caller-chosen ID. Resolves `{ created: false }` when the ID already exists for that owner. */
   create(principal: Principal, request: DurableCreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean }>;
   /** Server-side send as the owner, `mode: "enqueue"` (queued behind a running turn, never steering it). Resumes placement if needed. */
@@ -389,6 +464,14 @@ export interface PlatformToolDefinition {
 export interface DurablePlatformToolsPort {
   register(definition: PlatformToolDefinition): void;
   get?(name: string): PlatformToolDefinition | undefined;
+}
+
+/** Core's authenticator, as the background-credential service uses it. */
+export interface DurableAuthPort {
+  /** `background: true` verifies a stored background credential without recording it as the account's live one. */
+  authenticate(token: string, options?: { readonly background?: boolean }): Promise<Principal>;
+  /** Drops every reference core holds to a background credential that was removed (logout, invalidation). */
+  forgetCredential?(token: string): void;
 }
 
 declare module "../../app.js" {

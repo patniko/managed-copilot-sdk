@@ -2,7 +2,7 @@ import { createHmac } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { approveAll, defineTool, type PermissionHandler } from "@github/copilot-sdk";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { isManagedCopilotError, WEBHOOK_HEADERS, type PendingAction } from "@managed-copilot/protocol";
+import { isManagedCopilotError, ToolDeclarationSchema, WEBHOOK_HEADERS, type PendingAction } from "@managed-copilot/protocol";
 import { runActions } from "../src/features/actions.js";
 import { createSchedulesApi, toToolDeclaration } from "../src/features/schedules.js";
 import { verifyWebhook } from "../src/features/webhooks.js";
@@ -228,6 +228,21 @@ describe("SDK durable features", () => {
       expect(gateway.claims).toHaveLength(0);
     });
 
+    it("leaves a prompt known only from its derived form for a person", async () => {
+      const { payload: _payload, ...bare } = permissionAction("act_1");
+      gateway.actions = [bare];
+      let asked = 0;
+      const results = await runActions(new HttpClient(base, "gho_owner"), "s1", {
+        onPermissionRequest: () => {
+          asked++;
+          return { kind: "approve-once" };
+        },
+      });
+      expect(results).toEqual([]);
+      expect(asked).toBe(0);
+      expect(gateway.claims).toHaveLength(0);
+    });
+
     it("reports handler failures as errors and releases undecided permission prompts", async () => {
       gateway.actions = [toolAction("act_1"), permissionAction("act_2", { kind: "shell", managedApprovalRequired: true })];
       const failing = defineTool("lookup_order", {
@@ -269,6 +284,16 @@ describe("SDK durable features", () => {
       expect(toToolDeclaration(defineTool("ping", {}))).toEqual({ name: "ping", revision: expect.any(String) });
       expect(() => toToolDeclaration(defineTool("bad name", {}))).toThrow(/Invalid tool name/);
       expect(() => toToolDeclaration(defineTool("x", { parameters: "nope" as never }))).toThrow(/zod schema or a JSON schema/);
+    });
+
+    it("keeps the stock tool flags the runtime honors", () => {
+      const grep = toToolDeclaration(defineTool("grep", { description: "Search files", overridesBuiltInTool: true, skipPermission: true, handler: () => "x" }));
+      expect(grep).toMatchObject({ name: "grep", overridesBuiltInTool: true, skipPermission: true });
+      expect(ToolDeclarationSchema.parse(grep)).toEqual(grep);
+      const plain = toToolDeclaration(defineTool("grep", { description: "Search files", handler: () => "x" }));
+      expect(plain).not.toHaveProperty("skipPermission");
+      // The flags change runtime behavior, so they are part of the revision.
+      expect(plain.revision).not.toBe(grep.revision);
     });
 
     it("retries runNow with the same invocation ID", async () => {

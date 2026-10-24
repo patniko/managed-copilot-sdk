@@ -43,6 +43,10 @@ export interface ActionRow {
   readonly notified_at: number | null;
   /** JSON `{ connectionId: generation }`: live connections that held this action, and the placement they held it in. */
   readonly live_claimants: string | null;
+  /** The session incarnation that asked (session IDs are reusable after deletion). Null only on pre-migration rows. */
+  readonly incarnation: string | null;
+  /** The request ID the runtime waits on now, when a restarted runtime rebuilt the request under a new one. */
+  readonly runtime_request_id: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -51,6 +55,7 @@ export interface ActionRow {
 export interface NewAction {
   readonly id: string;
   readonly sessionId: string;
+  readonly incarnation: string;
   readonly ownerId: number;
   readonly environment: string;
   readonly kind: ActionKind;
@@ -105,16 +110,21 @@ export class ActionStore {
     this.#db = db;
   }
 
+  /**
+   * Records an action once per runtime request. The returned row is the one stored under that request, which belongs
+   * to another incarnation only if a reused session ID also reused a runtime request ID (callers refuse that).
+   */
   insertIfAbsent(action: NewAction): { row: ActionRow; created: boolean } {
     const result = this.#db
       .prepare(
-        `INSERT OR IGNORE INTO durable_actions (id, session_id, owner_id, environment, kind, request_id, tool_call_id, turn_id, tool,
+        `INSERT OR IGNORE INTO durable_actions (id, session_id, incarnation, owner_id, environment, kind, request_id, tool_call_id, turn_id, tool,
            provider_id, agent_id, arguments, event, generation, state, idempotency_key, deadline_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       )
       .run(
         action.id,
         action.sessionId,
+        action.incarnation,
         action.ownerId,
         action.environment,
         action.kind,
@@ -132,7 +142,9 @@ export class ActionStore {
         action.now,
         action.now,
       );
-    const row = this.findByRequest(action.sessionId, action.kind, action.requestId);
+    const row = this.#db
+      .prepare("SELECT * FROM durable_actions WHERE session_id = ? AND kind = ? AND request_id = ?")
+      .get(action.sessionId, action.kind, action.requestId) as ActionRow | undefined;
     if (!row) throw new Error("Action insert did not persist");
     return { row, created: changed(result) };
   }
@@ -141,17 +153,135 @@ export class ActionStore {
     return this.#db.prepare("SELECT * FROM durable_actions WHERE id = ?").get(id) as ActionRow | undefined;
   }
 
-  findByRequest(sessionId: string, kind: ActionKind, requestId: string): ActionRow | undefined {
-    return this.#db.prepare("SELECT * FROM durable_actions WHERE session_id = ? AND kind = ? AND request_id = ?").get(sessionId, kind, requestId) as
-      | ActionRow
-      | undefined;
+  findByRequest(sessionId: string, incarnation: string, kind: ActionKind, requestId: string): ActionRow | undefined {
+    // The request ID it was recorded under or the one a restarted runtime uses now; the current one wins.
+    return this.#db
+      .prepare(
+        `SELECT * FROM durable_actions WHERE session_id = ? AND incarnation = ? AND kind = ? AND (request_id = ? OR runtime_request_id = ?)
+         ORDER BY CASE WHEN COALESCE(runtime_request_id, request_id) = ? THEN 0 ELSE 1 END, rowid LIMIT 1`,
+      )
+      .get(sessionId, incarnation, kind, requestId, requestId, requestId) as ActionRow | undefined;
   }
 
-  listBySession(sessionId: string, states?: readonly ActionState[]): ActionRow[] {
-    if (!states) return this.#db.prepare("SELECT * FROM durable_actions WHERE session_id = ? ORDER BY created_at, rowid").all(sessionId) as unknown as ActionRow[];
+  /** The (latest) tool action for a model tool call: rebuilt requests keep the tool call ID. */
+  findByToolCall(sessionId: string, incarnation: string, toolCallId: string): ActionRow | undefined {
+    return this.#db
+      .prepare("SELECT * FROM durable_actions WHERE session_id = ? AND incarnation = ? AND kind = 'tool' AND tool_call_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .get(sessionId, incarnation, toolCallId) as ActionRow | undefined;
+  }
+
+  /**
+   * Points an action at the request ID a restarted runtime now uses (CAS on the previous one). `redeliver` sends a
+   * recorded answer again (to the current placement); `clearClaim` voids a previous owner's claim.
+   */
+  rebindRequest(
+    id: string,
+    change: {
+      readonly from: string;
+      readonly to: string;
+      readonly event: unknown;
+      readonly state: ActionState;
+      readonly reason: string | null;
+      readonly redeliver: boolean;
+      readonly clearClaim: boolean;
+      readonly generation: number;
+      readonly now: number;
+    },
+  ): boolean {
+    const sets = ["runtime_request_id = ?", "event = ?", "state = ?", "reason = ?", "updated_at = ?"];
+    const params: Bindable[] = [change.to, JSON.stringify(change.event), change.state, change.reason, change.now];
+    if (change.redeliver) {
+      sets.push("forwarded = 0", "next_forward_at = NULL", "forward_attempts = 0", "generation = MAX(generation, ?)");
+      params.push(change.generation);
+    }
+    if (OPEN_STATES.includes(change.state)) sets.push("completed_at = NULL", "forwarded = 0", "next_forward_at = NULL");
+    if (change.clearClaim) sets.push("claim_seq = claim_seq + 1", "claim_token_hash = NULL", "claimed_by = NULL", "responder_type = NULL", "live_connection = NULL", "lease_expires_at = NULL");
+    params.push(id, change.from);
+    return changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE id = ? AND COALESCE(runtime_request_id, request_id) = ?`).run(...params));
+  }
+
+  /** Whether an incarnation's runtime may still wait on the ledger: an open action or an undelivered answer. */
+  hasOpenWork(sessionId: string, incarnation: string): boolean {
+    return (
+      this.#db
+        .prepare(
+          `SELECT 1 FROM durable_actions WHERE session_id = ? AND incarnation = ?
+             AND (state IN (${placeholders(OPEN_STATES)}) OR (state IN (${placeholders(ANSWERED_STATES)}) AND forwarded = 0)) LIMIT 1`,
+        )
+        .get(sessionId, incarnation, ...OPEN_STATES, ...ANSWERED_STATES) !== undefined
+    );
+  }
+
+  /** One incarnation's actions (all of them, or those in `states`), oldest first. */
+  listBySession(sessionId: string, incarnation: string, states?: readonly ActionState[]): ActionRow[] {
+    if (!states) {
+      return this.#db
+        .prepare("SELECT * FROM durable_actions WHERE session_id = ? AND incarnation = ? ORDER BY created_at, rowid")
+        .all(sessionId, incarnation) as unknown as ActionRow[];
+    }
+    return this.#db
+      .prepare(`SELECT * FROM durable_actions WHERE session_id = ? AND incarnation = ? AND state IN (${placeholders(states)}) ORDER BY created_at, rowid`)
+      .all(sessionId, incarnation, ...states) as unknown as ActionRow[];
+  }
+
+  /** Every incarnation's actions in `states` (deletion without a known incarnation; nothing newer exists then). */
+  listByAnyIncarnation(sessionId: string, states: readonly ActionState[]): ActionRow[] {
     return this.#db
       .prepare(`SELECT * FROM durable_actions WHERE session_id = ? AND state IN (${placeholders(states)}) ORDER BY created_at, rowid`)
       .all(sessionId, ...states) as unknown as ActionRow[];
+  }
+
+  /** Sessions with rows from before incarnations were recorded. */
+  sessionsWithoutIncarnation(): string[] {
+    return (this.#db.prepare("SELECT DISTINCT session_id FROM durable_actions WHERE incarnation IS NULL").all() as { session_id: string }[]).map((row) => row.session_id);
+  }
+
+  /** Incarnations recorded provisionally from a session's creation time (`created:<iso>`). */
+  provisionalIncarnations(): { session_id: string; incarnation: string }[] {
+    return this.#db.prepare("SELECT DISTINCT session_id, incarnation FROM durable_actions WHERE incarnation LIKE 'created:%'").all() as unknown as {
+      session_id: string;
+      incarnation: string;
+    }[];
+  }
+
+  rekeyIncarnation(sessionId: string, from: string, to: string): void {
+    this.#db.prepare("UPDATE durable_actions SET incarnation = ? WHERE session_id = ? AND incarnation = ?").run(to, sessionId, from);
+  }
+
+  /** Incarnations with work the runtime may still wait on (open actions or undelivered answers). */
+  liveIncarnations(): { session_id: string; incarnation: string }[] {
+    return this.#db
+      .prepare(
+        `SELECT DISTINCT session_id, incarnation FROM durable_actions WHERE incarnation IS NOT NULL AND incarnation != 'retired'
+           AND (state IN (${placeholders(OPEN_STATES)}) OR (state IN (${placeholders(ANSWERED_STATES)}) AND forwarded = 0))`,
+      )
+      .all(...OPEN_STATES, ...ANSWERED_STATES) as unknown as { session_id: string; incarnation: string }[];
+  }
+
+  /** Replaces the stored runtime event (the full request arrived for a prompt first known from its derived form). */
+  updateEvent(id: string, event: unknown): void {
+    this.#db.prepare("UPDATE durable_actions SET event = ? WHERE id = ?").run(JSON.stringify(event), id);
+  }
+
+  /**
+   * Assigns pre-migration rows to the session's current incarnation when they are its owner's and not older than it;
+   * every other such row belonged to an earlier incarnation and is retired (never listed, claimed, or delivered).
+   */
+  assignIncarnation(sessionId: string, current: { readonly incarnation: string; readonly ownerId: number; readonly createdAtMs?: number } | undefined): void {
+    if (current) {
+      this.#db
+        .prepare("UPDATE durable_actions SET incarnation = ? WHERE session_id = ? AND incarnation IS NULL AND owner_id = ? AND created_at >= ?")
+        .run(current.incarnation, sessionId, current.ownerId, current.createdAtMs ?? 0);
+    }
+    this.#db
+      .prepare(
+        `UPDATE durable_actions SET incarnation = 'retired', forwarded = 1, next_forward_at = NULL,
+           state = CASE WHEN state IN (${placeholders(OPEN_STATES)}) THEN 'cancelled' ELSE state END,
+           reason = CASE WHEN state IN (${placeholders(OPEN_STATES)}) THEN 'The session this action belonged to was deleted' ELSE reason END,
+           claim_token_hash = NULL, live_connection = NULL, lease_expires_at = NULL
+         WHERE session_id = ? AND incarnation IS NULL`,
+      )
+      .run(...OPEN_STATES, ...OPEN_STATES, sessionId);
   }
 
   listByLiveConnection(connectionId: string): ActionRow[] {
@@ -383,6 +513,11 @@ export class ActionStore {
   }
 }
 
+/** The request ID the runtime waits on now (a restarted runtime may have rebuilt the request under a new one). */
+export function runtimeRequestId(row: Pick<ActionRow, "request_id" | "runtime_request_id">): string {
+  return row.runtime_request_id ?? row.request_id;
+}
+
 /** Customer-visible view of an action (`GET /v1/sessions/:id/actions`, `SessionInfo.pendingActions`). */
 export function toPendingAction(row: ActionRow): PendingAction {
   const answered = row.state === "completed" || row.state === "failed";
@@ -393,7 +528,7 @@ export function toPendingAction(row: ActionRow): PendingAction {
     sessionId: row.session_id,
     kind: row.kind,
     state: row.state,
-    requestId: row.request_id,
+    requestId: runtimeRequestId(row),
     ...(row.tool ? { tool: row.tool } : {}),
     ...(row.tool_call_id ? { toolCallId: row.tool_call_id } : {}),
     ...(row.kind === "tool" && row.arguments !== null ? { arguments: parseJson(row.arguments) } : {}),

@@ -100,9 +100,11 @@ export const durableModule: GatewayModule = {
     const onLifecycle = async (event: PlatformEvent) => {
       if (!event.sessionId) return;
       if (event.type === "session.deleted") {
-        actions.onSessionDeleted(event.sessionId);
+        // Only the deleted incarnation: a later session that reuses the ID is a different session.
+        const incarnation = typeof event.data.incarnation === "string" ? event.data.incarnation : undefined;
+        actions.onSessionDeleted(event.sessionId, incarnation);
         webhooks!.dropSession(event.sessionId);
-        schedules!.onSessionDeleted(event.sessionId);
+        schedules!.onSessionDeleted(event.sessionId, incarnation);
       } else if (event.type === "session.promoted") {
         // Promotion normally calls actions.onGenerationChanged directly first; repeating it here is a no-op.
         const generation = typeof event.data.generation === "number" ? event.data.generation : (await sessions()?.get(event.sessionId))?.generation;

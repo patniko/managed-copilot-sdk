@@ -16,7 +16,7 @@ import type { Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
 import type { ActionChange } from "../actions/service.js";
 import type { ActionsService, CredentialsService, DurableSessionsPort, PlatformEventMeta, RuntimeSessionEvent, SchedulesService } from "../contract.js";
-import { canonicalJson, deterministicUuid, newId, parseJson } from "../ids.js";
+import { canonicalJson, deterministicUuid, incarnationOf, isGone, newId, parseJson } from "../ids.js";
 import { LOGIN_HINT } from "../credentials/service.js";
 import { assertTimeZone, minimumIntervalMinutes, nextOccurrence, occurrencesBetween, parseCron } from "./cron.js";
 import {
@@ -128,6 +128,19 @@ const TRANSIENT_CODES = new Set(["capability_unavailable", "timeout", "internal"
 const LEDGER_CHECK_INTERVAL_MS = 30_000;
 /** Tolerated clock difference between the gateway and a runtime when matching a prompt in history. */
 const INPUT_CLOCK_SKEW_MS = 5_000;
+/** How often a run whose prompt may still be queued in the runtime checks again (it never sends a second copy). */
+const ACCEPTANCE_RECHECK_MS = { max: 60_000 };
+const QUEUE_READ_TIMEOUT_MS = 15_000;
+const TARGET_GONE = "The session this schedule continues was deleted, so it cannot run again. Delete the schedule, or create a new one for another session.";
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ManagedCopilotError("timeout", `The runtime did not answer within ${Math.round(ms / 1000)}s`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 function occurrenceIdFor(scheduleId: string, trigger: RunTrigger, key: string | number): string {
   return `occ_${createHash("sha256").update(`${scheduleId}:${trigger}:${key}`).digest("base64url").slice(0, 32)}`;
@@ -250,14 +263,17 @@ export class DurableSchedules implements SchedulesService {
     assertTimeZone(timeZone);
 
     let environment: string;
+    let targetIncarnation: string | null = null;
     if (parsed.target) {
       if (parsed.session) throw new ManagedCopilotError("invalid_request", "A schedule that continues an existing session uses that session's configuration; remove session");
-      const view = await this.#deps.sessions()?.get(parsed.target.sessionId);
-      if (!view || view.ownerId !== principal.accountId) throw new ManagedCopilotError("not_found", `Session ${parsed.target.sessionId} was not found`);
-      if (parsed.environment && parsed.environment !== view.environment) {
-        throw new ManagedCopilotError("invalid_request", `Session ${parsed.target.sessionId} runs in environment "${view.environment}", not "${parsed.environment}"`);
+      const view = this.#deps.sessions()?.get(parsed.target.sessionId);
+      if (isGone(view) || view!.ownerId !== principal.accountId) throw new ManagedCopilotError("not_found", `Session ${parsed.target.sessionId} was not found`);
+      if (parsed.environment && parsed.environment !== view!.environment) {
+        throw new ManagedCopilotError("invalid_request", `Session ${parsed.target.sessionId} runs in environment "${view!.environment}", not "${parsed.environment}"`);
       }
-      environment = view.environment;
+      environment = view!.environment;
+      // The schedule continues this session, not a later one that reuses its ID.
+      targetIncarnation = incarnationOf(view!);
     } else {
       if (!parsed.environment) throw new ManagedCopilotError("invalid_request", "environment is required unless the schedule targets an existing session");
       environment = parsed.environment;
@@ -316,7 +332,9 @@ export class DurableSchedules implements SchedulesService {
     let name = parsed.name;
     const existing = this.#store.byName(principal.accountId, name);
     if (existing) {
-      if (existing.definition_hash === definitionHash && existing.created_by === createdBy) return this.#info(existing);
+      // The same definition for the same session (not an earlier one that had its ID) is a retry.
+      const sameTarget = existing.target_incarnation === null || existing.target_incarnation === targetIncarnation;
+      if (existing.definition_hash === definitionHash && existing.created_by === createdBy && sameTarget) return this.#info(existing);
       if (createdBy !== "agent") throw new ManagedCopilotError("conflict", `A schedule named "${name}" already exists; delete it or choose another name`);
       name = `${name.slice(0, 90)}-${newId("x", 3).slice(2)}`;
     }
@@ -336,6 +354,7 @@ export class DurableSchedules implements SchedulesService {
       paused_reason: null,
       created_by: createdBy,
       target_session_id: parsed.target?.sessionId ?? null,
+      target_incarnation: targetIncarnation,
       origin_session_id: options.originSessionId ?? null,
       session_config: session ? JSON.stringify(session) : null,
       webhook: parsed.webhook ?? null,
@@ -355,9 +374,12 @@ export class DurableSchedules implements SchedulesService {
   }
 
   listForSession(ownerId: number, sessionId: string): ScheduleInfo[] {
+    // Only schedules that continue this session, not an earlier deleted session that had the same ID.
+    const view = this.#deps.sessions()?.get(sessionId);
+    const current = isGone(view) ? undefined : incarnationOf(view!);
     return this.#store
       .listByTarget(sessionId)
-      .filter((row) => row.owner_id === ownerId)
+      .filter((row) => row.owner_id === ownerId && (row.target_incarnation === null || row.target_incarnation === current))
       .map((row) => this.#info(row));
   }
 
@@ -381,6 +403,7 @@ export class DurableSchedules implements SchedulesService {
   resume(ownerId: number, scheduleId: string): ScheduleInfo {
     const row = this.#owned(ownerId, scheduleId);
     if (!this.#deps.credentials().has(ownerId)) throw new ManagedCopilotError("authentication_required", `Schedules run as you while you're away. ${LOGIN_HINT}`);
+    if (this.#targetGone(row)) throw new ManagedCopilotError("conflict", TARGET_GONE);
     const problem = this.#policyProblem(row);
     if (problem) throw problem;
     const now = this.#now();
@@ -412,6 +435,7 @@ export class DurableSchedules implements SchedulesService {
     if (row.state !== "active" && row.paused_reason) {
       throw new ManagedCopilotError("conflict", `This schedule was paused by the platform: ${row.paused_reason.replace(/^Paused: /, "")} Resume it first.`);
     }
+    if (this.#targetGone(row)) throw new ManagedCopilotError("conflict", TARGET_GONE);
     const key = invocationId?.trim() || newId("inv");
     if (key.length > 200) throw new ManagedCopilotError("invalid_request", "invocationId must be at most 200 characters");
     const occurrenceId = occurrenceIdFor(row.id, "manual", key);
@@ -438,14 +462,36 @@ export class DurableSchedules implements SchedulesService {
     return Number(result.changes);
   }
 
-  /** A deleted session can no longer be continued: schedules targeting it pause and its queued runs are skipped. */
-  onSessionDeleted(sessionId: string): void {
+  /**
+   * A deleted session can no longer be continued: schedules that continue it pause, its queued runs are skipped, and
+   * runs in progress in it fail. Only the deleted incarnation is affected; a later session reusing the ID is not.
+   */
+  onSessionDeleted(sessionId: string, incarnation?: string): void {
+    const view = this.#deps.sessions()?.get(sessionId);
+    const current = isGone(view) ? undefined : incarnationOf(view!);
     for (const schedule of this.#store.listByTarget(sessionId)) {
-      this.#pauseFor(schedule, "Paused: the session this schedule continues was deleted");
+      const bound = schedule.target_incarnation;
+      const affected = bound === null ? current === undefined : incarnation !== undefined ? bound === incarnation : bound !== current;
+      if (affected) this.#pauseFor(schedule, "Paused: the session this schedule continues was deleted");
     }
-    for (const run of this.#deps.db.prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status = 'queued'").all(sessionId) as unknown as RunRow[]) {
-      if (!this.#inFlight.has(run.id)) this.#finishRun(run, "skipped", "The session was deleted before this run started");
+    // Runs are tracked by session ID: while the ID names a live session again, they cannot be told apart.
+    if (current !== undefined) return;
+    const runs = this.#deps.db
+      .prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status IN ('queued', 'running', 'waiting')")
+      .all(sessionId) as unknown as RunRow[];
+    for (const run of runs) {
+      if (this.#inFlight.has(run.id)) continue;
+      if (run.status === "queued") this.#finishRun(run, "skipped", "The session was deleted before this run started");
+      else this.#finishRun(run, "failed", "The run's session was deleted while the run was in progress");
     }
+  }
+
+  /** The session a schedule continues was deleted (or its ID now names a different session). */
+  #targetGone(schedule: ScheduleRow): boolean {
+    if (!schedule.target_session_id) return false;
+    const view = this.#deps.sessions()?.get(schedule.target_session_id);
+    if (isGone(view) || view!.ownerId !== schedule.owner_id) return true;
+    return schedule.target_incarnation !== null && schedule.target_incarnation !== incarnationOf(view!);
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -506,6 +552,7 @@ export class DurableSchedules implements SchedulesService {
           paused_reason: `Declared by this deployment's AppHost to run as ${account.login}. Resume it to allow it to run as you.`,
           created_by: "apphost",
           target_session_id: null,
+          target_incarnation: null,
           origin_session_id: null,
           apphost_key: key,
           origin_key: null,
@@ -685,8 +732,7 @@ export class DurableSchedules implements SchedulesService {
         });
         this.#store.updateRun(run.id, ["queued"], { session_created: 1 }, this.#now());
       } else if (run.session_mode === "target") {
-        const view = await sessions.get(run.session_id!);
-        if (!view || view.ownerId !== schedule.owner_id) {
+        if (this.#targetGone(schedule)) {
           const message = "The session this schedule continues no longer exists";
           this.#pauseFor(schedule, `Paused: ${message}`);
           return this.#finishRun(run, "failed", message, schedule);
@@ -696,15 +742,21 @@ export class DurableSchedules implements SchedulesService {
       run = this.#store.run(run.id)!;
       if (run.status !== "queued") return;
       if (run.input_state === "submitting") {
-        // A previous attempt may have reached the runtime: its history decides, never a blind resend.
+        // A previous attempt may have reached the runtime. Its history decides, and while the runtime might still hold
+        // the prompt unrecorded (queued behind a turn, or its turn just starting), it is never sent a second time.
         const found = await this.#findSubmittedInput(sessions, run, schedule);
         if (found === undefined) return this.#retryLater(run, schedule, new ManagedCopilotError("capability_unavailable", "Could not read the session's history to confirm the prompt"));
-        if (found !== null) {
-          // The prompt is already in the session: its turn may still run, or may have ended while we were away.
-          this.#markStarted(run, schedule, found, true);
-          await this.#settleFromLedger(sessions, run.id);
-          return;
+        if (found !== null) return this.#adoptSubmitted(sessions, run, schedule, found);
+        const held = await this.#runtimeMayHold(sessions, run);
+        if (held === undefined) {
+          return this.#retryLater(run, schedule, new ManagedCopilotError("capability_unavailable", "Could not read the session's queue to confirm the prompt was not accepted"));
         }
+        if (held) return this.#awaitAcceptance(run, schedule);
+        // Nothing queued or running now. A prompt accepted meanwhile has left the queue for the history, so the
+        // history, read again after the queue, is conclusive.
+        const settled = await this.#findSubmittedInput(sessions, run, schedule);
+        if (settled === undefined) return this.#retryLater(run, schedule, new ManagedCopilotError("capability_unavailable", "Could not read the session's history to confirm the prompt"));
+        if (settled !== null) return this.#adoptSubmitted(sessions, run, schedule, settled);
       }
       const startedAt = this.#now();
       this.#store.updateRun(run.id, ["queued"], { input_state: "submitting", input_started_at: startedAt }, startedAt);
@@ -720,6 +772,9 @@ export class DurableSchedules implements SchedulesService {
           // The runtime refused the prompt: nothing was accepted, so the failure is certain.
           this.#store.updateRun(latest.id, ["queued"], { input_state: "none" }, this.#now());
         }
+        // The session needs a handler that is not connected (for example its SDK hooks): every run would fail the same
+        // way until it is, so the schedule pauses with the reason instead of failing on each occurrence.
+        if (error.code === "background_callback_unsupported") this.#pauseFor(schedule, `Paused: ${error.message}`);
         return this.#finishRun(this.#store.run(run.id) ?? latest, "failed", `Could not start the run: ${error.message}`, schedule);
       }
       return this.#retryLater(latest, schedule, error);
@@ -727,7 +782,60 @@ export class DurableSchedules implements SchedulesService {
   }
 
   /**
-   * `null`: the history shows the prompt was not accepted. `undefined`: the history could not be read.
+   * Whether the runtime might hold an accepted prompt that its history does not show yet: a prompt waits in the queue
+   * until its turn starts (prompts sent as `system` are not listed individually, so any queued work counts), and a
+   * turn that just started records its message a moment later. `false` only when nothing is queued or running;
+   * `undefined` when the runtime cannot say.
+   */
+  async #runtimeMayHold(sessions: DurableSessionsPort, run: RunRow): Promise<boolean | undefined> {
+    const sessionId = run.session_id!;
+    const view = sessions.get(sessionId);
+    if (isGone(view)) return false;
+    if (view!.state === "running" || view!.state === "waiting" || view!.lastTurn?.status === "running") return true;
+    try {
+      const [pending, queue] = await withTimeout(
+        Promise.all([
+          sessions.request<{ hasPending?: unknown }>(sessionId, "session.queue.hasPending", { sessionId }),
+          sessions.request<{ items?: unknown; steeringMessages?: unknown; withdrawableTurnMessageId?: unknown }>(sessionId, "session.queue.pendingItems", { sessionId }),
+        ]),
+        QUEUE_READ_TIMEOUT_MS,
+      );
+      if (typeof pending?.hasPending !== "boolean" || !Array.isArray(queue?.items)) return undefined;
+      const steering = Array.isArray(queue.steeringMessages) ? queue.steeringMessages.length : 0;
+      return pending.hasPending || queue.items.length > 0 || steering > 0 || typeof queue.withdrawableTurnMessageId === "string";
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * The prompt may still be queued in the runtime: check again later, never send it again. A run that cannot
+   * confirm it within the run lifetime ends `needs_reconciliation`.
+   */
+  #awaitAcceptance(run: RunRow, schedule: ScheduleRow): void {
+    const now = this.#now();
+    const since = run.input_started_at ?? run.created_at;
+    if (now - since >= this.#options.maxRunLifetimeMs) {
+      return this.#finishRun(
+        run,
+        "needs_reconciliation",
+        "The session still had queued or running work, so it is unknown whether it accepted this run's prompt; it was not sent again. Check the session before running it again.",
+        schedule,
+      );
+    }
+    const delay = Math.min(ACCEPTANCE_RECHECK_MS.max, Math.max(this.#options.dispatchRetryBaseMs, Math.round((now - since) / 4)));
+    this.#store.updateRun(run.id, ["queued"], { next_attempt_at: now + delay, reason: "Waiting: confirming that the session accepted this run's prompt (it has queued or running work)" }, now);
+    this.#log.info("Schedule run is confirming its prompt was accepted", { runId: run.id, sessionId: run.session_id, recheckInMs: delay });
+  }
+
+  /** The history shows the run's prompt: its turn may still run, or may have ended while no event was observed. */
+  async #adoptSubmitted(sessions: DurableSessionsPort, run: RunRow, schedule: ScheduleRow, messageId: string): Promise<void> {
+    this.#markStarted(run, schedule, messageId, true);
+    await this.#settleFromLedger(sessions, run.id);
+  }
+
+  /**
+   * `null`: the history shows the prompt was not consumed. `undefined`: the history could not be read.
    * Throws `needs_reconciliation` when the history cannot attribute a message to this occurrence unambiguously.
    */
   async #findSubmittedInput(sessions: DurableSessionsPort, run: RunRow, schedule: ScheduleRow): Promise<string | null | undefined> {
