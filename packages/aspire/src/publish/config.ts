@@ -102,8 +102,9 @@ export function applyAccessRules(config: ManagedCopilotConfig, deploy: DeployAcc
   const name = config.name;
   throw new AzurePublishError(
     `Managed Copilot "${name}" has no access rules, so any GitHub account could use the deployed platform (and run sandboxes in your subscription). ` +
-      `Set Parameters:${name}-github-users (for example \`aspire secret set Parameters:${name}-github-users your-login\`) or Parameters:${name}-github-orgs, ` +
-      `add access: { githubUsers: [...] } to addManagedCopilot, or set Parameters:${name}-allow-any-github-account to "true" to deploy it open on purpose.`,
+      `Set Parameters:${name}-github-users to the GitHub logins allowed to use this deployment (for example \`aspire secret set Parameters:${name}-github-users your-login\`), ` +
+      `or Parameters:${name}-github-orgs to their organizations. Alternatively add access: { githubUsers: [...] } to addManagedCopilot, ` +
+      `or set Parameters:${name}-allow-any-github-account to "true" to deploy it open on purpose.`,
   );
 }
 
