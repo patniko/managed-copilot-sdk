@@ -66,5 +66,13 @@ export default snippet(
   const { catalog, creationDenied } = await probeAttach(managed.url, session.sessionId);
   t.check(catalog.length === 1 && catalog[0] === `ahp-session:/${session.sessionId}`, "the attach socket publishes exactly this session, not the runtime's catalog");
   t.check(creationDenied, "attached clients cannot create sessions outside admission");
+
+  // A session in its own sandbox attaches the same way, through the sandbox's tunnel.
+  if (managed.info.capabilities.includes("isolated")) {
+    const coder = await managed.createSession({ environment: "coder", onPermissionRequest: approveAll });
+    t.cleanup(() => managed.sessions.delete(coder.sessionId));
+    const sandboxed = await probeAttach(managed.url, coder.sessionId);
+    t.check(sandboxed.catalog.length === 1 && sandboxed.catalog[0] === `ahp-session:/${coder.sessionId}`, "a sandboxed session attaches the same way, publishing only itself");
+  }
   console.log(`Attach interactively with: npx managed-copilot attach ${session.sessionId.slice(0, 8)}`);
 });

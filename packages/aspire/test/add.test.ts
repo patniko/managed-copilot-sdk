@@ -140,6 +140,16 @@ describe("addManagedCopilot", () => {
     expect(environmentOf(lazy.apps[0]!.builder).has("MANAGED_COPILOT_SANDBOX_PREPARE")).toBe(false);
   });
 
+  it("leaves zero-config discovery to another copy when told to", async () => {
+    const environments = { chat: { type: "shared" as const } };
+    const second = new FakeBuilder(appHost);
+    await addManagedCopilot(second, "copilot", { gatewayDirectory, environments, port: 7500, discovery: false });
+    expect(environmentOf(second.apps[0]!.builder).get("MANAGED_COPILOT_WRITE_DISCOVERY")).toBe("0");
+    const first = new FakeBuilder(appHost);
+    await addManagedCopilot(first, "copilot", { gatewayDirectory, environments });
+    expect(environmentOf(first.apps[0]!.builder).has("MANAGED_COPILOT_WRITE_DISCOVERY")).toBe(false);
+  });
+
   it("fails clearly when the gateway has not been built", async () => {
     const builder = new FakeBuilder(appHost);
     await expect(addManagedCopilot(builder, "copilot", { gatewayDirectory: join(appHost, "nowhere"), environments: { chat: { type: "shared" } } })).rejects.toThrow(
