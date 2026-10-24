@@ -371,7 +371,11 @@ describe("Factory pipeline", () => {
     second.factory.resumeInterrupted();
     const wo = await settle(second.factory, second.id);
     expect(wo.status).toBe("completed");
-    expect(second.platform.sessions.get(second.releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
+    const prompt = second.platform.sessions.get(second.releaseSession)!.prompts[0]!;
+    expect(prompt).toContain("Your previous turn was interrupted");
+    // Nothing from the killed turn is taken as done: the agent re-checks the workspace, and the check must run again.
+    expect(prompt).toContain("may have been stopped partway. Check the workspace's current state");
+    expect(second.factory.activity(second.id).some((item) => item.text === "The interrupted turn failed; asking the agent to check its workspace and continue")).toBe(true);
   });
 
   it("continues a turn whose sandbox restarted under it, without stopping anything", async () => {

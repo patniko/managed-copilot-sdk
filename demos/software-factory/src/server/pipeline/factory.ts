@@ -1155,8 +1155,8 @@ export class Factory {
         run.wo,
         station.id,
         stuck === "restarted"
-          ? "The sandbox restarted while this turn was running, so the turn can't finish; asking the agent to continue from its workspace"
-          : `The in-flight turn showed no activity for ${spokenDuration(stallMs)}; stopping it and asking the agent to continue`,
+          ? "The sandbox restarted while this turn was running, so the turn can't finish; asking the agent to check its workspace and continue"
+          : `The in-flight turn showed no activity for ${spokenDuration(stallMs)}; stopping it and asking the agent to check its workspace and continue`,
         "warning",
       );
       log.info("Continuing an in-flight turn that can't finish", { id: run.wo.id, station: station.id, reason: stuck });
@@ -1167,7 +1167,7 @@ export class Factory {
       return;
     }
     if (outcome === "failed" || outcome === "cancelled") {
-      this.#activity(run.wo, station.id, `The interrupted turn ${outcome === "failed" ? "failed" : "was stopped"}; asking the agent to continue`, "warning");
+      this.#activity(run.wo, station.id, `The interrupted turn ${outcome === "failed" ? "failed" : "was stopped"}; asking the agent to check its workspace and continue`, "warning");
       await this.#turn(run, station, active, continuePrompt(release), "continue", Math.max(station.round, 1));
       return;
     }
