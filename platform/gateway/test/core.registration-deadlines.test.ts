@@ -1,6 +1,7 @@
-// Deadlines on a session's registration path: a resume, restore, or tools update its runtime never answers fails with
-// `timeout` instead of holding every later registration of the session, and a runtime connection that does not answer
-// a `ping` either is closed, so the session's next request connects afresh (a half-open gateway→sandbox stream).
+// Deadlines on a session's registration path: a resume, restore, or tools update on a runtime connection that stopped
+// responding (a half-open gateway→sandbox stream) fails with `timeout` instead of holding every later registration of
+// the session, and the connection is closed, so the session's next request connects afresh. A runtime that still
+// answers pings is still working on the step, which may yet apply: it is waited for, with nothing else sent meanwhile.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { SessionManager } from "../src/modules/core/sessions.js";
 import { upstreamTimings } from "../src/modules/core/sessions.js";
@@ -79,21 +80,30 @@ describe("registration path deadlines", () => {
     ping.release();
   });
 
-  it("fails a resume a connected runtime is slow to answer, and keeps the connection", async () => {
+  it("waits for a resume a connected runtime is slow to answer, sending it nothing else meanwhile, and keeps the connection", async () => {
     upstreamTimings.answerMs = 300;
     upstreamTimings.probeMs = 200;
     const owner = await connect();
     const sessionId = crypto.randomUUID();
     await owner.request("session.create", { sessionId, requestPermission: true });
     const opened = opens(sessionId);
+    const resumes = () => runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).length;
+    const before = resumes();
     const resume = runtime.holdNext("session.resume", sessionId);
     const client = await connect();
-    const slow = failure(client.request("session.resume", { sessionId }));
+    let settled = false;
+    const slow = client.request("session.resume", { sessionId }).finally(() => {
+      settled = true;
+    });
     await resume.held;
-    expect(await slow).toMatchObject({ data: { code: "timeout" }, message: expect.stringContaining("did not answer session.resume within 0.3 s. Try again shortly.") });
+    // Several answer bounds pass; the runtime answers pings, so it is still working on the resume, which may yet apply.
+    // Giving up would let it land after whatever the session is sent next (a resume withdrawing hooks after the
+    // registrations that restore them), so nothing else is sent to it and the call keeps waiting.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(settled).toBe(false);
+    expect(resumes()).toBe(before + 1);
     resume.release();
-    // The runtime answers a ping, so its connection stays and serves the next resume.
-    await expect(client.request("session.resume", { sessionId })).resolves.toBeDefined();
+    await expect(slow).resolves.toBeDefined();
     expect(opens(sessionId)).toBe(opened);
   });
 
@@ -122,17 +132,22 @@ describe("registration path deadlines", () => {
     await expect(sessions.request(sessionId, "session.getMessages", {})).resolves.toMatchObject({ events: expect.any(Array) });
   });
 
-  it("bounds a tools update the runtime never answers, so the session's next registration goes through", async () => {
+  it("bounds a tools update on a connection that stopped responding, so the session's next registration goes through", async () => {
     upstreamTimings.answerMs = 300;
     upstreamTimings.probeMs = 200;
     const client = await connect();
     const sessionId = crypto.randomUUID();
     await client.request("session.create", { sessionId, requestPermission: true });
+    const opened = opens(sessionId);
     const set = runtime.holdNext("session.tools.set", sessionId);
+    const ping = runtime.holdNext("ping");
     const update = failure(client.request("session.tools.set", { sessionId, tools: [{ name: "lookup_order" }] }));
     await set.held;
-    expect(await update).toMatchObject({ data: { code: "timeout" } });
+    expect(await update).toMatchObject({ data: { code: "timeout" }, message: expect.stringContaining("did not answer session.tools.set within 0.3 s and its connection stopped responding") });
     set.release();
+    ping.release();
+    // The session connects afresh and takes the next update.
     await expect(client.request("session.tools.set", { sessionId, tools: [{ name: "lookup_order" }] })).resolves.toBeDefined();
+    expect(opens(sessionId)).toBe(opened + 1);
   });
 });
