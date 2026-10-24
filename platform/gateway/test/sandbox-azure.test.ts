@@ -1,6 +1,6 @@
 // Azure Container Apps Sandboxes provider against a fake data plane that mirrors the published wire format
 // (azure-containerapps-sandbox 0.1.0b4). The live qualification runs separately against Azure.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -169,6 +169,14 @@ class FakeDataPlane {
       return send(200, image);
     }
     return send(404, { error: { code: "NotFound", message: url.pathname } });
+  }
+
+  /** Lets every dropped create that has not taken effect yet take effect now. */
+  commitPending(): void {
+    for (const pending of this.#pending.splice(0)) {
+      this.sandboxes.set(pending.sandbox.id, pending.sandbox);
+      this.#attach(pending.sandbox, true);
+    }
   }
 
   #view(sandbox: FakeSandbox): Record<string, unknown> {
@@ -432,6 +440,33 @@ describe("Azure sandbox provider", () => {
     expect(isManagedCopilotError(error, "capability_unavailable")).toBe(true);
     expect((error as Error).message).toMatch(/did not confirm whether the sandbox was created/);
     expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+  });
+
+  it("remembers an unconfirmed create across calls and restarts, and adopts it when it appears", async () => {
+    plane.dropSandboxCreates = 1;
+    plane.dropCommitAfterLists = 1_000_000; // takes effect only when the test says so
+    const first = provider(env(), { timeouts: { reconcileMs: 20 } });
+    await expect(first.create(spec())).rejects.toThrow(/did not confirm whether the sandbox was created/);
+    const restarted = provider(env(), { timeouts: { reconcileMs: 20 } });
+    await expect(restarted.create(spec())).rejects.toThrow(/earlier attempt to create the sandbox has not been confirmed/);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+
+    plane.commitPending();
+    await restarted.create(spec());
+    expect(plane.sandboxes.size).toBe(1);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+    expect(existsSync(join(dataDir, "sandbox-azure", "unconfirmed-creates.json"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(dataDir, "sandbox-azure", "unconfirmed-creates.json"), "utf8"))).toEqual({});
+  });
+
+  it("creates again only once an unconfirmed create is past its horizon", async () => {
+    plane.dropSandboxCreates = 1;
+    plane.dropCommitAfterLists = "never";
+    const subject = provider(env(), { timeouts: { reconcileMs: 20, unconfirmedMs: 0 } });
+    await expect(subject.create(spec())).rejects.toThrow(/did not confirm/);
+    await subject.create(spec());
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(2);
+    expect(plane.sandboxes.size).toBe(1);
   });
 
   it("refuses an environment with system packages but no image of its own instead of using the base image", async () => {
