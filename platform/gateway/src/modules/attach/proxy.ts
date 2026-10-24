@@ -99,6 +99,8 @@ export interface BridgeOptions {
   readonly scrub: (value: unknown) => unknown;
   /** Keepalive for the attached client (default `KEEPALIVE`). */
   readonly keepAlive?: { readonly intervalMs: number; readonly timeoutMs: number };
+  /** The client's network connection, so bytes still arriving (a large message on a slow link) count as life. */
+  readonly transport?: Duplex;
 }
 
 function reasonOf(error: unknown): string {
@@ -167,6 +169,8 @@ export class AhpBridge implements AttachedBridge {
     this.#keepAlive.unref();
     client.on("pong", () => (this.#heard = Date.now()));
     client.on("ping", () => (this.#heard = Date.now()));
+    // A pong waits behind a large message still arriving: every byte received counts, not just whole messages.
+    options.transport?.on("data", () => (this.#heard = Date.now()));
 
     client.on("message", (data: RawData, isBinary: boolean) => this.#onClientFrame(data, isBinary));
     upstream.on("message", (data: RawData, isBinary: boolean) => this.#onUpstreamFrame(data, isBinary));

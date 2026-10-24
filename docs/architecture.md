@@ -989,12 +989,13 @@ sequenceDiagram
   conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
   attach again with new material.
 - **Keepalive.** Ingresses close idle WebSockets (Azure Container Apps after 240 s, with 1006). The relay pings the
-  deployment every 30 s, and when the deployment has sent nothing (no frame or pong) for 90 s, a half-open link after
-  sleep or a network change, it reconnects the CLI the same way ("Managed Copilot stopped responding. Reconnecting.",
-  counted against the same reconnect limit, then `upstream_unavailable`). The gateway pings each attached client every
-  30 s and ends one silent for 90 s, which detaches its `cli` responder and releases prompts it claimed instead of
-  waiting on the operating system to notice. The gateway's link to a sandbox's listener is a sandbox runtime stream,
-  which the sandbox module keeps alive; on shared placement it is loopback.
+  deployment every 30 s, and when nothing at all has arrived from it for 90 s (bytes of a large frame still arriving
+  count, since a pong waits behind them), a half-open link after sleep or a network change, it reconnects the CLI the
+  same way ("Managed Copilot stopped responding. Reconnecting.", counted against the same reconnect limit, then
+  `upstream_unavailable`). The gateway pings each attached client every 30 s and ends one it has received nothing from
+  for 90 s, which detaches its `cli` responder and releases prompts it claimed instead of waiting on the operating
+  system to notice. The gateway's link to a sandbox's listener is a sandbox runtime stream, which the sandbox module
+  keeps alive; on shared placement it is loopback.
 - **Verified live** (stock Copilot CLI 1.0.92, runtime 1.0.103, real model, captured between the relay and the
   gateway): with an SDK app holding a permission prompt, the CLI's "Approve once" was refused ("Another responder owns
   this action"), the tool did not run, and the app's later answer completed the turn; with no app attached, the CLI's

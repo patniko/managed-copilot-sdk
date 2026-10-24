@@ -29,6 +29,8 @@ const stalled: Duplex[] = [];
 /** How many more upgraded sockets go silent (a half-open link: no frames, no pongs), and pings the deployment got. */
 const silent = { upgrades: 0 };
 const pings = { count: 0 };
+/** How many more upgraded sockets send one large message a chunk at a time (a slow link), then go silent. */
+const slow = { upgrades: 0 };
 const BUSY_BODY = JSON.stringify({ error: { code: "session_busy", message: "This session is moving into a sandbox. Attach again when the move finishes." } });
 
 async function listen(server: Server): Promise<string> {
@@ -83,6 +85,23 @@ beforeAll(async () => {
     if (silent.upgrades > 0) {
       silent.upgrades--;
       silentWss.handleUpgrade(req, socket, head, (ws) => gatewaySockets.add(ws));
+      return;
+    }
+    if (slow.upgrades > 0) {
+      slow.upgrades--;
+      silentWss.handleUpgrade(req, socket, head, (ws) => {
+        gatewaySockets.add(ws);
+        // One text frame written by hand, a chunk every 20 ms: nothing completes, and no pong could get out, until it ends.
+        const payload = Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "action", params: { pad: "x".repeat(20_000) } }));
+        socket.write(Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xff]));
+        let offset = 0;
+        const timer = setInterval(() => {
+          if (socket.destroyed) return clearInterval(timer);
+          socket.write(payload.subarray(offset, offset + 1_000));
+          offset += 1_000;
+          if (offset >= payload.length) clearInterval(timer);
+        }, 20);
+      });
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
@@ -439,5 +458,18 @@ describe("Copilot CLI attach relay", () => {
     expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
     expect(relay.outcome).toBeUndefined();
     again.close();
+  });
+
+  it("counts a large message still arriving as life, so a slow link isn't taken for a dead one", async () => {
+    const { url } = await startRelay({ keepAlive: { intervalMs: 20, timeoutMs: 100 } });
+    slow.upgrades = 1;
+    const cli = await connect(url, "gho_owner");
+    const events: string[] = [];
+    cli.on("message", (data) => events.push(`message ${(JSON.parse(data.toString()) as { params: { pad: string } }).params.pad.length}`));
+    const [code] = (await once(cli, "close")) as [number, Buffer];
+    // It arrived whole after ~400 ms (four timeouts) in which only its own bytes came; then the link, which never
+    // answers pings, was ended.
+    expect(events).toEqual(["message 20000"]);
+    expect(code).toBe(1012);
   });
 });

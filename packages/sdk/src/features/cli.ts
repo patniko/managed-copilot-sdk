@@ -184,6 +184,8 @@ export class AttachRelay {
   readonly #verifying = new Map<string, Promise<{ id: number; login: string }>>();
   /** Every upstream connection, including handshakes in flight, so `close()` can end them all. */
   readonly #upstreams = new Set<WebSocket>();
+  /** Each upstream's network connection, so bytes still arriving (a large frame on a slow link) count as life. */
+  readonly #transports = new WeakMap<WebSocket, Duplex>();
   #pending: AttachMaterial | undefined;
   #active: { client: WebSocket; upstream: WebSocket } | undefined;
   /**
@@ -317,6 +319,7 @@ export class AttachRelay {
         maxPayload: 256 * 1024 * 1024,
       });
       this.#upstreams.add(upstream);
+      upstream.once("upgrade", (response) => this.#transports.set(upstream, response.socket));
       upstream.once("close", () => this.#upstreams.delete(upstream));
       // Errors after the outcome below (a terminated handshake) have nothing left to report.
       upstream.on("error", () => undefined);
@@ -449,6 +452,8 @@ export class AttachRelay {
     keepAlive.unref();
     upstream.on("pong", () => (heard = Date.now()));
     upstream.on("ping", () => (heard = Date.now()));
+    // A pong waits behind a large frame still arriving: every byte received counts, not just whole messages.
+    this.#transports.get(upstream)?.on("data", () => (heard = Date.now()));
     client.on("message", (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
       let filtered: ReturnType<typeof filterAhpClientFrame>;
