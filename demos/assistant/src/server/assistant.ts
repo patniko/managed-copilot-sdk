@@ -7,8 +7,10 @@ import { join } from "node:path";
 import type { Tool } from "@github/copilot-sdk";
 import type { AccountInfo, VerifiedWebhookEvent } from "@managed-copilot/sdk";
 import type { AgendaView, ConnectionsView, DecisionRequest, OfflineView, ScheduleView, SendMessageRequest, ServerEvent, Snapshot } from "../shared/protocol.js";
+import { BackgroundWork } from "./background.js";
 import type { AssistantConfig } from "./config.js";
 import { Conversation, UserFacingError } from "./conversation.js";
+import { backgroundReason, isBackgroundWorkError } from "./describe.js";
 import { EffectLedger } from "./effects.js";
 import { EventHub, HttpError, redirect, Router, type RequestContext } from "./http.js";
 import { createLogger, errorMessage, type Logger } from "./log.js";
@@ -26,6 +28,10 @@ import { createTools, systemInstructions } from "./tools/index.js";
 import type { Workspace } from "./tools/types.js";
 
 const AGENDA_REFRESH_MS = 5 * 60_000;
+/** How often to consider re-checking background work while a tab is open (`BackgroundWork.due` decides). */
+const BACKGROUND_CHECK_MS = 15_000;
+/** A tab opening re-checks background work if the last check is older than this. */
+const BACKGROUND_FRESH_MS = 10_000;
 const CALENDAR_TOOLS = new Set(["create_event", "update_event", "delete_event"]);
 
 function plainText(markdown: string): string {
@@ -46,6 +52,7 @@ export class Assistant {
   readonly conversation: Conversation;
   readonly schedules: Schedules;
   readonly offline: OfflineWorker;
+  readonly background: BackgroundWork;
   readonly #effects: EffectLedger;
   #account: AccountInfo | undefined;
   #demo: DemoWorkspace | undefined;
@@ -57,6 +64,7 @@ export class Assistant {
   #attachFailures = 0;
   #pollTimer: NodeJS.Timeout | undefined;
   #agendaTimer: NodeJS.Timeout | undefined;
+  #backgroundTimer: NodeJS.Timeout | undefined;
   #schedulesTimer: NodeJS.Timeout | undefined;
 
   constructor(config: AssistantConfig, log: Logger = createLogger("assistant")) {
@@ -66,6 +74,11 @@ export class Assistant {
     if (!config.sealingKey) log.warn("ASSISTANT_SEALING_KEY is not set; using a generated development key in the data directory");
     const sealer = Sealer.fromSecret(config.sealingKey ?? loadOrCreateDevSealingKey(config.dataDir));
     this.platform = new Platform(config, log.child("platform"));
+    this.background = new BackgroundWork({
+      platform: this.platform,
+      log: log.child("background"),
+      onChange: (background) => this.#broadcast({ type: "background", background }),
+    });
     this.googleAuth = new GoogleAuth({ client: config.google, redirectUri: `${config.publicUrl}/api/google/callback`, store: this.store, sealer, log: log.child("google") });
     this.#effects = new EffectLedger(this.store);
     this.offline = new OfflineWorker({
@@ -115,6 +128,9 @@ export class Assistant {
         // Trigger pills replayed before the schedules were known get their names now.
         const changes = this.conversation.timeline.refresh();
         if (changes.length) this.#onTimelineChanges(changes);
+        // The platform pauses everything when a background sign-in is revoked; don't keep showing it as on.
+        const blocked = isBackgroundWorkError(error) || schedules.some((schedule) => schedule.state === "paused" && backgroundReason(schedule.pausedReason) !== undefined);
+        if (blocked && this.background.view.state === "on" && this.background.due(BACKGROUND_FRESH_MS)) void this.background.refresh("an automation is paused for background work");
       },
     });
   }
@@ -128,7 +144,10 @@ export class Assistant {
     if (last) this.#account = { id: last.account_id, login: last.login, name: last.name ?? undefined };
     this.platform.onStatus((status) => {
       if (status.state === "ready") void this.#onPlatformReady();
-      else this.conversation.reset();
+      else {
+        this.conversation.reset();
+        this.background.reset();
+      }
       this.#broadcastStatus();
     });
     this.platform.start();
@@ -141,11 +160,17 @@ export class Assistant {
       if (this.#viewers > 0) void this.refreshAgenda();
     }, AGENDA_REFRESH_MS);
     this.#agendaTimer.unref();
+    // While someone is looking, keep the background-work status current (for example after `npx managed-copilot login`).
+    this.#backgroundTimer = setInterval(() => {
+      if (this.#viewers > 0 && this.platform.status.state === "ready" && this.background.due()) void this.background.refresh("periodic check");
+    }, BACKGROUND_CHECK_MS);
+    this.#backgroundTimer.unref();
   }
 
   async stop(): Promise<void> {
     clearInterval(this.#pollTimer);
     clearInterval(this.#agendaTimer);
+    clearInterval(this.#backgroundTimer);
     clearTimeout(this.#detachTimer);
     clearTimeout(this.#schedulesTimer);
     clearTimeout(this.#attachTimer);
@@ -165,6 +190,7 @@ export class Assistant {
     this.#rememberBrowserTimeZone();
     this.#broadcastStatus();
     this.#broadcast({ type: "connections", connections: this.connections() });
+    void this.background.refresh("platform ready");
     // Know the conversation (even with no tab open) before listing its schedules and answering its webhooks.
     await this.conversation.ensureKnown().catch((error) => this.log.warn("Couldn't find the conversation yet", { error: errorMessage(error) }));
     await this.schedules.refresh();
@@ -178,6 +204,8 @@ export class Assistant {
     if (event.type === "schedule.run_started" && !this.conversation.live) this.#ensureAttached();
     if (event.type.startsWith("schedule.") || event.type === "session.idle") void this.schedules.refresh();
     if (event.type === "session.idle") void this.refreshAgenda();
+    // A run is where a revoked or missing background sign-in shows up first.
+    if (event.type === "schedule.run_completed") void this.background.refresh("a scheduled run finished");
   }
 
   // ---- viewers and attach policy -----------------------------------------------------------------------------------
@@ -205,6 +233,7 @@ export class Assistant {
     clearTimeout(this.#detachTimer);
     this.#detachTimer = undefined;
     this.#ensureAttached();
+    if (this.platform.status.state === "ready" && this.background.due(BACKGROUND_FRESH_MS)) void this.background.refresh("tab opened");
   }
 
   #viewerLeft(): void {
@@ -228,6 +257,20 @@ export class Assistant {
     const timeZone = this.#browserTimeZone;
     if (!timeZone || !this.#account) return;
     if (this.store.getUser(this.#account.id)?.detectedTimeZone !== timeZone) this.store.setDetectedTimeZone(this.#account.id, timeZone);
+  }
+
+  /**
+   * Actions that make scheduled work run (adding, resuming, or running an automation) need background work confirmed
+   * on. If one still fails for that reason (it was turned off or revoked elsewhere), the status is checked again.
+   */
+  async #scheduling<T>(action: () => Promise<T>): Promise<T> {
+    await this.background.ensureOn();
+    try {
+      return await action();
+    } catch (error) {
+      if (isBackgroundWorkError(errorMessage(error))) void this.background.refresh("a scheduling action needed background work");
+      throw error;
+    }
   }
 
   // ---- identity, workspace, tools ----------------------------------------------------------------------------------
@@ -320,6 +363,7 @@ export class Assistant {
       connections: this.connections(),
       schedules: this.schedules.list as ScheduleView[],
       schedulesError: this.schedules.error,
+      background: this.background.view,
       settings: { timeZone: this.timeZone() },
       offline: this.offline.view() as OfflineView,
       agenda: this.#agenda,
@@ -344,6 +388,7 @@ export class Assistant {
         case "item":
           this.#broadcast({ type: "item", item: change.item });
           if (change.item.kind === "tool" && change.item.status === "succeeded" && CALENDAR_TOOLS.has(change.item.name)) void this.refreshAgenda();
+          if (change.item.kind === "tool" && change.item.needsBackgroundWork) void this.background.refresh("scheduling needs background work");
           break;
         case "delta":
           this.#broadcast({ type: "delta", id: change.id, text: change.text });
@@ -465,11 +510,30 @@ export class Assistant {
       }),
     );
 
-    router.add("POST", "/api/schedules/briefing", async () => run(() => this.schedules.addMorningBriefing()));
+    router.add("POST", "/api/schedules/briefing", async () => run(() => this.#scheduling(() => this.schedules.addMorningBriefing())));
     router.add("POST", "/api/schedules/:id/pause", async (ctx) => run(() => this.schedules.pause(ctx.params.id!)));
-    router.add("POST", "/api/schedules/:id/resume", async (ctx) => run(() => this.schedules.resume(ctx.params.id!)));
-    router.add("POST", "/api/schedules/:id/run", async (ctx) => run(() => this.schedules.runNow(ctx.params.id!, randomUUID())));
+    router.add("POST", "/api/schedules/:id/resume", async (ctx) => run(() => this.#scheduling(() => this.schedules.resume(ctx.params.id!))));
+    router.add("POST", "/api/schedules/:id/run", async (ctx) => run(() => this.#scheduling(() => this.schedules.runNow(ctx.params.id!, randomUUID()))));
     router.add("DELETE", "/api/schedules/:id", async (ctx) => run(() => this.schedules.remove(ctx.params.id!)));
+
+    // Background work: the person's explicit, one-click consent to the platform's background sign-in.
+    router.add("POST", "/api/background/enable", async (ctx) =>
+      run(async () => {
+        const { consent } = await ctx.json<{ consent?: unknown }>();
+        if (consent !== true) throw new HttpError(400, "consent_required", "Turning on background work needs your explicit OK.");
+        const view = await this.background.enable();
+        void this.schedules.refresh();
+        return view;
+      }),
+    );
+    router.add("POST", "/api/background/disable", async () =>
+      run(async () => {
+        const view = await this.background.disable();
+        void this.schedules.refresh();
+        return view;
+      }),
+    );
+    router.add("POST", "/api/background/refresh", async () => run(() => this.background.refresh("checked from the app")));
 
     router.add("POST", "/api/google/connect", async () => run(() => ({ url: this.googleAuth.beginAuthorization(this.#requireAccount().id) })));
 

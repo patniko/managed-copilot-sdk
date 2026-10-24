@@ -7,7 +7,7 @@ export default snippet(import.meta.url, { title: "Promotable: start cheap, move 
   t.cleanup(() => managed.close());
   const promoted: string[] = [];
 
-  managed.on("session.promoted", (e) => console.log(`${e.sessionId} moved to sandbox ${String(e.data.sandboxId)}`));
+  managed.on("session.promoted", (e) => console.log(`${e.sessionId} moved to sandbox ${e.sandboxId}`));
   managed.on("session.promoted", (e) => void promoted.push(e.sessionId ?? ""));
 
   const client = await managed.client("helper");
@@ -26,6 +26,8 @@ export default snippet(import.meta.url, { title: "Promotable: start cheap, move 
   t.check(before.placement === "shared", "the session started on shared placement");
   t.check(after.placement === "sandbox" && after.id === session.sessionId, `the same session moved into sandbox ${after.sandbox?.id}`);
   t.check(promoted.includes(session.sessionId), "managed.on('session.promoted') fired");
+  // Outputs publish just after the turn completes; wait for that turn's publication, not just the reply.
+  await managed.artifacts(session).waitForPublication();
   const summary = await managed.artifacts(session).read("summary.json");
   t.check(summary.includes("60"), "the continued work wrote outputs/summary.json with 60");
 });

@@ -66,6 +66,8 @@ export const NETWORK_MIGRATIONS: readonly string[] = [
    );`,
   // The binding before an uncommitted promotion, so a pre-commit rollback can restore it (spec 9.5).
   `ALTER TABLE network_sessions ADD COLUMN promoted_from TEXT;`,
+  // The isolated environment a session was promoted into. The source environment keeps owning the session's grants.
+  `ALTER TABLE network_sessions ADD COLUMN promoted_to TEXT;`,
 ];
 
 export function migrateNetwork(db: Database): void {

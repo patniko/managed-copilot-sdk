@@ -1,4 +1,4 @@
-import { Bell, Check, Copy, Monitor, Moon, Sun, X } from "lucide-react";
+import { Bell, Check, Copy, Monitor, Moon, ShieldAlert, ShieldCheck, Sun, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Snapshot } from "../../../shared/protocol";
 import { getTheme, setTheme, type Theme } from "../theme";
@@ -30,13 +30,16 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
-export function SettingsDialog({ snapshot, onClose, actions }: { snapshot?: Snapshot; onClose(): void; actions: AssistantActions }) {
+export function SettingsDialog({ snapshot, onClose, onOpenBackground, actions }: { snapshot?: Snapshot; onClose(): void; onOpenBackground(): void; actions: AssistantActions }) {
   const timeZone = snapshot?.settings.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
   const zones = useMemo(() => timeZones(timeZone), [timeZone]);
   const [permission, setPermission] = useState(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
   const [copied, setCopied] = useState(false);
   const [theme, setThemeState] = useState<Theme>(getTheme);
   const [confirming, setConfirming] = useState<"armed" | "busy" | undefined>();
+  const [turningOff, setTurningOff] = useState<"armed" | "busy" | undefined>();
+  const background = snapshot?.background;
+  const ready = snapshot?.platform.state === "ready";
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -126,6 +129,55 @@ export function SettingsDialog({ snapshot, onClose, actions }: { snapshot?: Snap
           <Row label="Signed in as">
             <span className="font-medium">{snapshot?.account ? `@${snapshot.account.login}` : "—"}</span>
             <span className="text-zinc-500"> (GitHub)</span>
+          </Row>
+          <Row label="Background work">
+            <div data-testid="settings-background" data-state={background?.state ?? "unknown"}>
+              {background?.state === "on" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+                    <ShieldCheck className="size-4" aria-hidden /> On{background.login ? ` · runs as @${background.login}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary ml-auto px-2.5 py-1 text-xs"
+                    disabled={!ready || turningOff === "busy"}
+                    onClick={async () => {
+                      if (turningOff !== "armed") {
+                        setTurningOff("armed");
+                        return;
+                      }
+                      setTurningOff("busy");
+                      await actions.disableBackground();
+                      setTurningOff(undefined);
+                    }}
+                  >
+                    {turningOff === "armed" ? "Confirm turn off" : turningOff === "busy" ? "Turning off…" : "Turn off"}
+                  </button>
+                  {turningOff === "armed" && (
+                    <p className="w-full text-xs text-zinc-500 dark:text-zinc-400">
+                      Your reminders and automations on this deployment pause until you turn it back on.
+                    </p>
+                  )}
+                </div>
+              ) : background?.state === "off" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-300">
+                    <ShieldAlert className="size-4" aria-hidden /> Off
+                  </span>
+                  <button type="button" className="btn-secondary ml-auto px-2.5 py-1 text-xs" onClick={onOpenBackground}>
+                    Turn on…
+                  </button>
+                </div>
+              ) : background?.state === "unavailable" ? (
+                <span className="text-zinc-500">Not available on this deployment</span>
+              ) : background?.state === "error" ? (
+                <span className="text-zinc-500" title={background.error}>
+                  Couldn't check
+                </span>
+              ) : (
+                <span className="text-zinc-500">Checking…</span>
+              )}
+            </div>
           </Row>
           <Row label="Platform">
             <span className="block truncate">{snapshot?.platform.url ?? "Not connected"}</span>

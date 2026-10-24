@@ -12,6 +12,7 @@ import {
   Info,
   LoaderCircle,
   Mail,
+  Power,
   Repeat,
   RotateCcw,
   Satellite,
@@ -122,7 +123,7 @@ export function TriggerPill({ item, timeZone }: { item: TriggerItem; timeZone: s
   );
 }
 
-export function ToolRow({ item, onOpenSchedule }: { item: ToolItem; onOpenSchedule?: (id: string) => void }) {
+export function ToolRow({ item, onOpenSchedule, onOpenBackground }: { item: ToolItem; onOpenSchedule?: (id: string) => void; onOpenBackground?: () => void }) {
   const Icon = TOOL_ICONS[item.icon] ?? Wrench;
   return (
     <li className="flex animate-fade items-start gap-2.5 py-1" data-testid="tool" data-tool={item.name} data-status={item.status} data-offline={item.handledOffline ? "true" : "false"}>
@@ -153,6 +154,17 @@ export function ToolRow({ item, onOpenSchedule }: { item: ToolItem; onOpenSchedu
         </div>
         {item.detail && <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">{item.detail}</div>}
         {item.error && <div className="mt-0.5 text-xs text-red-600 dark:text-red-400">{item.error}</div>}
+        {item.needsBackgroundWork && onOpenBackground && (
+          <button
+            type="button"
+            data-testid="turn-on-background"
+            className="mt-1 inline-flex items-center gap-1 rounded-md bg-violet-50 px-2 py-0.5 text-xs font-medium text-violet-700 ring-1 ring-violet-200 hover:bg-violet-100 dark:bg-violet-500/10 dark:text-violet-300 dark:ring-violet-500/30"
+            onClick={onOpenBackground}
+          >
+            <Power className="size-3" aria-hidden />
+            Turn on background work
+          </button>
+        )}
       </div>
     </li>
   );

@@ -30,6 +30,7 @@ import {
 } from "@managed-copilot/protocol";
 import { transaction, type Database } from "../../db.js";
 import type { Logger } from "../../log.js";
+import { getState, setState } from "./store.js";
 import type { CredentialMeta, VaultRecord, VaultStore } from "./vaults.js";
 
 /** What core passes to `bindSession` (matches `PolicyBinding` in modules/core/contracts.ts). */
@@ -49,9 +50,12 @@ export interface SessionBindingInput {
 export interface SessionNetwork {
   readonly sessionId: string;
   readonly ownerId: number;
+  /** The environment the session was created in. It owns the session's AppHost vault grants, even after promotion. */
   readonly environment: string | undefined;
+  /** The isolated environment the session was promoted into, whose ceiling narrows the policy too. */
+  readonly promotedTo?: string;
   readonly type: EnvironmentType;
-  /** Effective policy now: the stored session policy, narrowed by the environment's current ceiling. */
+  /** Effective policy now: the stored session policy, narrowed by the current ceilings of both environments. */
   readonly policy: NetworkPolicy;
   /** Vault IDs bound to the session (AppHost vault names and `vlt_…` IDs). */
   readonly vaults: readonly string[];
@@ -103,6 +107,7 @@ interface SessionRow {
   vaults: string;
   /** JSON `PromotionSnapshot` while a promotion is uncommitted. */
   promoted_from: string | null;
+  promoted_to: string | null;
 }
 
 /** A session's binding before an uncommitted promotion, restored by `revertPromotion`. */
@@ -111,6 +116,8 @@ interface PromotionSnapshot {
   readonly type: EnvironmentType;
   /** The stored policy JSON, exactly as it was. */
   readonly policy: string;
+  /** Absent in snapshots taken before promotion targets were recorded separately. */
+  readonly promotedTo?: string | null;
 }
 
 interface CredentialRow {
@@ -132,6 +139,8 @@ interface SandboxRow {
 const SANDBOX_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const EVENTS_PER_SESSION = 200;
 const NO_PROXY = "localhost,127.0.0.1,::1";
+/** `network_state` key set once bindings promoted by earlier versions were converted (see convertLegacyPromotions). */
+const LEGACY_PROMOTIONS_STATE = "legacy_promotions_converted";
 
 export interface PolicyServiceOptions {
   readonly db: Database;
@@ -215,7 +224,8 @@ export class PolicyService {
           `INSERT INTO network_sessions (session_id, owner_id, environment, type, requested, policy, vaults, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(session_id) DO UPDATE SET owner_id = excluded.owner_id, environment = excluded.environment, type = excluded.type,
-             requested = excluded.requested, policy = excluded.policy, vaults = excluded.vaults, promoted_from = NULL, updated_at = excluded.updated_at`,
+             requested = excluded.requested, policy = excluded.policy, vaults = excluded.vaults, promoted_from = NULL, promoted_to = NULL,
+             updated_at = excluded.updated_at`,
         )
         .run(input.sessionId, input.owner, environment ?? null, input.type, input.requested === undefined ? null : JSON.stringify(input.requested), JSON.stringify(policy), JSON.stringify(vaults.map((vault) => vault.id)), now, now);
       const insert = this.#db.prepare("INSERT INTO network_credentials (id, session_id, vault_id, credential_key, placeholder, created_at) VALUES (?, ?, ?, ?, ?, ?)");
@@ -264,18 +274,28 @@ export class PolicyService {
     return this.#db.prepare("SELECT * FROM network_sessions WHERE session_id = ?").get(sessionId) as SessionRow | undefined;
   }
 
+  /** An environment's current ceiling for a stored binding: a declared environment since removed means no egress. */
+  #storedCeiling(environment: string | undefined): NetworkPolicy {
+    if (environment === undefined) return this.deploymentDefault;
+    const config = this.#declared(environment);
+    return config ? normalizeNetwork(config.network, this.deploymentDefault) : NETWORK_DISABLED;
+  }
+
   #toSession(row: SessionRow): SessionNetwork {
     const stored = JSON.parse(row.policy) as NetworkPolicy;
+    // Bindings store declared names only (none for inline). The source environment owns the session's ceiling and its
+    // AppHost vault grants for the session's whole life; after a promotion, the target's ceiling narrows it as well.
+    // Both are read live, so an operator tightening either one applies at once.
     const environment = row.environment ?? undefined;
-    const config = this.#declared(environment);
-    // Bindings store declared names only (none for inline). An environment since removed from the AppHost means no
-    // further egress, and AppHost vaults stay bound only while the current environment still grants them.
-    const ceiling = environment === undefined ? this.deploymentDefault : config ? normalizeNetwork(config.network, this.deploymentDefault) : NETWORK_DISABLED;
-    const granted = config?.vaults ?? [];
+    const promotedTo = row.promoted_to ?? undefined;
+    const sourceCeiling = this.#storedCeiling(environment);
+    const ceiling = promotedTo === undefined ? sourceCeiling : narrowNetwork(this.#storedCeiling(promotedTo), sourceCeiling);
+    const granted = this.#declared(environment)?.vaults ?? [];
     return {
       sessionId: row.session_id,
       ownerId: row.owner_id,
       environment,
+      ...(promotedTo !== undefined ? { promotedTo } : {}),
       type: row.type,
       policy: narrowNetwork(ceiling, stored),
       vaults: (JSON.parse(row.vaults) as string[]).filter((id) => !this.#options.vaults.apphost(id) || granted.includes(id)),
@@ -289,38 +309,42 @@ export class PolicyService {
   }
 
   /**
-   * One-way promotion into an isolated environment: the target's ceiling can only narrow the session's current policy.
-   * Until `commitPromotion`, the binding from before the promotion is kept so `revertPromotion` can restore it.
+   * One-way promotion into an isolated environment (spec section 9): never broadens the session's network or vaults.
+   * The source environment keeps owning the session's ceiling and AppHost vault grants; the target is recorded, and
+   * its ceiling narrows the policy too. Until `commitPromotion`, the binding from before the promotion is kept so
+   * `revertPromotion` can restore it.
    */
   promoteSession(sessionId: string, targetEnvironment: string): NetworkPolicy {
     const row = this.#sessionRow(sessionId);
     if (!row) throw new ManagedCopilotError("not_found", `Session ${sessionId} has no network binding`);
     const target = this.#declared(targetEnvironment);
     if (!target || target.type !== "isolated") throw new ManagedCopilotError("invalid_request", `Promotion target "${targetEnvironment}" is not an isolated environment`);
-    // The effective policy, not the stored one: a source ceiling tightened since creation must survive promotion.
+    // Stored narrowed from the effective policy, so a source tightened since creation, or an earlier promotion's
+    // target, keeps narrowing whatever comes next.
     const policy = narrowNetwork(this.ceiling(targetEnvironment), this.#toSession(row).policy);
     // A retried promotion keeps the original source, so a rollback always returns to the session as it was.
-    const previous = row.promoted_from ?? JSON.stringify({ environment: row.environment, type: row.type, policy: row.policy } satisfies PromotionSnapshot);
+    const previous = row.promoted_from ?? JSON.stringify({ environment: row.environment, type: row.type, policy: row.policy, promotedTo: row.promoted_to } satisfies PromotionSnapshot);
     this.#db
-      .prepare("UPDATE network_sessions SET environment = ?, type = 'isolated', policy = ?, promoted_from = ?, updated_at = ? WHERE session_id = ?")
+      .prepare("UPDATE network_sessions SET type = 'isolated', promoted_to = ?, policy = ?, promoted_from = ?, updated_at = ? WHERE session_id = ?")
       .run(targetEnvironment, JSON.stringify(policy), previous, new Date().toISOString(), sessionId);
-    this.#log.info("Session network promoted", { sessionId, environment: targetEnvironment, access: policy.access });
+    const promoted = this.session(sessionId)!;
+    this.#log.info("Session network promoted", { sessionId, environment: promoted.environment ?? "inline", promotedTo: targetEnvironment, access: promoted.policy.access });
     this.#pushSession(sessionId);
-    return policy;
+    return promoted.policy;
   }
 
   /**
-   * Pre-commit rollback of a promotion (spec 9.5): restores the environment, type, and stored policy from before the
-   * uncommitted `promoteSession` and pushes them. Returns the restored effective policy, or undefined (a no-op) when no
-   * promotion is pending.
+   * Pre-commit rollback of a promotion (spec 9.5): restores the environment, type, stored policy, and promotion target
+   * from before the uncommitted `promoteSession` and pushes them. Returns the restored effective policy, or undefined
+   * (a no-op) when no promotion is pending.
    */
   revertPromotion(sessionId: string): NetworkPolicy | undefined {
     const row = this.#sessionRow(sessionId);
     if (!row?.promoted_from) return undefined;
     const previous = JSON.parse(row.promoted_from) as PromotionSnapshot;
     this.#db
-      .prepare("UPDATE network_sessions SET environment = ?, type = ?, policy = ?, promoted_from = NULL, updated_at = ? WHERE session_id = ?")
-      .run(previous.environment, previous.type, previous.policy, new Date().toISOString(), sessionId);
+      .prepare("UPDATE network_sessions SET environment = ?, type = ?, policy = ?, promoted_to = ?, promoted_from = NULL, updated_at = ? WHERE session_id = ?")
+      .run(previous.environment, previous.type, previous.policy, previous.promotedTo ?? null, new Date().toISOString(), sessionId);
     this.#log.info("Session network promotion reverted", { sessionId, environment: previous.environment ?? "inline", type: previous.type });
     this.#pushSession(sessionId);
     return this.session(sessionId)?.policy;
@@ -329,6 +353,53 @@ export class PolicyService {
   /** The promotion committed: its binding is final, and a later `revertPromotion` is a no-op. */
   commitPromotion(sessionId: string): void {
     this.#db.prepare("UPDATE network_sessions SET promoted_from = NULL, updated_at = ? WHERE session_id = ? AND promoted_from IS NOT NULL").run(new Date().toISOString(), sessionId);
+  }
+
+  /**
+   * Converts bindings promoted by earlier versions, which stored the promotion target as the session's environment and
+   * so lost the source that owns its ceiling and AppHost vault grants. Runs once per database, before any request. The
+   * source comes from a pending promotion's snapshot, else from core's session ledger, whose environment a promotion
+   * never changes (read only). A binding that promotion records show was promoted, but whose core session is gone,
+   * fails closed. Returns the number of bindings converted.
+   */
+  convertLegacyPromotions(): number {
+    const db = this.#db;
+    if (getState(db, LEGACY_PROMOTIONS_STATE)) return 0;
+    const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    if (!tables.has("core_sessions")) return 0;
+    const candidates = db
+      .prepare("SELECT session_id, environment, promoted_from FROM network_sessions WHERE type = 'isolated' AND promoted_to IS NULL AND environment IS NOT NULL")
+      .all() as { session_id: string; environment: string; promoted_from: string | null }[];
+    const coreSession = db.prepare("SELECT environment FROM core_sessions WHERE id = ?");
+    const committedTo = tables.has("promotion_operations") ? db.prepare("SELECT 1 FROM promotion_operations WHERE session_id = ? AND target = ? AND state = 'committed' LIMIT 1") : undefined;
+    const now = new Date().toISOString();
+    let converted = 0;
+    transaction(db, () => {
+      for (const row of candidates) {
+        // null: an inline source; undefined: promoted, but the source is unknown.
+        let source: string | null | undefined;
+        if (row.promoted_from) {
+          source = (JSON.parse(row.promoted_from) as Partial<PromotionSnapshot>).environment ?? null;
+        } else {
+          const core = coreSession.get(row.session_id) as { environment: string } | undefined;
+          if (core) source = this.#isInline(core.environment) ? null : core.environment;
+          else if (committedTo?.get(row.session_id, row.environment)) source = undefined;
+          else continue;
+        }
+        if (source === row.environment) continue;
+        if (source === undefined) {
+          // No environment grants AppHost vaults, and the stored policy allows nothing.
+          db.prepare("UPDATE network_sessions SET environment = NULL, promoted_to = ?, policy = ?, updated_at = ? WHERE session_id = ?").run(row.environment, JSON.stringify(NETWORK_DISABLED), now, row.session_id);
+          this.#log.warn("A session promoted by an earlier version has no recoverable source environment; its network access is disabled", { sessionId: row.session_id, promotedTo: row.environment });
+        } else {
+          db.prepare("UPDATE network_sessions SET environment = ?, promoted_to = ?, updated_at = ? WHERE session_id = ?").run(source, row.environment, now, row.session_id);
+        }
+        converted++;
+      }
+      setState(db, LEGACY_PROMOTIONS_STATE, now);
+    });
+    if (converted > 0) this.#log.info("Converted sessions promoted by an earlier version", { sessions: converted });
+    return converted;
   }
 
   /** The session was deleted: revoke its sandboxes, placeholders, MCP routes, and history. */
@@ -350,7 +421,8 @@ export class PolicyService {
 
   /**
    * Live credentials of a session: rows whose vault and credential still exist, whose user vault still belongs to the
-   * owner, and whose AppHost vault the session's current environment still grants (inline environments grant none).
+   * owner, and whose AppHost vault the session's environment still grants (its source environment, also after a
+   * promotion; inline environments grant none).
    */
   #credentials(session: SessionNetwork): { row: CredentialRow; vault: VaultRecord; meta: CredentialMeta }[] {
     const granted = this.#declared(session.environment)?.vaults ?? [];
@@ -364,15 +436,29 @@ export class PolicyService {
     return out;
   }
 
-  /** Vault-backed headers for a remote MCP server. Shared placement goes through the MCP adapter instead. */
+  /**
+   * Vault-backed headers for a remote MCP server, merged by admission into the server's configuration. Shared
+   * placement returns nothing: the MCP adapter attaches the credential at request time. Sandbox placement returns
+   * only the session's placeholder (`Bearer <placeholder>` in `authorization`, or the bare placeholder in the header
+   * the vault names). The egress proxy substitutes it on that session's HTTPS requests to the server's exact host on
+   * port 443. Returns undefined without a live credential for exactly this URL, and throws when one exists but the
+   * proxy could never substitute it, so the session fails visibly instead of sending a dead placeholder.
+   */
   mcpHeaders(sessionId: string, url: string, placement: Placement): Record<string, string> | undefined {
     const session = this.session(sessionId);
     if (!session) return undefined;
     const target = mcpKey(url);
     for (const { row, meta } of this.#credentials(session)) {
       if (meta.kind !== "mcp" || mcpKey(meta.mcpServer) !== target) continue;
-      if (placement === "shared") return undefined;
-      return { [meta.header]: meta.bearer ? `Bearer ${row.placeholder}` : row.placeholder };
+      // Only isolated sessions' sandboxes are registered with credentials (see #registration).
+      if (placement === "shared" || session.type !== "isolated") return undefined;
+      if (!mcpDestination(meta.mcpServer)) {
+        throw new ManagedCopilotError(
+          "capability_unavailable",
+          `The vault credential for MCP server ${meta.mcpServer} cannot be used from a sandbox: the egress proxy substitutes vault credentials only for host names on port 443`,
+        );
+      }
+      return { [meta.header]: meta.bearer ? ["Bearer", row.placeholder].join(" ") : row.placeholder };
     }
     return undefined;
   }
@@ -495,9 +581,8 @@ export class PolicyService {
       if (meta.kind === "env") {
         credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: meta.destinations, headers: meta.headers });
       } else {
-        const url = new URL(meta.mcpServer);
-        const host = normalizeDestinationHost(url.hostname)?.host;
-        if (host && (url.port === "" || url.port === "443")) credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: [{ host, port: 443 }], headers: [meta.header] });
+        const destination = mcpDestination(meta.mcpServer);
+        if (destination) credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: [destination], headers: [meta.header] });
       }
     }
     return {
@@ -549,10 +634,11 @@ export class PolicyService {
     if (!credential) throw deny("This vault credential was revoked or never belonged to this session.");
     const { vault, meta } = credential;
     const host = normalizeDestinationHost(request.host)?.host;
+    const mcp = meta.kind === "mcp" ? mcpDestination(meta.mcpServer) : undefined;
     const destinationOk =
       meta.kind === "env"
         ? meta.destinations.some((destination) => destination.host === host && destination.port === request.port) && meta.headers.includes(request.header)
-        : normalizeDestinationHost(new URL(meta.mcpServer).hostname)?.host === host && request.port === 443 && meta.header === request.header;
+        : mcp !== undefined && mcp.host === host && mcp.port === request.port && meta.header === request.header;
     if (!host || !destinationOk) throw deny(`This vault credential is not valid for ${request.header} on ${request.host}:${request.port}.`);
     if (!isHostAllowed(session.policy, host)) throw deny(`${host} is not allowed by this session's network policy.`);
     const value = this.#options.vaults.secret(vault.id, meta.key, session.ownerId);
@@ -654,4 +740,20 @@ export function mcpKey(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * Where the egress proxy substitutes a sandbox's MCP vault credential: the server's exact host name on port 443. IP
+ * addresses and other ports have none (the proxy never terminates TLS for them).
+ */
+export function mcpDestination(mcpServer: string): { readonly host: string; readonly port: number } | undefined {
+  let url: URL;
+  try {
+    url = new URL(mcpServer);
+  } catch {
+    return undefined;
+  }
+  const destination = normalizeDestinationHost(url.hostname);
+  if (url.protocol !== "https:" || !destination || destination.ip || (url.port !== "" && url.port !== "443")) return undefined;
+  return { host: destination.host, port: 443 };
 }

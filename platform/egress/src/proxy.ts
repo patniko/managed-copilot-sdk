@@ -129,41 +129,123 @@ function isCertificateError(error: NodeJS.ErrnoException): boolean {
   return /CERT|SIGNATURE|ALTNAME|ISSUER|SELF_SIGNED/i.test(error.code ?? "");
 }
 
-/** Streams a body while replacing any secret value with `[redacted]`, including values split across chunks. */
-function redactingStream(secrets: readonly string[]): Transform {
-  const needles = secrets.filter((secret) => secret.length >= 4).map((secret) => Buffer.from(secret, "utf8"));
-  const keep = Math.max(1, ...needles.map((needle) => needle.length)) - 1;
+/** KMP failure table: `table[k]` is the length of the longest proper border of `needle`'s first `k` bytes. */
+function borders(needle: Buffer): Int32Array {
+  const table = new Int32Array(needle.length + 1);
+  for (let i = 1, k = 0; i < needle.length; i++) {
+    while (k > 0 && needle[i] !== needle[k]) k = table[k]!;
+    if (needle[i] === needle[k]) k++;
+    table[i + 1] = k;
+  }
+  return table;
+}
+
+/**
+ * Streams a body while replacing any secret value with `[redacted]`, including values split across chunks. Secrets are
+ * matched leftmost first, and the longest at a position wins; a redacted span grows over every secret that overlaps
+ * it, so neither a secret that begins another nor overlapping secrets can expose a readable tail. Only a tail that
+ * could still grow into a secret is held back (always shorter than the longest secret), so streamed responses
+ * (server-sent events, MCP) are not delayed, and adversarial bodies cannot make the proxy buffer or rescan without
+ * bound: every chunk is processed in time linear in its length.
+ */
+export function redactingStream(secrets: readonly string[]): Transform {
+  const needles = [...new Set(secrets.filter((secret) => secret.length >= 4))].map((secret) => Buffer.from(secret, "utf8")).sort((a, b) => b.length - a.length);
+  const tables = needles.map(borders);
   const marker = Buffer.from("[redacted]");
-  const replace = (data: Buffer): Buffer => {
-    let out: Buffer = data;
-    for (const needle of needles) {
-      const parts: Buffer[] = [];
-      let start = 0;
-      for (let index = out.indexOf(needle); index >= 0; index = out.indexOf(needle, start)) {
-        parts.push(out.subarray(start, index), marker);
-        start = index + needle.length;
+  /** The earliest position where the rest of `data` is a proper prefix of a secret (one that may still be arriving), or -1. */
+  const pendingStart = (data: Buffer): number => {
+    let earliest = -1;
+    needles.forEach((needle, n) => {
+      const table = tables[n]!;
+      let state = 0;
+      for (let i = Math.max(0, data.length - needle.length + 1); i < data.length; i++) {
+        while (state > 0 && data[i] !== needle[state]) state = table[state]!;
+        if (data[i] === needle[state]) state++;
       }
-      if (parts.length > 0) {
-        parts.push(out.subarray(start));
-        out = Buffer.concat(parts);
-      }
-    }
-    return out;
+      if (state > 0 && (earliest < 0 || data.length - state < earliest)) earliest = data.length - state;
+    });
+    return earliest;
   };
   let carry: Buffer = Buffer.alloc(0);
+  /** Leading bytes of `carry` inside a redacted span whose marker was already sent. */
+  let covered = 0;
+  /** Redacts `data`; unless the body ended, keeps back in `carry` a tail that could still grow into a secret. */
+  const process = (data: Buffer, ended: boolean): Buffer => {
+    const pending = ended ? -1 : pendingStart(data);
+    // Next occurrence of each secret at or after the last search position (-1: none left in `data`).
+    const next = needles.map(() => -2);
+    const nextFrom = (n: number, from: number): number => {
+      const cached = next[n]!;
+      return cached === -1 || cached >= from ? cached : (next[n] = data.indexOf(needles[n]!, from));
+    };
+    /** Grows the span [start, end) over every secret that starts inside it. */
+    const extend = (start: number, end: number): number => {
+      for (let grown = true; grown; ) {
+        grown = false;
+        needles.forEach((needle, n) => {
+          const at = nextFrom(n, start);
+          if (at < 0 || at >= end) return;
+          const last = data.lastIndexOf(needle, end - 1);
+          if (last + needle.length > end) {
+            end = last + needle.length;
+            grown = true;
+          }
+        });
+      }
+      return end;
+    };
+    /** Ends the call; a span still growing at `pending` stays open in `covered`. */
+    const keep = (from: number, openUntil = 0): void => {
+      carry = from < 0 ? Buffer.alloc(0) : Buffer.from(data.subarray(from));
+      covered = Math.max(0, openUntil - Math.max(from, 0));
+    };
+    const parts: Buffer[] = [];
+    let index = 0;
+    if (covered > 0) {
+      const end = extend(0, covered);
+      if (pending >= 0 && pending < end) {
+        keep(pending, end);
+        return Buffer.alloc(0);
+      }
+      index = end;
+    }
+    for (;;) {
+      let found = -1;
+      let length = 0;
+      needles.forEach((needle, n) => {
+        const at = nextFrom(n, index);
+        if (at >= 0 && (found < 0 || at < found)) {
+          found = at;
+          length = needle.length;
+        }
+      });
+      if (pending >= 0 && (found < 0 || pending <= found)) {
+        parts.push(data.subarray(index, pending));
+        keep(pending);
+        return Buffer.concat(parts);
+      }
+      if (found < 0) {
+        parts.push(data.subarray(index));
+        keep(-1);
+        return Buffer.concat(parts);
+      }
+      parts.push(data.subarray(index, found), marker);
+      const end = extend(found, found + length);
+      if (pending >= 0 && pending < end) {
+        keep(pending, end);
+        return Buffer.concat(parts);
+      }
+      index = end;
+    }
+  };
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      const data = replace(Buffer.concat([carry, chunk]));
-      if (data.length > keep) {
-        carry = Buffer.from(data.subarray(data.length - keep));
-        callback(null, data.subarray(0, data.length - keep));
-      } else {
-        carry = data;
-        callback();
-      }
+      const out = process(carry.length === 0 ? chunk : Buffer.concat([carry, chunk]), false);
+      callback(null, out.length > 0 ? out : undefined);
     },
     flush(callback) {
-      callback(null, replace(carry));
+      const out = process(carry, true);
+      callback(null, out.length > 0 ? out : undefined);
     },
   });
 }
