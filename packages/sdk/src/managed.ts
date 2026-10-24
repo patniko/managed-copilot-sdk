@@ -1,6 +1,6 @@
 import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
 import type { AccountInfo, DeploymentInfo, PlatformEventType, PromoteResult } from "@managed-copilot/protocol";
-import { createContext } from "./connection.js";
+import { createContext, type ManagedState } from "./connection.js";
 import { createArtifactsApi } from "./features/artifacts.js";
 import { openCli } from "./features/cli.js";
 import { createClient, createManagedSession, resumeManagedSession } from "./features/client.js";
@@ -15,7 +15,6 @@ import type {
   EnvironmentSelector,
   ManagedArtifacts,
   ManagedClientOptions,
-  ManagedContext,
   ManagedFiles,
   ManagedResumeConfig,
   ManagedSchedules,
@@ -40,12 +39,12 @@ function sessionIdOf(session: SessionRef): string {
  * ```
  */
 export class ManagedCopilot {
-  readonly #ctx: ManagedContext;
+  readonly #ctx: ManagedState;
   readonly sessions: ManagedSessions;
   readonly vaults: ManagedVaults;
   readonly schedules: ManagedSchedules;
 
-  private constructor(ctx: ManagedContext) {
+  private constructor(ctx: ManagedState) {
     this.#ctx = ctx;
     this.sessions = createSessionsApi(ctx);
     this.vaults = createVaultsApi(ctx);
@@ -121,6 +120,7 @@ export class ManagedCopilot {
     for (const client of this.#ctx.clients) pending.push(client.stop().catch(() => undefined));
     for (const dispose of this.#ctx.disposables) pending.push(Promise.resolve().then(dispose).catch(() => undefined));
     this.#ctx.clients.clear();
+    this.#ctx.cachedClients.clear();
     this.#ctx.disposables.clear();
     this.#ctx.listeners.clear();
     await Promise.all(pending);
