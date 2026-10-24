@@ -458,7 +458,9 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   (`<apphost>/.managed-copilot/data`), `MANAGED_COPILOT_APPHOST_DIR`, `MANAGED_COPILOT_NPM_REGISTRY` (from
   `npm config get registry`), and `MANAGED_COPILOT_INSTANCE` (`mc-<hash of the AppHost path>`, so checkouts sharing one
   Docker engine never collide). The gateway builds sandbox images and supervises the relay and egress containers
-  itself, so the AppHost declares no containers.
+  itself, so the AppHost declares no containers. When an isolated or promotable environment exists, the AppHost also
+  sets `MANAGED_COPILOT_SANDBOX_PREPARE=1` (opt out with `prepareSandboxes: false`), so the base image builds while
+  the platform starts rather than on the first sandboxed session.
 - The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).

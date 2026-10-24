@@ -58,6 +58,11 @@ export interface ManagedCopilotOptions extends Omit<ConfigInput, "name" | "vault
   dataDirectory?: string;
   /** Gateway package directory. Defaults to the installed `@managed-copilot/gateway` package. */
   gatewayDirectory?: string;
+  /**
+   * Build the sandbox base image and start the relay when the gateway starts, rather than on the first isolated
+   * session (progress appears in the gateway's logs). Defaults to true when an isolated or promotable environment exists.
+   */
+  prepareSandboxes?: boolean;
 }
 
 /** A secret the gateway receives through its environment, never through `MANAGED_COPILOT_CONFIG`. */
@@ -82,7 +87,7 @@ export class ManagedCopilotOptionsError extends Error {
   }
 }
 
-const HOSTING_KEYS = ["port", "dataDirectory", "gatewayDirectory"] as const;
+const HOSTING_KEYS = ["port", "dataDirectory", "gatewayDirectory", "prepareSandboxes"] as const;
 
 function envSegment(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");

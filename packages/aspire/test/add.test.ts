@@ -127,6 +127,17 @@ describe("addManagedCopilot", () => {
     expect(copilot.port).toBe(7444);
     expect(copilot.gateway).toBe(app.builder.resource);
     expect(copilot.url).toEqual(new FakeEndpoint("copilot", "http"));
+    expect(env.has("MANAGED_COPILOT_SANDBOX_PREPARE")).toBe(false);
+  });
+
+  it("prepares sandboxes at gateway start when an isolated environment exists, unless told not to", async () => {
+    const environments = { chat: { type: "shared" as const }, coder: { type: "isolated" as const } };
+    const prepared = new FakeBuilder(appHost);
+    await addManagedCopilot(prepared, "copilot", { gatewayDirectory, environments });
+    expect(environmentOf(prepared.apps[0]!.builder).get("MANAGED_COPILOT_SANDBOX_PREPARE")).toBe("1");
+    const lazy = new FakeBuilder(appHost);
+    await addManagedCopilot(lazy, "copilot", { gatewayDirectory, environments, prepareSandboxes: false });
+    expect(environmentOf(lazy.apps[0]!.builder).has("MANAGED_COPILOT_SANDBOX_PREPARE")).toBe(false);
   });
 
   it("fails clearly when the gateway has not been built", async () => {
