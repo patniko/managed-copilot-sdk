@@ -132,6 +132,27 @@ describe("registration path deadlines", () => {
     await expect(sessions.request(sessionId, "session.getMessages", {})).resolves.toMatchObject({ events: expect.any(Array) });
   });
 
+  it("deletes a sandbox session while its runtime is still working on a registration step", async () => {
+    upstreamTimings.answerMs = 300;
+    upstreamTimings.probeMs = 200;
+    const owner = await connect();
+    const sessionId = crypto.randomUUID();
+    await owner.request("session.create", { sessionId, requestPermission: true });
+    const resume = runtime.holdNext("session.resume", sessionId);
+    const client = await connect();
+    const resuming = failure(client.request("session.resume", { sessionId }));
+    await resume.held;
+    // The runtime answers pings, so the resume is waited for; deleting the session ends that wait by closing the
+    // sandbox's connection (the sandbox goes with the session), instead of waiting for the runtime forever.
+    const started = Date.now();
+    const deleted = await fetch(`${gateway.url}/v1/sessions/${sessionId}`, { method: "DELETE", headers: { authorization: `Bearer ${ALICE}` } });
+    expect(deleted.status).toBe(204);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(await resuming).toMatchObject({ data: { code: "not_found" }, message: expect.stringContaining(`Session ${sessionId} was deleted`) });
+    expect(sandboxes.ops(sessionId)).toContain("delete");
+    resume.release();
+  });
+
   it("bounds a tools update on a connection that stopped responding, so the session's next registration goes through", async () => {
     upstreamTimings.answerMs = 300;
     upstreamTimings.probeMs = 200;

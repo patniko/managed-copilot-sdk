@@ -266,6 +266,28 @@ describe("placement cutover", () => {
     expect((JSON.parse(row.admitted) as { params: Record<string, unknown> }).params["workingDirectory"]).toBe("/workspace");
   });
 
+  it("never installs a destination that was still opening when its cutover closed", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: sessions().get(sessionId)!.generation });
+    cut.fence();
+    const open = sandboxes.holdNextOpen();
+    const opening = cut.open({ continuePendingWork: true }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await open.held;
+    // The cutover closes while its destination is still being opened (nothing to close yet).
+    await cut.abort();
+    const resumes = runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).length;
+    open.release();
+    expect(await opening).toMatchObject({ code: "conflict", message: expect.stringContaining("is already closed") });
+    // Nothing was sent to the abandoned destination, and the session still works where it was.
+    expect(runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId)).toHaveLength(resumes);
+    await expect(client.request("session.sendAndWait", { sessionId, prompt: "still here" })).resolves.toMatchObject({ response: { data: { content: "echo: still here" } } });
+  });
+
   it("moves remote MCP servers with their original endpoints and carries the caller's option changes", async (ctx) => {
     if (!(gateway.gateway.app.services as Record<string, unknown>)["policy"]) return ctx.skip();
     const client = await connect();
