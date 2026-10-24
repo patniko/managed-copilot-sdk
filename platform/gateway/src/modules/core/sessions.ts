@@ -162,6 +162,11 @@ interface LiveSession {
    * committed before it, so a change that fails never leaks into another's registration upstream.
    */
   registrations: Promise<void>;
+  /**
+   * A registration that did not commit may have reached the runtime: the session is not routable until it was resumed
+   * with the registrations in effect (`#reconcile`).
+   */
+  unreconciled: boolean;
   /** Ensures events of one session are processed in order even when routing awaits the actions hook. */
   queue: Promise<void>;
   /** In-flight create, resume, or restore; concurrent callers wait for it. */
@@ -630,8 +635,10 @@ export class SessionManager implements SessionsService {
     // A placement cutover in progress ends here (its owner cleans up the candidate sandbox on `deleted`).
     if (live?.cutover) await this.#abortCutover(live, live.cutover, undefined).catch(() => undefined);
     if (live) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `Session ${sessionId} was deleted`, { code: "not_found" }));
-    // Let an in-flight create/resume settle so it cannot reopen the session after deletion.
+    // Let an in-flight create/resume (and registrations waiting their turn) settle so none reopens the session after
+    // deletion; they see it is being deleted.
     await live?.residency?.catch(() => undefined);
+    await live?.registrations;
     const placement = (this.get(sessionId) ?? record).placement;
     try {
       if (placement === "sandbox") {
@@ -955,6 +962,8 @@ export class SessionManager implements SessionsService {
     live.placement = "sandbox";
     live.upstream = destination.upstream;
     live.sandbox = destination.sandbox;
+    // The destination opened with the registrations in effect.
+    live.unreconciled = false;
     // What the sealed source still sends for the session is handoff: hidden from history as well.
     if (state.sealed) live.sealedSource = { upstream: state.source, settled: Promise.resolve() };
     // Genuine source events from the fence window first (their placement and generation), then what the destination
@@ -996,7 +1005,7 @@ export class SessionManager implements SessionsService {
     state.flushed = true;
     if (live.cutover === state) live.cutover = undefined;
     for (const reply of replies) reply.resolve(reply.value);
-    if (state.fenced) live.ready = ready();
+    if (state.fenced) live.ready = ready() && !live.unreconciled;
     if (state.gate && live.residency === state.gate) live.residency = undefined;
     state.release?.();
     // Held completions continue from the session's owner; one that is not running is resumed for them.
@@ -1040,6 +1049,10 @@ export class SessionManager implements SessionsService {
   async #resumeRegistered(peer: ClientPeer, params: Record<string, unknown>, record: SessionRecord, live: LiveSession, requested: Record<string, unknown>): Promise<{ result: unknown; after: () => Promise<void> }> {
     const sessionId = record.id;
     for (;;) {
+      // It may have waited behind other registrations: never for a session deleted (or created again) meanwhile.
+      if (live.deleting || this.#live.get(sessionId) !== live || this.get(sessionId)?.incarnation !== record.incarnation) {
+        throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+      }
       // An open placement cutover decides where the session lives next, and so which admission rules apply.
       if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
       const placement = live.placement;
@@ -1054,6 +1067,8 @@ export class SessionManager implements SessionsService {
       const outcome = await this.#resumeClient(live, peer, admitted, moves, optionsPatch);
       // A cutover fenced the session during this resume: admit it again and resume where the session lives after it.
       if (outcome === MOVED) continue;
+      // Stored only for the session it resumed (deletes wait for registrations, so this holds; checked anyway).
+      if (this.get(sessionId)?.incarnation !== record.incarnation) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
       this.#persist(sessionId, (stored) => {
         const stable = storedParams(admitted.params);
         // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
@@ -1095,6 +1110,7 @@ export class SessionManager implements SessionsService {
       const prepared = await this.#prepare(live, "session.resume", resumeParams);
       await this.#sealSettled(live, upstream);
       // Checked and sent in one synchronous step.
+      if (live.deleting || this.#live.get(live.id) !== live) throw new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id });
       if (live.moves !== moves || live.cutover?.fenced || upstream.closed) return MOVED;
       // A client that disconnected meanwhile is not attached (its disconnect has run): the session is resumed with the
       // registrations it has without that client.
@@ -1112,7 +1128,7 @@ export class SessionManager implements SessionsService {
         this.#unattach(live, peer.id, previous);
         if (live.moves !== moves) return MOVED;
         // The runtime may have applied what this resume registered before failing.
-        this.#reconcile(live, upstream);
+        this.#unreconciled(live, upstream);
         throw error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
@@ -1122,13 +1138,22 @@ export class SessionManager implements SessionsService {
         return MOVED;
       }
       if (change) this.#persistInventory(live, peer.id, change);
+      // It sent the session's whole registration, now in effect.
+      live.unreconciled = false;
       live.ready = true;
       return { result };
     };
     await live.residency?.catch(() => undefined);
     if (live.moves !== moves) return MOVED;
     // Resident already: the runtime re-registers this client's tools and handler flags.
-    if (live.upstream && !live.upstream.closed && live.ready) return run(live.upstream);
+    if (live.upstream && !live.upstream.closed && live.ready) {
+      try {
+        return await run(live.upstream);
+      } catch (error) {
+        await this.#reconcile(live);
+        throw error;
+      }
+    }
     // Not resident: the client's own resume restores it, and concurrent callers wait for it.
     let outcome: { result: unknown } | typeof MOVED = MOVED;
     await this.#serialize(live, async () => {
@@ -1142,7 +1167,7 @@ export class SessionManager implements SessionsService {
   forwardForClient(peer: ClientPeer, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     const registration: ToolsRegistration = { stored: false };
     const forward = () =>
-      this.#forwardForClient(peer, method, params, signal, registration).finally(() => {
+      this.#forwardForClient(peer, method, params, signal, registration).finally(async () => {
         const { live, attachment, before, change, upstream } = registration;
         if (registration.stored || !live || !change) return;
         // A `tools.set` that did not apply leaves the client's registration as it was (unless it registered again
@@ -1151,7 +1176,10 @@ export class SessionManager implements SessionsService {
           attachment.tools = before.tools;
           attachment.declarations = before.declarations;
         }
-        if (upstream) this.#reconcile(live, upstream);
+        if (upstream) {
+          this.#unreconciled(live, upstream);
+          await this.#reconcile(live);
+        }
       });
     // A tools update is a registration change: one at a time per session, like client resumes.
     const sessionId = params["sessionId"];
@@ -1199,22 +1227,25 @@ export class SessionManager implements SessionsService {
           break;
         case "session.tools.set": {
           const admitted = admitToolsSet(params, context());
-          const attachment = live.attachments.get(peer.id);
-          registration.change = undefined;
-          if (attachment) {
-            // What it withdraws is decided against the client's registration before this call (also on a retry).
-            if (registration.attachment !== attachment) {
-              registration.attachment = attachment;
-              registration.before = { tools: attachment.tools, declarations: attachment.declarations };
+          const declarations = clientDeclarations(admitted.params["tools"], this.#options.platformTools);
+          // The client's registration changes in the step that writes it: what runs while this call waits (a restore,
+          // a cutover's destination) registers what is in effect, and a call that never reaches a runtime changes
+          // nothing. What it withdraws is decided against the registration before this call (also on a retry).
+          build = () => {
+            registration.change = undefined;
+            const attachment = live.attachments.get(peer.id);
+            if (attachment) {
+              if (registration.attachment !== attachment) {
+                registration.attachment = attachment;
+                registration.before = { tools: attachment.tools, declarations: attachment.declarations };
+              }
+              registration.change = this.#inventoryChange(live, peer.id, { ...attachment, declarations: registration.before!.declarations }, { tools: declarations, flags: {} }, "tools");
+              registration.set = declarations;
+              attachment.tools = new Set(admitted.names);
+              attachment.declarations = declarations;
             }
-            const declarations = clientDeclarations(admitted.params["tools"], this.#options.platformTools);
-            registration.change = this.#inventoryChange(live, peer.id, { ...attachment, declarations: registration.before!.declarations }, { tools: declarations, flags: {} }, "tools");
-            registration.set = declarations;
-            attachment.tools = new Set(admitted.names);
-            attachment.declarations = declarations;
-          }
-          const change = registration.change;
-          build = () => ({ ...admitted.params, tools: [...this.#registrations(live, change).tools, ...this.#platformToolDeclarations(live, placement)], sessionId });
+            return { ...admitted.params, tools: [...this.#registrations(live, registration.change).tools, ...this.#platformToolDeclarations(live, placement)], sessionId };
+          };
           break;
         }
         case "session.model.switchTo":
@@ -1704,6 +1735,7 @@ export class SessionManager implements SessionsService {
       creator: undefined,
       presences: new Map(),
       registrations: Promise.resolve(),
+      unreconciled: false,
       queue: Promise.resolve(),
       residency: undefined,
       deleting: false,
@@ -1759,14 +1791,25 @@ export class SessionManager implements SessionsService {
   }
 
   /**
-   * After a registration that did not commit: the runtime may have applied it, so the session is resumed there again
-   * with the registrations in effect, and nothing else runs on it until that finishes. A restore or cutover already
-   * under way applies them anyway.
+   * After a registration that did not commit (`unreconciled`): the runtime may have applied it, so the session is not
+   * routable until it was resumed with the registrations in effect, which this does now (unless a fenced cutover will:
+   * its destination opens with them, and a source it leaves unreconciled stays unroutable). A failed attempt is
+   * retried by the session's next request.
    */
-  #reconcile(live: LiveSession, upstream: RuntimeUpstream): void {
-    if (live.upstream !== upstream || upstream.closed || live.deleting || live.cutover || live.residency) return;
+  async #reconcile(live: LiveSession): Promise<void> {
+    if (!live.unreconciled || live.deleting || live.cutover?.fenced || this.#live.get(live.id) !== live) return;
+    try {
+      await this.#resident(live);
+    } catch (error) {
+      this.#log.warn("Resuming a session again after a failed registration failed; its next request retries", { sessionId: live.id, error: (error as Error).message });
+    }
+  }
+
+  /** Marks the session as possibly holding a registration that did not commit on `upstream` (see `#reconcile`). */
+  #unreconciled(live: LiveSession, upstream: RuntimeUpstream): void {
+    if (live.upstream !== upstream) return;
+    live.unreconciled = true;
     live.ready = false;
-    this.#restore(live, upstream).catch((error: unknown) => this.#log.warn("Resuming a session again after a failed registration failed; its next request retries", { sessionId: live.id, error: (error as Error).message }));
   }
 
   /**
@@ -1791,6 +1834,8 @@ export class SessionManager implements SessionsService {
   /** Connects the session's upstream (shared runtime, or its sandbox) without opening the session on it. */
   async #connect(live: LiveSession, moves = live.moves): Promise<RuntimeUpstream> {
     live.ready = false;
+    // Still connected (the session needs resuming there, e.g. after a registration that did not commit): reuse it.
+    if (live.upstream && !live.upstream.closed) return live.upstream;
     if (live.placement === "sandbox") {
       const sandboxes = this.#sandboxes;
       if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available on this gateway");
@@ -1819,17 +1864,11 @@ export class SessionManager implements SessionsService {
     return residency.then((upstream) => (live.moves !== moves || live.cutover?.fenced ? this.#resident(live) : upstream));
   }
 
-  /** Resumes the session upstream with its stored configuration and registrations (on `existing`, if still its runtime). */
-  #restore(live: LiveSession, existing?: RuntimeUpstream): Promise<RuntimeUpstream> {
+  /** Resumes the session upstream with its stored configuration and registrations. */
+  #restore(live: LiveSession): Promise<RuntimeUpstream> {
     const moves = live.moves;
     return this.#serialize(live, async () => {
-      let upstream: RuntimeUpstream;
-      if (existing && live.upstream === existing && !existing.closed) {
-        live.ready = false;
-        upstream = existing;
-      } else {
-        upstream = await this.#connect(live, moves);
-      }
+      const upstream = await this.#connect(live, moves);
       if (live.moves !== moves) return upstream;
       const admitted = this.#ledger.admitted(live.id);
       if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
@@ -1860,6 +1899,8 @@ export class SessionManager implements SessionsService {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
+      // The runtime has the registrations in effect again.
+      live.unreconciled = false;
       // A cutover fenced while this restore ran keeps the session fenced.
       if (live.moves === moves && !live.cutover?.fenced) live.ready = true;
       this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
@@ -1916,9 +1957,12 @@ export class SessionManager implements SessionsService {
     try {
       return await upstream.request("session.resume", params, { onSettle: reopened });
     } catch (error) {
-      if (!(error instanceof RpcError) || !UNKNOWN_SESSION.test(error.message) || this.get(live.id)?.lastTurn) throw error;
+      // Only for a session that still exists: never one deleted meanwhile (its runtime state is gone on purpose).
+      const current = this.get(live.id);
+      if (!(error instanceof RpcError) || !UNKNOWN_SESSION.test(error.message) || !current || live.deleting || current.lastTurn) throw error;
       this.#log.info("The runtime has no state for a session that never ran a turn; creating it again", { sessionId: live.id });
-      return upstream.request("session.create", params);
+      // With the session's model when this resume names none (the runtime would pick its default otherwise).
+      return upstream.request("session.create", params["model"] === undefined && current.model ? { ...params, model: current.model } : params);
     }
   }
 

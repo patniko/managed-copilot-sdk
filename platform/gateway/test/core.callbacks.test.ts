@@ -680,6 +680,67 @@ describe("callback obligations and runtime credentials", () => {
     }
   });
 
+  it("restores a session with the registrations in effect, not a tools update waiting for that restore", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "committed_tool" }], requestPermission: true });
+    const done = stopped(sessionId);
+    runtime.dropConnections();
+    await done();
+    const resumes = () => runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId);
+    const before = resumes().length;
+    // The update finds the session stopped and restores it; it then fails, so it never takes effect.
+    runtime.failNext("session.tools.set", sessionId);
+    await expect(client.request("session.tools.set", { sessionId, tools: [{ name: "pending_tool" }] })).rejects.toBeDefined();
+    await waitUntil(() => resumes().length > before);
+    await sleep(50);
+    for (const call of resumes().slice(before)) {
+      const names = (call.params["tools"] as { name: string }[]).map((tool) => tool.name);
+      expect(names).toContain("committed_tool");
+      expect(names).not.toContain("pending_tool");
+    }
+  });
+
+  it("never brings a deleted session back for a resume that waited behind another", async () => {
+    const one = await connect();
+    const sessionId = crypto.randomUUID();
+    await one.request("session.create", { sessionId, requestPermission: true });
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const first = one.request("session.resume", { sessionId, requestPermission: true });
+    await hold.held;
+    const two = await connect();
+    const second = two.request("session.resume", { sessionId, requestPermission: true });
+    second.catch(() => undefined);
+    await sleep(20);
+    const deleting = sessions().delete(1001, sessionId);
+    hold.release();
+    await first;
+    await deleting;
+    await expect(second).rejects.toMatchObject({ data: { code: "not_found" } });
+    // The runtime never got the session again.
+    expect(runtime.calls("session.create").filter((call) => call.params["sessionId"] === sessionId)).toHaveLength(1);
+    expect(runtime.sessions.has(sessionId)).toBe(false);
+    // Nor does the waiting resume touch another account's session that reuses the ID.
+    const bob = await gateway.gateway.app.service("auth").authenticate(BOB, { background: true });
+    await sessions().create(bob, { sessionId, environment: "chat" });
+    expect(sessions().get(sessionId)).toMatchObject({ ownerId: 2002 });
+  });
+
+  it("creates a session that never ran a turn again with its model when a client resumes it without one", async () => {
+    const client = await connect(undefined, "open");
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, model: "gpt-5.4", requestPermission: true });
+    const done = stopped(sessionId);
+    runtime.dropConnections();
+    await done();
+    // A restarted runtime has no state for a session that never ran a turn.
+    runtime.sessions.delete(sessionId);
+    const other = await connect(undefined, "open");
+    await other.request("session.resume", { sessionId, requestPermission: true });
+    const recreated = runtime.calls("session.create").filter((call) => call.params["sessionId"] === sessionId).at(-1)!.params;
+    expect(recreated["model"]).toBe("gpt-5.4");
+  });
+
   it("lets clients withdraw a registration they share in either order, even concurrently", async () => {
     const a = await connect();
     const sessionId = crypto.randomUUID();

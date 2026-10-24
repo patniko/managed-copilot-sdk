@@ -687,7 +687,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   CLI's) is recorded the same way and replaces the model an earlier `session.options.update` set, since restores apply
   option changes after the session's params.
 - **Restores.** The stock runtime persists a session with its first turn, so a restarted runtime does not know a
-  session that never ran one: it is created again with the same ID and stored configuration. A session whose history
+  session that never ran one: it is created again with the same ID, stored configuration, and current model (never a
+  session deleted meanwhile). A session whose history
   the runtime lost fails with `state_restore_failed`. A shared runtime left running by a dead gateway (recorded with its
   pid and start time in `<data>/runtime/shared/runtime.json`) is stopped before a new one starts. Restores and client
   resumes pass `continuePendingWork: true` while durable still owns something the runtime may await
@@ -750,10 +751,12 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   A withdrawal of something other attached clients still register passes the stored registration to them, so the last
   of them can withdraw it. Every handler flag is sent explicitly (`false` once nobody registers it), so a withdrawn
   handler is turned off on the runtime. A session's registration changes (client resumes, tools updates) run one at a
-  time, each from the last one committed; one that fails leaves the client's registration as it was, and the session is
-  resumed again with the registrations in effect (the runtime may have applied the failed one) before anything else
-  runs on it. A client that disconnects while its create or resume is in flight is never attached (what it registered
-  stays in the inventory).
+  time, each from the last one committed, and a tools update changes the client's registration only in the step that
+  writes it to the runtime. One that fails leaves the client's registration as it was, and the session is not routable
+  again until it was resumed with the registrations in effect (the runtime may have applied the failed one; a cutover
+  that leaves the session on its source keeps it unroutable until then). A client that disconnects while its create or
+  resume is in flight is never attached (what it registered stays in the inventory); a deletion waits for queued
+  registrations, which then fail with `not_found`.
   Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, and user-input
   requests go to the newest connected client that registered that handler, else fail with
   `background_callback_unsupported` (no fabricated answer).
