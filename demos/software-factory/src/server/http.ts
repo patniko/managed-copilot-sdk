@@ -131,12 +131,22 @@ class Router {
       pathMatched = true;
       if (route.method !== method) continue;
       const params: Params = {};
-      route.keys.forEach((key, index) => {
-        params[key] = decodeURIComponent(match[index + 1]!);
-      });
+      for (const [index, key] of route.keys.entries()) {
+        const value = safeDecode(match[index + 1]!);
+        if (value === undefined) return undefined;
+        params[key] = value;
+      }
       return { handler: route.handler, params };
     }
     return pathMatched ? "method_not_allowed" : undefined;
+  }
+}
+
+function safeDecode(value: string): string | undefined {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return undefined;
   }
 }
 
@@ -226,7 +236,9 @@ function buildRouter(ctx: ApiContext): Router {
 
 function serveStatic(webRoot: string, pathname: string, res: ServerResponse): boolean {
   const root = resolve(webRoot);
-  let file = resolve(join(root, decodeURIComponent(pathname)));
+  const decoded = safeDecode(pathname);
+  if (decoded === undefined) return false;
+  let file = resolve(join(root, decoded));
   if (file !== root && !file.startsWith(root + sep)) return false;
   if (!existsSync(file) || statSync(file).isDirectory()) {
     if (extname(pathname)) return false;
@@ -252,7 +264,7 @@ const NOT_BUILT_PAGE = `<!doctype html><meta charset="utf-8"><title>Software Fac
 /** Returns the server's request handler. `ui` serves everything outside `/api` (Vite middleware in dev). */
 export function createRequestHandler(ctx: ApiContext, ui?: Middleware): (req: IncomingMessage, res: ServerResponse) => void {
   const router = buildRouter(ctx);
-  return (req, res) => {
+  const handle = (req: IncomingMessage, res: ServerResponse): void => {
     if (!hostAllowed(req.headers.host)) {
       sendError(res, 403, "forbidden", "This host name isn't allowed. Open the factory at http://localhost.");
       return;
@@ -282,5 +294,12 @@ export function createRequestHandler(ctx: ApiContext, ui?: Middleware): (req: In
       return;
     }
     sendError(res, 404, "not_found", "Not found.");
+  };
+  return (req, res) => {
+    try {
+      handle(req, res);
+    } catch (error) {
+      handleError(res, error);
+    }
   };
 }

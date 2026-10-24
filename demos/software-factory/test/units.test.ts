@@ -76,6 +76,17 @@ describe("activity mapper", () => {
     expect(describeSessionError({ errorType: "rate_limit", message: "Too many requests\n    at stack" })).toBe("Model rate limit reached: Too many requests");
     expect(parseTestSummary("no marker")).toBeUndefined();
     expect(parseTestSummary('FACTORY_TEST_SUMMARY {"total":"x"}')).toMatchObject({ total: 0 });
+    // Only a harness line counts: the marker quoted mid-line (as in SKILL.md) does not.
+    expect(parseTestSummary('a line such as `FACTORY_TEST_SUMMARY {"total":9,"passed":9}`.')).toBeUndefined();
+    expect(parseTestSummary('FACTORY_TEST_SUMMARY {"total":1,"passed":1}\r\nFACTORY_TEST_SUMMARY {"total":2,"passed":2}\r\n')).toMatchObject({ total: 2 });
+  });
+
+  it("only treats shell output as a test run", () => {
+    const { mapper, items, tests } = collect();
+    mapper.handle(event("tool.execution_start", { toolCallId: "v1", toolName: "view", arguments: { path: "SKILL.md" } }));
+    mapper.handle(event("tool.execution_complete", { toolCallId: "v1", success: true, result: { content: 'FACTORY_TEST_SUMMARY {"total":9,"passed":9}' } }));
+    expect(items.has("test:v1")).toBe(false);
+    expect(tests).toEqual([]);
   });
 });
 

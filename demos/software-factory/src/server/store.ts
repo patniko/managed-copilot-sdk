@@ -106,6 +106,11 @@ export class FactoryStore {
     this.#db.prepare("DELETE FROM factory_work_orders WHERE id = ?").run(id);
   }
 
+  /** Forgets a station's captured artifacts (its sandbox was replaced, so platform versions restart). */
+  deleteStationArtifacts(workOrderId: string, stationId: string): void {
+    this.#db.prepare("DELETE FROM factory_artifacts WHERE work_order_id = ? AND station_id = ?").run(workOrderId, stationId);
+  }
+
   /** Inserts or replaces an activity item; a replaced item keeps its original position. */
   upsertActivity(item: ActivityItem): void {
     this.#db

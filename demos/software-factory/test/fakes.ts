@@ -95,6 +95,10 @@ export class FakePlatform implements FactoryPlatform {
   readonly outputs = new Map<string, Map<string, StoredFile>>();
   readonly deleted: string[] = [];
   readonly scripts: Partial<Record<StationRole, Script>>;
+  /** What `sessionInfo().lastTurn.status` reports per session (default "completed"). */
+  readonly lastTurnStatus = new Map<string, "running" | "completed" | "failed" | "cancelled">();
+  /** Session IDs whose resume fails, as if the platform lost them. */
+  readonly lost = new Set<string>();
   createCount = 0;
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
@@ -119,7 +123,7 @@ export class FakePlatform implements FactoryPlatform {
   }
 
   async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession> {
-    if (!this.sessions.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
+    if (!this.sessions.has(sessionId) || this.lost.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
     const session = new FakeSession(this, role, config, sessionId);
     this.sessions.set(sessionId, session);
     return session;
@@ -137,7 +141,7 @@ export class FakePlatform implements FactoryPlatform {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       pendingActions: [],
-      lastTurn: { turnId: "t", status: "completed" },
+      lastTurn: { turnId: "t", status: this.lastTurnStatus.get(sessionId) ?? "completed" },
       ...(session?.role === "builder" || session?.role === "release"
         ? { sandbox: { id: `sbx_${sessionId}`, size: "small", state: "running", network: { access: "restricted", allowedDomains: ["github.com"] } } }
         : {}),

@@ -15,15 +15,14 @@ export interface ActivitySink {
   usage?(usage: UsageSummary): void;
 }
 
-/** Parses the harness's last line: `FACTORY_TEST_SUMMARY {"total":..}`. */
+/** Parses the harness's summary line (`FACTORY_TEST_SUMMARY {"total":..}` at the start of a line); the last one wins. */
 export function parseTestSummary(output: string, at = new Date().toISOString()): TestSummary | undefined {
-  const index = output.lastIndexOf(TEST_SUMMARY_MARKER);
-  if (index < 0) return undefined;
-  const rest = output.slice(index + TEST_SUMMARY_MARKER.length).trim();
-  const end = rest.indexOf("}");
-  if (end < 0) return undefined;
+  const pattern = new RegExp(`^${TEST_SUMMARY_MARKER} (\\{[^\\r\\n]*\\})[ \\t]*\\r?$`, "gm");
+  const matches = [...output.matchAll(pattern)];
+  const json = matches.at(-1)?.[1];
+  if (!json) return undefined;
   try {
-    const value = JSON.parse(rest.slice(0, end + 1)) as Partial<Record<"total" | "passed" | "failed" | "skipped" | "durationMs", unknown>>;
+    const value = JSON.parse(json) as Partial<Record<"total" | "passed" | "failed" | "skipped" | "durationMs", unknown>>;
     const num = (field: unknown) => (typeof field === "number" && Number.isFinite(field) ? field : 0);
     return {
       total: num(value.total),
@@ -181,7 +180,8 @@ export class StationActivityMapper {
           durationMs: Date.now() - running.startedAt,
         };
         this.#sink.item({ ...running.item, tool });
-        const tests = output ? parseTestSummary(output) : undefined;
+        // Only a shell run of the harness counts as a test run; viewing the skill's docs must not.
+        const tests = output && SHELL_TOOLS.has(running.item.tool!.name) ? parseTestSummary(output) : undefined;
         if (tests) {
           this.#emit({
             id: `test:${event.data.toolCallId}`,

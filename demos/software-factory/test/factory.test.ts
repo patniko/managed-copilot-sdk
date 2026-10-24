@@ -278,7 +278,9 @@ describe("Factory pipeline", () => {
       release: undefined,
       completedAt: undefined,
       stations: stored.stations.map((station) =>
-        station.id === "release" ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt: new Date().toISOString() } } : station,
+        station.id === "release"
+          ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt: new Date().toISOString() }, reportVersion: undefined, passedRound: undefined }
+          : station,
       ),
     } as WorkOrder;
     store.saveWorkOrder(rewound);
@@ -287,8 +289,10 @@ describe("Factory pipeline", () => {
     const second = setup({ planner, builder: builder(), reviewer, release }, store);
     for (const [sessionId, session] of first.platform.sessions) second.platform.sessions.set(sessionId, session);
     for (const [sessionId, files] of first.platform.outputs) second.platform.outputs.set(sessionId, files);
+    for (const [sessionId, files] of first.platform.workspaces) second.platform.workspaces.set(sessionId, files);
     second.factory.resumeInterrupted();
     const resumed = await settle(second.factory, created.id);
+    expect(resumed.error).toBeUndefined();
     expect(resumed.status).toBe("completed");
     expect(second.platform.createCount).toBe(0);
     expect(resumed.stations.find((station) => station.id === "release")!.sessionId).toBe(releaseStation.sessionId);
@@ -300,5 +304,107 @@ describe("Factory pipeline", () => {
     expect(() => factory.create({ title: "x", brief: CREATE.brief })).toThrow(/title of 3 to 120/);
     expect(() => factory.create({ title: "Valid", brief: "too short" })).toThrow(/20 to 8,000/);
     expect(() => factory.create({ ...CREATE, maxReviewRounds: 5 })).toThrow(/1, 2, or 3/);
+  });
+
+  it("retries a cancelled build in its sandbox, telling the builder why it stopped", async () => {
+    let hang = true;
+    const flaky: Script = async (session, prompt, platform) => {
+      if (hang) {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        return;
+      }
+      await builder()(session, prompt, platform);
+    };
+    const { platform, factory } = setup({ planner, builder: flaky, reviewer, release });
+    const created = factory.create(CREATE);
+    while (factory.get(created.id)?.stations.find((station) => station.kind === "build")?.status !== "working") await new Promise((resolve) => setTimeout(resolve, 5));
+    expect((await factory.cancel(created.id)).status).toBe("cancelled");
+    hang = false;
+    factory.retry(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    const prompts = platform.sessionsFor("builder").flatMap((session) => session.prompts);
+    expect(prompts.some((prompt) => prompt.startsWith("The factory is retrying this station. The previous attempt stopped: The work order was stopped"))).toBe(true);
+    expect(wo.stations.every((station) => station.retryNote === undefined)).toBe(true);
+  });
+
+  it("asks the agent to continue when the platform reports the interrupted turn failed", async () => {
+    const first = setup({ planner, builder: builder(), reviewer, release });
+    const created = first.factory.create(CREATE);
+    await settle(first.factory, created.id);
+    const stored = store.getWorkOrder(created.id)!;
+    const releaseSession = stored.stations.find((station) => station.id === "release")!.sessionId!;
+    store.saveWorkOrder({
+      ...stored,
+      status: "releasing",
+      release: undefined,
+      stations: stored.stations.map((station) =>
+        station.id === "release" ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt: new Date().toISOString() } } : station,
+      ),
+    } as WorkOrder);
+    hub.close();
+    const second = setup({ planner, builder: builder(), reviewer, release }, store);
+    for (const [map, source] of [
+      [second.platform.sessions, first.platform.sessions],
+      [second.platform.outputs, first.platform.outputs],
+      [second.platform.workspaces, first.platform.workspaces],
+    ] as const) for (const [key, value] of source as Map<string, never>) (map as Map<string, never>).set(key, value);
+    second.platform.lastTurnStatus.set(releaseSession, "failed");
+    second.factory.resumeInterrupted();
+    const wo = await settle(second.factory, created.id);
+    expect(wo.status).toBe("completed");
+    expect(second.platform.sessions.get(releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
+  });
+
+  it("detaches on shutdown without failing work, and resumes it on the next start", async () => {
+    let gate!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      gate = resolve;
+    });
+    const gated: Script = async (session, prompt, platform) => {
+      await opened;
+      await builder()(session, prompt, platform);
+    };
+    const first = setup({ planner, builder: gated, reviewer, release });
+    const created = first.factory.create(CREATE);
+    while (first.factory.get(created.id)?.status !== "building" || first.platform.sessionsFor("builder").length < 2) await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const stopping = first.factory.stop();
+    gate();
+    await stopping;
+    expect(store.getWorkOrder(created.id)?.status).toBe("building");
+
+    hub.close();
+    const second = setup({ planner, builder: builder(), reviewer, release }, store);
+    for (const [map, source] of [
+      [second.platform.sessions, first.platform.sessions],
+      [second.platform.outputs, first.platform.outputs],
+      [second.platform.workspaces, first.platform.workspaces],
+    ] as const) for (const [key, value] of source as Map<string, never>) (map as Map<string, never>).set(key, value);
+    second.factory.resumeInterrupted();
+    const wo = await settle(second.factory, created.id);
+    expect(wo.status).toBe("completed");
+    // The builders reattached to their original sandboxes instead of provisioning new ones.
+    const original = first.platform.sessionsFor("builder").map((session) => session.sessionId).sort();
+    expect(wo.stations.filter((station) => station.kind === "build").map((station) => station.sessionId).sort()).toEqual(original);
+    expect(wo.stations.filter((station) => station.kind === "build").every((station) => !station.previousSessionIds)).toBe(true);
+  });
+
+  it("starts a fresh sandbox when the old one is gone, and reviews the new build", async () => {
+    const failing = builder({ failing: true });
+    const { platform, factory } = setup({ planner, builder: failing, reviewer, release });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("failed");
+    for (const session of platform.sessionsFor("builder")) platform.lost.add(session.sessionId);
+    platform.scripts.builder = builder();
+    factory.retry(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    const builds = wo.stations.filter((station) => station.kind === "build");
+    expect(builds.every((station) => station.previousSessionIds?.length === 1)).toBe(true);
+    const index = factory.artifactIndex(created.id);
+    const report = index.files.find((file) => file.stationId === "build:json2csv" && file.path === "test-report.json")!;
+    expect(report.versions.map((version) => version.version)).toEqual([1]);
+    expect(factory.activity(created.id).some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(true);
   });
 });

@@ -46,15 +46,33 @@ function describe(station: Station): string {
   return `${station.title.padEnd(34)} ${parts}`;
 }
 
-/** Follows the server-sent event stream until the work order settles. */
-async function follow(id: string): Promise<WorkOrder> {
+/**
+ * Opens the server-sent event stream, then submits the work order, so no update can be missed, and follows it until
+ * it settles.
+ */
+async function follow(submit: () => Promise<WorkOrder>): Promise<WorkOrder> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const seen = new Map<string, string>();
-  let latest: WorkOrder | undefined;
+  let id: string | undefined;
+  const settled = (wo: WorkOrder) => ["completed", "failed", "cancelled"].includes(wo.status);
+  const report = (wo: WorkOrder) => {
+    for (const station of wo.stations) {
+      const key = `${station.status}|${station.detail}`;
+      if (seen.get(station.id) !== key) {
+        seen.set(station.id, key);
+        log(describe(station));
+      }
+    }
+  };
   try {
     const response = await fetch(`${base}/api/events`, { signal: controller.signal });
     if (!response.body) throw new Error("The factory's event stream is unavailable.");
+    const created = await submit();
+    id = created.id;
+    const current = await api<WorkOrder>(`/api/work-orders/${id}`);
+    report(current);
+    if (settled(current)) return current;
     const decoder = new TextDecoder();
     let buffer = "";
     for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
@@ -74,15 +92,8 @@ async function follow(id: string): Promise<WorkOrder> {
           log(`  ${event.item.stationId}: tests ${event.item.text}`);
         }
         if (event.type !== "workOrder" || event.workOrder.id !== id) continue;
-        latest = event.workOrder;
-        for (const station of latest.stations) {
-          const line = describe(station);
-          if (seen.get(station.id) !== `${station.status}|${station.detail}`) {
-            seen.set(station.id, `${station.status}|${station.detail}`);
-            log(line);
-          }
-        }
-        if (["completed", "failed", "cancelled"].includes(latest.status)) return latest;
+        report(event.workOrder);
+        if (settled(event.workOrder)) return event.workOrder;
       }
     }
     throw new Error("The factory's event stream closed before the work order finished.");
@@ -106,15 +117,16 @@ async function main(): Promise<void> {
   log(`Factory at ${base} · platform ${state.platform.deployment?.name} (${state.platform.deployment?.mode}) · signed in as ${state.platform.account?.login}`);
   for (const env of state.platform.environments) log(`  ${env.name.padEnd(17)} ${env.type.padEnd(8)} ${env.model}`);
 
-  const following = (async () => undefined)();
-  const created = await api<WorkOrder>("/api/work-orders", {
-    method: "POST",
-    body: JSON.stringify({ title: template.title, brief: template.brief, templateId: template.id }),
+  let created: WorkOrder | undefined;
+  const settled = await follow(async () => {
+    created = await api<WorkOrder>("/api/work-orders", {
+      method: "POST",
+      body: JSON.stringify({ title: template.title, brief: template.brief, templateId: template.id }),
+    });
+    log(`Submitted ${formatWorkOrderNumber(created.number)} "${created.title}" (${created.id})`);
+    return created;
   });
-  await following;
-  log(`Submitted ${formatWorkOrderNumber(created.number)} "${created.title}" (${created.id})`);
-  const settled = await follow(created.id);
-  const wo = await api<WorkOrder>(`/api/work-orders/${created.id}`);
+  const wo = await api<WorkOrder>(`/api/work-orders/${settled.id}`);
 
   const duration = wo.completedAt && wo.startedAt ? Math.round((Date.parse(wo.completedAt) - Date.parse(wo.startedAt)) / 1000) : undefined;
   if (settled.status !== "completed" || !wo.release) {
@@ -126,7 +138,7 @@ async function main(): Promise<void> {
   log(`  reviews: ${reviews.map((station) => `${station.taskId} ${station.reviews?.map((review) => review.verdict).join("→")}`).join("; ")}`);
   log(`  release: ${wo.release.files} files · ${wo.release.tests?.passed}/${wo.release.tests?.total} tests passed · patch ${wo.release.patchBytes ?? 0} bytes`);
 
-  const zip = await fetch(`${base}/api/work-orders/${created.id}/bundle.zip`);
+  const zip = await fetch(`${base}/api/work-orders/${wo.id}/bundle.zip`);
   if (zip.ok) {
     const dir = resolve(process.env.HAPPY_PATH_OUTPUT ?? join(process.cwd(), ".data", "happy-path"));
     mkdirSync(dir, { recursive: true });

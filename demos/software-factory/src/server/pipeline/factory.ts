@@ -38,10 +38,12 @@ import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, val
 import {
   buildPrompt,
   checkFailedPrompt,
+  continuePrompt,
   fixPrompt,
   planPrompt,
   planRetryPrompt,
   releasePrompt,
+  retryPrompt,
   reviewPrompt,
   reviewRetryPrompt,
 } from "./prompts.js";
@@ -120,8 +122,6 @@ interface Run {
   readonly wo: MWorkOrder;
   readonly abort: AbortController;
   readonly sessions: Map<string, ActiveSession>;
-  /** Version of `test-report.json` seen at the last collection, per station, to catch a skipped re-run. */
-  readonly reportVersions: Map<string, number>;
   done: Promise<void>;
 }
 
@@ -152,6 +152,7 @@ export class Factory {
   readonly #runs = new Map<string, Run>();
   readonly #sandboxes: Semaphore;
   readonly #usageTimers = new Map<string, NodeJS.Timeout>();
+  #stopping = false;
 
   constructor(options: FactoryOptions) {
     this.#options = options;
@@ -287,6 +288,13 @@ export class Factory {
     wo.status = "queued";
     for (const station of wo.stations) {
       if (station.status === "failed" || station.status === "cancelled" || station.status === "skipped") {
+        // A sandbox station that already has a session continues in it, starting with why it stopped.
+        if (station.sessionId && station.turn && (station.kind === "build" || station.kind === "release")) {
+          station.retryNote =
+            station.status === "failed"
+              ? (station.error?.message ?? "The previous attempt failed.")
+              : "The work order was stopped before this station finished.";
+        }
         station.status = "waiting";
         station.detail = "Queued for retry";
         delete station.error;
@@ -324,10 +332,18 @@ export class Factory {
     }
   }
 
+  /**
+   * Detaches from every running work order without recording failures, so `resumeInterrupted()` picks them up after
+   * the next start. Accepted platform turns keep running while the factory is away.
+   */
   async stop(): Promise<void> {
-    for (const run of this.#runs.values()) {
+    this.#stopping = true;
+    const runs = [...this.#runs.values()];
+    for (const run of runs) {
       for (const active of run.sessions.values()) active.mapper.close();
+      await Promise.allSettled([...run.sessions.values()].map((active) => active.session.disconnect()));
     }
+    await Promise.race([Promise.allSettled(runs.map((run) => run.done)), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
     for (const timer of this.#usageTimers.values()) clearTimeout(timer);
   }
 
@@ -339,7 +355,7 @@ export class Factory {
   }
 
   #start(wo: MWorkOrder): void {
-    const run: Run = { wo, abort: new AbortController(), sessions: new Map(), reportVersions: new Map(), done: Promise.resolve() };
+    const run: Run = { wo, abort: new AbortController(), sessions: new Map(), done: Promise.resolve() };
     this.#runs.set(wo.id, run);
     run.done = this.#execute(run).finally(() => this.#finish(run));
   }
@@ -355,6 +371,7 @@ export class Factory {
       this.#setWorkOrder(run, { status: "completed", completedAt: now() });
       log.info("Work order completed", { id: wo.id, tests: wo.release?.tests });
     } catch (error) {
+      if (this.#stopping) return;
       if (run.abort.signal.aborted || error instanceof CancelledError) {
         this.#cancelStations(wo);
         this.#setWorkOrder(run, { status: "cancelled", completedAt: now() });
@@ -376,14 +393,9 @@ export class Factory {
     this.#runs.delete(run.wo.id);
     const timer = this.#usageTimers.get(run.wo.id);
     if (timer) clearTimeout(timer);
+    if (this.#stopping) return;
     this.#persist(run.wo);
-    await Promise.allSettled(
-      [...run.sessions.values()].map(async (active) => {
-        active.mapper.close();
-        await active.session.disconnect();
-      }),
-    );
-    run.sessions.clear();
+    await Promise.allSettled([...run.sessions.keys()].map((stationId) => this.#closeSession(run, stationId)));
   }
 
   #cancelStations(wo: MWorkOrder): void {
@@ -501,27 +513,40 @@ export class Factory {
     try {
       const dependencyFiles = this.#dependencyFiles(run, task);
       const active = await this.#openSandboxSession(run, build, () => builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot));
-      if (!build.turn) await this.#turn(run, build, active, buildPrompt(run.wo, task, [...dependencyFiles.keys()]), "work", 1);
-      else if (!build.turn.completedAt) await this.#awaitTurn(run, build, active);
+      await this.#bringTurnCurrent(run, build, active, false, () => buildPrompt(run.wo, task, [...dependencyFiles.keys()]));
 
       let nudges = 0;
       for (;;) {
         current = build;
-        const outcome = await this.#collect(run, build, false);
-        if (!outcome.passed) {
-          if (nudges >= MAX_NUDGES) throw new StationError(outcome.code, `The builder couldn't get the factory check to pass: ${outcome.problem}`);
-          nudges++;
-          this.#activity(run.wo, build.id, `Check failed: ${outcome.problem}. Asking the builder to fix it.`, "warning");
-          await this.#turn(run, build, active, checkFailedPrompt(outcome.problem, outcome.report, false), "nudge", build.round);
-          continue;
+        let report: TestReport | undefined;
+        if (build.passedRound !== build.round) {
+          const outcome = await this.#collect(run, build, false);
+          if (!outcome.passed) {
+            if (nudges >= MAX_NUDGES) throw new StationError(outcome.code, `The builder couldn't get the factory check to pass: ${outcome.problem}`);
+            nudges++;
+            this.#activity(run.wo, build.id, `Check failed: ${outcome.problem}. Asking the builder to fix it.`, "warning");
+            await this.#turn(run, build, active, checkFailedPrompt(outcome.problem, outcome.report, false), "nudge", build.round);
+            continue;
+          }
+          report = outcome.report;
+          this.#updateStation(run, build, {
+            status: "done",
+            passedRound: build.round,
+            detail: `${report!.summary.passed} tests passed · in review`,
+            finishedAt: now(),
+          });
+        } else {
+          // This round already passed its check (a restart or retry stopped during review): review it as published.
+          report = this.#latestReport(run, build.id);
+          if (build.status !== "done") this.#updateStation(run, build, { status: "done", detail: "Tests passed · in review", finishedAt: build.finishedAt ?? now() });
         }
-        this.#updateStation(run, build, { status: "done", detail: `${outcome.report!.summary.passed} tests passed · in review`, finishedAt: now() });
 
         current = review;
-        const verdict = await this.#reviewRound(run, task, build, outcome.report, active.mapper.lastMessage);
+        const verdict = await this.#reviewRound(run, task, build, report, active.mapper.lastMessage);
+        const passedTests = `${report?.summary.passed ?? build.tests?.passed ?? 0} tests passed`;
         if (verdict.verdict === "approve") {
           this.#updateStation(run, review, { status: "done", detail: `Approved in round ${build.round}`, finishedAt: now() });
-          this.#updateStation(run, build, { detail: `${outcome.report!.summary.passed} tests passed` });
+          this.#updateStation(run, build, { detail: passedTests });
           return;
         }
         if (build.round >= run.wo.maxReviewRounds) {
@@ -531,7 +556,7 @@ export class Factory {
             detail: `Accepted after ${build.round} rounds with findings open`,
             finishedAt: now(),
           });
-          this.#updateStation(run, build, { detail: `${outcome.report!.summary.passed} tests passed` });
+          this.#updateStation(run, build, { detail: passedTests });
           this.#activity(run.wo, review.id, "Maximum review rounds reached: accepting the task and passing open findings to the release notes", "warning");
           return;
         }
@@ -541,11 +566,33 @@ export class Factory {
         await this.#turn(run, build, active, fixPrompt(build.round + 1, run.wo.maxReviewRounds, verdict.findings, verdict.summary), "fix", build.round + 1);
       }
     } catch (error) {
-      if (!(error instanceof CancelledError) && !run.abort.signal.aborted) this.#failStation(run, current, error);
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) this.#failStation(run, current, error);
       throw error;
     } finally {
       releaseSlot();
+      if (!this.#stopping) {
+        // Detach from finished stations; their sessions (and sandboxes) stay on the platform for history and attach.
+        await this.#closeSession(run, build.id);
+        await this.#closeSession(run, review.id);
+      }
     }
+  }
+
+  /** Makes sure the station's latest turn has run: the first prompt, a retry note, or an in-flight turn after a restart. */
+  async #bringTurnCurrent(run: Run, station: MStation, active: ActiveSession, release: boolean, firstPrompt: () => string): Promise<void> {
+    if (!station.turn) {
+      await this.#turn(run, station, active, firstPrompt(), "work", 1);
+    } else if (station.retryNote) {
+      const note = station.retryNote;
+      this.#updateStation(run, station, { retryNote: undefined, passedRound: undefined });
+      await this.#turn(run, station, active, retryPrompt(note, release), "retry", Math.max(station.round, 1));
+    } else if (!station.turn.completedAt) {
+      await this.#awaitTurn(run, station, active, release);
+    }
+  }
+
+  #latestReport(run: Run, stationId: string): TestReport | undefined {
+    return parseJson<TestReport>(this.#store.latestArtifacts(run.wo.id, stationId).find((artifact) => artifact.path === "test-report.json")?.content);
   }
 
   async #reviewRound(run: Run, task: PlanTask, build: MStation, report: TestReport | undefined, builderSummary: string | undefined): Promise<ValidReview> {
@@ -613,8 +660,7 @@ export class Factory {
     const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
     try {
       const active = await this.#openSandboxSession(run, station, () => [...seed.files]);
-      if (!station.turn) await this.#turn(run, station, active, releasePrompt(run.wo, plan, seed.conflicts), "work", 1);
-      else if (!station.turn.completedAt) await this.#awaitTurn(run, station, active);
+      await this.#bringTurnCurrent(run, station, active, true, () => releasePrompt(run.wo, plan, seed.conflicts));
       let nudges = 0;
       for (;;) {
         const outcome = await this.#collect(run, station, true);
@@ -643,10 +689,11 @@ export class Factory {
         return;
       }
     } catch (error) {
-      if (!(error instanceof CancelledError) && !run.abort.signal.aborted) this.#failStation(run, station, error);
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) this.#failStation(run, station, error);
       throw error;
     } finally {
       releaseSlot();
+      if (!this.#stopping) await this.#closeSession(run, station.id);
     }
   }
 
@@ -718,8 +765,24 @@ export class Factory {
       } catch (error) {
         if (run.abort.signal.aborted) throw new CancelledError();
         mapper.status(`Couldn't reattach to session ${station.sessionId} (${toFactoryError(error).message}); starting a fresh sandbox`, "warning");
+        // The new sandbox starts over: its artifact versions restart at 1 and its rounds need fresh reviews.
+        this.#store.deleteStationArtifacts(run.wo.id, station.id);
         station.previousSessionIds = [...(station.previousSessionIds ?? []), station.sessionId];
-        this.#updateStation(run, station, { sessionId: undefined, turn: undefined, round: 0, sandbox: undefined });
+        this.#updateStation(run, station, {
+          sessionId: undefined,
+          turn: undefined,
+          round: 0,
+          sandbox: undefined,
+          reportVersion: undefined,
+          passedRound: undefined,
+          retryNote: undefined,
+          tests: undefined,
+        });
+        if (station.kind === "build" && station.taskId) {
+          const review = this.#station(run, `review:${station.taskId}`);
+          this.#updateStation(run, review, { status: "waiting", detail: "Waits for the build", reviews: undefined, round: 0, acceptedWithFindings: undefined });
+        }
+        this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
       }
     }
     this.#updateStation(run, station, {
@@ -778,7 +841,14 @@ export class Factory {
 
   async #turn(run: Run, station: MStation, active: ActiveSession, prompt: string, kind: NonNullable<Station["turn"]>["kind"], round: number): Promise<void> {
     this.#throwIfCancelled(run);
-    const detail = { work: "Working", fix: `Fixing review findings (round ${round})`, nudge: "Fixing the factory check", review: `Reviewing round ${round}` }[kind];
+    const detail = {
+      work: "Working",
+      fix: `Fixing review findings (round ${round})`,
+      nudge: "Fixing the factory check",
+      review: `Reviewing round ${round}`,
+      retry: "Retrying",
+      continue: "Continuing after an interruption",
+    }[kind];
     this.#updateStation(run, station, {
       status: "working",
       detail,
@@ -801,25 +871,35 @@ export class Factory {
     this.#updateStation(run, station, { turn: { ...station.turn!, completedAt: now() } });
   }
 
-  /** Waits for a turn that was already running when the factory restarted. */
-  async #awaitTurn(run: Run, station: MStation, active: ActiveSession): Promise<void> {
+  /**
+   * Waits for a turn that was already running when the factory restarted. If the platform reports that it failed or
+   * was cancelled, the agent is asked to continue rather than treating the turn as complete.
+   */
+  async #awaitTurn(run: Run, station: MStation, active: ActiveSession, release: boolean): Promise<void> {
     this.#updateStation(run, station, { status: "working", detail: "Resuming the in-flight turn" });
     const deadline = Date.now() + this.#options.config.turnTimeoutMs[station.role];
     const pollMs = this.#options.pollMs ?? 3_000;
     let idle = false;
+    let outcome: "completed" | "running" | "failed" | "cancelled" | undefined;
     const stopListening = active.session.on((event) => {
       if (event.type === "session.idle") idle = true;
     });
     try {
-      while (!idle) {
+      for (;;) {
         this.#throwIfCancelled(run);
         const info = await this.#platform.sessionInfo(active.session.sessionId);
-        if (!info.lastTurn || info.lastTurn.status !== "running") break;
+        outcome = info.lastTurn?.status;
+        if (outcome !== "running" || idle) break;
         if (Date.now() > deadline) throw new StationError("timeout", `The ${station.agent} agent didn't finish its turn in time.`);
         await new Promise((resolve) => setTimeout(resolve, pollMs));
       }
     } finally {
       stopListening();
+    }
+    if (outcome === "failed" || outcome === "cancelled") {
+      this.#activity(run.wo, station.id, `The interrupted turn ${outcome === "failed" ? "failed" : "was stopped"}; asking the agent to continue`, "warning");
+      await this.#turn(run, station, active, continuePrompt(release), "continue", Math.max(station.round, 1));
+      return;
     }
     this.#updateStation(run, station, { turn: { ...station.turn!, completedAt: now() } });
   }
@@ -834,8 +914,8 @@ export class Factory {
     const reportArtifact = latest.find((artifact) => artifact.path === "test-report.json");
     const report = parseJson<TestReport>(reportArtifact?.content);
     const manifest = parseJson<OutputManifest>(latest.find((artifact) => artifact.path === "manifest.json")?.content);
-    const previousVersion = run.reportVersions.get(station.id);
-    if (reportArtifact) run.reportVersions.set(station.id, reportArtifact.version);
+    const previousVersion = station.reportVersion;
+    if (reportArtifact) this.#updateStation(run, station, { reportVersion: reportArtifact.version });
     if (report) this.#updateStation(run, station, { tests: summaryOf(report, reportArtifact?.publishedAt) });
     const check = release ? "npm run check:release" : "npm run check";
     const fail = (code: string, problem: string): CheckOutcome => ({ passed: false, code, problem, ...(report ? { report } : {}), ...(manifest ? { manifest } : {}) });
@@ -938,8 +1018,10 @@ export class Factory {
   }
 
   #persist(wo: MWorkOrder): void {
+    // While stopping, the stored state is the checkpoint the next start resumes from: leave it untouched.
+    if (this.#stopping) return;
     wo.updatedAt = now();
-    const releaseTests = wo.release?.tests;
+    const releaseTests = wo.release?.tests ?? wo.stations.find((station) => station.kind === "release")?.tests;
     const buildTests = wo.stations.filter((station) => station.kind === "build" && station.tests).map((station) => station.tests!);
     const tests: TestSummary | undefined =
       releaseTests ??
@@ -968,6 +1050,7 @@ export class Factory {
   }
 
   #onItem(run: Run, station: MStation, item: ActivityItem): void {
+    if (this.#stopping) return;
     this.#store.upsertActivity(item);
     this.#options.hub.publish({ type: "activity", item });
     if (station.status !== "working") return;
@@ -978,6 +1061,7 @@ export class Factory {
   }
 
   #emitItem(wo: Pick<WorkOrder, "id">, partial: Omit<ActivityItem, "id" | "workOrderId" | "at"> & { id?: string }): void {
+    if (this.#stopping) return;
     const item: ActivityItem = { ...partial, id: partial.id ?? `${partial.stationId}:${randomUUID()}`, workOrderId: wo.id, at: now() };
     this.#store.upsertActivity(item);
     this.#options.hub.publish({ type: "activity", item });

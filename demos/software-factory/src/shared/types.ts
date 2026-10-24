@@ -161,11 +161,17 @@ export interface Station {
   readonly acceptedWithFindings?: boolean;
   /** The current or last agent turn; lets the factory pick up an in-flight turn after a restart. */
   readonly turn?: {
-    readonly kind: "work" | "fix" | "nudge" | "review";
+    readonly kind: "work" | "fix" | "nudge" | "review" | "retry" | "continue";
     readonly round: number;
     readonly sentAt: string;
     readonly completedAt?: string;
   };
+  /** Checkpoint: version of `test-report.json` the factory last checked, to notice a check that wasn't re-run. */
+  readonly reportVersion?: number;
+  /** Checkpoint: the build round whose factory check passed. */
+  readonly passedRound?: number;
+  /** Checkpoint: set by a retry so the agent first hears why its previous attempt stopped. */
+  readonly retryNote?: string;
   readonly error?: FactoryError;
 }
 

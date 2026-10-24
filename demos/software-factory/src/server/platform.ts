@@ -149,15 +149,18 @@ export class Platform implements FactoryPlatform {
   }
 
   async createSession(role: StationRole, config: SessionConfig): Promise<StationSession> {
+    const client = this.#client(role);
     try {
-      return await (await this.#client(role)).createSession(config);
+      return await (await client).createSession(config);
     } catch (error) {
       if (isManagedCopilotError(error)) throw error;
       // The environment's bridge may have dropped (for example after a gateway restart): retry once on a fresh client.
+      // Only evict the client this call used, so concurrent retries never stop each other's replacement.
       log.warn("Session creation failed; retrying on a fresh client", { role, error: (error as Error).message });
-      const stale = this.#clients.get(role);
-      this.#clients.delete(role);
-      void stale?.then((client) => client.stop()).catch(() => undefined);
+      if (this.#clients.get(role) === client) {
+        this.#clients.delete(role);
+        void client.then((stale) => stale.stop()).catch(() => undefined);
+      }
       return (await this.#client(role)).createSession(config);
     }
   }
@@ -231,7 +234,9 @@ export class Platform implements FactoryPlatform {
       if (!isManagedCopilotError(error) || error.code !== "environment_not_found") {
         log.warn("Model discovery failed; using preferred defaults", { error: (error as Error).message });
       }
+      const failed = this.#clients.get("planner");
       this.#clients.delete("planner");
+      void failed?.then((client) => client.stop()).catch(() => undefined);
       this.#models = chooseModels(undefined, this.#config.modelOverrides);
     }
   }

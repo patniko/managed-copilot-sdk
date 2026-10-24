@@ -144,7 +144,13 @@ async function runTests(root, testFiles) {
   let size = 0;
   try {
     const result = await new Promise((resolve) => {
-      const child = spawn(process.execPath, args, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      const child = spawn(process.execPath, args, {
+        cwd: root,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        detached: process.platform !== "win32",
+      });
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
@@ -183,10 +189,19 @@ function stop(child) {
   if (process.platform === "win32") {
     // taskkill /t also ends the per-file test processes, which killing the runner alone would orphan.
     spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
-  } else {
-    child.kill("SIGTERM"); // the runner cancels its tests and stops their processes
+    return;
   }
-  setTimeout(() => child.kill("SIGKILL"), 5000).unref();
+  // The runner leads its own process group, so test files and anything they spawned stop with it and release the
+  // output pipes (an orphaned grandchild holding them open would otherwise hang the harness).
+  const signal = (name) => {
+    try {
+      process.kill(-child.pid, name);
+    } catch {
+      // Already gone.
+    }
+  };
+  signal("SIGTERM");
+  setTimeout(() => signal("SIGKILL"), 5000).unref();
 }
 
 function readReport(file) {

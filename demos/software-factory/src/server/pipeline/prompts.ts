@@ -98,6 +98,20 @@ export interface ReviewMaterial {
   readonly builderSummary: string | undefined;
 }
 
+/** First message after a retry: why the previous attempt stopped, and what "done" means. */
+export function retryPrompt(reason: string, release: boolean): string {
+  const command = release ? "npm run check:release" : "npm run check";
+  return `The factory is retrying this station. The previous attempt stopped: ${reason}
+
+Continue where you left off. Make sure the work is complete, run \`${command}\` until it passes, then reply with a short summary.`;
+}
+
+/** After a restart, when the platform reports that the in-flight turn didn't finish. */
+export function continuePrompt(release: boolean): string {
+  const command = release ? "npm run check:release" : "npm run check";
+  return `Your previous turn was interrupted before it finished. Continue the task, run \`${command}\` until it passes, then reply with a short summary.`;
+}
+
 function testSection(report: TestReport | undefined): string {
   if (!report) return "No test report was published.";
   const { total, passed, failed, skipped } = report.summary;
