@@ -14,7 +14,8 @@ type Send = (method: string, params?: unknown) => Promise<unknown>;
 
 /**
  * Core's `sandboxes` port backed by the fake runtime: every "sandbox" is its own connection to it. Like the real
- * sandbox module, the runtime receives no GitHub credential until `sessionOpened` installs one.
+ * sandbox module, the runtime receives no GitHub credential until `sessionOpened` installs one, and a requested
+ * agent is deferred out of create/resume params and selected after that.
  */
 class FakeSandboxes {
   readonly log: { op: string; sessionId: string; detail?: Record<string, unknown> }[] = [];
@@ -48,6 +49,7 @@ class FakeSandboxes {
     await once(socket, "connect");
     this.streams.set(sessionId, socket);
     let send: Send | undefined;
+    const deferred = new Map<string, string>();
     return {
       stream: socket,
       connectionToken: this.runtime.token,
@@ -58,13 +60,17 @@ class FakeSandboxes {
       },
       prepareSessionParams: async (method: string, params: Record<string, unknown>) => {
         this.log.push({ op: `prepare ${method}`, sessionId, detail: params });
-        const { gitHubToken: _token, gitHubTokenProviderRegistrationId: _registration, ...rest } = params;
+        const { gitHubToken: _token, gitHubTokenProviderRegistrationId: _registration, agent, ...rest } = params;
+        if (typeof agent === "string") deferred.set(sessionId, agent);
         return rest;
       },
       sessionOpened: async (id: string) => {
         this.log.push({ op: "sessionOpened", sessionId: id });
         await options.resolveToken();
         await send!("session.gitHubAuth.setCredentials", { sessionId: id, credentials: { type: "token", host: "https://github.com", token: "mcrt_placeholder" } });
+        const agent = deferred.get(id);
+        deferred.delete(id);
+        if (agent) await send!("session.agent.select", { sessionId: id, name: agent });
       },
       close: () => socket.destroy(),
     };
@@ -127,18 +133,16 @@ describe("isolated placement through the sandboxes port", () => {
     if (apphost) rmSync(apphost, { recursive: true, force: true });
   });
 
-  it("selects a requested agent only after the sandbox installed the session credential", async () => {
+  it("opens the session on its sandbox before replying, passing the requested agent to the sandbox", async () => {
     const client = await connect("coder");
     const sessionId = crypto.randomUUID();
     await client.request("session.create", { sessionId, agent: "builder" });
     expect(sandboxes.ops(sessionId)).toEqual(["create", "openRuntime", "initialize", "prepare session.create", "sessionOpened"]);
     const prepared = sandboxes.detail(sessionId, "prepare session.create");
-    expect(prepared).not.toHaveProperty("agent");
+    expect(prepared).toMatchObject({ agent: "builder", workingDirectory: "/workspace", agentDirectories: [`${MOUNT}/agents`] });
     expect(prepared).not.toHaveProperty("gitHubTokenProviderRegistrationId");
-    expect(prepared).toMatchObject({ workingDirectory: "/workspace", agentDirectories: [`${MOUNT}/agents`] });
     const order = runtime.requests.filter((request) => request.params["sessionId"] === sessionId).map((request) => request.method);
-    expect(order.indexOf("session.gitHubAuth.setCredentials")).toBeGreaterThan(order.indexOf("session.create"));
-    expect(order.indexOf("session.agent.select")).toBeGreaterThan(order.indexOf("session.gitHubAuth.setCredentials"));
+    expect(order.slice(0, 3)).toEqual(["session.create", "session.gitHubAuth.setCredentials", "session.agent.select"]);
     expect(await client.request("session.agent.getCurrent", { sessionId })).toMatchObject({ agent: { name: "builder", path: `${MOUNT}/agents/builder.agent.md` } });
   });
 
@@ -161,7 +165,8 @@ describe("isolated placement through the sandboxes port", () => {
     await sleep(100);
     expect(await client.request("session.agent.getCurrent", { sessionId })).toMatchObject({ agent: { name: "reviewer" } });
     expect(sandboxes.ops(sessionId).slice(-5)).toEqual(["ensureRunning", "openRuntime", "initialize", "prepare session.resume", "sessionOpened"]);
-    expect(sandboxes.detail(sessionId, "prepare session.resume")).not.toHaveProperty("agent");
+    // The restore asks for the agent the session last had, not the one it was created with.
+    expect(sandboxes.detail(sessionId, "prepare session.resume")).toMatchObject({ agent: "reviewer" });
     expect(agentSelections(sessionId)).toEqual(["builder", "reviewer", "reviewer"]);
   });
 

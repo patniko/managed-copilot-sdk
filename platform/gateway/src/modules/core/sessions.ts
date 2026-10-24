@@ -481,11 +481,11 @@ export class SessionManager implements SessionsService {
     let result: unknown;
     const resumeOn = async (upstream: RuntimeUpstream) => {
       const prepared = await this.#prepare(live, "session.resume", admitted.params);
-      this.#attach(live, peer, admitted, prepared.params);
-      const forwarded = this.#withRegistrations(live, prepared.params);
+      this.#attach(live, peer, admitted, prepared);
+      const forwarded = this.#withRegistrations(live, prepared);
       try {
         result = await upstream.request("session.resume", forwarded);
-        await this.#opened(live, upstream, admitted.optionsPatch, prepared.agent);
+        await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
         this.#detach(live, peer.id);
         throw error;
@@ -744,10 +744,10 @@ export class SessionManager implements SessionsService {
           upstream = await this.#options.sharedRuntime!.ready();
           created.upstream = upstream;
         }
-        const prepared = await this.#prepare(created, "session.create", admitted.params);
-        if (input.peer) this.#attach(created, input.peer, admitted, prepared.params);
-        result = await upstream.request("session.create", prepared.params);
-        await this.#opened(created, upstream, admitted.optionsPatch, prepared.agent);
+        const forwarded = await this.#prepare(created, "session.create", admitted.params);
+        if (input.peer) this.#attach(created, input.peer, admitted, forwarded);
+        result = await upstream.request("session.create", forwarded);
+        await this.#opened(created, upstream, admitted.optionsPatch);
         created.ready = true;
         return upstream;
       });
@@ -935,8 +935,8 @@ export class SessionManager implements SessionsService {
         ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
       });
       try {
-        await upstream.request("session.resume", prepared.params);
-        await this.#opened(live, upstream, admitted.optionsPatch, prepared.agent);
+        await upstream.request("session.resume", prepared);
+        await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
       }
@@ -966,20 +966,14 @@ export class SessionManager implements SessionsService {
     return upstream;
   }
 
-  /**
-   * Sandbox runtimes get the owner's credential only in `sessionOpened` (after create/resume), and the stock runtime
-   * resolves custom agents only for an authenticated session. So a requested agent is selected after that instead.
-   */
-  async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<{ params: Record<string, unknown>; agent: string | undefined }> {
-    if (live.placement !== "sandbox") return { params, agent: undefined };
-    const { agent, ...rest } = params;
-    const prepared = live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, rest) : rest;
-    return { params: prepared, agent: typeof agent === "string" && agent ? agent : undefined };
+  async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, params) : params;
   }
 
-  async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>, agent?: string): Promise<void> {
+  async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>): Promise<void> {
+    // Sandboxes install the owner's credential here, then select a requested agent (the runtime resolves agents only
+    // for authenticated sessions, so the sandbox module defers `agent` out of create/resume params).
     if (live.sandbox?.sessionOpened) await live.sandbox.sessionOpened(live.id);
-    if (agent) await upstream.request("session.agent.select", { sessionId: live.id, name: agent });
     if (Object.keys(optionsPatch).length > 0) {
       const result = await upstream.request<{ success?: boolean; error?: string }>("session.options.update", { ...optionsPatch, sessionId: live.id });
       if (result && result.success === false) throw new ManagedCopilotError("internal", `The runtime rejected the session lockdown: ${result.error ?? "unknown error"}`);
@@ -1075,7 +1069,7 @@ export class SessionManager implements SessionsService {
     if (!responder) return;
     try {
       const replay = await actions.onAttached({ sessionId, ownerId: record.ownerId, environment: record.environment, generation: record.generation, responder });
-      for (const event of replay) peer.notify("session.event", { sessionId, event: this.#sanitizeEvent(live, event) });
+      for (const event of replay) peer.notify("session.event", { sessionId, event: this.#scrub(live, this.#sanitizeEvent(live, event)) });
     } catch (error) {
       this.#log.warn("Action replay after attach failed", { sessionId, error: (error as Error).message });
     }
