@@ -175,6 +175,9 @@ describe("platform interruptions", () => {
     const lost = [
       rpc("The shared runtime is restarting", "upstream_unavailable"),
       rpc("The gateway is draining", "capability_unavailable"),
+      // The runtime's answer to a turn's completion wait when its gateway shuts down (no platform code).
+      Object.assign(new Error("Completion wait cancelled"), { code: -32603 }),
+      Object.assign(new Error("Completion wait cancelled"), { code: -32603, data: { code: "cancelled" } }),
       new PlatformUnavailableError("The factory is reconnecting to Managed Copilot."),
       new ManagedCopilotError("capability_unavailable", "The gateway is not serving on this instance yet: handed over to a newer deployment. Retry shortly."),
       new ManagedCopilotError("upstream_unavailable", "GitHub is unreachable"),
@@ -200,6 +203,6 @@ describe("platform interruptions", () => {
     ];
     for (const error of lost) expect(isPlatformInterruption(error), String(error)).toBe(true);
     for (const error of failures) expect(isPlatformInterruption(error), String(error)).toBe(false);
-    expect(toFactoryError(lost[2])).toEqual({ code: "platform_unavailable", message: "The factory is reconnecting to Managed Copilot." });
+    expect(toFactoryError(lost[4])).toEqual({ code: "platform_unavailable", message: "The factory is reconnecting to Managed Copilot." });
   });
 });

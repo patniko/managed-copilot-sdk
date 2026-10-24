@@ -16,6 +16,8 @@ export class FakeSession implements StationSession {
   readonly #platform: FakePlatform;
   readonly #abort = new AbortController();
   aborted = false;
+  /** What an in-flight turn rejects with when the session is aborted (the runtime's answer to the abort). */
+  abortError: Error | undefined;
 
   constructor(platform: FakePlatform, role: StationRole, config: SessionConfig | ResumeSessionConfig, sessionId = id("sess")) {
     this.#platform = platform;
@@ -63,7 +65,7 @@ export class FakeSession implements StationSession {
     this.emit("assistant.turn_start", { turnId: id("turn") });
     this.emit("assistant.usage", { model: "fake", inputTokens: 100, outputTokens: 20, duration: 50 });
     const aborted = new Promise<never>((_, reject) => {
-      this.#abort.signal.addEventListener("abort", () => reject(new Error("Session aborted")), { once: true });
+      this.#abort.signal.addEventListener("abort", () => reject(this.abortError ?? new Error("Session aborted")), { once: true });
     });
     await Promise.race([this.#platform.script(this, options.prompt), aborted]);
     this.emit("session.idle", {});

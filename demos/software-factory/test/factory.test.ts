@@ -617,6 +617,73 @@ describe("Factory pipeline", () => {
     expect(stored.release).toBeDefined();
   });
 
+  it("pauses, rather than fails, when the platform cancels a review's completion wait", async () => {
+    let cancelled = false;
+    const flaky: Script = async (session, prompt, platform) => {
+      if (!cancelled && prompt.includes('"csv2json: CSV to JSON" (round 1')) {
+        cancelled = true;
+        // What the runtime answers when its gateway shuts down mid-turn.
+        throw new Error("Completion wait cancelled");
+      }
+      await reviewer(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: builder(), reviewer: flaky, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(cancelled).toBe(true);
+    expect(wo.status).toBe("completed");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Completion wait cancelled)"))).toBe(true);
+  });
+
+  it("keeps a user's cancel a cancel, even when the turn reports a cancelled completion wait", async () => {
+    let reviewing = false;
+    const waiting: Script = async (session, prompt, platform) => {
+      if (!prompt.includes('"csv2json: CSV to JSON"')) return reviewer(session, prompt, platform);
+      session.abortError = new Error("Completion wait cancelled");
+      reviewing = true;
+      await new Promise(() => undefined);
+    };
+    const { factory } = setup({ planner, builder: builder(), reviewer: waiting, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    await until(() => reviewing);
+    await factory.cancel(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("cancelled");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused:"))).toBe(false);
+  });
+
+  it("pauses on an error it doesn't recognize while the platform doesn't answer, and fails on it when the platform does", async () => {
+    const strange: (count: number) => Script = (count) => {
+      let thrown = 0;
+      return async (session, prompt, platform) => {
+        if (thrown < count && taskOf(platform, session).id === "csv2json") {
+          thrown++;
+          throw new Error("The runtime went away");
+        }
+        await builder()(session, prompt, platform);
+      };
+    };
+    // The platform doesn't answer when the error happens (it starts reconnecting), then answers again.
+    let answers = false;
+    const outage = setup({ planner, builder: strange(1), reviewer, release }, undefined, {
+      resumeBackoffMs: 10,
+      checkPlatform: async () => {
+        const result = answers;
+        answers = true;
+        return result;
+      },
+    });
+    const paused = outage.factory.create(CREATE);
+    expect((await settle(outage.factory, paused.id)).status).toBe("completed");
+    expect(outage.factory.activity(paused.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime went away)"))).toBe(true);
+
+    const healthy = setup({ planner, builder: strange(1), reviewer, release }, undefined, { checkPlatform: async () => true });
+    const failed = healthy.factory.create(CREATE);
+    const wo = await settle(healthy.factory, failed.id);
+    expect(wo.status).toBe("failed");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.error?.message).toBe("The runtime went away");
+  });
+
   it("leaves files a builder deleted in a later round out of the release", async () => {
     const shrinking: Script = async (session, prompt, platform) => {
       const task = taskOf(platform, session);

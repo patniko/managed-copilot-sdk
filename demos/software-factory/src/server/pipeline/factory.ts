@@ -576,7 +576,7 @@ export class Factory {
       this.#activity(run.wo, station.id, `Plan accepted: ${plan.tasks.map((task) => task.title).join(" · ")}`, "success");
       await this.#closeSession(run, station.id);
     } catch (error) {
-      this.#failStation(run, station, error);
+      await this.#failStation(run, station, error);
       throw error;
     }
   }
@@ -727,7 +727,7 @@ export class Factory {
         await this.#turn(run, build, active, fixPrompt(build.round + 1, run.wo.maxReviewRounds, verdict.findings, verdict.summary), "fix", build.round + 1);
       }
     } catch (error) {
-      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) this.#failStation(run, current, error);
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) await this.#failStation(run, current, error);
       throw error;
     } finally {
       releaseSlot();
@@ -850,7 +850,7 @@ export class Factory {
         return;
       }
     } catch (error) {
-      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) this.#failStation(run, station, error);
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) await this.#failStation(run, station, error);
       throw error;
     } finally {
       releaseSlot();
@@ -923,8 +923,8 @@ export class Factory {
       } catch (error) {
         if (run.abort.signal.aborted) throw new CancelledError();
         // A dropped connection isn't a lost sandbox: keep the workspace and its checkpoint, whether the work order pauses
-        // or (out of pauses) fails.
-        if (this.#isInterruption(error)) throw error;
+        // or (out of pauses) fails. Starting over discards work, so it also needs a platform that answers right now.
+        if (this.#isInterruption(error) || !(await this.#platformAnswers())) throw error;
         mapper.status(`Couldn't reattach to session ${station.sessionId} (${toFactoryError(error).message}); starting a fresh sandbox`, "warning");
         // The new sandbox starts over: its artifact versions restart at 1 and its rounds need fresh reviews.
         this.#store.deleteStationArtifacts(run.wo.id, station.id);
@@ -1200,8 +1200,8 @@ export class Factory {
     if (run.abort.signal.aborted) throw new CancelledError();
   }
 
-  #failStation(run: Run, station: MStation, error: unknown): void {
-    if (this.#interrupts(run, error)) {
+  async #failStation(run: Run, station: MStation, error: unknown): Promise<void> {
+    if (await this.#interruptedBy(run, error)) {
       // Not a failure: the work order pauses at its checkpoint and resumes when the platform is back (#pauseRun).
       run.interrupted = true;
       return;
@@ -1220,8 +1220,29 @@ export class Factory {
 
   /** Whether the work order pauses for an interruption: after MAX_AUTO_RESUMES pauses, the next one fails it instead. */
   #interrupts(run: Run, error: unknown): boolean {
-    if (run.abort.signal.aborted || !this.#isInterruption(error)) return false;
+    return this.#canPause(run, error) && this.#isInterruption(error);
+  }
+
+  /** A cancel by the user (or a shutdown) is never a pause, and pauses are budgeted. */
+  #canPause(run: Run, error: unknown): boolean {
+    if (this.#stopping || run.abort.signal.aborted || error instanceof CancelledError) return false;
     return (this.#pauses.get(run.wo.id) ?? 0) < MAX_AUTO_RESUMES;
+  }
+
+  /**
+   * `#interrupts`, plus: a platform error the classifier doesn't know is the outage's too when the platform doesn't
+   * answer right now (FactoryOptions.checkPlatform). The factory's own verdicts (StationError) are taken as given.
+   */
+  async #interruptedBy(run: Run, error: unknown): Promise<boolean> {
+    if (this.#interrupts(run, error)) return true;
+    if (error instanceof StationError || !this.#canPause(run, error)) return false;
+    return !(await this.#platformAnswers());
+  }
+
+  /** Whether the platform answers right now. Assumed when there's no check (tests). */
+  async #platformAnswers(): Promise<boolean> {
+    if (!this.#options.readiness().ready) return false;
+    return this.#options.checkPlatform ? await this.#options.checkPlatform().catch(() => false) : true;
   }
 
   /** Leaves an interrupted work order at its checkpoint: running stations wait, and nothing is marked failed. */
