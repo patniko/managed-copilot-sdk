@@ -100,8 +100,17 @@ export class SandboxApi {
     return url;
   }
 
-  async #request(method: string, url: URL | string, init: { body?: unknown; raw?: Uint8Array; allow404?: boolean } = {}): Promise<{ status: number; body: unknown }> {
+  /**
+   * `idempotent: false` (collection creates with server-assigned IDs): a network failure or server error is not retried,
+   * because Azure may have carried out the request; the caller reconciles by labels. Throttling (429) is still retried.
+   */
+  async #request(
+    method: string,
+    url: URL | string,
+    init: { body?: unknown; raw?: Uint8Array; allow404?: boolean; idempotent?: boolean } = {},
+  ): Promise<{ status: number; body: unknown }> {
     const retries = this.#options.retries ?? 4;
+    const retryAmbiguous = init.idempotent ?? true;
     for (let attempt = 0; ; attempt++) {
       const token = await this.#options.tokens.token(DATA_PLANE_RESOURCE);
       const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "application/json" };
@@ -117,7 +126,7 @@ export class SandboxApi {
       try {
         response = await this.#fetch(url, { method, headers, ...(body !== undefined ? { body } : {}), signal: AbortSignal.timeout(60_000) });
       } catch (error) {
-        if (attempt < retries) {
+        if (retryAmbiguous && attempt < retries) {
           await this.#sleep(backoff(attempt));
           continue;
         }
@@ -127,7 +136,7 @@ export class SandboxApi {
         await response.body?.cancel();
         return { status: 404, body: undefined };
       }
-      if ((response.status === 429 || response.status >= 500) && attempt < retries) {
+      if ((response.status === 429 || (retryAmbiguous && response.status >= 500)) && attempt < retries) {
         const retryAfter = Number(response.headers.get("retry-after"));
         await response.body?.cancel();
         await this.#sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 30_000) : backoff(attempt));
@@ -175,7 +184,7 @@ export class SandboxApi {
   }
 
   async createSandbox(body: CreateSandboxBody): Promise<RemoteSandbox> {
-    return (await this.#request("PUT", this.#url("/sandboxes"), { body })).body as RemoteSandbox;
+    return (await this.#request("PUT", this.#url("/sandboxes"), { body, idempotent: false })).body as RemoteSandbox;
   }
 
   async deleteSandbox(id: string): Promise<void> {
@@ -227,7 +236,7 @@ export class SandboxApi {
 
   async createDiskImage(image: string, labels: Readonly<Record<string, string>>, managedIdentityResourceId?: string): Promise<RemoteDiskImage> {
     const body = { image: { base: image }, labels, ...(managedIdentityResourceId ? { managedIdentityResourceId } : {}) };
-    return (await this.#request("PUT", this.#url("/diskimages"), { body })).body as RemoteDiskImage;
+    return (await this.#request("PUT", this.#url("/diskimages"), { body, idempotent: false })).body as RemoteDiskImage;
   }
 }
 

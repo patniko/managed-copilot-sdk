@@ -20,7 +20,7 @@ import type {
   SandboxSpec,
   SandboxStartResult,
 } from "../types.js";
-import { SandboxApi, SandboxApiError, type CreateSandboxBody, type RemoteSandbox } from "./api.js";
+import { SandboxApi, SandboxApiError, type CreateSandboxBody, type RemoteDiskImage, type RemoteSandbox } from "./api.js";
 import type { AzureSandboxConfig, LoadedConfig } from "./config.js";
 
 /** Labels on every resource this gateway creates (Kubernetes-style keys without dots, which the service accepts). */
@@ -43,6 +43,18 @@ const DISKS = [
 const READY_IMAGE_STATES = new Set(["ready", "succeeded"]);
 const FAILED_IMAGE_STATES = new Set(["failed"]);
 const FAILED_SANDBOX_STATES = new Set(["failed", "stopfailed"]);
+/** States from which a sandbox becomes (or is) running without being replaced. */
+const LIVE_SANDBOX_STATES = new Set(["running", "creating", "resuming"]);
+/** Attempts for a create whose outcome Azure did not report. */
+const CREATE_ATTEMPTS = 3;
+
+const stateOf = (sandbox: RemoteSandbox): string => sandbox.state?.toLowerCase() ?? "";
+const isDeleting = (sandbox: RemoteSandbox): boolean => stateOf(sandbox) === "deleting";
+
+/** A failure that does not say whether Azure carried out the request (no answer, or a server error). */
+function isAmbiguous(error: unknown): boolean {
+  return error instanceof SandboxApiError && (error.status === 0 || error.status >= 500);
+}
 const CUSTOMIZATION_LIMITS = { files: 256, bytes: 8 * 1024 * 1024 };
 /** How long a successful readiness check is trusted. */
 const READY_TRUST_MS = 30_000;
@@ -63,7 +75,7 @@ function unavailable(message: string, cause?: unknown): ManagedCopilotError {
 function describeApiError(error: unknown, config: AzureSandboxConfig): string {
   if (!(error instanceof SandboxApiError)) return (error as Error)?.message ?? String(error);
   if (error.status === 401 || error.status === 403) {
-    return `the gateway's managed identity is not allowed to use sandbox group "${config.sandboxGroup}" (assign it the "Container Apps SandboxGroup Data Owner" role on resource group "${config.resourceGroup}"): ${error.message}`;
+    return `the gateway's managed identity is not allowed to use sandbox group "${config.sandboxGroup}" (assign it the "Container Apps SandboxGroup Data Owner" role on that sandbox group, in resource group "${config.resourceGroup}"): ${error.message}`;
   }
   if (error.status === 404) return `sandbox group "${config.sandboxGroup}" was not found in resource group "${config.resourceGroup}" (${config.region}): ${error.message}`;
   return error.message;
@@ -138,8 +150,14 @@ export class AzureSandboxProvider implements SandboxProvider {
     );
   }
 
-  ensureImage(environment: string, _config: EnvironmentConfig): Promise<SandboxImageRef> {
+  ensureImage(environment: string, environmentConfig: EnvironmentConfig): Promise<SandboxImageRef> {
     const { config } = this.#require();
+    if ((environmentConfig.packages?.system?.length ?? 0) > 0 && !config.images[environment]) {
+      // The base image lacks them: running without them would be a silently weaker environment.
+      return Promise.reject(
+        unavailable(`Environment "${environment}" declares system packages, but no image with them was deployed. Redeploy with \`aspire deploy\` so its image is built and pushed.`),
+      );
+    }
     const ref = config.images[environment] ?? config.images["*"];
     if (!ref) {
       return Promise.reject(unavailable(`No sandbox image was deployed for environment "${environment}". Redeploy with \`aspire deploy\` so its image is built and pushed.`));
@@ -162,7 +180,7 @@ export class AzureSandboxProvider implements SandboxProvider {
     let image = existing.find((candidate) => READY_IMAGE_STATES.has(candidate.status?.state?.toLowerCase() ?? "")) ?? existing.find((candidate) => !FAILED_IMAGE_STATES.has(candidate.status?.state?.toLowerCase() ?? ""));
     if (!image) {
       this.#log.info("Converting the sandbox image into a disk image", { image: ref });
-      image = await api.createDiskImage(ref, { [LABELS.instance]: this.#instance, [LABELS.image]: key }, config.registryIdentity);
+      image = await this.#createDiskImage(ref, key, config);
     }
     const deadline = Date.now() + this.#timeouts.imageMs;
     for (;;) {
@@ -174,6 +192,24 @@ export class AzureSandboxProvider implements SandboxProvider {
       if (Date.now() > deadline) throw unavailable(`The sandbox image ${ref} is still being prepared on Azure; try again in a few minutes.`);
       await this.#sleep(this.#pollMs * 2);
       image = (await api.getDiskImage(image.id)) ?? image;
+    }
+  }
+
+  /** Creates a disk image; like sandbox creation, adopts one Azure accepted without answering instead of creating a second. */
+  async #createDiskImage(ref: string, key: string, config: AzureSandboxConfig): Promise<RemoteDiskImage> {
+    const { api } = this.#require();
+    const labels = { [LABELS.instance]: this.#instance, [LABELS.image]: key };
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await api.createDiskImage(ref, labels, config.registryIdentity);
+      } catch (error) {
+        if (!isAmbiguous(error) || attempt >= CREATE_ATTEMPTS) throw error;
+        await this.#sleep(this.#pollMs);
+        const adopted = (await api.listDiskImages()).find(
+          (image) => image.labels?.[LABELS.image] === key && image.labels?.[LABELS.instance] === this.#instance && !FAILED_IMAGE_STATES.has(image.status?.state?.toLowerCase() ?? ""),
+        );
+        if (adopted) return adopted;
+      }
     }
   }
 
@@ -189,22 +225,28 @@ export class AzureSandboxProvider implements SandboxProvider {
     return `${this.#instance}-${sandboxId.replace("_", "-")}-${role}`;
   }
 
+  /** Every Azure sandbox labelled with this sandbox ID (normally one; more only after an interrupted replacement). */
+  async #remotes(sandboxId: string): Promise<RemoteSandbox[]> {
+    const { api } = this.#require();
+    return (await api.listSandboxes({ [LABELS.instance]: this.#instance, [LABELS.sandbox]: sandboxId })).filter(
+      (sandbox) => sandbox.labels?.[LABELS.sandbox] === sandboxId && sandbox.labels?.[LABELS.instance] === this.#instance,
+    );
+  }
+
+  /** The sandbox's compute: a live one if any, else one still being deleted (which still holds the disks). */
   async #remote(sandboxId: string): Promise<RemoteSandbox | undefined> {
     const { api } = this.#require();
     const cached = this.#remoteIds.get(sandboxId);
     if (cached) {
       const sandbox = await api.getSandbox(cached);
-      if (sandbox && sandbox.state?.toLowerCase() !== "deleting") return sandbox;
+      if (sandbox && !isDeleting(sandbox)) return sandbox;
       this.#remoteIds.delete(sandboxId);
     }
-    const matches = (await api.listSandboxes({ [LABELS.instance]: this.#instance, [LABELS.sandbox]: sandboxId })).filter(
-      (sandbox) => sandbox.labels?.[LABELS.sandbox] === sandboxId && sandbox.state?.toLowerCase() !== "deleting",
-    );
-    const found = matches[0];
-    if (found) this.#remoteIds.set(sandboxId, found.id);
+    const matches = await this.#remotes(sandboxId);
+    const found = matches.find((sandbox) => !isDeleting(sandbox)) ?? matches[0];
+    if (found && !isDeleting(found)) this.#remoteIds.set(sandboxId, found.id);
     return found;
   }
-
   async #ensureDisks(spec: SandboxSpec, options: SandboxOperationOptions): Promise<void> {
     const { config, api } = this.#require();
     const sizes = config.disks[spec.size];
@@ -280,15 +322,22 @@ export class AzureSandboxProvider implements SandboxProvider {
   }
 
   async create(spec: SandboxSpec, options: SandboxOperationOptions = {}): Promise<void> {
-    const { config, api } = this.#require();
+    const { config } = this.#require();
     await this.#ensureDisks(spec, options);
-    let remote = await this.#remote(spec.sandboxId);
+    const existing = await this.#remotes(spec.sandboxId);
+    let remote = existing.find((sandbox) => LIVE_SANDBOX_STATES.has(stateOf(sandbox)));
+    for (const leftover of existing) {
+      if (leftover === remote) continue;
+      // Compute left from before (stopped by the platform, failed, or still being deleted) holds the disks.
+      this.#log.info("Removing the sandbox's leftover compute", { sandboxId: spec.sandboxId, remoteId: leftover.id, state: leftover.state });
+      await this.#deleteCompute(spec.sandboxId, leftover);
+    }
     if (!remote) {
       options.onProgress?.("Allocating an Azure sandbox…");
-      remote = await api.createSandbox(this.#createBody(spec, config));
-      this.#remoteIds.set(spec.sandboxId, remote.id);
+      remote = await this.#createCompute(spec, config);
       this.#log.info("Created an Azure sandbox", { sandboxId: spec.sandboxId, remoteId: remote.id, size: spec.size });
     }
+    this.#remoteIds.set(spec.sandboxId, remote.id);
     await this.#waitForState(remote.id, "running", options, this.#timeouts.createMs, "start");
     if (spec.customizations) {
       options.onProgress?.("Copying the environment's customizations…");
@@ -319,37 +368,62 @@ export class AzureSandboxProvider implements SandboxProvider {
     }
   }
 
-  async start(sandboxId: string, options: SandboxOperationOptions = {}): Promise<SandboxStartResult> {
-    const remote = await this.#remote(sandboxId);
-    if (remote) {
-      const state = remote.state?.toLowerCase() ?? "";
-      if (state === "running") return "started";
-      if (state === "creating" || state === "resuming") {
-        await this.#waitForState(remote.id, "running", options, this.#timeouts.createMs, "start");
-        return "started";
+  /**
+   * Creates the sandbox's compute. A failure without a definite answer (network error, server error) may hide a
+   * request Azure accepted, so before trying again the sandbox is looked up by its labels and adopted if it exists.
+   */
+  async #createCompute(spec: SandboxSpec, config: AzureSandboxConfig): Promise<RemoteSandbox> {
+    const { api } = this.#require();
+    const body = this.#createBody(spec, config);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await api.createSandbox(body);
+      } catch (error) {
+        if (!isAmbiguous(error) || attempt >= CREATE_ATTEMPTS) throw error;
+        await this.#sleep(this.#pollMs);
+        const adopted = (await this.#remotes(spec.sandboxId)).find((sandbox) => !isDeleting(sandbox));
+        if (adopted) {
+          this.#log.warn("Adopted a sandbox whose creation Azure accepted without answering", { sandboxId: spec.sandboxId, remoteId: adopted.id });
+          return adopted;
+        }
       }
-      // Compute is not running (stopped by the platform, failed, or half-deleted): replace it over the same disks.
-      this.#log.info("Replacing the sandbox's compute", { sandboxId, remoteId: remote.id, state: remote.state });
-      await this.#deleteCompute(sandboxId, remote.id);
+    }
+  }
+
+  async start(sandboxId: string, options: SandboxOperationOptions = {}): Promise<SandboxStartResult> {
+    const remotes = await this.#remotes(sandboxId);
+    const live = remotes.find((sandbox) => stateOf(sandbox) === "running") ?? remotes.find((sandbox) => LIVE_SANDBOX_STATES.has(stateOf(sandbox)));
+    if (live) {
+      this.#remoteIds.set(sandboxId, live.id);
+      if (stateOf(live) !== "running") await this.#waitForState(live.id, "running", options, this.#timeouts.createMs, "start");
+      return "started";
+    }
+    // No running compute (stopped by the platform, failed, or still being deleted): it must release the disks before
+    // the service recreates the sandbox over them.
+    for (const leftover of remotes) {
+      this.#log.info("Replacing the sandbox's compute", { sandboxId, remoteId: leftover.id, state: leftover.state });
+      await this.#deleteCompute(sandboxId, leftover);
     }
     return (await this.#disksExist(sandboxId)) ? "recreate" : "gone";
   }
 
-  async #deleteCompute(sandboxId: string, remoteId: string): Promise<void> {
+  /** Deletes one sandbox's compute and waits until it is gone (and has released its disks). */
+  async #deleteCompute(sandboxId: string, remote: RemoteSandbox): Promise<void> {
     const { api } = this.#require();
-    await api.deleteSandbox(remoteId);
+    // Deletion is asynchronous; a sandbox already being deleted needs only the wait.
+    if (!isDeleting(remote)) await api.deleteSandbox(remote.id);
     const deadline = Date.now() + this.#timeouts.deleteMs;
-    while (await api.getSandbox(remoteId)) {
+    while (await api.getSandbox(remote.id)) {
       if (Date.now() > deadline) throw unavailable(`The Azure sandbox for ${sandboxId} is still being deleted; try again shortly.`);
       await this.#sleep(this.#pollMs);
     }
-    this.#remoteIds.delete(sandboxId);
+    if (this.#remoteIds.get(sandboxId) === remote.id) this.#remoteIds.delete(sandboxId);
   }
 
   /** Deletes compute; the data disks (and with them every declared piece of state) survive. */
   async stop(sandboxId: string): Promise<void> {
-    const remote = await this.#remote(sandboxId);
-    if (remote) await this.#deleteCompute(sandboxId, remote.id);
+    for (const remote of await this.#remotes(sandboxId)) await this.#deleteCompute(sandboxId, remote);
+    this.#remoteIds.delete(sandboxId);
   }
 
   async remove(sandboxId: string): Promise<void> {
@@ -385,7 +459,7 @@ export class AzureSandboxProvider implements SandboxProvider {
 
   async endpoint(sandboxId: string): Promise<SandboxEndpoint> {
     const remote = await this.#remote(sandboxId);
-    const url = remote?.ports?.find((port) => port.port === SANDBOXD_PORT)?.url;
+    const url = remote && !isDeleting(remote) ? remote.ports?.find((port) => port.port === SANDBOXD_PORT)?.url : undefined;
     if (!remote || !url) throw unavailable("The sandbox is not running, so it has no endpoint.");
     return { url: url.replace(/\/+$/, ""), headers: {} };
   }

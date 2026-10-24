@@ -21,6 +21,7 @@ interface FakeSandbox {
   labels: Record<string, string>;
   body: Record<string, unknown>;
   ports: { port: number; url: string }[];
+  deleteLag: number;
 }
 
 class FakeDataPlane {
@@ -31,6 +32,11 @@ class FakeDataPlane {
   readonly requests: string[] = [];
   denyAll = false;
   failImages = false;
+  /** Polls a deleted sandbox stays in Deleting (holding its disks) before it disappears. */
+  deleteLag = 0;
+  /** Creates (sandboxes, disk images) that are carried out but whose responses are lost. */
+  dropSandboxCreates = 0;
+  dropImageCreates = 0;
   #next = 0;
   #server: Server | undefined;
   url = "";
@@ -76,10 +82,19 @@ class FakeDataPlane {
       }
       if (path.length === 1 && req.method === "PUT") {
         const body = JSON.parse(raw.toString()) as Record<string, unknown>;
+        // A data disk attaches to one sandbox at a time.
+        if (((body.volumes as { volumeName: string }[] | undefined) ?? []).some((mount) => this.volumes.get(mount.volumeName)?.isAttached)) {
+          return send(409, { error: { code: "VolumeAttached", message: "A volume is attached to another sandbox" } });
+        }
         const id = `remote-${++this.#next}`;
-        const sandbox: FakeSandbox = { id, state: "Creating", labels: body.labels as Record<string, string>, body, ports: [{ port: 7781, url: `https://${id}-7781.westus2.adcproxy.io/` }] };
+        const sandbox: FakeSandbox = { id, state: "Creating", labels: body.labels as Record<string, string>, body, ports: [{ port: 7781, url: `https://${id}-7781.westus2.adcproxy.io/` }], deleteLag: 0 };
         this.sandboxes.set(id, sandbox);
         this.#attach(sandbox, true);
+        if (this.dropSandboxCreates > 0) {
+          this.dropSandboxCreates--;
+          req.socket.destroy();
+          return;
+        }
         return send(201, this.#view(sandbox));
       }
       const sandbox = this.sandboxes.get(path[1] ?? "");
@@ -87,13 +102,14 @@ class FakeDataPlane {
       if (path.length === 2 && req.method === "GET") {
         const view = this.#view(sandbox);
         if (sandbox.state === "Creating") sandbox.state = "Running";
-        if (sandbox.state === "Deleting") {
+        if (sandbox.state === "Deleting" && sandbox.deleteLag-- <= 0) {
           this.sandboxes.delete(sandbox.id);
           this.#attach(sandbox, false);
         }
         return send(200, view);
       }
       if (path.length === 2 && req.method === "DELETE") {
+        if (sandbox.state !== "Deleting") sandbox.deleteLag = this.deleteLag;
         sandbox.state = "Deleting";
         return send(202);
       }
@@ -125,6 +141,11 @@ class FakeDataPlane {
         const body = JSON.parse(raw.toString()) as { image: { base: string }; labels: Record<string, string> };
         const id = `img-${++this.#next}`;
         this.images.set(id, { id, labels: body.labels, image: body.image, status: { state: "Building" }, reads: 0 });
+        if (this.dropImageCreates > 0) {
+          this.dropImageCreates--;
+          req.socket.destroy();
+          return;
+        }
         return send(201, this.images.get(id));
       }
       const image = this.images.get(path[1] ?? "");
@@ -332,6 +353,67 @@ describe("Azure sandbox provider", () => {
     await subject.create(spec());
     [...plane.sandboxes.values()][0]!.state = "Stopped";
     expect(await subject.start("sbx_0123456789abcdef01234567")).toBe("recreate");
+    expect(plane.sandboxes.size).toBe(0);
+  });
+
+  it("waits for compute still being deleted (it holds the disks) before reporting stopped or recreating", async () => {
+    plane.deleteLag = 3;
+    const first = provider();
+    await first.create(spec());
+    const remoteId = [...plane.sandboxes.keys()][0]!;
+    // A delete that was interrupted (gateway restart): the next gateway finds the sandbox still Deleting.
+    plane.sandboxes.get(remoteId)!.state = "Deleting";
+    plane.sandboxes.get(remoteId)!.deleteLag = 3;
+    const restarted = provider();
+    expect(await restarted.start("sbx_0123456789abcdef01234567")).toBe("recreate");
+    expect(plane.sandboxes.size).toBe(0);
+    await expect(restarted.endpoint("sbx_0123456789abcdef01234567")).rejects.toThrow(/not running/);
+    await restarted.create(spec());
+    expect(plane.sandboxes.size).toBe(1);
+
+    const again = [...plane.sandboxes.values()][0]!;
+    again.state = "Deleting";
+    again.deleteLag = 3;
+    await provider().stop("sbx_0123456789abcdef01234567");
+    expect(plane.sandboxes.size).toBe(0);
+    expect([...plane.volumes.values()].every((volume) => !volume.isAttached)).toBe(true);
+  });
+
+  it("replaces leftover compute when creating, so a stopped or failed sandbox never blocks the disks", async () => {
+    const subject = provider();
+    await subject.create(spec());
+    [...plane.sandboxes.values()][0]!.state = "Failed";
+    await subject.create(spec());
+    expect(plane.sandboxes.size).toBe(1);
+    expect([...plane.sandboxes.values()][0]!.state).toBe("Running");
+  });
+
+  it("adopts a sandbox or disk image Azure created without answering, instead of creating a second", async () => {
+    plane.dropImageCreates = 1;
+    plane.dropSandboxCreates = 1;
+    const subject = provider();
+    const image = await subject.ensureImage("coder", {} as EnvironmentConfig);
+    expect(plane.images.size).toBe(1);
+    expect(image.id).toBe([...plane.images.keys()][0]);
+    await subject.create(spec({ imageId: image.id }));
+    expect(plane.sandboxes.size).toBe(1);
+    expect(await subject.isRunning("sbx_0123456789abcdef01234567")).toBe(true);
+  });
+
+  it("refuses an environment with system packages but no image of its own instead of using the base image", async () => {
+    const subject = provider();
+    await expect(subject.ensureImage("tools", { type: "isolated", packages: { system: ["ffmpeg"] } } as EnvironmentConfig)).rejects.toThrow(
+      /declares system packages, but no image with them was deployed/,
+    );
+    expect((await subject.ensureImage("coder", { type: "isolated", packages: { system: ["ffmpeg"] } } as EnvironmentConfig)).ref).toBe("acr.example/coder:def");
+  });
+
+  it("stops every sandbox that carries the sandbox's labels", async () => {
+    const subject = provider();
+    await subject.create(spec());
+    const original = [...plane.sandboxes.values()][0]!;
+    plane.sandboxes.set("remote-duplicate", { ...original, id: "remote-duplicate", body: { ...original.body, volumes: [] }, deleteLag: 0 });
+    await subject.stop("sbx_0123456789abcdef01234567");
     expect(plane.sandboxes.size).toBe(0);
   });
 
