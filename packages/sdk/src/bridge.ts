@@ -55,24 +55,47 @@ function checkUrl(value: string): URL {
 
 /** Splits LSP frames (`Content-Length: N\r\n\r\n<body>`) from the SDK's stdin. */
 function frameReader(onMessage: (body: string) => void): (chunk: Buffer) => void {
-  let buffer: Buffer = Buffer.alloc(0);
+  const chunks: Buffer[] = [];
+  let size = 0;
+  /** Total bytes the current frame needs (header + body), once its header is parsed. */
+  let needed = 0;
+  let headerLength = 0;
+  const contiguous = (): Buffer => {
+    if (chunks.length > 1) {
+      const joined = Buffer.concat(chunks, size);
+      chunks.length = 0;
+      chunks.push(joined);
+    }
+    return chunks[0] ?? Buffer.alloc(0);
+  };
   return (chunk) => {
-    buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+    chunks.push(chunk);
+    size += chunk.length;
     for (;;) {
-      const headerEnd = buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) {
-        if (buffer.length > 8192) fail("Received a malformed message from the Copilot SDK.");
-        return;
+      if (needed === 0) {
+        const buffer = contiguous();
+        const headerEnd = buffer.indexOf("\r\n\r\n");
+        if (headerEnd < 0) {
+          if (size > 8192) fail("Received a malformed message from the Copilot SDK.");
+          return;
+        }
+        const header = buffer.subarray(0, headerEnd).toString("ascii");
+        const match = /(?:^|\r\n)content-length:\s*(\d{1,10})\s*(?:\r\n|$)/i.exec(header);
+        const length = match ? Number(match[1]) : Number.NaN;
+        if (!Number.isSafeInteger(length) || length < 0) fail("Received a malformed message from the Copilot SDK.");
+        if (length > BRIDGE_MAX_FRAME_BYTES) fail(`A message from the Copilot SDK exceeds ${BRIDGE_MAX_FRAME_BYTES} bytes; send large files with managed.files(session).`);
+        headerLength = headerEnd + 4;
+        needed = headerLength + length;
       }
-      const header = buffer.subarray(0, headerEnd).toString("ascii");
-      const match = /(?:^|\r\n)content-length:\s*(\d+)/i.exec(header);
-      if (!match) fail("Received a malformed message from the Copilot SDK.");
-      const length = Number(match[1]);
-      if (length > BRIDGE_MAX_FRAME_BYTES) fail(`A message from the Copilot SDK exceeds ${BRIDGE_MAX_FRAME_BYTES} bytes; send large files with managed.files(session).`);
-      const end = headerEnd + 4 + length;
-      if (buffer.length < end) return;
-      onMessage(buffer.subarray(headerEnd + 4, end).toString("utf8"));
-      buffer = buffer.subarray(end);
+      if (size < needed) return;
+      const buffer = contiguous();
+      onMessage(buffer.subarray(headerLength, needed).toString("utf8"));
+      const rest = buffer.subarray(needed);
+      chunks.length = 0;
+      size = rest.length;
+      if (size > 0) chunks.push(rest);
+      needed = 0;
+      headerLength = 0;
     }
   };
 }

@@ -70,5 +70,10 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
     return undefined;
   });
 
-  app.routes.get(ROUTES.events, (ctx) => events.stream(ctx));
+  app.routes.get(ROUTES.events, (ctx) =>
+    events.stream(ctx, async () => {
+      const principal = await app.service("auth").authenticate(ctx.principal!.token);
+      if (principal.accountId !== ctx.principal!.accountId) throw new ManagedCopilotError("authentication_required", "The credential now belongs to another account");
+    }),
+  );
 }

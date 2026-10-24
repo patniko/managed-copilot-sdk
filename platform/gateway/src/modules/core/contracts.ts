@@ -44,7 +44,7 @@ export interface CustomizationBundle {
   /** Absolute path of the pinned copy the runtime reads. Sandbox providers mount it read-only. */
   readonly root: string;
   readonly digest: string;
-  readonly agents: readonly { readonly name: string; readonly description?: string; readonly tools?: readonly string[] }[];
+  readonly agents: readonly { readonly name: string; readonly description?: string; readonly model?: string; readonly tools?: readonly string[] }[];
   readonly agentDirectory?: string;
   readonly skillDirectory?: string;
   readonly instructionDirectory?: string;

@@ -10,6 +10,8 @@ export const PLATFORM_EVENT_TYPES = [
   "artifact.published",
   "schedule.run_started",
   "schedule.run_completed",
+  /** A shared session's outbound request was blocked by network policy (`{ host, port, reason }`; no credentials). */
+  "network.blocked",
 ] as const;
 export type PlatformEventType = (typeof PLATFORM_EVENT_TYPES)[number];
 

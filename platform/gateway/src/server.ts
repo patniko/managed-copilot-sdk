@@ -11,7 +11,7 @@ import { createLogger } from "./log.js";
 import { modules } from "./modules/index.js";
 
 export async function createGateway(config: GatewayConfig): Promise<GatewayApp> {
-  const log = createLogger("gateway");
+  const log = createLogger("gateway", config.env.LOG_LEVEL ?? "info");
   const db = openDatabase(join(config.dataDir, "gateway.db"));
   const app = new GatewayApp(config, db, log);
   try {
