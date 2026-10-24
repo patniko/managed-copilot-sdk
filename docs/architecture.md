@@ -804,8 +804,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   ephemeral root `session.error` (`errorType: "interrupted"`, "This turn was interrupted because the platform lost the
   connection to the session's runtime … Send your message again to continue.") and a root `session.idle`. The ledger
   records `lastTurn` `failed` (state `idle`) and emits `session.failed` and `session.idle` (`status: "failed"`), so
-  `SessionInfo` shows it. A `sendAndWait` whose own turn core ended this way rejects with the same message
-  (`capability_unavailable`). One whose turn completed (only the reply was lost), or whose turn pending work carries,
+  `SessionInfo` shows it. A `sendAndWait` rejects with the same message (`capability_unavailable`) only when the turn
+  core ended is positively its own: the only root turn started since the call began. Otherwise, for example when its
+  turn completed and only the reply was lost, when another turn followed it, or when pending work carries its turn, it
   gets the connection error. The session stays resumable; the next turn restores it. A turn waiting on work durable
   owns (`hasOpenActions`) is kept, because `continuePendingWork` keeps the runtime's pending tool call or permission
   and answering it continues the turn. On every restore, a turn the ledger still has running is checked against the
@@ -815,8 +816,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   retries it. The end applies only while that runtime still owns the session, so a cutover that commits meanwhile
   wins, and a client resume overtaken that way is admitted again where the session moved. An external shared runtime
   (`MANAGED_COPILOT_RUNTIME_URL`) keeps running its turns, so nothing ends while its connection is down. A turn it
-  finished unseen ends as its history records: its own root `session.error`, an abort (`cancelled`), or neither
-  (`completed`).
+  no longer processes ends as its history records. Its own root `session.error` fails it, and an abort cancels it. It
+  is `completed` only on evidence: a root `session.idle`, a final reply that requested no tools followed by
+  `assistant.turn_end`, or a later turn. A turn with no recorded ending was lost to a runtime restart and is
+  interrupted.
 - **Reopening a sandbox runtime.** Because the stock runtime refuses `llmInference.setProvider` while a lost
   connection holds the registration, the sandbox module restarts the runtime (session state stays on disk) and its
   handle's `initialize` throws `capability_unavailable` with `details.reopen: true`. Core then opens the runtime again,
@@ -824,14 +827,17 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   is open is a `conflict` and is never reopened.
 - **Registration path deadlines.** A session's registration changes run one at a time, so a runtime answer that never
   comes would hold every later resume of the session (seen on Azure: a resume on a dead gateway→sandbox stream, with
-  the client's retry queued behind it). Each runtime answer on the path therefore gets 60 s (`upstreamTimings` in
-  `sessions.ts`). The bounded steps are `session.create`, `session.resume` (client resumes, restores, and a cutover's
-  destination), the sandbox handle's `initialize` and `sessionOpened`, `session.options.update`, `session.tools.set`,
-  and a restore's turn checks. When one expires, the connection is probed with `ping` (10 s). One that does not answer
-  is closed: a sandbox session opens a fresh stream on its next request, and the shared runtime's supervisor restarts
-  it. The caller fails with `timeout` (`details: { sessionId, step }`), which it can retry. `RuntimeUpstream.open`
-  already bounds the runtime handshake (30 s); starting a sandbox (`ensureRunning`, `openRuntime`) is bounded by the
-  sandbox module.
+  the client's retry queued behind it). The bounded steps are `session.create`, `session.resume` (client resumes,
+  restores, and a cutover's destination), the sandbox handle's `initialize` and `sessionOpened`,
+  `session.options.update`, `session.tools.set`, and a restore's turn checks. Every 60 s without the answer
+  (`upstreamTimings` in `sessions.ts`), the connection is probed with `ping` (10 s). A connection that answers is still
+  working on the step, which may yet apply, so core keeps waiting and sends it nothing else for the session. Giving up
+  then would let the step land after whatever comes next, such as a resume withdrawing hooks after the reconcile that
+  restored them. A connection that does not answer is closed, so nothing it carried can apply later: a sandbox runtime
+  is restarted before it serves the session again (the reopen above), and the shared runtime's supervisor restarts it.
+  The caller fails with `timeout` (`details: { sessionId, step }`), which it can retry. `RuntimeUpstream.open` already
+  bounds the runtime handshake (30 s); starting a sandbox (`ensureRunning`, `openRuntime`) is bounded by the sandbox
+  module.
 - **Interrupted creates and deletions.** At startup (in the background) and on the next request for the session,
   rows a stopped gateway left `deleting` finish their deletion (sandbox, runtime state, policy, `session.deleted`,
   ledger), and rows left `creating` are discarded (sandbox and policy released), so a schedule retrying its
