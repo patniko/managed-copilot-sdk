@@ -1,12 +1,18 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer, request, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { EGRESS_KEY_HEADER, EGRESS_ROUTES, type EgressRegistration, type VaultInfo } from "@managed-copilot/protocol";
+import { EGRESS_KEY_HEADER, EGRESS_ROUTES, parseConfig, type EgressRegistration, type VaultInfo } from "@managed-copilot/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createCaMaterial } from "../../egress/src/x509.js";
 import { loadConfig } from "../src/config.js";
+import { openDatabase, type Database } from "../src/db.js";
+import { createLogger } from "../src/log.js";
+import { PolicyService } from "../src/modules/network/policy.js";
+import { Sealer } from "../src/modules/network/sealing.js";
+import { migrateNetwork } from "../src/modules/network/store.js";
+import { VaultStore } from "../src/modules/network/vaults.js";
 import { startGateway, type RunningGateway } from "../src/server.js";
 
 const ALICE = { token: "tok-alice", id: 101, login: "alice" };
@@ -325,5 +331,114 @@ describe("network module", () => {
   it("advertises the network capabilities", async () => {
     const info = await call("GET", "/v1/info", ALICE);
     expect(info.body?.capabilities).toEqual(expect.arrayContaining(["network.policy", "vaults", "web_fetch"]));
+  });
+});
+
+describe("policy service across deployment changes", () => {
+  const log = createLogger("test", "error");
+  const sealer = new Sealer(randomBytes(32));
+  const vaults = { payments: [{ env: "STRIPE_API_KEY", value: { secretEnv: "TEST_STRIPE_KEY" }, hosts: ["api.stripe.com"] }] };
+  const database = () => {
+    const db = openDatabase(":memory:");
+    migrateNetwork(db);
+    return db;
+  };
+  /** The policy service as the gateway builds it at startup, over an existing database (a restart with new config). */
+  const start = (db: Database, config: { readonly network?: unknown; readonly environments: Record<string, unknown> }, pushed: EgressRegistration[] = []) => {
+    const deployment = parseConfig({ name: "copilot", vaults, ...config });
+    const store = new VaultStore({ db, sealer, deployment, env: { TEST_STRIPE_KEY: "sk_test_stripe_123" }, log });
+    const channel = { ready: true, caCertificate: () => "", waitReady: async () => undefined, upsert: (registration: EgressRegistration) => void pushed.push(registration), remove: (_sandboxId: string) => undefined };
+    return new PolicyService({ db, deployment, vaults: store, egress: channel, log });
+  };
+
+  it("applies a declared environment's own setting even when its name starts with inline-", () => {
+    const db = database();
+    const policy = start(db, { network: ["example.com"], environments: { "inline-denied": { type: "isolated", network: false }, "inline-open": { type: "isolated", network: true } } });
+    const bind = (sessionId: string, environment: string | undefined) => policy.bindSession({ sessionId, owner: 1, environment, type: "isolated", requested: undefined, vaults: undefined });
+    expect(bind("s-denied", "inline-denied")).toEqual({ access: "disabled", allowedDomains: [] });
+    expect(policy.session("s-denied")).toMatchObject({ environment: "inline-denied", policy: { access: "disabled" } });
+    expect(policy.ceiling("inline-denied").access).toBe("disabled");
+    expect(bind("s-open", "inline-open").access).toBe("enabled");
+    const deploymentDefault = { access: "restricted", allowedDomains: ["example.com"] };
+    expect(bind("s-inline", undefined)).toEqual(deploymentDefault);
+    expect(bind("s-inline-name", "inline-isolated-small")).toEqual(deploymentDefault);
+    expect(policy.session("s-inline-name")?.environment).toBeUndefined();
+    expect(policy.ceiling("inline-shared")).toEqual(deploymentDefault);
+    expect(() => bind("s-unknown", "unknown")).toThrow(/not declared/);
+    // A declared inline-… environment that is later removed means no egress, not the deployment default.
+    const restarted = start(db, { network: ["example.com"], environments: { other: { type: "isolated" } } });
+    expect(restarted.session("s-open")?.policy.access).toBe("disabled");
+    expect(restarted.session("s-inline")?.policy).toEqual(deploymentDefault);
+  });
+
+  it("revokes AppHost vault credentials when the environment stops granting the vault", async () => {
+    const db = database();
+    const before = start(db, { environments: { coder: { type: "isolated", vaults: ["payments"], network: ["api.stripe.com"] } } });
+    before.bindSession({ sessionId: "s-vault", owner: 1, environment: "coder", type: "isolated", requested: undefined, vaults: undefined });
+    const sandbox = await before.registerSandbox({ sandboxId: "sbx_vault", sessionId: "s-vault" });
+    const binding = before.registrations()[0]!.credentials[0]!;
+    expect(binding.placeholder).toBe(sandbox.env.STRIPE_API_KEY);
+    const use = { sandboxId: "sbx_vault", credentialId: binding.id, placeholder: binding.placeholder, host: "api.stripe.com", port: 443, header: "authorization" };
+    expect(before.resolveSecret(use)).toBe("sk_test_stripe_123");
+
+    // Same database, restarted with an AppHost that still declares the vault but no longer grants it to "coder".
+    const after = start(db, { environments: { coder: { type: "isolated", network: ["api.stripe.com"] } } });
+    expect(after.registrations()).toMatchObject([{ sandboxId: "sbx_vault", credentials: [] }]);
+    expect(() => after.resolveSecret(use)).toThrow(/revoked/);
+    expect(after.session("s-vault")?.vaults).toEqual([]);
+    expect((await after.registerSandbox({ sandboxId: "sbx_vault", sessionId: "s-vault" })).env.STRIPE_API_KEY).toBeUndefined();
+  });
+
+  it("promotes from the session's current policy, so a tightened source ceiling survives promotion", () => {
+    const db = database();
+    const worker = { type: "isolated" };
+    start(db, { environments: { helper: { type: "promotable", promoteTo: "worker" }, worker } }).bindSession({ sessionId: "s-promote", owner: 1, environment: "helper", type: "promotable", requested: undefined, vaults: undefined });
+    const tightened = start(db, { environments: { helper: { type: "promotable", promoteTo: "worker", network: false }, worker } });
+    expect(tightened.session("s-promote")?.policy.access).toBe("disabled");
+    expect(tightened.promoteSession("s-promote", "worker").access).toBe("disabled");
+    expect(tightened.session("s-promote")).toMatchObject({ environment: "worker", type: "isolated", policy: { access: "disabled" } });
+  });
+
+  it("reverts an uncommitted promotion exactly, across restarts, and keeps a committed one", async () => {
+    const db = database();
+    const config = { network: ["example.com", "pypi.org"], environments: { helper: { type: "promotable", promoteTo: "worker" }, worker: { type: "isolated", network: ["pypi.org"] } } };
+    const pushed: EgressRegistration[] = [];
+    const policy = start(db, config, pushed);
+    const source = policy.bindSession({ sessionId: "s-roll", owner: 1, environment: "helper", type: "promotable", requested: undefined, vaults: undefined });
+    expect(source).toEqual({ access: "restricted", allowedDomains: ["example.com", "pypi.org"] });
+    expect(policy.revertPromotion("s-roll")).toBeUndefined();
+    expect(policy.promoteSession("s-roll", "worker")).toEqual({ access: "restricted", allowedDomains: ["pypi.org"] });
+    // A retried promotion still reverts to the original source.
+    policy.promoteSession("s-roll", "worker");
+    await policy.registerSandbox({ sandboxId: "sbx_candidate", sessionId: "s-roll" });
+    expect(pushed.at(-1)).toMatchObject({ sandboxId: "sbx_candidate", policy: { allowedDomains: ["pypi.org"] } });
+
+    const restarted = start(db, config, pushed);
+    expect(restarted.revertPromotion("s-roll")).toEqual(source);
+    expect(restarted.session("s-roll")).toMatchObject({ environment: "helper", type: "promotable", policy: source });
+    // The candidate sandbox left behind by the rollback gets no egress, and no new sandbox can register.
+    expect(pushed.at(-1)).toMatchObject({ sandboxId: "sbx_candidate", policy: { access: "disabled" }, credentials: [] });
+    await expect(restarted.registerSandbox({ sandboxId: "sbx_other", sessionId: "s-roll" })).rejects.toThrow(/shared session/);
+    expect(restarted.revertPromotion("s-roll")).toBeUndefined();
+
+    restarted.promoteSession("s-roll", "worker");
+    restarted.commitPromotion("s-roll");
+    expect(restarted.revertPromotion("s-roll")).toBeUndefined();
+    expect(restarted.session("s-roll")).toMatchObject({ environment: "worker", type: "isolated", policy: { allowedDomains: ["pypi.org"] } });
+  });
+
+  it("builds proxy URLs for the address a sandbox provider names", async () => {
+    const policy = start(database(), { environments: { coder: { type: "isolated", network: true } } });
+    policy.bindSession({ sessionId: "s-proxy", owner: 1, environment: "coder", type: "isolated", requested: undefined, vaults: undefined });
+    const urlFor = async (proxy?: { host: string; port: number }) => new URL((await policy.registerSandbox({ sandboxId: "sbx_proxy", sessionId: "s-proxy", ...(proxy ? { proxy } : {}) })).proxyUrl);
+    expect((await urlFor()).host).toBe("mc-egress:3128");
+    expect((await urlFor({ host: "Egress.Internal.Example", port: 8080 })).host).toBe("egress.internal.example:8080");
+    expect((await urlFor({ host: "10.0.1.4", port: 3128 })).host).toBe("10.0.1.4:3128");
+    expect((await urlFor({ host: "fd00::4", port: 3128 })).host).toBe("[fd00::4]:3128");
+    const sandbox = await policy.registerSandbox({ sandboxId: "sbx_proxy", sessionId: "s-proxy", proxy: { host: "10.0.1.4", port: 3128 } });
+    expect(sandbox.env.HTTPS_PROXY).toBe(sandbox.proxyUrl);
+    for (const proxy of [{ host: "bad host", port: 3128 }, { host: "egress", port: 0 }, { host: "egress", port: 3128.5 }, { host: "a/b", port: 1 }]) {
+      await expect(policy.registerSandbox({ sandboxId: "sbx_proxy", sessionId: "s-proxy", proxy }), JSON.stringify(proxy)).rejects.toThrow(/proxy\./);
+    }
   });
 });
