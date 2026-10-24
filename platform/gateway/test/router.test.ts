@@ -79,7 +79,7 @@ describe("core router with a stock-protocol runtime", () => {
     expect(forwarded["memory"]).toEqual({ enabled: false });
     expect(forwarded["allowedModels"]).toEqual(["claude-haiku-4.5"]);
     expect(String(forwarded["workingDirectory"])).toContain(sessionId);
-    expect(forwarded["systemMessage"]).toMatchObject({ mode: "customize", sections: { environment_context: { action: "remove" } } });
+    expect(forwarded["systemMessage"]).toMatchObject({ mode: "customize", sections: { environment_context: { action: "replace" }, code_change_rules: { action: "remove" } } });
     // The runtime asked the gateway for the session owner's token (never a shared service token).
     expect([ALICE, ALICE_SECOND]).toContain(runtime.sessions.get(sessionId)!.token);
     const lockdown = runtime.calls("session.options.update").find((call) => call.params["sessionId"] === sessionId);
@@ -105,7 +105,10 @@ describe("core router with a stock-protocol runtime", () => {
     await expect(attempt({ pluginDirectories: ["/plugins"] })).rejects.toMatchObject({ data: { code: "policy_violation" } });
     await expect(attempt({ provider: { type: "openai", baseUrl: "https://example.com" } })).rejects.toMatchObject({ data: { code: "policy_violation" } });
     await expect(attempt({ model: "gpt-5.4" })).rejects.toMatchObject({ data: { code: "policy_violation" } });
-    await expect(attempt({ mcpServers: { remote: { type: "http", url: "https://mcp.example.com" } } })).rejects.toMatchObject({ data: { code: "capability_unavailable" } });
+    // Remote MCP goes through the network module's adapter (here: DNS fails for the reserved .invalid name); without
+    // that module, shared placement cannot reach a remote server at all.
+    const hasAdapter = Boolean((gateway.gateway.app.services as Record<string, unknown>)["policy"]);
+    await expect(attempt({ mcpServers: { remote: { type: "http", url: "https://mcp.example.invalid/mcp" } } })).rejects.toMatchObject({ data: { code: hasAdapter ? "invalid_request" : "capability_unavailable" } });
     await expect(attempt({ someFutureOption: true })).rejects.toMatchObject({ data: { code: "capability_unavailable" } });
     await expect(attempt({ tools: [{ name: "schedule_task" }] })).rejects.toMatchObject({ data: { code: "conflict" } });
 
@@ -159,18 +162,18 @@ describe("core router with a stock-protocol runtime", () => {
     expect(runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId)).toHaveLength(2);
   });
 
-  it("withholds actionable events from other clients able to execute them", async () => {
+  it("delivers actionable events to exactly one eligible client: the creating connection first", async () => {
     const a = await connect(ALICE);
     const b = await connect(ALICE);
     const sessionId = crypto.randomUUID();
     await a.request("session.create", { sessionId, tools: [{ name: "lookup_order" }] });
     await b.request("session.resume", { sessionId, tools: [{ name: "lookup_order" }] });
     await b.request("session.send", { sessionId, prompt: "tool:lookup_order" });
-    const requested = await b.waitForEvent("external_tool.requested");
-    await b.request("session.tools.handlePendingToolCall", { sessionId, requestId: (requested["data"] as Record<string, unknown>)["requestId"], result: "ok" });
-    await a.waitForEvent("session.idle");
-    expect(a.events("external_tool.requested")).toHaveLength(0);
-    expect(a.events("assistant.message")).toHaveLength(1);
+    const requested = await a.waitForEvent("external_tool.requested");
+    await a.request("session.tools.handlePendingToolCall", { sessionId, requestId: (requested["data"] as Record<string, unknown>)["requestId"], result: "ok" });
+    await b.waitForEvent("session.idle");
+    expect(b.events("external_tool.requested")).toHaveLength(0);
+    expect(b.events("assistant.message")).toHaveLength(1);
   });
 
   it("keeps request IDs apart for concurrent clients and relays cancellation", async () => {
@@ -212,7 +215,9 @@ describe("core router with a stock-protocol runtime", () => {
     const observer = await connect(ALICE);
     await observer.request("session.resume", { sessionId, tools: [{ name: "list_orders" }] });
     const resumed = runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).at(-1)!;
-    expect((resumed.params["tools"] as { name: string }[]).map((tool) => tool.name).sort()).toEqual(["list_orders", "lookup_order"]);
+    const platformTools = gateway.gateway.app.service("platformTools");
+    const declared = (resumed.params["tools"] as { name: string }[]).map((tool) => tool.name).filter((name) => !platformTools.get(name));
+    expect(declared.sort()).toEqual(["list_orders", "lookup_order"]);
     expect(resumed.params).toMatchObject({ requestPermission: true, hooks: true });
     // The owner's tool still reaches the owner.
     owner.answer = () => ({});
