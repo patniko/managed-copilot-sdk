@@ -127,6 +127,33 @@ export function planSandboxImages(inputs: SandboxImageInputs): SandboxImagePlan 
   return { inputs, baseHash, builds };
 }
 
+/** The egress proxy image (platform/egress), built from its bundled dist/egress.mjs. */
+export interface EgressImagePlan {
+  readonly context: string;
+  readonly repository: string;
+  readonly tag: string;
+}
+
+export function planEgressImage(name: string, context: string): EgressImagePlan {
+  if (!existsSync(join(context, "Dockerfile"))) throw new AzurePublishError(`The egress proxy definition was not found at ${join(context, "Dockerfile")}.`);
+  if (!existsSync(join(context, "dist", "egress.mjs"))) throw new AzurePublishError("The egress proxy is not built yet. Run `pnpm build` at the repository root, then deploy again.");
+  const tag = short(hashTree(context, (rel) => rel === "Dockerfile" || rel === ".dockerignore" || rel === "dist/egress.mjs"));
+  return { context, repository: `${name}-egress`, tag };
+}
+
+/** Builds and pushes the egress proxy image unless the registry has it (after pushSandboxImages signed Docker in). */
+export async function pushEgressImage(plan: EgressImagePlan, context: PushContext): Promise<"pushed" | "present"> {
+  const run = context.run ?? runCommand;
+  const ref = `${context.loginServer}/${plan.repository}:${plan.tag}`;
+  if ((await run("docker", ["buildx", "imagetools", "inspect", ref])).code === 0) return "present";
+  await context.report(`Building and pushing ${plan.repository}:${plan.tag}`);
+  const build = await run("docker", ["build", "--progress=plain", "--platform", PLATFORM, "-t", ref, plan.context], context.debug);
+  if (build.code !== 0) throw failure("Building the egress proxy image", build);
+  const push = await run("docker", ["push", ref], context.debug);
+  if (push.code !== 0) throw failure(`Pushing ${ref}`, push);
+  return "pushed";
+}
+
 /** The gateway's `MANAGED_COPILOT_AZURE_SANDBOX_IMAGES`: environment → image, relative to `MANAGED_COPILOT_AZURE_REGISTRY`. */
 export function imageMap(plan: SandboxImagePlan): string {
   return JSON.stringify(Object.fromEntries(plan.builds.map((build) => [build.environment, `${build.repository}:${build.tag}`])));
@@ -142,7 +169,16 @@ export type CommandRunner = (command: string, args: readonly string[], onLine?: 
 
 export const runCommand: CommandRunner = (command, args, onLine) =>
   new Promise((resolve, reject) => {
-    const child = spawn(command, [...args], { windowsHide: true, shell: process.platform === "win32" && command === "az", env: { ...process.env, DOCKER_BUILDKIT: "1" } });
+    // The Azure CLI is a .cmd on Windows and runs only through a shell; its arguments here are fixed words and Azure
+    // resource names, checked so nothing is interpreted by the shell.
+    const viaShell = process.platform === "win32" && command === "az";
+    if (viaShell && args.some((arg) => !/^[A-Za-z0-9._:/=-]+$/.test(arg))) {
+      reject(new AzurePublishError(`Refusing to run the Azure CLI with an unexpected argument: ${args.join(" ")}`));
+      return;
+    }
+    const child = viaShell
+      ? spawn([command, ...args].join(" "), { windowsHide: true, shell: true, env: { ...process.env, DOCKER_BUILDKIT: "1" } })
+      : spawn(command, [...args], { windowsHide: true, env: { ...process.env, DOCKER_BUILDKIT: "1" } });
     const lines: string[] = [];
     let pending = "";
     const take = (chunk: Buffer) => {

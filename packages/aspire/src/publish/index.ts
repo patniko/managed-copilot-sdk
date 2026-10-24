@@ -12,10 +12,11 @@ import type { ManagedCopilotResource } from "../add.js";
 import type { AspireBuilder } from "../aspire.js";
 import type { ManagedCopilotOptions, SecretBinding } from "../options.js";
 import { AzurePublishError, applyAccessRules, listSetting, prepareAzureConfig, rewriteWebhooks } from "./config.js";
-import { expr } from "./expressions.js";
+import { expr, joinExpression } from "./expressions.js";
 import { writeGatewayBuildFiles } from "./gateway-image.js";
+import { EGRESS_BICEP } from "./egress.js";
 import { SANDBOX_GROUP_BICEP } from "./sandbox-group.js";
-import { imageMap, planSandboxImages, pushSandboxImages, type SandboxImagePlan } from "./sandbox-images.js";
+import { imageMap, planEgressImage, planSandboxImages, pushEgressImage, pushSandboxImages, type EgressImagePlan, type SandboxImagePlan } from "./sandbox-images.js";
 import type { PublishAzureResource, PublishBuilder, PublishContainer, PublishContainerResource, PublishEnvironmentResource, PublishValue } from "./types.js";
 
 export { AzurePublishError } from "./config.js";
@@ -55,6 +56,8 @@ interface Deployment {
   readonly appsByPort: Map<number, string>;
   /** One value per publish: a newer deployment's replicas take over the data volume's leases from older ones. */
   readonly stamp: string;
+  /** Source ranges allowed to open the published apps (Parameters:app-allowed-ips, or this machine's public address). */
+  allowedSources?: string;
   appToken?: object;
 }
 
@@ -104,6 +107,34 @@ function installedVersion(fromDirectory: string, name: string): string {
   throw new AzurePublishError(`Cannot find the installed version of ${name}. Run \`pnpm install\` at the repository root.`);
 }
 
+/** This machine's public IPv4 address, as the Internet sees it. */
+async function publicAddress(): Promise<string | undefined> {
+  try {
+    const response = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(10_000) });
+    const { ip } = (await response.json()) as { ip?: unknown };
+    return typeof ip === "string" && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Who may open the published apps, which act as the deployer's GitHub account: Parameters:app-allowed-ips (IPv4 CIDRs,
+ * comma-separated, or "*"), else this machine's public address.
+ */
+async function appAllowedSources(builder: PublishBuilder): Promise<string> {
+  const configured = await setting(builder, "Parameters:app-allowed-ips");
+  if (configured) return configured;
+  const address = await publicAddress();
+  if (!address) {
+    throw new AzurePublishError(
+      "The published apps act as your GitHub account, so their public address must be restricted, and this machine's public address could not be detected. " +
+        'Set Parameters:app-allowed-ips to the IPv4 ranges allowed to open your apps (for example "203.0.113.7/32"), or to "*" to allow any address.',
+    );
+  }
+  return `${address}/32`;
+}
+
 /** The pip index baked into sandbox images, as `aspire run` resolves it. */
 function pipIndexUrl(): string | undefined {
   const configured = process.env.MANAGED_COPILOT_PIP_INDEX_URL;
@@ -147,9 +178,7 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     .withEnvironment("MANAGED_COPILOT_LEASE_STAMP", deployment.stamp)
     .withEnvironment("MANAGED_COPILOT_INSTANCE", name.slice(0, 24))
     .withEnvironment("MANAGED_COPILOT_PLATFORM_KEY", platformKey)
-    .withEnvironment("MANAGED_COPILOT_SANDBOX_PROVIDER", "azure")
-    // The egress proxy is not deployed to Azure yet: sandboxes that need network access fail with capability_unavailable.
-    .withEnvironment("MANAGED_COPILOT_EGRESS", "off");
+    .withEnvironment("MANAGED_COPILOT_SANDBOX_PROVIDER", "azure");
   for (const [parameter, variable] of [
     [`${name}-durable-key`, "MANAGED_COPILOT_DURABLE_KEY"],
     [`${name}-vault-key`, "MANAGED_COPILOT_VAULT_KEY"],
@@ -169,11 +198,15 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     sdkVersion: installedVersion(gatewayDirectory(input.options, input.appHostDirectory), "@github/copilot-sdk"),
   }) : undefined;
   if (plan) {
-    const sandboxes = await sandboxGroup(builder, name, environment, plan);
+    const egress = planEgressImage(name, join(gatewayDirectory(input.options, input.appHostDirectory), "..", "egress"));
+    const sandboxes = await sandboxGroup(builder, name, environment, plan, egress, addressSpace);
     gateway = gateway.withAzureUserAssignedIdentity(sandboxes.identity);
     for (const [variable, value] of sandboxes.env) gateway = gateway.withEnvironment(variable, value);
     // As with `aspire run`: import the sandbox images into disk images at start instead of on the first session.
     if (input.options.prepareSandboxes ?? true) gateway = gateway.withEnvironment("MANAGED_COPILOT_SANDBOX_PREPARE", "1");
+  } else {
+    // No sandboxes: nothing needs the sandbox egress proxy (shared sessions fetch through the gateway itself).
+    gateway = gateway.withEnvironment("MANAGED_COPILOT_EGRESS", "off");
   }
   // Computed last, after every app is declared, so loopback webhooks can point at the deployed apps.
   gateway = gateway.withEnvironmentCallback(async (context) => {
@@ -186,7 +219,11 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     `print-${name}-url`,
     async (context) => {
       const domain = await (await environment.getOutput("AZURE_CONTAINER_APPS_ENVIRONMENT_DEFAULT_DOMAIN")).value();
-      await (await context.summary()).add("Managed Copilot", `https://${name}.${domain} (ManagedCopilot.connect({ url }), MANAGED_COPILOT_URL, or managed-copilot attach --url)`);
+      const summary = await context.summary();
+      await summary.add("Managed Copilot", `https://${name}.${domain} (ManagedCopilot.connect({ url }), MANAGED_COPILOT_URL, or managed-copilot attach --url)`);
+      if (deployment.allowedSources) {
+        await summary.add("Apps open to", `${deployment.allowedSources === "*" ? "any address" : deployment.allowedSources} (change with Parameters:app-allowed-ips)`);
+      }
     },
     { dependsOn: ["provision-azure-bicep-resources"], requiredBy: ["deploy"] },
   );
@@ -204,6 +241,8 @@ async function sandboxGroup(
   name: string,
   environment: PublishEnvironmentResource,
   plan: SandboxImagePlan,
+  egressImage: EgressImagePlan,
+  addressSpace: string,
 ): Promise<{ identity: PublishAzureResource; env: [string, PublishValue][] }> {
   const identity = await builder.addAzureUserAssignedIdentity(`${name}-gateway-identity`);
   const group = await builder
@@ -214,6 +253,19 @@ async function sandboxGroup(
   const loginServer = await environment.getOutput("AZURE_CONTAINER_REGISTRY_ENDPOINT");
   const registryName = await environment.getOutput("AZURE_CONTAINER_REGISTRY_NAME");
 
+  // The sandboxes' egress proxy (external mode): its own internal environment on the egress subnet, linked to the gateway.
+  const egressKey = await builder.addParameterWithGeneratedValue(`${name}-egress-key`, { minLength: 43, special: false }, { secret: true, persist: true });
+  const egress = await builder
+    .addBicepTemplateString(`${name}-egress`, EGRESS_BICEP)
+    .withParameter("subnetId", { value: await environment.getOutput("MANAGED_COPILOT_EGRESS_SUBNET_ID") })
+    .withParameter("logAnalyticsWorkspaceName", { value: await environment.getOutput("AZURE_LOG_ANALYTICS_WORKSPACE_NAME") })
+    .withParameter("registryServer", { value: loginServer })
+    .withParameter("registryIdentityId", { value: await environment.getOutput("AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID") })
+    .withParameter("image", { value: joinExpression([loginServer, `/${egressImage.repository}:${egressImage.tag}`]) })
+    .withParameter("gatewayUrl", { value: joinExpression(["https://", name, ".", await environment.getOutput("AZURE_CONTAINER_APPS_ENVIRONMENT_DEFAULT_DOMAIN")]) })
+    .withParameter("gatewayKey", { value: egressKey })
+    .withParameter("protectedCidrs", { value: addressSpace });
+
   await builder.pipeline().addStep(
     `push-${name}-sandbox-images`,
     async (context) => {
@@ -222,10 +274,11 @@ async function sandboxGroup(
       try {
         const [server, registry] = [await loginServer.value(), await registryName.value()];
         if (!server || !registry) throw new AzurePublishError("The container registry has not been provisioned yet.");
-        const result = await pushSandboxImages(plan, { registryName: registry, loginServer: server, report: async (message) => void (await task.updateTask(message)) });
-        await task.completeTask({
-          completionMessage: result.pushed.length > 0 ? `Pushed ${result.pushed.length} sandbox image(s)` : `Sandbox images are up to date (${result.present.length})`,
-        });
+        const push = { registryName: registry, loginServer: server, report: async (message: string) => void (await task.updateTask(message)) };
+        const result = await pushSandboxImages(plan, push);
+        const proxy = await pushEgressImage(egressImage, push);
+        const pushed = result.pushed.length + (proxy === "pushed" ? 1 : 0);
+        await task.completeTask({ completionMessage: pushed > 0 ? `Pushed ${pushed} image(s)` : `Sandbox and egress images are up to date (${result.present.length + 1})` });
       } catch (error) {
         await task.completeTask({ completionMessage: (error as Error).message, completionState: "CompletedWithError" });
         throw error;
@@ -245,9 +298,11 @@ async function sandboxGroup(
       ["MANAGED_COPILOT_AZURE_SANDBOX_GROUP", await group.getOutput("name")],
       ["MANAGED_COPILOT_AZURE_REGION", await group.getOutput("region")],
       ["MANAGED_COPILOT_AZURE_VNET_CONNECTION", await group.getOutput("vnetConnection")],
-      ["MANAGED_COPILOT_AZURE_REGISTRY_IDENTITY", await group.getOutput("pullIdentityId")],
       ["MANAGED_COPILOT_AZURE_REGISTRY", loginServer],
       ["MANAGED_COPILOT_AZURE_SANDBOX_IMAGES", imageMap(plan)],
+      ["MANAGED_COPILOT_EGRESS", "external"],
+      ["MANAGED_COPILOT_EGRESS_KEY", egressKey],
+      ["MANAGED_COPILOT_AZURE_EGRESS_PROXY", await egress.getOutput("proxyAddress")],
     ],
   };
 }
@@ -284,13 +339,8 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   const gatewayUrl = copilot.url as object;
   const holder = deployment.appsByPort.get(app.port);
   if (holder) throw new AzurePublishError(`Apps "${holder}" and "${app.name}" both use port ${app.port}; webhooks address apps by port.`);
-  const allowed = await setting(publisher, "Parameters:app-allowed-ips");
-  if (!allowed) {
-    throw new AzurePublishError(
-      `"${app.name}" acts as your GitHub account, so its public address must be restricted. Set Parameters:app-allowed-ips to the IPv4 ranges ` +
-        'allowed to open your apps (for example "203.0.113.7/32"), or to "*" to allow any address.',
-    );
-  }
+  deployment.allowedSources ??= await appAllowedSources(publisher);
+  const allowed = deployment.allowedSources;
   deployment.appsByPort.set(app.port, app.name);
   deployment.appToken ??= await publisher.addParameter("app-github-token", { secret: true });
 
