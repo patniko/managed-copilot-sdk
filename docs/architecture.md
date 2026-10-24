@@ -527,8 +527,8 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   while the ID names a session in sandbox placement: the promoted session's home, or a new session's sandbox, whose
   creation may already be queued in the sandbox service. A candidate still registered then is retried at the next
   start. Otherwise the check and the queued delete happen in one synchronous step, and core records a session before
-  allocating its sandbox, so no other session's creation can be queued ahead of it. The expected sandbox ID goes along
-  so the sandbox service can confirm it under its lock.
+  allocating its sandbox, so no other session's creation can be queued ahead of it. The sandbox service also confirms
+  the expected sandbox ID under its session lock and skips a delete whose sandbox was replaced.
 - **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
   core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
   generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried
