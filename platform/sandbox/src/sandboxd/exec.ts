@@ -6,22 +6,48 @@ export interface Identity {
   readonly gid: number;
 }
 
+const SETPRIV = "/usr/bin/setpriv";
+
 /**
- * Spawn arguments that enter `cwd` only after the privilege drop: libuv changes directory before `setuid`, and
- * sandboxd's root holds no DAC capabilities, so a workload that tightens `/workspace` permissions would otherwise
- * make every spawn fail. The shell `exec`s the command, so the pid and signals are the command's own.
+ * Spawn arguments that run `command` as the workload identity with no way back to privilege, independent of what the
+ * backend's container runtime enforces: `setpriv` switches uid/gid, clears supplementary groups, sets no_new_privs,
+ * and empties the inheritable, ambient, and bounding capability sets (the bounding drop is a no-op where sandboxd
+ * lacks CAP_SETPCAP, as under Docker's minimal set). The shell then enters `cwd`, which happens only after the
+ * privilege drop because sandboxd's root holds no DAC capabilities, and `exec`s the command, so the pid and signals are
+ * the command's own.
  */
-export function inDirectory(cwd: string, command: string, args: readonly string[]): { command: string; args: string[]; cwd: string } {
-  return { command: "/bin/sh", args: ["-c", 'cd -- "$0" || exit 126; exec "$@"', cwd, command, ...args], cwd: "/" };
+export function asWorkload(identity: Identity, cwd: string, command: string, args: readonly string[]): { command: string; args: string[]; cwd: string } {
+  return {
+    command: SETPRIV,
+    args: [
+      `--reuid=${identity.uid}`,
+      `--regid=${identity.gid}`,
+      "--clear-groups",
+      "--no-new-privs",
+      "--inh-caps=-all",
+      "--ambient-caps=-all",
+      "--bounding-set=-all",
+      "--",
+      "/bin/sh",
+      "-c",
+      'cd -- "$0" || exit 126; exec "$@"',
+      cwd,
+      command,
+      ...args,
+    ],
+    cwd: "/",
+  };
 }
 
-/** Replaces secret values and URL userinfo in diagnostic text. */
+/** Replaces secret values, URL userinfo, and signed-URL credentials (SAS `sig`, S3/GCS signatures, tokens) in diagnostic text. */
 export function redact(text: string, secrets: readonly string[]): string {
   let out = text;
   for (const secret of secrets) {
     if (secret.length >= 6) out = out.split(secret).join("[redacted]");
   }
-  return out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@");
+  return out
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/([?&](?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|token|access_token|api[-_]?key|code)=)[^&\s'")]+/gi, "$1[redacted]");
 }
 
 /** Keeps the last `limit` bytes of combined output. */
@@ -81,13 +107,12 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
  */
 export function run(command: string, args: readonly string[], options: RunOptions): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const target = options.identity ? inDirectory(options.cwd, command, args) : { command, args: [...args], cwd: options.cwd };
+    const target = options.identity ? asWorkload(options.identity, options.cwd, command, args) : { command, args: [...args], cwd: options.cwd };
     const child = spawn(target.command, target.args, {
       cwd: target.cwd,
       env: options.env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
-      ...(options.identity ? { uid: options.identity.uid, gid: options.identity.gid } : {}),
     });
     const tail = new OutputTail(options.outputLimit);
     const stdout: Buffer[] = [];

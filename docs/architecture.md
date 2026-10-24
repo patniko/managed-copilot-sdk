@@ -121,6 +121,13 @@ denies configuration RPCs it does not understand.
   client's session lifecycle events. Owner checks are never weakened to make a helper work.
 - The SDK validates the deployment URL before sending a credential: HTTPS for remote deployments, HTTP only for
   verified loopback, no embedded credentials, and a validated discovery record.
+- **GitHub verification** (`auth`). Tokens are verified against GitHub `/user` (cached 5 minutes) plus the AppHost
+  access rules. Transport errors, timeouts, and 5xx answers are retried with jittered backoff inside a 35 s deadline;
+  rate limits are not retried. While GitHub is unreachable, a token's last successful verification stands in for up
+  to 15 minutes (re-checked in the background every 30 s); a rejection (401, a non-rate-limit 403, or `forbidden`)
+  replaces it, so it never revives a rejected token. Otherwise callers get `upstream_unavailable` (HTTP 503 with
+  `Retry-After` and `details.retryAfterSeconds`), never `authentication_required` for an outage. Long-lived
+  connections re-verify at most once a minute and are closed only for `authentication_required`/`forbidden`.
 
 ### Credentials and inference
 
@@ -158,9 +165,20 @@ denies configuration RPCs it does not understand.
 
 ### Isolated placement
 
-As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platform/sandbox`; contract in
-`platform/gateway/src/modules/sandbox/contract.ts` and `packages/protocol/src/sandbox.ts`):
+As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts in
+`platform/gateway/src/modules/sandbox/contract.ts`, `.../sandbox/providers/types.ts`, and
+`packages/protocol/src/sandbox.ts`):
 
+- **Backends.** The service owns policy and lifecycle (setup, egress registration, the runtime, idle stop,
+  reconciliation, artifacts); a `SandboxProvider` (`providers/types.ts`) owns compute, persistent storage,
+  networking, images, and reachability of each sandbox's sandboxd: `ready`/`prepare`, `ensureImage`/`hasImage`,
+  `create`/`start` (with cancellation and progress), `stop`/`remove`/`isRunning`, `address` (egress pinning, when
+  `capabilities.addressPinning`), `endpoint` (http or https base URL plus headers, also used for WebSocket upgrades),
+  optional `egressProxy` (passed to `policy.registerSandbox`), `reportUnreachable`/`reattach`, and `inventory`.
+  `MANAGED_COPILOT_SANDBOX_PROVIDER` selects `docker` (local, `providers/docker/`, described below) or `azure`
+  (`providers/azure/`, owned by the azure workstream). Providers must keep: sandboxd as root with only CHOWN, KILL,
+  SETGID, and SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, `/var/lib/managed-copilot`; no
+  route between sandboxes and no Internet except through the egress proxy; sandboxd reachable only through `endpoint`.
 - **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
@@ -180,10 +198,13 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   attach), streamed workspace list/read/write, and output manifests. It starts the SDK's stock headless
   `copilot-runtime` as uid 10001 with cwd `/workspace`, `COPILOT_CONNECTION_TOKEN`, its own `COPILOT_HOME`, the egress
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
-  unexpected exits. Every workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a
-  short-lived worker as uid 10001 that walks the path one segment at a time with `chdir`, refuses symbolic links,
-  verifies the real directory after every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root
-  never touches workspace paths, and children enter `/workspace` only after dropping privileges.
+  unexpected exits. Every workload process (the runtime, setup commands, file workers) starts through `setpriv`:
+  uid/gid 10001, cleared groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so the
+  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. Every
+  workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a short-lived worker as uid 10001
+  that walks the path one segment at a time with `chdir`, refuses symbolic links, verifies the real directory after
+  every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root never touches workspace paths, and
+  children enter `/workspace` only after dropping privileges.
 - **Custom agents.** The stock runtime resolves a named `agent` from `agentDirectories` only when it holds a GitHub
   credential at construction (verified on 1.0.103: without one, `session.create` fails with "Custom agent … not
   found"). A sandbox runtime gets its brokered credential after construction, so the sandbox module removes `agent`
@@ -201,12 +222,20 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   FROM it, must carry the base label, and are pinned by image ID per sandbox, so a resume never changes the toolchain.
   `warm > 0` fails gateway start: this backend cannot keep warm sandboxes safely.
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
-  tool/permission/elicitation action is pending, and no file transfer or publication is in flight; it closes runtime
-  streams so core resumes on next use. `ensureRunning` restarts (or recreates from the pinned image and existing
-  volumes) and re-registers egress. Stops close runtime streams, stop the container, then unregister egress and detach
-  the relay and proxy from the sandbox network. `delete` marks `deleting`, removes container, volumes, network, and
-  artifacts, and reconciliation finishes after a crash; orphaned resources labelled with the instance are swept on
-  start.
+  tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
+  no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
+  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until its
+  events flow again), and idle sweeps begin only after that reconciliation. `ensureRunning` restarts (or recreates
+  from the pinned image and existing volumes) and re-registers egress. Stops close runtime streams, stop the
+  container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
+  `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources
+  labelled with the instance that no current record owns are swept on start.
+- **Promotion import.** `sandboxes.importRuntimeState(sessionId, { sessionStateDir, activeTurnId? })` copies the
+  regular files of a gateway-host `session-state/<sessionId>` export (no `*.lock` files; links and special files are
+  refused; ≤10,000 files, ≤1 GiB) into the running sandbox runtime's COPILOT_HOME as uid 10001. Files are staged under
+  `COPILOT_HOME/.mc-import/<random>` and swapped in for `session-state/<sessionId>` with two renames, so a retried
+  import replaces rather than merges. `activeTurnId` tracks a turn that started in shared placement so its root
+  `session.idle` in the sandbox publishes outputs and idle stop waits for it.
 - **The sandbox relay** (`<instance>-relay`, same image, uid 65534, read-only rootfs) is on `<instance>-edge`
   (published on 127.0.0.1) and every sandbox network; it forwards `/relay/<sandboxId>/...` HTTP and upgrades to
   `sbx-<id>:7781` after checking the platform key.
@@ -224,12 +253,15 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   total are rejected with reasons), the gateway downloads and re-verifies each changed file into content-addressed
   storage under `<dataDir>/artifacts/<sessionId>/`, and records versions, digests, and a per-turn manifest. Rejections,
   cancelled turns, and turns that ended in errors are recorded as `failed` publications, never empty successes.
-  Publications run one at a time per session, and `artifact.published` (through core's events) lists only new
-  versions; a turn that changed nothing under `outputs/` emits no event.
+  Publications run one at a time per session. If a later root turn started before a turn's outputs manifest was
+  captured, that publication fails ("cannot be attributed to this turn") rather than label the later turn's bytes;
+  the current outputs publish when the later turn completes. Publications still pending at gateway start are failed
+  with an explicit reason. `artifact.published` (through core's events) lists only new versions; a turn that changed
+  nothing under `outputs/` emits no event.
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the
-  placeholder); a publication can race a following turn that rewrites a file within its download window, which the
-  digest re-check turns into a `failed` publication rather than a wrong artifact.
+  placeholder); turn attribution relies on the runtime's `user.message` reaching the gateway before the next turn's
+  tools change `outputs/`.
 - **REST** (owner-scoped, shared sessions answer `invalid_request`): `GET /v1/sessions/:id/files?path=&recursive=`,
   `GET|PUT /v1/sessions/:id/files/content?path=&overwrite=` (streamed, 512 MiB limit, atomic replace by default),
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
@@ -379,13 +411,13 @@ structurally (they may add members).
 
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
-| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected); `liveCredential(accountId)` |
+| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity); `liveCredential(accountId)` |
 | `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
 | `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
-| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `stop` and workspace `listFiles`/`readFile`/`writeFile` |
+| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy`. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |
@@ -423,10 +455,18 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 - **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
   delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the first attached
   client able to answer, in durable's preference order (the creating connection, then by attach time), gets them and
-  other eligible clients are withheld. `session.lifecycle` goes only to
+  other eligible clients are withheld. Replayed actions (`onAttached`) take the same sanitizing path. `session.detach`,
+  deletion, and failed creates call `onDetached(connectionId, sessionId)`; only a closed connection calls
+  `onDetached(connectionId)`. `session.lifecycle` goes only to
   the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Everything a shared session
   sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
-  rewritten (`/workspace` for the session directory, `/platform` otherwise).
+  rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
+  (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
+  else under the data directory (including its resolved form) `/platform`.
+- **Agents.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a restore
+  (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
+  Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
+  create/resume params and selects it in `sessionOpened`.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
@@ -537,6 +577,7 @@ sequenceDiagram
 | `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs |
 | `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images |
 | `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `platform/sandbox` | Use a prebuilt base image instead (must carry the base label) |
+| `MANAGED_COPILOT_SANDBOX_PROVIDER` | `docker` | Sandbox backend: `docker` (local) or `azure` |
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
 | `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
 | `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |

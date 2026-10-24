@@ -19,6 +19,7 @@ export const ERROR_CODES = [
   "state_restore_failed",
   "publication_failed",
   "inference_unavailable",
+  "upstream_unavailable",
   "transport_unsupported",
   "timeout",
   "internal",
@@ -42,6 +43,8 @@ export const ERROR_HTTP_STATUS: Readonly<Record<ErrorCode, number>> = {
   state_restore_failed: 424,
   publication_failed: 424,
   inference_unavailable: 503,
+  /** A platform dependency (GitHub) is briefly unreachable; retry after `details.retryAfterSeconds`. */
+  upstream_unavailable: 503,
   transport_unsupported: 400,
   timeout: 504,
   internal: 500,
