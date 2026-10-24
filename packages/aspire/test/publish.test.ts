@@ -7,9 +7,24 @@ import { APPHOST_DIR_IN_IMAGE, AzurePublishError, applyAccessRules, listSetting,
 import { expr } from "../src/publish/expressions.js";
 import { writeGatewayBuildFiles } from "../src/publish/gateway-image.js";
 import { EGRESS_BICEP } from "../src/publish/egress.js";
+import { appTokenParameterOptions } from "../src/publish/index.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const appHost = repoRoot;
+
+describe("published app credentials", () => {
+  it("keeps explicit replacement credentials secret and overrides saved parameter values", () => {
+    expect(appTokenParameterOptions({ "Parameters__app-github-token": " replacement-test-credential\n" })).toEqual({
+      secret: true,
+      value: "replacement-test-credential",
+    });
+    expect(appTokenParameterOptions({})).toEqual({ secret: true });
+  });
+
+  it("does not silently reuse a saved credential after an explicitly empty replacement", () => {
+    expect(() => appTokenParameterOptions({ "Parameters__app-github-token": " " })).toThrow(/is empty/);
+  });
+});
 
 describe("Azure egress persistence", () => {
   it("mounts the same restricted NFS CA directory for initialization and the non-root proxy", () => {

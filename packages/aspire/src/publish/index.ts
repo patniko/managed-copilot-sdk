@@ -63,6 +63,14 @@ interface Deployment {
 
 const deployments = new WeakMap<object, Deployment>();
 
+/** An explicit environment credential must override Aspire's saved deployment parameter, without going through argv. */
+export function appTokenParameterOptions(env: Readonly<Record<string, string | undefined>> = process.env): { secret: true; value?: string } {
+  const value = env["Parameters__app-github-token"];
+  if (value === undefined) return { secret: true };
+  if (!value.trim()) throw new AzurePublishError("Parameters:app-github-token is empty. Provide the GitHub credential the published apps should use.");
+  return { secret: true, value: value.trim() };
+}
+
 function hostNpmRegistry(): string {
   try {
     const registry = execSync("npm config get registry", { encoding: "utf8", timeout: 15_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -347,7 +355,7 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   deployment.allowedSources ??= await appAllowedSources(publisher);
   const allowed = deployment.allowedSources;
   deployment.appsByPort.set(app.port, app.name);
-  deployment.appToken ??= await publisher.addParameter("app-github-token", { secret: true });
+  deployment.appToken ??= await publisher.addParameter("app-github-token", appTokenParameterOptions());
 
   const dataDirectory = app.dataDirectory ?? "/data";
   let container = amd64(publisher.addDockerfile(app.name, deployment.context, { dockerfilePath: app.dockerfile }).withBuildArg("NPM_REGISTRY", deployment.npmRegistry))
