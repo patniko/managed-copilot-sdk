@@ -539,6 +539,30 @@ describe("placement cutover", () => {
     expect(client.events("session.usage_checkpoint").map((event) => event["id"])).not.toContain(late);
   });
 
+  it("refuses an attached CLI's writes while the session is fenced and after it moved", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cli = await sessions().attachCli!(1001, sessionId, { connectionId: `cli_${sessionId}`, notify: () => undefined });
+    let sent = 0;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    // Not queued for later: the input would otherwise land in whatever runtime owns the session after the move.
+    expect(() => cli.write({ kind: "turn", text: "during the move" }, () => sent++)).toThrowError(expect.objectContaining({ code: "session_busy" }));
+    await expect(sessions().attachCli!(1001, sessionId, { connectionId: `cli2_${sessionId}`, notify: () => undefined })).rejects.toMatchObject({ code: "session_busy" });
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    expect(() => cli.write({ kind: "turn", text: "after the move" }, () => sent++)).toThrowError(expect.objectContaining({ code: "conflict" }));
+    await expect(cli.answer("session.permissions.handlePendingPermissionRequest", { requestId: "p", result: { kind: "approved" } })).rejects.toMatchObject({ code: "conflict" });
+    expect(sent).toBe(0);
+    // Attaching again pins the sandbox runtime.
+    const again = await sessions().attachCli!(1001, sessionId, { connectionId: `cli3_${sessionId}`, notify: () => undefined });
+    again.write({ kind: "abort" }, () => sent++);
+    expect(sent).toBe(1);
+    expect(again.generation).toBe(1);
+  });
+
   it("refuses stale generations and a second cutover, and ends an open cutover when the session is deleted", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();

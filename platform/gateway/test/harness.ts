@@ -43,6 +43,8 @@ export class FakeRuntime {
   #connections = 0;
   #server: Server | undefined;
   port = 0;
+  /** Like stock runtime 1.0.103: lifecycle notifications follow the create/resume answer (default: before it). */
+  lifecycleAfterAnswer = false;
 
   async start(): Promise<void> {
     this.#server = createServer((socket) => this.#accept(socket));
@@ -181,7 +183,9 @@ export class FakeRuntime {
         }
         this.#emit(endpoint, created, "session.start", { sessionId: id, context: { cwd: "/platform/host/path" } });
         if (typeof params["workingDirectory"] === "string") this.#emit(endpoint, created, "session.info", { infoType: "cwd", message: `Working in ${params["workingDirectory"]}` });
-        endpoint.notify("session.lifecycle", { type: "session.created", sessionId: id, metadata: { startTime: new Date().toISOString(), modifiedTime: new Date().toISOString() } });
+        const lifecycle = () => endpoint.notify("session.lifecycle", { type: "session.created", sessionId: id, metadata: { startTime: new Date().toISOString(), modifiedTime: new Date().toISOString() } });
+        if (this.lifecycleAfterAnswer) setTimeout(lifecycle, 50);
+        else lifecycle();
         return { sessionId: id, workspacePath: "/platform/host/session-state", capabilities: { ui: { elicitation: false } } };
       }
       case "session.resume": {

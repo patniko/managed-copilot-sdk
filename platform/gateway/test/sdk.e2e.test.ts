@@ -133,6 +133,17 @@ describe.skipIf(!built)("SDK over the bridge (fake runtime)", () => {
       const asAlice = await ManagedCopilot.connect({ url: gateway.url, gitHubToken: ALICE });
       expect(isManagedCopilotError(await asAlice.sessions.get(session.sessionId).catch((error: unknown) => error), "not_found")).toBe(true);
       await asAlice.close();
+      // managed.createSession / resumeSession with a per-user token: helpers called right away already act as that user,
+      // even though the runtime's lifecycle notification follows the answer.
+      runtime.lifecycleAfterAnswer = true;
+      try {
+        const created = await managed.createSession({ environment: "chat", gitHubToken: BOB, onPermissionRequest: approveAll });
+        expect((await managed.sessions.get(created.sessionId)).owner).toMatchObject({ id: 1002, login: "bob" });
+      } finally {
+        runtime.lifecycleAfterAnswer = false;
+      }
+      const resumed = await managed.resumeSession(session.sessionId, { gitHubToken: BOB, onPermissionRequest: approveAll });
+      expect((await managed.sessions.get(resumed.sessionId)).owner).toMatchObject({ id: 1002, login: "bob" });
     } finally {
       await managed.close();
     }
