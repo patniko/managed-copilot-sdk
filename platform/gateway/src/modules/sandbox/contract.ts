@@ -208,6 +208,8 @@ export interface SandboxSessionView {
   readonly state?: string;
   /** The ledger's last root turn; survives gateway restarts. */
   readonly lastTurn?: { readonly turnId: string; readonly status: string };
+  /** Which life of a reused session ID this is; durable actions are scoped to it. */
+  readonly incarnation?: string;
 }
 
 /** From core: `sessions`. `subscribe` listeners run synchronously, in order, before fan-out to clients. */

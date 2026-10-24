@@ -98,10 +98,32 @@ export class SandboxAgent {
       sandboxId: this.#config.sandboxId,
       version: this.#config.version,
       state: this.#state,
-      runtime: { state: this.runtime.state, restarts: this.runtime.restarts, ...(this.runtime.exitCode !== undefined ? { exitCode: this.runtime.exitCode } : {}) },
+      runtime: {
+        state: this.runtime.state,
+        restarts: this.runtime.restarts,
+        ...(this.runtime.exitCode !== undefined ? { exitCode: this.runtime.exitCode } : {}),
+        ...(this.runtime.instance ? { instance: this.runtime.instance } : {}),
+      },
       ...(this.#setup ? { setup: this.#setup } : {}),
       ...(this.#error ? { error: this.#error } : {}),
     };
+  }
+
+  /**
+   * Replaces the runtime process with a fresh one (`SANDBOXD_ROUTES.runtimeRestart`). The gateway asks for it when a
+   * previous connection still holds the stock runtime's inference-provider registration. Only once the sandbox is ready.
+   */
+  async restartRuntime(): Promise<void> {
+    if (this.#starting || this.#state !== "ready") {
+      throw new AgentError("conflict", `The sandbox is ${this.#starting ? "starting" : this.#state}; its runtime can only be restarted once it is ready.`);
+    }
+    const previous = this.runtime.instance;
+    try {
+      await this.runtime.restart();
+    } catch (error) {
+      throw new AgentError("internal", `The Copilot runtime could not be restarted: ${redact((error as Error).message ?? String(error), this.#secrets)}`);
+    }
+    this.#log.info("Copilot runtime restarted on request", { previous, instance: this.runtime.instance });
   }
 
   /**
