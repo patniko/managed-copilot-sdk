@@ -14,8 +14,11 @@ export class FakeSession implements StationSession {
   readonly prompts: string[] = [];
   readonly #handlers = new Set<(event: SessionEvent) => void>();
   readonly #platform: FakePlatform;
-  readonly #abort = new AbortController();
+  #turnAbort: AbortController | undefined;
+  /** Set once the session was aborted (the runtime still takes new messages afterwards). */
   aborted = false;
+  /** What an in-flight turn rejects with when the session is aborted (the runtime's answer to the abort). */
+  abortError: Error | undefined;
 
   constructor(platform: FakePlatform, role: StationRole, config: SessionConfig | ResumeSessionConfig, sessionId = id("sess")) {
     this.#platform = platform;
@@ -58,21 +61,27 @@ export class FakeSession implements StationSession {
   }
 
   async sendAndWait(options: { prompt: string }): Promise<undefined> {
-    if (this.aborted) throw new Error("Session aborted");
     this.prompts.push(options.prompt);
+    const turn = new AbortController();
+    this.#turnAbort = turn;
     this.emit("assistant.turn_start", { turnId: id("turn") });
     this.emit("assistant.usage", { model: "fake", inputTokens: 100, outputTokens: 20, duration: 50 });
     const aborted = new Promise<never>((_, reject) => {
-      this.#abort.signal.addEventListener("abort", () => reject(new Error("Session aborted")), { once: true });
+      turn.signal.addEventListener("abort", () => reject(this.abortError ?? new Error("Session aborted")), { once: true });
     });
-    await Promise.race([this.#platform.script(this, options.prompt), aborted]);
+    try {
+      await Promise.race([this.#platform.script(this, options.prompt), aborted]);
+    } finally {
+      if (this.#turnAbort === turn) this.#turnAbort = undefined;
+    }
     this.emit("session.idle", {});
     return undefined;
   }
 
+  /** Stops the turn in flight, like the runtime's abort: later messages start new turns. */
   async abort(): Promise<void> {
     this.aborted = true;
-    this.#abort.abort();
+    this.#turnAbort?.abort();
   }
 
   async disconnect(): Promise<void> {
@@ -97,6 +106,10 @@ export class FakePlatform implements FactoryPlatform {
   readonly scripts: Partial<Record<StationRole, Script>>;
   /** What `sessionInfo().lastTurn.status` reports per session (default "completed"). */
   readonly lastTurnStatus = new Map<string, "running" | "completed" | "failed" | "cancelled">();
+  /** When each session's sandbox last started (`sessionInfo().sandbox.startedAt`). */
+  readonly sandboxStartedAt = new Map<string, string>();
+  /** Errors the next sessionInfo calls throw, in order (e.g. a read that ran out of time). */
+  readonly sessionInfoErrors: unknown[] = [];
   /** Session IDs whose resume fails, as if the platform lost them. */
   readonly lost = new Set<string>();
   /** Remaining injected failures per artifact path (reads) and workspace path (writes). */
@@ -104,6 +117,8 @@ export class FakePlatform implements FactoryPlatform {
   readonly writeFailures = new Map<string, number>();
   /** Like the gateway's list cap: only the newest sessions are listed. */
   listLimit = Number.POSITIVE_INFINITY;
+  /** Errors the next resumeSession calls throw, in order (e.g. a connection that drops again while reattaching). */
+  readonly resumeErrors: unknown[] = [];
   createCount = 0;
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
@@ -128,6 +143,8 @@ export class FakePlatform implements FactoryPlatform {
   }
 
   async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession> {
+    const failure = this.resumeErrors.shift();
+    if (failure !== undefined) throw failure;
     if (!this.sessions.has(sessionId) || this.lost.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
     const session = new FakeSession(this, role, config, sessionId);
     this.sessions.set(sessionId, session);
@@ -135,8 +152,11 @@ export class FakePlatform implements FactoryPlatform {
   }
 
   async sessionInfo(sessionId: string): Promise<SessionInfo> {
+    const failure = this.sessionInfoErrors.shift();
+    if (failure !== undefined) throw failure;
     const session = this.sessions.get(sessionId);
     if (!session || this.lost.has(sessionId)) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
+    const startedAt = this.sandboxStartedAt.get(sessionId);
     return {
       id: sessionId,
       environment: "fake",
@@ -149,7 +169,15 @@ export class FakePlatform implements FactoryPlatform {
       pendingActions: [],
       lastTurn: { turnId: "t", status: this.lastTurnStatus.get(sessionId) ?? "completed" },
       ...(session?.role === "builder" || session?.role === "release"
-        ? { sandbox: { id: `sbx_${sessionId}`, size: "small", state: "running", network: { access: "restricted", allowedDomains: ["github.com"] } } }
+        ? {
+            sandbox: {
+              id: `sbx_${sessionId}`,
+              size: "small",
+              state: "running",
+              network: { access: "restricted", allowedDomains: ["github.com"] },
+              ...(startedAt ? { startedAt } : {}),
+            },
+          }
         : {}),
     } as SessionInfo;
   }

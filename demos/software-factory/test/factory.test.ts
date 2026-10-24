@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventHub } from "../src/server/hub.js";
-import { Factory } from "../src/server/pipeline/factory.js";
+import { Factory, type FactoryOptions } from "../src/server/pipeline/factory.js";
+import { PlatformUnavailableError } from "../src/server/pipeline/errors.js";
 import { FactoryStore } from "../src/server/store.js";
 import type { ServerEvent, WorkOrder } from "../src/shared/types.js";
 import { FakePlatform, manifest, testReport, type FakeSession, type Script } from "./fakes.js";
@@ -96,7 +97,7 @@ const release: Script = async (session, _prompt, platform) => {
 let store: FactoryStore;
 let hub: EventHub;
 
-function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingStore?: FactoryStore) {
+function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingStore?: FactoryStore, overrides: Partial<FactoryOptions> = {}) {
   store = existingStore ?? new FactoryStore(":memory:");
   hub = new EventHub(60_000);
   const platform = new FakePlatform(scripts);
@@ -108,6 +109,7 @@ function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingS
     account: () => ({ login: "octocat" }),
     config: { maxSandboxes: 4, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000 }, publicationTimeoutMs: 1_000 },
     pollMs: 10,
+    ...overrides,
   });
   return { platform, factory };
 }
@@ -120,6 +122,41 @@ async function settle(factory: Factory, id: string, timeoutMs = 5_000): Promise<
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`Work order ${id} did not settle: ${factory.get(id)?.status}`);
+}
+
+async function until(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting for the condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/**
+ * A finished work order rewound to its release turn in flight (sent a minute ago), handed to a second factory as after
+ * a restart. The second platform has the first one's sessions, workspaces, and outputs.
+ */
+async function releaseInFlight(overrides: Partial<FactoryOptions> = {}) {
+  const first = setup({ planner, builder: builder(), reviewer, release });
+  const created = first.factory.create(CREATE);
+  await settle(first.factory, created.id);
+  const stored = store.getWorkOrder(created.id)!;
+  const releaseSession = stored.stations.find((station) => station.id === "release")!.sessionId!;
+  const sentAt = new Date(Date.now() - 60_000).toISOString();
+  store.saveWorkOrder({
+    ...stored,
+    status: "releasing",
+    release: undefined,
+    stations: stored.stations.map((station) => (station.id === "release" ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt } } : station)),
+  } as WorkOrder);
+  hub.close();
+  const second = setup({ planner, builder: builder(), reviewer, release }, store, overrides);
+  for (const [map, source] of [
+    [second.platform.sessions, first.platform.sessions],
+    [second.platform.outputs, first.platform.outputs],
+    [second.platform.workspaces, first.platform.workspaces],
+  ] as const) for (const [key, value] of source as Map<string, never>) (map as Map<string, never>).set(key, value);
+  return { ...second, id: created.id, releaseSession };
 }
 
 afterEach(() => {
@@ -329,31 +366,85 @@ describe("Factory pipeline", () => {
   });
 
   it("asks the agent to continue when the platform reports the interrupted turn failed", async () => {
-    const first = setup({ planner, builder: builder(), reviewer, release });
-    const created = first.factory.create(CREATE);
-    await settle(first.factory, created.id);
-    const stored = store.getWorkOrder(created.id)!;
-    const releaseSession = stored.stations.find((station) => station.id === "release")!.sessionId!;
-    store.saveWorkOrder({
-      ...stored,
-      status: "releasing",
-      release: undefined,
-      stations: stored.stations.map((station) =>
-        station.id === "release" ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt: new Date().toISOString() } } : station,
-      ),
-    } as WorkOrder);
-    hub.close();
-    const second = setup({ planner, builder: builder(), reviewer, release }, store);
-    for (const [map, source] of [
-      [second.platform.sessions, first.platform.sessions],
-      [second.platform.outputs, first.platform.outputs],
-      [second.platform.workspaces, first.platform.workspaces],
-    ] as const) for (const [key, value] of source as Map<string, never>) (map as Map<string, never>).set(key, value);
-    second.platform.lastTurnStatus.set(releaseSession, "failed");
+    const second = await releaseInFlight();
+    second.platform.lastTurnStatus.set(second.releaseSession, "failed");
     second.factory.resumeInterrupted();
-    const wo = await settle(second.factory, created.id);
+    const wo = await settle(second.factory, second.id);
     expect(wo.status).toBe("completed");
-    expect(second.platform.sessions.get(releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
+    const prompt = second.platform.sessions.get(second.releaseSession)!.prompts[0]!;
+    expect(prompt).toContain("Your previous turn was interrupted");
+    // Nothing from the killed turn is taken as done: the agent re-checks the workspace, and the check must run again.
+    expect(prompt).toContain("may have been stopped partway. Check the workspace's current state");
+    expect(second.factory.activity(second.id).some((item) => item.text === "The interrupted turn failed; asking the agent to check its workspace and continue")).toBe(true);
+  });
+
+  it("continues a turn whose sandbox restarted under it, without stopping anything", async () => {
+    // The gateway's ledger still says "running": the recreated runtime never ran the turn, so it never ends.
+    const second = await releaseInFlight({ restartGraceMs: 50, stallMs: 60_000 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    second.platform.sandboxStartedAt.set(second.releaseSession, new Date().toISOString());
+    second.factory.resumeInterrupted();
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    const session = second.platform.sessions.get(second.releaseSession)!;
+    expect(session.prompts).toHaveLength(1);
+    expect(session.prompts[0]).toContain("Your previous turn was interrupted");
+    expect(session.aborted).toBe(false);
+    expect(second.factory.activity(second.id).some((item) => item.text?.startsWith("The sandbox restarted while this turn was running"))).toBe(true);
+  });
+
+  it("stops an in-flight turn that shows no activity, then asks the agent to continue", async () => {
+    const second = await releaseInFlight({ stallMs: 100, restartGraceMs: 60_000 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    // Started before the turn was sent: the runtime that has the turn is still there, but the turn is stuck.
+    second.platform.sandboxStartedAt.set(second.releaseSession, new Date(Date.now() - 10 * 60_000).toISOString());
+    second.factory.resumeInterrupted();
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    const session = second.platform.sessions.get(second.releaseSession)!;
+    expect(session.aborted).toBe(true);
+    expect(session.prompts).toHaveLength(1);
+    expect(session.prompts[0]).toContain("Your previous turn was interrupted");
+    expect(second.factory.activity(second.id).some((item) => item.text?.startsWith("The in-flight turn showed no activity"))).toBe(true);
+  });
+
+  it("keeps waiting for an in-flight turn that shows activity, through a failed status read", async () => {
+    const second = await releaseInFlight({ stallMs: 800, restartGraceMs: 50 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    second.factory.resumeInterrupted();
+    const releaseStation = () => second.factory.get(second.id)!.stations.find((station) => station.id === "release")!;
+    await until(() => releaseStation().detail === "Resuming the in-flight turn");
+    const session = second.platform.sessions.get(second.releaseSession)!;
+    second.platform.sessionInfoErrors.push(new PlatformUnavailableError("Reading the session's status took longer than 10 s."));
+    // The turn keeps working past the stall limit, then finishes on its own.
+    for (const started = Date.now(); Date.now() - started < 1_100; ) {
+      session.emit("assistant.message_delta", { messageId: "m", deltaContent: "." });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(second.platform.sessionInfoErrors).toHaveLength(0);
+    await release(session, "", second.platform);
+    second.platform.lastTurnStatus.set(second.releaseSession, "completed");
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    expect(session.prompts).toHaveLength(0);
+    expect(session.aborted).toBe(false);
+    expect(second.factory.activity(second.id).some((item) => /^Paused|showed no activity|sandbox restarted/.test(item.text ?? ""))).toBe(false);
+  });
+
+  it("pauses, rather than failing the station, when the in-flight turn's status keeps failing to load", async () => {
+    const second = await releaseInFlight({ stallMs: 60_000, restartGraceMs: 60_000, resumeBackoffMs: 100 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    second.factory.resumeInterrupted();
+    const releaseStation = () => second.factory.get(second.id)!.stations.find((station) => station.id === "release")!;
+    await until(() => releaseStation().detail === "Resuming the in-flight turn");
+    const unreadable = new PlatformUnavailableError("Reading the session's status took longer than 10 s.");
+    second.platform.sessionInfoErrors.push(...Array.from({ length: 5 }, () => unreadable));
+    await until(() => second.factory.activity(second.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Reading the session's status")));
+    // Readable again, and the platform reports the turn failed: the work order resumes and the agent continues.
+    second.platform.lastTurnStatus.set(second.releaseSession, "failed");
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    expect(second.platform.sessions.get(second.releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
   });
 
   it("detaches on shutdown without failing work, and resumes it on the next start", async () => {
@@ -494,6 +585,235 @@ describe("Factory pipeline", () => {
     ]);
     expect(file.viewable).toBe(false);
     expect(factory.artifact(created.id, "build:csv2json", "data.txt", 1)?.content).toBe("small");
+  });
+
+  it("pauses a work order whose platform connection drops, then resumes it from its checkpoint", async () => {
+    let ready = true;
+    let dropped = false;
+    // The turn runs to completion on the platform, but the factory loses the connection before it hears back.
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        ready = false;
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { readiness: () => ({ ready }), resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    await until(() => dropped && !factory.isActive(created.id));
+
+    const paused = factory.get(created.id)!;
+    expect(paused.status).toBe("building");
+    const build = paused.stations.find((station) => station.id === "build:csv2json")!;
+    expect(build).toMatchObject({ status: "waiting", detail: "Paused until Managed Copilot is back" });
+    expect(paused.stations.filter((station) => station.status === "failed")).toEqual([]);
+
+    // The platform is back: main.ts resumes interrupted work orders when it reports ready again.
+    ready = true;
+    factory.resumeInterrupted();
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    const resumed = wo.stations.find((station) => station.id === "build:csv2json")!;
+    expect(resumed.sessionId).toBe(build.sessionId);
+    expect(resumed.previousSessionIds).toBeUndefined();
+    const texts = factory.activity(created.id).map((item) => item.text ?? "");
+    expect(texts.some((text) => text.startsWith("Paused: lost the connection to Managed Copilot (Session disconnected"))).toBe(true);
+    expect(texts).toContain("Managed Copilot is back; resuming from the last checkpoint");
+  });
+
+  it("resumes a paused work order by itself when only its transport dropped", async () => {
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "json2csv") {
+        dropped = true;
+        throw new Error("CLI server exited with code 1\n[managed-copilot] Managed Copilot closed the connection: gateway shutting down (close code 1001)");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    expect(dropped).toBe(true);
+    expect(wo.stations.find((station) => station.id === "build:json2csv")!.previousSessionIds).toBeUndefined();
+    expect(factory.activity(created.id).some((item) => item.text?.includes("(Managed Copilot closed the connection: gateway shutting down (close code 1001))"))).toBe(true);
+  });
+
+  it("fails a work order that keeps losing its connection instead of pausing forever", async () => {
+    const dropping: Script = async (session, prompt, platform) => {
+      if (taskOf(platform, session).id === "csv2json") throw new Error("Session disconnected while waiting for a response");
+      await builder()(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 1 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id, 10_000);
+    expect(wo.status).toBe("failed");
+    expect(wo.error?.code).toBe("interrupted");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.status).toBe("failed");
+    expect(factory.activity(created.id).filter((item) => item.text?.startsWith("Paused:")).length).toBe(5);
+  });
+
+  it("fails with its sandbox intact when it runs out of pauses while reattaching", async () => {
+    const lostAgain = () => new Error("Session disconnected while waiting for a response");
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        // Every reattach that follows loses the connection again.
+        platform.resumeErrors.push(...Array.from({ length: 5 }, lostAgain));
+        throw lostAgain();
+      }
+    };
+    const { platform, factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 1 });
+    const created = factory.create(CREATE);
+    await until(() => dropped);
+    const original = factory.get(created.id)!.stations.find((station) => station.id === "build:csv2json")!.sessionId;
+    const wo = await settle(factory, created.id, 10_000);
+    expect(wo.status).toBe("failed");
+    const build = wo.stations.find((station) => station.id === "build:csv2json")!;
+    expect(build.sessionId).toBe(original);
+    expect(build.previousSessionIds).toBeUndefined();
+    expect(platform.sessionsFor("builder")).toHaveLength(2);
+    expect(factory.activity(created.id).some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(false);
+  });
+
+  it("ignores late events from a session it let go of", async () => {
+    let dropped: FakeSession | undefined;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = session;
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("completed");
+    // The detach was never answered, so the old session can still deliver events.
+    dropped!.emit("assistant.usage", { model: "fake", inputTokens: 5, outputTokens: 5, duration: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    const stored = store.getWorkOrder(created.id)!;
+    expect(stored.status).toBe("completed");
+    expect(stored.release).toBeDefined();
+  });
+
+  it("pauses, rather than fails, when the platform cancels a review's completion wait", async () => {
+    let cancelled = false;
+    const flaky: Script = async (session, prompt, platform) => {
+      if (!cancelled && prompt.includes('"csv2json: CSV to JSON" (round 1')) {
+        cancelled = true;
+        // What the runtime answers when its gateway shuts down mid-turn.
+        throw new Error("Completion wait cancelled");
+      }
+      await reviewer(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: builder(), reviewer: flaky, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(cancelled).toBe(true);
+    expect(wo.status).toBe("completed");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Completion wait cancelled)"))).toBe(true);
+  });
+
+  it("keeps a user's cancel a cancel, even when the turn reports a cancelled completion wait", async () => {
+    let reviewing = false;
+    const waiting: Script = async (session, prompt, platform) => {
+      if (!prompt.includes('"csv2json: CSV to JSON"')) return reviewer(session, prompt, platform);
+      session.abortError = new Error("Completion wait cancelled");
+      reviewing = true;
+      await new Promise(() => undefined);
+    };
+    const { factory } = setup({ planner, builder: builder(), reviewer: waiting, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    await until(() => reviewing);
+    await factory.cancel(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("cancelled");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused:"))).toBe(false);
+  });
+
+  it("pauses on an error it doesn't recognize while the platform doesn't answer, and fails on it when the platform does", async () => {
+    const strange: (count: number) => Script = (count) => {
+      let thrown = 0;
+      return async (session, prompt, platform) => {
+        if (thrown < count && taskOf(platform, session).id === "csv2json") {
+          thrown++;
+          throw new Error("The runtime went away");
+        }
+        await builder()(session, prompt, platform);
+      };
+    };
+    // The platform doesn't answer when the error happens (it starts reconnecting), then answers again.
+    let answers = false;
+    const outage = setup({ planner, builder: strange(1), reviewer, release }, undefined, {
+      resumeBackoffMs: 10,
+      checkPlatform: async () => {
+        const result = answers;
+        answers = true;
+        return result;
+      },
+    });
+    const paused = outage.factory.create(CREATE);
+    expect((await settle(outage.factory, paused.id)).status).toBe("completed");
+    expect(outage.factory.activity(paused.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime went away)"))).toBe(true);
+
+    const healthy = setup({ planner, builder: strange(1), reviewer, release }, undefined, { checkPlatform: async () => true });
+    const failed = healthy.factory.create(CREATE);
+    const wo = await settle(healthy.factory, failed.id);
+    expect(wo.status).toBe("failed");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.error?.message).toBe("The runtime went away");
+  });
+
+  it("doesn't replace a sandbox when the work order is cancelled while the platform is being checked", async () => {
+    const probes: ((answer: boolean) => void)[] = [];
+    let deferProbes = false;
+    const { platform, factory } = setup({ planner, builder: builder({ failing: true }), reviewer, release }, undefined, {
+      checkPlatform: () => (deferProbes ? new Promise<boolean>((resolve) => probes.push(resolve)) : Promise.resolve(true)),
+    });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("failed");
+    const builds = () => factory.get(created.id)!.stations.filter((station) => station.kind === "build");
+    const sessions = builds().map((station) => station.sessionId);
+    const artifacts = factory.artifactIndex(created.id).files.length;
+    for (const session of platform.sessionsFor("builder")) platform.lost.add(session.sessionId);
+    platform.scripts.builder = builder();
+    deferProbes = true;
+    factory.retry(created.id);
+    // Both reattaches failed, and the factory is checking the platform before starting over.
+    await until(() => probes.length === 2);
+    const cancelling = factory.cancel(created.id);
+    for (const resolve of probes) resolve(true);
+    await cancelling;
+    expect((await settle(factory, created.id)).status).toBe("cancelled");
+    expect(builds().map((station) => station.sessionId)).toEqual(sessions);
+    expect(builds().every((station) => !station.previousSessionIds)).toBe(true);
+    expect(factory.artifactIndex(created.id).files.length).toBe(artifacts);
+    expect(platform.sessionsFor("builder")).toHaveLength(2);
+  });
+
+  it("keeps a failed platform check's verdict, even when the platform is back before the station gives up", async () => {
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        platform.resumeErrors.push(new Error("The runtime went away"));
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    // Resuming finds the platform answering; the failed reattach finds it down; after that it's back for good.
+    const answers = [true, false];
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, {
+      resumeBackoffMs: 10,
+      checkPlatform: async () => answers.shift() ?? true,
+    });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    expect(answers).toEqual([]);
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime went away)"))).toBe(true);
   });
 
   it("leaves files a builder deleted in a later round out of the release", async () => {

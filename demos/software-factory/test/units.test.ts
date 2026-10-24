@@ -1,8 +1,10 @@
 import type { SessionEvent } from "@github/copilot-sdk";
+import { ManagedCopilotError } from "@managed-copilot/sdk";
 import { describe, expect, it } from "vitest";
 import { attachCommand, parseAttachUrl } from "../src/server/attach.js";
 import { loadConfig } from "../src/server/config.js";
 import { describeSessionError, parseTestSummary, StationActivityMapper, summarizeToolCall } from "../src/server/pipeline/activity.js";
+import { isPlatformInterruption, PlatformUnavailableError, StationError, toFactoryError } from "../src/server/pipeline/errors.js";
 import { chooseModels } from "../src/server/models.js";
 import { FactoryStore } from "../src/server/store.js";
 import { createZip, crc32 } from "../src/server/zip.js";
@@ -163,5 +165,44 @@ describe("attach commands", () => {
       expect(parseAttachUrl(unsafe), unsafe).toBeUndefined();
     }
     expect(loadConfig({ FACTORY_ATTACH_URL: "https://gw.example.com|calc" }).attachUrl).toBeUndefined();
+  });
+});
+
+describe("platform interruptions", () => {
+  it("tells a lost connection apart from a station's own failure", () => {
+    // Gateway errors on a session's JSON-RPC connection: the SDK's ResponseError carries the platform code in `data.code`.
+    const rpc = (message: string, code: string) => Object.assign(new Error(`${message} [${code}]`), { code: -32001, data: { code } });
+    const lost = [
+      rpc("The shared runtime is restarting", "upstream_unavailable"),
+      rpc("The gateway is draining", "capability_unavailable"),
+      // The runtime's answer to a turn's completion wait when its gateway shuts down (no platform code).
+      Object.assign(new Error("Completion wait cancelled"), { code: -32603 }),
+      Object.assign(new Error("Completion wait cancelled"), { code: -32603, data: { code: "cancelled" } }),
+      new PlatformUnavailableError("The factory is reconnecting to Managed Copilot."),
+      new ManagedCopilotError("capability_unavailable", "The gateway is not serving on this instance yet: handed over to a newer deployment. Retry shortly."),
+      new ManagedCopilotError("upstream_unavailable", "GitHub is unreachable"),
+      new ManagedCopilotError("internal", "Unexpected error response (HTTP 504)"),
+      new Error("Session disconnected while waiting for a response"),
+      new Error("Session is disconnected"),
+      new Error("Client not connected"),
+      new Error("Connection is closed."),
+      new Error("CLI server exited with code 1\n[managed-copilot] Managed Copilot closed the connection: gateway shutting down (close code 1001)"),
+      new Error("[managed-copilot] Managed Copilot rejected the connection: HTTP 503"),
+      new Error("[managed-copilot] Managed Copilot rejected the connection: The gateway is draining (capability_unavailable)"),
+    ];
+    const failures = [
+      rpc("Session sess_1 was not found", "not_found"),
+      rpc("Unknown model", "invalid_request"),
+      new StationError("timeout", "The builder agent didn't finish within 20 minutes."),
+      new ManagedCopilotError("not_found", "Session sess_1 was not found"),
+      new ManagedCopilotError("internal", "Unexpected error response (HTTP 400)"),
+      new ManagedCopilotError("setup_failed", "npm install failed"),
+      new Error("[managed-copilot] Managed Copilot rejected the connection: Unknown environment \"x\" (environment_not_found)"),
+      new Error("Session sess_1 not found"),
+      "not an error",
+    ];
+    for (const error of lost) expect(isPlatformInterruption(error), String(error)).toBe(true);
+    for (const error of failures) expect(isPlatformInterruption(error), String(error)).toBe(false);
+    expect(toFactoryError(lost[4])).toEqual({ code: "platform_unavailable", message: "The factory is reconnecting to Managed Copilot." });
   });
 });
