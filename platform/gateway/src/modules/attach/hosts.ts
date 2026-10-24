@@ -149,6 +149,9 @@ export class AhpHosts {
         if (host) await this.#dispose(host, "The session moved to a new runtime. Reconnecting.", ATTACH_CLOSE_CODES.moved).catch(() => undefined);
         // A fence that timed out may still be stopping the previous host on this runtime.
         await this.#settled(sessionId);
+        // Fenced while waiting: nothing may start on the runtime the session is leaving. From here to the start's
+        // registration in `#starting` is one synchronous step, so a later fence sees the start and waits for it.
+        if (this.#fenced.has(sessionId) || this.epoch(sessionId) !== epoch) throw moving(sessionId);
         host = await this.#startTracked(sessionId, runtime, resolvedAt);
         if (this.#fenced.has(sessionId) || this.epoch(sessionId) !== epoch) {
           // Fenced while starting: it must not stay on the runtime the session is leaving (the fence waits for this).

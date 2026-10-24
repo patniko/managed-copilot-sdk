@@ -914,6 +914,46 @@ describe("AhpHosts", () => {
     hosts.unfence("s1");
     expect(hosts.isFenced("s1")).toBe(false);
   });
+
+  it("starts nothing on the source when a fence goes up while an attach waits for the previous host to stop", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    let unstall!: () => void;
+    const stalled = new Promise<void>((resolve) => (unstall = resolve));
+    class StallingRuntime extends FakeRuntime {
+      disposes = 0;
+      override async request<T>(method: string, params: any): Promise<T> {
+        // The first host.dispose stalls (as a busy runtime might), so the first fence times out.
+        if (method === "host.dispose" && this.disposes++ === 0) {
+          this.requests.push({ method, params });
+          await stalled;
+          return {} as T;
+        }
+        return super.request<T>(method, params);
+      }
+    }
+    const source = new StallingRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
+    await hosts.ensure("s1", async () => source);
+    // First move: the fence's dispose stalls, promotion's bound aborts it, and the attempt is released.
+    const first = new AbortController();
+    const fencing = hosts.fence("s1", first.signal);
+    first.abort(new ManagedCopilotError("promotion_busy", "bounded"));
+    await expect(fencing).rejects.toMatchObject({ code: "promotion_busy" });
+    hosts.unfence("s1");
+    // A CLI reconnects: its attach resolves the source again and waits for the stalled disposal.
+    const reconnect = hosts.ensure("s1", async () => source);
+    await sleep(20);
+    // A second move fences: no host and nothing starting, so it resolves at once.
+    await hosts.fence("s1", new AbortController().signal);
+    const startsBefore = source.count("host.start");
+    unstall();
+    await expect(reconnect).rejects.toMatchObject({ code: "session_busy" });
+    await sleep(20);
+    expect(source.count("host.start")).toBe(startsBefore);
+    expect(source.count("host.publishSession")).toBe(1);
+    hosts.unfence("s1");
+  });
 });
 
 describe("attach tickets", () => {
