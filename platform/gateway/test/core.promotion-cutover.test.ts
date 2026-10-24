@@ -572,6 +572,54 @@ describe("placement cutover", () => {
     expect(client.requests.filter((request) => request.method === "hooks.invoke")).toHaveLength(0);
   });
 
+  it("keeps a source unroutable after an unsealed move while a registration it got is unanswered", async () => {
+    const guard = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(guard);
+    guard.answer = (method) => (method === "hooks.invoke" ? { output: { permissionDecision: "deny", permissionDecisionReason: "guarded" } } : {});
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    // The guard's hooks withdrawal reached the runtime and is unanswered when a move is fenced and aborted.
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const withdrawing = guard.request("session.resume", { sessionId, requestPermission: true });
+    withdrawing.catch(() => undefined);
+    await hold.held;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.abort();
+    const mark = runtime.requests.length;
+    const reading = sessions().request(sessionId, "session.getMessages", {});
+    await sleep(30);
+    hold.release();
+    await reading;
+    await withdrawing;
+    // Nothing reached the source before it was resumed with the registrations in effect.
+    const after = runtime.requests.slice(mark).filter((request) => request.params["sessionId"] === sessionId).map((request) => request.method);
+    expect(after.indexOf("session.resume")).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf("session.resume")).toBeLessThan(after.indexOf("session.getMessages"));
+  });
+
+  it("opens a destination with committed registrations, not a resume still unanswered on the source", async () => {
+    const guard = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(guard);
+    guard.answer = (method) => (method === "hooks.invoke" ? { output: {} } : {});
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const withdrawing = guard.request("session.resume", { sessionId, requestPermission: true });
+    withdrawing.catch(() => undefined);
+    await hold.held;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    expect(lastCall("session.resume", sessionId)!.params).toMatchObject({ hooks: true });
+    await cut.commit();
+    hold.release();
+    // The withdrawal is then made where the session lives.
+    await withdrawing;
+    expect(lastCall("session.resume", sessionId)!.params).toMatchObject({ hooks: false });
+  });
+
   it("resumes a session again with its hooks when their withdrawal fails while a move is open but not fenced", async () => {
     const guard = await RawClient.connect(gateway.url, ALICE, "helper");
     clients.push(guard);
