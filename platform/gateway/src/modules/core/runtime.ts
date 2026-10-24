@@ -226,6 +226,11 @@ export class SharedRuntime {
     return this.#options.externalUrl ? undefined : join(this.#options.root, "copilot-home", "session-state", sessionId);
   }
 
+  /** Connected to a runtime this gateway did not start (it keeps running, with its turns, when the gateway restarts). */
+  get external(): boolean {
+    return Boolean(this.#options.externalUrl);
+  }
+
   get lastError(): string | undefined {
     return this.#lastError;
   }

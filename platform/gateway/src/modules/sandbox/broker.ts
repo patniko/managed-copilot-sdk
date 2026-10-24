@@ -55,6 +55,14 @@ interface Exchange {
 
 const identityCache = new Map<string, { value: Record<string, unknown>; expires: number }>();
 
+/** The stock runtime's refusal of a second inference provider (`llmInference.setProvider`). */
+const PROVIDER_TAKEN = /already the LLM inference provider/i;
+
+/** True for the broker's error when the runtime already has an inference provider (see `InferenceBroker.initialize`). */
+export function isProviderTaken(error: unknown): boolean {
+  return isManagedCopilotError(error, "conflict") && (error as ManagedCopilotError).details?.["providerTaken"] === true;
+}
+
 function identityKey(token: string, githubApiUrl: string): string {
   return createHash("sha256").update(`${githubApiUrl}\0${token}`).digest("hex");
 }
@@ -137,7 +145,16 @@ export class InferenceBroker {
   /** Registers the gateway as the runtime's inference provider on this upstream connection. */
   async initialize(send: UpstreamSend): Promise<void> {
     this.#send = send;
-    const result = (await send("llmInference.setProvider", {})) as { success?: boolean } | undefined;
+    let result: { success?: boolean } | undefined;
+    try {
+      result = (await send("llmInference.setProvider", {})) as { success?: boolean } | undefined;
+    } catch (error) {
+      // Stock runtimes keep the registration with the first provider connection, even after it closed (1.0.103).
+      if (PROVIDER_TAKEN.test((error as Error)?.message ?? "")) {
+        throw new ManagedCopilotError("conflict", "Another connection is already the sandbox runtime's inference provider.", { providerTaken: true });
+      }
+      throw error;
+    }
     if (result && result.success === false) throw new ManagedCopilotError("inference_unavailable", "The sandbox runtime refused the gateway as its inference provider.");
   }
 

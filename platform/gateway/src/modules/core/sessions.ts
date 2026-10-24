@@ -22,6 +22,7 @@ import {
   ACTION_EVENT_TYPES,
   ANSWER_METHOD_SET,
   ANSWER_METHODS,
+  PENDING_LIST_METHODS,
   type ActionsService,
   type AttachedResponder,
   type RuntimeSessionEvent,
@@ -191,6 +192,8 @@ interface LiveSession {
    * its answers to the sealing calls): its output for this session is handoff, hidden from clients and history.
    */
   sealedSource: { readonly upstream: RuntimeUpstream; readonly settled: Promise<void> } | undefined;
+  /** The last turn core ended because the runtime connection it needed was lost (`#endTurn`). */
+  interrupted?: string;
 }
 
 interface InflightWait {
@@ -261,6 +264,28 @@ interface NotificationOrigin {
 
 /** Thrown inside dispatch when a placement cutover moved the session after the request was admitted. */
 const MOVED = Symbol("moved");
+
+/** How many times a sandbox runtime is opened again after its sandbox restarted it (`details.reopen`). */
+const MAX_REOPENS = 2;
+
+/**
+ * How long a session's registration path (create, resume, restore, a tools update) waits for each answer of its
+ * runtime, and then for a `ping` that shows whether its connection still answers at all (`#bounded`). Mutable for tests.
+ */
+export const upstreamTimings = { answerMs: 60_000, probeMs: 10_000 };
+
+/** What a bound that expired resolves to (never surfaced). */
+const EXPIRED = Symbol("expired");
+
+/** The ending a turn gets when the platform lost the runtime connection it needed (a standard `session.error`). */
+const INTERRUPTED_TURN =
+  "This turn was interrupted because the platform lost the connection to the session's runtime (for example, during an update or restart). Send your message again to continue.";
+
+/**
+ * How core ends a running turn whose runtime cannot (`#endTurn`): interrupted by a lost connection, or as a runtime
+ * that ran it unseen recorded it (completed, cancelled, or its own `session.error`).
+ */
+type TurnEnding = "interrupted" | "completed" | "cancelled" | { readonly error: RuntimeSessionEvent };
 
 /**
  * What a runtime emits because `session.suspend` / `sessions.close` interrupted the session, seen on the wire of runtime
@@ -695,6 +720,21 @@ export class SessionManager implements SessionsService {
     for (const record of this.#ledger.byState("creating")) {
       await this.#discardInterrupted(record).catch((error: unknown) => this.#log.warn("Cleaning up an interrupted create failed", { sessionId: record.id, error: (error as Error).message }));
     }
+    // Turns the stopped gateway was running were cut with its runtime connections (its shared runtime stopped with it,
+    // and a sandbox runtime cannot serve a new gateway's inference): they end, unless durable carries their pending
+    // work. A session a client restored meanwhile has its turn checked by that restore instead.
+    for (const record of this.#ledger.byState("running")) {
+      const turnId = record.lastTurn?.status === "running" ? record.lastTurn.turnId : undefined;
+      if (!turnId) continue;
+      let live: LiveSession;
+      try {
+        live = this.#liveFor(record.id);
+      } catch {
+        continue;
+      }
+      if (live.upstream || live.residency) continue;
+      this.#endLostTurn(live, turnId);
+    }
   }
 
   /** Removes what a create the gateway stopped in the middle of allocated; the session never existed for its owner. */
@@ -896,24 +936,44 @@ export class SessionManager implements SessionsService {
     // Options the caller changed later, admitted for the sandbox too (the model comes from the ledger).
     const { model: _model, ...callerOptions } = stored.requestedOptions ?? {};
     const optionsPatch = { ...admitted.optionsPatch, ...(Object.keys(callerOptions).length > 0 ? admitOptionsUpdate(callerOptions, context) : {}) };
-    const handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token) });
+    let handle!: SandboxRuntimeHandle;
     let upstream: RuntimeUpstream | undefined;
+    for (let reopen = 0; ; reopen++) {
+      handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token) });
+      upstream = undefined;
+      try {
+        upstream = await RuntimeUpstream.open({ id: `sandbox:${live.id}`, kind: "sandbox", sandboxId: live.id }, streamTransport(handle.stream), {
+          token: handle.connectionToken,
+          handlers: this.#upstreamHandlers,
+          log: this.#log,
+        });
+        const opened = upstream;
+        // Registered first, so the destination's requests (inference, credentials) and events route during the open.
+        state.destination = { upstream: opened, sandbox: handle, admitted, optionsPatch };
+        if (handle.initialize) await this.#bounded(live, opened, "the sandbox runtime's setup", () => handle.initialize!((method, params) => opened.request(method, params)));
+        break;
+      } catch (error) {
+        if (state.destination?.sandbox === handle) {
+          state.destination = undefined;
+          state.destinationBuffer.length = 0;
+        }
+        upstream?.close();
+        handle.close?.();
+        if (reopen < MAX_REOPENS && wantsReopen(error) && !state.done) {
+          this.#log.info("The sandbox restarted its runtime; opening the destination again", { sessionId: live.id });
+          continue;
+        }
+        throw error;
+      }
+    }
+    const opened = upstream!;
     try {
-      upstream = await RuntimeUpstream.open({ id: `sandbox:${live.id}`, kind: "sandbox", sandboxId: live.id }, streamTransport(handle.stream), {
-        token: handle.connectionToken,
-        handlers: this.#upstreamHandlers,
-        log: this.#log,
-      });
-      const opened = upstream;
-      // Registered first, so the destination's requests (inference, credentials) and events route during the open.
-      state.destination = { upstream: opened, sandbox: handle, admitted, optionsPatch };
-      if (handle.initialize) await handle.initialize((method, params) => opened.request(method, params));
       const registrations = this.#registrations(live, undefined, true);
       const params = await this.#withVaultHeaders(live.id, { ...admitted.params, ...registrations.flags, sessionId: live.id, tools: [...registrations.tools, ...this.#platformToolDeclarations(live, "sandbox")], ...extra }, "sandbox");
       const prepared = handle.prepareSessionParams ? await handle.prepareSessionParams("session.resume", params) : params;
-      await opened.request("session.resume", prepared);
-      if (handle.sessionOpened) await handle.sessionOpened(live.id);
-      if (Object.keys(optionsPatch).length > 0) await opened.request("session.options.update", { ...optionsPatch, sessionId: live.id });
+      await this.#bounded(live, opened, "session.resume", (signal) => opened.request("session.resume", prepared, { signal }));
+      if (handle.sessionOpened) await this.#bounded(live, opened, "the session's credential setup", () => handle.sessionOpened!(live.id));
+      if (Object.keys(optionsPatch).length > 0) await this.#bounded(live, opened, "session.options.update", (signal) => opened.request("session.options.update", { ...optionsPatch, sessionId: live.id }, { signal }));
       if (state.done || state.destination?.upstream !== opened) throw new ManagedCopilotError("conflict", "The cutover closed while its destination was opening", { sessionId: live.id });
       return { request: <T,>(method: string, params: Record<string, unknown> = {}) => opened.request<T>(method, { sessionId: live.id, ...params }) };
     } catch (error) {
@@ -1106,7 +1166,7 @@ export class SessionManager implements SessionsService {
    * MOVED when a placement cutover fenced the session meanwhile; nothing is sent to a runtime after a fence.
    */
   async #resumeClient(live: LiveSession, peer: ClientPeer, admitted: AdmittedSession, moves: number, optionsPatch: Record<string, unknown>): Promise<{ result: unknown } | typeof MOVED> {
-    const run = async (upstream: RuntimeUpstream): Promise<{ result: unknown } | typeof MOVED> => {
+    const run = async (upstream: RuntimeUpstream, restored: boolean): Promise<{ result: unknown } | typeof MOVED> => {
       const extras = live.resumeExtras;
       const resumeParams = await this.#withVaultHeaders(live.id, { ...admitted.params, ...this.#resumeExtras(live, admitted.params) }, live.placement);
       const prepared = await this.#prepare(live, "session.resume", resumeParams);
@@ -1127,6 +1187,9 @@ export class SessionManager implements SessionsService {
       try {
         result = await this.#resumeUpstream(live, upstream, forwarded);
         await this.#opened(live, upstream, optionsPatch);
+        // Restored by this resume: a turn the lost connection cut ends before the session takes new work (checked
+        // before the move check below, so a cutover that committed meanwhile still takes the MOVED path).
+        if (restored && live.moves === moves) await this.#settleTurn(live, upstream);
       } catch (error) {
         this.#unattach(live, peer.id, previous);
         // The runtime may have applied what this resume registered before failing (or being overtaken by a move).
@@ -1155,7 +1218,7 @@ export class SessionManager implements SessionsService {
     // Resident already: the runtime re-registers this client's tools and handler flags.
     if (live.upstream && !live.upstream.closed && live.ready) {
       try {
-        return await run(live.upstream);
+        return await run(live.upstream, false);
       } catch (error) {
         await this.#reconcile(live);
         throw error;
@@ -1165,7 +1228,7 @@ export class SessionManager implements SessionsService {
     let outcome: { result: unknown } | typeof MOVED = MOVED;
     await this.#serialize(live, async () => {
       const upstream = await this.#connect(live, moves);
-      outcome = await run(upstream);
+      outcome = await run(upstream, true);
       return upstream;
     });
     return outcome;
@@ -1280,7 +1343,11 @@ export class SessionManager implements SessionsService {
             written = upstream;
             live.inflight = upstream;
           }
-          return method === "session.sendAndWait" ? this.#sendAndWait(live, upstream, forwarded, signal, placement) : upstream.request(method, build ? build() : forwarded, { signal });
+          if (method === "session.sendAndWait") return this.#sendAndWait(live, upstream, forwarded, signal, placement);
+          // A tools update is a step of the session's registration path: bounded like a resume, so one the runtime
+          // never answers cannot hold the session's later registrations.
+          if (build) return this.#bounded(live, upstream, method, (bounded) => upstream.request(method, build(), { signal: AbortSignal.any([signal, bounded]) }));
+          return upstream.request(method, forwarded, { signal });
         });
       } catch (error) {
         // A cutover moved the session after this call was admitted: admit it again where the session lives now.
@@ -1345,6 +1412,8 @@ export class SessionManager implements SessionsService {
    */
   async #sendAndWait(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>, signal: AbortSignal, placement: Placement): Promise<unknown> {
     const wait: InflightWait = { fenced: false, signal, held: undefined };
+    // The turn before this call's own (a turn core later ends as interrupted is this call's only if it is newer).
+    const before = this.get(live.id)?.lastTurn?.turnId;
     live.waits.add(wait);
     let reply: unknown;
     let failure: { readonly error: unknown } | undefined;
@@ -1368,7 +1437,19 @@ export class SessionManager implements SessionsService {
       }
       this.#unhold(live, held);
     }
-    if (failure) throw failure.error;
+    if (failure) {
+      // The runtime connection was lost under this call. Once what it delivered is tracked (and a turn it cut ended,
+      // see `#endLostTurn`), a caller whose own turn core ended learns it was interrupted, not that a connection
+      // closed; a turn that completed (only its reply was lost), or that pending work carries, keeps the raw error.
+      if (upstream.closed && !signal.aborted && !wait.fenced) {
+        await live.queue.catch(() => undefined);
+        const ended = live.interrupted;
+        if (ended !== undefined && ended !== before && this.get(live.id)?.lastTurn?.turnId === ended) {
+          throw new RpcError(-32000, INTERRUPTED_TURN, { code: "capability_unavailable" });
+        }
+      }
+      throw failure.error;
+    }
     const clean = this.#scrub(live, reply, placement);
     const cutover = live.cutover;
     if (wait.fenced && cutover && !cutover.flushed) return new Promise((resolve) => cutover.replies.push({ value: clean, resolve }));
@@ -1595,7 +1676,8 @@ export class SessionManager implements SessionsService {
             if (attachment.flags[key] === true && revision !== undefined) attachment.registered.flags[key] = revision;
           }
         }
-        result = await upstream.request("session.create", forwarded);
+        const opened = upstream;
+        result = await this.#bounded(created, opened, "session.create", (signal) => opened.request("session.create", forwarded, { signal }));
         await this.#opened(created, upstream, admitted.optionsPatch);
         created.ready = true;
         return upstream;
@@ -1921,6 +2003,8 @@ export class SessionManager implements SessionsService {
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
       // The runtime has the registrations in effect again.
       live.unreconciled = false;
+      // A turn the lost connection cut ends before the session takes new work.
+      if (live.moves === moves && !live.cutover?.fenced) await this.#settleTurn(live, upstream);
       // A cutover fenced while this restore ran keeps the session fenced.
       if (live.moves === moves && !live.cutover?.fenced) live.ready = true;
       this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
@@ -1950,16 +2034,31 @@ export class SessionManager implements SessionsService {
 
   async #openSandbox(live: LiveSession): Promise<RuntimeUpstream> {
     const sandboxes = this.#sandboxes!;
-    const handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token) });
-    const upstream = await RuntimeUpstream.open({ id: `sandbox:${live.id}`, kind: "sandbox", sandboxId: live.id }, streamTransport(handle.stream), {
-      token: handle.connectionToken,
-      handlers: this.#upstreamHandlers,
-      log: this.#log,
-    });
-    live.sandbox = handle;
-    live.upstream = upstream;
-    if (handle.initialize) await handle.initialize((method, params) => upstream.request(method, params));
-    return upstream;
+    for (let reopen = 0; ; reopen++) {
+      const handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token) });
+      let upstream: RuntimeUpstream | undefined;
+      try {
+        upstream = await RuntimeUpstream.open({ id: `sandbox:${live.id}`, kind: "sandbox", sandboxId: live.id }, streamTransport(handle.stream), {
+          token: handle.connectionToken,
+          handlers: this.#upstreamHandlers,
+          log: this.#log,
+        });
+        const opened = upstream;
+        if (handle.initialize) await this.#bounded(live, opened, "the sandbox runtime's setup", () => handle.initialize!((method, params) => opened.request(method, params)));
+      } catch (error) {
+        upstream?.close();
+        handle.close?.();
+        if (reopen < MAX_REOPENS && wantsReopen(error)) {
+          this.#log.info("The sandbox restarted its runtime; opening it again", { sessionId: live.id });
+          continue;
+        }
+        throw error;
+      }
+      // Routed only once open: a connection that failed to open never becomes the session's (or reports it stopped).
+      live.sandbox = handle;
+      live.upstream = upstream;
+      return upstream;
+    }
   }
 
   /**
@@ -1975,15 +2074,77 @@ export class SessionManager implements SessionsService {
       if (sealed && live.sealedSource === sealed) live.sealedSource = undefined;
     };
     try {
-      return await upstream.request("session.resume", params, { onSettle: reopened });
+      return await this.#bounded(live, upstream, "session.resume", (signal) => upstream.request("session.resume", params, { onSettle: reopened, signal }));
     } catch (error) {
       // Only for a session that still exists: never one deleted meanwhile (its runtime state is gone on purpose).
       const current = this.get(live.id);
       if (!(error instanceof RpcError) || !UNKNOWN_SESSION.test(error.message) || !current || live.deleting || current.lastTurn) throw error;
       this.#log.info("The runtime has no state for a session that never ran a turn; creating it again", { sessionId: live.id });
       // With the session's model when this resume names none (the runtime would pick its default otherwise).
-      return upstream.request("session.create", params["model"] === undefined && current.model ? { ...params, model: current.model } : params);
+      const create = params["model"] === undefined && current.model ? { ...params, model: current.model } : params;
+      return this.#bounded(live, upstream, "session.create", (signal) => upstream.request("session.create", create, { signal }));
     }
+  }
+
+  /**
+   * Waits for one answer of a session's runtime on its registration path (create, resume, restore, a tools update) for
+   * at most `upstreamTimings.answerMs`. These steps run one at a time per session, so an answer that never comes (a
+   * half-open sandbox stream after a gateway handover, a wedged runtime) would hold every later resume of the session.
+   * The connection is then probed: one that does not answer a `ping` either is closed, so the session's next request
+   * connects afresh. The caller fails with `timeout`, which it can retry.
+   */
+  async #bounded<T>(live: LiveSession, upstream: RuntimeUpstream, step: string, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<typeof EXPIRED>((resolve) => {
+      timer = setTimeout(() => resolve(EXPIRED), upstreamTimings.answerMs);
+    });
+    let outcome: T | typeof EXPIRED;
+    try {
+      outcome = await Promise.race([run(controller.signal), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (outcome !== EXPIRED) return outcome;
+    controller.abort();
+    const within = duration(upstreamTimings.answerMs);
+    if (await this.#probe(live, upstream)) {
+      throw new ManagedCopilotError(
+        "timeout",
+        `The runtime of session ${live.id} did not answer ${step} within ${within} and its connection stopped responding, so the gateway closed it. Try again; the session reconnects.`,
+        { sessionId: live.id, step },
+      );
+    }
+    throw new ManagedCopilotError("timeout", `The runtime of session ${live.id} did not answer ${step} within ${within}. Try again shortly.`, { sessionId: live.id, step });
+  }
+
+  /** Whether a runtime connection that left a step unanswered is gone: closed, or closed now for not answering a `ping`. */
+  async #probe(live: LiveSession, upstream: RuntimeUpstream): Promise<boolean> {
+    if (upstream.closed) return true;
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<typeof EXPIRED>((resolve) => {
+      timer = setTimeout(() => resolve(EXPIRED), upstreamTimings.probeMs);
+    });
+    // Any answer, even an error, shows the connection works.
+    const answered = upstream.request("ping", { message: "managed-copilot" }).then(
+      () => true,
+      () => !upstream.closed,
+    );
+    let outcome: boolean | typeof EXPIRED;
+    try {
+      outcome = await Promise.race([answered, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (outcome === true) {
+      this.#log.warn("A session's runtime is connected but did not answer in time", { sessionId: live.id, upstream: upstream.info.id });
+      return false;
+    }
+    if (!upstream.closed) {
+      this.#log.warn("A session's runtime connection stopped responding; closing it so the session connects again", { sessionId: live.id, upstream: upstream.info.id });
+      upstream.close();
+    }
+    return true;
   }
 
   async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -2099,9 +2260,12 @@ export class SessionManager implements SessionsService {
   async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>): Promise<void> {
     // Sandboxes install the owner's credential here, then select a requested agent (the runtime resolves agents only
     // for authenticated sessions, so the sandbox module defers `agent` out of create/resume params).
-    if (live.sandbox?.sessionOpened) await live.sandbox.sessionOpened(live.id);
+    const sandbox = live.sandbox;
+    if (sandbox?.sessionOpened) await this.#bounded(live, upstream, "the session's credential setup", () => sandbox.sessionOpened!(live.id));
     if (Object.keys(optionsPatch).length > 0) {
-      const result = await upstream.request<{ success?: boolean; error?: string }>("session.options.update", { ...optionsPatch, sessionId: live.id });
+      const result = await this.#bounded(live, upstream, "session.options.update", (signal) =>
+        upstream.request<{ success?: boolean; error?: string }>("session.options.update", { ...optionsPatch, sessionId: live.id }, { signal }),
+      );
       if (result && result.success === false) throw new ManagedCopilotError("internal", `The runtime rejected the session lockdown: ${result.error ?? "unknown error"}`);
     }
   }
@@ -2137,7 +2301,108 @@ export class SessionManager implements SessionsService {
       if (!live.cutover) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, "The session's runtime connection closed before the turn completed", { code: "state_restore_failed" }));
       // A session being deleted ends with `deleted`, not `stopped`.
       if (!live.deleting) this.#emitLifecycle(live.id, "stopped");
+      // Its running turn cannot finish without this connection (on stock 1.0.103 a sandbox's inference provider goes
+      // with it, and a runtime that restarts loses its turns): it ends now, for the clients still waiting on it.
+      if (!live.deleting && !live.cutover && !this.#stopped) this.#endLostTurn(live);
     }
+  }
+
+  // ------------------------------------------------------------------------------------------------------------
+  // Turns a lost runtime connection cut
+
+  /**
+   * Ends the session's running turn when the runtime connection it needed was lost and nothing can carry it: work
+   * durable owns (a pending tool call or permission) survives in a resumed runtime (`continuePendingWork`, verified on
+   * 1.0.103), and an external shared runtime keeps running its turns. The ending is what the runtime would send: a
+   * root `session.error` and `session.idle`, so waits settle, observers (`sessions.subscribe`) see the turn end, and
+   * the ledger records it `failed`. A turn the session's restore finds is still running continues (`#settleTurn`).
+   */
+  #endLostTurn(live: LiveSession, turnId?: string): void {
+    void this.#endTurn(live, (record) => (turnId === undefined || record.lastTurn?.turnId === turnId) && this.#lostTurnEnds(live));
+  }
+
+  /** Whether a turn whose runtime connection was lost ends: nothing carries it (durable's pending work, an external runtime). */
+  #lostTurnEnds(live: LiveSession): boolean {
+    if (live.placement === "shared" && this.#options.sharedRuntime?.external) return false;
+    return !this.#hasOpenActions(live.id);
+  }
+
+  /**
+   * After a restore, a turn the ledger still has running is checked against the runtime that now owns the session:
+   * one it still processes, or whose pending work durable owns and the runtime still awaits, continues; any other ended
+   * while the connection was lost. Only answers decide: a check the runtime cannot answer leaves the turn as it is, and
+   * a connection that is gone or stopped answering fails the restore (the session's next request tries again). The end
+   * applies only while that runtime still owns the session (no cutover moved it meanwhile).
+   */
+  async #settleTurn(live: LiveSession, upstream: RuntimeUpstream): Promise<void> {
+    const turn = this.get(live.id)?.lastTurn;
+    if (turn?.status !== "running") return;
+    const moves = live.moves;
+    const ask = <T,>(method: string): Promise<T | undefined> => this.#check<T>(live, upstream, method);
+    if ((await ask<{ processing?: unknown }>("session.metadata.isProcessing"))?.processing !== false) return;
+    if (this.#hasOpenActions(live.id)) {
+      const [tools, permissions] = await Promise.all([ask<{ items?: unknown[] }>(PENDING_LIST_METHODS.tool), ask<{ items?: unknown[] }>(PENDING_LIST_METHODS.permission)]);
+      if (!Array.isArray(tools?.items) || !Array.isArray(permissions?.items) || tools.items.length + permissions.items.length > 0) return;
+    }
+    const owned = (record: SessionRecord) => record.lastTurn?.turnId === turn.turnId && live.moves === moves && !live.cutover?.fenced && live.upstream === upstream && !upstream.closed;
+    // An external shared runtime kept running the turn while the gateway was away: it ended as the runtime recorded.
+    if (live.placement === "shared" && this.#options.sharedRuntime?.external === true) {
+      const outcome = await this.#unseenOutcome(live, upstream, turn.turnId);
+      if (outcome) await this.#endTurn(live, owned, outcome);
+      return;
+    }
+    await this.#endTurn(live, owned, "interrupted");
+  }
+
+  /** A runtime's answer to a check: undefined when it answered with an error; throws when its connection is gone or silent. */
+  async #check<T>(live: LiveSession, upstream: RuntimeUpstream, method: string, params: Record<string, unknown> = {}): Promise<T | undefined> {
+    try {
+      return await this.#bounded(live, upstream, method, (signal) => upstream.request<T>(method, { ...params, sessionId: live.id }, { signal }));
+    } catch (error) {
+      if (upstream.closed || (isManagedCopilotError(error) && error.code === "timeout")) throw error;
+      return undefined;
+    }
+  }
+
+  /**
+   * How a turn an external runtime ran unseen ended, from the history it persisted after the turn's `user.message`: its
+   * own root `session.error`, an abort, or neither (completed). Undefined when the history does not say.
+   */
+  async #unseenOutcome(live: LiveSession, upstream: RuntimeUpstream, turnId: string): Promise<TurnEnding | undefined> {
+    const events = (await this.#check<{ events?: RuntimeSessionEvent[] }>(live, upstream, "session.getMessages"))?.events;
+    if (!Array.isArray(events)) return undefined;
+    const start = events.findIndex((event) => event.type === "user.message" && !event.agentId && String(event.data?.["messageId"] ?? event.id) === turnId);
+    if (start < 0) return undefined;
+    const after = events.slice(start + 1).filter((event) => !event.agentId);
+    const error = after.find((event) => event.type === "session.error");
+    if (error) return { error };
+    return after.some((event) => event.type === "abort" || (event.type === "session.idle" && event.data?.["aborted"] === true)) ? "cancelled" : "completed";
+  }
+
+  /**
+   * Ends the running turn (if `applies` still holds once the session's earlier events were tracked) with the root
+   * events the runtime would have sent, delivered like the runtime's own: an interruption (a `session.error` the
+   * platform reports), or how a runtime that ran it unseen ended it (its own error, an abort, a completion).
+   */
+  #endTurn(live: LiveSession, applies: (record: SessionRecord) => boolean, outcome: TurnEnding = "interrupted"): Promise<void> {
+    const end = async (): Promise<void> => {
+      const record = this.get(live.id);
+      const turn = record?.lastTurn;
+      if (!record || turn?.status !== "running" || live.deleting || this.#live.get(live.id) !== live || !applies(record)) return;
+      const now = new Date().toISOString();
+      if (outcome === "interrupted") {
+        this.#log.warn("Ending a turn whose runtime connection was lost", { sessionId: live.id, turnId: turn.turnId });
+        const error: RuntimeSessionEvent = { id: randomUUID(), timestamp: now, parentId: null, ephemeral: true, type: "session.error", data: { errorType: "interrupted", message: INTERRUPTED_TURN, originatingMessageId: turn.turnId } };
+        live.interrupted = turn.turnId;
+        await this.#deliverEvent(live, error);
+      } else if (typeof outcome === "object") {
+        await this.#deliverEvent(live, outcome.error);
+      }
+      await this.#deliverEvent(live, { id: randomUUID(), timestamp: now, parentId: null, ephemeral: true, type: "session.idle", data: outcome === "cancelled" ? { aborted: true } : {} });
+    };
+    const ended = live.queue.then(end);
+    live.queue = ended.catch((error: unknown) => this.#log.warn("Ending a lost turn failed", { sessionId: live.id, error: (error as Error).message }));
+    return live.queue;
   }
 
   // ------------------------------------------------------------------------------------------------------------
@@ -2855,6 +3120,20 @@ function hooksUnavailable(sessionId: string): string {
 /** A record's incarnation, for durable inputs that are scoped to it. */
 function pinned(record: SessionRecord): { readonly incarnation?: string } {
   return record.incarnation ? { incarnation: record.incarnation } : {};
+}
+
+/**
+ * The sandbox restarted its runtime and asks for it to be opened again (`details.reopen`): stock 1.0.103 keeps the
+ * inference-provider registration of a closed connection forever, so a runtime a lost connection served can only
+ * serve a new one after a restart.
+ */
+function wantsReopen(error: unknown): boolean {
+  return isManagedCopilotError(error) && error.details?.["reopen"] === true;
+}
+
+/** `60 s`, `0.3 s`. */
+function duration(ms: number): string {
+  return `${ms % 1000 === 0 ? ms / 1000 : (ms / 1000).toFixed(1)} s`;
 }
 
 /** A session's callback inventory; sessions stored before it existed always asked for permission decisions. */

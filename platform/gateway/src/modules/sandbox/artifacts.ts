@@ -191,6 +191,28 @@ export class ArtifactService implements ArtifactsService {
   }
 
   /**
+   * Ends the session's running turns because the runtime process running them was replaced: stock runtimes neither
+   * continue nor end such a turn when the session is resumed in a new process. Records their publications as failed
+   * with `reason` and wakes waiters. Returns the turn IDs (none when no turn was running).
+   */
+  turnsInterrupted(sessionId: string, reason: string): string[] {
+    const db = this.#options.db;
+    const running = (db.prepare("SELECT turn_id FROM sandbox_turns WHERE session_id = ? AND state = 'running' ORDER BY seq").all(sessionId) as { turn_id: string }[]).map((row) => row.turn_id);
+    if (running.length === 0) return [];
+    const now = new Date().toISOString();
+    transaction(db, () => {
+      for (const turnId of running) {
+        db.prepare("UPDATE sandbox_turns SET state = 'failed', completed_at = ? WHERE session_id = ? AND turn_id = ?").run(now, sessionId, turnId);
+        db.prepare(
+          "INSERT INTO sandbox_publications (session_id, turn_id, state, error, created_at, completed_at) VALUES (?, ?, 'failed', ?, ?, ?) ON CONFLICT (session_id, turn_id) DO UPDATE SET state = 'failed', error = excluded.error, completed_at = excluded.completed_at",
+        ).run(sessionId, turnId, reason, now, now);
+      }
+    });
+    for (const turnId of running) this.#notify(sessionId, turnId);
+    return running;
+  }
+
+  /**
    * Turns still running when the gateway (re)starts lost their completion event with the old connection; their
    * outputs are not labeled successful. Marks them failed so waiters get an explicit answer.
    */

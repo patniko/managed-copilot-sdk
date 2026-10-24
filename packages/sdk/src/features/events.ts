@@ -1,5 +1,6 @@
 // Owner: core workstream. Subscribes to `GET /v1/events` (server-sent events) for `managed.on(...)`.
 import { ROUTES, type PlatformEvent } from "@managed-copilot/protocol";
+import { timings } from "../http.js";
 import type { ManagedContext } from "../types.js";
 
 const streams = new WeakMap<ManagedContext, AbortController>();
@@ -17,8 +18,11 @@ export function dispatchEvent(ctx: ManagedContext, event: PlatformEvent): void {
   }
 }
 
-/** Parses an SSE byte stream into events. */
-export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<{ id?: string; event?: string; data: string }> {
+/**
+ * Parses an SSE byte stream into messages. A block with an `id` but no `data` (a cursor) is yielded without `data`: it
+ * moves the stream's last event ID but is not an event.
+ */
+export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<{ id?: string; event?: string; data?: string }> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -31,7 +35,7 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
       while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
         const block = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary).replace(/^\r?\n\r?\n/, "");
-        const message: { id?: string; event?: string; data: string } = { data: "" };
+        const message: { id?: string; event?: string; data?: string } = {};
         const data: string[] = [];
         for (const line of block.split(/\r?\n/)) {
           if (!line || line.startsWith(":")) continue;
@@ -42,8 +46,8 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
           else if (field === "event") message.event = value;
           else if (field === "data") data.push(value);
         }
-        if (data.length === 0) continue;
-        message.data = data.join("\n");
+        if (data.length > 0) message.data = data.join("\n");
+        else if (message.id === undefined) continue;
         yield message;
       }
     }
@@ -52,7 +56,11 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
   }
 }
 
-/** Starts the event stream on first subscription; reconnects with backoff and `Last-Event-ID`. Never throws. */
+/**
+ * Starts the event stream on first subscription; reconnects with backoff and `Last-Event-ID`. The connection is
+ * bounded, and a stream that stays silent for three of the gateway's 15 s heartbeats (a gateway being replaced, a
+ * proxy holding a dead connection) is dropped and resumed. Never throws.
+ */
 export function ensureEventStream(ctx: ManagedContext): void {
   if (streams.has(ctx)) return;
   const controller = new AbortController();
@@ -63,17 +71,22 @@ export function ensureEventStream(ctx: ManagedContext): void {
   });
   void (async () => {
     let lastEventId: string | undefined;
-    let delay = 1000;
+    let delay = timings.eventsRetryMs;
     while (!controller.signal.aborted) {
       try {
         const response = await ctx.http.fetch("GET", ROUTES.events, {
           headers: { accept: "text/event-stream", ...(lastEventId ? { "last-event-id": lastEventId } : {}) },
           signal: controller.signal,
+          timeoutMs: timings.connectMs,
+          idleTimeoutMs: timings.eventsIdleMs,
         });
         if (!response.body) throw new Error("The event stream has no body");
-        delay = 1000;
+        delay = timings.eventsRetryMs;
         for await (const message of parseEventStream(response.body)) {
-          if (message.id) lastEventId = message.id;
+          // The gateway starts a stream without a usable cursor with one, so even a stream that ends before its first
+          // event resumes where it began.
+          if (message.id !== undefined) lastEventId = message.id || undefined;
+          if (message.data === undefined) continue;
           try {
             dispatchEvent(ctx, JSON.parse(message.data) as PlatformEvent);
           } catch {
