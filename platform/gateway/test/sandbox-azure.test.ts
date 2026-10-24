@@ -297,6 +297,20 @@ describe("Azure sandbox provider", () => {
     expect((error as Error).message).toMatch(/Container Apps SandboxGroup Data Owner/);
   });
 
+  it("refuses disk sizes beyond Azure's budget of 20 GiB per vCPU (root disk included)", () => {
+    const loaded = loadAzureConfig(env({ MANAGED_COPILOT_AZURE_SANDBOX_DISKS: JSON.stringify({ small: { workspace: "16Gi" } }) }));
+    expect(loaded.config).toBeUndefined();
+    expect(loaded.problems.join(" ")).toMatch(/small sandbox disks add up to 28 GiB, more than Azure allows for 1 vCPU \(20 GiB\)/);
+    expect(loadAzureConfig(env({ MANAGED_COPILOT_AZURE_SANDBOX_DISKS: JSON.stringify({ small: { root: "4Gi", workspace: "10Gi" } }) })).config?.disks.small).toEqual({ root: "4Gi", workspace: "10Gi", home: "4Gi", state: "2Gi" });
+  });
+
+  it("denies all egress without a proxy, and needs the proxy as an IPv4 address", () => {
+    expect(loadAzureConfig(env({ MANAGED_COPILOT_AZURE_EGRESS_PROXY: "egress.internal:3128" })).problems.join(" ")).toMatch(/must be an IPv4 address and port/);
+    const variables = env();
+    delete variables.MANAGED_COPILOT_AZURE_EGRESS_PROXY;
+    expect(loadAzureConfig(variables).config?.egressProxy).toBeUndefined();
+  });
+
   it("resolves registry-relative images against MANAGED_COPILOT_AZURE_REGISTRY", () => {
     const images = JSON.stringify({ "*": "copilot-sandbox:abc", coder: "other.example/coder:def", local: "localhost/x:1" });
     expect(loadAzureConfig(env({ MANAGED_COPILOT_AZURE_SANDBOX_IMAGES: images, MANAGED_COPILOT_AZURE_REGISTRY: "myacr.azurecr.io" })).config?.images).toEqual({
@@ -359,11 +373,11 @@ describe("Azure sandbox provider", () => {
     await subject.create(spec({ customizations }), { onProgress: (message) => progress.push(message) });
 
     expect([...plane.volumes.keys()].sort()).toEqual(["mctest-sbx-0123456789abcdef01234567-home", "mctest-sbx-0123456789abcdef01234567-state", "mctest-sbx-0123456789abcdef01234567-ws"]);
-    expect(plane.volumes.get("mctest-sbx-0123456789abcdef01234567-ws")).toMatchObject({ type: "DataDisk", size: "32Gi", labels: { [LABELS.instance]: "mctest", [LABELS.role]: "ws" } });
+    expect(plane.volumes.get("mctest-sbx-0123456789abcdef01234567-ws")).toMatchObject({ type: "DataDisk", size: "20Gi", labels: { [LABELS.instance]: "mctest", [LABELS.role]: "ws" } });
     const created = [...plane.sandboxes.values()][0]!;
     expect(created.body).toMatchObject({
       sourcesRef: { diskImage: { id: "img-1" } },
-      resources: { cpu: "2", memory: "4096Mi" },
+      resources: { cpu: "2", memory: "4096Mi", disk: "8192Mi" }, // root + data disks = 40 GiB, the 2-vCPU budget
       labels: { [LABELS.instance]: "mctest", [LABELS.sandbox]: "sbx_0123456789abcdef01234567", [LABELS.session]: "session-1", [LABELS.owner]: "42", [LABELS.environment]: "coder" },
       environment: { SANDBOX_ID: "sbx_0123456789abcdef01234567", SANDBOXD_KEY: "key", SANDBOXD_RUNTIME_TOKEN: "token" },
       volumes: [
@@ -373,7 +387,11 @@ describe("Azure sandbox provider", () => {
       ],
       ports: [{ port: 7781, auth: { anonymous: true }, ipAccessControl: { defaultAction: "Deny", rules: [{ action: "Allow", sourceCidrs: ["20.1.2.3/32"] }] } }],
       lifecycle: { autoSuspendPolicy: { enabled: false }, autoDeletePolicy: { enabled: false } },
-      egressPolicy: { http: { defaultAction: "Deny", rules: [{ match: { host: "10.42.4.4" }, action: { type: "Allow", routingMode: "Vnet" } }] } },
+      // Only TCP to the egress proxy's private address (what Azure accepts and routes through the VNet connection).
+      egressPolicy: {
+        http: { defaultAction: "Deny", rules: [] },
+        transportRules: { defaultAction: "Deny", rules: [{ name: "managed-copilot-egress", action: "Allow", protocol: "Tcp", destination: "10.42.4.4/32", port: 3128 }] },
+      },
       customerVnetConnectionName: "default",
     });
     expect(plane.files).toEqual([{ sandbox: created.id, path: "/opt/managed-copilot/customizations/agents/builder.agent.md", mode: "0644", content: "# builder" }]);

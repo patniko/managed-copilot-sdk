@@ -43,7 +43,7 @@ public static class ManagedCopilotAzureExtensions
         {
             throw new ArgumentOutOfRangeException(nameof(shareQuotaGiB), "An SSD (provisioned v2) NFS share is at least 32 GiB.");
         }
-        builder.WithAnnotation(new ManagedCopilotNetworkAnnotation(addressSpace, prefixes.Platform, prefixes.Sandboxes), ResourceAnnotationMutationBehavior.Replace);
+        builder.WithAnnotation(new ManagedCopilotNetworkAnnotation(addressSpace, prefixes.Platform, prefixes.Sandboxes, prefixes.Egress), ResourceAnnotationMutationBehavior.Replace);
 
         return builder.ConfigureInfrastructure(infra =>
         {
@@ -68,8 +68,17 @@ public static class ManagedCopilotAzureExtensions
                 AddressPrefix = prefixes.Sandboxes,
                 Delegations = { new ServiceDelegation { Name = "containerapps", ServiceName = "Microsoft.App/environments" } },
             };
+            // The egress proxy's internal Container Apps environment: sandboxes reach its load balancer through the VNet.
+            var egress = new SubnetResource("mcEgressSubnet")
+            {
+                Parent = network,
+                Name = "egress",
+                AddressPrefix = prefixes.Egress,
+                Delegations = { new ServiceDelegation { Name = "containerapps", ServiceName = "Microsoft.App/environments" } },
+            };
             // Azure applies one change per virtual network at a time; create the subnets in order.
             sandboxes.DependsOn.Add(platform);
+            egress.DependsOn.Add(sandboxes);
             environment.VnetConfiguration = new ContainerAppVnetConfiguration { InfrastructureSubnetId = platform.Id, IsInternal = false };
 
             var account = new StorageAccount("mcData")
@@ -116,11 +125,13 @@ public static class ManagedCopilotAzureExtensions
             infra.Add(network);
             infra.Add(platform);
             infra.Add(sandboxes);
+            infra.Add(egress);
             infra.Add(account);
             infra.Add(files);
             infra.Add(share);
             infra.Add(storage);
             infra.Add(new ProvisioningOutput("MANAGED_COPILOT_SANDBOX_SUBNET_ID", typeof(string)) { Value = sandboxes.Id });
+            infra.Add(new ProvisioningOutput("MANAGED_COPILOT_EGRESS_SUBNET_ID", typeof(string)) { Value = egress.Id });
             infra.Add(new ProvisioningOutput("MANAGED_COPILOT_DATA_STORAGE", typeof(string)) { Value = storage.Name });
         });
     }
@@ -257,7 +268,7 @@ public static class ManagedCopilotAzureExtensions
     private static ContainerAppContainer MainContainer(ContainerApp app) =>
         app.Template.Containers.Single().Value ?? throw new InvalidOperationException($"Container app {app.BicepIdentifier} must have exactly one container.");
 
-    private static (string Platform, string Sandboxes) SubnetPrefixes(string addressSpace)
+    private static (string Platform, string Sandboxes, string Egress) SubnetPrefixes(string addressSpace)
     {
         var parts = addressSpace.Split('/');
         var octets = parts[0].Split('.');
@@ -266,7 +277,7 @@ public static class ManagedCopilotAzureExtensions
             throw new ArgumentException($"The address space must be an IPv4 /16 such as 10.42.0.0/16 (got \"{addressSpace}\").", nameof(addressSpace));
         }
         var prefix = $"{octets[0]}.{octets[1]}";
-        return ($"{prefix}.0.0/23", $"{prefix}.2.0/23");
+        return ($"{prefix}.0.0/23", $"{prefix}.2.0/23", $"{prefix}.4.0/24");
     }
 }
 
@@ -274,4 +285,5 @@ public static class ManagedCopilotAzureExtensions
 /// <param name="AddressSpace">The virtual network's /16.</param>
 /// <param name="PlatformSubnet">The environment's infrastructure subnet (the gateway and apps).</param>
 /// <param name="SandboxSubnet">The subnet isolated sandboxes connect through.</param>
-public sealed record ManagedCopilotNetworkAnnotation(string AddressSpace, string PlatformSubnet, string SandboxSubnet) : IResourceAnnotation;
+/// <param name="EgressSubnet">The subnet of the egress proxy's internal environment.</param>
+public sealed record ManagedCopilotNetworkAnnotation(string AddressSpace, string PlatformSubnet, string SandboxSubnet, string EgressSubnet) : IResourceAnnotation;

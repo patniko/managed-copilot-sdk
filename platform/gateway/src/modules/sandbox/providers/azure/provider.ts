@@ -21,7 +21,8 @@ import type {
   SandboxStartResult,
 } from "../types.js";
 import { SandboxApi, SandboxApiError, type CreateSandboxBody, type RemoteDiskImage, type RemoteSandbox } from "./api.js";
-import type { AzureSandboxConfig, LoadedConfig } from "./config.js";
+import { quantityMiB, type AzureSandboxConfig, type LoadedConfig } from "./config.js";
+import { RegistryCredentialsError, type RegistryCredentials } from "./registry.js";
 import { UnconfirmedCreates } from "./unconfirmed.js";
 
 /** Labels on every resource this gateway creates (Kubernetes-style keys without dots, which the service accepts). */
@@ -69,6 +70,8 @@ const READY_TRUST_MS = 30_000;
 
 export interface AzureProviderOverrides {
   readonly api?: SandboxApi;
+  /** Pull credentials for a registry image (see registry.ts); undefined for public images. */
+  readonly registryCredentials?: (image: string) => Promise<RegistryCredentials | undefined>;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly pollMs?: number;
   /** reconcileMs: how long one call looks for an unconfirmed create; unconfirmedMs: how long later calls still wait for it. */
@@ -102,6 +105,7 @@ export class AzureSandboxProvider implements SandboxProvider {
   readonly #pollMs: number;
   readonly #timeouts: { createMs: number; deleteMs: number; imageMs: number; reconcileMs: number; unconfirmedMs: number };
   readonly #unconfirmed: UnconfirmedCreates;
+  readonly #registryCredentials: (image: string) => Promise<RegistryCredentials | undefined>;
   readonly #remoteIds = new Map<string, string>();
   readonly #images = new Map<string, Promise<SandboxImageRef>>();
   #readyUntil = 0;
@@ -117,6 +121,7 @@ export class AzureSandboxProvider implements SandboxProvider {
     this.#pollMs = overrides.pollMs ?? 2_000;
     this.#timeouts = { createMs: 10 * 60_000, deleteMs: 5 * 60_000, imageMs: 30 * 60_000, reconcileMs: 60_000, unconfirmedMs: 5 * 60_000, ...overrides.timeouts };
     this.#unconfirmed = new UnconfirmedCreates(join(deps.dataDir, "sandbox-azure", "unconfirmed-creates.json"), this.#timeouts.unconfirmedMs);
+    this.#registryCredentials = overrides.registryCredentials ?? (async () => undefined);
   }
 
   #require(): { config: AzureSandboxConfig; api: SandboxApi } {
@@ -192,7 +197,7 @@ export class AzureSandboxProvider implements SandboxProvider {
     if (image) this.#unconfirmed.clear(`image:${key}`);
     if (!image) {
       this.#log.info("Converting the sandbox image into a disk image", { image: ref });
-      image = await this.#createDiskImage(ref, key, config);
+      image = await this.#createDiskImage(ref, key);
     }
     const deadline = Date.now() + this.#timeouts.imageMs;
     for (;;) {
@@ -208,14 +213,22 @@ export class AzureSandboxProvider implements SandboxProvider {
   }
 
   /** Creates a disk image; like sandbox creation, never submits a second create when Azure's answer was lost. */
-  async #createDiskImage(ref: string, key: string, config: AzureSandboxConfig): Promise<RemoteDiskImage> {
+  async #createDiskImage(ref: string, key: string): Promise<RemoteDiskImage> {
     const { api } = this.#require();
     const labels = { [LABELS.instance]: this.#instance, [LABELS.image]: key };
+    // Before the create is recorded: failing to get credentials sends nothing.
+    let registryCredentials: RegistryCredentials | undefined;
+    try {
+      registryCredentials = await this.#registryCredentials(ref);
+    } catch (error) {
+      if (error instanceof RegistryCredentialsError) throw unavailable(`The sandbox image ${ref} cannot be imported: ${error.message}`, error);
+      throw error;
+    }
     const lookup = async () =>
       (await api.listDiskImages()).find(
         (image) => image.labels?.[LABELS.image] === key && image.labels?.[LABELS.instance] === this.#instance && !FAILED_IMAGE_STATES.has(image.status?.state?.toLowerCase() ?? ""),
       );
-    return this.#createOnce(`image:${key}`, `the disk image for ${ref}`, () => api.createDiskImage(ref, labels, config.registryIdentity), lookup);
+    return this.#createOnce(`image:${key}`, `the disk image for ${ref}`, () => api.createDiskImage(ref, labels, registryCredentials ? { registryCredentials } : {}), lookup);
   }
 
   /**
@@ -326,10 +339,16 @@ export class AzureSandboxProvider implements SandboxProvider {
     if (config.egressPolicyTemplate) {
       return JSON.parse(config.egressPolicyTemplate.replaceAll("{{proxyHost}}", proxy?.host ?? "").replaceAll("{{proxyPort}}", String(proxy?.port ?? ""))) as Record<string, unknown>;
     }
-    const rules = proxy
-      ? [{ name: "managed-copilot-egress", match: { host: proxy.host }, action: { type: "Allow", ...(config.vnetConnection ? { routingMode: "Vnet" } : {}) } }]
-      : [];
-    return { http: { defaultAction: "Deny", rules } };
+    // Measured on Azure (deploy/azure/qualify): HTTP rules cannot route through the VNet ("RoutingMode is only
+    // supported on Rewrite rules") and a forward proxy cannot carry per-sandbox credentials, but a TCP transport rule to
+    // the proxy's private address passes the sandbox's CONNECT, with its Proxy-Authorization, through the VNet
+    // connection. Everything else is denied: direct HTTP(S) (the platform inspects it) and other TCP/UDP.
+    const deny = { http: { defaultAction: "Deny", rules: [] } };
+    if (!proxy) return deny;
+    return {
+      ...deny,
+      transportRules: { defaultAction: "Deny", rules: [{ name: "managed-copilot-egress", action: "Allow", protocol: "Tcp", destination: `${proxy.host}/32`, port: proxy.port }] },
+    };
   }
 
   #createBody(spec: SandboxSpec, config: AzureSandboxConfig): CreateSandboxBody {
@@ -340,7 +359,7 @@ export class AzureSandboxProvider implements SandboxProvider {
     }
     return {
       sourcesRef: { diskImage: { id: spec.imageId } },
-      resources: { cpu: String(size.cpus), memory: `${size.memoryMiB}Mi` },
+      resources: { cpu: String(size.cpus), memory: `${size.memoryMiB}Mi`, disk: `${quantityMiB(config.disks[spec.size].root)}Mi` },
       labels: {
         [LABELS.instance]: this.#instance,
         [LABELS.sandbox]: spec.sandboxId,

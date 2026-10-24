@@ -39,7 +39,7 @@ export interface RemoteDiskImage {
 
 export interface CreateSandboxBody {
   readonly sourcesRef: { readonly diskImage: { readonly id: string } };
-  readonly resources: { readonly cpu: string; readonly memory: string };
+  readonly resources: { readonly cpu: string; readonly memory: string; readonly disk?: string };
   readonly labels: Readonly<Record<string, string>>;
   readonly environment: Readonly<Record<string, string>>;
   readonly volumes: readonly { readonly volumeName: string; readonly mountpoint: string; readonly readOnly?: boolean }[];
@@ -172,8 +172,8 @@ export class SandboxApi {
         }
       }
       if (!response.ok) {
-        const error = (parsed as { error?: { code?: string; message?: string } } | undefined)?.error;
-        throw new SandboxApiError(response.status, error?.code, error?.message ?? (typeof parsed === "string" && parsed ? parsed.slice(0, 500) : `HTTP ${response.status}`));
+        const { code, message } = describeFailure(parsed);
+        throw new SandboxApiError(response.status, code, message ?? `HTTP ${response.status}`);
       }
       return { status: response.status, body: parsed };
     }
@@ -223,6 +223,21 @@ export class SandboxApi {
     await this.#request("PUT", this.#url(`/sandboxes/${encodeURIComponent(id)}/files`, { path, createDirs: "true", mode }), { raw: content });
   }
 
+  /** Runs a shell command in the sandbox's VM (as the platform's agent, outside sandboxd). Qualification and diagnostics. */
+  async executeShellCommand(id: string, command: string, workingDirectory?: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const { body } = await this.#request("POST", this.#url(`/sandboxes/${encodeURIComponent(id)}/executeShellCommand`), {
+      body: { command, ...(workingDirectory ? { workingDirectory } : {}) },
+      idempotent: false,
+    });
+    const result = (body ?? {}) as { exitCode?: number; stdout?: string; stderr?: string };
+    return { exitCode: result.exitCode ?? 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }
+
+  /** Replaces a running sandbox's egress policy; it applies to subsequent requests. */
+  async setEgressPolicy(id: string, policy: Readonly<Record<string, unknown>>): Promise<void> {
+    await this.#request("POST", this.#url(`/sandboxes/${encodeURIComponent(id)}/egresspolicy`), { body: policy });
+  }
+
   // Volumes ----------------------------------------------------------------------------------------------------
 
   listVolumes(): Promise<RemoteVolume[]> {
@@ -254,8 +269,16 @@ export class SandboxApi {
     return status === 404 ? undefined : (body as RemoteDiskImage);
   }
 
-  async createDiskImage(image: string, labels: Readonly<Record<string, string>>, managedIdentityResourceId?: string): Promise<RemoteDiskImage> {
-    const body = { image: { base: image }, labels, ...(managedIdentityResourceId ? { managedIdentityResourceId } : {}) };
+  /**
+   * Imports a registry image as a disk image. A private registry needs `registryCredentials` (for Azure Container
+   * Registry, a token from its /oauth2/exchange); the 2026-02-01-preview data plane rejects identity-based pulls.
+   */
+  async createDiskImage(
+    image: string,
+    labels: Readonly<Record<string, string>>,
+    auth: { readonly registryCredentials?: { readonly username: string; readonly token: string } } = {},
+  ): Promise<RemoteDiskImage> {
+    const body = { image: { base: image }, labels, ...(auth.registryCredentials ? { registryCredentials: auth.registryCredentials } : {}) };
     return created<RemoteDiskImage>((await this.#request("PUT", this.#url("/diskimages"), { body, idempotent: false })).body, "disk image");
   }
 }
@@ -268,6 +291,23 @@ function created<T extends { readonly id: string }>(body: unknown, what: string)
   const id = body && typeof body === "object" ? (body as { id?: unknown }).id : undefined;
   if (typeof id !== "string" || !id) throw new SandboxApiError(0, "network", `Azure accepted the ${what} create but its answer did not name the ${what}.`);
   return body as T;
+}
+
+/**
+ * The reason a request failed: ARM-style `{ error: { code, message } }` or RFC 9110 problem details
+ * (`{ title, detail, errors }`, what the 2026-02-01-preview data plane answers).
+ */
+function describeFailure(body: unknown): { code: string | undefined; message: string | undefined } {
+  if (typeof body === "string") return { code: undefined, message: body.slice(0, 500) || undefined };
+  if (!body || typeof body !== "object") return { code: undefined, message: undefined };
+  const arm = (body as { error?: { code?: string; message?: string } }).error;
+  if (arm?.message) return { code: arm.code, message: arm.message };
+  const problem = body as { title?: string; detail?: string; errors?: Record<string, string[]> };
+  const fields = Object.entries(problem.errors ?? {})
+    .filter(([field]) => field !== "request")
+    .map(([field, messages]) => `${field}: ${messages.join(" ")}`);
+  const message = [problem.detail, ...fields].filter(Boolean).join(" ") || problem.title;
+  return { code: problem.title, message: message?.slice(0, 1000) };
 }
 
 function normalizeVolume(volume: RemoteVolume & { volumeName?: string }): RemoteVolume {

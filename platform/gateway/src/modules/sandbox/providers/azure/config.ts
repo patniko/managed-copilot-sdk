@@ -4,9 +4,21 @@
 import { SANDBOX_SIZES, type SandboxSize } from "@managed-copilot/protocol";
 
 export interface DiskSizes {
+  /** The sandbox's own disk (the image and everything outside the three data disks). */
+  readonly root: string;
   readonly workspace: string;
   readonly home: string;
   readonly state: string;
+}
+
+/** Azure Container Apps Sandboxes allow this much disk (root plus data disks) per vCPU. */
+export const DISK_BUDGET_MIB_PER_CPU = 20 * 1024;
+
+/** A size such as "16Gi" or "512Mi" in MiB. */
+export function quantityMiB(quantity: string): number {
+  const match = /^(\d+)(Mi|Gi|Ti)$/.exec(quantity);
+  if (!match) return Number.NaN;
+  return Number(match[1]) * ({ Mi: 1, Gi: 1024, Ti: 1024 * 1024 } as const)[match[2] as "Mi" | "Gi" | "Ti"];
 }
 
 export interface AzureSandboxConfig {
@@ -27,11 +39,10 @@ export interface AzureSandboxConfig {
    * Images without a registry host are in `MANAGED_COPILOT_AZURE_REGISTRY`.
    */
   readonly images: Readonly<Record<string, string>>;
-  /** Resource ID of the managed identity the sandbox group uses to pull those images. */
-  readonly registryIdentity?: string;
+
   /** VNet connection of the sandbox group, through which sandboxes reach the egress proxy. */
   readonly vnetConnection?: string;
-  /** Where sandboxes reach the egress proxy (a private address in the VNet). */
+  /** Where sandboxes reach the egress proxy: a private IPv4 address in the VNet (the egress environment's load balancer). */
   readonly egressProxy?: { readonly host: string; readonly port: number };
   /** Source ranges allowed to reach each sandbox's sandboxd port (the gateway's outbound addresses). */
   readonly ingressCidrs: readonly string[];
@@ -46,10 +57,11 @@ export interface LoadedConfig {
   readonly problems: readonly string[];
 }
 
+// Each size uses its whole disk budget (20 GiB per vCPU, measured on Azure): small 1 vCPU, medium 2, large 4.
 const DEFAULT_DISKS: Record<SandboxSize, DiskSizes> = {
-  small: { workspace: "16Gi", home: "8Gi", state: "4Gi" },
-  medium: { workspace: "32Gi", home: "16Gi", state: "4Gi" },
-  large: { workspace: "64Gi", home: "32Gi", state: "8Gi" },
+  small: { root: "6Gi", workspace: "8Gi", home: "4Gi", state: "2Gi" },
+  medium: { root: "8Gi", workspace: "20Gi", home: "8Gi", state: "4Gi" },
+  large: { root: "10Gi", workspace: "50Gi", home: "14Gi", state: "6Gi" },
 };
 
 export const DEFAULT_API_VERSION = "2026-02-01-preview";
@@ -152,8 +164,17 @@ export function loadAzureConfig(env: Readonly<Record<string, string | undefined>
     }
     disks[size as SandboxSize] = merged;
   }
+  for (const size of Object.keys(SANDBOX_SIZES) as SandboxSize[]) {
+    const total = Object.values(disks[size]).reduce((sum, quantity) => sum + quantityMiB(quantity), 0);
+    const budget = SANDBOX_SIZES[size].cpus * DISK_BUDGET_MIB_PER_CPU;
+    if (total > budget) {
+      problems.push(`The ${size} sandbox disks add up to ${total / 1024} GiB, more than Azure allows for ${SANDBOX_SIZES[size].cpus} vCPU (${budget / 1024} GiB). Reduce MANAGED_COPILOT_AZURE_SANDBOX_DISKS.${size}.`);
+    }
+  }
 
   const egressProxy = parseHostPort(env.MANAGED_COPILOT_AZURE_EGRESS_PROXY, "MANAGED_COPILOT_AZURE_EGRESS_PROXY", problems);
+  // The sandbox's egress policy allows TCP to this one address (a transport rule takes a CIDR, not a name).
+  if (egressProxy && !isCidr(`${egressProxy.host}/32`)) problems.push(`MANAGED_COPILOT_AZURE_EGRESS_PROXY must be an IPv4 address and port (got "${env.MANAGED_COPILOT_AZURE_EGRESS_PROXY}").`);
   if (problems.length > 0) return { problems };
   return {
     problems,
@@ -167,7 +188,7 @@ export function loadAzureConfig(env: Readonly<Record<string, string | undefined>
       credential: credential as AzureSandboxConfig["credential"],
       ...(env.MANAGED_COPILOT_AZURE_CLIENT_ID?.trim() ? { clientId: env.MANAGED_COPILOT_AZURE_CLIENT_ID.trim() } : {}),
       images: imageMap,
-      ...(env.MANAGED_COPILOT_AZURE_REGISTRY_IDENTITY?.trim() ? { registryIdentity: env.MANAGED_COPILOT_AZURE_REGISTRY_IDENTITY.trim() } : {}),
+  
       ...(env.MANAGED_COPILOT_AZURE_VNET_CONNECTION?.trim() ? { vnetConnection: env.MANAGED_COPILOT_AZURE_VNET_CONNECTION.trim() } : {}),
       ...(egressProxy ? { egressProxy } : {}),
       ingressCidrs,

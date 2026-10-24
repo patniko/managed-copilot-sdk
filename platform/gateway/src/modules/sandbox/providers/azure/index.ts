@@ -5,6 +5,7 @@ import { SandboxApi } from "./api.js";
 import { loadAzureConfig } from "./config.js";
 import { AzureCliTokenSource, ManagedIdentityTokenSource, type TokenSource } from "./credential.js";
 import { AzureSandboxProvider } from "./provider.js";
+import { AcrCredentials } from "./registry.js";
 
 export { AzureSandboxProvider } from "./provider.js";
 
@@ -12,6 +13,7 @@ export function createAzureSandboxProvider(deps: SandboxProviderDeps): SandboxPr
   const loaded = loadAzureConfig(deps.env);
   const config = loaded.config;
   let api: SandboxApi | undefined;
+  let registry: AcrCredentials | undefined;
   if (config) {
     const tokens: TokenSource =
       config.credential === "cli"
@@ -25,8 +27,10 @@ export function createAzureSandboxProvider(deps: SandboxProviderDeps): SandboxPr
       apiVersion: config.apiVersion,
       tokens,
     });
+    // The gateway's identity pulls the deployment's sandbox images (AcrPull on the registry).
+    registry = new AcrCredentials(tokens);
   } else {
     deps.log.warn("The Azure sandbox backend is not configured; isolated sessions will fail until it is", { problems: loaded.problems });
   }
-  return new AzureSandboxProvider(deps, loaded, api);
+  return new AzureSandboxProvider(deps, loaded, api, registry ? { registryCredentials: (image) => registry.credentialsFor(image) } : {});
 }
