@@ -58,8 +58,11 @@ function reducer(state: AssistantState, action: Action): AssistantState {
       return { ...state, stream: action.state };
     case "pending.add":
       return { ...state, pending: [...state.pending, action.message] };
-    case "pending.update":
-      return { ...state, pending: state.pending.map((m) => (m.localId === action.localId ? { ...m, ...action.patch } : m)) };
+    case "pending.update": {
+      // The message may already be in the timeline (its event can arrive before the send request returns).
+      const pending = state.pending.map((m) => (m.localId === action.localId ? { ...m, ...action.patch } : m));
+      return { ...state, pending: dropDelivered(pending, state.items) };
+    }
     case "pending.remove":
       return { ...state, pending: state.pending.filter((m) => m.localId !== action.localId) };
     case "toast.add":

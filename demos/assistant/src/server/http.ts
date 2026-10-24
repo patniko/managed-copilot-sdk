@@ -70,6 +70,8 @@ export interface SecurityOptions {
   readonly port: number;
   readonly publicUrl: string;
   readonly extraOrigins: readonly string[];
+  /** Extra host names (any port), or `name:port` for one port only. */
+  readonly extraHosts?: readonly string[];
 }
 
 export class Router {
@@ -79,8 +81,21 @@ export class Router {
 
   constructor(security: SecurityOptions) {
     const publicUrl = new URL(security.publicUrl);
-    this.#allowedHosts = new Set([`localhost:${security.port}`, `127.0.0.1:${security.port}`, `[::1]:${security.port}`, publicUrl.host]);
+    const extraHosts = (security.extraHosts ?? []).map((host) => host.toLowerCase());
+    this.#allowedHosts = new Set([`localhost:${security.port}`, `127.0.0.1:${security.port}`, `[::1]:${security.port}`, publicUrl.host, ...extraHosts]);
     this.#allowedOrigins = new Set([publicUrl.origin, `http://localhost:${security.port}`, `http://127.0.0.1:${security.port}`, ...security.extraOrigins]);
+  }
+
+  /**
+   * DNS-rebinding protection: only answer requests addressed to this server's own names. `*.localhost` always resolves
+   * to loopback (RFC 6761); configured extra names match on any port.
+   */
+  #hostAllowed(header: string | undefined): boolean {
+    const host = (header ?? "").toLowerCase();
+    if (!host) return false;
+    if (this.#allowedHosts.has(host)) return true;
+    const name = host.replace(/:\d+$/, "");
+    return name.endsWith(".localhost") || this.#allowedHosts.has(name);
   }
 
   add(method: string, path: string, handler: Handler, options: { sameOrigin?: boolean } = {}): void {
@@ -109,10 +124,15 @@ export class Router {
     if (!match) return false;
     try {
       // DNS-rebinding protection: only answer requests addressed to this server's own host names.
-      if (!this.#allowedHosts.has((req.headers.host ?? "").toLowerCase())) throw new HttpError(421, "misdirected", "Unexpected Host header.");
+      if (!this.#hostAllowed(req.headers.host)) throw new HttpError(421, "misdirected", "Unexpected Host header.");
       if (match.route.sameOrigin) {
         const origin = req.headers.origin;
         if (origin !== undefined && !this.#allowedOrigins.has(origin)) throw new HttpError(403, "forbidden_origin", "Cross-origin requests are not allowed.");
+        // Browsers label cross-site requests, including ones that send no Origin (images, some navigations).
+        const site = req.headers["sec-fetch-site"];
+        if (site !== undefined && site !== "same-origin" && site !== "none") throw new HttpError(403, "forbidden_origin", "Cross-site requests are not allowed.");
+        // A cross-site form can't send JSON, and a cross-site fetch can't without a CORS preflight this server never grants.
+        if (req.method === "POST" && !(req.headers["content-type"] ?? "").includes("application/json")) throw new HttpError(415, "unsupported_media_type", "Send JSON.");
       }
       const ctx: RequestContext = {
         req,

@@ -1,7 +1,7 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
 import { describeApproval, describeTool, humanizeName, scheduleDisplayName, scheduleIdFrom } from "../src/server/describe.js";
-import { Timeline } from "../src/server/timeline.js";
+import { approvalItemId, Timeline } from "../src/server/timeline.js";
 
 let seq = 0;
 function event(type: string, data: Record<string, unknown>, extra: Record<string, unknown> = {}): SessionEvent {
@@ -104,6 +104,59 @@ describe("Timeline", () => {
     const t = timeline();
     t.apply(event("tool.execution_start", { toolCallId: "call-offline", toolName: "list_events", arguments: { start: "2026-10-26", end: "2026-10-27" } }));
     expect(t.get("call-offline")).toMatchObject({ handledOffline: true });
+  });
+
+  it("ignores late deltas for a message that already completed", () => {
+    const t = timeline();
+    t.apply(event("assistant.message", { messageId: "a9", content: "Done." }));
+    expect(t.apply(event("assistant.message_delta", { messageId: "a9", deltaContent: "Do" }, { ephemeral: true }))).toEqual([]);
+    expect(t.get("a9")).toMatchObject({ text: "Done.", streaming: false });
+  });
+
+  it("treats stopped or failed turns as finished when rebuilding", () => {
+    const stopped = timeline();
+    stopped.replaceAll([
+      event("user.message", { content: "Search everything", messageId: "m1" }),
+      event("assistant.turn_start", { turnId: "t1" }),
+      event("tool.execution_start", { toolCallId: "c9", toolName: "search_email", arguments: { query: "x" } }),
+      event("abort", { reason: "user initiated" }),
+    ]);
+    expect(stopped.busy).toBe(false);
+    expect(stopped.get("c9")).toMatchObject({ status: "failed", error: "Stopped before it finished." });
+
+    const failed = timeline();
+    failed.replaceAll([event("assistant.turn_start", { turnId: "t2" }), event("session.error", { errorType: "model", message: "Model unavailable" })]);
+    expect(failed.busy).toBe(false);
+  });
+
+  it("keeps looked-up event details on approval cards when rebuilding", () => {
+    const t = timeline();
+    const current = { title: "Dentist", start: "2026-10-27T17:00:00.000Z", end: "2026-10-27T18:00:00.000Z" };
+    t.enrichApproval("approval:c10", describeApproval("delete_event", { id: "evt_9" }, "America/Los_Angeles", current));
+    t.replaceAll([
+      event("permission.requested", {
+        requestId: "r10",
+        permissionRequest: { kind: "custom-tool", toolName: "delete_event", toolCallId: "c10", toolDescription: "", args: { id: "evt_9" } },
+      }),
+    ]);
+    expect(t.get("approval:c10")).toMatchObject({ title: "Cancel “Dentist”?", preview: { current } });
+  });
+
+  it("names trigger pills once their schedules are known", () => {
+    const names = new Map<string, string>();
+    const t = new Timeline({ timeZone: () => "UTC", scheduleNameFor: (_id, text) => names.get(text), isOffline: () => false, isActionable: () => false });
+    t.apply(event("user.message", { content: "Brief me", source: "system", messageId: "m5" }));
+    expect(t.get("m5")).toMatchObject({ kind: "trigger", scheduleName: undefined });
+    names.set("Brief me", "Morning briefing");
+    expect(t.refresh()).toEqual([{ type: "item", item: expect.objectContaining({ id: "m5", scheduleName: "Morning briefing" }) }]);
+  });
+
+  it("keys approvals without a tool call by their full arguments", () => {
+    const body = "x".repeat(300);
+    const a = approvalItemId({ toolName: "send_email", args: { to: ["sam@contoso.example"], body: `${body}a` } });
+    const b = approvalItemId({ toolName: "send_email", args: { to: ["sam@contoso.example"], body: `${body}b` } });
+    expect(a).not.toBe(b);
+    expect(approvalItemId({ toolCallId: "c1", toolName: "send_email" })).toBe("approval:c1");
   });
 });
 

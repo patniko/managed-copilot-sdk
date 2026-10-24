@@ -2,6 +2,7 @@
  * Turns stock Copilot SDK session events into chat timeline items. The same reducer rebuilds the chat from
  * `session.getEvents()` after a resume and applies live events, so history and streaming render identically.
  */
+import { createHash } from "node:crypto";
 import type { SessionEvent } from "@github/copilot-sdk";
 import type { ApprovalItem, ApprovalStatus, AssistantItem, TimelineItem, ToolItem } from "../shared/protocol.js";
 import { describeApproval, describeTool, HIDDEN_TOOLS, scheduleIdFrom } from "./describe.js";
@@ -26,9 +27,17 @@ export interface TimelineContext {
 
 const MAX_ERROR_LENGTH = 400;
 
-/** Approval cards are keyed by tool call so the permission event and the live permission callback meet on one item. */
+/**
+ * Approval cards are keyed by tool call so the permission event and the live permission callback meet on one item.
+ * Without a tool call ID (not expected from the stock runtime) the key covers the full arguments, never a prefix.
+ */
 export function approvalItemId(request: { toolCallId?: string; toolName?: string; args?: unknown }): string {
-  return `approval:${request.toolCallId ?? `${request.toolName}:${JSON.stringify(request.args ?? {}).slice(0, 200)}`}`;
+  if (request.toolCallId) return `approval:${request.toolCallId}`;
+  const digest = createHash("sha256")
+    .update(JSON.stringify(request.args ?? {}))
+    .digest("base64url")
+    .slice(0, 22);
+  return `approval:${request.toolName}:${digest}`;
 }
 
 function errorText(message: string): string {
@@ -50,6 +59,8 @@ export class Timeline {
   readonly #tools = new Map<string, { name: string; args: unknown; at: Date }>();
   /** Runtime permission request ID → approval item ID. */
   readonly #approvals = new Map<string, string>();
+  /** Looked-up approval card details by item ID; kept across rebuilds (tool call IDs are unique). */
+  readonly #details = new Map<string, Pick<ApprovalItem, "title" | "preview">>();
   #origin: "user" | "schedule" = "user";
   #busy = false;
   /** A turn started and has not ended (`session.idle` is not persisted, so history replays rely on this). */
@@ -98,16 +109,30 @@ export class Timeline {
     for (const event of events) this.apply(event);
     // `session.idle` is not persisted: a run is still going only if its last turn never ended.
     this.#busy = this.#turnOpen;
-    if (!this.#busy) {
-      for (const item of this.#items.values()) {
-        if (item.kind === "assistant" && item.streaming) this.#items.set(item.id, { ...item, streaming: false });
-      }
-    }
+    if (!this.#busy) this.#settle();
     this.#lastProactive = undefined;
     for (const notice of notices) this.set(notice);
   }
 
-  /** Refreshes derived flags (offline badges, actionable approvals) after the context changed. */
+  /**
+   * Remembers what an approval card should show (the live permission handler looks up the event being changed), so
+   * rebuilding from history, which only has the request's arguments, keeps those details.
+   */
+  enrichApproval(id: string, details: Pick<ApprovalItem, "title" | "preview">): void {
+    this.#details.set(id, details);
+  }
+
+  /** Nothing is running: finish streaming messages and mark tools that never completed as interrupted. */
+  #settle(): TimelineChange[] {
+    const changes: TimelineChange[] = [];
+    for (const item of this.#items.values()) {
+      if (item.kind === "assistant" && item.streaming) changes.push(this.set({ ...item, streaming: false }));
+      if (item.kind === "tool" && item.status === "running") changes.push(this.set({ ...item, status: "failed", error: "Stopped before it finished." }));
+    }
+    return changes;
+  }
+
+  /** Refreshes derived flags (offline badges, actionable approvals, schedule names) after the context changed. */
   refresh(): TimelineChange[] {
     const changes: TimelineChange[] = [];
     for (const item of this.#items.values()) {
@@ -117,6 +142,9 @@ export class Timeline {
       } else if (item.kind === "approval" && item.status === "pending") {
         const actionable = this.#ctx.isActionable(item.id);
         if (actionable !== item.actionable) changes.push(this.set({ ...item, actionable }));
+      } else if (item.kind === "trigger" && !item.scheduleName) {
+        const scheduleName = this.#ctx.scheduleNameFor(undefined, item.text);
+        if (scheduleName) changes.push(this.set({ ...item, scheduleName }));
       }
     }
     return changes;
@@ -155,7 +183,9 @@ export class Timeline {
         if (parentToolCallId || !deltaContent) return [];
         const existing = this.#items.get(messageId);
         if (existing?.kind === "assistant") {
-          this.#items.set(messageId, { ...existing, text: existing.text + deltaContent, streaming: true });
+          // A late delta (buffered while history loaded) for a message that already completed adds nothing.
+          if (!existing.streaming) return [];
+          this.#items.set(messageId, { ...existing, text: existing.text + deltaContent });
           return [{ type: "delta", id: messageId, text: deltaContent }];
         }
         return [this.set({ kind: "assistant", id: messageId, at, text: deltaContent, streaming: true, proactive: this.#origin === "schedule" })];
@@ -230,7 +260,7 @@ export class Timeline {
         const id = approvalItemId(permissionRequest);
         this.#approvals.set(requestId, id);
         if (this.#items.has(id)) return [];
-        const description = describeApproval(permissionRequest.toolName, permissionRequest.args, this.#ctx.timeZone());
+        const description = this.#details.get(id) ?? describeApproval(permissionRequest.toolName, permissionRequest.args, this.#ctx.timeZone());
         return [
           this.set({
             kind: "approval",
@@ -253,14 +283,15 @@ export class Timeline {
         return [this.set({ ...existing, status: approvalStatusFor(result.kind), actionable: false, decidedAt: at, feedback })];
       }
       case "session.error":
+        // An error ends the turn (it may never reach turn_end), so a replay doesn't think it is still running.
+        this.#turnOpen = false;
         return [this.set({ kind: "notice", id: event.id, at, level: "error", text: errorText(event.data.message) })];
       case "abort":
+        this.#turnOpen = false;
         return [this.set({ kind: "notice", id: event.id, at, level: "info", text: "Stopped." })];
       case "session.idle": {
-        const changes: TimelineChange[] = [];
-        for (const item of this.#items.values()) {
-          if (item.kind === "assistant" && item.streaming) changes.push(this.set({ ...item, streaming: false }));
-        }
+        this.#turnOpen = false;
+        const changes = this.#settle();
         if (this.#busy) {
           this.#busy = false;
           changes.push({ type: "busy", busy: false });

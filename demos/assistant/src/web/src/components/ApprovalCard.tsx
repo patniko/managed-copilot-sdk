@@ -17,6 +17,20 @@ function when(start: string | undefined, end: string | undefined, timeZone: stri
   return `${dayLabel(start, timeZone)} · ${timeRange(start, end, timeZone)}`;
 }
 
+/** The times an update will actually set, worked out like update_event does: a new start keeps the duration. */
+function proposedTimes(preview: Extract<ApprovalPreview, { type: "event" }>): { start?: string; end?: string } {
+  const { current } = preview;
+  if (preview.action !== "update" || (!preview.start && !preview.end)) return { start: preview.start, end: preview.end };
+  const start = preview.start ?? current?.start;
+  let end = preview.end;
+  if (!end && preview.start && current) {
+    const duration = Date.parse(current.end) - Date.parse(current.start);
+    const startMs = Date.parse(preview.start);
+    if (!Number.isNaN(duration) && !Number.isNaN(startMs)) end = new Date(startMs + duration).toISOString();
+  }
+  return { start, end };
+}
+
 function EmailPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "email" }> }) {
   return (
     <div className="text-sm">
@@ -37,15 +51,20 @@ function EmailPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "
   );
 }
 
-function EventPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "event" }> }) {
+function EventPreview({ preview, pending }: { preview: Extract<ApprovalPreview, { type: "event" }>; pending: boolean }) {
   const { timeZone, current } = preview;
-  const proposed = when(preview.start, preview.end, timeZone);
+  const times = proposedTimes(preview);
+  const proposed = when(times.start, times.end, timeZone);
   const existing = current ? when(current.start, current.end, timeZone) : undefined;
   const title = preview.title ?? current?.title;
   const removing = preview.action === "delete";
+  const removingGuests = preview.action === "update" && preview.attendees !== undefined && preview.attendees.length === 0;
   return (
     <div className="space-y-2.5 px-4 py-3 text-sm">
       {title && <div className={`text-base font-semibold text-zinc-900 dark:text-zinc-50 ${removing ? "line-through decoration-red-400" : ""}`}>{title}</div>}
+      {pending && !current && preview.action !== "create" && (
+        <p className="text-xs text-zinc-500">The event's current details couldn't be loaded. Check your calendar if you're not sure which event this is.</p>
+      )}
       {preview.action === "update" && current && preview.title && preview.title !== current.title && (
         <div className="text-xs text-zinc-500">Renamed from “{current.title}”</div>
       )}
@@ -68,13 +87,20 @@ function EventPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "
       {preview.attendees && preview.attendees.length > 0 && (
         <div className="flex items-start gap-2 text-zinc-700 dark:text-zinc-300">
           <Users className="mt-0.5 size-4 shrink-0 text-zinc-400" aria-hidden />
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap items-center gap-1">
+            {preview.action === "update" && <span className="mr-1 text-xs text-zinc-500">New guest list:</span>}
             {preview.attendees.map((attendee) => (
               <span key={attendee} className="rounded-full bg-zinc-100 px-2 py-0.5 text-xs dark:bg-zinc-800">
                 {attendee}
               </span>
             ))}
           </div>
+        </div>
+      )}
+      {removingGuests && (
+        <div className="flex items-center gap-2 font-medium text-zinc-900 dark:text-zinc-100">
+          <Users className="size-4 shrink-0 text-zinc-400" aria-hidden />
+          Remove all guests
         </div>
       )}
       {preview.location && (
@@ -132,7 +158,7 @@ export function ApprovalCard({
           {pending && <span className="chip bg-violet-600/10 text-violet-700 dark:text-violet-300">Needs your OK</span>}
         </div>
         {item.preview.type === "email" && <EmailPreview preview={item.preview} />}
-        {item.preview.type === "event" && <EventPreview preview={item.preview} />}
+        {item.preview.type === "event" && <EventPreview preview={item.preview} pending={pending} />}
         {item.preview.type === "generic" && <pre className="overflow-x-auto px-4 py-3 text-xs text-zinc-600 dark:text-zinc-400">{item.preview.summary}</pre>}
         <div className="border-t border-zinc-100 px-4 py-2.5 dark:border-zinc-800">
           {pending ? (

@@ -6,6 +6,7 @@ import { Store } from "../src/server/store.js";
 import { isoInZone } from "../src/server/time.js";
 import { DemoWorkspace, parseMailQuery } from "../src/server/tools/demo/provider.js";
 import { APPROVAL_TOOLS, createTools } from "../src/server/tools/index.js";
+import { ToolError, type CalendarEvent, type CalendarProvider, type MailProvider, type Workspace } from "../src/server/tools/types.js";
 
 const LA = "America/Los_Angeles";
 const NOW = new Date("2026-10-23T17:30:00Z"); // Friday 10:30 AM PDT
@@ -13,7 +14,7 @@ const NOW = new Date("2026-10-23T17:30:00Z"); // Friday 10:30 AM PDT
 function setup() {
   const store = new Store(":memory:");
   store.upsertUser({ id: 42, login: "octo", name: "Octo Cat" });
-  const workspace = new DemoWorkspace(store, { accountId: 42, name: "Octo Cat", address: "octo@example.com" }, () => LA);
+  const workspace = new DemoWorkspace(store, { accountId: 42, name: "Octo Cat", address: "octo@example.com" }, () => LA, () => NOW);
   workspace.reset(NOW);
   const offline: string[] = [];
   const tools = createTools({
@@ -22,6 +23,7 @@ function setup() {
     effects: new EffectLedger(store),
     log: createLogger("test"),
     onCall: (id) => offline.push(id),
+    now: () => NOW,
   });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
   let seq = 0;
@@ -60,7 +62,7 @@ describe("demo workspace", () => {
   });
 
   it("keeps each account's data separate", async () => {
-    const other = new DemoWorkspace(ctx.store, { accountId: 7, name: "Other", address: "other@example.com" }, () => LA);
+    const other = new DemoWorkspace(ctx.store, { accountId: 7, name: "Other", address: "other@example.com" }, () => LA, () => NOW);
     other.reset(NOW);
     await other.mail.send({ to: ["sam.rivera@contoso.example"], subject: "Only mine", body: "x" });
     expect(await ctx.workspace.mail.search({ query: "subject:only", max: 10 })).toHaveLength(0);
@@ -147,5 +149,108 @@ describe("assistant tools", () => {
       expect(["09:30", "10:00", "10:30"]).not.toContain(start);
     }
     expect(isoInZone(new Date(suggestions[0]!.start), LA)).toBe(suggestions[0]!.start);
+  });
+
+  it("invites guests by bare, validated address", async () => {
+    const created = await ctx.call("create_event", {
+      title: "Sync",
+      start: "2026-10-26T13:00",
+      end: "2026-10-26T13:30",
+      attendees: ["Sam Rivera <Sam.Rivera@contoso.example>", "sam.rivera@contoso.example", "Octo <octo@example.com>"],
+    });
+    expect((created.event as { attendees: string[] }).attendees).toEqual(["sam.rivera@contoso.example"]);
+    const invalid = await ctx.call("create_event", { title: "Sync", start: "2026-10-26T13:00", end: "2026-10-26T13:30", attendees: ["not an email"] });
+    expect(invalid.textResultForLlm).toMatch(/not a valid email address/);
+  });
+});
+
+describe("effect ledger", () => {
+  it("never repeats an action whose outcome is unknown, but allows retrying a definite failure", async () => {
+    const store = new Store(":memory:");
+    const ledger = new EffectLedger(store);
+    const lost = ledger.run("s1:send_email:c1", "send_email", async () => {
+      throw new Error("socket hang up");
+    });
+    await expect(lost).rejects.toMatchObject({ uncertain: true });
+    expect(store.getEffect("s1:send_email:c1")?.state).toBe("started");
+    let ranAgain = false;
+    await expect(
+      ledger.run("s1:send_email:c1", "send_email", async () => {
+        ranAgain = true;
+      }),
+    ).rejects.toMatchObject({ uncertain: true });
+    expect(ranAgain).toBe(false);
+
+    const refused = ledger.run("s1:send_email:c2", "send_email", async () => {
+      throw new ToolError("Gmail rejected the request (invalidArgument).");
+    });
+    await expect(refused).rejects.toMatchObject({ uncertain: false });
+    expect(store.getEffect("s1:send_email:c2")).toBeUndefined();
+    expect(await ledger.run("s1:send_email:c2", "send_email", async () => "sent")).toBe("sent");
+  });
+});
+
+describe("calendar edge cases", () => {
+  function calendarTools(events: CalendarEvent[], timeZone: string) {
+    const store = new Store(":memory:");
+    const unused = async (): Promise<never> => {
+      throw new Error("not used in this test");
+    };
+    const calendar: CalendarProvider = {
+      list: async () => events,
+      get: async (id) => events.find((e) => e.id === id)!,
+      create: unused,
+      update: unused,
+      remove: unused,
+    };
+    const workspace: Workspace = { kind: "google", label: "Google (me@example.com)", address: "me@example.com", mail: {} as MailProvider, calendar };
+    const tools = createTools({ workspace: async () => workspace, timeZone: () => timeZone, effects: new EffectLedger(store), log: createLogger("test"), now: () => NOW });
+    return async (name: string, args: unknown) => {
+      const tool = tools.find((t) => t.name === name) as Tool<unknown>;
+      return (await tool.handler!(args, { sessionId: "s1", toolCallId: "c1", toolName: name, arguments: args })) as Record<string, unknown>;
+    };
+  }
+
+  it("reports all-day events by their calendar dates, east of UTC too", async () => {
+    // Tokyo midnight is the previous day in UTC; the dates must not shift.
+    const offsite: CalendarEvent = {
+      id: "e1",
+      title: "Offsite",
+      start: "2026-10-25T15:00:00.000Z",
+      end: "2026-10-27T15:00:00.000Z",
+      allDay: true,
+      startDate: "2026-10-26",
+      endDate: "2026-10-28",
+      attendees: [],
+    };
+    const call = calendarTools([offsite], "Asia/Tokyo");
+    const result = await call("list_events", { start: "2026-10-26T00:00", end: "2026-10-29T00:00" });
+    const [event] = result.events as { start: string; end: string; when: string }[];
+    expect(event).toMatchObject({ start: "2026-10-26", end: "2026-10-27", allDay: true });
+    expect(event!.when).toMatch(/ through .*\(all day\)$/);
+  });
+
+  it("counts all-day events as busy unless they show as free", async () => {
+    const call = calendarTools(
+      [
+        { id: "off", title: "Offsite", start: "2026-10-26T07:00:00.000Z", end: "2026-10-27T07:00:00.000Z", allDay: true, startDate: "2026-10-26", endDate: "2026-10-27", attendees: [] },
+        {
+          id: "hol",
+          title: "Holiday reminder",
+          start: "2026-10-27T07:00:00.000Z",
+          end: "2026-10-28T07:00:00.000Z",
+          allDay: true,
+          startDate: "2026-10-27",
+          endDate: "2026-10-28",
+          free: true,
+          attendees: [],
+        },
+        { id: "mtg", title: "Planning", start: "2026-10-27T16:00:00.000Z", end: "2026-10-27T19:00:00.000Z", allDay: false, attendees: [] },
+      ],
+      LA,
+    );
+    const result = await call("find_free_time", { start: "2026-10-26T00:00", end: "2026-10-28T00:00", durationMinutes: 60 });
+    // Monday is blocked by the offsite; Tuesday's free-showing reminder doesn't block, the 9-12 planning does.
+    expect((result.suggestions as { start: string }[]).map((s) => s.start)).toEqual(["2026-10-27T12:00:00-07:00"]);
   });
 });

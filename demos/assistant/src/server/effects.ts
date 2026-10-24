@@ -1,4 +1,5 @@
 import type { Store } from "./store.js";
+import { TimeInputError } from "./time.js";
 import { ToolError } from "./tools/types.js";
 
 /**
@@ -27,9 +28,14 @@ export class EffectLedger {
       this.#store.completeEffect(key, JSON.stringify(result ?? null));
       return result;
     } catch (error) {
-      // A definite failure means nothing happened, so a retry is safe; an uncertain one stays recorded as started.
-      if (!(error instanceof ToolError && error.uncertain)) this.#store.clearEffect(key);
-      throw error;
+      // Only a definite failure proves nothing happened, so a retry is safe. Anything else (an uncertain ToolError or an
+      // unexpected error after the request may have been sent) stays recorded as started and is never repeated blindly.
+      if ((error instanceof ToolError && !error.uncertain) || error instanceof TimeInputError) {
+        this.#store.clearEffect(key);
+        throw error;
+      }
+      if (error instanceof ToolError) throw error;
+      throw new ToolError("Something went wrong partway through, so this action may or may not have happened. Check before trying again.", { uncertain: true });
     }
   }
 }

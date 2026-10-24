@@ -49,6 +49,11 @@ export interface CalendarEvent {
   readonly start: string;
   readonly end: string;
   readonly allDay: boolean;
+  /** All-day events only: first day and the day after the last (`YYYY-MM-DD`, end exclusive), as the calendar records them. */
+  readonly startDate?: string;
+  readonly endDate?: string;
+  /** True when the event doesn't block time (shown as free, or the person declined it). */
+  readonly free?: boolean;
   readonly location?: string;
   readonly description?: string;
   readonly attendees: readonly string[];
@@ -76,7 +81,8 @@ export interface EventPatch {
 
 export interface CalendarProvider {
   list(range: { start: Date; end: Date; query?: string; max?: number }): Promise<CalendarEvent[]>;
-  get(id: string): Promise<CalendarEvent>;
+  /** One event; `timeZone` places all-day events when the calendar doesn't say. */
+  get(id: string, timeZone: string): Promise<CalendarEvent>;
   create(input: EventInput, timeZone: string): Promise<CalendarEvent>;
   update(id: string, patch: EventPatch, timeZone: string): Promise<CalendarEvent>;
   remove(id: string): Promise<void>;

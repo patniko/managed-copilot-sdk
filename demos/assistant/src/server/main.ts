@@ -11,7 +11,7 @@ process.on("unhandledRejection", (reason) => log.error("Unhandled rejection", { 
 async function main(): Promise<void> {
   const config = loadConfig();
   const assistant = new Assistant(config, log);
-  const router = new Router({ port: config.port, publicUrl: config.publicUrl, extraOrigins: config.devOrigins });
+  const router = new Router({ port: config.port, publicUrl: config.publicUrl, extraOrigins: config.devOrigins, extraHosts: config.allowedHosts });
   assistant.routes(router);
 
   const handler = (req: IncomingMessage, res: ServerResponse) => {
