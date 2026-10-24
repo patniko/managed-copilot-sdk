@@ -57,3 +57,13 @@ test("prints pretty JSON", () => {
 - Cover every acceptance criterion with at least one test, plus the error cases (missing file, malformed input).
 - Use `fs.mkdtempSync(path.join(os.tmpdir(), "case-"))` for temporary files and clean them up.
 - Keep tests deterministic and fast: no network, no sleeps.
+
+## Portability
+
+The sandbox is Linux, but customers run the release on Windows and macOS too:
+
+- Turn module URLs into paths with `fileURLToPath(new URL(..., import.meta.url))`. Never use `URL.pathname`, which
+  becomes `/C:/...` on Windows.
+- Build paths with `path.join`, run child processes with `process.execPath` (never a shebang or shell), and don't
+  rely on shell utilities, `/dev/null`, or `/tmp`.
+- Compare text after normalizing line endings when output could contain `\r\n`.

@@ -1,6 +1,7 @@
 import type {
   AssistantMessageEvent,
   CopilotClient,
+  CopilotSession,
   MessageOptions,
   ResumeSessionConfig,
   SessionConfig,
@@ -43,9 +44,12 @@ export interface StationArtifacts {
 /** What the pipeline needs from Managed Copilot. Implemented by `Platform`; faked in unit tests. */
 export interface FactoryPlatform {
   readonly models: Readonly<Record<StationRole, string>>;
-  createSession(role: StationRole, config: SessionConfig): Promise<StationSession>;
-  resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession>;
+  /** `note` receives user-facing remarks about how the session was set up (for the station's activity). */
+  createSession(role: StationRole, config: SessionConfig, note?: (text: string) => void): Promise<StationSession>;
+  resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession>;
   sessionInfo(sessionId: string): Promise<SessionInfo>;
+  /** The signed-in user's sessions on the platform (owner-scoped). */
+  listSessions(): Promise<SessionInfo[]>;
   deleteSession(sessionId: string): Promise<void>;
   files(sessionId: string): StationFiles;
   artifacts(sessionId: string): StationArtifacts;
@@ -68,12 +72,17 @@ function describeFailure(error: unknown, url: string | undefined): Pick<Platform
           message: "Your GitHub account isn't allowed on this deployment.",
           hint: "Ask the operator to add you to the AppHost's `access` rules.",
         };
-      case "capability_unavailable":
+      case "capability_unavailable": {
+        // Only "can't reach it" means the platform isn't up; anything else (GitHub unreachable, ...) is shown as is.
+        if (!/cannot reach|no managed copilot deployment found/i.test(error.message)) {
+          return { state: "unavailable", message: error.message, hint: "The factory retries automatically. Check the platform logs in the Aspire dashboard." };
+        }
         return {
           state: "unavailable",
           message: url ? `Waiting for the Managed Copilot platform at ${url}.` : "The Managed Copilot platform isn't running.",
           hint: "Start it from the repository root with `aspire run`.",
         };
+      }
       default:
         return { state: "unavailable", message: error.message, hint: "Check the platform logs in the Aspire dashboard." };
     }
@@ -148,7 +157,12 @@ export class Platform implements FactoryPlatform {
     return created;
   }
 
-  async createSession(role: StationRole, config: SessionConfig): Promise<StationSession> {
+  /** Creates a session with the station's deployed custom agent (`agent`), retrying once on a fresh client. */
+  async createSession(role: StationRole, config: SessionConfig, _note?: (text: string) => void): Promise<StationSession> {
+    return this.#create(role, config);
+  }
+
+  async #create(role: StationRole, config: SessionConfig): Promise<CopilotSession> {
     const client = this.#client(role);
     try {
       return await (await client).createSession(config);
@@ -176,12 +190,30 @@ export class Platform implements FactoryPlatform {
     }
   }
 
-  resumeSession(_role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession> {
-    return this.#managedOrThrow().resumeSession(sessionId, config);
+  /** Resumes a session and makes sure its station's agent is still the selected one. */
+  async resumeSession(_role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession> {
+    const { agent, ...rest } = config;
+    const session = await this.#managedOrThrow().resumeSession(sessionId, rest);
+    if (agent) {
+      try {
+        const current = await session.rpc.agent.getCurrent();
+        if (current.agent?.name !== agent) {
+          await session.rpc.agent.select({ name: agent });
+          note?.(`Re-selected the deployed "${agent}" agent`);
+        }
+      } catch (error) {
+        log.warn("Couldn't confirm the session's agent after resume", { sessionId, agent, error: (error as Error).message });
+      }
+    }
+    return session;
   }
 
   sessionInfo(sessionId: string): Promise<SessionInfo> {
     return this.#managedOrThrow().sessions.get(sessionId);
+  }
+
+  listSessions(): Promise<SessionInfo[]> {
+    return this.#managedOrThrow().sessions.list({ limit: 1000 });
   }
 
   deleteSession(sessionId: string): Promise<void> {

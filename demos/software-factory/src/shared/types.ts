@@ -174,6 +174,8 @@ export interface Station {
   readonly retryNote?: string;
   /** Checkpoint: every seed file was written into the sandbox. */
   readonly seeded?: boolean;
+  /** The platform's view of `sessionId`, reconciled with `managed.sessions.list()`; `deleted` when it no longer exists. */
+  readonly sessionState?: string;
   readonly error?: FactoryError;
 }
 

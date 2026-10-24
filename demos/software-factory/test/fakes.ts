@@ -151,6 +151,11 @@ export class FakePlatform implements FactoryPlatform {
     } as SessionInfo;
   }
 
+  async listSessions(): Promise<SessionInfo[]> {
+    const ids = [...this.sessions.keys()].filter((sessionId) => !this.lost.has(sessionId));
+    return Promise.all(ids.map((sessionId) => this.sessionInfo(sessionId)));
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     this.deleted.push(sessionId);
   }
