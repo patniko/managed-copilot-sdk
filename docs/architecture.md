@@ -1118,10 +1118,10 @@ local-quickstart webhook snippets are skipped; the deployed assistant's webhook/
 separately. Precise evidence and limits (including no partition-tolerant HA or live Google OAuth claim) are in the
 deployment guide.
 Bounded factory reconnect operations fixed a 240-second ingress timeout: the latest gateway-only rollover recovered
-both services in 26.3 seconds without restarting the factory. Active-work recovery remains gated: interrupted native
-turns are still exposed as running after the old gateway stops the sandbox compute and the new gateway recreates it.
-The factory now pauses and reattaches, but cannot finish those turns. Sandbox and core are reconciling the native-turn
-state before this qualification can close; file/history persistence alone is not execution recovery.
+both services in 26.3 seconds without restarting the factory. A cut native turn is ended visibly as failed/idle;
+retaining files and conversation history does not continue the killed process. In Azure, the preserved work order
+completed through an explicit, workspace-checking checkpoint Retry, retaining both builder session IDs and producing
+a 9-file, 44-test release. This does not authorize blind replay of uncertain external effects.
 
 - **Publish path.** In publish mode `addManagedCopilot` calls `publishManagedCopilot`: a Container Apps environment in
   a new VNet (`platform` and `sandboxes` /23 subnets, `egress` /24) with an Azure Files NFS 4.1 share, and the gateway as a
