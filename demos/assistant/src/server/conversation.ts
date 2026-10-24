@@ -178,8 +178,21 @@ export class Conversation {
     this.#session = session;
     this.#setState("live");
     this.#deps.onReset();
-    // The snapshot already carries every item; still run the side effects (schedule refreshes, notifications).
-    const effects = changes.filter((change) => change.type !== "delta");
+    // The snapshot already carries every item. Still run the side effects (agenda and schedule refreshes,
+    // notifications), re-sending items in their final state so an early version never rolls the snapshot back.
+    const effects: TimelineChange[] = [];
+    const resent = new Set<string>();
+    for (const change of changes) {
+      if (change.type === "delta") continue;
+      if (change.type !== "item") {
+        effects.push(change);
+        continue;
+      }
+      if (resent.has(change.item.id)) continue;
+      resent.add(change.item.id);
+      const item = this.timeline.get(change.item.id);
+      if (item) effects.push({ type: "item", item });
+    }
     if (effects.length) this.#deps.onChanges(effects);
     this.#startHeartbeat(generation);
     this.#deps.log.info("Attached to the conversation", { sessionId: session.sessionId, events: history.length });

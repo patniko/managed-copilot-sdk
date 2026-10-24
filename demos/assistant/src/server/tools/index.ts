@@ -69,8 +69,11 @@ export function createTools(ctx: ToolContext): Tool<any>[] {
         if (!parsed.success) return failure(`Invalid arguments for ${name}: ${describeZodError(parsed.error)}`);
         try {
           const run = () => config.handler(parsed.data, invocation);
-          // Keyed by session too, so a new conversation can never collide with an old one's tool call IDs.
-          return config.sideEffect ? await ctx.effects.run(`${invocation.sessionId}:${name}:${invocation.toolCallId}`, name, run) : await run();
+          // Keyed by session too, so a new conversation can never collide with an old one's tool call IDs. Records
+          // from before that change (keyed by tool and call only) are still honored.
+          return config.sideEffect
+            ? await ctx.effects.run(`${invocation.sessionId}:${name}:${invocation.toolCallId}`, name, run, { aliases: [`${name}:${invocation.toolCallId}`] })
+            : await run();
         } catch (error) {
           if (error instanceof ToolError || error instanceof TimeInputError) return failure(error.message);
           ctx.log.error("Tool failed unexpectedly", { tool: name, error: (error as Error).message });

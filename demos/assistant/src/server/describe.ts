@@ -69,9 +69,9 @@ export function scheduleIdFrom(content: string | undefined): string | undefined 
 
 /** "stretch-water-reminder" → "Stretch water reminder"; names with spaces are kept as written. */
 export function humanizeName(name: string): string {
-  if (/\s/.test(name) || !/[-_]/.test(name)) return name;
   // The platform suffixes duplicate agent schedule names with 4 random characters ("…-2QQq"); drop that for display.
-  const base = name.replace(/-(?=[A-Za-z0-9_-]{4}$)(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]{4}$/, "");
+  const base = name.replace(/-(?=[A-Za-z0-9]{4}$)(?=[a-z0-9]*[A-Z])[A-Za-z0-9]{4}$/, "");
+  if (/\s/.test(base) || !/[-_]/.test(base)) return base;
   const words = base.replace(/[-_]+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }

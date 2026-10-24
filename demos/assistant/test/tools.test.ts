@@ -188,6 +188,17 @@ describe("effect ledger", () => {
     expect(store.getEffect("s1:send_email:c2")).toBeUndefined();
     expect(await ledger.run("s1:send_email:c2", "send_email", async () => "sent")).toBe("sent");
   });
+
+  it("honors records written before effect keys included the session", async () => {
+    const ctx = setup();
+    const args = { to: ["sam.rivera@contoso.example"], subject: "Legacy check", body: "Hello" };
+    ctx.store.startEffect("send_email:call_legacy", "send_email");
+    ctx.store.completeEffect("send_email:call_legacy", JSON.stringify({ status: "Sent", messageId: "m-legacy" }));
+    expect(await ctx.call("send_email", args, "call_legacy")).toMatchObject({ messageId: "m-legacy" });
+    ctx.store.startEffect("send_email:call_unknown", "send_email");
+    expect((await ctx.call("send_email", args, "call_unknown")).textResultForLlm).toMatch(/outcome is unknown/);
+    expect(await ctx.workspace.mail.search({ query: 'in:sent subject:"Legacy check"', max: 10 })).toHaveLength(0);
+  });
 });
 
 describe("calendar edge cases", () => {

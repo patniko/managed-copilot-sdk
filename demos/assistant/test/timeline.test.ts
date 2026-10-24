@@ -164,6 +164,8 @@ describe("descriptions", () => {
   it("humanizes schedule names", () => {
     expect(humanizeName("stretch-water-reminder")).toBe("Stretch water reminder");
     expect(humanizeName("stretch-water-reminder-2QQq")).toBe("Stretch water reminder");
+    expect(humanizeName("Stretch reminder-UIEP")).toBe("Stretch reminder");
+    expect(humanizeName("report-2024")).toBe("Report 2024");
     expect(humanizeName("q3-launch-plan")).toBe("Q3 launch plan");
     expect(humanizeName("Weekday morning briefing")).toBe("Weekday morning briefing");
     expect(scheduleDisplayName("task-Yb4iEB", "Remind Patrick to stretch and grab some water.")).toBe("Remind Patrick to stretch and grab some water");
