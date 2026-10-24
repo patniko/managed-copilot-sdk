@@ -1,6 +1,6 @@
 // The promotion ledger (`promotion_operations`): one row per attempt. At most one attempt per session is open at a
-// time (a partial unique index makes admission atomic), and recovery after a restart reconciles open rows against
-// core's ledger, whose commit moves placement and generation in one transaction.
+// time (a partial unique index makes admission atomic). Recovery after a restart reconciles open rows against core's
+// ledger, whose commit moves placement and generation in one transaction, and finishes the work each row still owes.
 import { ManagedCopilotError, type PromotionTrigger } from "@managed-copilot/protocol";
 import { migrate, type Database } from "../../db.js";
 import type { OperationState, PromotionOperation } from "./contract.js";
@@ -22,6 +22,9 @@ const MIGRATIONS = [
      error TEXT,
      source_state_dir TEXT,
      source_cleaned INTEGER NOT NULL DEFAULT 0,
+     event_published INTEGER NOT NULL DEFAULT 0,
+     finalized INTEGER NOT NULL DEFAULT 0,
+     cleanup_pending INTEGER NOT NULL DEFAULT 0,
      created_at TEXT NOT NULL,
      updated_at TEXT NOT NULL,
      committed_at TEXT
@@ -46,6 +49,9 @@ interface Row {
   error: string | null;
   source_state_dir: string | null;
   source_cleaned: number;
+  event_published: number;
+  finalized: number;
+  cleanup_pending: number;
   created_at: string;
   updated_at: string;
   committed_at: string | null;
@@ -68,6 +74,9 @@ function toOperation(row: Row): PromotionOperation {
     ...(row.error ? { error: row.error } : {}),
     ...(row.source_state_dir ? { sourceStateDir: row.source_state_dir } : {}),
     sourceCleaned: row.source_cleaned === 1,
+    eventPublished: row.event_published === 1,
+    finalized: row.finalized === 1,
+    cleanupPending: row.cleanup_pending === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.committed_at ? { committedAt: row.committed_at } : {}),
@@ -93,6 +102,9 @@ export type OperationUpdate = Partial<{
   error: string;
   sourceStateDir: string;
   sourceCleaned: boolean;
+  eventPublished: boolean;
+  finalized: boolean;
+  cleanupPending: boolean;
   committedAt: string;
 }>;
 
@@ -105,6 +117,9 @@ const COLUMNS: Record<keyof OperationUpdate, string> = {
   error: "error",
   sourceStateDir: "source_state_dir",
   sourceCleaned: "source_cleaned",
+  eventPublished: "event_published",
+  finalized: "finalized",
+  cleanupPending: "cleanup_pending",
   committedAt: "committed_at",
 };
 
@@ -159,13 +174,8 @@ export class PromotionStore {
     return row ? toOperation(row) : undefined;
   }
 
-  open(sessionId: string): PromotionOperation | undefined {
-    const row = this.#db.prepare("SELECT * FROM promotion_operations WHERE session_id = ? AND state NOT IN ('committed', 'failed')").get(sessionId) as Row | undefined;
-    return row ? toOperation(row) : undefined;
-  }
-
   committed(sessionId: string): PromotionOperation | undefined {
-    const row = this.#db.prepare("SELECT * FROM promotion_operations WHERE session_id = ? AND state = 'committed' ORDER BY created_at DESC LIMIT 1").get(sessionId) as Row | undefined;
+    const row = this.#db.prepare("SELECT * FROM promotion_operations WHERE session_id = ? AND state = 'committed' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(sessionId) as Row | undefined;
     return row ? toOperation(row) : undefined;
   }
 
@@ -174,8 +184,8 @@ export class PromotionStore {
     return (this.#db.prepare("SELECT * FROM promotion_operations WHERE state NOT IN ('committed', 'failed')").all() as unknown as Row[]).map(toOperation);
   }
 
-  /** Committed attempts whose source copy of the session state still has to be removed. */
-  uncleaned(): PromotionOperation[] {
-    return (this.#db.prepare("SELECT * FROM promotion_operations WHERE state = 'committed' AND source_cleaned = 0").all() as unknown as Row[]).map(toOperation);
+  /** Terminal attempts that still owe work: post-commit steps, or releasing an interrupted attempt's candidate. */
+  owing(): PromotionOperation[] {
+    return (this.#db.prepare("SELECT * FROM promotion_operations WHERE (state = 'committed' AND finalized = 0) OR (state = 'failed' AND cleanup_pending = 1)").all() as unknown as Row[]).map(toOperation);
   }
 }

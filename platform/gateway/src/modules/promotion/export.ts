@@ -1,8 +1,9 @@
 // Exports a session's stock runtime state for promotion: the `session-state/<sessionId>/` directory of the source
 // runtime's COPILOT_HOME, which is everything the stock runtime (1.0.103) needs to `session.resume` the same session
-// elsewhere. Lock files are skipped, platform host paths are rewritten (the session's shared working directory
-// becomes `/workspace`, any other platform path `/platform`), and an export that would carry a GitHub token into a
-// sandbox is refused.
+// elsewhere. Lock files are skipped; platform host paths under the gateway's data directory are rewritten (the
+// session's shared working directory becomes `/workspace`, its deployed customizations the sandbox's read-only mount,
+// anything else `/platform`); and an export that would carry a GitHub token into a sandbox is refused.
+import { once } from "node:events";
 import { createReadStream, createWriteStream, realpathSync } from "node:fs";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
@@ -12,14 +13,20 @@ import { ManagedCopilotError } from "@managed-copilot/protocol";
 /** Limits match what the sandbox imports (`importRuntimeState`). */
 export const EXPORT_LIMITS = { files: 10_000, bytes: 1024 * 1024 * 1024 } as const;
 
+/** Where the sandbox mounts the deployed customizations bundle (read-only), as core's admission uses it. */
+export const SANDBOX_CUSTOMIZATIONS_MOUNT = "/opt/managed-copilot/customizations";
+
 /** Files whose text is rewritten. Everything else is copied byte for byte (and still scanned for tokens). */
 const JSONL = new Set([".jsonl"]);
 const JSON_FILES = new Set([".json"]);
 const TEXT = new Set([".yaml", ".yml", ".md", ".txt", ".log", ".csv", ".toml", ".ini", ".xml", ".html"]);
 /** Text files larger than this are copied without rewriting (they are not expected in session state). */
 const MAX_REWRITE_BYTES = 32 * 1024 * 1024;
-/** GitHub token formats: classic and OAuth/app tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and fine-grained PATs. */
-const TOKEN_PATTERN = /\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})\b/;
+/**
+ * GitHub token formats: classic and OAuth/app tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`) and fine-grained PATs.
+ * Only letters and digits count as adjacent token characters, so Markdown emphasis (`_ghp_…_`) still matches.
+ */
+const TOKEN_PATTERN = /(?<![A-Za-z0-9])(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})/;
 
 export interface ExportOptions {
   /** `<COPILOT_HOME>/session-state/<sessionId>` of the source runtime. */
@@ -27,7 +34,7 @@ export interface ExportOptions {
   /** A new, empty staging directory that receives the export. */
   readonly targetDir: string;
   readonly sessionId: string;
-  /** Platform directories to hide. `<root>/workspaces/<sessionId>` becomes `/workspace`; anything else `/platform`. */
+  /** The gateway's data directories: every path under them is a platform path. */
   readonly platformRoots: readonly string[];
   /** Literal secrets (for example the owner's current token) the export must never contain. */
   readonly secrets?: readonly string[];
@@ -45,7 +52,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** The given root plus its canonical spelling (Windows 8.3 short names, symlinked temp directories). */
+/** The given roots plus their canonical spellings (Windows 8.3 short names, symlinked temp directories). */
 function rootVariants(roots: readonly string[]): string[] {
   const variants = new Set<string>();
   for (const root of roots) {
@@ -61,33 +68,47 @@ function rootVariants(roots: readonly string[]): string[] {
   return [...variants].sort((a, b) => b.length - a.length);
 }
 
+/** Characters a platform path segment can contain (identifiers, digests, file names); punctuation ends the path. */
+const SEGMENT = String.raw`[A-Za-z0-9._~@+=-]+`;
 /**
- * Rewrites platform paths inside strings. Separators may be `/`, `\`, or JSON-escaped `\\`; the path continues over
- * further segments, which are re-joined with `/`.
+ * Separator styles. One path is written in one style: plain (`\` or `/`, as in decoded strings and YAML) or
+ * JSON-escaped (`\\` or `/`, as inside a nested JSON document). Matching each style on its own keeps a nested `\n`
+ * escape after an escaped path intact while plain segments such as `\runtime` or `\notes` still continue the path.
+ */
+const STYLES = [String.raw`(?:\\\\|/)`, String.raw`(?:\\|/)`] as const;
+
+/**
+ * Rewrites platform paths inside strings: `<root>/runtime/shared/workspaces/<sessionId>` becomes `/workspace`,
+ * `<root>/customizations/<environment>/<digest>` the sandbox's customizations mount, and anything else under a root
+ * `/platform`. Further segments are kept and re-joined with `/`; sentence punctuation after a path stays outside it.
  */
 export function pathRewriter(roots: readonly string[], sessionId: string): { test(text: string): boolean; rewrite(text: string): string } {
   const variants = rootVariants(roots);
   if (variants.length === 0) return { test: () => false, rewrite: (text) => text };
-  const separator = String.raw`[\\/]+`;
-  const alternatives = variants.map((root) => root.split(/[\\/]+/).map(escapeRegExp).join(separator));
   const flags = process.platform === "win32" ? "gi" : "g";
-  // A root, not followed by more characters of the same directory name, then any further path segments.
-  const source = `(?:${alternatives.join("|")})(?![^\\\\/\\s"'\`<>|])((?:${separator}[^\\\\/\\s"'\`<>|*?:]+)*)`;
-  const pattern = new RegExp(source, flags);
-  const probe = new RegExp(`(?:${alternatives.join("|")})`, flags.replace("g", ""));
-  const caseInsensitive = process.platform === "win32";
+  // The root must end a directory name (`shared.bak` is a sibling; `shared.` ends a sentence).
+  const boundary = String.raw`(?![A-Za-z0-9_~@+=-]|\.[A-Za-z0-9_-])`;
+  const patterns = STYLES.map((separator) => {
+    const alternatives = variants.map((root) => root.split(/[\\/]+/).map(escapeRegExp).join(separator)).join("|");
+    return new RegExp(`(?:${alternatives})${boundary}((?:${separator}${SEGMENT})*)`, flags);
+  });
+  const probe = new RegExp(variants.map((root) => root.split(/[\\/]+/).map(escapeRegExp).join(String.raw`[\\/]+`)).join("|"), flags.replace("g", ""));
+  const fold = process.platform === "win32" ? (value: string) => value.toLowerCase() : (value: string) => value;
+  const is = (value: string | undefined, expected: string) => value !== undefined && fold(value) === fold(expected);
+  const replace = (_match: string, rest: string) => {
+    const trailing = /\.+$/.exec(rest)?.[0] ?? "";
+    const segments = rest.slice(0, rest.length - trailing.length).split(/[\\/]+/).filter(Boolean);
+    const join = (base: string, tail: readonly string[]) => `${tail.length > 0 ? `${base.replace(/\/$/, "")}/${tail.join("/")}` : base}${trailing}`;
+    if (is(segments[0], "runtime") && is(segments[1], "shared") && is(segments[2], "workspaces") && is(segments[3], sessionId)) {
+      return join("/workspace", segments.slice(4));
+    }
+    if (is(segments[0], "customizations") && segments.length >= 3) return join(SANDBOX_CUSTOMIZATIONS_MOUNT, segments.slice(3));
+    if (is(segments[0], "runtime") && is(segments[1], "shared")) return join("/platform", segments.slice(2));
+    return join("/platform", segments);
+  };
   return {
     test: (text) => probe.test(text),
-    rewrite: (text) =>
-      text.replace(pattern, (_match, rest: string) => {
-        const segments = rest.split(/[\\/]+/).filter(Boolean);
-        const same = (a: string | undefined, b: string) => (a === undefined ? false : caseInsensitive ? a.toLowerCase() === b.toLowerCase() : a === b);
-        if (same(segments[0], "workspaces") && same(segments[1], sessionId)) {
-          const tail = segments.slice(2);
-          return tail.length > 0 ? `/workspace/${tail.join("/")}` : "/workspace";
-        }
-        return segments.length > 0 ? `/platform/${segments.join("/")}` : "/platform";
-      }),
+    rewrite: (text) => patterns.reduce((out, pattern) => out.replace(pattern, replace), text),
   };
 }
 
@@ -160,9 +181,7 @@ export async function exportSessionState(options: ExportOptions): Promise<Export
       if (files > limits.files) throw new ManagedCopilotError("capability_unavailable", `The session's history has more than ${limits.files} files, more than a sandbox can import.`);
       const extension = extname(entry.name).toLowerCase();
       if (JSONL.has(extension)) {
-        const result = await copyJsonLines(source, target, rewriter, scanner, name);
-        account(result.bytes, name);
-        if (result.rewritten) rewritten += 1;
+        if (await copyJsonLines(source, target, rewriter, scanner, name, (size) => account(size, name))) rewritten += 1;
       } else if ((JSON_FILES.has(extension) || TEXT.has(extension)) && stats.size <= MAX_REWRITE_BYTES) {
         const text = await readFile(source, "utf8");
         let output = text;
@@ -198,7 +217,8 @@ export async function exportSessionState(options: ExportOptions): Promise<Export
 
 /**
  * Streams a JSONL journal line by line (split on `\n` only: JSON strings may hold raw U+2028/U+2029, which readline
- * would treat as line breaks); only lines that mention a platform path are parsed and re-serialized.
+ * would treat as line breaks); only lines that mention a platform path are parsed and re-serialized. Any read or write
+ * failure, including one while flushing, fails the export: a truncated journal is never handed to a sandbox.
  */
 async function copyJsonLines(
   source: string,
@@ -206,9 +226,12 @@ async function copyJsonLines(
   rewriter: ReturnType<typeof pathRewriter>,
   scanner: SecretScanner,
   name: string,
-): Promise<{ bytes: number; rewritten: boolean }> {
+  account: (bytes: number) => void,
+): Promise<boolean> {
   const output = createWriteStream(target);
-  let bytes = 0;
+  // Until `finished` is awaited, an error event must not go unhandled.
+  const failed = new Promise<never>((_, reject) => output.once("error", reject));
+  failed.catch(() => undefined);
   let rewritten = false;
   let pending = "";
   const write = async (line: string, terminated: boolean) => {
@@ -224,9 +247,10 @@ async function copyJsonLines(
     }
     scanner.check(text, name);
     const chunk = terminated ? `${text}\n` : text;
-    bytes += Buffer.byteLength(chunk);
-    if (!output.write(chunk)) await new Promise<void>((resolve) => output.once("drain", () => resolve()));
+    account(Buffer.byteLength(chunk));
+    if (!output.write(chunk)) await Promise.race([once(output, "drain"), failed]);
   };
+  let error: unknown;
   try {
     for await (const chunk of createReadStream(source, { encoding: "utf8" })) {
       pending += chunk as string;
@@ -238,9 +262,19 @@ async function copyJsonLines(
       }
     }
     if (pending.length > 0) await write(pending, false);
-  } finally {
-    output.end();
-    await finished(output).catch(() => undefined);
+  } catch (caught) {
+    error = caught;
   }
-  return { bytes, rewritten };
+  if (error) {
+    output.destroy();
+    await finished(output).catch(() => undefined);
+    throw error instanceof ManagedCopilotError ? error : new ManagedCopilotError("state_restore_failed", `The session's history could not be staged (${name}): ${(error as Error).message}`);
+  }
+  output.end();
+  try {
+    await finished(output);
+  } catch (caught) {
+    throw new ManagedCopilotError("state_restore_failed", `The session's history could not be staged (${name}): ${(caught as Error).message}`);
+  }
+  return rewritten;
 }

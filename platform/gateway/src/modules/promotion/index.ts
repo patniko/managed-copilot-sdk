@@ -31,7 +31,7 @@ export const promotionModule: GatewayModule = {
       app,
       log,
       store,
-      platformRoots: [join(app.config.dataDir, "runtime", "shared")],
+      platformRoots: [app.config.dataDir],
       stagingRoot: join(app.config.dataDir, "promotion"),
     });
     app.provide("promotion", manager);
@@ -53,6 +53,13 @@ export const promotionModule: GatewayModule = {
         return manager.fromTool(context);
       },
     });
+
+    // Before any module starts (durable replays platform tools at start): settle attempts a restart interrupted.
+    try {
+      manager.reconcile();
+    } catch (error) {
+      log.error("Promotion reconciliation failed", { error: (error as Error).message });
+    }
 
     app.onStart(async () => {
       if (manager.available()) app.capabilities.add("promotion");

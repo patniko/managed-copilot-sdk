@@ -446,34 +446,44 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   sessions on shared placement with `skipPermission: false`, so the session's permission policy approves it before
   anything is allocated. Both return or report the same `PromoteResult { sessionId, placement, sandboxId, generation }`.
 - **Admission** (`promotion_operations`, one open attempt per session by a partial unique index; concurrent and
-  repeated calls join it, and an already promoted session returns its result): owned and promotable, the
-  `promoteTo` target is an isolated environment, the router supports cutovers, sandboxes import state, the session's
-  model is allowed by the target, at most 4 attempts in flight, and (API) no running turn (`session_busy`).
+  repeated API calls join it, a second `request_sandbox` call gets `promotion_busy` at once so the first can drain,
+  and an already promoted session returns its result): owned and promotable, the `promoteTo` target is an isolated
+  environment that does not route inference to Foundry (a different billing route is incompatible), the router
+  supports cutovers, sandboxes import state, at most 4 attempts in flight, and (API) no running turn
+  (`session_busy`); a tool call must come from the main agent's still-running turn. All of this is checked before
+  anything is allocated.
 - **Policy never broadens.** Before allocation, `policy.promoteSession(id, target)` narrows the session's current
   effective network policy by the target's ceiling (`network: false` stays false), and the sandbox is created from the
   target's image, size, setup, and idle policy with the *source's* pinned customizations (no new persona), the
-  session's vault bindings, and the caller's recorded additions (`files`, `packages`, `env`). Model and approval
-  ceilings stay the promotable environment's: core re-admits the caller's requested configuration for the sandbox.
+  session's vault bindings, and the caller's recorded additions (`files`, `packages`, `env`). The target supplies
+  compute only: model and approval ceilings stay the promotable environment's (core re-admits the caller's requested
+  configuration for the sandbox), so the target's `models` list does not apply to promoted sessions.
 - **Quiesce.** The source keeps serving while setup runs. API promotions then require an idle session
   (`session.metadata.isProcessing`, no open actions, no running or idle background tasks); otherwise `session_busy`
   and nothing was interrupted. Tool promotions wait up to 20 s until their own `request_sandbox` call (a root-agent
   call) is the only open work: no other pending tool calls, permission prompts, durable actions, background tasks,
   or queued messages; otherwise `promotion_busy` reaches the agent as a failed tool result. The checks run again right
-  after `fence()`.
+  after `fence()`, against the same session incarnation. Probes fail closed: only the runtime's "session not found"
+  (a session it does not hold, therefore idle) is accepted as an answer other than a valid result.
 - **Fence and transfer.** `fence()` makes new requests for the session wait and keeps everything the source emits
   from clients, durable, observers, and the ledger. A tool promotion calls `session.suspend`, then `sessions.close`.
-  The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped, platform paths
-  rewritten (the session's shared working directory becomes `/workspace`, other platform paths `/platform`; JSONL is
-  split on `\n` only and only lines that mention a path are re-serialized), refused with `policy_violation` if any
-  file holds a GitHub token (`gh[pousr]_`, `github_pat_`, or the owner's live token), at most 10,000 files and
-  1 GiB. `sandboxes.importRuntimeState` writes it into the sandbox runtime's `COPILOT_HOME` as uid 10001; a tool
-  promotion passes `activeTurnId` so the carried turn's `outputs/` publish when it completes.
+  The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
+  data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
+  `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
+  plain and JSON-escaped separators are matched separately so nested `\n` escapes survive, and punctuation after a
+  path stays outside it); JSONL split on `\n` only, with only lines that mention a path re-serialized; JSON and text
+  files up to 32 MiB rewritten, other files copied byte for byte; refused with `policy_violation` if any file holds a
+  GitHub token (`gh[pousr]_…`, `github_pat_…`, also inside Markdown emphasis, or the owner's live token); at most
+  10,000 files and 1 GiB; any read or write failure fails the export. `sandboxes.importRuntimeState` writes it into
+  the sandbox runtime's `COPILOT_HOME` as uid 10001; a tool promotion passes `activeTurnId` so the carried turn's
+  `outputs/` publish when it completes.
 - **Open and commit.** `cutover.open({ continuePendingWork })` resumes the session on the sandbox runtime with the
   sandbox admission and the union of attached clients' registrations; a tool promotion verifies the carried call is
-  pending there. `commit()` moves placement and generation in one transaction and switches routing; the old owner
-  stays fenced. Then: `policy.commitPromotion`, `actions.onGenerationChanged(id, generation, { carried: [requestId] })`
-  (the carried call keeps its platform claim and its answer is delivered into the new generation), the
-  `session.promoted` platform event (top-level `sessionId` and `sandboxId`; `data: SessionPromotedData` with
+  pending there and records its request ID. `commit()` moves placement and generation in one transaction and switches
+  routing; the old owner stays fenced, and nothing after the commit can roll the move back. Then:
+  `policy.commitPromotion`, `actions.onGenerationChanged(id, generation, { carried: [requestId] })` (the carried call
+  keeps its platform claim and its answer is delivered into the new generation), the `session.promoted` platform
+  event (id `evt_promoted_<operation>`, top-level `sessionId` and `sandboxId`; `data: SessionPromotedData` with
   `generation`, `target`, `trigger`, `toolCallId`, `network`, `durationMs`), and removal of the source's copy of the
   state, so the fenced owner can never be reactivated. Only then does `request_sandbox` return; durable delivers its
   result to the sandbox runtime and the turn continues there with the shell.
@@ -485,13 +495,20 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   source's suspend artifacts (`agent.interrupted`, `model.turn_failed`, `session.idle {aborted}`, `session.shutdown`)
   never reach clients; they remain in the persisted history, followed by the sandbox's `session.resume`.
 - **Failures.** Before commit, any failure reverts the network narrowing (`policy.revertPromotion`), aborts the
-  cutover (a closed source resumes on next use, with `continuePendingWork` for a tool promotion so its call can still
-  be answered there with the failure), deletes the candidate sandbox and staging, and records the attempt `failed`;
-  the source is the only owner. After commit, nothing undoes the move: later steps only log, and core recovers the
-  destination. At start, unfinished attempts are reconciled against core's ledger: committed generations finish their
-  cleanup, others release their candidate and stay on shared placement (core returns `promoting` rows to `idle`).
+  cutover (once suspend or close was attempted the source resumes on next use, with `continuePendingWork` for a tool
+  promotion so its call can still be answered there with the failure), deletes the candidate sandbox and staging,
+  and records the attempt `failed`; the source is the only owner. After commit, nothing undoes the move: later steps
+  only log, and core recovers the destination.
+- **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
+  core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
+  generation at once; any other is marked failed, its network narrowing reverted, and its candidate sandbox and
+  staging released at start (core returns `promoting` rows to `idle`). Committed attempts then finish what they owe
+  (the event, staging, the source's copy of the state), but only for the incarnation that was promoted: a session ID
+  reused after deletion is never touched. A restart still interrupts the turn that was moving, as it interrupts any
+  running turn.
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
-  attach module then publishes the session on the sandbox runtime and attached Copilot CLIs reconnect to it.
+  attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
+  publishes the same session on the sandbox runtime's AHP host.
 - **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
   sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
   so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.

@@ -33,6 +33,7 @@ interface Behavior {
   sourcePending?: () => Record<string, unknown>[];
   destinationPending?: () => Record<string, unknown>[];
   openFails?: ManagedCopilotError;
+  sourceFails?: (method: string) => Error | undefined;
   commitFails?: ManagedCopilotError;
 }
 
@@ -54,6 +55,8 @@ class FakeCutover implements PlacementCutover {
 
   async source<T>(method: string): Promise<T> {
     this.steps.push(`source:${method}`);
+    const failure = this.#behavior.sourceFails?.(method);
+    if (failure) throw failure;
     switch (method) {
       case "session.metadata.isProcessing":
         return { processing: this.#behavior.processing?.(this.#fenced) ?? false } as T;
@@ -268,7 +271,7 @@ beforeEach(() => {
     app,
     log: createLogger("promotion-test", "error"),
     store,
-    platformRoots: [join(dataDir, "runtime", "shared")],
+    platformRoots: [dataDir],
     stagingRoot: join(dataDir, "promotion"),
     drainTimeoutMs: 300,
     drainPollMs: 20,
@@ -404,14 +407,40 @@ describe("API promotion (managed.promote)", () => {
     expect(sandboxes.created).toHaveLength(0);
   });
 
-  it("rejects sessions that are not promotable, other owners, and incompatible targets", async () => {
+  it("rejects sessions that are not promotable, other owners, and targets that would change the billing route", async () => {
     sessions.records.set(SESSION, record({ environment: "chat", type: "shared" }));
     expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "invalid_request");
     sessions.records.set(SESSION, record());
     expectError(await manager.promote({ ...OWNER, accountId: 202, login: "intruder" }, SESSION).catch((error: unknown) => error), "not_found");
-    sessions.records.set(SESSION, record({ model: "gpt-5.4" }));
-    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "policy_violation");
+    (app.config.deployment.environments["coder"] as { inference?: { foundry: string } }).inference = { foundry: "contoso-foundry" };
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "capability_unavailable");
     expect(sandboxes.created).toHaveLength(0);
+  });
+
+  it("keeps the promotable environment's model policy: the target supplies compute only", async () => {
+    sessions.records.set(SESSION, record({ model: "gpt-5.4" }));
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox" });
+  });
+
+  it("treats a session the runtime does not hold as idle, but fails closed on any other probe failure", async () => {
+    sessions.behavior.sourceFails = (method) => (method === "session.metadata.isProcessing" || method === "session.tasks.list" ? new Error(`Request ${method} failed with message: Session not found for sessionId: ${SESSION}`) : undefined);
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox" });
+
+    sessions.records.set(SESSION, record({ id: SESSION, generation: 1, placement: "shared" }));
+    sessions.behavior.sourceFails = (method) => (method === "session.tasks.list" ? new Error("upstream timed out") : undefined);
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "session_busy");
+  });
+
+  it("never rolls back after commit, even when recording the commit fails", async () => {
+    const update = store.update.bind(store);
+    store.update = (id, fields) => {
+      if (fields.state === "committed") throw new Error("disk full");
+      return update(id, fields);
+    };
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox", generation: 1 });
+    expect(sessions.steps).not.toContain("abort:{}");
+    expect(sandboxes.deleted).toHaveLength(0);
+    expect(published).toHaveLength(1);
   });
 
   it("refuses to carry a GitHub token into the sandbox", async () => {
@@ -484,6 +513,31 @@ describe("agent-initiated promotion (request_sandbox)", () => {
     expect(actions.generations).toHaveLength(0);
   });
 
+  it("resumes with continuePendingWork when the source suspended but closing it failed", async () => {
+    sessions.behavior.sourceFails = (method) => (method === "sessions.close" ? new Error("connection reset") : undefined);
+    const result = (await manager.fromTool(context)) as { resultType: string };
+    expect(result.resultType).toBe("failure");
+    expect(sessions.steps).toContain("source:session.suspend");
+    expect(sessions.steps.at(-1)).toBe('abort:{"resume":{"continuePendingWork":true}}');
+  });
+
+  it("answers a second request_sandbox call at once instead of making it wait for the first", async () => {
+    sandboxes.createDelayMs = 60;
+    const first = manager.fromTool(context);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = (await manager.fromTool({ ...context, toolCallId: "call-2", idempotencyKey: `${SESSION}:call-2` })) as { error: string };
+    expect(second.error).toMatch(/^promotion_busy: /);
+    expect(await first).toBe(SANDBOX_READY_TEXT);
+  });
+
+  it("fails closed when a quiescence probe fails", async () => {
+    sessions.behavior.sourceFails = (method) => (method === "session.tasks.list" ? new Error("upstream timed out") : undefined);
+    const result = (await manager.fromTool(context)) as { error: string };
+    expect(result.error).toMatch(/^promotion_busy: /);
+    expect(sandboxes.created).toHaveLength(0);
+    expect(sessions.steps).not.toContain("source:session.suspend");
+  });
+
   it("does not commit when the destination did not carry the pending call", async () => {
     sessions.behavior.destinationPending = () => [];
     const result = (await manager.fromTool(context)) as { error: string };
@@ -492,12 +546,14 @@ describe("agent-initiated promotion (request_sandbox)", () => {
     expect(sessions.steps.at(-1)).toBe('abort:{"resume":{"continuePendingWork":true}}');
   });
 
-  it("stops when the turn that asked ended, and refuses subagents", async () => {
+  it("stops when the turn that asked ended, and refuses subagents, without allocating anything", async () => {
     sessions.behavior.sourcePending = () => [];
     expect(((await manager.fromTool(context)) as { error: string }).error).toMatch(/^conflict: /);
     sessions.behavior.sourcePending = () => [{ ...own, agentId: "sub-1" }];
     expect(((await manager.fromTool(context)) as { error: string }).error).toMatch(/^invalid_request: /);
     expect(sessions.steps).not.toContain("fence");
+    expect(sandboxes.created).toHaveLength(0);
+    expect(policy.calls).toHaveLength(0);
   });
 
   it("answers a retried call (after a gateway restart) without moving again", async () => {
@@ -517,8 +573,9 @@ describe("agent-initiated promotion (request_sandbox)", () => {
 
 describe("recovery after a restart", () => {
   it("finishes attempts whose commit reached the ledger and releases the others", async () => {
-    const committedId = store.insert({ id: "prm_a", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" }).id;
-    store.update(committedId, { state: "opening", sandboxId: "sbx_test", sourceStateDir: stateDir });
+    const created = new Date(Date.now() + 1000).toISOString();
+    const committedId = store.insert({ id: "prm_a", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "tool", toolCallId: "call-1", target: "coder" }).id;
+    store.update(committedId, { state: "opening", sandboxId: "sbx_test", sourceStateDir: stateDir, requestId: "req-1" });
     sessions.records.set(SESSION, record({ placement: "sandbox", generation: 1 }));
 
     const other = "7a7a7a7a-1111-4222-8333-944444444444";
@@ -526,12 +583,31 @@ describe("recovery after a restart", () => {
     store.insert({ id: "prm_b", sessionId: other, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "tool", toolCallId: "call-9", target: "coder" });
     store.update("prm_b", { state: "transferring" });
 
+    // Synchronous part (while modules register): the carried call moves before durable replays anything.
+    manager.reconcile();
+    expect(actions.generations).toEqual([{ sessionId: SESSION, generation: 1, options: { carried: ["req-1"] } }]);
+    expect(policy.calls).toEqual([`commit:${SESSION}`, `revert:${other}`]);
+    expect(store.get("prm_b")).toMatchObject({ state: "failed", cleanupPending: true });
+    expect(sandboxes.deleted).toEqual([]);
+
+    // Asynchronous part (at start): event, cleanup, candidate release.
     await manager.recover();
-    expect(store.get("prm_a")).toMatchObject({ state: "committed", toGeneration: 1, sourceCleaned: true });
+    expect(store.get("prm_a")).toMatchObject({ state: "committed", toGeneration: 1, sourceCleaned: true, eventPublished: true, finalized: true });
     expect(existsSync(stateDir)).toBe(false);
-    expect(store.get("prm_b")).toMatchObject({ state: "failed" });
-    expect(policy.calls).toEqual([`revert:${other}`]);
+    expect(published).toEqual([expect.objectContaining({ id: "evt_promoted_prm_a", type: "session.promoted", sessionId: SESSION, sandboxId: "sbx_test" })]);
+    expect(store.get("prm_b")).toMatchObject({ state: "failed", cleanupPending: false });
     expect(sandboxes.deleted).toEqual([other]);
+    void created;
+  });
+
+  it("never deletes the state of a session that reused a promoted session's ID", async () => {
+    store.insert({ id: "prm_c", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_c", { state: "committed", toGeneration: 1, sandboxId: "sbx_old", sourceStateDir: stateDir, eventPublished: true, committedAt: new Date().toISOString() });
+    // The promoted session was deleted; a new shared session now uses the same ID.
+    sessions.records.set(SESSION, record({ createdAt: new Date(Date.now() + 60_000).toISOString() }));
+    await manager.recover();
+    expect(existsSync(join(stateDir, "events.jsonl"))).toBe(true);
+    expect(store.get("prm_c")).toMatchObject({ finalized: true });
   });
 });
 

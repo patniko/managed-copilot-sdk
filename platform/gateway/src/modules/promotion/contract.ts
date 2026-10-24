@@ -13,7 +13,8 @@
  * ## One promotion, step by step (the stock runtime 1.0.103 primitives it relies on are noted)
  *
  * 1. Admit one operation per session and placement generation: the session is promotable and owned, the target is
- *    available, the session's model is allowed there, and no other operation is open. Concurrent calls join it.
+ *    an available isolated environment on the same billing route, and no other operation is open. API calls join an
+ *    operation already in flight; a second `request_sandbox` call is answered `promotion_busy` at once.
  * 2. Narrow the session's network policy to the target (`policy.promoteSession`) and allocate the sandbox from the
  *    target's image, size, and setup with the source's customizations, policy, vaults, and caller additions. The
  *    source keeps serving while setup runs.
@@ -59,6 +60,12 @@ export interface PromotionOperation {
   readonly sourceStateDir?: string;
   /** Whether the source runtime's copy of the session state was removed after commit. */
   readonly sourceCleaned: boolean;
+  /** Whether `session.promoted` went out. */
+  readonly eventPublished: boolean;
+  /** Committed attempts: every post-commit step is done. */
+  readonly finalized: boolean;
+  /** Failed attempts interrupted by a restart: the candidate sandbox and staging still have to be released. */
+  readonly cleanupPending: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly committedAt?: string;

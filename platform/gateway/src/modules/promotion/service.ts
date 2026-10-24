@@ -36,14 +36,14 @@ export interface PromotionManagerOptions {
   readonly app: GatewayApp;
   readonly log: Logger;
   readonly store: PromotionStore;
-  /** Platform directories whose paths are rewritten in exported state (the shared runtime's root). */
+  /** The gateway's data directories: paths under them are rewritten in exported state. */
   readonly platformRoots: readonly string[];
   /** Where exports are staged (`<dataDir>/promotion`). */
   readonly stagingRoot: string;
   /** How long a tool promotion waits for unrelated work to drain before `promotion_busy`. */
   readonly drainTimeoutMs?: number;
   readonly drainPollMs?: number;
-  /** Promotions allocating at the same time (each allocates a sandbox). */
+  /** Promotions in flight at the same time (each allocates a sandbox). */
   readonly maxConcurrent?: number;
 }
 
@@ -57,6 +57,7 @@ interface Attempt {
 interface InFlight {
   readonly generation: number;
   readonly trigger: PromotionTrigger;
+  readonly toolCallId?: string;
   readonly promise: Promise<PromoteResult>;
 }
 
@@ -69,7 +70,8 @@ interface Progress {
   narrowed: boolean;
   allocated: boolean;
   fenced: boolean;
-  sourceClosed: boolean;
+  /** `session.suspend` or `sessions.close` was attempted: the source may no longer hold the session. */
+  sourceTouched: boolean;
 }
 
 interface Quiescence {
@@ -88,9 +90,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function items(value: unknown): Record<string, unknown>[] {
+/** The `items` of a pending-list response; anything else is not a usable answer. */
+function items(value: unknown, method: string): Record<string, unknown>[] {
   const list = isRecord(value) ? value["items"] : undefined;
-  return Array.isArray(list) ? list.filter(isRecord) : [];
+  if (!Array.isArray(list)) throw new ManagedCopilotError("internal", `The runtime returned an unexpected answer to ${method}`);
+  return list.filter(isRecord);
+}
+
+/** The stock runtime's answer for a session it does not hold (closed, or never resumed since a restart). */
+function notHeld(error: unknown): boolean {
+  return /session not found/i.test((error as Error)?.message ?? "");
 }
 
 export class PromotionManager implements PromotionService {
@@ -98,7 +107,7 @@ export class PromotionManager implements PromotionService {
   readonly #log: Logger;
   readonly #store: PromotionStore;
   readonly #inflight = new Map<string, InFlight>();
-  #allocating = 0;
+  #running = 0;
 
   constructor(options: PromotionManagerOptions) {
     this.#options = options;
@@ -170,15 +179,16 @@ export class PromotionManager implements PromotionService {
     if (record.placement === "sandbox") return this.#promotedResult(record);
     const inflight = this.#inflight.get(record.id);
     if (inflight && inflight.generation === record.generation) {
-      // A caller joins the operation that is already moving this session. The agent's own tool call cannot wait for
-      // an API promotion of its running turn, which needs the session idle.
-      if (attempt.trigger === "tool" && inflight.trigger === "api") {
-        throw new ManagedCopilotError("promotion_busy", "A promotion requested through the API is already moving this session; try again in a moment");
+      // An API caller joins whatever is already moving the session. A tool call joins only its own retry: another
+      // request_sandbox call must get its answer now, or the first one could never drain, and an API promotion needs
+      // the idle session the agent's running turn prevents.
+      if (attempt.trigger === "tool" && (inflight.trigger !== "tool" || inflight.toolCallId !== attempt.toolCallId)) {
+        throw new ManagedCopilotError("promotion_busy", "The session is already moving into its sandbox; the conversation continues there once that finishes");
       }
       return inflight.promise;
     }
     const promise = this.#execute(attempt);
-    this.#inflight.set(record.id, { generation: record.generation, trigger: attempt.trigger, promise });
+    this.#inflight.set(record.id, { generation: record.generation, trigger: attempt.trigger, ...(attempt.toolCallId ? { toolCallId: attempt.toolCallId } : {}), promise });
     try {
       return await promise;
     } finally {
@@ -210,18 +220,20 @@ export class PromotionManager implements PromotionService {
     if (!source || !target || !targetConfig || targetConfig.type !== "isolated") {
       throw new ManagedCopilotError("capability_unavailable", `Environment "${record.environment}" has no isolated promoteTo target in this deployment`);
     }
+    // The session keeps its own policy (models, approvals) and billing route; a target that would change the
+    // billing route is incompatible rather than silently ignored.
+    if (targetConfig.inference?.foundry) {
+      throw new ManagedCopilotError("capability_unavailable", `Environment "${target}" routes inference to Azure AI Foundry; promotion cannot change a session's billing route`);
+    }
     const sessions = this.#sessions();
     const sandboxes = this.#sandboxes();
     if (typeof sessions.cutover !== "function") throw new ManagedCopilotError("capability_unavailable", "This gateway's router cannot move sessions between placements yet");
     if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "This deployment has no sandboxes, so sessions cannot be promoted");
     if (typeof sandboxes.importRuntimeState !== "function") throw new ManagedCopilotError("capability_unavailable", "This deployment's sandboxes cannot import session state yet");
-    if (targetConfig.models && record.model && !targetConfig.models.includes(record.model)) {
-      throw new ManagedCopilotError("policy_violation", `Model "${record.model}" is not allowed in "${target}", the sandbox environment this session would move to`, { allowedModels: targetConfig.models });
-    }
     if (attempt.trigger === "api" && (record.state === "running" || record.state === "waiting" || record.lastTurn?.status === "running")) {
       throw new ManagedCopilotError("session_busy", `Session ${record.id} is working on a turn; promote it once the turn completes`, { sessionId: record.id });
     }
-    if (this.#allocating >= (this.#options.maxConcurrent ?? 4)) {
+    if (this.#running >= (this.#options.maxConcurrent ?? 4)) {
       throw new ManagedCopilotError("promotion_busy", "Several sessions are being promoted right now; try again in a moment");
     }
     return { target, targetConfig };
@@ -240,7 +252,7 @@ export class PromotionManager implements PromotionService {
       ...(attempt.toolCallId ? { toolCallId: attempt.toolCallId } : {}),
       target,
     });
-    const progress: Progress = { operation, attempt, staging: join(this.#options.stagingRoot, operation.id), narrowed: false, allocated: false, fenced: false, sourceClosed: false };
+    const progress: Progress = { operation, attempt, staging: join(this.#options.stagingRoot, operation.id), narrowed: false, allocated: false, fenced: false, sourceTouched: false };
     this.#log.info("Promoting session", { sessionId: record.id, operation: operation.id, trigger: attempt.trigger, target });
     const sessions = this.#sessions();
     const sandboxes = this.#sandboxes()!;
@@ -248,90 +260,104 @@ export class PromotionManager implements PromotionService {
     let network: NetworkPolicy;
     let sandboxId: string;
     let requestId: string | undefined;
-    this.#allocating++;
+    this.#running++;
     try {
-      const cutover = await sessions.cutover!(record.id, { generation: record.generation });
-      progress.cutover = cutover;
-      if (!cutover.sourceStateDir) {
-        throw new ManagedCopilotError("capability_unavailable", "The shared runtime runs outside this gateway, so its session state cannot be moved into a sandbox");
-      }
-      this.#update(progress, { sourceStateDir: cutover.sourceStateDir });
-      if (attempt.trigger === "api") await this.#requireIdle(progress);
-
-      // Allocation: the source keeps serving while the target's image and setup are prepared.
-      network = this.#narrow(progress, target);
-      this.#update(progress, { state: "allocating" });
-      progress.allocated = true;
-      const handle = await sandboxes.create({
-        sessionId: record.id,
-        ownerId: record.ownerId,
-        environment: target,
-        size: targetConfig.size ?? "small",
-        network,
-        ...(record.environmentRequest.vaults ? { vaults: record.environmentRequest.vaults } : {}),
-        additions: {
-          ...(record.environmentRequest.files ? { files: record.environmentRequest.files } : {}),
-          ...(record.environmentRequest.packages ? { packages: record.environmentRequest.packages } : {}),
-          ...(record.environmentRequest.env ? { env: record.environmentRequest.env } : {}),
-        },
-        resolved: this.#resolved(record, targetConfig),
-      });
-      sandboxId = handle.sandboxId;
-      this.#update(progress, { state: "quiescing", sandboxId });
-
-      // Quiesce at a supported checkpoint, then fence the source and re-check what may have started meanwhile.
-      if (attempt.trigger === "tool") await this.#drain(progress);
-      else await this.#requireIdle(progress);
-      cutover.fence();
-      progress.fenced = true;
-      if (attempt.trigger === "tool") {
-        const check = await this.#quiescent(progress);
-        if (!check.ok) throw check.fatal ?? new ManagedCopilotError("promotion_busy", `Other work started while the session was moving (${check.reason}); try again when it completes`);
-      } else {
-        await this.#requireIdle(progress);
-      }
-
-      // Move the runtime state: checkpoint the pending call, close the session on the source, copy, import.
-      this.#update(progress, { state: "transferring" });
-      if (attempt.trigger === "tool") await cutover.source("session.suspend");
-      await cutover.source("sessions.close");
-      progress.sourceClosed = true;
-      const secrets = this.#secretsFor(attempt);
-      const exported = await exportSessionState({
-        sourceDir: cutover.sourceStateDir,
-        targetDir: progress.staging,
-        sessionId: record.id,
-        platformRoots: this.#options.platformRoots,
-        secrets,
-      });
-      const activeTurnId = attempt.trigger === "tool" ? record.lastTurn?.turnId : undefined;
-      await sandboxes.importRuntimeState!(record.id, { sessionStateDir: progress.staging, ...(activeTurnId ? { activeTurnId } : {}) });
-      this.#log.info("Session state moved", { sessionId: record.id, operation: operation.id, files: exported.files, bytes: exported.bytes, rewritten: exported.rewritten });
-
-      // Resume the same session ID in the sandbox; a tool promotion carries its pending call along.
-      this.#update(progress, { state: "opening" });
-      const destination = await cutover.open(attempt.trigger === "tool" ? { continuePendingWork: true } : {});
-      if (attempt.trigger === "tool") {
-        const pending = items(await destination.request("session.tools.listPendingRequests"));
-        const carried = pending.find((item) => item["toolCallId"] === attempt.toolCallId);
-        if (!carried || typeof carried["requestId"] !== "string") {
-          throw new ManagedCopilotError("state_restore_failed", "The sandbox runtime resumed the session without the pending request_sandbox call, so the turn could not continue there");
+      try {
+        const cutover = await sessions.cutover!(record.id, { generation: record.generation });
+        progress.cutover = cutover;
+        if (!cutover.sourceStateDir) {
+          throw new ManagedCopilotError("capability_unavailable", "The shared runtime runs outside this gateway, so its session state cannot be moved into a sandbox");
         }
-        requestId = carried["requestId"];
-      }
+        this.#update(progress, { sourceStateDir: cutover.sourceStateDir });
+        // Nothing is allocated for a request that cannot be honored: the session must be idle (API), or the call must
+        // come from the main agent's still-running turn (tool).
+        if (attempt.trigger === "api") await this.#requireIdle(progress);
+        else {
+          const check = await this.#quiescent(progress);
+          if (check.fatal) throw check.fatal;
+        }
 
-      committed = cutover.commit();
-      this.#update(progress, { state: "committed", toGeneration: committed.generation, committedAt: new Date().toISOString(), ...(requestId ? { requestId } : {}) });
-    } catch (error) {
-      const managed = toManaged(error);
-      await this.#rollback(progress, managed);
-      throw managed;
+        // Allocation: the source keeps serving while the target's image and setup are prepared.
+        network = this.#narrow(progress, target);
+        this.#update(progress, { state: "allocating" });
+        progress.allocated = true;
+        const handle = await sandboxes.create({
+          sessionId: record.id,
+          ownerId: record.ownerId,
+          environment: target,
+          size: targetConfig.size ?? "small",
+          network,
+          ...(record.environmentRequest.vaults ? { vaults: record.environmentRequest.vaults } : {}),
+          additions: {
+            ...(record.environmentRequest.files ? { files: record.environmentRequest.files } : {}),
+            ...(record.environmentRequest.packages ? { packages: record.environmentRequest.packages } : {}),
+            ...(record.environmentRequest.env ? { env: record.environmentRequest.env } : {}),
+          },
+          resolved: this.#resolved(record, targetConfig),
+        });
+        sandboxId = handle.sandboxId;
+        this.#update(progress, { state: "quiescing", sandboxId });
+
+        // Quiesce at a supported checkpoint, then fence the source and re-check what may have started meanwhile.
+        if (attempt.trigger === "tool") await this.#drain(progress);
+        else await this.#requireIdle(progress);
+        cutover.fence();
+        progress.fenced = true;
+        if (attempt.trigger === "tool") {
+          const check = await this.#quiescent(progress);
+          if (!check.ok) throw check.fatal ?? new ManagedCopilotError("promotion_busy", `Other work started while the session was moving (${check.reason}); try again when it completes`);
+        } else {
+          await this.#requireIdle(progress);
+        }
+
+        // Move the runtime state: checkpoint the pending call, close the session on the source, copy, import.
+        this.#update(progress, { state: "transferring" });
+        progress.sourceTouched = true;
+        if (attempt.trigger === "tool") await cutover.source("session.suspend");
+        await cutover.source("sessions.close");
+        const exported = await exportSessionState({
+          sourceDir: cutover.sourceStateDir,
+          targetDir: progress.staging,
+          sessionId: record.id,
+          platformRoots: this.#options.platformRoots,
+          secrets: this.#secretsFor(attempt),
+        });
+        const activeTurnId = attempt.trigger === "tool" ? this.#sessions().get(record.id)?.lastTurn?.turnId : undefined;
+        await sandboxes.importRuntimeState!(record.id, { sessionStateDir: progress.staging, ...(activeTurnId ? { activeTurnId } : {}) });
+        this.#log.info("Session state moved", { sessionId: record.id, operation: operation.id, files: exported.files, bytes: exported.bytes, rewritten: exported.rewritten });
+
+        // Resume the same session ID in the sandbox; a tool promotion carries its pending call along.
+        this.#update(progress, { state: "opening" });
+        const destination = await cutover.open(attempt.trigger === "tool" ? { continuePendingWork: true } : {});
+        if (attempt.trigger === "tool") {
+          const pending = items(await destination.request("session.tools.listPendingRequests"), "session.tools.listPendingRequests");
+          const carried = pending.find((item) => item["toolCallId"] === attempt.toolCallId);
+          if (!carried || typeof carried["requestId"] !== "string") {
+            throw new ManagedCopilotError("state_restore_failed", "The sandbox runtime resumed the session without the pending request_sandbox call, so the turn could not continue there");
+          }
+          requestId = carried["requestId"];
+          // Recorded before commit, so recovery can carry the call even if the gateway stops right after commit.
+          this.#update(progress, { requestId });
+        }
+        committed = cutover.commit();
+      } catch (error) {
+        const managed = toManaged(error);
+        await this.#rollback(progress, managed);
+        throw managed;
+      }
     } finally {
-      this.#allocating--;
+      this.#running--;
     }
 
-    // After commit only the destination is recovered; nothing below may undo the move.
-    await this.#afterCommit(progress, { committed, network, sandboxId, requestId, durationMs: Date.now() - started, target });
+    // The commit is the point of no return: nothing below may undo the move, and core recovers only the destination.
+    try {
+      this.#update(progress, { state: "committed", toGeneration: committed.generation, committedAt: new Date().toISOString(), sandboxId });
+    } catch (error) {
+      this.#log.error("Could not record the promotion's commit; recovery finishes it at the next start", { sessionId: record.id, error: (error as Error).message });
+    }
+    this.#finalizeSync(progress.operation, committed.generation);
+    await this.#finalize(progress.operation, { committed, network, sandboxId, durationMs: Date.now() - started });
+    this.#log.info("Session promoted", { sessionId: record.id, operation: operation.id, sandboxId, generation: committed.generation, trigger: attempt.trigger, ms: Date.now() - started });
     return { sessionId: record.id, placement: "sandbox", sandboxId, generation: committed.generation };
   }
 
@@ -344,9 +370,8 @@ export class PromotionManager implements PromotionService {
     const { record } = progress.attempt;
     const policy = this.#policy();
     if (policy?.promoteSession) {
-      const narrowed = policy.promoteSession(record.id, target);
       progress.narrowed = true;
-      return narrowed;
+      return policy.promoteSession(record.id, target);
     }
     const ceiling = normalizeNetwork(this.#app.config.deployment.environments[target]?.network, normalizeNetwork(this.#app.config.deployment.network));
     return narrowNetwork(ceiling, record.network);
@@ -379,20 +404,43 @@ export class PromotionManager implements PromotionService {
 
   // Quiescence -----------------------------------------------------------------------------------------------------
 
-  /** API promotions move idle sessions only (`session_busy` otherwise); work is never interrupted invisibly. */
+  /** The session as the ledger has it now; it must still be the same, live, shared incarnation. */
+  #current(progress: Progress): SessionRecord {
+    const { record } = progress.attempt;
+    const current = this.#sessions().get(record.id);
+    if (!current || current.state === "deleting" || current.state === "deleted") throw new ManagedCopilotError("not_found", `Session ${record.id} was deleted while it was being promoted`, { sessionId: record.id });
+    if (current.generation !== record.generation || current.placement !== "shared" || current.createdAt !== record.createdAt) {
+      throw new ManagedCopilotError("conflict", `Session ${record.id} changed placement while it was being promoted`, { sessionId: record.id });
+    }
+    return current;
+  }
+
+  /**
+   * API promotions move idle sessions only (`session_busy` otherwise); work is never interrupted invisibly. A probe
+   * that fails for another reason than "the runtime does not hold this session" fails the promotion: idleness is
+   * never assumed.
+   */
   async #requireIdle(progress: Progress): Promise<void> {
     const cutover = progress.cutover!;
-    const record = this.#sessions().get(progress.attempt.record.id);
-    const busy = (why: string) => new ManagedCopilotError("session_busy", `Session ${progress.attempt.record.id} is ${why}; promote it once that completes`, { sessionId: progress.attempt.record.id });
-    if (!record) throw new ManagedCopilotError("not_found", `Session ${progress.attempt.record.id} was not found`);
-    if (record.generation !== progress.attempt.record.generation || record.placement !== "shared") throw new ManagedCopilotError("conflict", `Session ${record.id} moved while it was being promoted`);
-    if (!progress.fenced && (record.state === "running" || record.state === "waiting" || record.lastTurn?.status === "running")) throw busy("working on a turn");
-    const open = this.#actions()?.list(record.id, { open: true }) ?? [];
+    const id = progress.attempt.record.id;
+    const busy = (why: string) => new ManagedCopilotError("session_busy", `Session ${id} is ${why}; promote it once that completes`, { sessionId: id });
+    const current = this.#current(progress);
+    if (!progress.fenced && (current.state === "running" || current.state === "waiting" || current.lastTurn?.status === "running")) throw busy("working on a turn");
+    const open = this.#actions()?.list(id, { open: true }) ?? [];
     if (open.length > 0) throw busy(`waiting for ${open.length === 1 ? "an action" : `${open.length} actions`} (tool calls or prompts)`);
-    const processing = await cutover.source<{ processing?: boolean }>("session.metadata.isProcessing").catch(() => undefined);
+    const probe = async <T>(method: string): Promise<T | undefined> => {
+      try {
+        return await cutover.source<T>(method);
+      } catch (error) {
+        if (notHeld(error)) return undefined;
+        throw new ManagedCopilotError("session_busy", `Session ${id} could not be confirmed idle (${method}: ${(error as Error).message}); try again in a moment`, { sessionId: id });
+      }
+    };
+    const processing = await probe<{ processing?: boolean }>("session.metadata.isProcessing");
     if (processing?.processing === true) throw busy("working on a turn");
-    const tasks = await this.#activeTasks(cutover);
-    if (tasks > 0) throw busy(`running ${tasks === 1 ? "a background task" : `${tasks} background tasks`}`);
+    const tasks = await probe<{ tasks?: { status?: string }[] }>("session.tasks.list");
+    const active = activeTasks(tasks);
+    if (active > 0) throw busy(`running ${active === 1 ? "a background task" : `${active} background tasks`}`);
   }
 
   /** Tool promotions wait (bounded) for unrelated work to finish; their own call is the checkpoint. */
@@ -409,10 +457,19 @@ export class PromotionManager implements PromotionService {
     }
   }
 
+  /** Whether the agent's own call is the only open work. Every probe must answer; a failed probe fails the move. */
   async #quiescent(progress: Progress): Promise<Quiescence> {
     const cutover = progress.cutover!;
-    const { record, toolCallId } = progress.attempt;
-    const tools = items(await cutover.source("session.tools.listPendingRequests"));
+    const { toolCallId } = progress.attempt;
+    const id = this.#current(progress).id;
+    const probe = async <T>(method: string): Promise<T> => {
+      try {
+        return await cutover.source<T>(method);
+      } catch (error) {
+        throw new ManagedCopilotError("promotion_busy", `The session's state could not be checked before moving it (${method}: ${(error as Error).message})`, { sessionId: id });
+      }
+    };
+    const tools = items(await probe("session.tools.listPendingRequests"), "session.tools.listPendingRequests");
     const own = tools.find((item) => item["toolCallId"] === toolCallId);
     if (!own) {
       return { ok: false, fatal: new ManagedCopilotError("conflict", "The turn that asked for a sandbox ended before the sandbox was ready, so the session stays where it is") };
@@ -422,22 +479,17 @@ export class PromotionManager implements PromotionService {
     }
     const others = tools.length - 1;
     if (others > 0) return { ok: false, reason: `${others === 1 ? "another tool call is" : `${others} other tool calls are`} still running` };
-    const permissions = items(await cutover.source("session.permissions.pendingRequests"));
+    const permissions = items(await probe("session.permissions.pendingRequests"), "session.permissions.pendingRequests");
     if (permissions.length > 0) return { ok: false, reason: "a permission prompt is waiting for an answer" };
-    const open = (this.#actions()?.list(record.id, { open: true }) ?? []).filter((action) => action.toolCallId !== toolCallId);
+    const open = (this.#actions()?.list(id, { open: true }) ?? []).filter((action) => action.toolCallId !== toolCallId);
     if (open.length > 0) return { ok: false, reason: `${open.length === 1 ? "an action is" : `${open.length} actions are`} waiting for a responder` };
-    const tasks = await this.#activeTasks(cutover);
+    const tasks = activeTasks(await probe<{ tasks?: { status?: string }[] }>("session.tasks.list"));
     if (tasks > 0) return { ok: false, reason: `${tasks === 1 ? "a background task is" : `${tasks} background tasks are`} running` };
-    const queue = await cutover.source<{ items?: unknown[]; steeringMessages?: unknown[] }>("session.queue.pendingItems").catch(() => undefined);
-    const queued = (queue?.items?.length ?? 0) + (queue?.steeringMessages?.length ?? 0);
+    const queue = await probe<{ items?: unknown[]; steeringMessages?: unknown[] }>("session.queue.pendingItems");
+    if (!isRecord(queue) || !Array.isArray(queue.items)) throw new ManagedCopilotError("promotion_busy", "The runtime returned an unexpected answer to session.queue.pendingItems");
+    const queued = queue.items.length + (Array.isArray(queue.steeringMessages) ? queue.steeringMessages.length : 0);
     if (queued > 0) return { ok: false, reason: `${queued === 1 ? "a message is" : `${queued} messages are`} queued behind this turn` };
     return { ok: true };
-  }
-
-  /** Background agents and shells that are running or waiting for input (they do not survive a runtime move). */
-  async #activeTasks(cutover: PlacementCutover): Promise<number> {
-    const list = await cutover.source<{ tasks?: { status?: string }[] }>("session.tasks.list").catch(() => undefined);
-    return (list?.tasks ?? []).filter((task) => task.status === "running" || task.status === "idle").length;
   }
 
   // Failure before commit, and the steps after commit --------------------------------------------------------------
@@ -454,114 +506,160 @@ export class PromotionManager implements PromotionService {
     }
     if (progress.cutover) {
       try {
-        // A closed source resumes on next use; a tool promotion's call must stay answerable there.
-        await progress.cutover.abort(progress.sourceClosed && trigger === "tool" ? { resume: { continuePendingWork: true } } : undefined);
+        // Once suspend or close was attempted the source resumes on next use; a tool promotion's call must stay
+        // answerable there, so it resumes with its pending work.
+        await progress.cutover.abort(progress.sourceTouched && trigger === "tool" ? { resume: { continuePendingWork: true } } : undefined);
       } catch (abortError) {
         this.#log.error("Could not abort the placement cutover", { sessionId: record.id, error: (abortError as Error).message });
       }
     }
+    let released = !progress.allocated;
     if (progress.allocated) {
       try {
         await this.#sandboxes()?.delete(record.id);
+        released = true;
       } catch (deleteError) {
-        this.#log.warn("Could not release the candidate sandbox yet; sandbox reconciliation retries", { sessionId: record.id, error: (deleteError as Error).message });
+        this.#log.warn("Could not release the candidate sandbox yet; it is retried at the next start", { sessionId: record.id, error: (deleteError as Error).message });
       }
     }
     await rm(progress.staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
-    this.#update(progress, { state: "failed", errorCode: error.code, error: error.message });
+    this.#update(progress, { state: "failed", errorCode: error.code, error: error.message, cleanupPending: !released });
   }
 
-  async #afterCommit(
-    progress: Progress,
-    input: { committed: SessionRecord; network: NetworkPolicy; sandboxId: string; requestId: string | undefined; durationMs: number; target: string },
-  ): Promise<void> {
-    const { record, trigger, toolCallId } = progress.attempt;
-    const { committed, sandboxId, requestId } = input;
+  /** Synchronous post-commit steps, so durable sees the carried call at the new generation before anything replays. */
+  #finalizeSync(operation: PromotionOperation, generation: number): void {
     try {
-      this.#policy()?.commitPromotion?.(record.id);
+      this.#policy()?.commitPromotion?.(operation.sessionId);
     } catch (error) {
-      this.#log.warn("Could not finalize the session's promoted network binding", { sessionId: record.id, error: (error as Error).message });
+      this.#log.warn("Could not finalize the session's promoted network binding", { sessionId: operation.sessionId, error: (error as Error).message });
     }
     try {
       // Before the tool returns: the carried call stays claimed and its answer is delivered to the new generation.
-      await this.#actions()?.onGenerationChanged?.(record.id, committed.generation, requestId ? { carried: [requestId] } : {});
+      this.#actions()?.onGenerationChanged?.(operation.sessionId, generation, operation.requestId ? { carried: [operation.requestId] } : {});
     } catch (error) {
-      this.#log.error("Durable did not move the session's actions to the new generation", { sessionId: record.id, error: (error as Error).message });
+      this.#log.error("Durable did not move the session's actions to the new generation", { sessionId: operation.sessionId, error: (error as Error).message });
     }
-    const data: SessionPromotedData = {
-      generation: committed.generation,
-      placement: "sandbox",
-      target: input.target,
-      trigger,
-      ...(toolCallId ? { toolCallId } : {}),
-      network: input.network,
-      durationMs: input.durationMs,
-    };
-    const event: PlatformEvent = {
-      id: `evt_${randomUUID()}`,
-      type: "session.promoted",
-      createdAt: new Date().toISOString(),
-      sessionId: record.id,
-      environment: record.environment,
-      sandboxId,
-      data: data as unknown as Record<string, unknown>,
-    };
-    try {
-      this.#app.service("events").publish(event, { ownerId: record.ownerId });
-    } catch (error) {
-      this.#log.warn("Could not publish session.promoted", { sessionId: record.id, error: (error as Error).message });
-    }
-    await rm(progress.staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
-    await this.#cleanSource(progress.operation);
-    this.#log.info("Session promoted", { sessionId: record.id, operation: progress.operation.id, sandboxId, generation: committed.generation, trigger, ms: input.durationMs });
   }
 
-  /** Removes the source runtime's copy of the session state, so the fenced owner can never be reactivated. */
-  async #cleanSource(operation: PromotionOperation): Promise<void> {
-    const target = operation.sourceStateDir;
-    if (!target) {
-      this.#store.update(operation.id, { sourceCleaned: true });
-      return;
+  /** The rest of the post-commit work: the platform event, staging, and the source's copy of the state. Idempotent. */
+  async #finalize(operation: PromotionOperation, input: { committed: SessionRecord; network: NetworkPolicy | undefined; sandboxId: string | undefined; durationMs: number }): Promise<void> {
+    const { committed } = input;
+    let current = this.#store.get(operation.id) ?? operation;
+    if (!current.eventPublished) {
+      const network = input.network ?? (await Promise.resolve(this.#policy()?.session?.(committed.id)).catch(() => undefined))?.policy ?? committed.network;
+      const data: SessionPromotedData = {
+        generation: committed.generation,
+        placement: "sandbox",
+        target: current.target,
+        trigger: current.trigger,
+        ...(current.toolCallId ? { toolCallId: current.toolCallId } : {}),
+        network,
+        durationMs: input.durationMs,
+      };
+      const sandboxId = input.sandboxId ?? current.sandboxId ?? (await this.#sandboxes()?.get(committed.id))?.id;
+      const event: PlatformEvent = {
+        // Stable per attempt, so subscribers can drop a repeat published by recovery.
+        id: `evt_promoted_${current.id}`,
+        type: "session.promoted",
+        createdAt: new Date().toISOString(),
+        sessionId: committed.id,
+        environment: committed.environment,
+        ...(sandboxId ? { sandboxId } : {}),
+        data: data as unknown as Record<string, unknown>,
+      };
+      try {
+        this.#app.service("events").publish(event, { ownerId: committed.ownerId });
+        current = this.#store.update(current.id, { eventPublished: true });
+      } catch (error) {
+        this.#log.warn("Could not publish session.promoted; it is retried at the next start", { sessionId: committed.id, error: (error as Error).message });
+      }
     }
+    await rm(join(this.#options.stagingRoot, current.id), { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    current = await this.#cleanSource(current);
+    if (current.eventPublished && current.sourceCleaned) this.#store.update(current.id, { finalized: true });
+  }
+
+  /**
+   * Removes the source runtime's copy of the session state, so the fenced owner can never be reactivated. Only for
+   * the incarnation that was promoted: a session ID reused after deletion is someone else's state.
+   */
+  async #cleanSource(operation: PromotionOperation): Promise<PromotionOperation> {
+    const target = operation.sourceStateDir;
+    const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
+    const same = current !== undefined && current.placement === "sandbox" && current.generation >= (operation.toGeneration ?? operation.fromGeneration + 1) && current.createdAt <= operation.createdAt;
+    if (!target || !same) return this.#store.update(operation.id, { sourceCleaned: true });
     try {
       await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-      this.#store.update(operation.id, { sourceCleaned: true });
+      return this.#store.update(operation.id, { sourceCleaned: true });
     } catch (error) {
       this.#log.warn("Could not remove the session's state from the shared runtime yet; it is retried at the next start", { sessionId: operation.sessionId, error: (error as Error).message });
+      return operation;
     }
   }
 
   // Recovery -------------------------------------------------------------------------------------------------------
 
   /**
-   * After a restart: an attempt whose commit reached core's ledger is finished (cleanup only); any other open attempt
-   * never committed, so its candidate sandbox is released and the source stays the owner.
+   * Synchronous ledger reconciliation, run while modules register (before any of them starts and replays work). An
+   * attempt whose commit reached core's ledger is committed: its carried call moves to the new generation at once,
+   * before durable replays platform tools. Any other open attempt never committed: it is marked failed, its network
+   * narrowing is reverted, and its candidate is released later by `recover()`. The source is then the only owner.
    */
-  async recover(): Promise<void> {
+  reconcile(): void {
     const sessions = optionalService<SessionsService>(this.#app.services, "sessions");
     for (const operation of this.#store.unfinished()) {
       const record = sessions?.get(operation.sessionId);
-      if (record && record.placement === "sandbox" && record.generation > operation.fromGeneration) {
-        this.#store.update(operation.id, { state: "committed", toGeneration: record.generation, committedAt: new Date().toISOString() });
-        this.#log.info("Promotion committed before the restart; finishing its cleanup", { sessionId: operation.sessionId, operation: operation.id });
+      if (record && record.placement === "sandbox" && record.generation > operation.fromGeneration && record.createdAt <= operation.createdAt) {
+        const committed = this.#store.update(operation.id, { state: "committed", toGeneration: record.generation, committedAt: new Date().toISOString() });
+        this.#finalizeSync(committed, record.generation);
+        this.#log.info("A promotion committed before the restart; finishing its post-commit steps", { sessionId: operation.sessionId, operation: operation.id });
         continue;
       }
-      this.#log.warn("Promotion was interrupted by a restart before commit; the session stays on shared placement", { sessionId: operation.sessionId, operation: operation.id, state: operation.state });
+      this.#log.warn("A promotion was interrupted by a restart before it committed; the session stays on shared placement", { sessionId: operation.sessionId, operation: operation.id, state: operation.state });
       try {
         this.#policy()?.revertPromotion?.(operation.sessionId);
       } catch (error) {
         this.#log.warn("Could not restore the network policy of an interrupted promotion", { sessionId: operation.sessionId, error: (error as Error).message });
       }
-      if (operation.state !== "admitted" && (!record || record.placement === "shared")) {
-        await this.#sandboxes()
-          ?.delete(operation.sessionId)
-          .catch((error: unknown) => this.#log.warn("Could not release an interrupted promotion's sandbox yet", { sessionId: operation.sessionId, error: (error as Error).message }));
-      }
-      await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
-      this.#store.update(operation.id, { state: "failed", errorCode: "internal", error: "The gateway restarted before the promotion committed; the session stayed on shared placement" });
+      this.#store.update(operation.id, {
+        state: "failed",
+        errorCode: "internal",
+        error: "The gateway restarted before the promotion committed; the session stayed on shared placement",
+        cleanupPending: operation.state !== "admitted",
+      });
     }
-    for (const operation of this.#store.uncleaned()) await this.#cleanSource(operation);
   }
+
+  /** Finishes what terminal attempts still owe: post-commit steps, or releasing an interrupted attempt's candidate. */
+  async recover(): Promise<void> {
+    const sessions = optionalService<SessionsService>(this.#app.services, "sessions");
+    for (const operation of this.#store.owing()) {
+      const record = sessions?.get(operation.sessionId);
+      try {
+        if (operation.state === "committed") {
+          if (record && record.placement === "sandbox" && record.createdAt <= operation.createdAt) {
+            this.#finalizeSync(operation, record.generation);
+            await this.#finalize(operation, { committed: record, network: undefined, sandboxId: operation.sandboxId, durationMs: Date.parse(operation.committedAt ?? operation.updatedAt) - Date.parse(operation.createdAt) });
+          } else {
+            // The promoted session is gone (deleted, or its ID reused): nothing of it remains to finish.
+            this.#store.update(operation.id, { finalized: true, sourceCleaned: true });
+          }
+          continue;
+        }
+        // An interrupted attempt's candidate, unless the session meanwhile became something else.
+        if (!record || (record.placement === "shared" && record.createdAt <= operation.createdAt)) await this.#sandboxes()?.delete(operation.sessionId);
+        await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
+        this.#store.update(operation.id, { cleanupPending: false });
+      } catch (error) {
+        this.#log.warn("Promotion recovery step failed; it is retried at the next start", { sessionId: operation.sessionId, operation: operation.id, error: (error as Error).message });
+      }
+    }
+  }
+}
+
+/** Background agents and shells that are running or waiting for input (they do not survive a runtime move). */
+function activeTasks(list: { tasks?: { status?: string }[] } | undefined): number {
+  return (list?.tasks ?? []).filter((task) => task.status === "running" || task.status === "idle").length;
 }
 
 function failure(code: string, message: string): PlatformToolResult {
