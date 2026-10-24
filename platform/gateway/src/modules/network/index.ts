@@ -103,6 +103,7 @@ export const networkModule: GatewayModule = {
       egress: hub,
       log,
       alwaysWaitForEgress: mode !== "off",
+      egressMode: mode,
       onBlocked: (session, report) => {
         if (!events || !canPublish) return;
         const key = `${session.sessionId}|${report.reason}|${report.host ?? ""}`;
