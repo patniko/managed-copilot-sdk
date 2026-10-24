@@ -1,0 +1,535 @@
+// What an attached Copilot CLI may send over AHP, and how the runtime's frames are filtered before it sees them.
+//
+// The relay is deny-by-default: reads of the attached session pass through, writes go through core's attachment
+// (`CliAttachment.write`, which admits them and checks the fence in the same step as the socket write) or the actions
+// ledger (`answer`), and everything else is refused. Facts from stock Copilot CLI 1.0.92 with runtime 1.0.103:
+// - A turn is `dispatchAction chat/turnStarted { turnId, startedAt, message: { text, origin: { kind: "user" } } }`.
+// - A permission prompt is `chat/toolCallReady` (and `session/inputNeededSet` kind `toolConfirmation`) carrying the
+//   runtime's `requestId` in `_meta.requestId`; the CLI answers with `chat/toolCallConfirmed { turnId, toolCallId,
+//   approved, ... }`. When an answer reaches the runtime over JSON-RPC, the AHP host emits no `toolCallConfirmed`; the
+//   tool call goes straight to `chat/toolCallComplete`.
+// - The CLI does not display `rejectionReason`; a rejected confirmation closes its dialog and the tool call is shown
+//   as still waiting until the runtime reports the real outcome.
+// - The host advertises `terminalCommandPrefix: "!"` and opens a shell for `createTerminal`, offers host slash
+//   commands (`/chronicle` reads the runtime's whole session store), and serves changeset and file resources.
+
+/** AHP JSON-RPC error codes (AHP 0.9). */
+export const AHP_ERRORS = {
+  invalidRequest: -32600,
+  methodNotFound: -32601,
+  invalidParams: -32602,
+  permissionDenied: -32009,
+} as const;
+
+export const ROOT_CHANNEL = "ahp-root://";
+const CHAT_CHANNEL = /^ahp-chat:\/[^/?#\s]+$/;
+
+/** Where the attached session runs: the policy differs only for host commands (`/chronicle` on a shared runtime). */
+export type AttachPlacement = "shared" | "sandbox";
+
+export interface JsonRpcMessage {
+  readonly jsonrpc?: unknown;
+  readonly id?: unknown;
+  readonly method?: unknown;
+  readonly params?: unknown;
+  readonly result?: unknown;
+  readonly error?: unknown;
+}
+
+export type Dict = Record<string, unknown>;
+
+export function isDict(value: unknown): value is Dict {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function str(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+export function sessionChannel(sessionId: string): string {
+  return `ahp-session:/${sessionId}`;
+}
+
+/** Client requests that only read the attached session (forwarded, with their results filtered). */
+const READ_REQUESTS: ReadonlySet<string> = new Set(["initialize", "reconnect", "ping", "subscribe", "listSessions", "fetchTurns", "completions", "extensions/getPlan", "extensions/getSessionModels"]);
+
+/** Why a request is refused, by what it would have reached. */
+function refusalFor(method: string): string {
+  if (/^(createSession|disposeSession|createChat|disposeChat|resolveSessionConfig|sessionConfigCompletions)$/.test(method)) {
+    return "Copilot CLI attach continues this session only; it can't create or remove sessions or chats.";
+  }
+  if (/terminal/i.test(method)) return "Shell access isn't available to an attached Copilot CLI.";
+  if (/^resource|ResourceWatch|Changeset/i.test(method)) return "File access isn't available to an attached Copilot CLI. Use the session's files API instead.";
+  if (/automation/i.test(method)) return "Automations aren't available to an attached Copilot CLI.";
+  if (/^extensions\/|^x-/.test(method)) return `${method} isn't available to an attached Copilot CLI.`;
+  return `${method} isn't supported over Copilot CLI attach.`;
+}
+
+export type RequestVerdict = { readonly kind: "forward"; readonly message: JsonRpcMessage } | { readonly kind: "refuse"; readonly code: number; readonly message: string };
+
+/** Whether a subscription channel belongs to the attached session (the stock host also refuses other sessions' chats). */
+export function channelAllowed(channel: unknown, sessionId: string): boolean {
+  return channel === ROOT_CHANNEL || channel === sessionChannel(sessionId) || (typeof channel === "string" && CHAT_CHANNEL.test(channel));
+}
+
+/** Decides a client request (a message with `method` and `id`). */
+export function decideRequest(message: JsonRpcMessage, sessionId: string): RequestVerdict {
+  if (typeof message.method !== "string") return { kind: "refuse", code: AHP_ERRORS.invalidParams, message: "Malformed request." };
+  const method = message.method;
+  if (!READ_REQUESTS.has(method)) return { kind: "refuse", code: AHP_ERRORS.permissionDenied, message: refusalFor(method) };
+  const params = isDict(message.params) ? message.params : {};
+  const channel = params["channel"];
+  // A read names this session's channels or none; session extensions name the session itself. The stock host serves
+  // only the session it published, and this keeps that true whatever the host would answer.
+  const outside =
+    (channel !== undefined && !channelAllowed(channel, sessionId)) ||
+    (method === "subscribe" && channel === undefined) ||
+    (method.startsWith("extensions/") && channel !== sessionChannel(sessionId));
+  if (outside) return { kind: "refuse", code: AHP_ERRORS.permissionDenied, message: "Copilot CLI attach shows this session's conversation only." };
+  if (method === "reconnect" && Array.isArray(params["subscriptions"])) {
+    // Channels outside the session are dropped; the host replays or snapshots the rest.
+    const subscriptions = params["subscriptions"].filter((channel) => channelAllowed(channel, sessionId));
+    return { kind: "forward", message: { ...message, params: { ...params, subscriptions } } };
+  }
+  if (method === "initialize" && Array.isArray(params["initialSubscriptions"])) {
+    const initialSubscriptions = params["initialSubscriptions"].filter((channel) => channelAllowed(channel, sessionId));
+    return { kind: "forward", message: { ...message, params: { ...params, initialSubscriptions } } };
+  }
+  return { kind: "forward", message };
+}
+
+/** A user message the CLI dispatched (`chat/turnStarted`, `chat/pendingMessageSet`). */
+interface AhpMessage {
+  readonly text?: unknown;
+  readonly origin?: { readonly kind?: unknown };
+  readonly attachments?: unknown;
+  readonly model?: unknown;
+  readonly agent?: unknown;
+}
+
+const SLASH_COMMAND = /^\s*\/([A-Za-z][\w-]*)(?=\s|$)/;
+/** Host slash commands a shared session may run: they act on this session only. */
+const SHARED_HOST_COMMANDS: ReadonlySet<string> = new Set(["compact"]);
+const SESSION_MODES: ReadonlySet<string> = new Set(["interactive", "plan", "autopilot"]);
+
+export type ActionVerdict =
+  | { readonly kind: "refuse"; readonly reason: string }
+  /** Forward `action` after the attachment's fence and ownership check (state that starts no work). */
+  | { readonly kind: "gated"; readonly action: Dict }
+  /** A user message: core admits it and `action` is written inside `CliAttachment.write`. */
+  | { readonly kind: "turn"; readonly text: string; readonly modelId?: string; readonly action: Dict }
+  | { readonly kind: "abort"; readonly action: Dict }
+  /** The person's decision on a permission prompt: answered through the actions ledger, never forwarded. */
+  | { readonly kind: "confirm"; readonly channel: string; readonly toolCallId: string; readonly approved: boolean; readonly feedback?: string }
+  /** The person's answer to a question (`chat/inputCompleted`); `action` is what an ask_user answer forwards. */
+  | { readonly kind: "input"; readonly channel: string; readonly inputId: string; readonly response: string; readonly answers: Dict; readonly action: Dict };
+
+type Checked<T> = T | { readonly kind: "refuse"; readonly reason: string };
+
+/** A user message the CLI sent, checked: text only, from the person, with at most a model. */
+function checkMessage(message: unknown, placement: AttachPlacement): Checked<{ readonly kind: "ok"; readonly text: string; readonly modelId?: string; readonly message: Dict }> {
+  if (!isDict(message)) return { kind: "refuse", reason: "A message needs text." };
+  const { text, origin, attachments, model, agent } = message as AhpMessage;
+  if (typeof text !== "string" || !text.trim()) return { kind: "refuse", reason: "A message needs text." };
+  if (!isDict(origin) || origin["kind"] !== "user") return { kind: "refuse", reason: "Copilot CLI can only send your own messages." };
+  if (Array.isArray(attachments) ? attachments.length > 0 : attachments !== undefined && attachments !== null) {
+    return { kind: "refuse", reason: "Attachments aren't supported over Copilot CLI attach. Paste the content into your message instead." };
+  }
+  if (agent !== undefined && agent !== null) return { kind: "refuse", reason: "Choose agents in your application; Copilot CLI attach sends messages only." };
+  let modelId: string | undefined;
+  if (model !== undefined && model !== null) {
+    modelId = isDict(model) ? str(model["id"]) : undefined;
+    if (!modelId) return { kind: "refuse", reason: "The message names a model without an id." };
+  }
+  // The host runs `!command` in a shell (terminalCommandPrefix): no shell is reachable through attach.
+  if (text.trimStart().startsWith("!")) return { kind: "refuse", reason: "Shell commands aren't available to an attached Copilot CLI." };
+  const command = SLASH_COMMAND.exec(text)?.[1];
+  if (command && placement === "shared" && !SHARED_HOST_COMMANDS.has(command.toLowerCase())) {
+    // Host commands such as /chronicle read every session on the runtime, which a shared runtime shares with others.
+    return { kind: "refuse", reason: `/${command} isn't available in a shared session.` };
+  }
+  // Rebuilt from what was checked: nothing else the client put on the message (`_meta`, ...) reaches the host.
+  return { kind: "ok", text, ...(modelId ? { modelId } : {}), message: { text, origin: { kind: "user" }, ...(modelId ? { model: { id: modelId } } : {}) } };
+}
+
+const PENDING_KINDS: ReadonlySet<string> = new Set(["steering", "queued"]);
+
+/**
+ * Decides a `dispatchAction` (fire-and-forget AHP write) from the client. What is forwarded is rebuilt from the fields
+ * the policy checked (`action` in the verdict), never the client's action as sent.
+ */
+export function decideAction(params: unknown, context: { readonly sessionId: string; readonly placement: AttachPlacement; readonly clientId: string | undefined }): ActionVerdict {
+  const malformed = { kind: "refuse", reason: "Malformed action." } as const;
+  if (!isDict(params) || !isDict(params["action"])) return malformed;
+  const channel = params["channel"];
+  const action = params["action"];
+  const type = action["type"];
+  if (typeof type !== "string") return malformed;
+  const onSession = channel === sessionChannel(context.sessionId);
+  const onChat = typeof channel === "string" && CHAT_CHANNEL.test(channel);
+  if (type.startsWith("chat/") && !onChat) return { kind: "refuse", reason: "Chat actions must target a chat of this session." };
+  if ((type.startsWith("session/") || type.startsWith("copilot/")) && !onSession) return { kind: "refuse", reason: "Session actions must target this session." };
+  const clientSeq = params["clientSeq"];
+  if (typeof clientSeq !== "number" || !Number.isSafeInteger(clientSeq) || clientSeq < 0) return malformed;
+  switch (type) {
+    case "chat/turnStarted": {
+      const turnId = str(action["turnId"]);
+      const startedAt = str(action["startedAt"]);
+      if (!turnId || !startedAt) return malformed;
+      const checked = checkMessage(action["message"], context.placement);
+      if (checked.kind === "refuse") return checked;
+      const queuedMessageId = str(action["queuedMessageId"]);
+      return { kind: "turn", text: checked.text, ...(checked.modelId ? { modelId: checked.modelId } : {}), action: { type, turnId, startedAt, message: checked.message, ...(queuedMessageId ? { queuedMessageId } : {}) } };
+    }
+    case "chat/pendingMessageSet": {
+      const id = str(action["id"]);
+      const kind = str(action["kind"]);
+      if (!id || !kind || !PENDING_KINDS.has(kind)) return malformed;
+      const checked = checkMessage(action["message"], context.placement);
+      if (checked.kind === "refuse") return checked;
+      return { kind: "turn", text: checked.text, ...(checked.modelId ? { modelId: checked.modelId } : {}), action: { type, kind, id, message: checked.message } };
+    }
+    case "chat/turnCancelled": {
+      const turnId = str(action["turnId"]);
+      if (!turnId) return malformed;
+      return { kind: "abort", action: { type, turnId, duration: typeof action["duration"] === "number" ? action["duration"] : 0 } };
+    }
+    case "chat/pendingMessageRemoved": {
+      const id = str(action["id"]);
+      const kind = str(action["kind"]);
+      if (!id || !kind || !PENDING_KINDS.has(kind)) return malformed;
+      return { kind: "gated", action: { type, kind, id } };
+    }
+    case "chat/queuedMessagesReordered": {
+      const order = action["order"];
+      if (!Array.isArray(order) || !order.every((id) => typeof id === "string")) return malformed;
+      return { kind: "gated", action: { type, order } };
+    }
+    case "chat/draftChanged": {
+      // A draft is only the text being composed; clearing it sends none.
+      const draft = isDict(action["draft"]) && typeof action["draft"]["text"] === "string" ? { text: action["draft"]["text"], origin: { kind: "user" } } : undefined;
+      return { kind: "gated", action: { type, ...(draft ? { draft } : {}) } };
+    }
+    case "chat/inputAnswerChanged": {
+      const requestId = str(action["requestId"]);
+      const questionId = str(action["questionId"]);
+      if (!requestId || !questionId) return malformed;
+      return { kind: "gated", action: { type, requestId, questionId, ...(isDict(action["answer"]) ? { answer: action["answer"] } : {}) } };
+    }
+    case "session/titleChanged":
+      return typeof action["title"] === "string" ? { kind: "gated", action: { type, title: action["title"] } } : malformed;
+    case "session/isReadChanged":
+      return typeof action["isRead"] === "boolean" ? { kind: "gated", action: { type, isRead: action["isRead"] } } : malformed;
+    case "copilot/viewState":
+      // The CLI's own view (sidebar, pickers), echoed back to it by the host.
+      return isDict(action["view"]) ? { kind: "gated", action: { type, view: action["view"] } } : malformed;
+    case "session/activeClientSet": {
+      const client = isDict(action["activeClient"]) ? action["activeClient"] : undefined;
+      const tools = client?.["tools"];
+      const customizations = client?.["customizations"];
+      if (!client || !context.clientId || client["clientId"] !== context.clientId) return { kind: "refuse", reason: "A client can only register itself." };
+      // Client-provided tools and plugins would change the session's tools outside admission.
+      if ((Array.isArray(tools) && tools.length > 0) || (tools !== undefined && !Array.isArray(tools))) return { kind: "refuse", reason: "Copilot CLI can't add tools to this session." };
+      if (Array.isArray(customizations) ? customizations.length > 0 : customizations !== undefined && customizations !== null) {
+        return { kind: "refuse", reason: "Copilot CLI can't add plugins or customizations to this session." };
+      }
+      const displayName = str(client["displayName"]);
+      return { kind: "gated", action: { type, activeClient: { clientId: context.clientId, ...(displayName ? { displayName } : {}), tools: [] } } };
+    }
+    case "session/activeClientRemoved":
+      return context.clientId && action["clientId"] === context.clientId ? { kind: "gated", action: { type, clientId: context.clientId } } : { kind: "refuse", reason: "A client can only remove itself." };
+    case "session/configChanged": {
+      const config = action["config"];
+      if (!isDict(config) || action["replace"] === true) return { kind: "refuse", reason: "Only the session mode can be changed from Copilot CLI." };
+      const keys = Object.keys(config);
+      // The approval mode stays with the platform: "allow-all" would run tools without the actions ledger.
+      const mode = config["mode"];
+      if (keys.length !== 1 || keys[0] !== "mode" || typeof mode !== "string" || !SESSION_MODES.has(mode)) {
+        return { kind: "refuse", reason: "Only the session mode can be changed from Copilot CLI; approvals stay as configured." };
+      }
+      return { kind: "gated", action: { type, config: { mode: config["mode"] } } };
+    }
+    case "chat/toolCallConfirmed": {
+      const toolCallId = str(action["toolCallId"]);
+      if (!toolCallId || typeof action["approved"] !== "boolean") return { kind: "refuse", reason: "Malformed approval." };
+      if (action["editedToolInput"] !== undefined) return { kind: "refuse", reason: "Editing a tool's input isn't supported over Copilot CLI attach." };
+      const feedback = action["approved"] ? undefined : textOf(action["reasonMessage"]) ?? textOf(isDict(action["userSuggestion"]) ? action["userSuggestion"]["text"] : undefined);
+      return { kind: "confirm", channel: channel as string, toolCallId, approved: action["approved"], ...(feedback ? { feedback } : {}) };
+    }
+    case "chat/inputCompleted": {
+      const inputId = str(action["requestId"]);
+      const response = str(action["response"]);
+      if (!inputId || !response) return { kind: "refuse", reason: "Malformed answer." };
+      const answers = isDict(action["answers"]) ? action["answers"] : {};
+      return { kind: "input", channel: channel as string, inputId, response, answers, action: { type, requestId: inputId, response, answers } };
+    }
+    default:
+      // Tool results (only the app runs its tools), history truncation, turn resume, working directories, terminals,
+      // customizations, MCP servers, annotations, automations, and host configuration.
+      return { kind: "refuse", reason: `${type} isn't available to an attached Copilot CLI.` };
+  }
+}
+function textOf(value: unknown): string | undefined {
+  if (typeof value === "string") return value.trim() || undefined;
+  if (isDict(value) && typeof value["markdown"] === "string") return value["markdown"].trim() || undefined;
+  return undefined;
+}
+
+/** An elicitation result for `session.ui.handlePendingElicitation` from an AHP `chat/inputCompleted`. */
+export function elicitationResult(response: string, answers: Dict): Dict {
+  if (response !== "accept") return { action: response === "decline" ? "decline" : "cancel" };
+  const content: Dict = {};
+  for (const [question, answer] of Object.entries(answers)) {
+    if (!isDict(answer) || (answer["state"] !== undefined && answer["state"] !== "submitted")) continue;
+    const value = answer["value"];
+    if (isDict(value) && "value" in value) content[question] = value["value"];
+  }
+  return { action: "accept", content };
+}
+
+/** A prompt the runtime surfaced over AHP, keyed by chat channel and tool call or question ID. */
+export interface PromptRecord {
+  readonly requestId: string;
+}
+
+const MAX_TRACKED = 1_000;
+
+function key(channel: string, id: string): string {
+  return `${channel}\u0000${id}`;
+}
+
+function remember<T>(map: Map<string, T>, k: string, value: T): void {
+  map.delete(k);
+  map.set(k, value);
+  if (map.size > MAX_TRACKED) map.delete(map.keys().next().value!);
+}
+
+/**
+ * What the bridge learns from the runtime's frames: the request IDs behind the prompts the CLI was shown (only the
+ * server's frames are trusted for these), and the latest `serverSeq` for envelopes the relay synthesizes.
+ */
+export class AhpObserver {
+  lastServerSeq = 0;
+  readonly #permissions = new Map<string, PromptRecord>();
+  /** Questions (`chat/inputRequested`); `requestId` is set when the host links one to a runtime request. */
+  readonly #inputs = new Map<string, { readonly requestId?: string }>();
+
+  permission(channel: string, toolCallId: string): PromptRecord | undefined {
+    return this.#permissions.get(key(channel, toolCallId));
+  }
+
+  input(channel: string, inputId: string): { readonly requestId?: string } | undefined {
+    return this.#inputs.get(key(channel, inputId));
+  }
+
+  /** Learns from a runtime frame (notification or response) before it is forwarded. */
+  observe(message: JsonRpcMessage): void {
+    if (message.method === "action" && isDict(message.params)) {
+      const envelope = message.params;
+      if (typeof envelope["serverSeq"] === "number") this.lastServerSeq = Math.max(this.lastServerSeq, envelope["serverSeq"]);
+      // A client's own action (echoed with its `origin`) never teaches a prompt; it can still retire one.
+      if (typeof envelope["channel"] === "string" && isDict(envelope["action"])) this.#action(envelope["channel"], envelope["action"], envelope["origin"] === undefined);
+      return;
+    }
+    if (isDict(message.result)) {
+      const result = message.result;
+      if (typeof result["serverSeq"] === "number") this.lastServerSeq = Math.max(this.lastServerSeq, result["serverSeq"]);
+      if (Array.isArray(result["actions"])) for (const envelope of result["actions"]) this.observe({ method: "action", params: envelope });
+      this.#walk(result, undefined, 0);
+    }
+  }
+
+  #action(channel: string, action: Dict, fromRuntime: boolean): void {
+    const type = action["type"];
+    if (type === "chat/toolCallComplete") {
+      const toolCallId = str(action["toolCallId"]);
+      if (toolCallId) this.#permissions.delete(key(channel, toolCallId));
+    } else if (type === "chat/inputCompleted") {
+      const requestId = str(action["requestId"]);
+      if (requestId) this.#inputs.delete(key(channel, requestId));
+    } else if (!fromRuntime) {
+      return;
+    } else if (type === "chat/toolCallReady") {
+      this.#toolCall(channel, action);
+    } else if (type === "chat/inputRequested" && isDict(action["request"])) {
+      this.#question(channel, action["request"]);
+    } else if (type === "session/inputNeededSet" && isDict(action["request"])) {
+      this.#walk(action["request"], undefined, 0);
+    }
+  }
+
+  #toolCall(channel: string, toolCall: Dict): void {
+    const toolCallId = str(toolCall["toolCallId"]);
+    const meta = isDict(toolCall["_meta"]) ? toolCall["_meta"] : undefined;
+    const requestId = str(meta?.["requestId"]);
+    const permission = meta?.["permissionRequest"];
+    if (!toolCallId || !requestId || !isDict(permission)) return;
+    // The runtime's permission request names the tool call it is for: a mismatch is not a prompt the runtime authored.
+    if (permission["toolCallId"] !== undefined && permission["toolCallId"] !== toolCallId) return;
+    remember(this.#permissions, key(channel, toolCallId), { requestId });
+  }
+
+  #question(channel: string, request: Dict): void {
+    const id = str(request["id"]);
+    if (!id || !Array.isArray(request["questions"])) return;
+    const requestId = str(isDict(request["_meta"]) ? request["_meta"]["requestId"] : undefined);
+    remember(this.#inputs, key(channel, id), requestId ? { requestId } : {});
+  }
+
+  /**
+   * Snapshots (`subscribe`, `reconnect`) and `inputNeeded` entries: tool calls and questions waiting for a person.
+   * Only the runtime's own state is read: what clients wrote (messages, drafts, answers, view state, client
+   * registrations) and what the model or tools produced (inputs, arguments, results, content) is skipped, as is `_meta`
+   * (a tool call's own `_meta` is read where the tool call is found).
+   */
+  #walk(node: unknown, chat: string | undefined, depth: number): void {
+    if (depth > 24) return;
+    if (Array.isArray(node)) {
+      for (const item of node) this.#walk(item, chat, depth + 1);
+      return;
+    }
+    if (!isDict(node)) return;
+    let scope = chat;
+    for (const field of ["resource", "chat"]) {
+      const value = node[field];
+      if (typeof value === "string" && CHAT_CHANNEL.test(value)) scope = value;
+    }
+    if (scope && typeof node["toolCallId"] === "string") this.#toolCall(scope, node);
+    if (scope && Array.isArray(node["questions"]) && typeof node["id"] === "string") this.#question(scope, node);
+    for (const [field, value] of Object.entries(node)) {
+      if (NOT_RUNTIME_STATE.has(field)) continue;
+      if (typeof value === "object" && value !== null) this.#walk(value, scope, depth + 1);
+    }
+  }
+}
+
+/** State fields the runtime stores as a client, the model, or a tool wrote them (and `_meta`, read in place). */
+const NOT_RUNTIME_STATE: ReadonlySet<string> = new Set([
+  // Replayed action envelopes are read one by one in `observe` (client-originated ones never teach a prompt).
+  "actions",
+  "message",
+  "draft",
+  "queuedMessages",
+  "answers",
+  "answer",
+  "view",
+  "activeClient",
+  "activeClients",
+  "config",
+  "customizations",
+  "toolInput",
+  "args",
+  "arguments",
+  "result",
+  "content",
+  "_meta",
+]);
+
+/**
+ * Filters a runtime response for the request that asked for it. Every result loses the host's shell prefix and its host
+ * directory (neither shells nor files are reachable; `initialize` carries them), and a shared session's completions
+ * lose host commands it may not run.
+ */
+export function filterResult(method: string | undefined, result: unknown, placement: AttachPlacement): unknown {
+  if (!isDict(result)) return result;
+  const { terminalCommandPrefix: _prefix, defaultDirectory: _directory, ...rest } = result;
+  if (method === "completions" && placement === "shared" && Array.isArray(rest["items"])) {
+    const items = rest["items"].filter((item) => {
+      const command = isDict(item) && typeof item["insertText"] === "string" ? SLASH_COMMAND.exec(item["insertText"])?.[1] : undefined;
+      return !command || SHARED_HOST_COMMANDS.has(command.toLowerCase());
+    });
+    return { ...rest, items };
+  }
+  return rest;
+}
+
+/** What replaces runtime state nested too deeply to scrub (no AHP frame comes close). */
+export const TOO_DEEP = "[omitted: nested too deeply]";
+const MAX_SCRUB_DEPTH = 128;
+
+/**
+ * A `file:` URI's path, percent-decoded (`%3A`, `%23`, ... included). Runs of valid escapes are decoded together (a
+ * multi-byte character spans several); a malformed one stays as written.
+ */
+function fileUriPath(uri: string): string {
+  return uri.slice("file://".length).replace(/(?:%[0-9A-Fa-f]{2})+/g, (run) => {
+    try {
+      return decodeURIComponent(run);
+    } catch {
+      return run;
+    }
+  });
+}
+
+/** Percent-encodes a scrubbed path for a `file:` URI (a lone surrogate, which `encodeURI` refuses, stays as is). */
+function encodePath(path: string): string {
+  try {
+    return encodeURI(path).replace(/[?#]/g, encodeURIComponent);
+  } catch {
+    return path.replace(/[ \t\n\r\f\v%?#]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+  }
+}
+
+/**
+ * Deep scrubber for platform host paths: core's `pathScrubber` (data directory, its resolved form, and the session
+ * workspace), applied to `file:` URIs by their decoded path, which AHP uses for working directories. A URI whose path
+ * is rewritten is rebuilt around the sandbox-style path (`file:///workspace`), percent-encoded again. State nested
+ * deeper than any AHP frame is replaced, never passed on unscrubbed.
+ */
+export function uriAwareScrubber(scrub: (value: unknown) => unknown): (value: unknown) => unknown {
+  const FILE_URI = /file:\/\/[^\s"'<>]*/gi;
+  const scrubUri = (uri: string): string => {
+    const path = fileUriPath(uri);
+    let local: string;
+    if (path.startsWith("/")) {
+      // `file:///C:/x` names `C:/x`; `file:///home/x` names `/home/x`.
+      local = /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
+    } else {
+      // An authority: `file://localhost/x` is local; `file://server/share/x` names the UNC path `//server/share/x`.
+      const slash = path.indexOf("/");
+      const authority = slash === -1 ? path : path.slice(0, slash);
+      const rest = slash === -1 ? "" : path.slice(slash);
+      local = authority.toLowerCase() === "localhost" ? (/^\/[A-Za-z]:[\\/]/.test(rest) ? rest.slice(1) : rest) : `//${path}`;
+    }
+    const scrubbed = scrub(local) as string;
+    if (scrubbed === local) return uri;
+    return `file://${scrubbed.startsWith("/") ? "" : "/"}${encodePath(scrubbed)}`;
+  };
+  const scrubText = (text: string): string => {
+    const out = scrub(/file:/i.test(text) ? text.replace(FILE_URI, scrubUri) : text) as string;
+    // A drive path rewritten inside a URI that wasn't percent-encoded (a raw space) leaves `file:///` + `/workspace`.
+    return out.includes("file:////") ? out.replace(/file:\/\/\/\/(?=workspace|platform|opt\/managed-copilot)/gi, "file:///") : out;
+  };
+  const walk = (value: unknown, depth: number): unknown => {
+    if (typeof value === "string") return scrubText(value);
+    if (value === null || typeof value !== "object") return value;
+    if (depth > MAX_SCRUB_DEPTH) return TOO_DEEP;
+    if (Array.isArray(value)) return value.map((item) => walk(item, depth + 1));
+    const out: Dict = {};
+    for (const [field, item] of Object.entries(value as Dict)) out[field] = walk(item, depth + 1);
+    return out;
+  };
+  return (value) => walk(value, 0);
+}
+
+/**
+ * Whether JSON `text` nests arrays and objects no deeper than `limit`, measured without parsing (so a hostile frame
+ * can't exhaust the stack in a parser, a serializer, or a walk).
+ */
+export function withinNesting(text: string, limit: number): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 0x5c) i++;
+      else if (c === 0x22) inString = false;
+      continue;
+    }
+    if (c === 0x22) inString = true;
+    else if (c === 0x7b || c === 0x5b) {
+      if (++depth > limit) return false;
+    } else if (c === 0x7d || c === 0x5d) depth--;
+  }
+  return true;
+}

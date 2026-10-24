@@ -1,15 +1,23 @@
-// Owner: devloop workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
-// WebSocket that relays the stock CLI's AHP connection to a per-session listener on the session's own runtime.
+// Owner: attach workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
+// WebSocket that mediates the stock CLI's AHP connection to a per-session listener on the session's own runtime.
+// The CLI is a `cli` responder of the session (core's `attachCli`): its turns and cancels are admitted and fenced by
+// core, its approvals and answers go through the actions ledger, and anything else it may not do is refused
+// (policy.ts). A promotion fences it (promotion participant) before the source runtime is checkpointed.
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { ATTACH_CLOSE_CODES, ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import type { GatewayApp, GatewayModule } from "../../app.js";
+import type { Principal } from "../../http.js";
+import { pathScrubber } from "../core/sessions.js";
+import type { PromotionParticipant } from "../promotion/contract.js";
 import { AhpHosts } from "./hosts.js";
-import { bridge, openUpstream } from "./proxy.js";
+import { uriAwareScrubber } from "./policy.js";
+import { AhpBridge, LEDGER_WAIT_MS, openUpstream } from "./proxy.js";
 import { AttachTickets, TICKET_PREFIX } from "./tickets.js";
-import type { AttachSessions, SessionLifecycleEvent } from "./types.js";
+import type { AttachActions, AttachSessions, CliAttachment, SessionLifecycleEvent } from "./types.js";
 
-export type { AttachSessions, SessionLifecycleEvent, SessionRuntime } from "./types.js";
+export type { AttachActions, AttachSessions, SessionLifecycleEvent, SessionRuntime } from "./types.js";
 
 const MAX_CLIENT_FRAME_BYTES = 16 * 1024 * 1024;
 
@@ -19,8 +27,16 @@ function sessionsOf(app: GatewayApp): AttachSessions {
   return sessions;
 }
 
+function actionsOf(app: GatewayApp): AttachActions | undefined {
+  return (app.services as Record<string, unknown>).actions as AttachActions | undefined;
+}
+
+function moving(sessionId: string): ManagedCopilotError {
+  return new ManagedCopilotError("session_busy", "This session is moving into a sandbox. Attach again when the move finishes.", { sessionId });
+}
+
 function assertAttachable(info: SessionInfo): void {
-  if (info.state === "promoting") throw new ManagedCopilotError("session_busy", "This session is moving into a sandbox. Attach again when the move finishes.");
+  if (info.state === "promoting") throw moving(info.id);
   if (info.state === "deleting" || info.state === "deleted") throw new ManagedCopilotError("conflict", "This session was deleted.");
   if (info.state === "failed") throw new ManagedCopilotError("conflict", "This session failed and cannot be attached.");
 }
@@ -69,10 +85,62 @@ export const attachModule: GatewayModule = {
     const ticketTtlMs = setting(app, "MANAGED_COPILOT_ATTACH_TICKET_TTL_MS", 60_000);
     const idleMs = setting(app, "MANAGED_COPILOT_ATTACH_IDLE_MS", 5 * 60_000);
     const maxLifetimeMs = setting(app, "MANAGED_COPILOT_ATTACH_MAX_LIFETIME_MS", 8 * 60 * 60_000);
+    const ledgerWaitMs = setting(app, "MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS", LEDGER_WAIT_MS);
+    const reconnectGraceMs = setting(app, "MANAGED_COPILOT_ATTACH_RECONNECT_GRACE_MS", 60_000);
     const tickets = new AttachTickets(app.db);
     const hosts = new AhpHosts(log, idleMs);
     const socketBase = app.config.publicUrl.replace(/^http/i, "ws");
+    // Built on first use, once the data directory exists, so its resolved form (8.3 names, links) is covered too.
+    let scrubber: ((value: unknown) => unknown) | undefined;
+    const scrub = (value: unknown) => (scrubber ??= uriAwareScrubber(pathScrubber(app.config.dataDir)))(value);
     app.capabilities.add("attach.cli");
+
+    /** The principals of each session's attached Copilot CLIs, by connection (each is the session's credential). */
+    const attachedPrincipals = new Map<string, Map<string, Principal>>();
+    /**
+     * Presences kept for the CLIs a fence ended: from the fence until a CLI attaches to the session again, or for
+     * `reconnectGraceMs` after the move ends (`timer`), whichever comes first.
+     */
+    const heldPresences = new Map<string, { readonly releases: (() => void)[]; timer: NodeJS.Timeout | undefined }>();
+
+    /**
+     * A fence ends the attached CLIs' attachments, and with them their credential, but the person is still there (the
+     * CLI reconnects once the move ends) and may be the session's only credential: the destination needs one to open
+     * the session, and the resumed turn needs one for every model call until the CLI is back. Each attached CLI's
+     * principal stays present on the session until then.
+     */
+    const holdCredentials = (sessionId: string): void => {
+      let held = heldPresences.get(sessionId);
+      // Another move before the CLIs came back: what the last one kept stays until this one ends too.
+      if (held?.timer) clearTimeout(held.timer);
+      if (held) held.timer = undefined;
+      const principals = attachedPrincipals.get(sessionId);
+      const sessions = (app.services as Record<string, unknown>).sessions as AttachSessions | undefined;
+      if (!principals?.size || !sessions?.presence) return;
+      if (!held) heldPresences.set(sessionId, (held = { releases: [], timer: undefined }));
+      for (const principal of principals.values()) {
+        try {
+          held.releases.push(sessions.presence(sessionId, principal));
+        } catch (error) {
+          log.warn("Could not keep an attached Copilot CLI's credential through a move", { sessionId, error: (error as Error).message });
+        }
+      }
+    };
+    /** The move ended: the kept credential stays until a CLI attaches again, at most `reconnectGraceMs`. */
+    const releaseCredentialsLater = (sessionId: string): void => {
+      const held = heldPresences.get(sessionId);
+      if (!held) return;
+      if (held.timer) clearTimeout(held.timer);
+      held.timer = setTimeout(() => dropCredentials(sessionId), reconnectGraceMs);
+      held.timer.unref();
+    };
+    const dropCredentials = (sessionId: string): void => {
+      const held = heldPresences.get(sessionId);
+      if (!held) return;
+      heldPresences.delete(sessionId);
+      if (held.timer) clearTimeout(held.timer);
+      for (const release of held.releases) release();
+    };
 
     /**
      * The session's current runtime, checked as attachable. Resolved inside the host queue, so a release queued by a
@@ -84,12 +152,23 @@ export const attachModule: GatewayModule = {
       return sessions.runtime(sessionId);
     };
 
+    /** For CLI writes that start no work: the same incarnation, placement generation, and no fence. */
+    const gateFor = (sessionId: string, attachment: CliAttachment) => () => {
+      if (hosts.isFenced(sessionId)) throw moving(sessionId);
+      const record = sessionsOf(app).get?.(sessionId);
+      if (!record || record.incarnation !== attachment.incarnation) throw new ManagedCopilotError("not_found", "This session no longer exists.", { sessionId });
+      if (record.state === "promoting") throw moving(sessionId);
+      if (record.generation !== attachment.generation) throw new ManagedCopilotError("conflict", "The session moved since Copilot CLI attached. Reconnecting.", { sessionId });
+    };
+
     app.routes.post("/v1/sessions/:id/attach", async (ctx) => {
       const principal = ctx.principal;
       const sessionId = ctx.params.id;
       if (!principal || !sessionId) throw new ManagedCopilotError("authentication_required", "Sign in to attach to a session");
       const host = await hosts.ensure(sessionId, currentRuntime(principal.accountId, sessionId));
-      const { token, expiresAt } = tickets.mint(principal.accountId, sessionId, ticketTtlMs);
+      const incarnation = sessionsOf(app).get?.(sessionId)?.incarnation;
+      // The principal stays in memory with the ticket: the attached CLI is the session's connected credential.
+      const { token, expiresAt } = tickets.mint(principal, sessionId, ticketTtlMs, incarnation ? { incarnation } : {});
       const material: AttachMaterial = { transport: "ahp", url: `${socketBase}${ROUTES.attachSocket(sessionId)}`, token, expiresAt, ahpSessionId: host.sessionUri };
       return material;
     });
@@ -106,44 +185,97 @@ export const attachModule: GatewayModule = {
         if (!presented) throw new ManagedCopilotError("authentication_required", `Attach with a ticket from POST ${ROUTES.attach(sessionId)}`);
         const ticket = tickets.redeem(presented, sessionId);
         if (!ticket) throw new ManagedCopilotError("authentication_required", "This attach ticket is invalid, expired, or already used. Request a new one.");
+        // Minted before a gateway restart: its requester's credential is gone with it.
+        if (!ticket.principal) throw new ManagedCopilotError("authentication_required", "This attach ticket is no longer valid. Request a new one.");
+        const principal = ticket.principal;
+        const sessions = sessionsOf(app);
+        if (!sessions.attachCli || !sessions.get) throw new ManagedCopilotError("capability_unavailable", "This gateway can't mediate Copilot CLI attachments.");
+        // Any fence while this upgrade waits makes everything it resolved stale.
+        const epoch = hosts.epoch(sessionId);
         const host = await hosts.ensure(sessionId, currentRuntime(ticket.accountId, sessionId));
-        let upstream;
-        try {
-          upstream = await openUpstream(host, protocols);
-        } catch (error) {
-          throw new ManagedCopilotError("capability_unavailable", `Cannot reach this session's Copilot CLI listener: ${(error as Error).message}`);
-        }
-        if (host.closed) {
-          upstream.terminate();
-          throw new ManagedCopilotError("conflict", "The session's Copilot CLI hosting ended while connecting. Attach again.");
-        }
-        if (socket.destroyed) {
-          upstream.terminate();
-          return;
-        }
-        const server = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_CLIENT_FRAME_BYTES, handleProtocols: () => upstream.protocol || false });
+        const stale = () => hosts.isFenced(sessionId) || hosts.epoch(sessionId) !== epoch || host.closed;
+        if (stale()) throw moving(sessionId);
+        const connectionId = `cli_${randomUUID()}`;
+        const attachment = await sessions.attachCli(ticket.accountId, sessionId, { connectionId, notify: () => undefined, principal });
         let attached = false;
-        server.handleUpgrade(req, socket, head, (client) => {
-          attached = true;
-          hosts.track(host, client);
-          bridge(client, upstream, { log, sessionId, maxLifetimeMs });
-          log.info("Copilot CLI attached", { sessionId, accountId: ticket.accountId });
-        });
-        // ws completes or refuses the handshake synchronously; a refused one leaves nothing to own the upstream.
-        if (!attached) upstream.terminate();
+        try {
+          if (ticket.incarnation && attachment.incarnation !== ticket.incarnation) {
+            throw new ManagedCopilotError("not_found", "This session was replaced since the attach ticket was issued. Attach again.", { sessionId });
+          }
+          const record = sessions.get(sessionId);
+          if (!record || record.incarnation !== attachment.incarnation) throw new ManagedCopilotError("not_found", "This session no longer exists.", { sessionId });
+          if (stale()) throw moving(sessionId);
+          let upstream: WebSocket;
+          try {
+            upstream = await openUpstream(host, protocols);
+          } catch (error) {
+            throw new ManagedCopilotError("capability_unavailable", `Cannot reach this session's Copilot CLI listener: ${(error as Error).message}`);
+          }
+          if (stale()) {
+            upstream.terminate();
+            throw moving(sessionId);
+          }
+          if (socket.destroyed) {
+            upstream.terminate();
+            return;
+          }
+          const placement = record.placement === "sandbox" ? "sandbox" : "shared";
+          const server = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_CLIENT_FRAME_BYTES, handleProtocols: () => upstream.protocol || false });
+          // ws completes or refuses the handshake synchronously, so no fence can come between the check above and
+          // `track`, which registers the relay for the next one.
+          server.handleUpgrade(req, socket, head, (client) => {
+            attached = true;
+            const relay = new AhpBridge(client, upstream, { log, sessionId, maxLifetimeMs, ledgerWaitMs, placement, attachment, actions: actionsOf(app), gate: gateFor(sessionId, attachment), scrub });
+            if (!hosts.track(host, relay)) return;
+            log.info("Copilot CLI attached", { sessionId, accountId: ticket.accountId, connectionId });
+            const principals = attachedPrincipals.get(sessionId) ?? new Map<string, Principal>();
+            attachedPrincipals.set(sessionId, principals.set(connectionId, principal));
+            void relay.ended.then(() => {
+              principals.delete(connectionId);
+              if (principals.size === 0 && attachedPrincipals.get(sessionId) === principals) attachedPrincipals.delete(sessionId);
+            });
+            // Back after a move: its own attachment is the session's credential again.
+            if (heldPresences.get(sessionId)?.timer) dropCredentials(sessionId);
+          });
+          // A refused handshake leaves nothing to own the upstream.
+          if (!attached) upstream.terminate();
+        } finally {
+          if (!attached) attachment.close();
+        }
       },
       { auth: "none" },
     );
 
     let unsubscribe: (() => void) | undefined;
+    let unregisterParticipant: (() => void) | undefined;
     app.onStart(() => {
       const sessions = (app.services as Record<string, unknown>).sessions as AttachSessions | undefined;
-      unsubscribe = sessions?.onLifecycle?.((event) =>
-        void hosts.release(event.sessionId, lifecycleReason(event.type), event.type === "promoted" ? { code: ATTACH_CLOSE_CODES.moved } : {}),
-      );
+      unsubscribe = sessions?.onLifecycle?.((event) => {
+        // A move or a stopped runtime ends hosts whose runtime was resolved before it, not one an attach resolves on
+        // the new runtime afterwards (a host resolved on the old one but still starting is released too).
+        const resolvedBy = event.type === "deleted" ? undefined : hosts.mark();
+        void hosts.release(event.sessionId, lifecycleReason(event.type), { ...(resolvedBy !== undefined ? { resolvedBy } : {}), ...(event.type === "promoted" ? { code: ATTACH_CLOSE_CODES.moved } : {}) });
+        if (event.type === "deleted") dropCredentials(event.sessionId);
+      });
+      // Promotion registers after attach, so its participant hook is only available once the gateway starts.
+      const promotion = (app.services as Record<string, unknown>).promotion as { participate?(participant: PromotionParticipant): () => void } | undefined;
+      unregisterParticipant = promotion?.participate?.({
+        name: "Copilot CLI attach",
+        fence: (sessionId, signal) => {
+          // Before the fence closes the relays (synchronously), so the session's credential never lapses.
+          holdCredentials(sessionId);
+          return hosts.fence(sessionId, signal);
+        },
+        release: (sessionId) => {
+          hosts.unfence(sessionId);
+          releaseCredentialsLater(sessionId);
+        },
+      });
     });
     app.onStop(async () => {
       unsubscribe?.();
+      unregisterParticipant?.();
+      for (const sessionId of [...heldPresences.keys()]) dropCredentials(sessionId);
       await hosts.disposeAll("The Managed Copilot gateway is shutting down.");
     });
   },

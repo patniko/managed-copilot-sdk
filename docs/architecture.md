@@ -898,6 +898,7 @@ sequenceDiagram
   participant CLI as Copilot CLI (stock)
   participant Relay as managed-copilot / openCli<br/>loopback relay
   participant GW as gateway attach module
+  participant Core as core sessions / actions ledger
   participant RT as session runtime<br/>(AHP host, one-session catalog)
   Relay->>GW: POST /v1/sessions/:id/attach (owner's GitHub token)
   GW->>RT: host.start(computeId mc-session-<id>, creation denied) + host.publishSession
@@ -906,34 +907,124 @@ sequenceDiagram
   CLI->>Relay: WebSocket (CLI's own GitHub token)
   Relay->>Relay: CLI's GitHub account must be the session owner
   Relay->>GW: WebSocket /v1/sessions/:id/ahp, Authorization: Bearer <ticket>
+  GW->>Core: sessions.attachCli (cli responder, pinned incarnation and generation)
   GW->>RT: WebSocket via runtime.connect(port), ?tkn=<listener token>
-  CLI-->>RT: AHP 0.9 (authenticate answered locally, never forwarded)
+  CLI-->>GW: AHP 0.9: reads pass, turns via write(), approvals via the ledger, the rest refused
+  GW-->>CLI: runtime frames, filtered and scrubbed of host paths
 ```
 
-- Verified on Copilot CLI 1.0.92 with runtime 1.0.103 (shared placement): the CLI attaches, shows history, and its
-  turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
-  after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one alive), on `deleted` and
-  `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on `promoted` or a new
-  runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the listener
-  connection drops abnormally, the client stays open for 500 ms so the lifecycle event that usually follows closes it
-  with its own code and reason; otherwise it closes with 1011. Host starts and releases for a session run in order,
-  and each start resolves the session's runtime only after earlier releases, so it never lands on a runtime the session
-  just left.
-- Reconnects: the stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
+- **The CLI is a responder, not a pipe.** Once its ticket is redeemed, the gateway registers the CLI with core's
+  `sessions.attachCli` as a `cli` responder of the session incarnation the ticket was minted for. The principal that
+  requested the ticket (kept in memory with it, never stored) is the session's connected credential while the CLI is
+  attached; a ticket minted before a gateway restart is refused (the relay fetches a fresh one). The relay
+  (`modules/attach/proxy.ts`) parses and mediates every message in both directions; nothing is forwarded byte for byte.
+- **What the CLI may send** (deny by default, `modules/attach/policy.ts`):
+  - Reads: `initialize`, `reconnect`, `ping`, `listSessions`, `subscribe` (root, this session, its chats; the stock
+    host refuses other sessions' chats too), `fetchTurns`, `completions`, `extensions/getPlan`,
+    `extensions/getSessionModels`, and `unsubscribe`. A read that names a channel must name one of these (session
+    extensions name the session itself). A request ID already in flight is refused (each response is filtered for the
+    request it answers), and a connection keeps the client ID it initialized with.
+  - Turns and steering (`chat/turnStarted`, `chat/pendingMessageSet`): text from `origin.kind: "user"` only, without
+    attachments or an agent. The AHP write runs inside
+    `CliAttachment.write({ kind: "turn" })`, in the same synchronous step as core's admission, ownership, fence, and
+    placement checks, so input never reaches a fenced or former runtime. A model on the message is checked by core
+    (and recorded for restores) inside that admitted write, so a refused turn records nothing. Cancels
+    (`chat/turnCancelled`) go through
+    `write({ kind: "abort" })`, and `ask_user` answers (`chat/inputCompleted` for a question with no runtime request
+    ID) through `write({ kind: "userInput" })`, refused while a connected app answers questions.
+  - State that starts no work (drafts, queue edits, the title, the read flag, `copilot/viewState`, its own
+    `session/activeClientSet` without tools or plugins, and `session/configChanged` for `mode` only) is forwarded after
+    a synchronous check that the session is not fenced, moved, or replaced.
+  - Approvals (`chat/toolCallConfirmed`) and elicitation answers are never forwarded. The runtime's request ID comes
+    only from the runtime's own frames (`_meta.requestId` on `chat/toolCallReady`, `session/inputNeededSet`, and
+    snapshots), never from the client: not from a client's echoed actions, nor from what clients, the model, or tools
+    wrote into state (messages, drafts, answers, view state, client registrations, tool arguments, inputs, results),
+    and only when the permission request names the same tool call. The ledger must have recorded the request: durable's
+    `actions.promptVisibility` when it is available, otherwise its open actions, waited for up to 5 s
+    (`MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS`), because the runtime reports a prompt to the gateway and to the CLI on
+    different connections. `CliAttachment.answer` then records the decision as `responderKind: "cli"`
+    (`approve-once` with `approvedInteractively`, or `reject` with the person's feedback; editing a tool's input is
+    refused), so a prompt an app, webhook worker, or poller owns is refused (`conflict`). On success the CLI gets its
+    own action echoed (the AHP host emits no confirmation for an answer it receives over JSON-RPC), otherwise an AHP
+    rejection.
+  - Everything else is refused, with JSON-RPC `-32009` for requests and an AHP rejection for actions: terminals
+    (`createTerminal`, `terminal/*`, `!command` text; on shared placement the host's terminal is a shell on the
+    platform host), file, resource, and changeset access (`resource*`, resource watches, `invokeChangesetOperation`,
+    changeset subscriptions, which expose the host repository on shared placement), session and chat creation or
+    disposal, approval-mode changes (`allow-all` would bypass the ledger), tool results, history truncation, turn
+    resume, working directories, customizations and MCP servers, automations, host configuration, unknown extensions,
+    and on shared placement host slash commands other than `/compact` (`/chronicle` reads every session on the runtime).
+- **What the CLI sees.** Runtime frames go through core's `pathScrubber` (with every escape in a `file:` URI decoded
+  first, `%3A` and `%23` included, a URI's server read as a UNC path, and the URI re-encoded), so working directories,
+  plan paths, and context read `/workspace`, `/platform/...`, or `/opt/managed-copilot/customizations/...`; state nested
+  deeper than 128 levels is replaced rather than passed on unscrubbed. Every result loses the host's `terminalCommandPrefix` and
+  `defaultDirectory`, shared sessions' completions lose host commands they can't run, the host's requests to the
+  client (its resources) are answered with an error, and OTLP telemetry is not forwarded. A message the relay can't
+  handle ends only its own attachment (1008 for the client's, including messages nested deeper than 64 levels; 1011
+  for the runtime's); fields of the wrong type are refused, never coerced.
+- **Promotion.** Attach is a promotion participant ("Copilot CLI attach"). Its `fence` marks the session fenced and
+  bumps the session's epoch, stops every relay at once (clients close with 4307, "The session is moving into a
+  sandbox. Reconnecting."), and disposes every host of the session its runtime hasn't confirmed stopping (the current
+  one, one still starting, and one whose earlier disposal is still in flight or failed; stock `host.dispose` is
+  idempotent, so it is sent again) with `host.dispose` on the runtime that started it (never through core's session
+  routing, which waits for the cutover). It resolves once each runtime confirmed. A failed `host.dispose` rejects,
+  failing the move before the checkpoint. Until `release`, `POST /attach`
+  and upgrades answer `session_busy`, and an attach, host start, or upgrade that straddled the fence is refused when
+  it completes, as is a runtime lookup that spanned a fence already lifted. After `release` (a commit, or a sealed or
+  unsealed abort) the next attach starts a fresh host through a
+  fresh `sessions.runtime()`, even when the runtime connection is the same. Lifecycle releases (`promoted`,
+  `stopped`) end only hosts whose runtime lookup started before the event, so a host already on the new runtime stays.
+  The fence ends the attached CLIs' attachments, and with them their credential, but the person is still there (the
+  CLI reconnects after the move) and may be the session's only credential, which the destination needs to open the
+  session and the resumed turn needs for every model call: before closing the relays, the fence keeps each attached
+  CLI's principal present on the session (`sessions.presence`) until a CLI attaches to the session again, or at most
+  `MANAGED_COPILOT_ATTACH_RECONNECT_GRACE_MS` (60 s) after `release`.
+- **Reconnects.** The stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
   1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
-  into 1012: the CLI reconnects through the relay, which re-verifies its GitHub account and attaches it with a fresh
-  ticket to the same session wherever it now runs (verified for a dropped connection: the conversation continued).
-  The relay refuses a reconnect whose material names a different conversation (spec section 9), and stops after 5
-  platform-requested reconnects in a minute. Generic AHP clients attach again with new material.
+  into 1012 and reconnects the CLI with a fresh ticket to the same session wherever it now runs; while a move is under
+  way it retries `session_busy` (ticket or socket) with backoff for up to 2 minutes as long as the CLI waits (then
+  reports `session_busy`). A dial the CLI abandons ends at once, even mid-handshake, and its redial takes over; a
+  message the relay can't filter ends only that CLI connection, never the launcher. The
+  relay refuses a reconnect whose material names a different
+  conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
+  attach again with new material.
+- **Verified live** (stock Copilot CLI 1.0.92, runtime 1.0.103, real model, captured between the relay and the
+  gateway): with an SDK app holding a permission prompt, the CLI's "Approve once" was refused ("Another responder owns
+  this action"), the tool did not run, and the app's later answer completed the turn; with no app attached, the CLI's
+  approval was recorded as `cli:<connection>` (`approve-once`) and the turn continued, while the app's own tool call
+  stayed `pending`; an `ask_user` question was answered from the CLI; 285 and 316 runtime frames of a shared and a
+  promotable session contained no data-directory path (long or 8.3 form), user name, `terminalCommandPrefix`, or
+  `defaultDirectory`; the CLI no longer opens a host terminal for `!`. Promoting an attached session: the fence closed
+  the CLI 1 s after the request, before the state export, attaches answered `session_busy` until the commit (2.8 s),
+  the stock CLI reconnected by itself, and its next turn ran in the sandbox (`agent`, `/workspace`, `Linux`) with the
+  approval recorded as the CLI's. Again after the Argon and Astra fixes, with durable's `promptVisibility` in place: an
+  app-held prompt's CLI approval was refused ("Your application is answering this request.") and the app's answer
+  completed it; with the app gone, the real CLI's turn asked for `request_sandbox`, its "Approve once" (recorded as
+  `cli:<connection>`) moved the session with the CLI's credential as the only one (before the credential was kept
+  through the fence, that move failed with `authentication_required`), the CLI showed "Connection lost.
+  Reconnecting...", reconnected through the relay by itself, and approved the shell command in the sandbox
+  (`cli-ok`, `Linux`, `/workspace`); Esc on a running turn sent `chat/turnCancelled` through `write({ kind: "abort" })`
+  and the runtime ended the turn; `managed-copilot attach` exited 0 with "Detached from ...". 132 more CLI-bound frames
+  had no host path.
+- Hosts are disposed after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one
+  alive), on `deleted` and `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on
+  `promoted` or a new runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the
+  listener connection drops abnormally, the client stays open for 500 ms so the lifecycle event that usually follows
+  closes it with its own code and reason; otherwise it closes with 1011. Host starts and releases for a session run in
+  order, and each start resolves the session's runtime only after earlier releases.
 - Tickets are 60-second, single-use, owner- and session-bound, stored as SHA-256 hashes (`attach_tickets`). Upgrades
-  re-check ownership and session state. Generic AHP clients may pass the ticket as `?tkn=`.
+  re-check ownership, session state, and the incarnation. Generic AHP clients may pass the ticket as `?tkn=`.
 - The stock CLI sends its GitHub OAuth token as `Authorization` and in an AHP `authenticate` request. The relay and
   the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
   headers, so no CLI token reaches a runtime or sandbox.
-- Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
-  empty because the host cannot list models without an AHP credential. GitHub Copilot app publication is not
-  implemented: a deployment whose environment sets `github.publish: true` is refused at gateway startup with
-  `transport_unsupported`, naming the environment (never silently ignored).
+- Limits: Copilot CLI 1.0.92 does not show an AHP `rejectionReason` (a refused approval closes its dialog and the tool
+  shows as waiting until the real outcome arrives); its `!` shell, attachments, agent selection on a message, and
+  approval-mode changes are unavailable; `ask_user` answers are user input, not ledger actions; an elicitation
+  question the host doesn't link to its runtime request is refused while the ledger holds an open elicitation; the CLI
+  asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is empty because the host
+  cannot list models without an AHP credential. GitHub Copilot app publication is not implemented: a deployment whose
+  environment sets `github.publish: true` is refused at gateway startup with `transport_unsupported`, naming the
+  environment (never silently ignored).
 
 ### CLI and quickstart
 
@@ -1014,6 +1105,7 @@ deployment guide.
 | `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
+| `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
 | Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
@@ -1044,7 +1136,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **sandbox** | `platform/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
 | **network** | `platform/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
-| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
+| **attach** (was devloop) | `packages/aspire/**` (except `src/publish/**`, azure), `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
