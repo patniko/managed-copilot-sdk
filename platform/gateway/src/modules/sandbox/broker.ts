@@ -54,6 +54,14 @@ interface Exchange {
 
 const identityCache = new Map<string, { value: Record<string, unknown>; expires: number }>();
 
+function safeHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "invalid";
+  }
+}
+
 /** Resolves the owner's Copilot identity (`copilot_internal/user`) outside the sandbox, with a short cache. */
 export async function resolveCopilotUser(token: string, githubApiUrl: string, fetchImpl: typeof fetch = fetch): Promise<Record<string, unknown>> {
   const key = createHash("sha256").update(`${githubApiUrl}\0${token}`).digest("hex");
@@ -251,6 +259,8 @@ export class InferenceBroker {
 
   async #run(requestId: string, exchange: Exchange): Promise<void> {
     const start = exchange.start!;
+    const began = Date.now();
+    this.#options.log.debug("Brokering sandbox inference request", { sessionId: this.#options.sessionId, requestId, method: start.method, host: safeHost(start.url), transport: start.transport ?? "http" });
     try {
       const authorized = await this.#authorize(start);
       if ("status" in authorized) {
@@ -265,6 +275,7 @@ export class InferenceBroker {
       await this.#fail(requestId, exchange, 502, exchange.cancelled ? "Request cancelled by the runtime" : `Inference request failed: ${(error as Error).message}`, exchange.cancelled ? "cancelled" : "bad_gateway");
     } finally {
       this.#exchanges.delete(requestId);
+      this.#options.log.debug("Sandbox inference request finished", { sessionId: this.#options.sessionId, requestId, ms: Date.now() - began, cancelled: exchange.cancelled });
     }
   }
 

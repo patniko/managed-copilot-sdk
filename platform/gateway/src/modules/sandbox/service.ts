@@ -2,7 +2,6 @@
 // when setup and the runtime are ready, stopped when idle after work drains, resumed without replaying setup, and
 // deleted with crash-safe reconciliation.
 import { randomBytes } from "node:crypto";
-import { resolve as resolvePath, sep } from "node:path";
 import type { Duplex, Readable } from "node:stream";
 import {
   isReservedSandboxEnv,
@@ -38,11 +37,12 @@ import type {
 import type { DockerClient } from "./docker.js";
 import type { SandboxImages } from "./images.js";
 import type { DockerSandboxProvider } from "./provider.js";
+import { rewriteSessionParams } from "./params.js";
 import type { SandboxRow, SandboxStore } from "./store.js";
 
 const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.requested", "elicitation.requested"]);
 const ACTION_COMPLETED = new Set(["external_tool.completed", "permission.completed", "elicitation.completed"]);
-const IDLE_SWEEP_MS = 30_000;
+const IDLE_SWEEP_MS = Number(process.env.MANAGED_COPILOT_SANDBOX_IDLE_SWEEP_MS ?? 30_000) || 30_000;
 const RECONCILE_MS = 5 * 60_000;
 
 interface LiveState {
@@ -73,16 +73,6 @@ function optional<T>(app: GatewayApp, key: string): T | undefined {
 function toManaged(error: unknown, fallback: ErrorCode = "internal"): ManagedCopilotError {
   if (error instanceof ManagedCopilotError) return error;
   return new ManagedCopilotError(fallback, (error as Error)?.message ?? String(error));
-}
-
-function samePathPrefix(path: string, root: string): string | undefined {
-  const normalize = (value: string) => resolvePath(value).split(sep).join("/");
-  const candidate = normalize(path);
-  const base = normalize(root).replace(/\/+$/, "");
-  const fold = process.platform === "win32" ? (value: string) => value.toLowerCase() : (value: string) => value;
-  if (fold(candidate) === fold(base)) return "";
-  if (fold(candidate).startsWith(`${fold(base)}/`)) return candidate.slice(base.length + 1);
-  return undefined;
 }
 
 export class SandboxService implements SandboxesService {
@@ -457,7 +447,7 @@ export class SandboxService implements SandboxesService {
       connectionToken: row.runtimeToken,
       handlers: broker.handlers,
       initialize: (send) => broker.initialize(send),
-      prepareSessionParams: async (method, params) => this.#prepareSessionParams(row, method, params),
+      prepareSessionParams: async (_method, params) => rewriteSessionParams(params, row.customizations),
       sessionOpened: async (id) => {
         live.lastActivity = Date.now();
         await broker.sessionOpened(id);
@@ -475,31 +465,6 @@ export class SandboxService implements SandboxesService {
       live.runtimes.delete(runtime);
     });
     return runtime;
-  }
-
-  #prepareSessionParams(row: SandboxRow, _method: string, params: Record<string, unknown>): Record<string, unknown> {
-    const out: Record<string, unknown> = { ...params };
-    for (const key of ["gitHubToken", "gitHubTokenProviderRegistrationId", "enableManagedSettings"]) delete out[key];
-    if (out["provider"] !== undefined && out["provider"] !== null) {
-      throw new ManagedCopilotError(
-        "policy_violation",
-        "Custom model providers are not available in sandboxes: inference is brokered by the gateway with the session owner's Copilot entitlement.",
-      );
-    }
-    out["workingDirectory"] ??= SANDBOX_PATHS.workspace;
-    const root = row.customizations;
-    if (root) {
-      for (const key of ["skillDirectories", "agentDirectories", "instructionDirectories"]) {
-        const value = out[key];
-        if (!Array.isArray(value)) continue;
-        out[key] = value.map((entry: unknown) => {
-          if (typeof entry !== "string") return entry;
-          const rest = samePathPrefix(entry, root);
-          return rest === undefined ? entry : rest ? `${SANDBOX_PATHS.customizations}/${rest}` : SANDBOX_PATHS.customizations;
-        });
-      }
-    }
-    return out;
   }
 
   async connect(sessionId: string, port: number): Promise<Duplex> {

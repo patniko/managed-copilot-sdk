@@ -1,7 +1,7 @@
 // Sandbox image preparation (spec section 1): the base image built from platform/sandbox, environment images built
 // FROM it, and derived layers for operator-declared system packages. Images are cached by content hash and every
 // sandbox pins the resolved image ID so a resume never silently changes its runtime or toolchain.
-import { spawn, execFile } from "node:child_process";
+import { spawn, exec } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,7 +12,7 @@ import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { Logger } from "../../log.js";
 import type { DockerClient } from "./docker.js";
 
-const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 /** The tag customer Dockerfiles use in `FROM` (spec section 1); kept pointing at the base image this gateway built. */
 export const CANONICAL_BASE_IMAGE = "ghcr.io/patniko/managed-copilot-sandbox:0.1.0";
@@ -64,9 +64,9 @@ function hashTree(root: string, include: (relativePath: string) => boolean, hash
   return hash;
 }
 
-async function hostConfig(command: string, args: readonly string[]): Promise<string | undefined> {
+async function hostConfig(command: string): Promise<string | undefined> {
   try {
-    const { stdout } = await execFileAsync(command, args, { windowsHide: true, timeout: 20_000, shell: process.platform === "win32" });
+    const { stdout } = await execAsync(command, { windowsHide: true, timeout: 20_000 });
     return stdout.trim() || undefined;
   } catch {
     return undefined;
@@ -86,13 +86,13 @@ export class SandboxImages {
   registries(): Promise<{ npm: string; pip: string | undefined }> {
     this.#registry ??= (async () => {
       const env = this.#options.env;
-      const npm = env.MANAGED_COPILOT_NPM_REGISTRY ?? (await hostConfig("npm", ["config", "get", "registry"]));
+      const npm = env.MANAGED_COPILOT_NPM_REGISTRY ?? (await hostConfig("npm config get registry"));
       if (!npm || !/^https?:\/\//.test(npm)) {
         throw new ManagedCopilotError("capability_unavailable", "Set MANAGED_COPILOT_NPM_REGISTRY (or configure `npm config get registry`) so the sandbox image can install the Copilot runtime.");
       }
       let pip = env.MANAGED_COPILOT_PIP_INDEX_URL;
       if (pip === undefined) {
-        const listed = await hostConfig("python", ["-m", "pip", "config", "list"]);
+        const listed = await hostConfig("python -m pip config list");
         pip = listed?.split(/\r?\n/).map((line) => /^global\.index-url='(.*)'$/.exec(line.trim())?.[1]).find(Boolean);
       }
       return { npm, pip: pip || undefined };

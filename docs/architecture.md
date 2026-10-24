@@ -158,20 +158,65 @@ denies configuration RPCs it does not understand.
 
 ### Isolated placement
 
-- Every sandbox gets its **own internal Docker network** (explicit small subnets, so Docker's default address pools
-  are not exhausted) with no route to the Internet. A single shared internal network would let sandboxes reach each
-  other's ports, so peers must not share a network. Tests include direct peer-IP access attempts.
-- Each sandbox runs `sandboxd` (platform-owned, not uid 10001) which starts the stock runtime as uid 10001 with
-  `COPILOT_CONNECTION_TOKEN`, workdir `/workspace`, and `HTTP(S)_PROXY` pointing at the egress proxy with a
-  per-sandbox proxy credential. `sandboxd` exposes, behind a per-sandbox bearer key: health, `/runtime` (WebSocket ⇄
-  runtime TCP), streamed workspace files, output snapshots for artifact publication, and setup execution.
-- The **sandbox relay** container is connected to each sandbox network and to a published bridge network so the host
-  gateway can reach each `sandboxd` (`/relay/<sandboxId>/...`, platform-key authenticated).
+As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platform/sandbox`; contract in
+`platform/gateway/src/modules/sandbox/contract.ts` and `packages/protocol/src/sandbox.ts`):
+
+- **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
+  pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
+  prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
+  resolves only when setup and the runtime are ready; a failing setup step rejects with `setup_failed` (step, exit code,
+  redacted output) and the session is never reported usable. Sizes map to CPU and memory limits; containers drop all
+  capabilities except what sandboxd needs (CHOWN, DAC_READ_SEARCH, KILL, SETGID, SETUID) and run with
+  `no-new-privileges`.
+- **Networks.** Every sandbox gets its **own internal Docker network** on an explicit /28 from `10.213.0.0/16`
+  (probing on overlap), so sandboxes can never reach each other's ports and Docker's default pools are not
+  exhausted. The relay and the egress proxy (`<instance>-egress`, alias `mc-egress`) are connected to each sandbox
+  network by the gateway on create and resume; nothing else is. The end-to-end test verifies a peer sandbox's IP is
+  unreachable and that `network: false` sandboxes have no Internet route.
+- **sandboxd** (`platform/sandbox/src/sandboxd`) runs as root, never as uid 10001. It serves, behind a per-sandbox
+  bearer key: health/status, `POST /v1/start` (NDJSON progress: egress CA trust, one-time setup, runtime start),
+  `/v1/runtime` (WebSocket ⇄ the runtime's loopback TCP port 7790), `/v1/tunnel?port=` (loopback TCP for CLI
+  attach), streamed workspace list/read/write, and output manifests. It starts the SDK's stock headless
+  `copilot-runtime` as uid 10001 with cwd `/workspace`, `COPILOT_CONNECTION_TOKEN`, its own `COPILOT_HOME`, the egress
+  env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
+  unexpected exits. Workspace writes run in a short-lived worker as uid 10001; reads use `O_NOFOLLOW` plus
+  `/proc/self/fd` verification, so traversal and symlink escapes are refused.
+- **Setup** (spec section 5) runs once, in order: pip packages into the persisted venv, npm packages into the
+  persisted prefix, setup files (≤64, ≤1 MiB each, ≤8 MiB total), then `setupCommands` (`bash -c` as uid 10001).
+  Progress, resolved versions, and file digests are recorded in the gateway ledger (authoritative) and in root-only
+  sandboxd state. Installs obey the session's network policy; an offline failure says so. Resume never replays
+  setup: an interrupted or failed setup makes the sandbox `state_restore_failed`. System packages are built into a
+  derived image layer at environment preparation, never installed per session.
+- **Images.** The gateway builds the base image from `platform/sandbox/image/Dockerfile` (content-hash tag
+  `managed-copilot-sandbox:<hash>`, also tagged `ghcr.io/patniko/managed-copilot-sandbox:0.1.0` for customer `FROM`
+  lines) with the operator's npm registry and pip index baked in as session defaults. Environment images are built
+  FROM it, must carry the base label, and are pinned by image ID per sandbox, so a resume never changes the toolchain.
+  `warm > 0` fails gateway start: this backend cannot keep warm sandboxes safely.
+- **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
+  tool/permission/elicitation action is pending, and no file transfer or publication is in flight; it closes runtime
+  streams so core resumes on next use. `ensureRunning` restarts (or recreates from the pinned image and existing
+  volumes) and re-registers egress. `delete` marks `deleting`, removes container, volumes, network, and artifacts, and
+  reconciliation finishes after a crash; orphaned resources labelled with the instance are swept on start.
+- **The sandbox relay** (`<instance>-relay`, same image, uid 65534, read-only rootfs) is on `<instance>-edge`
+  (published on 127.0.0.1) and every sandbox network; it forwards `/relay/<sandboxId>/...` HTTP and upgrades to
+  `sbx-<id>:7781` after checking the platform key.
 - The **egress proxy** container is connected to each sandbox network and to a bridge network with Internet access;
   sandboxes reach the Internet only through it. It applies each sandbox's effective network policy (fetched from or
   pushed by the gateway), blocks platform internals, loopback/link-local, private, and metadata addresses after DNS
-  resolution, and substitutes vault placeholders in permitted HTTPS headers.
-- Per-session volumes hold `/workspace`, `HOME`, and runtime state so compute can be replaced without losing them.
+  resolution, and substitutes vault placeholders in permitted HTTPS headers. Per start the gateway calls
+  `policy.registerSandbox` → passes its env and CA to sandboxd → `policy.updateSandbox(id, { address })`; on stop and
+  delete, `policy.unregisterSandbox`. Without a policy service, only `network: false` sandboxes without vaults start.
+- **Artifacts** (spec section 6). A turn starts at a root `user.message` (turn ID = its `messageId`) and completes at
+  the next root `session.idle`. Completed turns publish: sandboxd hashes the bounded regular files under
+  `/workspace/outputs` (symlinks, special files, changing files, and anything over 256 files / 100 MiB each / 512 MiB
+  total are rejected with reasons), the gateway downloads and re-verifies each changed file into content-addressed
+  storage under `<dataDir>/artifacts/<sessionId>/`, and records versions, digests, and a per-turn manifest. Rejections,
+  cancelled turns, and turns that ended in errors are recorded as `failed` publications, never empty successes.
+  `artifact.published` is emitted through core's events.
+- **REST** (owner-scoped, shared sessions answer `invalid_request`): `GET /v1/sessions/:id/files?path=&recursive=`,
+  `GET|PUT /v1/sessions/:id/files/content?path=&overwrite=` (streamed, 512 MiB limit, atomic replace by default),
+  `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
+  request; the SDK keeps waiting), and `GET .../artifacts/:artifactId/content`.
 
 ### Shared placement egress
 
@@ -199,8 +244,8 @@ and `app.service(key)`. Proposed services (owners finalize the exact shapes and 
 | `sessions` | core | Ledger lookups with owner checks, internal create/resume/send for schedules, session event subscription |
 | `events` | core | Publish platform events (SSE `/v1/events`, webhooks subscribe) |
 | `platformTools` | core | Register gateway-executed tools (`schedule_task`, `request_sandbox`, ...) injected per environment |
-| `sandboxes` | sandbox | Create, resume, stop, and delete sandboxes; open runtime streams; files; output snapshots |
-| `artifacts` | sandbox | Turn-scoped publication and immutable storage |
+| `sandboxes` | sandbox | `create` (resolves when setup + runtime are ready), `ensureRunning`, `openRuntime` (stream, connect token, gateway-answered `llmInference.*`, `initialize`/`prepareSessionParams`/`sessionOpened`), `connect(sessionId, port)` tunnels, `get`, `stop`, `delete`, files |
+| `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs`, immutable versioned storage, `waitForPublication`, `list`, `open` |
 | `policy` | network | Effective network policy, vault bindings, and egress registration per sandbox/session |
 | `vaults` | network | AppHost and per-user vault storage (sealed at rest) |
 | `actions` | durable | Durable action ledger, claims, results, reconciliation, polling |
@@ -218,6 +263,14 @@ and `app.service(key)`. Proposed services (owners finalize the exact shapes and 
 | `MANAGED_COPILOT_PLATFORM_KEY` | random per run | Internal service credential (relay, egress, sandboxd provisioning) |
 | `MANAGED_COPILOT_PUBLIC_URL` | `http://localhost:<port>` | URL clients use |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway; read by `ManagedCopilot.connect()` |
+| `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix and `managed-copilot.instance` label for Docker networks, containers, and volumes (use a unique value per parallel gateway) |
+| `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs |
+| `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images |
+| `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `platform/sandbox` | Use a prebuilt base image instead (must carry the base label) |
+| `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
+| `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
+| `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |
+| `DOCKER_HOST` | Docker Desktop pipe / `/var/run/docker.sock` | Docker Engine API endpoint for sandboxes |
 
 ## Workstreams and ownership
 
