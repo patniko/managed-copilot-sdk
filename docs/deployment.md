@@ -5,10 +5,11 @@ Apps: the gateway (with its stock shared runtime) behind HTTPS/WSS ingress, your
 Azure Container Apps Sandboxes group for isolated sessions. Customer code does not change: `ManagedCopilot.connect()`
 reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public URL.
 
-> **Status.** The root AppHost has deployed successfully to westus2. The deployed NFS share passed all ten storage
-> checks; shared-session snippets and isolated network-deny/allow checks have passed against its HTTPS gateway.
-> Demo, recovery, and remaining acceptance checks are still in progress; the capability matrix marks what is pending.
-> Capabilities whose backend is not ready (for example
+> **Status.** The root AppHost and both demos have passed live qualification in westus2 (2026-10-24), using stock
+> SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
+> with the deployed assistant's webhook and reminder journeys checked separately. NFS locking, revision recovery,
+> and persistent proxy trust have been exercised. This is a single-writer deployment, not a partition-tolerant HA
+> claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for example
 > isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
 > requests for them fail with `capability_unavailable` naming what is missing.
 
@@ -42,13 +43,14 @@ flowchart LR
   EP -- "allowed hosts" --> Net
   GW --- NFS
   Apps --- NFS
+  EP --- NFS
 ```
 
 | Resource | Purpose |
 | --- | --- |
 | Container Apps environment (workload profiles, Consumption) | Runs the gateway and your apps; VNet-integrated (`platform` subnet). Includes the Aspire dashboard. |
-| Virtual network | `platform` /23 (the environment, with a `Microsoft.Storage` service endpoint), `sandboxes` /23 (the sandbox group's VNet connection), and `egress` /24 (the egress proxy's internal environment). |
-| Storage account (FileStorage, Premium SSD v2) + NFS share `managed-copilot` (32 GiB) | Durable state: the gateway at `gateway/`, each app at `apps/<name>/`. NFS 4.1, reachable only from the `platform` subnet, shared-key access disabled. |
+| Virtual network | `platform` /23 (the environment), `sandboxes` /23 (the sandbox group's VNet connection), and `egress` /24 (the egress proxy's internal environment). Only `platform` and `egress` have a `Microsoft.Storage` service endpoint. |
+| Storage account (FileStorage, Premium SSD v2) + NFS share `managed-copilot` (32 GiB) | Durable state: the gateway at `gateway/`, each app at `apps/<name>/`, proxy CA at `egress/`. NFS 4.1, reachable only from the trusted `platform` and `egress` subnets, not the sandbox subnet; shared-key access disabled. |
 | Container registry + pull identity | Holds the gateway, app, egress proxy, and sandbox images. |
 | `copilot` container app | The gateway: external HTTPS ingress, exactly one replica, Single revision mode, `/data` on the NFS share, startup/liveness over TCP and readiness over HTTP. |
 | One container app per `publishApp` | Your apps (the demos): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. |
@@ -141,6 +143,45 @@ app's HTTPS address (`https://<app>.<environment-domain>/...`; calls between app
 gateway fills in the domain when it starts); a loopback webhook with no published app on that port fails the deploy
 with the fix.
 
+### App credentials and rotation
+
+The demo apps use the selected account's token, not a fallback service account. A GitHub CLI OAuth token can have broad
+scopes such as `repo`, `workflow`, and `user`; it is suitable for a controlled, IP-restricted evaluation, not a
+least-privilege recommendation. For a long-running deployment, use a dedicated credential for the intended account
+with only the permissions its repositories, Copilot access, and integrations actually require. Validate that
+credential against the platform and a real model before revoking the old one; not every token type grants the same
+Copilot access.
+
+The Aspire user-secret key is `Parameters:app-github-token`. `aspire secret set` manages user secrets, but its value is
+a positional argument: do not paste a token into that command, shell history, deployment scripts, or logs. An explicit
+`Parameters__app-github-token` environment value overrides Aspire's previously cached deployment parameter. For
+example, in PowerShell 7:
+
+```powershell
+${env:Parameters__app-github-token} = Read-Host "Replacement token for the same GitHub account" -MaskInput
+try {
+    aspire deploy
+    if ($LASTEXITCODE -ne 0) { throw "Deployment failed; do not revoke the old credential yet." }
+} finally {
+    Remove-Item Env:Parameters__app-github-token
+}
+```
+
+The value is delivered as a secure deployment parameter and a Container Apps secret reference, never a Bicep output
+or sandbox variable. Treat local Aspire user-secret and deployment-state files as sensitive; do not commit, export,
+or print them, enable trace logging around secrets, or dump container environments.
+
+Verify that a **new ready revision** is serving and both apps authenticate before revoking the old credential.
+Updating the Container Apps secret and restarting the existing revision alone did not refresh its credential in the
+live qualification; redeployment into a new revision did.
+
+An already-enabled background sign-in also stores a sealed copy of the credential in the gateway. Renew that existing
+grant with the replacement credential through the assistant's Background work control or
+`npx managed-copilot login --url <gateway-url>` using the updated sign-in. Do not re-enable background work if the
+account has turned it off. Rotating only the apps' secret does not rotate this stored grant. Expiry or revocation
+pauses background work with an explicit sign-in error; this deployment does not implement automatic GitHub App
+credential refresh.
+
 ### Publishing your own apps
 
 `addManagedCopilot` handles the platform. Apps that use it are ordinary Aspire resources; to deploy one with a durable
@@ -174,15 +215,16 @@ customizations on an **Azure Files NFS 4.1** share mounted at `/data`.
 
 - **Why NFS.** SQLite needs working POSIX byte-range locks, and the runtime's session store needs POSIX permissions and
   renames. Azure Files SMB failed for exactly this in the previous Copilot SDK Aspire deployment (locking errors).
-  NFS 4.1 implements byte-range locks (`fcntl`), and the database has a single host at a time (below), which is the
-  configuration SQLite supports on network file systems. A managed database would have meant replacing the gateway's
-  storage layer; a single-replica gateway on a supported persistent volume keeps it unchanged.
+  NFS 4.1 implements byte-range locks (`fcntl`), and the supervisor limits the database to a single active host
+  (below). The live locking and recovery probes qualify this specific mount and deployment, not arbitrary SQLite
+  WAL use over a network filesystem. A managed database would have meant replacing the gateway's storage layer;
+  the NFS deployment keeps that layer unchanged.
 - **Single writer.** Container Apps can run an old and a new revision side by side during a deployment, and can pre-warm
   a replacement replica during maintenance, even with one replica. The image's entrypoint is a lease supervisor
   (`deploy/azure/src/lease`): it holds an exclusive SQLite lock on `/data/.lease/gateway.lease` for the life of the
   process and starts the gateway only while it holds the lease, with a fencing generation and a heartbeat every 5 s. A
-  replica that loses the lease kills its gateway immediately. A waiting replica answers `503` (readiness fails, so it
-  gets no traffic). A newer deployment (higher `MANAGED_COPILOT_LEASE_STAMP`, set per publish) asks the holder to hand
+  detected lease or heartbeat failure terminates the gateway and its process group. A waiting replica answers `503`
+  (readiness fails, so it gets no traffic). A newer deployment (higher `MANAGED_COPILOT_LEASE_STAMP`, set per publish) asks the holder to hand
   over; an older one never takes the lease while a newer one waits; and if the newer replica never takes it, the old
   holder reclaims it and refuses that deployment for 10 minutes instead of flapping. The gateway runs in its own
   process group, and the lease is released only after every process in it (including the shared runtime) has exited.
@@ -191,13 +233,16 @@ customizations on an **Azure Files NFS 4.1** share mounted at `/data`.
   picks another directory than a fresh one under `/data/.probe`) checks POSIX metadata, atomic rename, fsync,
   cross-process lock exclusion, SQLite WAL and rollback journals under concurrent writers, and crash recovery, and
   prints a JSON report. The deployed Azure NFS share passed all ten checks, including directory fsync and recovery
-  from a killed SQLite writer. These are single-replica/cross-process checks; they do not establish unrestricted
-  multi-host WAL safety.
+  from a killed SQLite writer. A separate, non-serving diagnostic revision on a different kernel and NFS client
+  could not acquire the serving gateway's lease. It was then deactivated, and Single revision mode and normal
+  traffic restored. This proves healthy cross-host exclusion, not unrestricted multi-host WAL safety.
 
 **Limits.** One gateway replica: no horizontal scale-out, and a handover (deploy, restart, or maintenance) makes the API
 unavailable for seconds to tens of seconds while the new replica takes the lease and starts. Durable actions, webhooks,
 and schedules persist across it; open WebSocket streams reconnect. The share is zone-redundant only if you choose a ZRS
 account; the default is LRS. Back up the share with Azure Files snapshots if you need point-in-time recovery.
+Network partitions and NFS-server lock loss were not fault-injected; do not treat the lease as a partition-tolerant
+HA guarantee or run multiple active writers.
 
 ## Isolated placement on Azure
 
@@ -270,32 +315,71 @@ Alternatives when an address allowlist does not fit:
 
 | Capability | `aspire run` (local) | `aspire deploy` (Azure) |
 | --- | --- | --- |
-| Gateway API, HTTPS/WSS ingress, GitHub sign-in, access rules | Yes (HTTP on localhost) | Live HTTPS/WSS SDK sessions pass; broader access tests pending |
-| Shared sessions (stock shared runtime) | Yes | Spec snippets 01 and 02 pass on the deployed gateway |
-| Durable state across restarts and redeploys, single writer | Yes (local disk) | NFS probe passed all ten checks; revision lease generation advanced from 1 to 2; full recovery checks pending |
-| Durable actions, webhooks, schedules | Yes | Implemented; webhooks to published apps over HTTPS inside the environment; pending live qualification |
-| Isolated sessions (`network: false`) | Yes (Docker) | Live real-model/files/idle-replacement probe passed; spec snippet 06 passes on the deployed gateway |
-| Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Proxy deployment is live; network-disabled and network-enabled checks pass; vault tests pending |
-| Files and artifacts in sandboxes | Yes | Implemented with isolated sessions; pending live qualification |
-| Promotion (shared → isolated) | Yes | Implemented with isolated sessions; pending live qualification |
+| Gateway API, HTTPS/WSS ingress, GitHub sign-in, access rules | Yes (HTTP on localhost) | Configured-account SDK access verified; live two-account isolation is not qualified here |
+| Shared sessions (stock shared runtime) | Yes | Real tools and streaming; conversation history survives a gateway revision |
+| Durable state across restarts and redeploys, single writer | Yes (local disk) | NFS 10/10, healthy cross-host lease exclusion, shared history and two distinct isolated workspaces survive revision replacement; no partition-tolerant HA claim |
+| Durable actions, webhooks, schedules | Yes | Polling without duplicate execution; assistant's tab-closed webhook and reminder; one automatic scheduled occurrence completes exactly once after gateway replacement |
+| Isolated sessions (`network: false`) | Yes (Docker) | Real model/files/idle-replacement probe passes; network-denied CONNECT returns 403 while inference works |
+| Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Enabled network returns 200; vault substitution and response redaction pass; CA fingerprint is unchanged across proxy revisions |
+| Files and artifacts in sandboxes | Yes | File injection, upload/read, report output and real PNG artifact pass |
+| Promotion (shared → isolated) | Yes | Explicit promotion and continuation pass; broader interactive CLI continuity is a separate gate |
+| CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
-| Demos (software factory, assistant) | Yes | Published with `publishApp`; real happy-path checks in progress |
+| Demos (software factory, assistant) | Yes | Both deployed happy paths pass; assistant uses clearly labelled demo Google data, not a live Google account |
+
+## Live qualification
+
+The checks below used the deployed platform and real model calls, not a fake backend (westus2, 2026-10-24):
+
+| Check | Result |
+| --- | --- |
+| `aspire deploy` | All 37 pipeline steps succeeded; normal entrypoint, Single revision mode, latest ready gateway receiving 100% of traffic |
+| Spec snippets 01-09, 11, 13 | **11 passed**: genuine SDK objects/tools/streaming, repository work, setup, artifacts, network/vault behavior, promotion, resume, durable polling, and AHP attach |
+| Spec snippets 10 and 12 | **2 skipped**, not passed: they require the local quickstart receiver and its `COPILOT_WEBHOOK_SECRET`, deliberately not published by the root AppHost |
+| Isolated idle/recreate probe | **8/8 passed** in Phase A; real-model create and resume each took about 8 seconds; compute was replaced over retained disks |
+| NFS and lease | **10/10 storage checks**; a second host's contender was excluded while the original gateway served |
+| Gateway revision canaries | One shared conversation retained its marker; two isolated sessions retained different files at the same path and their distinct sandbox identities |
+| Scheduled recovery | A one-shot schedule created before redeployment automatically completed exactly once on the replacement gateway, using the renewed same-account background credential |
+| Proxy trust | Identical CA fingerprint across two real proxy revisions; NFS directory owned by uid 1000 with mode 0700; proxy remains non-root |
+| Software factory | CSV/JSON work order completed two parallel builds and a reviewer-requested fix/review loop; release contained **9 files, 37/37 tests**, with a downloadable patch bundle (319 seconds) |
+| Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
+
+The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real
+email or calendar invitation was sent. GitHub App credential refresh, real two-account access isolation, unsupported
+subprocess/subagent suspension, and arbitrary network-partition recovery are not established by these results.
+
+To rerun the applicable snippets against your deployment:
+
+```powershell
+$env:MANAGED_COPILOT_URL = "https://copilot.<environment-domain>"
+pnpm --filter @managed-copilot/quickstart acceptance 01 02 03 04 05 06 07 08 09 11 13 --strict
+```
+
+`deploy/azure/qualify/isolated.live.ts` covers idle compute replacement (use an environment with a short idle timeout,
+or allow the default 900 seconds). `deploy/azure/qualify/revision.live.mjs` prepares session canaries before a deploy
+and verifies them afterwards, deleting only its own test sessions.
 
 ## Cost
 
-Estimates for the default configuration in a US region at pay-as-you-go prices (check the Azure pricing calculator for
-yours):
+Estimates for westus2 in USD, using 730 hours/month. Compute and storage meters were checked on 2026-10-24 against the
+[Azure Retail Prices API](https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices);
+check your subscription's rates and discounts before deploying.
 
 | Item | Idle | Notes |
 | --- | --- | --- |
-| Gateway, 2 demo apps, and the egress proxy (Container Apps Consumption, 0.5 vCPU / 1 GiB each, always one replica) | ~$45–160/month | About $12/month per replica at the idle rate and $40 when busy. The monthly free grant applies once per subscription. Both environments are Consumption-only, so there is no environment fee. |
-| Azure Files NFS (Premium SSD v2, 32 GiB provisioned) | ~$3–10/month | Provisioned capacity, IOPS, and throughput. |
+| Gateway, 2 demo apps, and the egress proxy (Container Apps Consumption, 0.5 vCPU / 1 GiB each, always one replica) | ~$63/month at idle rates; ~$221/month continuously active | Before the subscription's shared free grant. Observed meters: $0.000034/vCPU-second active, $0.000004/vCPU-second idle, $0.000004/GiB-second. Both environments are Consumption-only. |
+| Azure Files NFS (Premium SSD v2, 32 GiB provisioned) | ~$5–10/month | Live share: 3,032 IOPS and 129 MiB/s. Capacity plus provisioned performance above included baselines; snapshots are extra. See [Azure Files cost guidance](https://learn.microsoft.com/en-us/azure/storage/files/file-estimate-cost). |
 | Container registry (Basic) | ~$5/month | |
 | Log Analytics | ~$0–10/month | Per GB ingested. |
 | Sandboxes (per isolated session) | Usage-based | microVM time while a sandbox runs, plus its data disks while they exist. Delete sessions you no longer need; idle stop keeps only disks. Check the resource group in Cost Management for actual figures. |
 
+Standing WebSocket/SSE connections and background work can keep replicas at active rates even without a browser open.
+The four apps alone cost roughly $0.09/hour at idle rates or $0.30/hour when active, before free grants. These are
+estimates, not a spending cap: sandbox usage, additional network/bandwidth charges, and model usage billed to the
+authorized GitHub account are separate.
+
 The probe resource group was created at 15:31 UTC and confirmed deleted by 16:28 UTC on 2026-10-24.
-Cost Management has not posted its usage yet; an empty billing result must not be interpreted as a zero-cost run.
+Cost Management had not posted its usage at the 18:52 UTC check; its **actual cost is unavailable**, not zero.
 
 ## Teardown
 
