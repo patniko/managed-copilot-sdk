@@ -38,7 +38,8 @@ interface ChunkParams {
 
 interface Exchange {
   start?: StartParams;
-  readonly chunks: Buffer[];
+  /** Request body chunks; `binary` keeps WebSocket frame types intact. */
+  readonly chunks: { readonly data: Buffer; readonly binary: boolean }[];
   ended: boolean;
   cancelled: boolean;
   readonly abort: AbortController;
@@ -111,6 +112,12 @@ export class InferenceBroker {
         "gitHubToken.getToken",
         async () => {
           throw new ManagedCopilotError("forbidden", "GitHub tokens are never provided to sandbox runtimes; inference is brokered by the gateway.");
+        },
+      ],
+      [
+        "providerToken.getToken",
+        async () => {
+          throw new ManagedCopilotError("forbidden", "Custom model providers are not available in sandboxes; inference is brokered by the gateway.");
         },
       ],
     ]);
@@ -190,7 +197,7 @@ export class InferenceBroker {
       exchange.abort.abort();
       exchange.socket?.terminate();
     } else {
-      if (params.data) exchange.chunks.push(params.binary ? Buffer.from(params.data, "base64") : Buffer.from(params.data, "utf8"));
+      if (params.data) exchange.chunks.push({ data: params.binary ? Buffer.from(params.data, "base64") : Buffer.from(params.data, "utf8"), binary: params.binary === true });
       if (params.end) exchange.ended = true;
     }
     const wake = exchange.wake;
@@ -216,6 +223,11 @@ export class InferenceBroker {
     if (start.sessionId !== undefined && start.sessionId !== this.#options.sessionId) {
       return { status: 403, message: "Inference requests are only brokered for this sandbox's own session.", code: "forbidden" };
     }
+    // Only model-catalog style reads happen outside a session; anything that can spend tokens must name the session.
+    const method = typeof start.method === "string" ? start.method.toUpperCase() : "";
+    if (start.sessionId === undefined && method !== "GET" && method !== "HEAD") {
+      return { status: 403, message: "Sandbox inference requests that are not reads must belong to the sandbox's session.", code: "forbidden" };
+    }
     let url: URL;
     try {
       url = new URL(start.url);
@@ -228,14 +240,18 @@ export class InferenceBroker {
     if (url.username || url.password || (url.port && url.port !== "443") || !this.#apiHosts.has(url.hostname.toLowerCase())) {
       return { status: 403, message: `Sandbox inference can only reach the Copilot API, not ${url.hostname}. Custom model providers are not available in sandboxes.`, code: "forbidden" };
     }
+    const unauthorized = { status: 401, message: "Sandbox inference requests must use the session's brokered credential.", code: "authentication_required" };
     const headers: Record<string, string> = {};
     let authorized = false;
     for (const [name, values] of Object.entries(start.headers ?? {})) {
       const lower = name.toLowerCase();
       if (!values || FORBIDDEN_REQUEST_HEADERS.has(lower)) continue;
+      if (lower in headers) return { status: 400, message: `Duplicate "${lower}" request header.`, code: "invalid_request" };
       let value = values.join(", ");
       if (lower === "authorization") {
-        if (!value.includes(this.#options.placeholder)) return { status: 401, message: "Sandbox inference requests must use the session's brokered credential.", code: "authentication_required" };
+        // Exactly one credential, and it must be the placeholder itself: nothing else is ever rewritten.
+        const match = values.length === 1 ? /^(Bearer|token) (\S+)$/i.exec(value) : null;
+        if (!match || match[2] !== this.#options.placeholder) return unauthorized;
         let token: string;
         try {
           token = await this.#options.resolveToken();
@@ -243,18 +259,18 @@ export class InferenceBroker {
           const managed = error instanceof ManagedCopilotError ? error : undefined;
           return { status: 401, message: managed?.message ?? "The session owner has no usable GitHub credential.", code: managed?.code ?? "authentication_required" };
         }
-        value = value.split(this.#options.placeholder).join(token);
+        value = `${match[1]} ${token}`;
         authorized = true;
       }
       headers[lower] = value;
     }
-    if (!authorized) return { status: 401, message: "Sandbox inference requests must use the session's brokered credential.", code: "authentication_required" };
+    if (!authorized) return unauthorized;
     return { url, headers };
   }
 
   async #body(exchange: Exchange): Promise<Buffer> {
     while (!exchange.ended && !exchange.cancelled) await new Promise<void>((resolve) => (exchange.wake = resolve));
-    return Buffer.concat(exchange.chunks.splice(0));
+    return Buffer.concat(exchange.chunks.splice(0).map((chunk) => chunk.data));
   }
 
   async #run(requestId: string, exchange: Exchange): Promise<void> {
@@ -311,30 +327,60 @@ export class InferenceBroker {
     if (target.protocol === "https:") target.protocol = "wss:";
     const socket = new WebSocket(target, { headers, perMessageDeflate: false, handshakeTimeout: 20_000 });
     exchange.socket = socket;
+    // A persistent listener: an unhandled WebSocket 'error' would crash the gateway.
+    let failure: Error | undefined;
+    socket.on("error", (error) => {
+      failure ??= error;
+    });
+    const wakeSender = () => {
+      const wake = exchange.wake;
+      exchange.wake = undefined;
+      wake?.();
+    };
+    const done = new Promise<void>((resolve) =>
+      socket.once("close", () => {
+        wakeSender();
+        resolve();
+      }),
+    );
     await new Promise<void>((resolve, reject) => {
       socket.once("open", () => resolve());
       socket.once("error", reject);
-      socket.once("unexpected-response", (_req, res) => reject(new Error(`WebSocket upgrade refused with HTTP ${res.statusCode}`)));
+      socket.once("unexpected-response", (request, response) => {
+        response.resume();
+        request.destroy();
+        reject(new Error(`WebSocket upgrade refused with HTTP ${response.statusCode}`));
+      });
+      socket.once("close", () => reject(failure ?? new Error("WebSocket closed during the upgrade")));
     });
     await this.#respond(requestId, exchange, "llmInference.httpResponseStart", { status: 101, headers: {} });
-    const done = new Promise<void>((resolve) => socket.once("close", () => resolve()));
     socket.on("message", (data, isBinary) => {
-      const buffer = Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data as ArrayBuffer);
+      const buffer = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
       void this.#respond(requestId, exchange, "llmInference.httpResponseChunk", isBinary ? { data: buffer.toString("base64"), binary: true } : { data: buffer.toString("utf8") });
     });
-    // Each request chunk is one runtime message.
+    // Each request chunk is one runtime message, sent with its original frame type.
     void (async () => {
       while (!exchange.cancelled && socket.readyState === WebSocket.OPEN) {
-        if (exchange.chunks.length === 0) {
+        const chunk = exchange.chunks.shift();
+        if (!chunk) {
           if (exchange.ended) break;
           await new Promise<void>((resolve) => (exchange.wake = resolve));
           continue;
         }
-        socket.send(exchange.chunks.shift()!.toString("utf8"));
+        try {
+          socket.send(chunk.binary ? chunk.data : chunk.data.toString("utf8"), { binary: chunk.binary });
+        } catch (error) {
+          failure ??= error as Error;
+          socket.terminate();
+        }
       }
       if (socket.readyState === WebSocket.OPEN) socket.close(1000);
     })();
     await done;
+    if (failure && !exchange.cancelled) {
+      await this.#respond(requestId, exchange, "llmInference.httpResponseChunk", { data: "", end: true, error: { message: `Inference stream failed: ${failure.message}`, code: "bad_gateway" } });
+      return;
+    }
     await this.#respond(requestId, exchange, "llmInference.httpResponseChunk", { data: "", end: true });
   }
 }

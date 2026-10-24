@@ -75,6 +75,23 @@ function toManaged(error: unknown, fallback: ErrorCode = "internal"): ManagedCop
   return new ManagedCopilotError(fallback, (error as Error)?.message ?? String(error));
 }
 
+/** Appends the last lines of a failed step's (already redacted) output; clients may see only the error message. */
+function withOutputTail(message: string, output: string | undefined): string {
+  const lines = (output ?? "").trim().split("\n").slice(-8).join("\n").slice(-800).trim();
+  return lines ? `${message}\nLast output:\n${lines}` : message;
+}
+
+const SETUP_PATH = /^(?!\/)(?![A-Za-z]:)(?!.*(?:^|\/)\.\.(?:\/|$))[^\u0000-\u001f\u007f\\]+$/;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** Exact decoded size of strict base64, or undefined when the text is not strict base64. */
+function base64Size(value: string): number | undefined {
+  const compact = value.replace(/\s+/g, "");
+  if (compact.length % 4 !== 0 || !BASE64.test(compact)) return undefined;
+  const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+  return (compact.length / 4) * 3 - padding;
+}
+
 export class SandboxService implements SandboxesService {
   readonly #options: SandboxServiceOptions;
   readonly #live = new Map<string, LiveState>();
@@ -253,13 +270,21 @@ export class SandboxService implements SandboxesService {
     if (entries.length > limits.count) throw new ManagedCopilotError("invalid_request", `Sessions accept at most ${limits.count} setup files; upload the rest with managed.files(session).upload().`);
     let total = 0;
     for (const [path, content] of entries) {
-      const bytes = Math.floor((content.length * 3) / 4);
+      const relative = path.startsWith(`${SANDBOX_PATHS.workspace}/`) ? path.slice(SANDBOX_PATHS.workspace.length + 1) : path;
+      if (!relative || relative.length > 4096 || !SETUP_PATH.test(relative)) {
+        throw new ManagedCopilotError("invalid_request", `Setup file path "${path}" must be relative to /workspace, use forward slashes, and contain no ".." segments.`);
+      }
+      if (typeof content !== "string") throw new ManagedCopilotError("invalid_request", `Setup file "${path}" must be base64-encoded text.`);
+      const bytes = base64Size(content);
+      if (bytes === undefined) throw new ManagedCopilotError("invalid_request", `Setup file "${path}" is not valid base64.`);
       if (bytes > limits.fileBytes) throw new ManagedCopilotError("invalid_request", `Setup file "${path}" is larger than 1 MiB; upload it with managed.files(session).upload() instead.`);
       total += bytes;
     }
     if (total > limits.totalBytes) throw new ManagedCopilotError("invalid_request", "Setup files exceed 8 MiB in total; upload large files with managed.files(session).upload() instead.");
     const workloadEnv: Record<string, string> = { ...(config.env ?? {}), ...(additions.env ?? {}) };
-    for (const name of Object.keys(workloadEnv)) {
+    for (const [name, value] of Object.entries(workloadEnv)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new ManagedCopilotError("invalid_request", `"${name}" is not a valid environment variable name.`);
+      if (typeof value !== "string" || value.includes("\u0000")) throw new ManagedCopilotError("invalid_request", `The value of env "${name}" must be a string without NUL characters.`);
       if (isReservedSandboxEnv(name)) throw new ManagedCopilotError("policy_violation", `"${name}" is reserved by the platform (identity, proxy, trust, or runtime settings) and cannot be set in env.`);
     }
     const plan: SandboxSetupPlan = {
@@ -322,6 +347,8 @@ export class SandboxService implements SandboxesService {
         ...(row.customizations ? { customizations: row.customizations } : {}),
       });
       store.update(row.sessionId, { subnet, state: "setting_up", startedAt: new Date().toISOString() });
+      // Egress pins the proxy credential to the sandbox's source address; setup installs already go through it.
+      await this.#pinAddress(row);
       const agent = this.#agent(row);
       await agent.waitHealthy();
       const final = await agent.start(
@@ -333,14 +360,13 @@ export class SandboxService implements SandboxesService {
       if (final.type === "failed") {
         store.update(row.sessionId, { state: "failed", ...(final.setup ? { setup: final.setup } : {}), errorCode: final.code, error: final.message });
         const failedStep = final.setup?.steps.find((step) => step.state === "failed");
-        throw new ManagedCopilotError(final.code === "internal" ? "internal" : "setup_failed", final.message, {
+        throw new ManagedCopilotError(final.code === "internal" ? "internal" : "setup_failed", withOutputTail(final.message, failedStep?.output), {
           sandboxId: row.id,
           ...(failedStep ? { step: failedStep.name, ...(failedStep.exitCode !== undefined ? { exitCode: failedStep.exitCode } : {}), ...(failedStep.output ? { output: failedStep.output.slice(-2000) } : {}) } : {}),
         });
       }
       if (final.type !== "ready") throw new ManagedCopilotError("internal", "The sandbox did not report ready.");
       store.update(row.sessionId, { state: "running", setup: final.setup, errorCode: null, error: null });
-      await this.#pinAddress(row);
       this.#liveFor(row.sessionId).lastActivity = Date.now();
       this.#log.info("Sandbox ready", { sessionId: row.sessionId, sandboxId: row.id, ms: Date.now() - started });
       return this.#handle(this.#row(row.sessionId));
@@ -349,8 +375,9 @@ export class SandboxService implements SandboxesService {
       const current = store.bySession(row.sessionId);
       if (current && current.state !== "failed") store.update(row.sessionId, { state: "failed", errorCode: managed.code, error: managed.message });
       this.#log.warn("Sandbox creation failed", { sessionId: row.sessionId, sandboxId: row.id, code: managed.code, error: managed.message });
+      // A sandbox that never became ready holds no user state; release its container, volumes, and subnet now.
+      await provider.remove(row.id).catch((cleanup: unknown) => this.#log.warn("Could not remove a failed sandbox; reconciliation retries", { sandboxId: row.id, error: (cleanup as Error).message }));
       await this.#unregisterEgress(row);
-      await provider.stop(row.id).catch(() => undefined);
       throw managed;
     }
   }
@@ -416,13 +443,13 @@ export class SandboxService implements SandboxesService {
     }
     try {
       const egress = await this.#registerEgress(row);
+      await this.#pinAddress(row);
       const agent = this.#agent(row);
       await agent.waitHealthy();
       const final = await agent.start({ mode: "resume", platformEnv: egress.env, workloadEnv: row.workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}) }, () => undefined);
       if (final.type === "failed") throw new ManagedCopilotError(final.code === "internal" ? "internal" : "state_restore_failed", final.message, { sandboxId: row.id });
       store.update(sessionId, { state: "running", startedAt: new Date().toISOString(), errorCode: null, error: null });
       row = this.#row(sessionId);
-      await this.#pinAddress(row);
       this.#liveFor(sessionId).lastActivity = Date.now();
       this.#log.info("Sandbox resumed", { sessionId, sandboxId: row.id, ms: Date.now() - started, recreated: fresh });
       return this.#handle(row);
@@ -430,8 +457,8 @@ export class SandboxService implements SandboxesService {
       const managed = toManaged(error);
       if (managed.code === "state_restore_failed") store.update(sessionId, { state: "failed", errorCode: managed.code, error: managed.message });
       else store.update(sessionId, { state: "stopped", errorCode: managed.code, error: managed.message });
-      await this.#unregisterEgress(row);
       await provider.stop(row.id).catch(() => undefined);
+      await this.#unregisterEgress(row);
       throw managed;
     }
   }
@@ -497,13 +524,14 @@ export class SandboxService implements SandboxesService {
     if (idle && live && (live.turnRunning || live.pending.size > 0 || live.busy > 0 || Date.now() - live.lastActivity < row.idleTimeoutSeconds * 1000)) return;
     store.update(sessionId, { state: "stopping" });
     for (const runtime of [...(live?.runtimes ?? [])]) runtime.close();
-    await this.#unregisterEgress(row);
     try {
       await provider.stop(row.id);
     } catch (error) {
       store.update(sessionId, { state: "running" });
       throw toManaged(error);
     }
+    // Only once the workload is stopped: unregistering first would leave a running sandbox without egress.
+    await this.#unregisterEgress(row);
     store.update(sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
     this.#log.info("Sandbox stopped", { sessionId, sandboxId: row.id, reason });
   }
@@ -523,9 +551,9 @@ export class SandboxService implements SandboxesService {
     store.update(sessionId, { state: "deleting" });
     for (const runtime of [...(this.#live.get(sessionId)?.runtimes ?? [])]) runtime.close();
     try {
-      await this.#unregisterEgress(row);
       await this.#docker();
       await provider.remove(row.id);
+      await this.#unregisterEgress(row);
       await this.#artifacts?.deleteSession(sessionId);
       store.update(sessionId, { state: "deleted", errorCode: null, error: null });
       store.scrub(sessionId);
@@ -557,17 +585,22 @@ export class SandboxService implements SandboxesService {
     const agent = await this.agentFor(sessionId);
     const live = this.#liveFor(sessionId);
     live.busy++;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      live.busy = Math.max(0, live.busy - 1);
+      live.lastActivity = Date.now();
+    };
     try {
       const file = await agent.readFile(path);
-      const release = () => {
-        live.busy = Math.max(0, live.busy - 1);
-        live.lastActivity = Date.now();
-      };
+      file.body.once("end", release);
+      file.body.once("error", release);
       file.body.once("close", release);
       const name = path.replace(/^\/workspace\//, "").replace(/^\.?\/+/, "");
       return { entry: { path: name, type: "file", size: file.size, modifiedAt: file.modifiedAt }, body: file.body };
     } catch (error) {
-      live.busy = Math.max(0, live.busy - 1);
+      release();
       throw error;
     }
   }
@@ -644,7 +677,8 @@ export class SandboxService implements SandboxesService {
         if (row.state === "provisioning" || row.state === "setting_up") {
           await this.#withLock(row.sessionId, async () => {
             store.update(row.sessionId, { state: "failed", errorCode: "setup_failed", error: "Sandbox creation was interrupted before setup finished; it is not replayed." });
-            await provider.stop(row.id).catch(() => undefined);
+            await provider.remove(row.id);
+            await this.#unregisterEgress(row);
           });
         } else if (row.state === "deleting") {
           await this.delete(row.sessionId);
@@ -652,7 +686,9 @@ export class SandboxService implements SandboxesService {
           if (!(await provider.isRunning(row.id))) store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
           else await provider.attachPlatform(provider.resources(row.id).network);
         } else if (row.state === "failed") {
-          await provider.stop(row.id).catch(() => undefined);
+          // Never-ready sandboxes hold no user state; failed resumes keep their volumes until the session is deleted.
+          if (row.setup?.state === "succeeded") await provider.stop(row.id);
+          else await provider.remove(row.id);
         }
       } catch (error) {
         this.#log.warn("Sandbox reconciliation step failed", { sessionId: row.sessionId, sandboxId: row.id, state: row.state, error: (error as Error).message });
@@ -702,8 +738,8 @@ export class SandboxService implements SandboxesService {
     await Promise.all(
       running.map((row) =>
         this.#withLock(row.sessionId, async () => {
-          await this.#unregisterEgress(row);
           await this.#options.provider.stop(row.id).catch(() => undefined);
+          await this.#unregisterEgress(row);
           this.#options.store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
         }).catch(() => undefined),
       ),

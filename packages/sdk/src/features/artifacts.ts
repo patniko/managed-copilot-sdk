@@ -6,9 +6,9 @@ import { saveResponse } from "./files.js";
 const DEFAULT_TIMEOUT_MS = 2 * 60_000;
 const SERVER_WAIT_MS = 60_000;
 
-/** Accepts `report.md`, `outputs/report.md`, or `/workspace/outputs/report.md`. */
+/** Accepts `report.md`, `outputs/report.md`, or `/workspace/outputs/report.md`; strips exactly one such prefix. */
 function outputsPath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/^\/?workspace\/outputs\//, "").replace(/^\.?\/?outputs\//, "").replace(/^\.\//, "");
+  return path.replace(/\\/g, "/").replace(/^(?:\/?workspace\/outputs\/|\.?\/?outputs\/|\.\/)/, "");
 }
 
 export function createArtifactsApi(ctx: ManagedContext, sessionId: string): ManagedArtifacts {

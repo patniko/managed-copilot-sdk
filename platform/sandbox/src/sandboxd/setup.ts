@@ -30,10 +30,12 @@ function validateSpec(kind: "python" | "npm", spec: string): string {
   return value;
 }
 
-/** Decodes strict base64 (setup `files` travel base64-encoded). */
+/** Decodes strict base64 (setup `files` travel base64-encoded), checking the decoded size before allocating it. */
 function decodeBase64(path: string, value: string): Buffer {
   const compact = value.replace(/\s+/g, "");
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(compact) || compact.length % 4 !== 0) throw new SetupError(`Setup file "${path}" is not valid base64.`);
+  const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
+  if ((compact.length / 4) * 3 - padding > LIMITS.setupFiles.fileBytes) throw new SetupError(`Setup file "${path}" is larger than 1 MiB; upload it with the files API instead.`);
   return Buffer.from(compact, "base64");
 }
 

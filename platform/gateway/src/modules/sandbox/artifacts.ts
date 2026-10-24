@@ -107,6 +107,8 @@ export interface ArtifactServiceOptions {
 export class ArtifactService implements ArtifactsService {
   readonly #options: ArtifactServiceOptions;
   readonly #waiters = new Map<string, Set<() => void>>();
+  /** Publications run one at a time per session, in turn order, so versions and blob cleanup never race. */
+  readonly #chains = new Map<string, Promise<void>>();
 
   constructor(options: ArtifactServiceOptions) {
     this.#options = options;
@@ -152,7 +154,14 @@ export class ArtifactService implements ArtifactsService {
 
   /** Publishes the outputs of completed turns (or records why they were not published). */
   publish(sessionId: string, turnIds: readonly string[], outcome: TurnOutcome): Promise<void> {
-    return this.#options.track(sessionId, this.#publish(sessionId, turnIds, outcome));
+    const previous = this.#chains.get(sessionId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.#publish(sessionId, turnIds, outcome));
+    this.#chains.set(sessionId, next);
+    const cleanup = () => {
+      if (this.#chains.get(sessionId) === next) this.#chains.delete(sessionId);
+    };
+    next.then(cleanup, cleanup);
+    return this.#options.track(sessionId, next);
   }
 
   /**
@@ -235,6 +244,7 @@ export class ArtifactService implements ArtifactsService {
       const now = new Date().toISOString();
       const artifactIds: string[] = [];
       const published: ArtifactInfo[] = [];
+      const fresh: ArtifactInfo[] = [];
       transaction(db, () => {
         for (const item of planned) {
           if (item.reuse) {
@@ -259,12 +269,15 @@ export class ArtifactService implements ArtifactsService {
           ).run(row.id, row.session_id, row.path, row.version, row.turn_id, row.size, row.digest, row.content_type, row.state, row.published_at, now);
           artifactIds.push(row.id);
           published.push(toInfo(row));
+          fresh.push(toInfo(row));
         }
         finish("published", null, artifactIds);
       });
-      this.#options.log.info("Published turn outputs", { sessionId, turnId, artifacts: published.length, newVersions: planned.filter((item) => !item.reuse).length });
+      created.length = 0;
+      this.#options.log.info("Published turn outputs", { sessionId, turnId, artifacts: published.length, newVersions: fresh.length });
       const ownerId = this.#options.ownerOf(sessionId);
-      if (ownerId !== undefined) {
+      // The event announces new versions only; a turn that changed nothing under outputs/ stays quiet.
+      if (ownerId !== undefined && fresh.length > 0) {
         try {
           this.#options.events()?.publish(
             {
@@ -272,7 +285,7 @@ export class ArtifactService implements ArtifactsService {
               type: "artifact.published",
               createdAt: now,
               sessionId,
-              data: { turnId, artifacts: published.map((artifact) => ({ id: artifact.id, path: artifact.path, version: artifact.version, size: artifact.size, digest: artifact.digest })) },
+              data: { turnId, artifacts: fresh.map((artifact) => ({ id: artifact.id, path: artifact.path, version: artifact.version, size: artifact.size, digest: artifact.digest })) },
             },
             { ownerId },
           );
@@ -281,7 +294,12 @@ export class ArtifactService implements ArtifactsService {
         }
       }
     } catch (error) {
-      for (const blob of created) await fs.rm(blob, { force: true }).catch(() => undefined);
+      // Remove only blobs this attempt stored that no committed version references.
+      for (const blob of created) {
+        const digest = blob.slice(blob.length - 64);
+        const referenced = db.prepare("SELECT 1 FROM sandbox_artifacts WHERE session_id = ? AND digest = ? LIMIT 1").get(sessionId, digest);
+        if (!referenced) await fs.rm(blob, { force: true }).catch(() => undefined);
+      }
       const message = error instanceof ManagedCopilotError ? error.message : `Publishing the turn's outputs failed: ${(error as Error).message}`;
       this.#options.log.warn("Publication failed", { sessionId, turnId, error: message });
       finish("failed", message, []);

@@ -129,5 +129,24 @@ describe("InferenceBroker", () => {
     await expect(broker.handlers.get("gitHubToken.getToken")!({ registrationId: "x", host: "https://github.com", reason: "initial" })).rejects.toSatisfy((error: unknown) =>
       isManagedCopilotError(error, "forbidden"),
     );
+    await expect(broker.handlers.get("providerToken.getToken")!({ sessionId: SESSION, providerName: "byok" })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "forbidden"));
+  });
+
+  it("refuses sessionless writes, duplicate credentials, and anything but the bare placeholder", async () => {
+    const credential = `Bearer ${PLACEHOLDER}`;
+    for (const [params, status] of [
+      [{ url: "https://api.githubcopilot.com/v1/messages", headers: { authorization: [credential] } }, 403],
+      [{ sessionId: SESSION, url: "https://api.githubcopilot.com/v1/messages", headers: { authorization: [credential], Authorization: [credential] } }, 400],
+      [{ sessionId: SESSION, url: "https://api.githubcopilot.com/v1/messages", headers: { authorization: [credential, "Bearer other"] } }, 401],
+      [{ sessionId: SESSION, url: "https://api.githubcopilot.com/v1/messages", headers: { authorization: [`${credential}x`] } }, 401],
+      [{ sessionId: SESSION, url: "https://api.githubcopilot.com/v1/messages", headers: { authorization: [`${credential} ${credential}`] } }, 401],
+      [{ method: "GET", url: "https://api.githubcopilot.com/models", headers: { authorization: [credential] } }, 200],
+    ] as const) {
+      const { broker, sent, send } = setup();
+      await broker.initialize(send);
+      await request(broker, params as unknown as Record<string, unknown>);
+      await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk" && entry.params["end"] === true));
+      expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"]).toBe(status);
+    }
   });
 });

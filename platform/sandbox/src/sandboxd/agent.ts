@@ -2,9 +2,9 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { posix } from "node:path";
-import type { Readable } from "node:stream";
+import { PassThrough, type Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import type { FileEntry, SandboxdStatus, SandboxSetupRecord, SandboxStartEvent, SandboxStartRequest } from "@managed-copilot/protocol";
+import type { FileEntry, SandboxdStatus, SandboxOutputsManifest, SandboxSetupRecord, SandboxStartEvent, SandboxStartRequest } from "@managed-copilot/protocol";
 import { LIMITS, PATHS, SANDBOX_GID, SANDBOX_RUNTIME_PORT, SANDBOX_UID } from "../shared/constants.js";
 import type { Log } from "../shared/log.js";
 import { PathError, type PathErrorCode } from "../shared/paths.js";
@@ -162,30 +162,101 @@ export class SandboxAgent {
 
   async #ensureWorkspace(): Promise<void> {
     await fs.mkdir(PATHS.runtimeHome, { recursive: true, mode: 0o700 });
-    await fs.chown(PATHS.runtimeHome, SANDBOX_UID, SANDBOX_GID);
+    // lchown: never follow a link the workload may have planted.
+    await fs.lchown(PATHS.runtimeHome, SANDBOX_UID, SANDBOX_GID);
     await this.mkdir("outputs");
   }
 
   async mkdir(relative: string): Promise<FileEntry> {
-    const result = await this.#worker(["mkdir", relative]);
+    const result = await this.#worker(["mkdir", "workspace", relative]);
     return JSON.parse(result) as FileEntry;
   }
 
   /** Writes a workspace file atomically as the workload identity. */
   async writeFile(relative: string, body: Buffer | Readable, options: { overwrite: boolean; expectedBytes?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
-    const args = ["write", relative, options.overwrite ? "1" : "0", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
+    const args = ["write", "workspace", relative, options.overwrite ? "1" : "0", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
     return JSON.parse(await this.#worker(args, body, options.signal)) as FileEntry & { sha256: string };
+  }
+
+  /** Lists workspace entries as the workload identity. */
+  async list(relative: string, recursive: boolean): Promise<FileEntry[]> {
+    return JSON.parse(await this.#worker(["list", "workspace", relative, recursive ? "1" : "0", String(LIMITS.listEntries)])) as FileEntry[];
+  }
+
+  /** Hashes the publishable files under /workspace/outputs as the workload identity. */
+  async outputsManifest(): Promise<SandboxOutputsManifest> {
+    const { count, fileBytes, totalBytes } = LIMITS.artifacts;
+    return JSON.parse(await this.#worker(["manifest", "outputs", String(count), String(fileBytes), String(totalBytes)])) as SandboxOutputsManifest;
+  }
+
+  /** Streams a regular file (workspace- or outputs-relative) read by the workload identity. */
+  openRead(scope: "workspace" | "outputs", relative: string, signal?: AbortSignal): Promise<{ size: number; modifiedAt: string; body: Readable }> {
+    return new Promise((resolve, reject) => {
+      const child = this.#spawnWorker(["read", scope, relative]);
+      const body = new PassThrough();
+      const stderr: Buffer[] = [];
+      let header: Buffer | undefined = Buffer.alloc(0);
+      const abort = () => child.kill("SIGTERM");
+      signal?.addEventListener("abort", abort, { once: true });
+      child.stdin.end();
+      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+      child.stdout.on("data", (chunk: Buffer) => {
+        if (header === undefined) {
+          if (!body.write(chunk)) {
+            child.stdout.pause();
+            body.once("drain", () => child.stdout.resume());
+          }
+          return;
+        }
+        header = Buffer.concat([header, chunk]);
+        const newline = header.indexOf(0x0a);
+        if (newline < 0) return;
+        const meta = JSON.parse(header.subarray(0, newline).toString("utf8")) as { size: number; modifiedAt: string };
+        const rest = header.subarray(newline + 1);
+        header = undefined;
+        if (rest.length > 0) body.write(rest);
+        resolve({ size: meta.size, modifiedAt: meta.modifiedAt, body });
+      });
+      body.on("close", () => {
+        if (child.exitCode === null) child.kill("SIGTERM");
+      });
+      child.on("error", (error) => reject(new AgentError("internal", `Workspace worker failed: ${error.message}`)));
+      child.on("close", (code) => {
+        signal?.removeEventListener("abort", abort);
+        if (code === 0 && header === undefined) {
+          body.end();
+          return;
+        }
+        const error = this.#workerError(code, stderr);
+        if (header !== undefined) reject(error);
+        else body.destroy(error);
+      });
+    });
+  }
+
+  #spawnWorker(args: readonly string[]) {
+    // The worker enters /workspace itself, after dropping to the workload identity.
+    return spawn(process.execPath, [WORKER, ...args], {
+      cwd: "/",
+      env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: PATHS.home },
+      uid: IDENTITY.uid,
+      gid: IDENTITY.gid,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  }
+
+  #workerError(code: number | null, stderr: readonly Buffer[]): Error {
+    try {
+      const failure = JSON.parse(Buffer.concat(stderr).toString("utf8").trim()) as { code: PathErrorCode | "internal"; message: string };
+      return failure.code === "internal" ? new AgentError("internal", failure.message) : new PathError(failure.code, failure.message);
+    } catch {
+      return new AgentError("internal", `Workspace worker exited with code ${code}.`);
+    }
   }
 
   #worker(args: readonly string[], input?: Buffer | Readable, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, [WORKER, ...args], {
-        cwd: PATHS.workspace,
-        env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: PATHS.home },
-        uid: IDENTITY.uid,
-        gid: IDENTITY.gid,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      const child = this.#spawnWorker(args);
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -204,12 +275,7 @@ export class SandboxAgent {
         signal?.removeEventListener("abort", abort);
         if (code === 0) return resolve(Buffer.concat(stdout).toString("utf8"));
         if (signal?.aborted) return reject(new AgentError("invalid_request", "The upload was cancelled."));
-        try {
-          const failure = JSON.parse(Buffer.concat(stderr).toString("utf8").trim()) as { code: PathErrorCode | "internal"; message: string };
-          reject(failure.code === "internal" ? new AgentError("internal", failure.message) : new PathError(failure.code, failure.message));
-        } catch {
-          reject(new AgentError("internal", `Workspace worker exited with code ${code}.`));
-        }
+        reject(this.#workerError(code, stderr));
       });
     });
   }

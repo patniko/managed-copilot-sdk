@@ -250,7 +250,8 @@ export class DockerSandboxProvider {
           MemorySwap: size.memoryMiB * 1024 * 1024,
           PidsLimit: 4096,
           CapDrop: ["ALL"],
-          CapAdd: ["CHOWN", "DAC_READ_SEARCH", "KILL", "SETGID", "SETUID"],
+          // sandboxd (root) needs only identity switching and signalling; every workspace access runs as uid 10001.
+          CapAdd: ["CHOWN", "KILL", "SETGID", "SETUID"],
           SecurityOpt: ["no-new-privileges:true"],
           Mounts: mounts,
           NetworkMode: resources.network,
@@ -300,8 +301,18 @@ export class DockerSandboxProvider {
     return container?.NetworkSettings.Networks?.[resources.network]?.IPAddress || undefined;
   }
 
+  /** Stops the container, then detaches the relay and egress proxy from its network (re-attached on start). */
   async stop(sandboxId: string): Promise<void> {
-    await this.#options.docker.stopContainer(this.resources(sandboxId).container, 15);
+    const { docker } = this.#options;
+    const resources = this.resources(sandboxId);
+    await docker.stopContainer(resources.container, 15);
+    await this.#detachPlatform(resources.network);
+  }
+
+  async #detachPlatform(network: string): Promise<void> {
+    const { docker } = this.#options;
+    if (!(await docker.inspectNetwork(network))) return;
+    for (const name of [this.relayName, this.egressName]) await docker.disconnectNetwork(network, name);
   }
 
   /** Removes the container, its volumes, and its network. Safe to repeat. */

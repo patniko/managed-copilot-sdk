@@ -1,13 +1,13 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { SandboxStartEvent, SandboxStartRequest } from "@managed-copilot/protocol";
 import { LIMITS, PATHS, ROUTES, SANDBOX_RUNTIME_PORT, SANDBOXD_PORT } from "../shared/constants.js";
 import type { Log } from "../shared/log.js";
 import { normalizeWorkspacePath, PathError } from "../shared/paths.js";
 import { AgentError, type SandboxAgent } from "./agent.js";
 import { LoopbackBridge } from "./bridge.js";
-import { listEntries, openRegularFile, outputsManifest } from "./fsops.js";
 
 const STATUS: Record<string, number> = { invalid_request: 400, forbidden: 403, not_found: 404, conflict: 409, unavailable: 503, internal: 500, authentication_required: 401 };
 
@@ -95,12 +95,11 @@ export function createSandboxdServer(options: ServerOptions): Server {
       }
       case `GET ${ROUTES.files}`: {
         const relative = normalizeWorkspacePath(url.searchParams.get("path") ?? "", { allowRoot: true });
-        const entries = await listEntries(PATHS.workspace, relative, { recursive: url.searchParams.get("recursive") === "true", limit: LIMITS.listEntries });
-        sendJson(res, 200, entries);
+        sendJson(res, 200, await agent.list(relative, url.searchParams.get("recursive") === "true"));
         return;
       }
       case `GET ${ROUTES.fileContent}`:
-        await streamFile(res, PATHS.workspace, normalizeWorkspacePath(url.searchParams.get("path")));
+        await streamFile(res, "workspace", normalizeWorkspacePath(url.searchParams.get("path")));
         return;
       case `PUT ${ROUTES.fileContent}`: {
         const relative = normalizeWorkspacePath(url.searchParams.get("path"));
@@ -114,36 +113,34 @@ export function createSandboxdServer(options: ServerOptions): Server {
         return;
       }
       case `POST ${ROUTES.outputsManifest}`:
-        sendJson(res, 200, await outputsManifest(PATHS.outputs, LIMITS.artifacts));
+        sendJson(res, 200, await agent.outputsManifest());
         return;
       case `GET ${ROUTES.outputsContent}`:
-        await streamFile(res, PATHS.outputs, normalizeWorkspacePath(url.searchParams.get("path"), { root: PATHS.outputs }));
+        await streamFile(res, "outputs", normalizeWorkspacePath(url.searchParams.get("path"), { root: PATHS.outputs }));
         return;
       default:
         sendJson(res, 404, { error: { code: "not_found", message: `No route for ${req.method} ${url.pathname}` } });
     }
   }
 
-  async function streamFile(res: ServerResponse, root: string, relative: string): Promise<void> {
-    const opened = await openRegularFile(root, relative);
+  /** Streams a file read by the workload identity; a file that changes mid-read ends the response early. */
+  async function streamFile(res: ServerResponse, scope: "workspace" | "outputs", relative: string): Promise<void> {
+    const controller = new AbortController();
+    const onClose = () => controller.abort();
+    res.on("close", onClose);
     try {
+      const opened = await agent.openRead(scope, relative, controller.signal);
       res.writeHead(200, {
         "content-type": "application/octet-stream",
-        "content-length": opened.stat.size,
-        "x-file-modified-at": opened.stat.mtime.toISOString(),
+        "content-length": opened.size,
+        "x-file-modified-at": opened.modifiedAt,
       });
-      if (opened.stat.size === 0) {
-        res.end();
-        return;
-      }
-      const stream = opened.handle.createReadStream({ start: 0, end: opened.stat.size - 1, autoClose: false });
-      await new Promise<void>((resolve, reject) => {
-        stream.on("error", reject);
-        res.on("close", resolve);
-        stream.pipe(res);
+      await pipeline(opened.body, res).catch((error: unknown) => {
+        log.debug("File stream ended early", { error: (error as Error)?.message ?? String(error) });
+        res.destroy();
       });
     } finally {
-      await opened.handle.close().catch(() => undefined);
+      res.off("close", onClose);
     }
   }
 

@@ -4,6 +4,18 @@ import type { Duplex } from "node:stream";
 import { createWebSocketStream, WebSocketServer, type WebSocket } from "ws";
 import type { Log } from "../shared/log.js";
 
+/** Closes a WebSocket without throwing: close reasons are capped at 123 bytes, and a socket that cannot close cleanly is terminated. */
+function closeQuietly(ws: WebSocket, code: number, reason: string): void {
+  let text = reason;
+  while (Buffer.byteLength(text, "utf8") > 120) text = text.slice(0, -1);
+  try {
+    if (ws.readyState === ws.OPEN) ws.close(code, text);
+    else if (ws.readyState === ws.CONNECTING) ws.terminate();
+  } catch {
+    ws.terminate();
+  }
+}
+
 /**
  * Bridges authenticated WebSocket upgrades to loopback TCP ports inside the sandbox: `/v1/runtime` to the stock
  * runtime's JSON-RPC port, `/v1/tunnel?port=` to another loopback listener (CLI attach). Binary frames carry raw
@@ -35,9 +47,10 @@ export class LoopbackBridge {
         this.#open.delete(ws);
         tcp.destroy();
         stream.destroy();
-        if (ws.readyState === ws.OPEN || ws.readyState === ws.CONNECTING) ws.close(1000, reason.slice(0, 120));
+        closeQuietly(ws, 1000, reason);
         this.#log.debug("bridge closed", { kind, port, reason });
       };
+      ws.on("error", (error) => close(`websocket error: ${error.message}`));
       tcp.on("error", (error) => close(`tcp error: ${error.message}`));
       tcp.on("close", () => close("tcp closed"));
       stream.on("error", (error) => close(`websocket error: ${error.message}`));
@@ -52,9 +65,9 @@ export class LoopbackBridge {
   closeAll(kind?: "runtime" | "tunnel"): void {
     for (const [ws, entry] of this.#open) {
       if (kind && entry.kind !== kind) continue;
-      entry.socket.destroy();
-      ws.close(1012, "runtime restarting");
       this.#open.delete(ws);
+      entry.socket.destroy();
+      closeQuietly(ws, 1012, "runtime restarting");
     }
   }
 }

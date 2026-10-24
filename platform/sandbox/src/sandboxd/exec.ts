@@ -6,6 +6,15 @@ export interface Identity {
   readonly gid: number;
 }
 
+/**
+ * Spawn arguments that enter `cwd` only after the privilege drop: libuv changes directory before `setuid`, and
+ * sandboxd's root holds no DAC capabilities, so a workload that tightens `/workspace` permissions would otherwise
+ * make every spawn fail. The shell `exec`s the command, so the pid and signals are the command's own.
+ */
+export function inDirectory(cwd: string, command: string, args: readonly string[]): { command: string; args: string[]; cwd: string } {
+  return { command: "/bin/sh", args: ["-c", 'cd -- "$0" || exit 126; exec "$@"', cwd, command, ...args], cwd: "/" };
+}
+
 /** Replaces secret values and URL userinfo in diagnostic text. */
 export function redact(text: string, secrets: readonly string[]): string {
   let out = text;
@@ -72,8 +81,9 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
  */
 export function run(command: string, args: readonly string[], options: RunOptions): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
+    const target = options.identity ? inDirectory(options.cwd, command, args) : { command, args: [...args], cwd: options.cwd };
+    const child = spawn(target.command, target.args, {
+      cwd: target.cwd,
       env: options.env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
