@@ -87,12 +87,15 @@ async function readJson<T>(req: IncomingMessage, limit = 64 * 1024): Promise<T> 
   }
 }
 
-/** Blocks DNS rebinding: only loopback host names (plus `FACTORY_ALLOWED_HOSTS`) may address this local server. */
+/**
+ * Blocks DNS rebinding: only loopback names may address this local server. `*.localhost` names (as Aspire can assign)
+ * always resolve to loopback (RFC 6761); `FACTORY_ALLOWED_HOSTS` adds more for deliberate remote setups.
+ */
 function hostAllowed(host: string | undefined): boolean {
   if (!host) return false;
   const name = host.replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
   const extra = (process.env.FACTORY_ALLOWED_HOSTS ?? "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
-  return ["localhost", "127.0.0.1", "::1"].includes(name) || extra.includes(name);
+  return ["localhost", "127.0.0.1", "::1"].includes(name) || name.endsWith(".localhost") || extra.includes(name);
 }
 
 /** Cross-site requests can't drive the factory: a present Origin must match the Host. */
