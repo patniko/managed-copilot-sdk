@@ -33,6 +33,7 @@
 import type { Duplex, Readable } from "node:stream";
 import type {
   ArtifactInfo,
+  EnvironmentConfig,
   FileEntry,
   NetworkPolicy,
   PlatformEvent,
@@ -64,6 +65,8 @@ export interface CreateSandboxRequest {
     readonly files?: Readonly<Record<string, string>>;
     readonly env?: Readonly<Record<string, string>>;
   };
+  /** Core's resolved environment: its configuration and the pinned customizations bundle (mounted read-only). */
+  readonly resolved?: { readonly config?: EnvironmentConfig; readonly customizations?: { readonly root?: string } };
   readonly signal?: AbortSignal;
 }
 
