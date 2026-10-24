@@ -1,7 +1,10 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { isManagedCopilotError } from "@managed-copilot/protocol";
-import { resolveToken, resolveUrl } from "../src/connection.js";
+import { isManagedCopilotError, ManagedCopilotError } from "@managed-copilot/protocol";
+import { readDiscovery, resolveToken, resolveUrl, validateDeploymentUrl } from "../src/connection.js";
 import { HttpClient } from "../src/http.js";
 
 const saved = { ...process.env };
@@ -11,9 +14,34 @@ afterEach(() => {
 
 describe("connection resolution", () => {
   it("prefers explicit values, then the environment", async () => {
-    process.env.MANAGED_COPILOT_URL = "http://from-env:1";
-    expect(await resolveUrl("http://explicit:2")).toBe("http://explicit:2");
-    expect(await resolveUrl()).toBe("http://from-env:1");
+    process.env.MANAGED_COPILOT_URL = "https://from-env.example/";
+    expect(await resolveUrl("https://explicit.example")).toBe("https://explicit.example");
+    expect(await resolveUrl()).toBe("https://from-env.example");
+  });
+
+  it("only sends credentials over https, or plain http to loopback", () => {
+    expect(validateDeploymentUrl("http://localhost:7400")).toBe("http://localhost:7400");
+    expect(validateDeploymentUrl("http://127.0.0.1:7400/")).toBe("http://127.0.0.1:7400");
+    expect(validateDeploymentUrl("http://[::1]:7400")).toBe("http://[::1]:7400");
+    for (const bad of ["http://copilot.contoso.example", "https://user:pass@copilot.contoso.example", "https://copilot.contoso.example/?x=1", "ftp://copilot.contoso.example", "not a url"]) {
+      expect(() => validateDeploymentUrl(bad), bad).toThrowError(ManagedCopilotError);
+    }
+  });
+
+  it("validates the local discovery record", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-discovery-"));
+    try {
+      const file = join(dir, "local.json");
+      writeFileSync(file, JSON.stringify({ name: "copilot", url: "http://localhost:7400", pid: process.pid, startedAt: new Date().toISOString(), version: "0.1.0" }));
+      expect((await readDiscovery(file)).url).toBe("http://localhost:7400");
+      writeFileSync(file, JSON.stringify({ name: "copilot", url: "http://evil.example:7400", pid: process.pid }));
+      await expect(readDiscovery(file)).rejects.toMatchObject({ code: "invalid_request" });
+      writeFileSync(file, JSON.stringify({ name: "copilot", url: "http://localhost:7400", pid: 2 ** 22 + 12345 }));
+      await expect(readDiscovery(file)).rejects.toMatchObject({ code: "capability_unavailable" });
+      await expect(readDiscovery(join(dir, "missing.json"))).rejects.toMatchObject({ code: "capability_unavailable" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reads tokens in the documented order", async () => {
