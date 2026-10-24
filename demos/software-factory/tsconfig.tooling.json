@@ -6,5 +6,6 @@
     "declaration": false,
     "declarationMap": false
   },
-  "include": ["apphost.mts", "vite.config.ts", "vitest.config.ts", "test"]
+  "include": ["apphost.mts", "vite.config.ts", "vitest.config.ts", "test"],
+  "exclude": ["test/web"]
 }

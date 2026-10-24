@@ -148,6 +148,7 @@ class PreviewServer {
           size: version.content.length || 4821,
           digest: `sha256:${(version.version * 7919 + file.path.length * 104729).toString(16).padStart(12, "0")}`,
           publishedAt: version.publishedAt,
+          viewable: file.viewable,
         })),
       })),
     };

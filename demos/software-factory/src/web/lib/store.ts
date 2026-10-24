@@ -1,5 +1,4 @@
 import { useEffect, useSyncExternalStore } from "react";
-import { TERMINAL_STATION_STATUSES } from "../../shared/types.js";
 import type {
   ActivityItem,
   ArtifactIndex,
@@ -250,12 +249,6 @@ function applyWorkOrder(workOrder: WorkOrder, fromRest = false): void {
   setState((current) => {
     const entry = current.workOrders[workOrder.id];
     if (entry?.data && (isOlder(workOrder, entry.data) || (fromRest && !isOlder(entry.data, workOrder)))) return current;
-    let drafts = current.drafts;
-    for (const station of workOrder.stations) {
-      if (TERMINAL_STATION_STATUSES.includes(station.status)) {
-        drafts = setEntry(drafts, activityKey(workOrder.id, station.id), undefined);
-      }
-    }
     return {
       ...current,
       workOrders: setEntry(current.workOrders, workOrder.id, {
@@ -264,9 +257,18 @@ function applyWorkOrder(workOrder: WorkOrder, fromRest = false): void {
         stale: false,
       }),
       summaries: upsertSummary(current.summaries, toSummary(workOrder), fromRest),
-      drafts,
+      drafts: withoutIdleDrafts(current.drafts, workOrder),
     };
   });
+}
+
+/** Streaming text only belongs to a station in the middle of a turn; anything left over when it stops is dropped. */
+function withoutIdleDrafts(drafts: StoreState["drafts"], workOrder: WorkOrder): StoreState["drafts"] {
+  let next = drafts;
+  for (const station of workOrder.stations) {
+    if (station.status !== "working") next = setEntry(next, activityKey(workOrder.id, station.id), undefined);
+  }
+  return next;
 }
 
 function applyDeleted(workOrderId: string): void {
@@ -313,6 +315,9 @@ function applyDelta(event: Extract<ServerEvent, { type: "delta" }>): void {
   if (deletedIds.has(event.workOrderId) || !event.text) return;
   const key = activityKey(event.workOrderId, event.stationId);
   if (completedMessages.has(`${key}\n${event.messageId}`)) return;
+  // A late delta for a station that already finished its turn would otherwise linger as a draft.
+  const station = state.workOrders[event.workOrderId]?.data?.stations.find((candidate) => candidate.id === event.stationId);
+  if (station && station.status !== "working") return;
   setState((current) => {
     const drafts = current.drafts[key] ?? [];
     const index = drafts.findIndex((draft) => draft.messageId === event.messageId);
@@ -381,34 +386,47 @@ function canStart<T>(resource: Resource<T> | undefined, force: boolean): boolean
   return force || resource.stale || (resource.data === undefined && resource.error === undefined);
 }
 
+/**
+ * Loads start by clearing `stale` and finish by keeping whatever `stale` is then: an invalidation that arrived while the
+ * request was in flight survives it, and the hooks (which re-run when `loading` drops) fetch again.
+ */
+function startLoading<T>(resource: Resource<T> | undefined): Resource<T> {
+  return { ...(resource ?? EMPTY), loading: true, stale: false };
+}
+
 export function ensureWorkOrder(id: string, force = false): void {
   if (deletedIds.has(id) || !canStart(state.workOrders[id], force)) return;
-  setState((current) => ({
-    ...current,
-    workOrders: setEntry(current.workOrders, id, { ...(current.workOrders[id] ?? EMPTY), loading: true }),
-  }));
+  setState((current) => ({ ...current, workOrders: setEntry(current.workOrders, id, startLoading(current.workOrders[id])) }));
   api.workOrder(id).then(
     (workOrder) => {
       if (deletedIds.has(id)) return;
       touchedAt.set(id, ++sequence);
       setState((current) => {
-        const previous = current.workOrders[id]?.data;
+        const entry = current.workOrders[id];
+        const previous = entry?.data;
         const data = previous && !isOlder(previous, workOrder) ? previous : workOrder;
         return {
           ...current,
-          workOrders: setEntry(current.workOrders, id, { data, loading: false, stale: false }),
+          workOrders: setEntry(current.workOrders, id, { data, loading: false, stale: entry?.stale ?? false }),
           summaries: upsertSummary(current.summaries, toSummary(data), true),
+          drafts: withoutIdleDrafts(current.drafts, data),
         };
       });
     },
     (error: unknown) => {
+      const info = toErrorInfo(error);
+      // Deleted while the event stream was down: a work order we had shown is gone, so treat it like a live deletion.
+      if (info.status === 404 && state.workOrders[id]?.data) {
+        applyDeleted(id);
+        return;
+      }
       setState((current) => ({
         ...current,
         workOrders: setEntry(current.workOrders, id, {
           data: current.workOrders[id]?.data,
           loading: false,
-          stale: false,
-          error: toErrorInfo(error),
+          stale: current.workOrders[id]?.stale ?? false,
+          error: info,
         }),
       }));
     },
@@ -419,10 +437,7 @@ export function ensureActivity(workOrderId: string, stationId: string, force = f
   const key = activityKey(workOrderId, stationId);
   if (deletedIds.has(workOrderId) || !canStart(state.activity[key], force)) return;
   pendingActivity.set(key, []);
-  setState((current) => ({
-    ...current,
-    activity: setEntry(current.activity, key, { ...(current.activity[key] ?? EMPTY), loading: true }),
-  }));
+  setState((current) => ({ ...current, activity: setEntry(current.activity, key, startLoading(current.activity[key])) }));
   api.activity(workOrderId, stationId).then(
     (items) => {
       const pending = pendingActivity.get(key) ?? [];
@@ -438,7 +453,11 @@ export function ensureActivity(workOrderId: string, stationId: string, force = f
         const remainingDrafts = drafts?.filter((draft) => !completed.has(draft.messageId));
         return {
           ...current,
-          activity: setEntry(current.activity, key, { data: mergeActivity(fetched, pending), loading: false, stale: false }),
+          activity: setEntry(current.activity, key, {
+            data: mergeActivity(fetched, pending),
+            loading: false,
+            stale: current.activity[key]?.stale ?? false,
+          }),
           drafts:
             drafts && remainingDrafts && remainingDrafts.length !== drafts.length
               ? setEntry(current.drafts, key, remainingDrafts.length > 0 ? remainingDrafts : undefined)
@@ -453,7 +472,7 @@ export function ensureActivity(workOrderId: string, stationId: string, force = f
         activity: setEntry(current.activity, key, {
           data: current.activity[key]?.data,
           loading: false,
-          stale: false,
+          stale: current.activity[key]?.stale ?? false,
           error: toErrorInfo(error),
         }),
       }));
@@ -465,14 +484,18 @@ export function ensureArtifacts(workOrderId: string, force = false): void {
   if (deletedIds.has(workOrderId) || !canStart(state.artifacts[workOrderId], force)) return;
   setState((current) => ({
     ...current,
-    artifacts: setEntry(current.artifacts, workOrderId, { ...(current.artifacts[workOrderId] ?? EMPTY), loading: true }),
+    artifacts: setEntry(current.artifacts, workOrderId, startLoading(current.artifacts[workOrderId])),
   }));
   api.artifacts(workOrderId).then(
     (index) => {
       if (deletedIds.has(workOrderId)) return;
       setState((current) => ({
         ...current,
-        artifacts: setEntry(current.artifacts, workOrderId, { data: index, loading: false, stale: false }),
+        artifacts: setEntry(current.artifacts, workOrderId, {
+          data: index,
+          loading: false,
+          stale: current.artifacts[workOrderId]?.stale ?? false,
+        }),
       }));
     },
     (error: unknown) => {
@@ -481,7 +504,7 @@ export function ensureArtifacts(workOrderId: string, force = false): void {
         artifacts: setEntry(current.artifacts, workOrderId, {
           data: current.artifacts[workOrderId]?.data,
           loading: false,
-          stale: false,
+          stale: current.artifacts[workOrderId]?.stale ?? false,
           error: toErrorInfo(error),
         }),
       }));
@@ -622,9 +645,10 @@ export async function deleteWorkOrder(id: string): Promise<void> {
 export function useWorkOrder(id: string | undefined): Resource<WorkOrder> | undefined {
   const resource = useStore((current) => (id ? current.workOrders[id] : undefined));
   const stale = resource?.stale ?? false;
+  const loading = resource?.loading ?? false;
   useEffect(() => {
     if (id) ensureWorkOrder(id);
-  }, [id, stale]);
+  }, [id, stale, loading]);
   return resource;
 }
 
@@ -638,17 +662,19 @@ export function useActivity(
   const resource = useStore((current) => (key ? current.activity[key] : undefined));
   const drafts = useStore((current) => (key ? current.drafts[key] : undefined)) ?? NO_DRAFTS;
   const stale = resource?.stale ?? false;
+  const loading = resource?.loading ?? false;
   useEffect(() => {
     if (stationId) ensureActivity(workOrderId, stationId);
-  }, [workOrderId, stationId, stale]);
+  }, [workOrderId, stationId, stale, loading]);
   return { resource, drafts };
 }
 
 export function useArtifactIndex(workOrderId: string, enabled = true): Resource<ArtifactIndex> | undefined {
   const resource = useStore((current) => current.artifacts[workOrderId]);
   const stale = resource?.stale ?? false;
+  const loading = resource?.loading ?? false;
   useEffect(() => {
     if (enabled) ensureArtifacts(workOrderId);
-  }, [workOrderId, stale, enabled]);
+  }, [workOrderId, stale, loading, enabled]);
   return resource;
 }

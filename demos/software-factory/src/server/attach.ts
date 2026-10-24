@@ -4,10 +4,23 @@ import type { AttachResponse } from "../shared/types.js";
 /** Session IDs are interpolated into a console command line, so only plain identifier characters are accepted. */
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 
-export const ATTACH_COMMAND_TEMPLATE = "npx managed-copilot attach {sessionId}";
+/** The gateway URL shown in attach commands is interpolated too: scheme, host, port, and a plain path only. */
+const ATTACH_URL = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?(?:\/[A-Za-z0-9._~/-]*)?$/;
 
-export function attachCommand(sessionId: string): string {
-  return ATTACH_COMMAND_TEMPLATE.replace("{sessionId}", sessionId);
+/** A valid `FACTORY_ATTACH_URL` (trailing slash removed), or undefined. */
+export function parseAttachUrl(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed || !ATTACH_URL.test(trimmed)) return undefined;
+  return trimmed.replace(/\/+$/, "");
+}
+
+/** `{sessionId}` marks where the session goes; `url` is the deployment users attach to, when it isn't their local one. */
+export function attachCommandTemplate(url?: string): string {
+  return `npx managed-copilot attach {sessionId}${url ? ` --url ${url}` : ""}`;
+}
+
+export function attachCommand(sessionId: string, url?: string): string {
+  return attachCommandTemplate(url).replace("{sessionId}", sessionId);
 }
 
 export function isValidSessionId(sessionId: string): boolean {
@@ -21,11 +34,16 @@ export function canLaunchTerminal(): boolean {
 
 /**
  * Opens a console window running `npx managed-copilot attach <sessionId>` from the repository root, where the
- * root package links the `managed-copilot` bin. The CLI resolves the deployment (`MANAGED_COPILOT_URL`, then local
- * discovery) and the GitHub sign-in itself; no credentials pass through this process's command line.
+ * root package links the `managed-copilot` bin. The CLI resolves the deployment (`--url`, `MANAGED_COPILOT_URL`, then
+ * local discovery) and the GitHub sign-in itself; no credentials pass through this process's command line.
  */
-export async function launchAttach(sessionId: string, repoRoot: string, gatewayUrl: string | undefined): Promise<AttachResponse> {
-  const command = attachCommand(sessionId);
+export async function launchAttach(
+  sessionId: string,
+  repoRoot: string,
+  gatewayUrl: string | undefined,
+  attachUrl?: string,
+): Promise<AttachResponse> {
+  const command = attachCommand(sessionId, attachUrl);
   if (!isValidSessionId(sessionId)) return { command, launched: false, message: "That session ID can't be attached." };
   if (!canLaunchTerminal()) {
     return { command, launched: false, message: "Run this command from the repository root to attach Copilot CLI to the session." };
