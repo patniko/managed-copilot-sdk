@@ -30,6 +30,7 @@ class FakeDataPlane {
   readonly images = new Map<string, { id: string; labels: Record<string, string>; image: { base: string }; status: { state: string }; reads: number }>();
   readonly files: { sandbox: string; path: string; mode: string; content: string }[] = [];
   readonly requests: string[] = [];
+  readonly malformedListings = new Map<string, unknown>();
   denyAll = false;
   failImages = false;
   /** Polls a deleted sandbox stays in Deleting (holding its disks) before it disappears. */
@@ -37,6 +38,9 @@ class FakeDataPlane {
   /** Creates (sandboxes, disk images) whose responses are lost. */
   dropSandboxCreates = 0;
   dropImageCreates = 0;
+  failDroppedImages = false;
+  hideDroppedImages = false;
+  readonly hiddenImages: { id: string; labels: Record<string, string>; image: { base: string }; status: { state: string }; reads: number }[] = [];
   /** When a dropped sandbox create takes effect: at once, after this many sandbox listings, or never. */
   dropCommitAfterLists: number | "never" = 0;
   /** Sandbox creates that get no answer until releaseHung() (the gateway "crashes" mid-request). */
@@ -91,6 +95,10 @@ class FakeDataPlane {
     if (url.searchParams.get("api-version") !== "2026-02-01-preview") return send(400, { error: { code: "BadApiVersion", message: "api-version" } });
     if (!url.pathname.startsWith(GROUP)) return send(404, { error: { code: "NotFound", message: "group" } });
     const path = url.pathname.slice(GROUP.length).split("/").filter(Boolean);
+
+    if (req.method === "GET" && path.length === 1 && this.malformedListings.has(path[0]!)) {
+      return send(200, this.malformedListings.get(path[0]!));
+    }
 
     if (path[0] === "sandboxes") {
       if (path.length === 1 && req.method === "GET") {
@@ -195,6 +203,11 @@ class FakeDataPlane {
         this.images.set(id, { id, labels: body.labels, image: body.image, status: { state: "Building" }, reads: 0 });
         if (this.dropImageCreates > 0) {
           this.dropImageCreates--;
+          if (this.failDroppedImages) this.images.get(id)!.status = { state: "Failed" };
+          if (this.hideDroppedImages) {
+            this.hiddenImages.push(this.images.get(id)!);
+            this.images.delete(id);
+          }
           req.socket.destroy();
           return;
         }
@@ -281,6 +294,48 @@ function spec(overrides: Partial<SandboxSpec> = {}): SandboxSpec {
 }
 
 describe("Azure sandbox provider", () => {
+  it.each([
+    null,
+    "<html>not a listing</html>",
+    {},
+    { value: {} },
+    { value: [{ id: "partial", labels: 7 }] },
+  ])("never treats a malformed sandbox listing as proof compute is absent: %j", async (body) => {
+    const subject = provider();
+    await subject.create(spec());
+    plane.malformedListings.set("sandboxes", body);
+    await expect(subject.stop(spec().sandboxId)).rejects.toMatchObject({ code: "invalid_response" });
+    expect(plane.sandboxes.size).toBe(1);
+    expect(plane.requests.filter((request) => request.startsWith("DELETE /sandboxes/"))).toHaveLength(0);
+  });
+
+  it("reconciles a failed import by its attempt ID without confusing it with an older failure", async () => {
+    const first = provider(env(), { timeouts: { reconcileMs: 20 } });
+    plane.failImages = true;
+    await expect(first.ensureImage("coder", { type: "isolated" })).rejects.toThrow(/could not be prepared/);
+    const old = [...plane.images.values()][0]!;
+
+    plane.dropImageCreates = 1;
+    plane.failDroppedImages = true;
+    plane.hideDroppedImages = true;
+    await expect(first.ensureImage("coder", { type: "isolated" })).rejects.toThrow(/did not confirm/);
+    const hidden = plane.hiddenImages[0]!;
+    expect(hidden.labels[LABELS.attempt]).not.toBe(old.labels[LABELS.attempt]);
+
+    const restarted = provider(env(), { timeouts: { reconcileMs: 20 } });
+    await expect(restarted.ensureImage("coder", { type: "isolated" })).rejects.toThrow(/earlier attempt/);
+    expect(plane.requests.filter((request) => request === "PUT /diskimages")).toHaveLength(2);
+
+    plane.images.set(hidden.id, hidden);
+    await expect(restarted.ensureImage("coder", { type: "isolated" })).rejects.toThrow(/could not be prepared/);
+    expect(JSON.parse(readFileSync(join(dataDir, "sandbox-azure", "unconfirmed-creates.json"), "utf8"))).toEqual({});
+
+    plane.failImages = false;
+    const fresh = await restarted.ensureImage("coder", { type: "isolated" });
+    expect(fresh.id).not.toBe(hidden.id);
+    expect(plane.requests.filter((request) => request === "PUT /diskimages")).toHaveLength(3);
+  });
+
   it("names every missing setting instead of failing the gateway at start", async () => {
     const broken = provider({ MANAGED_COPILOT_AZURE_REGION: "west us 2!" });
     const error = await broken.ready().catch((caught: unknown) => caught);

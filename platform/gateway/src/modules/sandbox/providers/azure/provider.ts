@@ -34,6 +34,7 @@ export const LABELS = {
   environment: "mc-environment",
   role: "mc-role",
   image: "mc-image",
+  attempt: "mc-create",
 } as const;
 
 const DISKS = [
@@ -190,10 +191,13 @@ export class AzureSandboxProvider implements SandboxProvider {
   }
 
   async #diskImageFor(ref: string): Promise<SandboxImageRef> {
-    const { config, api } = this.#require();
+    const { api } = this.#require();
     const key = createHash("sha256").update(ref).digest("hex").slice(0, 40);
     const existing = (await api.listDiskImages()).filter((image) => image.labels?.[LABELS.image] === key && image.labels?.[LABELS.instance] === this.#instance);
-    let image = existing.find((candidate) => READY_IMAGE_STATES.has(candidate.status?.state?.toLowerCase() ?? "")) ?? existing.find((candidate) => !FAILED_IMAGE_STATES.has(candidate.status?.state?.toLowerCase() ?? ""));
+    const intent = this.#unconfirmed.outstanding(`image:${key}`);
+    let image = intent?.attemptId
+      ? existing.find((candidate) => candidate.labels?.[LABELS.attempt] === intent.attemptId)
+      : existing.find((candidate) => READY_IMAGE_STATES.has(candidate.status?.state?.toLowerCase() ?? "")) ?? existing.find((candidate) => !FAILED_IMAGE_STATES.has(candidate.status?.state?.toLowerCase() ?? ""));
     if (image) this.#unconfirmed.clear(`image:${key}`);
     if (!image) {
       this.#log.info("Converting the sandbox image into a disk image", { image: ref });
@@ -224,11 +228,17 @@ export class AzureSandboxProvider implements SandboxProvider {
       if (error instanceof RegistryCredentialsError) throw unavailable(`The sandbox image ${ref} cannot be imported: ${error.message}`, error);
       throw error;
     }
-    const lookup = async () =>
+    const lookup = async (attemptId?: string) =>
       (await api.listDiskImages()).find(
-        (image) => image.labels?.[LABELS.image] === key && image.labels?.[LABELS.instance] === this.#instance && !FAILED_IMAGE_STATES.has(image.status?.state?.toLowerCase() ?? ""),
+        (image) => image.labels?.[LABELS.image] === key && image.labels?.[LABELS.instance] === this.#instance &&
+          (attemptId ? image.labels?.[LABELS.attempt] === attemptId : !FAILED_IMAGE_STATES.has(image.status?.state?.toLowerCase() ?? "")),
       );
-    return this.#createOnce(`image:${key}`, `the disk image for ${ref}`, () => api.createDiskImage(ref, labels, registryCredentials ? { registryCredentials } : {}), lookup);
+    return this.#createOnce(
+      `image:${key}`,
+      `the disk image for ${ref}`,
+      (attemptId) => api.createDiskImage(ref, { ...labels, [LABELS.attempt]: attemptId }, registryCredentials ? { registryCredentials } : {}),
+      lookup,
+    );
   }
 
   /**
@@ -238,26 +248,27 @@ export class AzureSandboxProvider implements SandboxProvider {
    * appears. After a failure without a definite answer, this call also keeps looking for the
    * resource until the reconciliation window ends.
    */
-  async #createOnce<T>(key: string, what: string, create: () => Promise<T>, lookup: () => Promise<T | undefined>): Promise<T> {
-    const since = this.#unconfirmed.outstanding(key);
-    if (since !== undefined) {
-      const adopted = await lookup();
+  async #createOnce<T>(key: string, what: string, create: (attemptId: string) => Promise<T>, lookup: (attemptId?: string) => Promise<T | undefined>): Promise<T> {
+    const pending = this.#unconfirmed.outstanding(key);
+    if (pending !== undefined) {
+      const adopted = await lookup(pending.attemptId);
       if (adopted) {
         this.#unconfirmed.clear(key);
         return adopted;
       }
       throw unavailable(`An earlier attempt to create ${what} has not been confirmed by Azure yet. Retry to reconcile it; no second create will be submitted without a definite outcome.`);
     }
-    this.#unconfirmed.record(key);
+    const intent = this.#unconfirmed.record(key);
+    if (!intent.attemptId) throw unavailable("The Azure creation intent has no attempt identity.");
     let created: T;
     try {
-      created = await create();
+      created = await create(intent.attemptId);
     } catch (error) {
       if (isDefinite(error)) {
         this.#unconfirmed.clear(key); // never sent, or refused: nothing will appear
         throw error;
       }
-      const adopted = await this.#reconcile(lookup);
+      const adopted = await this.#reconcile(() => lookup(intent.attemptId));
       if (!adopted) throw unconfirmed(what, error);
       this.#unconfirmed.clear(key);
       this.#log.warn("Adopted a resource Azure created without answering", { resource: what });
@@ -398,10 +409,10 @@ export class AzureSandboxProvider implements SandboxProvider {
 
   async create(spec: SandboxSpec, options: SandboxOperationOptions = {}): Promise<void> {
     const { config } = this.#require();
-    await this.#ensureDisks(spec, options);
     const existing = await this.#remotes(spec.sandboxId);
+    this.#confirmSandboxIntent(spec.sandboxId, existing);
+    await this.#ensureDisks(spec, options);
     let remote = existing.find((sandbox) => LIVE_SANDBOX_STATES.has(stateOf(sandbox)));
-    if (existing.length > 0) this.#unconfirmed.clear(`sandbox:${spec.sandboxId}`);
     for (const leftover of existing) {
       if (leftover === remote) continue;
       // Compute left from before (stopped by the platform, failed, or still being deleted) holds the disks.
@@ -454,14 +465,29 @@ export class AzureSandboxProvider implements SandboxProvider {
     return this.#createOnce(
       `sandbox:${spec.sandboxId}`,
       "the sandbox",
-      () => api.createSandbox(this.#createBody(spec, config)),
-      async () => (await this.#remotes(spec.sandboxId)).find((sandbox) => !isDeleting(sandbox)),
+      (attemptId) => {
+        const body = this.#createBody(spec, config);
+        return api.createSandbox({ ...body, labels: { ...body.labels, [LABELS.attempt]: attemptId } });
+      },
+      async (attemptId) => (await this.#remotes(spec.sandboxId)).find((sandbox) =>
+        attemptId ? sandbox.labels?.[LABELS.attempt] === attemptId : !isDeleting(sandbox)),
     );
+  }
+
+  #confirmSandboxIntent(sandboxId: string, remotes: readonly RemoteSandbox[]): void {
+    const key = `sandbox:${sandboxId}`;
+    const pending = this.#unconfirmed.outstanding(key);
+    if (!pending) return;
+    const confirmed = remotes.some((remote) => !pending.attemptId || remote.labels?.[LABELS.attempt] === pending.attemptId);
+    if (!confirmed) {
+      throw unavailable(`An earlier attempt to create the sandbox has not been confirmed by Azure yet. Its disks must be preserved until that creation is reconciled.`);
+    }
+    this.#unconfirmed.clear(key);
   }
 
   async start(sandboxId: string, options: SandboxOperationOptions = {}): Promise<SandboxStartResult> {
     const remotes = await this.#remotes(sandboxId);
-    if (remotes.length > 0) this.#unconfirmed.clear(`sandbox:${sandboxId}`);
+    this.#confirmSandboxIntent(sandboxId, remotes);
     const live = remotes.find((sandbox) => stateOf(sandbox) === "running") ?? remotes.find((sandbox) => LIVE_SANDBOX_STATES.has(stateOf(sandbox)));
     if (live) {
       this.#remoteIds.set(sandboxId, live.id);
@@ -493,10 +519,7 @@ export class AzureSandboxProvider implements SandboxProvider {
   /** Deletes compute; the data disks (and with them every declared piece of state) survive. */
   async stop(sandboxId: string): Promise<void> {
     const remotes = await this.#remotes(sandboxId);
-    if (remotes.length > 0) this.#unconfirmed.clear(`sandbox:${sandboxId}`);
-    if (this.#unconfirmed.outstanding(`sandbox:${sandboxId}`) !== undefined) {
-      throw unavailable(`Azure has not confirmed creation of sandbox ${sandboxId}. Its disks must be preserved until the outstanding creation can be reconciled.`);
-    }
+    this.#confirmSandboxIntent(sandboxId, remotes);
     for (const remote of remotes) await this.#deleteCompute(sandboxId, remote);
     this.#remoteIds.delete(sandboxId);
   }

@@ -4,6 +4,7 @@
 // create sandboxes, volumes, and disk images; POST for stop/resume; PUT for file writes. The API is still in preview,
 // so every request shape lives in this file and nowhere else.
 import type { TokenSource } from "./credential.js";
+import { z } from "zod";
 
 export const DATA_PLANE_RESOURCE = "https://management.azuredevcompute.io";
 
@@ -36,6 +37,33 @@ export interface RemoteDiskImage {
   readonly labels?: Readonly<Record<string, string>>;
   readonly status?: { readonly state?: string; readonly errorMessage?: string };
 }
+
+const labelsSchema = z.record(z.string(), z.string()).optional();
+const sandboxSchema: z.ZodType<RemoteSandbox> = z.object({
+  id: z.string().min(1),
+  state: z.string().optional(),
+  labels: labelsSchema,
+  ports: z.array(z.object({
+    port: z.number().int().min(1).max(65535),
+    name: z.string().optional(),
+    url: z.string().optional(),
+  }).passthrough()).optional(),
+  stateDetails: z.object({ stoppedReason: z.string().optional() }).passthrough().optional(),
+  outboundIpAddresses: z.array(z.string()).optional(),
+}).passthrough();
+const diskImageSchema: z.ZodType<RemoteDiskImage> = z.object({
+  id: z.string().min(1),
+  labels: labelsSchema,
+  status: z.object({ state: z.string().optional(), errorMessage: z.string().optional() }).passthrough().optional(),
+}).passthrough();
+const volumeSchema = z.object({
+  name: z.string().min(1).optional(),
+  volumeName: z.string().min(1).optional(),
+  type: z.string().min(1),
+  labels: labelsSchema,
+  isAttached: z.boolean().optional(),
+}).passthrough().refine((volume) => volume.type !== "DataDisk" || volume.isAttached !== undefined);
+const executionSchema = z.object({ exitCode: z.number().int(), stdout: z.string(), stderr: z.string() });
 
 export interface CreateSandboxBody {
   readonly sourcesRef: { readonly diskImage: { readonly id: string } };
@@ -133,7 +161,7 @@ export class SandboxApi {
       }
       let response: Response;
       try {
-        response = await this.#fetch(url, { method, headers, ...(body !== undefined ? { body } : {}), signal: AbortSignal.timeout(60_000) });
+        response = await this.#fetch(url, { method, headers, ...(body !== undefined ? { body } : {}), redirect: "error", signal: AbortSignal.timeout(60_000) });
       } catch (error) {
         if (retryAmbiguous && attempt < retries) {
           await this.#sleep(backoff(attempt));
@@ -179,32 +207,58 @@ export class SandboxApi {
     }
   }
 
-  async #list<T>(path: string, query: Query = {}): Promise<T[]> {
+  async #list<T>(path: string, parse: (body: unknown) => T, query: Query = {}): Promise<T[]> {
     const items: T[] = [];
-    let next: URL | string | undefined = this.#url(path, query);
-    for (let page = 0; next && page < 100; page++) {
+    const initial = this.#url(path, query);
+    let next: URL | undefined = initial;
+    const seen = new Set<string>();
+    while (next) {
+      if (seen.size >= 100 || seen.has(next.href)) throw malformed(`${path} pagination`);
+      seen.add(next.href);
       const { body } = await this.#request("GET", next);
-      if (Array.isArray(body)) return [...items, ...(body as T[])];
-      const paged = body as { value?: T[]; nextLink?: string } | undefined;
-      items.push(...(paged?.value ?? []));
-      next = paged?.nextLink && new URL(paged.nextLink).origin === new URL(this.#options.endpoint).origin ? paged.nextLink : undefined;
+      if (Array.isArray(body)) return [...items, ...body.map(parse)];
+      if (!body || typeof body !== "object" || !("value" in body) || !Array.isArray(body.value)) {
+        throw malformed(`${path} listing`);
+      }
+      items.push(...body.value.map(parse));
+      const link = "nextLink" in body ? body.nextLink : undefined;
+      if (link === undefined || link === null || link === "") break;
+      if (typeof link !== "string") throw malformed(`${path} continuation`);
+      let continuation: URL;
+      try {
+        continuation = new URL(link, next);
+      } catch {
+        throw malformed(`${path} continuation`);
+      }
+      if (continuation.origin !== initial.origin || continuation.pathname.toLowerCase() !== initial.pathname.toLowerCase() || continuation.username || continuation.password) {
+        throw malformed(`${path} continuation scope`);
+      }
+      if (!continuation.searchParams.has("api-version")) continuation.searchParams.set("api-version", this.#options.apiVersion);
+      next = continuation;
     }
     return items;
   }
 
   // Sandboxes --------------------------------------------------------------------------------------------------
 
-  listSandboxes(labels?: Readonly<Record<string, string>>): Promise<RemoteSandbox[]> {
-    return this.#list<RemoteSandbox>("/sandboxes", labels ? { labels: formatLabels(labels) } : {});
+  async listSandboxes(labels?: Readonly<Record<string, string>>): Promise<RemoteSandbox[]> {
+    const sandboxes = await this.#list("/sandboxes", parseSandbox, labels ? { labels: formatLabels(labels) } : {});
+    if (labels && sandboxes.some((sandbox) => Object.entries(labels).some(([key, value]) => sandbox.labels?.[key] !== value))) {
+      throw malformed("filtered sandbox listing");
+    }
+    return sandboxes;
   }
 
   async getSandbox(id: string): Promise<RemoteSandbox | undefined> {
     const { status, body } = await this.#request("GET", this.#url(`/sandboxes/${encodeURIComponent(id)}`), { allow404: true });
-    return status === 404 ? undefined : (body as RemoteSandbox);
+    if (status === 404) return undefined;
+    const sandbox = parseSandbox(body);
+    if (sandbox.id !== id) throw malformed("sandbox identity");
+    return sandbox;
   }
 
   async createSandbox(body: CreateSandboxBody): Promise<RemoteSandbox> {
-    return created<RemoteSandbox>((await this.#request("PUT", this.#url("/sandboxes"), { body, idempotent: false })).body, "sandbox");
+    return parseSandbox((await this.#request("PUT", this.#url("/sandboxes"), { body, idempotent: false })).body);
   }
 
   async deleteSandbox(id: string): Promise<void> {
@@ -229,8 +283,7 @@ export class SandboxApi {
       body: { command, ...(workingDirectory ? { workingDirectory } : {}) },
       idempotent: false,
     });
-    const result = (body ?? {}) as { exitCode?: number; stdout?: string; stderr?: string };
-    return { exitCode: result.exitCode ?? 0, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+    return parseResource(executionSchema, body, "command result");
   }
 
   /** Replaces a running sandbox's egress policy; it applies to subsequent requests. */
@@ -241,17 +294,20 @@ export class SandboxApi {
   // Volumes ----------------------------------------------------------------------------------------------------
 
   listVolumes(): Promise<RemoteVolume[]> {
-    return this.#list<RemoteVolume & { volumeName?: string }>("/volumes").then((volumes) => volumes.map(normalizeVolume));
+    return this.#list("/volumes", parseVolume);
   }
 
   async getVolume(name: string): Promise<RemoteVolume | undefined> {
     const { status, body } = await this.#request("GET", this.#url(`/volumes/${encodeURIComponent(name)}`), { allow404: true });
-    return status === 404 ? undefined : normalizeVolume(body as RemoteVolume & { volumeName?: string });
+    if (status === 404) return undefined;
+    const volume = parseVolume(body);
+    if (volume.name !== name) throw malformed("volume identity");
+    return volume;
   }
 
   async createDataDisk(name: string, size: string, labels: Readonly<Record<string, string>>): Promise<RemoteVolume> {
     const { body } = await this.#request("PUT", this.#url(`/volumes/${encodeURIComponent(name)}`), { body: { type: "DataDisk", size, labels } });
-    return normalizeVolume(body as RemoteVolume & { volumeName?: string });
+    return parseVolume(body);
   }
 
   async deleteVolume(name: string): Promise<void> {
@@ -261,12 +317,15 @@ export class SandboxApi {
   // Disk images ------------------------------------------------------------------------------------------------
 
   listDiskImages(): Promise<RemoteDiskImage[]> {
-    return this.#list<RemoteDiskImage>("/diskimages");
+    return this.#list("/diskimages", parseDiskImage);
   }
 
   async getDiskImage(id: string): Promise<RemoteDiskImage | undefined> {
     const { status, body } = await this.#request("GET", this.#url(`/diskimages/${encodeURIComponent(id)}`), { allow404: true });
-    return status === 404 ? undefined : (body as RemoteDiskImage);
+    if (status === 404) return undefined;
+    const image = parseDiskImage(body);
+    if (image.id !== id) throw malformed("disk image identity");
+    return image;
   }
 
   /**
@@ -279,7 +338,7 @@ export class SandboxApi {
     auth: { readonly registryCredentials?: { readonly username: string; readonly token: string } } = {},
   ): Promise<RemoteDiskImage> {
     const body = { image: { base: image }, labels, ...(auth.registryCredentials ? { registryCredentials: auth.registryCredentials } : {}) };
-    return created<RemoteDiskImage>((await this.#request("PUT", this.#url("/diskimages"), { body, idempotent: false })).body, "disk image");
+    return parseDiskImage((await this.#request("PUT", this.#url("/diskimages"), { body, idempotent: false })).body);
   }
 }
 
@@ -287,11 +346,18 @@ export class SandboxApi {
  * The resource a create answered with. A success without a readable resource (a truncated or non-JSON body) does not
  * say what Azure created, so it counts as an answer that never arrived (status 0): the caller reconciles by labels.
  */
-function created<T extends { readonly id: string }>(body: unknown, what: string): T {
-  const id = body && typeof body === "object" ? (body as { id?: unknown }).id : undefined;
-  if (typeof id !== "string" || !id) throw new SandboxApiError(0, "network", `Azure accepted the ${what} create but its answer did not name the ${what}.`);
-  return body as T;
+function malformed(what: string): SandboxApiError {
+  return new SandboxApiError(0, "invalid_response", `Azure returned a malformed ${what}; the resource outcome cannot be inferred from that response.`);
 }
+
+function parseResource<T>(schema: z.ZodType<T>, body: unknown, what: string): T {
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) throw malformed(what);
+  return parsed.data;
+}
+
+const parseSandbox = (body: unknown): RemoteSandbox => parseResource(sandboxSchema, body, "sandbox");
+const parseDiskImage = (body: unknown): RemoteDiskImage => parseResource(diskImageSchema, body, "disk image");
 
 /**
  * The reason a request failed: ARM-style `{ error: { code, message } }` or RFC 9110 problem details
@@ -310,8 +376,11 @@ function describeFailure(body: unknown): { code: string | undefined; message: st
   return { code: problem.title, message: message?.slice(0, 1000) };
 }
 
-function normalizeVolume(volume: RemoteVolume & { volumeName?: string }): RemoteVolume {
-  return { ...volume, name: volume.volumeName ?? volume.name };
+function parseVolume(body: unknown): RemoteVolume {
+  const volume = parseResource(volumeSchema, body, "volume");
+  const name = volume.volumeName ?? volume.name;
+  if (!name) throw malformed("volume identity");
+  return { ...volume, name };
 }
 
 export function formatLabels(labels: Readonly<Record<string, string>>): string {

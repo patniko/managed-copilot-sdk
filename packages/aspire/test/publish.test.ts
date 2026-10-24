@@ -85,10 +85,9 @@ describe("prepareAzureConfig", () => {
 });
 
 describe("applyAccessRules", () => {
-  it("requires GitHub users or organizations for a public deployment unless explicitly opened", () => {
+  it("requires GitHub users or organizations for every public deployment", () => {
     expect(() => applyAccessRules(config({ access: undefined }), {})).toThrow(/no access rules/);
     expect(() => applyAccessRules(config({ access: { githubOrgs: [] } }), { githubUsers: [] })).toThrow(AzurePublishError);
-    expect(applyAccessRules(config({ access: undefined }), { allowAnyAccount: true }).access).toBeUndefined();
     expect(applyAccessRules(config({ access: { githubOrgs: ["contoso"] } }), {}).access).toEqual({ githubOrgs: ["contoso"] });
   });
 

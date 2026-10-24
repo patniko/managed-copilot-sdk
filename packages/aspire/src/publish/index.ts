@@ -167,7 +167,6 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
   const access = applyAccessRules(input.config, {
     githubUsers: listSetting(await setting(builder, `Parameters:${name}-github-users`)),
     githubOrgs: listSetting(await setting(builder, `Parameters:${name}-github-orgs`)),
-    allowAnyAccount: (await setting(builder, `Parameters:${name}-allow-any-github-account`))?.toLowerCase() === "true",
   });
   const prepared = prepareAzureConfig(access, input.appHostDirectory);
   const addressSpace = (await setting(builder, `Parameters:${name}-address-space`)) ?? DEFAULT_ADDRESS_SPACE;

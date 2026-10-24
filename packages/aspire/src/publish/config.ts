@@ -76,8 +76,6 @@ export function prepareAzureConfig(config: ManagedCopilotConfig, appHostDirector
 export interface DeployAccess {
   readonly githubUsers?: readonly string[];
   readonly githubOrgs?: readonly string[];
-  /** `Parameters:<name>-allow-any-github-account` is "true": deploy without access rules on purpose. */
-  readonly allowAnyAccount?: boolean;
 }
 
 /** Splits a comma- or whitespace-separated setting into its entries. */
@@ -98,13 +96,11 @@ export function applyAccessRules(config: ManagedCopilotConfig, deploy: DeployAcc
   const githubUsers = merge(config.access?.githubUsers, deploy.githubUsers);
   const githubOrgs = merge(config.access?.githubOrgs, deploy.githubOrgs);
   if (githubUsers || githubOrgs) return { ...config, access: { ...(githubUsers ? { githubUsers } : {}), ...(githubOrgs ? { githubOrgs } : {}) } };
-  if (deploy.allowAnyAccount) return config;
   const name = config.name;
   throw new AzurePublishError(
     `Managed Copilot "${name}" has no access rules, so any GitHub account could use the deployed platform (and run sandboxes in your subscription). ` +
       `Set Parameters:${name}-github-users to the GitHub logins allowed to use this deployment (for example \`aspire secret set Parameters:${name}-github-users your-login\`), ` +
-      `or Parameters:${name}-github-orgs to their organizations. Alternatively add access: { githubUsers: [...] } to addManagedCopilot, ` +
-      `or set Parameters:${name}-allow-any-github-account to "true" to deploy it open on purpose.`,
+      `or Parameters:${name}-github-orgs to their organizations. Alternatively add access: { githubUsers: [...] } to addManagedCopilot.`,
   );
 }
 

@@ -128,7 +128,6 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | Setting | Required | Meaning |
 | --- | --- | --- |
 | `Parameters:<name>-github-users`, `Parameters:<name>-github-orgs` | One of them, unless the AppHost declares `access` | GitHub accounts or organizations allowed to use the platform. |
-| `Parameters:<name>-allow-any-github-account` | No | `true` deploys without access rules on purpose. |
 | `Parameters:app-github-token` | When the AppHost publishes apps | Secret. The GitHub token the published apps use (`MANAGED_COPILOT_GITHUB_TOKEN`). |
 | `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the apps' ingress (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it. The platform subnet is always allowed (webhooks). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |

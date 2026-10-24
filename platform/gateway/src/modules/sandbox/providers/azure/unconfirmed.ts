@@ -3,13 +3,27 @@
 // create while Azure may still carry out the first. Time passing is not evidence of failure: records remain until a
 // definite outcome is observed. Kept in the gateway's data directory, so a restarted gateway honors them.
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { z } from "zod";
+
+export interface CreationIntent {
+  readonly submittedAt: number;
+  /** Absent only in journals written by older versions, which cannot disambiguate failed historical imports. */
+  readonly attemptId?: string;
+}
+
+const intentSchema: z.ZodType<CreationIntent> = z.union([
+  z.number().int().nonnegative().transform((submittedAt) => ({ submittedAt })),
+  z.object({ submittedAt: z.number().int().nonnegative(), attemptId: z.uuid().optional() }),
+]);
+const journalSchema = z.record(z.string(), intentSchema);
 
 export class UnconfirmedCreates {
   readonly #file: string;
   /** Loaded lazily, so a transient read error is retried on the next operation rather than fixed at start. */
-  #records: Record<string, number> | undefined;
+  #records: Record<string, CreationIntent> | undefined;
 
   constructor(file: string) {
     this.#file = file;
@@ -19,7 +33,7 @@ export class UnconfirmedCreates {
    * When the outstanding create for this key was first submitted, or undefined if there is none (any more). Throws
    * capability_unavailable when the records cannot be read: without them a second create could duplicate a resource.
    */
-  outstanding(key: string): number | undefined {
+  outstanding(key: string): CreationIntent | undefined {
     return this.#load()[key];
   }
 
@@ -28,8 +42,9 @@ export class UnconfirmedCreates {
   }
 
   /** Records a create about to be submitted; durable before it returns (throws if it cannot be made durable). */
-  record(key: string, now = Date.now()): void {
-    const next = { ...this.#load(), [key]: now };
+  record(key: string, now = Date.now()): CreationIntent {
+    const intent = { submittedAt: now, attemptId: randomUUID() };
+    const next = { ...this.#load(), [key]: intent };
     try {
       this.#save(next);
     } catch (error) {
@@ -40,6 +55,7 @@ export class UnconfirmedCreates {
       );
     }
     this.#records = next; // only once durable: a failed save must not leave a record of a create never sent
+    return intent;
   }
 
   /** Forgets a create whose outcome is now definite, without hiding a failed journal update. */
@@ -56,7 +72,7 @@ export class UnconfirmedCreates {
     this.#records = next;
   }
 
-  #load(): Record<string, number> {
+  #load(): Record<string, CreationIntent> {
     if (this.#records) return this.#records;
     let text: string;
     try {
@@ -71,10 +87,11 @@ export class UnconfirmedCreates {
     } catch (error) {
       throw this.#unreadable((error as Error).message);
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((since) => typeof since !== "number" || !Number.isSafeInteger(since) || since < 0)) {
+    const decoded = journalSchema.safeParse(parsed);
+    if (!decoded.success) {
       throw this.#unreadable("it is not a record of creates");
     }
-    return (this.#records = { ...(parsed as Record<string, number>) });
+    return (this.#records = decoded.data);
   }
 
   #unreadable(reason: string): ManagedCopilotError {
@@ -85,7 +102,7 @@ export class UnconfirmedCreates {
     );
   }
 
-  #save(records: Record<string, number>): void {
+  #save(records: Record<string, CreationIntent>): void {
     const directory = dirname(this.#file);
     mkdirSync(directory, { recursive: true });
     syncDirectory(dirname(directory));
