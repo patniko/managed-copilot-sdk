@@ -597,7 +597,10 @@ export class EgressProxy {
       }
     }
     const secrets = [...values.values()];
-    let headers = filterHeaders(applySubstitution(req.rawHeaders, values), new Set(["expect"]));
+    // Exactly one Host header, the authority this connection was authorized for: a second Host could steer a shared
+    // front end (CDN) to another virtual host after the credential was substituted.
+    let headers = filterHeaders(applySubstitution(req.rawHeaders, values), new Set(["expect", "host"]));
+    headers.unshift("Host", port === 443 ? host : `${host}:${port}`);
     if (secrets.length > 0) headers = setRawHeader(headers, "Accept-Encoding", "identity");
 
     let raw: Socket;

@@ -482,13 +482,12 @@ export class PolicyService {
 
   // --- Blocked attempts --------------------------------------------------------------------------------------
 
-  /** Records blocked attempts. Reports are attributed by sandbox registration, never by the reported session. */
+  /** Records blocked attempts from the egress proxy, attributed by sandbox registration, never by the reported session. */
   record(reports: readonly EgressReport[]): void {
     for (const report of reports) {
-      const sandbox = report.sandboxId ? (this.#db.prepare("SELECT session_id FROM network_sandboxes WHERE sandbox_id = ?").get(report.sandboxId) as { session_id: string } | undefined) : undefined;
-      const sessionId = sandbox?.session_id ?? (report.sandboxId ? undefined : report.sessionId);
-      if (!sessionId) continue;
-      this.recordForSession(sessionId, report);
+      if (typeof report.sandboxId !== "string" || !report.sandboxId) continue;
+      const sandbox = this.#db.prepare("SELECT session_id FROM network_sandboxes WHERE sandbox_id = ?").get(report.sandboxId) as { session_id: string } | undefined;
+      if (sandbox) this.recordForSession(sandbox.session_id, report);
     }
   }
 

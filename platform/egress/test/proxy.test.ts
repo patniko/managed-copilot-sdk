@@ -348,6 +348,23 @@ describe("egress proxy", () => {
       tls.destroy();
     });
 
+    it("forwards exactly one Host header, the authorized one", async () => {
+      const tunnel = await openTunnel(port, "vault.example.test:443", auth("sbx_vault"));
+      const tls = await tlsOver(tunnel.socket!, "vault.example.test", platformCa.certPem);
+      const before = vaultRecords.length;
+      tls.write(`GET /dup HTTP/1.1\r\nHost: vault.example.test\r\nHost: evil.example.test\r\nAuthorization: ${bearer(STRIPE)}\r\nConnection: close\r\n\r\n`);
+      const raw = await new Promise<string>((resolve) => {
+        let data = "";
+        tls.on("data", (chunk: Buffer) => (data += chunk.toString("utf8")));
+        tls.on("close", () => resolve(data));
+        tls.on("end", () => resolve(data));
+      });
+      expect(raw).toMatch(/^HTTP\/1\.1 200/);
+      expect(vaultRecords.length).toBe(before + 1);
+      expect(vaultRecords.at(-1)!.headers.host).toBe("vault.example.test");
+      tls.destroy();
+    });
+
     it("stops new uses after revocation", async () => {
       revoked.add(STRIPE);
       try {
