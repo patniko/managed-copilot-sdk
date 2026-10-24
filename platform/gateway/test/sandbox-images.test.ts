@@ -1,5 +1,4 @@
-import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +6,7 @@ import { isManagedCopilotError } from "@managed-copilot/protocol";
 import { createLogger } from "../src/log.js";
 import type { DockerClient } from "../src/modules/sandbox/providers/docker/docker.js";
 import { checkRegistryUrl, registrySettingProblems, SandboxImages } from "../src/modules/sandbox/providers/docker/images.js";
+import { GUARD_TIMEOUT_MS, hasSh, runRegistryGuard } from "../../sandbox/test/registry-guard-runner.js";
 
 const SECRET = "hunter2-secret";
 const source = { setting: "MANAGED_COPILOT_NPM_REGISTRY", fix: "Use a plain URL." };
@@ -73,54 +73,44 @@ describe("checkRegistryUrl", () => {
 
 // The image's guard (platform/sandbox/image/check-registry-url.sh) refuses the same URLs when an image is built, so
 // anything the gateway accepts must pass it, or builds fail late with a less helpful message.
-const sh = spawnSync("sh", ["-c", "exit 0"], { encoding: "utf8" }).status === 0;
-
-describe.runIf(sh)("checkRegistryUrl and the image's registry guard", () => {
-  it("never accepts a URL that the image's guard refuses", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mc-registry-guard-"));
-    try {
-      const script = join(dir, "check-registry-url.sh");
-      writeFileSync(script, readFileSync(join(import.meta.dirname, "..", "..", "sandbox", "image", "check-registry-url.sh"), "utf8").replace(/\r\n/g, "\n"));
-      const corpus = [
-        "https://registry.npmjs.org/",
-        "http://proxy.internal:8080/npm/",
-        "HTTPS://packagefeedproxy.microsoft.io/pypi/simple/",
-        "https://host/npm/@scope/",
-        "https://[::1]:8080/npm/",
-        "https://registry.example/%40/",
-        "  https://registry.example/  ",
-        "http://a",
-        "https://",
-        "https:///",
-        "https:///registry.example/",
-        "https:////registry.example/",
-        "https:///user:pw@registry.example/",
-        "https://@registry.example/",
-        "https://user@registry.example/",
-        "https:/registry.example/",
-        "https:registry.example/",
-        "https://registry.example\\x@y/",
-        "https://registry.example?x@y/",
-        "https://registry.example#@y/",
-        "https://registry.example/\u00a0x",
-        "https://reg istry.example/",
-      ];
-      let accepted = 0;
-      for (const value of corpus) {
-        let url: string;
-        try {
-          url = checkRegistryUrl(value, source);
-        } catch {
-          continue;
-        }
-        accepted++;
-        const result = spawnSync("sh", ["-c", 'sh "$0" NPM_REGISTRY "${GUARD_VALUE}"', script], { encoding: "utf8", env: { ...process.env, GUARD_VALUE: url } });
-        expect({ status: result.status, stderr: result.stderr }, value).toEqual({ status: 0, stderr: "" });
+describe.runIf(hasSh)("checkRegistryUrl and the image's registry guard", () => {
+  // Every accepted URL in one sh process (see the sandbox package's registry-guard-runner).
+  it("never accepts a URL that the image's guard refuses", { timeout: GUARD_TIMEOUT_MS }, () => {
+    const corpus = [
+      "https://registry.npmjs.org/",
+      "http://proxy.internal:8080/npm/",
+      "HTTPS://packagefeedproxy.microsoft.io/pypi/simple/",
+      "https://host/npm/@scope/",
+      "https://[::1]:8080/npm/",
+      "https://registry.example/%40/",
+      "  https://registry.example/  ",
+      "http://a",
+      "https://",
+      "https:///",
+      "https:///registry.example/",
+      "https:////registry.example/",
+      "https:///user:pw@registry.example/",
+      "https://@registry.example/",
+      "https://user@registry.example/",
+      "https:/registry.example/",
+      "https:registry.example/",
+      "https://registry.example\\x@y/",
+      "https://registry.example?x@y/",
+      "https://registry.example#@y/",
+      "https://registry.example/\u00a0x",
+      "https://reg istry.example/",
+    ];
+    const accepted: { readonly value: string; readonly url: string }[] = [];
+    for (const value of corpus) {
+      try {
+        accepted.push({ value, url: checkRegistryUrl(value, source) });
+      } catch {
+        // Refused by the gateway; the guard need not agree.
       }
-      expect(accepted).toBe(8);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
     }
+    expect(accepted).toHaveLength(8);
+    const results = runRegistryGuard(accepted.map((entry) => entry.url));
+    accepted.forEach(({ value }, index) => expect(results[index], value).toEqual({ status: 0, stderr: "" }));
   });
 });
 
