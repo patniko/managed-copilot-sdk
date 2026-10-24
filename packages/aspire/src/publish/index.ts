@@ -284,8 +284,12 @@ async function sandboxGroup(
         throw error;
       }
     },
-    // After the registry exists, before the gateway (and the sandbox group) are deployed.
-    { dependsOn: [`provision-${name}-env-acr`, "check-container-runtime"], requiredBy: ["provision-azure-bicep-resources"] },
+    // After the environment (whose outputs name the registry) exists, and before the egress proxy is deployed (the gateway,
+    // which needs the sandbox images when it starts, is deployed after the proxy because it uses the proxy's address).
+    {
+      dependsOn: [`provision-${name}-env`, "check-container-runtime"],
+      requiredBy: [`provision-${name}-egress`, "provision-azure-bicep-resources"],
+    },
   );
 
   return {
