@@ -159,9 +159,13 @@ export class PromotionManager implements PromotionService {
   async fromTool(context: PlatformToolCallContext): Promise<PlatformToolResult> {
     const record = this.#sessions().get(context.sessionId);
     if (!record || record.ownerId !== context.ownerId) return failure("not_found", "This session is no longer available.");
-    // A retried call (the gateway restarted while it ran) that already moved the session reports the same outcome.
+    // A retried call (the gateway restarted while it ran) that already moved the session reports the same outcome,
+    // once its carried call is at the new generation.
     const committed = this.#store.committed(record.id);
-    if (committed?.toolCallId === context.toolCallId) return SANDBOX_READY_TEXT;
+    if (committed?.toolCallId === context.toolCallId) {
+      if (record.placement === "sandbox") this.#finalizeSync(committed, record.generation);
+      return SANDBOX_READY_TEXT;
+    }
     if (record.placement === "sandbox") return ALREADY_IN_SANDBOX_TEXT;
     try {
       await this.#run({ record, trigger: "tool", toolCallId: context.toolCallId });
@@ -276,6 +280,7 @@ export class PromotionManager implements PromotionService {
           const check = await this.#quiescent(progress);
           if (check.fatal) throw check.fatal;
         }
+        await this.#releaseLeftovers(record.id, operation.id);
 
         // Allocation: the source keeps serving while the target's image and setup are prepared.
         network = this.#narrow(progress, target);
@@ -314,7 +319,10 @@ export class PromotionManager implements PromotionService {
         this.#update(progress, { state: "transferring" });
         progress.sourceTouched = true;
         if (attempt.trigger === "tool") await cutover.source("session.suspend");
-        await cutover.source("sessions.close");
+        // Idempotent in the stock runtime; a session it does not hold has nothing to close.
+        await cutover.source("sessions.close").catch((error: unknown) => {
+          if (!notHeld(error)) throw error;
+        });
         const exported = await exportSessionState({
           sourceDir: cutover.sourceStateDir,
           targetDir: progress.staging,
@@ -581,19 +589,30 @@ export class PromotionManager implements PromotionService {
 
   /**
    * Removes the source runtime's copy of the session state, so the fenced owner can never be reactivated. Only for
-   * the incarnation that was promoted: a session ID reused after deletion is someone else's state.
+   * the incarnation that was promoted, or after that session was deleted: a session ID reused since then is someone
+   * else's state and is never touched.
    */
   async #cleanSource(operation: PromotionOperation): Promise<PromotionOperation> {
     const target = operation.sourceStateDir;
     const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
-    const same = current !== undefined && current.placement === "sandbox" && current.generation >= (operation.toGeneration ?? operation.fromGeneration + 1) && current.createdAt <= operation.createdAt;
-    if (!target || !same) return this.#store.update(operation.id, { sourceCleaned: true });
+    const promoted = current !== undefined && current.placement === "sandbox" && current.generation >= (operation.toGeneration ?? operation.fromGeneration + 1) && current.createdAt <= operation.createdAt;
+    if (!target || (current !== undefined && !promoted)) return this.#store.update(operation.id, { sourceCleaned: true });
     try {
       await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       return this.#store.update(operation.id, { sourceCleaned: true });
     } catch (error) {
       this.#log.warn("Could not remove the session's state from the shared runtime yet; it is retried at the next start", { sessionId: operation.sessionId, error: (error as Error).message });
       return operation;
+    }
+  }
+
+  /** A new attempt first releases what an attempt interrupted by a restart left behind (its candidate sandbox). */
+  async #releaseLeftovers(sessionId: string, current: string): Promise<void> {
+    for (const operation of this.#store.owing()) {
+      if (operation.sessionId !== sessionId || operation.id === current || operation.state !== "failed") continue;
+      await this.#sandboxes()?.delete(sessionId);
+      await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
+      this.#store.update(operation.id, { cleanupPending: false });
     }
   }
 
@@ -610,8 +629,7 @@ export class PromotionManager implements PromotionService {
     for (const operation of this.#store.unfinished()) {
       const record = sessions?.get(operation.sessionId);
       if (record && record.placement === "sandbox" && record.generation > operation.fromGeneration && record.createdAt <= operation.createdAt) {
-        const committed = this.#store.update(operation.id, { state: "committed", toGeneration: record.generation, committedAt: new Date().toISOString() });
-        this.#finalizeSync(committed, record.generation);
+        this.#store.update(operation.id, { state: "committed", toGeneration: record.generation, committedAt: new Date().toISOString() });
         this.#log.info("A promotion committed before the restart; finishing its post-commit steps", { sessionId: operation.sessionId, operation: operation.id });
         continue;
       }
@@ -628,6 +646,13 @@ export class PromotionManager implements PromotionService {
         cleanupPending: operation.state !== "admitted",
       });
     }
+    // Committed attempts whose post-commit steps a restart cut short: the carried call must reach the new generation
+    // before durable replays it (both steps are idempotent).
+    for (const operation of this.#store.owing()) {
+      if (operation.state !== "committed") continue;
+      const record = sessions?.get(operation.sessionId);
+      if (record && record.placement === "sandbox" && record.createdAt <= operation.createdAt) this.#finalizeSync(operation, record.generation);
+    }
   }
 
   /** Finishes what terminal attempts still owe: post-commit steps, or releasing an interrupted attempt's candidate. */
@@ -641,13 +666,19 @@ export class PromotionManager implements PromotionService {
             this.#finalizeSync(operation, record.generation);
             await this.#finalize(operation, { committed: record, network: undefined, sandboxId: operation.sandboxId, durationMs: Date.parse(operation.committedAt ?? operation.updatedAt) - Date.parse(operation.createdAt) });
           } else {
-            // The promoted session is gone (deleted, or its ID reused): nothing of it remains to finish.
-            this.#store.update(operation.id, { finalized: true, sourceCleaned: true });
+            // The promoted session is gone (deleted, or its ID reused): only its leftovers remain to clean up.
+            await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
+            const cleaned = await this.#cleanSource(operation);
+            this.#store.update(operation.id, { finalized: cleaned.sourceCleaned });
           }
           continue;
         }
-        // An interrupted attempt's candidate, unless the session meanwhile became something else.
-        if (!record || (record.placement === "shared" && record.createdAt <= operation.createdAt)) await this.#sandboxes()?.delete(operation.sessionId);
+        // An interrupted attempt's candidate, unless a newer attempt already took over (it releases the leftover
+        // itself before allocating) or the session meanwhile became something else.
+        const newest = this.#store.latest(operation.sessionId);
+        if (newest?.id === operation.id && (!record || (record.placement === "shared" && record.createdAt <= operation.createdAt))) {
+          await this.#sandboxes()?.delete(operation.sessionId);
+        }
         await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
         this.#store.update(operation.id, { cleanupPending: false });
       } catch (error) {

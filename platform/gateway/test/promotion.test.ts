@@ -562,6 +562,11 @@ describe("agent-initiated promotion (request_sandbox)", () => {
     expect(await manager.fromTool(context)).toBe(SANDBOX_READY_TEXT);
     expect(await manager.fromTool(context)).toBe(SANDBOX_READY_TEXT);
     expect(sandboxes.created).toHaveLength(1);
+    // The retry makes sure the carried call is at the new generation before durable delivers the answer.
+    expect(actions.generations).toEqual([
+      { sessionId: SESSION, generation: 1, options: { carried: ["req-1"] } },
+      { sessionId: SESSION, generation: 1, options: { carried: ["req-1"] } },
+    ]);
   });
 
   it("lets an API caller join the agent's promotion", async () => {
@@ -588,7 +593,7 @@ describe("recovery after a restart", () => {
     // Synchronous part (while modules register): the carried call moves before durable replays anything.
     manager.reconcile();
     expect(actions.generations).toEqual([{ sessionId: SESSION, generation: 1, options: { carried: ["req-1"] } }]);
-    expect(policy.calls).toEqual([`commit:${SESSION}`, `revert:${other}`]);
+    expect([...policy.calls].sort()).toEqual([`commit:${SESSION}`, `revert:${other}`].sort());
     expect(store.get("prm_b")).toMatchObject({ state: "failed", cleanupPending: true });
     expect(sandboxes.deleted).toEqual([]);
 
@@ -610,6 +615,42 @@ describe("recovery after a restart", () => {
     await manager.recover();
     expect(existsSync(join(stateDir, "events.jsonl"))).toBe(true);
     expect(store.get("prm_c")).toMatchObject({ finalized: true });
+  });
+
+  it("removes a deleted promoted session's leftover state", async () => {
+    store.insert({ id: "prm_d", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_d", { state: "committed", toGeneration: 1, sandboxId: "sbx_old", sourceStateDir: stateDir, committedAt: new Date().toISOString() });
+    sessions.records.delete(SESSION);
+    await manager.recover();
+    expect(existsSync(stateDir)).toBe(false);
+    expect(store.get("prm_d")).toMatchObject({ finalized: true, eventPublished: false });
+    expect(published).toHaveLength(0);
+  });
+
+  it("moves a committed attempt's carried call during registration even if its commit was recorded before the restart", () => {
+    store.insert({ id: "prm_e", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "tool", toolCallId: "call-1", target: "coder" });
+    store.update("prm_e", { state: "committed", toGeneration: 1, requestId: "req-1", sourceStateDir: stateDir, committedAt: new Date().toISOString() });
+    sessions.records.set(SESSION, record({ placement: "sandbox", generation: 1 }));
+    manager.reconcile();
+    expect(actions.generations).toEqual([{ sessionId: SESSION, generation: 1, options: { carried: ["req-1"] } }]);
+  });
+
+  it("lets a new attempt release an interrupted attempt's candidate first, and recovery leaves it to that attempt", async () => {
+    store.insert({ id: "prm_f", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_f", { state: "failed", cleanupPending: true, sandboxId: "sbx_old" });
+    const created: string[] = [];
+    const create = sandboxes.create.bind(sandboxes);
+    sandboxes.create = async (request) => {
+      created.push(`create after ${sandboxes.deleted.length} deletes`);
+      return create(request);
+    };
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox" });
+    expect(created).toEqual(["create after 1 deletes"]);
+    expect(store.get("prm_f")).toMatchObject({ cleanupPending: false });
+    // Recovery does not touch the newer attempt's sandbox.
+    store.update("prm_f", { cleanupPending: true });
+    await manager.recover();
+    expect(sandboxes.deleted).toEqual([SESSION]);
   });
 });
 
