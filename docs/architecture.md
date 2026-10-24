@@ -126,20 +126,35 @@ denies configuration RPCs it does not understand.
 
 - Shared runtime: per-session user credentials supplied by the gateway at create/resume (in memory), never a shared
   service token. Model attribution follows the session owner.
-- Sandboxes: the GitHub token never enters the sandbox environment or disk. Stock runtime 1.0.103 refuses to send
-  without a GitHub token or a Copilot HMAC key, and with a provider-supplied token it validates the account with a
-  direct call to `api.github.com/copilot_internal/user` that does **not** pass through `llmInference.*`. Two stock,
-  configuration-only candidates (the sandbox workstream picks one with evidence and documents its limits):
-  - **A.** The gateway answers `gitHubToken.getToken` with a per-session placeholder; the egress proxy substitutes the
-    owner's token only on the path-scoped `api.github.com/copilot_internal/*` calls; the gateway swaps the placeholder
-    in model requests it receives through `llmInference.*`.
-  - **B.** The runtime gets a placeholder `COPILOT_HMAC_KEY`, so it skips account validation and sends model traffic
-    through `llmInference.*`, where the gateway strips the HMAC headers and attaches the owner's credential. Reported
-    working on 1.0.103 by the Argon review; must be re-verified.
-  If neither holds, fail closed with `inference_unavailable` rather than injecting the token.
+- Sandboxes: the GitHub token never enters the sandbox's environment, disk, or runtime process. Stock runtime 1.0.103
+  refuses to send without a credential, and with a session `gitHubToken` (or `gitHubToken.getToken`) it validates the
+  account with a direct call to `api.github.com/copilot_internal/user` that does **not** pass through
+  `llmInference.*`. The implemented mechanism avoids that call with stock, public RPCs only:
+  1. The gateway's upstream connection to the sandbox runtime calls `llmInference.setProvider` after `connect`, so the
+     runtime sends every model-layer HTTP request to the gateway as `llmInference.httpRequestStart`/`httpRequestChunk`.
+  2. `session.create` / `session.resume` go upstream with no GitHub token fields (`prepareSessionParams` strips them,
+     and rejects a BYOK `provider` with `policy_violation`).
+  3. After create/resume succeeds, the gateway resolves `copilot_internal/user` itself with the owner's token and calls
+     `session.gitHubAuth.setCredentials({ credentials: { type: "token", host: "https://github.com", token: "mcrt_…",
+     copilotUser } })`. The runtime trusts a supplied `copilotUser` verbatim (`copilotUserResolved: true`) and does
+     not re-fetch it. `mcrt_…` is an opaque per-session placeholder with no value outside the gateway.
+  4. The gateway answers each `llmInference` request only for the sandbox's own session and only for allowlisted
+     Copilot API hosts (the identity's `endpoints.api` plus `api[.individual|.business|.enterprise].githubcopilot.com`):
+     it swaps the placeholder for the owner's current token (`resolveToken`) and streams the response back with
+     `llmInference.httpResponseStart`/`httpResponseChunk`. Anything else is refused.
+
+  Evidence (2026-10-23, Windows ARM64, both the SDK's `copilot-runtime` and the `@github/copilot` CLI binary, 1.0.103,
+  with all direct network egress blocked): session creation without a token succeeded, `GET <endpoints.api>/models` and
+  every `POST /v1/messages` arrived through `llmInference.*` carrying only the placeholder, and real model replies came
+  back. Afterwards neither the placeholder nor the token appeared anywhere under `COPILOT_HOME` or in runtime output.
+  Limits: runtime features that call GitHub services directly rather than through `llmInference` (the built-in GitHub
+  MCP server, telemetry) only ever see the placeholder and fail or are blocked by egress policy; the identity and quota
+  snapshot is taken at create/resume time; BYOK providers are not available in sandboxes; when the owner has no usable
+  credential, inference fails with `authentication_required` and never falls back to another account.
 - Runtime binary: the stock SDK spawns the dedicated headless runtime shipped in `@github/copilot-sdk-<platform>`;
-  `@github/copilot` is the larger interactive CLI. Prefer the SDK's headless runtime for the shared runtime and
-  sandboxes (both are stock), resolved through public package metadata.
+  `@github/copilot` is the larger interactive CLI. The sandbox image installs `@github/copilot-sdk@1.0.26` and runs its
+  headless `copilot-runtime` (1.0.103); the shared runtime should use the same binary, resolved through public package
+  metadata.
 
 ### Isolated placement
 
