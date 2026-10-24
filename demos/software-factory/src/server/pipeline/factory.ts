@@ -1,0 +1,1005 @@
+import { randomUUID } from "node:crypto";
+import { defineTool, type SessionConfig } from "@github/copilot-sdk";
+import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, SANDBOX_SIZES } from "../../shared/environments.js";
+import { findTemplate } from "../../shared/templates.js";
+import {
+  ACTIVE_WORK_ORDER_STATUSES,
+  formatWorkOrderNumber,
+  TERMINAL_STATION_STATUSES,
+  type ActivityItem,
+  type ArtifactFileView,
+  type ArtifactIndex,
+  type CreateWorkOrderRequest,
+  type FactoryError,
+  type NetworkView,
+  type OutputManifest,
+  type Plan,
+  type PlanTask,
+  type ReleaseSummary,
+  type ReviewRecord,
+  type SandboxView,
+  type Station,
+  type StationKind,
+  type StationRole,
+  type TestReport,
+  type TestSummary,
+  type WorkOrder,
+  type WorkOrderSummary,
+} from "../../shared/types.js";
+import type { FactoryConfig } from "../config.js";
+import type { EventHub } from "../hub.js";
+import { log } from "../log.js";
+import type { FactoryPlatform, StationSession } from "../platform.js";
+import type { StoredArtifact, FactoryStore } from "../store.js";
+import { StationActivityMapper } from "./activity.js";
+import { CancelledError, StationError, toFactoryError } from "./errors.js";
+import { factoryPermissions } from "./permissions.js";
+import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, validateReview, type ValidReview } from "./plan.js";
+import {
+  buildPrompt,
+  checkFailedPrompt,
+  fixPrompt,
+  planPrompt,
+  planRetryPrompt,
+  releasePrompt,
+  reviewPrompt,
+  reviewRetryPrompt,
+} from "./prompts.js";
+import { builderSeed, DEFAULT_SKILLS_ROOT, releaseSeed, type SeedFile, type TaskOutcome } from "./seed.js";
+import { Semaphore } from "./semaphore.js";
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+type MStation = Mutable<Station>;
+type MWorkOrder = Mutable<Omit<WorkOrder, "stations">> & { stations: MStation[] };
+
+/** Nudges per round when the factory check fails before the station gives up. */
+const MAX_NUDGES = 2;
+/** Artifacts the factory keeps in its own store for viewing, diffing, and the release (bytes). */
+const MAX_TEXT_BYTES = 1024 * 1024;
+const TEXT_EXTENSIONS = new Set([
+  "js", "mjs", "cjs", "ts", "mts", "cts", "tsx", "jsx", "json", "md", "markdown", "txt", "patch", "diff", "csv", "tsv", "yml", "yaml",
+  "toml", "ini", "sh", "bash", "py", "rb", "go", "rs", "java", "cs", "html", "htm", "css", "scss", "xml", "svg", "sql", "env", "gitignore", "npmignore", "editorconfig", "lock", "log",
+]);
+
+const ROLE_FOR_KIND: Readonly<Record<StationKind, StationRole>> = { plan: "planner", build: "builder", review: "reviewer", release: "release" };
+
+export function isTextPath(path: string): boolean {
+  const name = path.split("/").pop() ?? path;
+  if (!name.includes(".")) return ["README", "LICENSE", "Makefile", "Dockerfile"].some((known) => name.startsWith(known));
+  return TEXT_EXTENSIONS.has(name.split(".").pop()!.toLowerCase());
+}
+
+export function contentTypeFor(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  if (ext === "json") return "application/json";
+  if (ext === "md" || ext === "markdown") return "text/markdown";
+  if (ext === "patch" || ext === "diff") return "text/x-diff";
+  if (["js", "mjs", "cjs"].includes(ext)) return "text/javascript";
+  return isTextPath(path) ? "text/plain" : "application/octet-stream";
+}
+
+function now(): string {
+  return new Date().toISOString();
+}
+
+function networkView(policy: { access: NetworkView["access"]; allowedDomains: readonly string[] } | undefined): NetworkView {
+  return { access: policy?.access ?? "enabled", allowedDomains: [...(policy?.allowedDomains ?? [])] };
+}
+
+export function describeNetwork(network: NetworkView): string {
+  if (network.access === "disabled") return "network off";
+  if (network.access === "enabled") return "open network";
+  return `network limited to ${network.allowedDomains.join(", ")}`;
+}
+
+function summaryOf(report: TestReport, at = now()): TestSummary {
+  return { ...report.summary, durationMs: report.durationMs, at };
+}
+
+function parseJson<T>(text: string | undefined): T | undefined {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return undefined;
+  }
+}
+
+interface Capture {
+  plan?: Plan;
+  review?: ValidReview;
+}
+
+interface ActiveSession {
+  readonly session: StationSession;
+  readonly mapper: StationActivityMapper;
+  readonly capture: Capture;
+}
+
+interface Run {
+  readonly wo: MWorkOrder;
+  readonly abort: AbortController;
+  readonly sessions: Map<string, ActiveSession>;
+  /** Version of `test-report.json` seen at the last collection, per station, to catch a skipped re-run. */
+  readonly reportVersions: Map<string, number>;
+  done: Promise<void>;
+}
+
+interface CheckOutcome {
+  readonly passed: boolean;
+  readonly code: string;
+  readonly problem: string;
+  readonly report?: TestReport;
+  readonly manifest?: OutputManifest;
+}
+
+export interface FactoryOptions {
+  readonly store: FactoryStore;
+  readonly hub: EventHub;
+  readonly platform: FactoryPlatform;
+  /** Whether the platform can run work orders right now, with a user-facing reason when it can't. */
+  readonly readiness: () => { readonly ready: boolean; readonly reason?: string };
+  readonly account: () => { readonly login: string; readonly avatarUrl?: string } | undefined;
+  readonly config: Pick<FactoryConfig, "maxSandboxes" | "turnTimeoutMs" | "publicationTimeoutMs">;
+  readonly skillsRoot?: string;
+  /** Poll interval while waiting for a resumed turn (tests shorten it). */
+  readonly pollMs?: number;
+}
+
+/** Runs work orders through the factory: plan → parallel builds with review loops → release. */
+export class Factory {
+  readonly #options: FactoryOptions;
+  readonly #runs = new Map<string, Run>();
+  readonly #sandboxes: Semaphore;
+  readonly #usageTimers = new Map<string, NodeJS.Timeout>();
+
+  constructor(options: FactoryOptions) {
+    this.#options = options;
+    this.#sandboxes = new Semaphore(options.config.maxSandboxes);
+  }
+
+  get #store(): FactoryStore {
+    return this.#options.store;
+  }
+
+  get #platform(): FactoryPlatform {
+    return this.#options.platform;
+  }
+
+  // ─── Queries ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  get(id: string): WorkOrder | undefined {
+    return this.#runs.get(id)?.wo ?? this.#store.getWorkOrder(id);
+  }
+
+  list(): WorkOrderSummary[] {
+    return this.#store.listWorkOrders().map((stored) => toSummary(this.#runs.get(stored.id)?.wo ?? stored));
+  }
+
+  isActive(id: string): boolean {
+    return this.#runs.has(id);
+  }
+
+  activity(id: string, stationId?: string): ActivityItem[] {
+    return this.#store.listActivity(id, stationId);
+  }
+
+  artifactIndex(id: string): ArtifactIndex {
+    const wo = this.get(id);
+    const order = new Map((wo?.stations ?? []).map((station, index) => [station.id, index]));
+    const files = new Map<string, Mutable<ArtifactFileView> & { versions: ArtifactFileView["versions"][number][] }>();
+    for (const meta of this.#store.listArtifacts(id)) {
+      const key = `${meta.stationId}\u0000${meta.path}`;
+      let file = files.get(key);
+      if (!file) {
+        file = { stationId: meta.stationId, path: meta.path, contentType: meta.contentType, versions: [], viewable: meta.hasContent };
+        files.set(key, file);
+      }
+      file.versions.push({ version: meta.version, size: meta.size, digest: meta.digest, publishedAt: meta.publishedAt, round: meta.round });
+    }
+    const sorted = [...files.values()].sort(
+      (a, b) => (order.get(a.stationId) ?? 99) - (order.get(b.stationId) ?? 99) || a.path.localeCompare(b.path),
+    );
+    return { workOrderId: id, files: sorted };
+  }
+
+  artifact(id: string, stationId: string, path: string, version?: number): StoredArtifact | undefined {
+    return this.#store.getArtifact(id, stationId, path, version);
+  }
+
+  /** The release bundle (`bundle/**`) plus release notes, patch, and test report, for the zip download. */
+  releaseFiles(id: string): { projectName: string; files: { path: string; content: string }[] } | undefined {
+    const wo = this.get(id);
+    if (!wo?.plan || !wo.release) return undefined;
+    const latest = this.#store.latestArtifacts(id, "release").filter((artifact) => artifact.content !== undefined);
+    const files = latest
+      .filter((artifact) => artifact.path.startsWith("bundle/"))
+      .map((artifact) => ({ path: `${wo.plan!.projectName}/${artifact.path.slice("bundle/".length)}`, content: artifact.content! }));
+    for (const name of ["RELEASE.md", "project.patch", "test-report.json"]) {
+      const artifact = latest.find((candidate) => candidate.path === name);
+      if (artifact) files.push({ path: name, content: artifact.content! });
+    }
+    return { projectName: wo.plan.projectName, files };
+  }
+
+  // ─── Commands ───────────────────────────────────────────────────────────────────────────────────────────────
+
+  create(request: CreateWorkOrderRequest): WorkOrder {
+    const title = request.title?.trim() ?? "";
+    const brief = request.brief?.trim() ?? "";
+    if (title.length < 3 || title.length > 120) throw new StationError("invalid_request", "Give the work order a title of 3 to 120 characters.");
+    if (brief.length < 20 || brief.length > 8000) throw new StationError("invalid_request", "Describe the work in 20 to 8,000 characters.");
+    const rounds = request.maxReviewRounds ?? 2;
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > 3) throw new StationError("invalid_request", "Review rounds must be 1, 2, or 3.");
+    this.#requireReady();
+    const template = findTemplate(request.templateId);
+    const owner = this.#options.account();
+    const created = now();
+    const wo: MWorkOrder = {
+      id: `wo_${randomUUID().replace(/-/g, "").slice(0, 10)}`,
+      number: this.#store.nextWorkOrderNumber(),
+      title,
+      brief,
+      source: template ? { kind: "template", templateId: template.id } : { kind: "brief" },
+      maxReviewRounds: rounds,
+      status: "queued",
+      createdAt: created,
+      updatedAt: created,
+      taskCount: 0,
+      stations: [this.#newStation("plan"), this.#newStation("release")],
+      ...(owner ? { owner } : {}),
+    };
+    this.#store.saveWorkOrder(wo);
+    log.info("Work order created", { id: wo.id, number: formatWorkOrderNumber(wo.number), title });
+    const snapshot = structuredClone(wo);
+    this.#start(wo);
+    return snapshot;
+  }
+
+  async cancel(id: string): Promise<WorkOrder> {
+    const run = this.#runs.get(id);
+    if (!run) {
+      const stored = this.#store.getWorkOrder(id);
+      if (!stored) throw new StationError("not_found", "That work order doesn't exist.");
+      if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status)) throw new StationError("conflict", "Only an active work order can be cancelled.");
+      // Interrupted by a restart and never resumed: cancel the record directly.
+      const wo = stored as MWorkOrder;
+      this.#cancelStations(wo);
+      Object.assign(wo, { status: "cancelled", completedAt: now() });
+      this.#persist(wo);
+      return wo;
+    }
+    run.abort.abort();
+    await Promise.allSettled([...run.sessions.values()].map((active) => active.session.abort()));
+    await Promise.race([run.done, new Promise((resolve) => setTimeout(resolve, 15_000).unref())]);
+    return this.get(id)!;
+  }
+
+  retry(id: string): WorkOrder {
+    if (this.#runs.has(id)) throw new StationError("conflict", "This work order is still running.");
+    const stored = this.#store.getWorkOrder(id);
+    if (!stored) throw new StationError("not_found", "That work order doesn't exist.");
+    if (stored.status !== "failed" && stored.status !== "cancelled") throw new StationError("conflict", "Only a failed or cancelled work order can be retried.");
+    this.#requireReady();
+    const wo = stored as MWorkOrder;
+    delete wo.error;
+    delete wo.completedAt;
+    wo.status = "queued";
+    for (const station of wo.stations) {
+      if (station.status === "failed" || station.status === "cancelled" || station.status === "skipped") {
+        station.status = "waiting";
+        station.detail = "Queued for retry";
+        delete station.error;
+        delete station.finishedAt;
+      }
+    }
+    this.#persist(wo);
+    this.#activity(wo, "plan", "Retrying from the last checkpoint", "info");
+    const snapshot = structuredClone(wo);
+    this.#start(wo);
+    return snapshot;
+  }
+
+  /** Deletes the work order, its records, and (best effort) its platform sessions, sandboxes, and artifacts. */
+  async delete(id: string): Promise<void> {
+    if (this.#runs.has(id)) throw new StationError("conflict", "Cancel the work order before deleting it.");
+    const wo = this.#store.getWorkOrder(id);
+    if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
+    this.#store.deleteWorkOrder(id);
+    this.#options.hub.publish({ type: "workOrderDeleted", workOrderId: id });
+    const sessionIds = wo.stations.flatMap((station) => [...(station.sessionId ? [station.sessionId] : []), ...(station.previousSessionIds ?? [])]);
+    void Promise.allSettled(sessionIds.map((sessionId) => this.#platform.deleteSession(sessionId))).then((results) => {
+      const failed = results.filter((result) => result.status === "rejected").length;
+      if (failed > 0) log.warn("Some sessions could not be deleted", { workOrder: id, failed });
+    });
+  }
+
+  /** Resumes work orders interrupted by a factory restart. Call when the platform becomes ready. */
+  resumeInterrupted(): void {
+    for (const stored of this.#store.listWorkOrders()) {
+      if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.#runs.has(stored.id)) continue;
+      log.info("Resuming work order after restart", { id: stored.id });
+      this.#activity(stored, "plan", "The factory restarted; resuming from the last checkpoint", "warning");
+      this.#start(stored as MWorkOrder);
+    }
+  }
+
+  async stop(): Promise<void> {
+    for (const run of this.#runs.values()) {
+      for (const active of run.sessions.values()) active.mapper.close();
+    }
+    for (const timer of this.#usageTimers.values()) clearTimeout(timer);
+  }
+
+  // ─── Run loop ───────────────────────────────────────────────────────────────────────────────────────────────
+
+  #requireReady(): void {
+    const { ready, reason } = this.#options.readiness();
+    if (!ready) throw new StationError("platform_unavailable", reason ?? "The Managed Copilot platform isn't ready.");
+  }
+
+  #start(wo: MWorkOrder): void {
+    const run: Run = { wo, abort: new AbortController(), sessions: new Map(), reportVersions: new Map(), done: Promise.resolve() };
+    this.#runs.set(wo.id, run);
+    run.done = this.#execute(run).finally(() => this.#finish(run));
+  }
+
+  async #execute(run: Run): Promise<void> {
+    const { wo } = run;
+    try {
+      if (!wo.plan) await this.#plan(run);
+      this.#setWorkOrder(run, { status: "building" });
+      await this.#buildAll(run);
+      this.#setWorkOrder(run, { status: "releasing" });
+      await this.#release(run);
+      this.#setWorkOrder(run, { status: "completed", completedAt: now() });
+      log.info("Work order completed", { id: wo.id, tests: wo.release?.tests });
+    } catch (error) {
+      if (run.abort.signal.aborted || error instanceof CancelledError) {
+        this.#cancelStations(wo);
+        this.#setWorkOrder(run, { status: "cancelled", completedAt: now() });
+        log.info("Work order cancelled", { id: wo.id });
+      } else {
+        const failure = toFactoryError(error);
+        for (const station of wo.stations) {
+          if (!TERMINAL_STATION_STATUSES.includes(station.status) && station.status !== "changes_requested") {
+            Object.assign(station, { status: "skipped", detail: "Skipped", finishedAt: station.startedAt ? now() : undefined });
+          }
+        }
+        this.#setWorkOrder(run, { status: "failed", error: failure, completedAt: now() });
+        log.warn("Work order failed", { id: wo.id, code: failure.code, message: failure.message });
+      }
+    }
+  }
+
+  async #finish(run: Run): Promise<void> {
+    this.#runs.delete(run.wo.id);
+    const timer = this.#usageTimers.get(run.wo.id);
+    if (timer) clearTimeout(timer);
+    this.#persist(run.wo);
+    await Promise.allSettled(
+      [...run.sessions.values()].map(async (active) => {
+        active.mapper.close();
+        await active.session.disconnect();
+      }),
+    );
+    run.sessions.clear();
+  }
+
+  #cancelStations(wo: MWorkOrder): void {
+    for (const station of wo.stations) {
+      if (!TERMINAL_STATION_STATUSES.includes(station.status)) {
+        Object.assign(station, { status: "cancelled", detail: "Cancelled", ...(station.startedAt ? { finishedAt: now() } : {}) });
+      }
+    }
+  }
+
+  // ─── Plan ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+  async #plan(run: Run): Promise<void> {
+    const station = this.#station(run, "plan");
+    this.#setWorkOrder(run, { status: "planning", startedAt: run.wo.startedAt ?? now() });
+    try {
+      const capture: Capture = {};
+      const submitPlan = defineTool("submit_plan", {
+        description: "Submit the work order's build plan to the factory. Returns 'Accepted' or the problems to fix before resubmitting.",
+        parameters: PlanInputSchema,
+        skipPermission: true,
+        handler: async (args: unknown) => {
+          const result = validatePlan(args);
+          if (!result.ok) {
+            this.#activity(run.wo, station.id, `Plan rejected: ${result.problems.length} problem${result.problems.length === 1 ? "" : "s"} to fix`, "warning");
+            return `Rejected. Fix these problems and call submit_plan again:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`;
+          }
+          capture.plan = result.value;
+          return `Accepted: ${result.value.tasks.length} task(s). Builders are starting now.`;
+        },
+      });
+      const active = await this.#openSharedSession(run, station, { tools: [submitPlan] }, capture);
+      await this.#turn(run, station, active, planPrompt(run.wo), "work", 1);
+      if (!capture.plan) await this.#turn(run, station, active, planRetryPrompt(), "nudge", 1);
+      const plan = capture.plan;
+      if (!plan) throw new StationError("plan_missing", "The planner didn't submit a plan.");
+      const tasks = topologicalOrder(plan.tasks);
+      run.wo.plan = plan;
+      run.wo.taskCount = plan.tasks.length;
+      run.wo.stations = [
+        station,
+        ...tasks.flatMap((task) => [this.#newStation("build", task), this.#newStation("review", task)]),
+        this.#station(run, "release"),
+      ];
+      this.#updateStation(run, station, { status: "done", detail: `${plan.tasks.length} task${plan.tasks.length === 1 ? "" : "s"} planned`, finishedAt: now() });
+      this.#activity(run.wo, station.id, `Plan accepted: ${plan.tasks.map((task) => task.title).join(" · ")}`, "success");
+      await this.#closeSession(run, station.id);
+    } catch (error) {
+      this.#failStation(run, station, error);
+      throw error;
+    }
+  }
+
+  // ─── Build and review ───────────────────────────────────────────────────────────────────────────────────────
+
+  async #buildAll(run: Run): Promise<void> {
+    const plan = run.wo.plan!;
+    const byId = new Map(plan.tasks.map((task) => [task.id, task]));
+    const running = new Map<string, Promise<void>>();
+    const runTask = (task: PlanTask): Promise<void> => {
+      const existing = running.get(task.id);
+      if (existing) return existing;
+      const promise = (async () => {
+        if (task.dependsOn.length > 0) {
+          const build = this.#station(run, `build:${task.id}`);
+          if (build.status === "waiting") {
+            const names = task.dependsOn.map((dep) => byId.get(dep)?.title ?? dep).join(", ");
+            this.#updateStation(run, build, { detail: `Waiting for ${names}` });
+          }
+        }
+        const settled = await Promise.allSettled(task.dependsOn.map((dep) => runTask(byId.get(dep)!)));
+        if (settled.some((result) => result.status === "rejected")) {
+          for (const id of [`build:${task.id}`, `review:${task.id}`]) {
+            const station = this.#station(run, id);
+            if (!TERMINAL_STATION_STATUSES.includes(station.status)) this.#updateStation(run, station, { status: "skipped", detail: "Skipped: a dependency failed" });
+          }
+          throw new StationError("dependency_failed", `Task "${task.id}" was skipped because a task it depends on failed.`);
+        }
+        await this.#buildTask(run, task);
+      })();
+      running.set(task.id, promise);
+      return promise;
+    };
+    const results = await Promise.allSettled(plan.tasks.map(runTask));
+    if (run.abort.signal.aborted) throw new CancelledError();
+    const failures = results.flatMap((result) => (result.status === "rejected" ? [result.reason as unknown] : []));
+    if (failures.length > 0) {
+      const primary = failures.find((reason) => !(reason instanceof StationError && reason.code === "dependency_failed")) ?? failures[0];
+      throw primary;
+    }
+  }
+
+  #dependencyFiles(run: Run, task: PlanTask): Map<string, string> {
+    const files = new Map<string, string>();
+    for (const dep of task.dependsOn) for (const [path, content] of this.#taskFiles(run, dep)) files.set(path, content);
+    return files;
+  }
+
+  /** A task's newest published files (`outputs/files/**`), keyed by project path. */
+  #taskFiles(run: Run, taskId: string): Map<string, string> {
+    const files = new Map<string, string>();
+    for (const artifact of this.#store.latestArtifacts(run.wo.id, `build:${taskId}`)) {
+      if (artifact.path.startsWith("files/") && artifact.content !== undefined) files.set(artifact.path.slice("files/".length), artifact.content);
+    }
+    return files;
+  }
+
+  async #buildTask(run: Run, task: PlanTask): Promise<void> {
+    const build = this.#station(run, `build:${task.id}`);
+    const review = this.#station(run, `review:${task.id}`);
+    if (review.status === "done") return;
+    let current = build;
+    if (build.status === "waiting") this.#updateStation(run, build, { detail: "Queued for a sandbox" });
+    const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
+    try {
+      const dependencyFiles = this.#dependencyFiles(run, task);
+      const active = await this.#openSandboxSession(run, build, () => builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot));
+      if (!build.turn) await this.#turn(run, build, active, buildPrompt(run.wo, task, [...dependencyFiles.keys()]), "work", 1);
+      else if (!build.turn.completedAt) await this.#awaitTurn(run, build, active);
+
+      let nudges = 0;
+      for (;;) {
+        current = build;
+        const outcome = await this.#collect(run, build, false);
+        if (!outcome.passed) {
+          if (nudges >= MAX_NUDGES) throw new StationError(outcome.code, `The builder couldn't get the factory check to pass: ${outcome.problem}`);
+          nudges++;
+          this.#activity(run.wo, build.id, `Check failed: ${outcome.problem}. Asking the builder to fix it.`, "warning");
+          await this.#turn(run, build, active, checkFailedPrompt(outcome.problem, outcome.report, false), "nudge", build.round);
+          continue;
+        }
+        this.#updateStation(run, build, { status: "done", detail: `${outcome.report!.summary.passed} tests passed · in review`, finishedAt: now() });
+
+        current = review;
+        const verdict = await this.#reviewRound(run, task, build, outcome.report, active.mapper.lastMessage);
+        if (verdict.verdict === "approve") {
+          this.#updateStation(run, review, { status: "done", detail: `Approved in round ${build.round}`, finishedAt: now() });
+          this.#updateStation(run, build, { detail: `${outcome.report!.summary.passed} tests passed` });
+          return;
+        }
+        if (build.round >= run.wo.maxReviewRounds) {
+          this.#updateStation(run, review, {
+            status: "done",
+            acceptedWithFindings: true,
+            detail: `Accepted after ${build.round} rounds with findings open`,
+            finishedAt: now(),
+          });
+          this.#updateStation(run, build, { detail: `${outcome.report!.summary.passed} tests passed` });
+          this.#activity(run.wo, review.id, "Maximum review rounds reached: accepting the task and passing open findings to the release notes", "warning");
+          return;
+        }
+        nudges = 0;
+        current = build;
+        this.#updateStation(run, build, { finishedAt: undefined });
+        await this.#turn(run, build, active, fixPrompt(build.round + 1, run.wo.maxReviewRounds, verdict.findings, verdict.summary), "fix", build.round + 1);
+      }
+    } catch (error) {
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted) this.#failStation(run, current, error);
+      throw error;
+    } finally {
+      releaseSlot();
+    }
+  }
+
+  async #reviewRound(run: Run, task: PlanTask, build: MStation, report: TestReport | undefined, builderSummary: string | undefined): Promise<ValidReview> {
+    const review = this.#station(run, `review:${task.id}`);
+    const round = build.round;
+    const existing = review.reviews?.find((record) => record.round === round);
+    if (existing) return existing;
+    let active = run.sessions.get(review.id);
+    const capture: Capture = active?.capture ?? {};
+    if (!active) {
+      const submitReview = defineTool("submit_review", {
+        description: "Submit your review verdict for the task. Returns 'Recorded' or the problems to fix before resubmitting.",
+        parameters: ReviewInputSchema,
+        skipPermission: true,
+        handler: async (args: unknown) => {
+          const result = validateReview(args);
+          if (!result.ok) return `Rejected. Fix these problems and call submit_review again:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`;
+          capture.review = result.value;
+          return `Recorded: ${result.value.verdict === "approve" ? "approved" : "changes requested"}.`;
+        },
+      });
+      active = await this.#openSharedSession(run, review, { tools: [submitReview] }, capture);
+    }
+    delete capture.review;
+    const captured = (): ValidReview | undefined => capture.review;
+    const files = [...this.#taskFiles(run, task.id)]
+      .map(([path, content]) => ({ path, content }))
+      .sort((a, b) => Number(/\.(test|spec)\./.test(a.path)) - Number(/\.(test|spec)\./.test(b.path)) || a.path.localeCompare(b.path));
+    const previous = review.reviews?.at(-1)?.findings;
+    this.#updateStation(run, review, { round, detail: `Reviewing round ${round}` });
+    await this.#turn(run, review, active, reviewPrompt(task, round, run.wo.maxReviewRounds, { files, report, builderSummary }, previous), "review", round);
+    if (!captured()) await this.#turn(run, review, active, reviewRetryPrompt(), "nudge", round);
+    const verdict = captured();
+    if (!verdict) throw new StationError("review_missing", "The reviewer didn't submit a verdict.");
+    const record: ReviewRecord = { round, verdict: verdict.verdict, summary: verdict.summary, findings: verdict.findings, at: now() };
+    this.#updateStation(run, review, { reviews: [...(review.reviews ?? []), record] });
+    const blocking = verdict.findings.filter((finding) => finding.severity !== "minor").length;
+    this.#emitItem(run.wo, {
+      id: `${review.id}:review:${round}`,
+      stationId: review.id,
+      kind: "review",
+      review: { round, verdict: verdict.verdict, findings: verdict.findings.length },
+      text: verdict.summary,
+      level: verdict.verdict === "approve" ? "success" : "warning",
+    });
+    if (verdict.verdict === "request_changes") {
+      this.#updateStation(run, review, { status: "changes_requested", detail: `${blocking} finding${blocking === 1 ? "" : "s"} sent back to the builder` });
+      this.#activity(run.wo, build.id, `Reviewer requested changes: ${blocking} finding${blocking === 1 ? "" : "s"} to fix`, "warning");
+    }
+    return verdict;
+  }
+
+  // ─── Release ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  async #release(run: Run): Promise<void> {
+    const station = this.#station(run, "release");
+    if (station.status === "done" && run.wo.release) return;
+    const plan = run.wo.plan!;
+    const outcomes: TaskOutcome[] = plan.tasks.map((task) => {
+      const review = this.#station(run, `review:${task.id}`);
+      return { task, reviews: review.reviews ?? [], acceptedWithFindings: Boolean(review.acceptedWithFindings), files: this.#taskFiles(run, task.id) };
+    });
+    const seed = releaseSeed(run.wo, plan, outcomes, this.#skillsRoot);
+    this.#updateStation(run, station, { detail: "Queued for a sandbox" });
+    const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
+    try {
+      const active = await this.#openSandboxSession(run, station, () => [...seed.files]);
+      if (!station.turn) await this.#turn(run, station, active, releasePrompt(run.wo, plan, seed.conflicts), "work", 1);
+      else if (!station.turn.completedAt) await this.#awaitTurn(run, station, active);
+      let nudges = 0;
+      for (;;) {
+        const outcome = await this.#collect(run, station, true);
+        const latest = this.#store.latestArtifacts(run.wo.id, station.id);
+        const notes = latest.find((artifact) => artifact.path === "RELEASE.md")?.content;
+        const problem = !outcome.passed ? outcome.problem : notes ? undefined : "outputs/RELEASE.md is missing";
+        if (problem) {
+          if (nudges >= MAX_NUDGES) throw new StationError(outcome.passed ? "release_incomplete" : outcome.code, `The release couldn't be completed: ${problem}`);
+          nudges++;
+          this.#activity(run.wo, station.id, `Release check failed: ${problem}. Asking the release agent to fix it.`, "warning");
+          await this.#turn(run, station, active, checkFailedPrompt(problem, outcome.report, true), "nudge", station.round);
+          continue;
+        }
+        const manifest = outcome.manifest!;
+        const patch = latest.find((artifact) => artifact.path === "project.patch");
+        const release: ReleaseSummary = {
+          files: manifest.files.length,
+          bytes: manifest.files.reduce((total, file) => total + file.size, 0),
+          tests: summaryOf(outcome.report!),
+          ...(patch ? { patchBytes: patch.size } : {}),
+          ...(notes ? { notes } : {}),
+        };
+        run.wo.release = release;
+        this.#updateStation(run, station, { status: "done", detail: `Release ready · ${release.tests!.passed} tests passed`, finishedAt: now() });
+        this.#activity(run.wo, station.id, `Release ready: ${release.files} files, ${release.tests!.passed} tests passed`, "success");
+        return;
+      }
+    } catch (error) {
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted) this.#failStation(run, station, error);
+      throw error;
+    } finally {
+      releaseSlot();
+    }
+  }
+
+  // ─── Sessions and turns ─────────────────────────────────────────────────────────────────────────────────────
+
+  get #skillsRoot(): string {
+    return this.#options.skillsRoot ?? DEFAULT_SKILLS_ROOT;
+  }
+
+  #sessionConfig(run: Run, station: MStation, mapper: StationActivityMapper, extra: Partial<SessionConfig>): SessionConfig {
+    return {
+      agent: station.agent,
+      ...(station.model ? { model: station.model } : {}),
+      streaming: true,
+      onPermissionRequest: factoryPermissions(station.placement, (kind) => mapper.status(`Denied a "${kind}" request`, "warning")),
+      onEvent: (event) => mapper.handle(event),
+      ...extra,
+    };
+  }
+
+  #newMapper(run: Run, station: MStation): StationActivityMapper {
+    return new StationActivityMapper(run.wo.id, station.id, {
+      item: (item) => this.#onItem(run, station, item),
+      delta: (messageId, text) => this.#options.hub.publish({ type: "delta", workOrderId: run.wo.id, stationId: station.id, messageId, text }),
+      tests: (tests) => this.#updateStation(run, station, { tests, detail: tests.failed > 0 ? `${tests.failed} of ${tests.total} tests failing` : `${tests.passed} tests passed` }),
+      usage: (usage) => {
+        station.usage = usage;
+        this.#scheduleUsageSave(run);
+      },
+    }, station.usage);
+  }
+
+  /** Office stations get a fresh shared session (cheap); earlier sessions are kept for history. */
+  async #openSharedSession(run: Run, station: MStation, extra: Partial<SessionConfig>, capture: Capture): Promise<ActiveSession> {
+    this.#throwIfCancelled(run);
+    if (station.sessionId) station.previousSessionIds = [...(station.previousSessionIds ?? []), station.sessionId];
+    this.#updateStation(run, station, {
+      status: "starting",
+      detail: "Opening a session",
+      startedAt: station.startedAt ?? now(),
+      model: this.#platform.models[station.role],
+      sessionId: undefined,
+      turn: undefined,
+    });
+    const mapper = this.#newMapper(run, station);
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, extra));
+    const active: ActiveSession = { session, mapper, capture };
+    run.sessions.set(station.id, active);
+    this.#updateStation(run, station, { sessionId: session.sessionId });
+    mapper.status(`Session ${session.sessionId} opened on ${station.environment} (shared, no sandbox) with ${station.model}`);
+    return active;
+  }
+
+  /** Sandbox stations resume their existing session when they have one, so a restart or retry keeps the workspace. */
+  async #openSandboxSession(run: Run, station: MStation, seed: () => SeedFile[]): Promise<ActiveSession> {
+    this.#throwIfCancelled(run);
+    const existing = run.sessions.get(station.id);
+    if (existing) return existing;
+    if (station.sessionId) {
+      const mapper = this.#newMapper(run, station);
+      try {
+        this.#updateStation(run, station, { status: "starting", detail: "Reattaching to the sandbox" });
+        const session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}));
+        const active: ActiveSession = { session, mapper, capture: {} };
+        run.sessions.set(station.id, active);
+        await this.#refreshSandbox(run, station);
+        mapper.status(`Reattached to session ${session.sessionId}`);
+        return active;
+      } catch (error) {
+        if (run.abort.signal.aborted) throw new CancelledError();
+        mapper.status(`Couldn't reattach to session ${station.sessionId} (${toFactoryError(error).message}); starting a fresh sandbox`, "warning");
+        station.previousSessionIds = [...(station.previousSessionIds ?? []), station.sessionId];
+        this.#updateStation(run, station, { sessionId: undefined, turn: undefined, round: 0, sandbox: undefined });
+      }
+    }
+    this.#updateStation(run, station, {
+      status: "starting",
+      detail: "Provisioning a sandbox",
+      startedAt: station.startedAt ?? now(),
+      model: this.#platform.models[station.role],
+    });
+    const mapper = this.#newMapper(run, station);
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}));
+    const active: ActiveSession = { session, mapper, capture: {} };
+    run.sessions.set(station.id, active);
+    this.#updateStation(run, station, { sessionId: session.sessionId });
+    await this.#refreshSandbox(run, station);
+    const sandbox = station.sandbox;
+    mapper.status(
+      sandbox
+        ? `Sandbox ${sandbox.id} ready: ${sandbox.size} (${SANDBOX_SIZES[sandbox.size].cpus} vCPU · ${SANDBOX_SIZES[sandbox.size].memoryGiB} GiB), ${describeNetwork(sandbox.network)}`
+        : `Session ${session.sessionId} ready on ${station.environment}`,
+    );
+    this.#updateStation(run, station, { detail: "Seeding the workspace" });
+    const files = seed();
+    const writer = this.#platform.files(session.sessionId);
+    for (const file of files) await writer.write(file.path, file.content);
+    mapper.status(`Seeded ${files.length} files: ${files.map((file) => file.path).filter((path) => !path.startsWith(".factory/conflicts/")).slice(0, 8).join(", ")}${files.length > 8 ? ", …" : ""}`);
+    return active;
+  }
+
+  async #refreshSandbox(run: Run, station: MStation): Promise<void> {
+    if (!station.sessionId) return;
+    try {
+      const info = await this.#platform.sessionInfo(station.sessionId);
+      if (info.sandbox) {
+        const sandbox: SandboxView = {
+          id: info.sandbox.id,
+          size: info.sandbox.size,
+          state: info.sandbox.state,
+          ...(info.sandbox.image ? { image: info.sandbox.image } : {}),
+          network: networkView(info.sandbox.network),
+          ...(info.sandbox.startedAt ? { startedAt: info.sandbox.startedAt } : {}),
+        };
+        this.#updateStation(run, station, { sandbox });
+      }
+    } catch (error) {
+      log.debug("Sandbox details unavailable", { station: station.id, error: (error as Error).message });
+    }
+  }
+
+  async #closeSession(run: Run, stationId: string): Promise<void> {
+    const active = run.sessions.get(stationId);
+    if (!active) return;
+    run.sessions.delete(stationId);
+    active.mapper.close();
+    await active.session.disconnect().catch(() => undefined);
+  }
+
+  async #turn(run: Run, station: MStation, active: ActiveSession, prompt: string, kind: NonNullable<Station["turn"]>["kind"], round: number): Promise<void> {
+    this.#throwIfCancelled(run);
+    const detail = { work: "Working", fix: `Fixing review findings (round ${round})`, nudge: "Fixing the factory check", review: `Reviewing round ${round}` }[kind];
+    this.#updateStation(run, station, {
+      status: "working",
+      detail,
+      round,
+      turn: { kind, round, sentAt: now() },
+      startedAt: station.startedAt ?? now(),
+    });
+    const timeoutMs = this.#options.config.turnTimeoutMs[station.role];
+    try {
+      await active.session.sendAndWait({ prompt }, timeoutMs);
+    } catch (error) {
+      if (run.abort.signal.aborted) throw new CancelledError();
+      if (/timeout|timed out/i.test((error as Error).message ?? "")) {
+        await active.session.abort().catch(() => undefined);
+        throw new StationError("timeout", `The ${station.agent} agent didn't finish within ${Math.round(timeoutMs / 60_000)} minutes.`);
+      }
+      throw error;
+    }
+    this.#throwIfCancelled(run);
+    this.#updateStation(run, station, { turn: { ...station.turn!, completedAt: now() } });
+  }
+
+  /** Waits for a turn that was already running when the factory restarted. */
+  async #awaitTurn(run: Run, station: MStation, active: ActiveSession): Promise<void> {
+    this.#updateStation(run, station, { status: "working", detail: "Resuming the in-flight turn" });
+    const deadline = Date.now() + this.#options.config.turnTimeoutMs[station.role];
+    const pollMs = this.#options.pollMs ?? 3_000;
+    let idle = false;
+    const stopListening = active.session.on((event) => {
+      if (event.type === "session.idle") idle = true;
+    });
+    try {
+      while (!idle) {
+        this.#throwIfCancelled(run);
+        const info = await this.#platform.sessionInfo(active.session.sessionId);
+        if (!info.lastTurn || info.lastTurn.status !== "running") break;
+        if (Date.now() > deadline) throw new StationError("timeout", `The ${station.agent} agent didn't finish its turn in time.`);
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+      }
+    } finally {
+      stopListening();
+    }
+    this.#updateStation(run, station, { turn: { ...station.turn!, completedAt: now() } });
+  }
+
+  // ─── Artifacts and checks ───────────────────────────────────────────────────────────────────────────────────
+
+  async #collect(run: Run, station: MStation, release: boolean): Promise<CheckOutcome> {
+    this.#updateStation(run, station, { status: "collecting", detail: "Collecting artifacts" });
+    await this.#capturePublication(run, station);
+    void this.#refreshSandbox(run, station);
+    const latest = this.#store.latestArtifacts(run.wo.id, station.id);
+    const reportArtifact = latest.find((artifact) => artifact.path === "test-report.json");
+    const report = parseJson<TestReport>(reportArtifact?.content);
+    const manifest = parseJson<OutputManifest>(latest.find((artifact) => artifact.path === "manifest.json")?.content);
+    const previousVersion = run.reportVersions.get(station.id);
+    if (reportArtifact) run.reportVersions.set(station.id, reportArtifact.version);
+    if (report) this.#updateStation(run, station, { tests: summaryOf(report, reportArtifact?.publishedAt) });
+    const check = release ? "npm run check:release" : "npm run check";
+    const fail = (code: string, problem: string): CheckOutcome => ({ passed: false, code, problem, ...(report ? { report } : {}), ...(manifest ? { manifest } : {}) });
+    if (!report) return fail("no_test_report", `no test report was published (run \`${check}\`)`);
+    if (previousVersion !== undefined && reportArtifact!.version === previousVersion) return fail("check_not_run", `\`${check}\` wasn't run after the latest changes`);
+    if (report.summary.total === 0) return fail("no_tests", "no tests ran (name test files like test/<name>.test.js)");
+    if (report.summary.failed > 0) return fail("tests_failed", `${report.summary.failed} of ${report.summary.total} tests failed`);
+    if (report.exitCode !== 0) return fail("tests_failed", `the test run exited with status ${report.exitCode}`);
+    if (!manifest || manifest.files.length === 0) return fail("nothing_published", `no files were published (run \`${check}\`)`);
+    return { passed: true, code: "ok", problem: "", report, manifest };
+  }
+
+  async #capturePublication(run: Run, station: MStation): Promise<void> {
+    const sessionId = station.sessionId!;
+    const artifacts = this.#platform.artifacts(sessionId);
+    const publication = await artifacts.waitForPublication({ timeoutMs: this.#options.config.publicationTimeoutMs });
+    if (publication.state === "failed") throw new StationError("publication_failed", publication.error ?? "The platform couldn't publish this turn's artifacts.");
+    const list = await artifacts.list({ versions: "latest" });
+    let added = 0;
+    for (const info of list) {
+      if (info.state !== "published" || this.#store.hasArtifact(run.wo.id, station.id, info.path, info.version)) continue;
+      let content: string | undefined;
+      if (isTextPath(info.path) && info.size <= MAX_TEXT_BYTES) {
+        try {
+          const text = await artifacts.read(info.path, { version: info.version });
+          content = text.includes("\u0000") ? undefined : text;
+        } catch (error) {
+          log.warn("Couldn't read artifact", { station: station.id, path: info.path, error: (error as Error).message });
+        }
+      }
+      this.#store.putArtifact({
+        workOrderId: run.wo.id,
+        stationId: station.id,
+        path: info.path,
+        version: info.version,
+        round: station.round,
+        size: info.size,
+        digest: info.digest,
+        contentType: info.contentType ?? contentTypeFor(info.path),
+        publishedAt: info.publishedAt ?? now(),
+        ...(content !== undefined ? { content } : {}),
+      });
+      added++;
+    }
+    if (added > 0) {
+      this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
+      this.#emitItem(run.wo, { stationId: station.id, kind: "artifact", text: `Published ${added} file${added === 1 ? "" : "s"}`, level: "info" });
+    }
+  }
+
+  // ─── State helpers ──────────────────────────────────────────────────────────────────────────────────────────
+
+  #newStation(kind: StationKind, task?: PlanTask): MStation {
+    const role = ROLE_FOR_KIND[kind];
+    const title = { plan: "Plan", build: `Build · ${task?.title ?? ""}`, review: `Review · ${task?.title ?? ""}`, release: "Release" }[kind];
+    const detail = { plan: "Queued", build: "Queued", review: "Waits for the build", release: "Waits for every task" }[kind];
+    return {
+      id: task ? `${kind}:${task.id}` : kind,
+      kind,
+      title,
+      ...(task ? { taskId: task.id } : {}),
+      status: "waiting",
+      detail,
+      role,
+      environment: FACTORY_ENVIRONMENTS[role],
+      placement: role === "planner" || role === "reviewer" ? "shared" : "sandbox",
+      agent: ROLE_AGENTS[role],
+      model: this.#platform.models[role],
+      round: 0,
+    };
+  }
+
+  #station(run: Run, id: string): MStation {
+    const station = run.wo.stations.find((candidate) => candidate.id === id);
+    if (!station) throw new StationError("internal", `Unknown station ${id}`);
+    return station;
+  }
+
+  #throwIfCancelled(run: Run): void {
+    if (run.abort.signal.aborted) throw new CancelledError();
+  }
+
+  #failStation(run: Run, station: MStation, error: unknown): void {
+    const failure: FactoryError = toFactoryError(error);
+    this.#updateStation(run, station, { status: "failed", error: failure, detail: failure.message, finishedAt: now() });
+    this.#emitItem(run.wo, { stationId: station.id, kind: "error", text: failure.message, level: "error" });
+  }
+
+  #updateStation(run: Run, station: MStation, patch: Partial<MStation>): void {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete (station as Record<string, unknown>)[key];
+      else (station as Record<string, unknown>)[key] = value;
+    }
+    this.#persist(run.wo);
+  }
+
+  #setWorkOrder(run: Run, patch: Partial<MWorkOrder>): void {
+    Object.assign(run.wo, patch);
+    this.#persist(run.wo);
+  }
+
+  #persist(wo: MWorkOrder): void {
+    wo.updatedAt = now();
+    const releaseTests = wo.release?.tests;
+    const buildTests = wo.stations.filter((station) => station.kind === "build" && station.tests).map((station) => station.tests!);
+    const tests: TestSummary | undefined =
+      releaseTests ??
+      (buildTests.length > 0
+        ? buildTests.reduce((sum, item) => ({
+            total: sum.total + item.total,
+            passed: sum.passed + item.passed,
+            failed: sum.failed + item.failed,
+            skipped: sum.skipped + item.skipped,
+            at: item.at > sum.at ? item.at : sum.at,
+          }))
+        : undefined);
+    if (tests) wo.tests = tests;
+    this.#store.saveWorkOrder(wo);
+    this.#options.hub.publish({ type: "workOrder", workOrder: wo });
+  }
+
+  #scheduleUsageSave(run: Run): void {
+    if (this.#usageTimers.has(run.wo.id)) return;
+    const timer = setTimeout(() => {
+      this.#usageTimers.delete(run.wo.id);
+      this.#persist(run.wo);
+    }, 1_500);
+    timer.unref();
+    this.#usageTimers.set(run.wo.id, timer);
+  }
+
+  #onItem(run: Run, station: MStation, item: ActivityItem): void {
+    this.#store.upsertActivity(item);
+    this.#options.hub.publish({ type: "activity", item });
+    if (station.status !== "working") return;
+    if (item.kind === "intent" && item.text) this.#updateStation(run, station, { detail: item.text });
+    else if (item.kind === "tool" && item.tool?.status === "running" && /npm run check|check\.mjs/.test(item.tool.summary)) {
+      this.#updateStation(run, station, { detail: "Running the factory check" });
+    }
+  }
+
+  #emitItem(wo: Pick<WorkOrder, "id">, partial: Omit<ActivityItem, "id" | "workOrderId" | "at"> & { id?: string }): void {
+    const item: ActivityItem = { ...partial, id: partial.id ?? `${partial.stationId}:${randomUUID()}`, workOrderId: wo.id, at: now() };
+    this.#store.upsertActivity(item);
+    this.#options.hub.publish({ type: "activity", item });
+  }
+
+  #activity(wo: Pick<WorkOrder, "id">, stationId: string, text: string, level: ActivityItem["level"]): void {
+    this.#emitItem(wo, { stationId, kind: "status", text, level });
+  }
+}
+
+export function toSummary(wo: WorkOrder): WorkOrderSummary {
+  return {
+    id: wo.id,
+    number: wo.number,
+    title: wo.title,
+    status: wo.status,
+    createdAt: wo.createdAt,
+    updatedAt: wo.updatedAt,
+    ...(wo.startedAt ? { startedAt: wo.startedAt } : {}),
+    ...(wo.completedAt ? { completedAt: wo.completedAt } : {}),
+    taskCount: wo.taskCount,
+    ...(wo.tests ? { tests: wo.tests } : {}),
+    ...(wo.error ? { error: wo.error } : {}),
+  };
+}
