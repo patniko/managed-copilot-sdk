@@ -484,7 +484,7 @@ export class SessionManager implements SessionsService {
       this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared);
       try {
-        result = await upstream.request("session.resume", forwarded);
+        result = await this.#resumeUpstream(live, upstream, forwarded);
         await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
         this.#detach(live, peer.id);
@@ -506,15 +506,20 @@ export class SessionManager implements SessionsService {
     }
     this.#persist(sessionId, (stored) => {
       const params = storedParams(admitted.params);
-      // A resume without `agent` keeps the session's current agent.
-      if (params["agent"] === undefined && typeof stored.params["agent"] === "string") params["agent"] = stored.params["agent"];
+      // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
+      const kept = stored.params["agent"];
+      if (params["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, params)) params["agent"] = kept;
       return {
         params,
         ...(stored.tools ? { tools: stored.tools } : {}),
         optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
       };
     });
-    this.#ledger.update(sessionId, { state: record.state === "failed" || record.state === "stopped" ? "ready" : record.state, ...(admitted.model ? { model: admitted.model } : {}) });
+    this.#ledger.update(sessionId, {
+      state: record.state === "failed" || record.state === "stopped" ? "ready" : record.state,
+      ...(admitted.model ? { model: admitted.model } : {}),
+      ...(admitted.agent ? { agent: admitted.agent } : {}),
+    });
     return { result: this.#scrub(live, this.#sanitizeResponse(live, result)), after: () => this.#afterAttach(peer, sessionId) };
   }
 
@@ -935,7 +940,7 @@ export class SessionManager implements SessionsService {
         ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
       });
       try {
-        await upstream.request("session.resume", prepared);
+        await this.#resumeUpstream(live, upstream, prepared);
         await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
@@ -964,6 +969,21 @@ export class SessionManager implements SessionsService {
     live.upstream = upstream;
     if (handle.initialize) await handle.initialize((method, params) => upstream.request(method, params));
     return upstream;
+  }
+
+  /**
+   * Resumes the session on `upstream`. The stock runtime persists a session with its first turn, so a session that
+   * never ran one is unknown to a restarted runtime (shared runtime restart, sandbox idle stop): it is created again
+   * with the same ID and configuration. A session whose history the runtime lost still fails.
+   */
+  async #resumeUpstream(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>): Promise<unknown> {
+    try {
+      return await upstream.request("session.resume", params);
+    } catch (error) {
+      if (!(error instanceof RpcError) || !UNKNOWN_SESSION.test(error.message) || this.get(live.id)?.lastTurn) throw error;
+      this.#log.info("The runtime has no state for a session that never ran a turn; creating it again", { sessionId: live.id });
+      return upstream.request("session.create", params);
+    }
   }
 
   async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -1345,6 +1365,16 @@ export class SessionManager implements SessionsService {
   }
 }
 
+/** How the stock runtime reports a session it has no persisted state for. */
+const UNKNOWN_SESSION = /session not found|failed to load session events/i;
+
+/** Whether an agent name resolves in a session's configuration: deployed with its environment, or declared inline. */
+function agentResolves(environment: ResolvedEnvironment, name: string, params: Record<string, unknown>): boolean {
+  if (environment.customizations?.agents.some((agent) => agent.name === name)) return true;
+  const inline = params["customAgents"];
+  return Array.isArray(inline) && inline.some((agent) => agent && typeof agent === "object" && (agent as { name?: unknown }).name === name);
+}
+
 /** Whether stored admitted params include remote MCP servers (top-level or in custom agents). */
 function hasRemoteMcp(params: Record<string, unknown> | undefined): boolean {
   if (!params) return false;
@@ -1365,7 +1395,8 @@ function escapeRegExp(value: string): string {
  */
 export function pathScrubber(dataDir: string): (value: unknown) => unknown {
   const separators = String.raw`[\\/]+`;
-  const segment = String.raw`[^\\/\s"'\`]+`;
+  // Session IDs, environment names, and bundle digests: identifier characters only, so punctuation after a path stays.
+  const segment = String.raw`[A-Za-z0-9_-]+`;
   // The rest of the path (segments without spaces), rewritten with POSIX separators.
   const tail = String.raw`((?:[\\/]+[^\\/\s"'\`]+)*)`;
   const flags = process.platform === "win32" ? "gi" : "g";

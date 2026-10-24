@@ -1,8 +1,10 @@
 /**
- * SQLite schema for the durable module. Append new migrations; never edit one that has shipped.
+ * SQLite schema for the durable module. Append new migrations; never edit one that has shipped in a release.
  * Times are epoch milliseconds.
  */
 import type { Database } from "../../db.js";
+
+const NOW_MS = "CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)";
 
 /** Brings data directories from pre-release branch builds (which predate `notified_at`) up to the shipped schema. */
 export function upgradeDurableSchema(db: Database): void {
@@ -144,6 +146,21 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
     last_verified_at INTEGER
   );`,
 
-  // 5: a runtime message belongs to at most one run (schedule input reconciliation claims it atomically).
-  `CREATE UNIQUE INDEX durable_schedule_runs_message ON durable_schedule_runs (session_id, message_id) WHERE message_id IS NOT NULL;`,
+  // 5: a runtime message belongs to at most one run (schedule input reconciliation claims it atomically). Ledgers
+  // written before this rule may hold duplicates: every run after the first loses the assignment (named in its
+  // reason, for audit), and one still in progress ends as needs_reconciliation rather than ever running again.
+  // (The repair step joined this migration before any release; wherever the index alone applied, it was a no-op.)
+  `UPDATE durable_schedule_runs
+      SET reason = 'Runtime message ' || message_id || ' was also attributed to an earlier run of this session' || COALESCE('; ' || reason, ''),
+          status = CASE WHEN status IN ('queued', 'running', 'waiting') THEN 'needs_reconciliation' ELSE status END,
+          completed_at = CASE WHEN status IN ('queued', 'running', 'waiting') THEN ${NOW_MS} ELSE completed_at END,
+          updated_at = ${NOW_MS},
+          message_id = NULL
+    WHERE message_id IS NOT NULL
+      AND EXISTS (
+        SELECT 1 FROM durable_schedule_runs AS earlier
+         WHERE earlier.session_id = durable_schedule_runs.session_id
+           AND earlier.message_id = durable_schedule_runs.message_id
+           AND earlier.rowid < durable_schedule_runs.rowid);
+  CREATE UNIQUE INDEX durable_schedule_runs_message ON durable_schedule_runs (session_id, message_id) WHERE message_id IS NOT NULL;`,
 ];

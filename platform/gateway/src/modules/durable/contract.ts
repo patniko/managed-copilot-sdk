@@ -44,8 +44,12 @@
  *   (permission), or `cancel` (elicitation) — never an approval. Late results are `conflict`.
  * - `cancelled`: the runtime stopped waiting (completion event without a recorded answer, aborted turn, or
  *   reconciliation against the runtime's pending lists). Late results are `conflict`.
- * - Placement generations: an action belongs to the generation whose runtime asked. An answer recorded after the
- *   session moved to a newer generation stays recorded but is not delivered (reason says why).
+ * - Placement generations: an action belongs to the generation whose runtime asked. On promotion
+ *   (`onGenerationChanged`), actions whose request the new placement still awaits (`carried`) and gateway-executed
+ *   platform tools keep their claims and move; every other claim from an older generation is void, so late results
+ *   from it are `conflict` (tools become `needs_reconciliation`, prompts are offered again). A recorded answer is
+ *   delivered to the session's current placement only if that runtime still waits for exactly that request (it was
+ *   carried, or the runtime asks again); otherwise it stays recorded but undelivered (reason says why).
  * - Identity: `idempotencyKey` is `${sessionId}:${toolCallId}` for tools, identical across live callbacks, webhooks,
  *   polling, resume, and restarts.
  */
@@ -220,8 +224,22 @@ export interface ActionRouterHooks {
   releaseLiveClaim(actionId: string, claimToken: string): void;
   /** The session was deleted: its open actions are cancelled and nothing more is delivered for it. */
   onSessionDeleted?(sessionId: string): void;
-  /** The session moved to a new placement generation (promotion): fences actions owned under older generations. */
-  onGenerationChanged?(sessionId: string, generation: number): void;
+  /**
+   * The session moved to a new placement generation (promotion). Call it right after the generation is committed;
+   * it is idempotent (actions already at `generation` or newer are untouched), so the `session.promoted` event that
+   * follows a direct call changes nothing. Waiting actions move; carried actions and gateway-executed platform tools
+   * keep their claims; other claims from older generations are fenced.
+   */
+  onGenerationChanged?(sessionId: string, generation: number, options?: GenerationChangeOptions): void;
+}
+
+export interface GenerationChangeOptions {
+  /**
+   * Runtime request IDs the new placement still awaits (resumed with `continuePendingWork`, which keeps request
+   * IDs). Their actions keep state, claim token, and claim sequence, and their answers (including ones recorded but
+   * not yet delivered) go to the new placement.
+   */
+  readonly carried?: readonly string[];
 }
 
 export interface ActionRecordSummary {

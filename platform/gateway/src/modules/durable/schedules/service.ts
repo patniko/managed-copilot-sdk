@@ -372,7 +372,8 @@ export class DurableSchedules implements SchedulesService {
 
   pause(ownerId: number, scheduleId: string, reason?: string): ScheduleInfo {
     const row = this.#owned(ownerId, scheduleId);
-    this.#store.updateSchedule(row.id, { state: "paused", paused_reason: reason ?? null }, this.#now());
+    // Pausing again never clears a platform pause's reason: that reason blocks every run until the owner resumes.
+    if (row.state !== "paused") this.#store.updateSchedule(row.id, { state: "paused", paused_reason: reason ?? null }, this.#now());
     this.#log.info("Schedule paused", { scheduleId, reason });
     return this.#info(this.#store.schedule(row.id)!);
   }
@@ -427,9 +428,12 @@ export class DurableSchedules implements SchedulesService {
     return toScheduleRun(this.#store.runByOccurrence(occurrenceId)!);
   }
 
+  /** Platform pauses also take over a person's pause (its null reason would let manual runs through). */
   pauseAllForOwner(ownerId: number, reason: string): number {
     const result = this.#deps.db
-      .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND state = 'active' AND deleted_at IS NULL")
+      .prepare(
+        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL",
+      )
       .run(reason, this.#now(), ownerId);
     return Number(result.changes);
   }
@@ -964,8 +968,14 @@ export class DurableSchedules implements SchedulesService {
     }
   }
 
+  /**
+   * A platform pause (safety, revoked sign-in, policy) blocks every run, so it also takes over a person's pause, whose
+   * null reason would still let manual runs through. An existing platform reason is kept.
+   */
   #pauseFor(schedule: ScheduleRow, reason: string): void {
-    if (schedule.state === "active") this.#store.updateSchedule(schedule.id, { state: "paused", paused_reason: reason }, this.#now());
+    this.#deps.db
+      .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL")
+      .run(reason, this.#now(), schedule.id);
   }
 
   #owned(ownerId: number, scheduleId: string): ScheduleRow {

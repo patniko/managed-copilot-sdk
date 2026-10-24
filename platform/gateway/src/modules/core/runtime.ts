@@ -1,11 +1,12 @@
 // The shared runtime: the stock `@github/copilot` runtime started headless on a loopback port, supervised by the
 // gateway, and reached over a persistent JSON-RPC upstream connection. Client connections never own it.
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { connect as connectTcp } from "node:net";
 import { dirname, join } from "node:path";
+import { promisify } from "node:util";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { Logger } from "../../log.js";
 import type { UpstreamInfo } from "./contracts.js";
@@ -199,6 +200,7 @@ export class SharedRuntime {
   #restartTimer: NodeJS.Timeout | undefined;
   #backoffMs = 1000;
   #stopping = false;
+  #reaped = false;
   #waiters: { resolve(upstream: RuntimeUpstream): void; reject(error: Error): void }[] = [];
   #lastError: string | undefined;
   #stderrTail: string[] = [];
@@ -340,6 +342,10 @@ export class SharedRuntime {
 
   async #spawn(): Promise<{ port: number; token: string }> {
     const { log, root } = this.#options;
+    if (!this.#reaped) {
+      this.#reaped = true;
+      await reapStaleRuntime(root, log);
+    }
     const binary = resolveRuntimeBinary(this.#options.binary);
     const copilotHome = join(root, "copilot-home");
     const home = join(root, "home");
@@ -397,10 +403,13 @@ export class SharedRuntime {
       });
     });
     child.once("exit", (code, signal) => {
+      clearRuntimeRecord(root, child.pid);
       if (this.#child !== child) return;
       this.#child = undefined;
       if (!this.#stopping) this.#onLost(`runtime exited (${signal ?? `code ${code}`})`);
     });
+    // Lets a later gateway on this data directory stop this runtime if this gateway dies without tearing it down.
+    void recordRuntime(root, child, () => this.#child === child);
     log.info("Shared runtime started", { pid: child.pid, port, binary });
     return { port, token };
   }
@@ -439,6 +448,104 @@ export class SharedRuntime {
     const child = this.#child;
     this.#child = undefined;
     if (child && child.exitCode === null && child.signalCode === null) child.kill();
+  }
+}
+
+const execFileAsync = promisify(execFile);
+const RUNTIME_RECORD = "runtime.json";
+
+interface RuntimeRecord {
+  readonly pid: number;
+  /** The process's OS start time, so a reused pid is never mistaken for it. */
+  readonly startTime: string;
+  readonly gatewayPid: number;
+}
+
+function isRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** The OS start time of a running process, or undefined. */
+export async function processStartTime(pid: number): Promise<string | undefined> {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined;
+  try {
+    if (process.platform === "win32") {
+      const script = `$p = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($p) { $p.StartTime.ToUniversalTime().ToString('o') }`;
+      const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true, timeout: 20_000 });
+      return stdout.trim() || undefined;
+    }
+    const { stdout } = await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { timeout: 10_000 });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Records the spawned runtime in its data directory (best effort) while `current()` still holds. */
+export async function recordRuntime(root: string, child: ChildProcess, current: () => boolean): Promise<void> {
+  if (!child.pid) return;
+  const startTime = await processStartTime(child.pid);
+  if (!startTime || !current()) return;
+  const record: RuntimeRecord = { pid: child.pid, startTime, gatewayPid: process.pid };
+  try {
+    writeFileSync(join(root, RUNTIME_RECORD), JSON.stringify(record));
+  } catch {
+    // Best effort: without a record a stale runtime is not reaped, nothing else changes.
+  }
+}
+
+export function clearRuntimeRecord(root: string, pid: number | undefined): void {
+  const file = join(root, RUNTIME_RECORD);
+  try {
+    if ((JSON.parse(readFileSync(file, "utf8")) as Partial<RuntimeRecord>).pid === pid) rmSync(file, { force: true });
+  } catch {
+    // No record.
+  }
+}
+
+/**
+ * Stops the shared runtime a previous gateway on this data directory left running. On Windows, non-detached
+ * children share a kill-on-close job with the gateway, but a gateway launched where that job cannot apply, or a
+ * POSIX gateway killed with SIGKILL, leaves its runtime behind. Only the exact recorded process (pid and start time)
+ * is stopped, and never while the gateway that recorded it is still running.
+ */
+export async function reapStaleRuntime(root: string, log: Logger): Promise<void> {
+  const file = join(root, RUNTIME_RECORD);
+  let record: Partial<RuntimeRecord>;
+  try {
+    record = JSON.parse(readFileSync(file, "utf8")) as Partial<RuntimeRecord>;
+  } catch {
+    return;
+  }
+  const { pid, startTime, gatewayPid } = record;
+  if (typeof pid !== "number" || typeof startTime !== "string" || pid === process.pid) {
+    rmSync(file, { force: true });
+    return;
+  }
+  if (typeof gatewayPid === "number" && gatewayPid !== process.pid && isRunning(gatewayPid)) {
+    log.warn("Another gateway may be using this data directory; leaving its shared runtime alone", { pid, gatewayPid });
+    return;
+  }
+  rmSync(file, { force: true });
+  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) return;
+  log.warn("Stopping the shared runtime a previous gateway left running", { pid });
+  try {
+    process.kill(pid);
+  } catch {
+    return;
+  }
+  for (let waited = 0; waited < 5000 && isRunning(pid); waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
+  if (isRunning(pid)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Already gone.
+    }
   }
 }
 
