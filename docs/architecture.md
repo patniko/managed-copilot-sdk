@@ -456,8 +456,10 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   flushes buffered source events (with the source generation) and early destination events in order, delivers replies
   the source gave before the seal, lifts the fence, and only then emits `onLifecycle("promoted")`. A `sendAndWait`
   whose reply arrived after the seal completes from the owner's events (next root `session.idle`, with the last root
-  `assistant.message`; a root `session.error` fails it). `abort({ resume })` closes the destination, flushes the
-  buffer, and leaves the source the owner (resumed there with `resume` extras if it was sealed). Deleting the session
+  `assistant.message`; a root `session.error` fails it; deleting the session fails it; outside a cutover a session that
+  is not running is resumed for it, and fails it if that fails). `abort({ resume })` closes the destination, flushes the
+  buffer, and leaves the source the owner (resumed there with `resume` extras if it was sealed). Client calls admitted
+  for one placement are admitted again if a cutover moved the session while they waited. Deleting the session
   aborts an open cutover; rows left `promoting` by a crash return to `idle` at startup. Durable fences actions by
   generation, so carrying a pending call across the move is the promotion module's job.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
