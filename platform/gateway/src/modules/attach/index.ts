@@ -59,6 +59,7 @@ export const attachModule: GatewayModule = {
     const tickets = new AttachTickets(app.db);
     const hosts = new AhpHosts(log, idleMs);
     const socketBase = app.config.publicUrl.replace(/^http/i, "ws");
+    app.capabilities.add("attach.cli");
 
     app.routes.post("/v1/sessions/:id/attach", async (ctx) => {
       const principal = ctx.principal;
