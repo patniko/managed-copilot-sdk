@@ -1209,11 +1209,16 @@ was shown except for the items in the last column, which fail explicitly or are 
 | G4 | Passed with limits | Egress Docker suite 11/11, 7 cases in sandbox-like client containers and 4 in real sandboxes: `network: false` blocks curl, pip, npm, git, and raw sockets; host lists; metadata, private, direct-IP, port, and peer destinations blocked; vault substitution scoped to session, host, and header. Sandboxes hold no GitHub token. Gated SDK e2e keeps another account's sessions invisible | Network-denied CONNECT returns 403 while inference works; allowed hosts return 200; vault substitution and response redaction pass | A live check with two real GitHub accounts (tests use distinct identities); refresh of expiring user tokens |
 | G5 | Passed for Copilot CLI | Promotion e2e and snippet 08: same session object and ID, ordered outcomes, published artifact. The stock Copilot CLI attached live: one responder per prompt, `ask_user`, no host paths, and promotion of an attached session with the CLI reconnecting by itself | Explicit promotion and continuation; non-interactive AHP probe for shared and isolated sessions | GitHub Copilot app publication (refused with `transport_unsupported`); an interactive terminal check on Azure |
 
-The demos run end to end on both targets. The software factory completed work orders locally (19/19 tests) and on
-Azure (9 files, 37/37 tests), and recovered interrupted Azure work through explicit checkpoint Retry. The assistant's
+The demos run end to end on both targets. The software factory completed work orders locally (most recently the
+two-builder CSV ⇄ JSON toolkit on the final build: reviewed, fixed, and released with 40/40 tests) and on Azure (9
+files, 37/37 tests), and recovered interrupted Azure work through explicit checkpoint Retry. The assistant's
 triage, approvals, reminders, and background work passed locally and on Azure with its labelled demo Google data.
 Its real Gmail and Google Calendar provider is implemented, but it needs the operator's own Google OAuth client and
 was not run against real accounts.
+
+These checks use real models, so a check that depends on the model's choices can occasionally miss. On the final
+build, snippet 03 failed once in five runs: the turn completed and published normally, but without the report under
+`outputs/`. The other four runs passed.
 
 Still requiring a user decision before the affected behavior is finalized: GitHub App ownership/setup; active-wait
 cost limits and cancellation policy; the initial background callback subset; and concrete retention/schedule
