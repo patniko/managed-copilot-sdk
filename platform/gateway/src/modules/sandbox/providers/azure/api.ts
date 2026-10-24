@@ -204,7 +204,7 @@ export class SandboxApi {
   }
 
   async createSandbox(body: CreateSandboxBody): Promise<RemoteSandbox> {
-    return (await this.#request("PUT", this.#url("/sandboxes"), { body, idempotent: false })).body as RemoteSandbox;
+    return created<RemoteSandbox>((await this.#request("PUT", this.#url("/sandboxes"), { body, idempotent: false })).body, "sandbox");
   }
 
   async deleteSandbox(id: string): Promise<void> {
@@ -256,8 +256,18 @@ export class SandboxApi {
 
   async createDiskImage(image: string, labels: Readonly<Record<string, string>>, managedIdentityResourceId?: string): Promise<RemoteDiskImage> {
     const body = { image: { base: image }, labels, ...(managedIdentityResourceId ? { managedIdentityResourceId } : {}) };
-    return (await this.#request("PUT", this.#url("/diskimages"), { body, idempotent: false })).body as RemoteDiskImage;
+    return created<RemoteDiskImage>((await this.#request("PUT", this.#url("/diskimages"), { body, idempotent: false })).body, "disk image");
   }
+}
+
+/**
+ * The resource a create answered with. A success without a readable resource (a truncated or non-JSON body) does not
+ * say what Azure created, so it counts as an answer that never arrived (status 0): the caller reconciles by labels.
+ */
+function created<T extends { readonly id: string }>(body: unknown, what: string): T {
+  const id = body && typeof body === "object" ? (body as { id?: unknown }).id : undefined;
+  if (typeof id !== "string" || !id) throw new SandboxApiError(0, "network", `Azure accepted the ${what} create but its answer did not name the ${what}.`);
+  return body as T;
 }
 
 function normalizeVolume(volume: RemoteVolume & { volumeName?: string }): RemoteVolume {

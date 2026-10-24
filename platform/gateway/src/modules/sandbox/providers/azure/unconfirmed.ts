@@ -32,9 +32,17 @@ export class UnconfirmedCreates {
 
   /** Records a create about to be submitted; durable before it returns (throws if it cannot be made durable). */
   record(key: string, now = Date.now()): void {
-    const records = this.#load();
-    records[key] = now;
-    this.#save(records);
+    const next = { ...this.#load(), [key]: now };
+    try {
+      this.#save(next);
+    } catch (error) {
+      throw new ManagedCopilotError(
+        "capability_unavailable",
+        `The gateway cannot record an Azure create before submitting it (${this.#file}: ${(error as Error).message}), so it does not submit it: ` +
+          "without the record, a restart could create a duplicate. Check the gateway's data volume.",
+      );
+    }
+    this.#records = next; // only once durable: a failed save must not leave a record of a create never sent
   }
 
   /** Forgets a create whose outcome is now definite. Best effort: a record left behind only makes a later call look first. */

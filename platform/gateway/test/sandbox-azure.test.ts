@@ -45,6 +45,8 @@ class FakeDataPlane {
   rejectSandboxCreates = 0;
   /** Sandbox creates Azure carries out, whose answer then breaks off after its status line (with this status). */
   breakSandboxCreateBodies: number[] = [];
+  /** Sandbox creates Azure carries out but answers with a body that names no sandbox. */
+  garbleSandboxCreates = 0;
   readonly #hung: IncomingMessage[] = [];
   readonly #pending: { sandbox: FakeSandbox; lists: number }[] = [];
   #next = 0;
@@ -132,6 +134,12 @@ class FakeDataPlane {
         }
         this.sandboxes.set(id, sandbox);
         this.#attach(sandbox, true);
+        if (this.garbleSandboxCreates > 0) {
+          this.garbleSandboxCreates--;
+          res.writeHead(201, { "content-type": "text/html" });
+          res.end("<html>accepted</html>");
+          return;
+        }
         const broken = this.breakSandboxCreateBodies.shift();
         if (broken !== undefined) {
           res.writeHead(broken, { "content-type": "application/json", "content-length": "4096" });
@@ -535,6 +543,26 @@ describe("Azure sandbox provider", () => {
     expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
     expect(plane.sandboxes.size).toBe(1);
     expect(await subject.isRunning("sbx_0123456789abcdef01234567")).toBe(true);
+  });
+
+  it("treats a success that names no sandbox as unconfirmed, and adopts what Azure created", async () => {
+    plane.garbleSandboxCreates = 1;
+    const subject = provider(env(), { timeouts: { reconcileMs: 20 } });
+    await subject.create(spec());
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+    expect(await subject.isRunning("sbx_0123456789abcdef01234567")).toBe(true);
+  });
+
+  it("does not submit a create it cannot record first, and keeps no record of it", async () => {
+    writeFileSync(join(dataDir, "sandbox-azure"), "not a directory");
+    const subject = provider();
+    const error = await subject.create(spec()).catch((caught: unknown) => caught);
+    expect(isManagedCopilotError(error, "capability_unavailable")).toBe(true);
+    expect((error as Error).message).toMatch(/cannot record an Azure create before submitting it/);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(0);
+    rmSync(join(dataDir, "sandbox-azure"));
+    await subject.create(spec()); // nothing recorded in memory either
+    expect(plane.sandboxes.size).toBe(1);
   });
 
   it("knows a request that never left the gateway cannot have created anything", async () => {
