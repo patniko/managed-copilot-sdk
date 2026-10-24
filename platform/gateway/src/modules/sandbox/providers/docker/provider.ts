@@ -5,7 +5,7 @@ import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, 
 import type { Logger } from "../../../../log.js";
 import type { SandboxEndpoint, SandboxImageRef, SandboxProvider, SandboxProviderDeps, SandboxSpec, SandboxStartResult } from "../types.js";
 import { DockerClient, DockerError, resolveDockerEndpoints } from "./docker.js";
-import { SandboxImages } from "./images.js";
+import { SandboxImages, registrySettingProblems } from "./images.js";
 
 interface RelayTarget {
   /** e.g. http://127.0.0.1:52011 */
@@ -56,6 +56,8 @@ function isPoolOverlap(error: unknown): boolean {
 /** Builds the local Docker provider from gateway settings (`DOCKER_HOST`, `MANAGED_COPILOT_SANDBOX_*`). */
 export function createDockerSandboxProvider(deps: SandboxProviderDeps): DockerSandboxProvider {
   const { env, log } = deps;
+  // Refused again (with the same message) when an image is built; said at startup so the operator sees it at once.
+  for (const problem of registrySettingProblems(env)) log.warn(problem);
   const docker = new DockerClient(resolveDockerEndpoints(env));
   const images = new SandboxImages({ docker, log, env, appHostDir: deps.appHostDir, ...(env.MANAGED_COPILOT_SANDBOX_CONTEXT ? { contextDir: env.MANAGED_COPILOT_SANDBOX_CONTEXT } : {}) });
   return new DockerSandboxProvider({
