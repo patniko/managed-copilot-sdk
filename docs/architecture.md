@@ -548,6 +548,33 @@ sequenceDiagram
 - `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
   `/v1/info`, or `capability_unavailable`), or skipped (a local prerequisite such as background sign-in).
 
+## Azure deployment (`aspire deploy`)
+
+As built (`packages/aspire/src/publish`, `deploy/azure`, gateway `modules/sandbox/providers/azure`); operator guide and
+capability matrix in [deployment.md](deployment.md). Not yet qualified on a live deployment.
+
+- **Publish path.** In publish mode `addManagedCopilot` calls `publishManagedCopilot`: a Container Apps environment in
+  a new VNet (`platform` and `sandboxes` /23 subnets) with an Azure Files NFS 4.1 share, and the gateway as a
+  Dockerfile container (`platform/gateway/Dockerfile`, stage `azure`, plus a generated stage that copies the AppHost's
+  customization folders to `/opt/managed-copilot/apphost`) with external HTTPS ingress. Apps that use the platform
+  are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist). The C# integration in
+  `deploy/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
+  revision mode, IP rules). Publishing refuses an open gateway: access rules come from the AppHost or from
+  `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port.
+- **Durable state.** The gateway's data directory is `/data` on the NFS share (SQLite needs POSIX locks; SMB failed in
+  the earlier Copilot SDK Aspire deployment). One replica, Single revision mode, and a lease supervisor as the
+  entrypoint (`deploy/azure/src/lease`): an exclusive SQLite lock on `/data/.lease/gateway.lease` held for the
+  process's life, a fencing generation with a 5 s heartbeat (losing it kills the gateway), 503 while waiting, and
+  handover to strictly newer deployments (`MANAGED_COPILOT_LEASE_STAMP`). The demo images use the same supervisor.
+- **Isolated placement.** Azure Container Apps Sandboxes (`Microsoft.App/sandboxGroups`): one microVM per sandbox,
+  three data disks per sandbox that outlive compute (stop deletes the microVM; resume recreates it over the disks),
+  sandboxd reached through the sandbox's port URL with its per-sandbox key, and a deny-all platform egress policy.
+  `aspire deploy` builds and pushes content-tagged sandbox images (base, environment images, and the
+  `deploy/azure/sandbox` layer that runs the entrypoint as root and seeds empty disks) and creates the group, its VNet
+  connection, a registry pull identity, and the gateway's identity with only SandboxGroup Data Owner on the group.
+  The egress proxy is not deployed to Azure yet, so environments that need network access or vault credentials fail
+  with `capability_unavailable` there.
+
 ## Ports and environment
 
 | Setting | Default | Notes |
@@ -596,5 +623,6 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
+| **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 
-Later workstreams: promotion (G5, SDK `features/promote.ts`), Azure deployment (G3), and end-to-end polish.
+Later workstreams: promotion (G5, SDK `features/promote.ts`) and end-to-end polish.
