@@ -207,11 +207,11 @@ alternative and **check again**. The SDK doesn't wrap background sign-in yet, so
 documented route, `POST`/`GET`/`DELETE /v1/credentials/background` (the same one the CLI uses), with the token it
 connected with: it resolves that token once (`MANAGED_COPILOT_GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
 `GITHUB_TOKEN`, then `gh auth token`, like the SDK) and passes it to `ManagedCopilot.connect({ gitHubToken })`, so the
-route always acts as the connected account. While it's off, adding the briefing, resuming, and **Run now** are disabled
-(and refused by the server), the scheduling suggestions point to the card, and if the agent's `schedule_task` fails for
-that reason the chat offers the same button. The status is re-checked when a tab opens, after scheduled runs, and
-every 30 seconds while it's off (every 5 minutes while it's on), so a terminal login or a revoked sign-in shows up on
-its own.
+route always acts as the connected account. Until it's confirmed on, adding the briefing, resuming, and **Run now** are
+disabled and refused by the server, which checks again first. The scheduling suggestions wait too, pointing to the
+card while it's off. If the agent's `schedule_task` fails for that reason, the chat offers the same button. The status
+is re-checked when a tab opens, after scheduled runs and background-related failures, and every 30 seconds while it's
+off (every 5 minutes while it's on), so a terminal login or a revoked sign-in shows up on its own.
 
 **Work while you're away.** Thirty seconds after the last tab closes, the server detaches (`session.disconnect()`);
 the session keeps running on the platform. When a scheduled run needs your mail or calendar, the tool call becomes a
