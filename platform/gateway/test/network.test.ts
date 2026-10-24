@@ -324,7 +324,8 @@ describe("network module", () => {
     policy().bindSession({ sessionId: "s-chat-mcp", owner: ALICE.id, environment: "chat", type: "shared", requested: undefined, vaults: undefined });
     const vaults = gateway.app.service("vaults");
     expect(vaults.mcpHeaders("s-chat-mcp", "https://mcp.contoso.example/docs", "shared")).toBeUndefined();
-    expect(vaults.mcpHeaders("s-chat-mcp", "https://mcp.contoso.example/docs", "sandbox")).toEqual({ authorization: expect.stringMatching(/^Bearer mcv_placeholder_[0-9a-f]{40}$/) });
+    // Sandbox placeholders only exist for isolated sessions, whose sandboxes the egress proxy registers.
+    expect(vaults.mcpHeaders("s-chat-mcp", "https://mcp.contoso.example/docs", "sandbox")).toBeUndefined();
     expect(vaults.mcpHeaders("s-chat-mcp", "https://other.example.com/", "sandbox")).toBeUndefined();
   });
 
@@ -344,7 +345,7 @@ describe("policy service across deployment changes", () => {
     return db;
   };
   /** The policy service as the gateway builds it at startup, over an existing database (a restart with new config). */
-  const start = (db: Database, config: { readonly network?: unknown; readonly environments: Record<string, unknown> }, pushed: EgressRegistration[] = []) => {
+  const start = (db: Database, config: { readonly network?: unknown; readonly vaults?: unknown; readonly environments: Record<string, unknown> }, pushed: EgressRegistration[] = []) => {
     const deployment = parseConfig({ name: "copilot", vaults, ...config });
     const store = new VaultStore({ db, sealer, deployment, env: { TEST_STRIPE_KEY: "sk_test_stripe_123" }, log });
     const channel = { ready: true, caCertificate: () => "", waitReady: async () => undefined, upsert: (registration: EgressRegistration) => void pushed.push(registration), remove: (_sandboxId: string) => undefined };
@@ -476,6 +477,22 @@ describe("policy service across deployment changes", () => {
     await expect(policy.registerSandbox({ sandboxId: "sbx_keyed", sessionId: "s-keyed" })).rejects.toMatchObject({ code: "capability_unavailable" });
     expect((await policy.registerSandbox({ sandboxId: "sbx_off", sessionId: "s-off" })).policy.access).toBe("disabled");
     expect(waited).toBe(false);
+  });
+
+  it("hands sandboxes MCP placeholders only for destinations the egress proxy substitutes for", async () => {
+    const policy = start(database(), {
+      vaults: {
+        named: [{ mcpServer: "https://mcp.example.com/mcp", header: "x-api-key", value: { secretEnv: "TEST_STRIPE_KEY" } }],
+        address: [{ mcpServer: "https://93.184.216.34/mcp", value: { secretEnv: "TEST_STRIPE_KEY" } }],
+      },
+      environments: { research: { type: "isolated", vaults: ["named", "address"], network: true } },
+    });
+    policy.bindSession({ sessionId: "s-mcp", owner: 1, environment: "research", type: "isolated", requested: undefined, vaults: undefined });
+    await policy.registerSandbox({ sandboxId: "sbx_mcp", sessionId: "s-mcp" });
+    const named = policy.mcpHeaders("s-mcp", "https://mcp.example.com/mcp", "sandbox");
+    expect(named).toEqual({ "x-api-key": expect.stringMatching(/^mcv_placeholder_[0-9a-f]{40}$/) });
+    expect(policy.registrations()[0]!.credentials).toEqual([expect.objectContaining({ placeholder: named!["x-api-key"], destinations: [{ host: "mcp.example.com", port: 443 }], headers: ["x-api-key"] })]);
+    expect(() => policy.mcpHeaders("s-mcp", "https://93.184.216.34/mcp", "sandbox")).toThrow(/only for host names on port 443/);
   });
 
   it("builds proxy URLs for the address a sandbox provider names", async () => {
