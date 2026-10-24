@@ -107,17 +107,20 @@ const SESSION_MODES: ReadonlySet<string> = new Set(["interactive", "plan", "auto
 
 export type ActionVerdict =
   | { readonly kind: "refuse"; readonly reason: string }
-  /** Forward after the attachment's fence and ownership check (state that starts no work). */
-  | { readonly kind: "gated" }
-  /** A user message: core admits it and the AHP write runs inside `CliAttachment.write`. */
-  | { readonly kind: "turn"; readonly text: string; readonly modelId?: string }
-  | { readonly kind: "abort" }
+  /** Forward `action` after the attachment's fence and ownership check (state that starts no work). */
+  | { readonly kind: "gated"; readonly action: Dict }
+  /** A user message: core admits it and `action` is written inside `CliAttachment.write`. */
+  | { readonly kind: "turn"; readonly text: string; readonly modelId?: string; readonly action: Dict }
+  | { readonly kind: "abort"; readonly action: Dict }
   /** The person's decision on a permission prompt: answered through the actions ledger, never forwarded. */
   | { readonly kind: "confirm"; readonly channel: string; readonly toolCallId: string; readonly approved: boolean; readonly feedback?: string }
-  /** The person's answer to a question (`chat/inputCompleted`). */
-  | { readonly kind: "input"; readonly channel: string; readonly inputId: string; readonly response: string; readonly answers: Dict };
+  /** The person's answer to a question (`chat/inputCompleted`); `action` is what an ask_user answer forwards. */
+  | { readonly kind: "input"; readonly channel: string; readonly inputId: string; readonly response: string; readonly answers: Dict; readonly action: Dict };
 
-function messageVerdict(message: unknown, placement: AttachPlacement): ActionVerdict {
+type Checked<T> = T | { readonly kind: "refuse"; readonly reason: string };
+
+/** A user message the CLI sent, checked: text only, from the person, with at most a model. */
+function checkMessage(message: unknown, placement: AttachPlacement): Checked<{ readonly kind: "ok"; readonly text: string; readonly modelId?: string; readonly message: Dict }> {
   if (!isDict(message)) return { kind: "refuse", reason: "A message needs text." };
   const { text, origin, attachments, model, agent } = message as AhpMessage;
   if (typeof text !== "string" || !text.trim()) return { kind: "refuse", reason: "A message needs text." };
@@ -138,10 +141,16 @@ function messageVerdict(message: unknown, placement: AttachPlacement): ActionVer
     // Host commands such as /chronicle read every session on the runtime, which a shared runtime shares with others.
     return { kind: "refuse", reason: `/${command} isn't available in a shared session.` };
   }
-  return { kind: "turn", text, ...(modelId ? { modelId } : {}) };
+  // Rebuilt from what was checked: nothing else the client put on the message (`_meta`, ...) reaches the host.
+  return { kind: "ok", text, ...(modelId ? { modelId } : {}), message: { text, origin: { kind: "user" }, ...(modelId ? { model: { id: modelId } } : {}) } };
 }
 
-/** Decides a `dispatchAction` (fire-and-forget AHP write) from the client. */
+const PENDING_KINDS: ReadonlySet<string> = new Set(["steering", "queued"]);
+
+/**
+ * Decides a `dispatchAction` (fire-and-forget AHP write) from the client. What is forwarded is rebuilt from the fields
+ * the policy checked (`action` in the verdict), never the client's action as sent.
+ */
 export function decideAction(params: unknown, context: { readonly sessionId: string; readonly placement: AttachPlacement; readonly clientId: string | undefined }): ActionVerdict {
   if (!isDict(params) || !isDict(params["action"])) return { kind: "refuse", reason: "Malformed action." };
   const channel = params["channel"];
@@ -151,21 +160,60 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
   const onChat = typeof channel === "string" && CHAT_CHANNEL.test(channel);
   if (type.startsWith("chat/") && !onChat) return { kind: "refuse", reason: "Chat actions must target a chat of this session." };
   if ((type.startsWith("session/") || type.startsWith("copilot/")) && !onSession) return { kind: "refuse", reason: "Session actions must target this session." };
+  if (typeof params["clientSeq"] !== "number") return { kind: "refuse", reason: "Malformed action." };
+  const malformed = { kind: "refuse", reason: "Malformed action." } as const;
   switch (type) {
-    case "chat/turnStarted":
-      return messageVerdict(action["message"], context.placement);
-    case "chat/pendingMessageSet":
-      return messageVerdict(action["message"], context.placement);
-    case "chat/turnCancelled":
-      return { kind: "abort" };
-    case "chat/pendingMessageRemoved":
-    case "chat/queuedMessagesReordered":
-    case "chat/draftChanged":
-    case "chat/inputAnswerChanged":
+    case "chat/turnStarted": {
+      const turnId = str(action["turnId"]);
+      const startedAt = str(action["startedAt"]);
+      if (!turnId || !startedAt) return malformed;
+      const checked = checkMessage(action["message"], context.placement);
+      if (checked.kind === "refuse") return checked;
+      const queuedMessageId = str(action["queuedMessageId"]);
+      return { kind: "turn", text: checked.text, ...(checked.modelId ? { modelId: checked.modelId } : {}), action: { type, turnId, startedAt, message: checked.message, ...(queuedMessageId ? { queuedMessageId } : {}) } };
+    }
+    case "chat/pendingMessageSet": {
+      const id = str(action["id"]);
+      const kind = String(action["kind"]);
+      if (!id || !PENDING_KINDS.has(kind)) return malformed;
+      const checked = checkMessage(action["message"], context.placement);
+      if (checked.kind === "refuse") return checked;
+      return { kind: "turn", text: checked.text, ...(checked.modelId ? { modelId: checked.modelId } : {}), action: { type, kind, id, message: checked.message } };
+    }
+    case "chat/turnCancelled": {
+      const turnId = str(action["turnId"]);
+      if (!turnId) return malformed;
+      return { kind: "abort", action: { type, turnId, duration: typeof action["duration"] === "number" ? action["duration"] : 0 } };
+    }
+    case "chat/pendingMessageRemoved": {
+      const id = str(action["id"]);
+      const kind = String(action["kind"]);
+      if (!id || !PENDING_KINDS.has(kind)) return malformed;
+      return { kind: "gated", action: { type, kind, id } };
+    }
+    case "chat/queuedMessagesReordered": {
+      const order = action["order"];
+      if (!Array.isArray(order) || !order.every((id) => typeof id === "string")) return malformed;
+      return { kind: "gated", action: { type, order } };
+    }
+    case "chat/draftChanged": {
+      // A draft is only the text being composed; clearing it sends none.
+      const draft = isDict(action["draft"]) && typeof action["draft"]["text"] === "string" ? { text: action["draft"]["text"], origin: { kind: "user" } } : undefined;
+      return { kind: "gated", action: { type, ...(draft ? { draft } : {}) } };
+    }
+    case "chat/inputAnswerChanged": {
+      const requestId = str(action["requestId"]);
+      const questionId = str(action["questionId"]);
+      if (!requestId || !questionId) return malformed;
+      return { kind: "gated", action: { type, requestId, questionId, ...(isDict(action["answer"]) ? { answer: action["answer"] } : {}) } };
+    }
     case "session/titleChanged":
+      return typeof action["title"] === "string" ? { kind: "gated", action: { type, title: action["title"] } } : malformed;
     case "session/isReadChanged":
+      return typeof action["isRead"] === "boolean" ? { kind: "gated", action: { type, isRead: action["isRead"] } } : malformed;
     case "copilot/viewState":
-      return { kind: "gated" };
+      // The CLI's own view (sidebar, pickers), echoed back to it by the host.
+      return isDict(action["view"]) ? { kind: "gated", action: { type, view: action["view"] } } : malformed;
     case "session/activeClientSet": {
       const client = isDict(action["activeClient"]) ? action["activeClient"] : undefined;
       const tools = client?.["tools"];
@@ -176,10 +224,11 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
       if (Array.isArray(customizations) ? customizations.length > 0 : customizations !== undefined && customizations !== null) {
         return { kind: "refuse", reason: "Copilot CLI can't add plugins or customizations to this session." };
       }
-      return { kind: "gated" };
+      const displayName = str(client["displayName"]);
+      return { kind: "gated", action: { type, activeClient: { clientId: context.clientId, ...(displayName ? { displayName } : {}), tools: [] } } };
     }
     case "session/activeClientRemoved":
-      return context.clientId && action["clientId"] === context.clientId ? { kind: "gated" } : { kind: "refuse", reason: "A client can only remove itself." };
+      return context.clientId && action["clientId"] === context.clientId ? { kind: "gated", action: { type, clientId: context.clientId } } : { kind: "refuse", reason: "A client can only remove itself." };
     case "session/configChanged": {
       const config = action["config"];
       if (!isDict(config) || action["replace"] === true) return { kind: "refuse", reason: "Only the session mode can be changed from Copilot CLI." };
@@ -188,7 +237,7 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
       if (keys.length !== 1 || keys[0] !== "mode" || !SESSION_MODES.has(String(config["mode"]))) {
         return { kind: "refuse", reason: "Only the session mode can be changed from Copilot CLI; approvals stay as configured." };
       }
-      return { kind: "gated" };
+      return { kind: "gated", action: { type, config: { mode: config["mode"] } } };
     }
     case "chat/toolCallConfirmed": {
       const toolCallId = str(action["toolCallId"]);
@@ -201,7 +250,8 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
       const inputId = str(action["requestId"]);
       const response = str(action["response"]);
       if (!inputId || !response) return { kind: "refuse", reason: "Malformed answer." };
-      return { kind: "input", channel: channel as string, inputId, response, answers: isDict(action["answers"]) ? action["answers"] : {} };
+      const answers = isDict(action["answers"]) ? action["answers"] : {};
+      return { kind: "input", channel: channel as string, inputId, response, answers, action: { type, requestId: inputId, response, answers } };
     }
     default:
       // Tool results (only the app runs its tools), history truncation, turn resume, working directories, terminals,
@@ -209,7 +259,6 @@ export function decideAction(params: unknown, context: { readonly sessionId: str
       return { kind: "refuse", reason: `${type} isn't available to an attached Copilot CLI.` };
   }
 }
-
 function textOf(value: unknown): string | undefined {
   if (typeof value === "string") return value.trim() || undefined;
   if (isDict(value) && typeof value["markdown"] === "string") return value["markdown"].trim() || undefined;
@@ -302,7 +351,10 @@ export class AhpObserver {
     remember(this.#inputs, key(channel, id), requestId ? { requestId } : {});
   }
 
-  /** Snapshots (`subscribe`, `reconnect`) and `inputNeeded` entries: tool calls and questions waiting for a person. */
+  /**
+   * Snapshots (`subscribe`, `reconnect`) and `inputNeeded` entries: tool calls and questions waiting for a person.
+   * Messages, drafts, queued messages, and answers are what clients wrote, so they are never read for prompts.
+   */
   #walk(node: unknown, chat: string | undefined, depth: number): void {
     if (depth > 24) return;
     if (Array.isArray(node)) {
@@ -317,9 +369,15 @@ export class AhpObserver {
     }
     if (scope && typeof node["toolCallId"] === "string") this.#toolCall(scope, node);
     if (scope && Array.isArray(node["questions"]) && typeof node["id"] === "string") this.#question(scope, node);
-    for (const value of Object.values(node)) if (typeof value === "object" && value !== null) this.#walk(value, scope, depth + 1);
+    for (const [field, value] of Object.entries(node)) {
+      if (CLIENT_AUTHORED.has(field)) continue;
+      if (typeof value === "object" && value !== null) this.#walk(value, scope, depth + 1);
+    }
   }
 }
+
+/** State fields whose content a client wrote (and the host stores as sent). */
+const CLIENT_AUTHORED: ReadonlySet<string> = new Set(["message", "draft", "queuedMessages", "answers"]);
 
 /**
  * Filters a runtime response for the request that asked for it: `initialize` loses the host's shell prefix and its

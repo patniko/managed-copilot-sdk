@@ -233,18 +233,18 @@ export class AhpBridge implements AttachedBridge {
       case "refuse":
         return this.#reject(params, verdict.reason);
       case "gated":
-        return this.#write(params, (send) => {
+        return this.#write(params, verdict.action, (send) => {
           this.#options.gate();
           send();
         });
       case "turn":
-        return this.#write(params, (send) => {
+        return this.#write(params, verdict.action, (send) => {
           // A model on the message is checked against the environment (and recorded for restores) before the turn.
           if (verdict.modelId) attachment.write({ kind: "model", modelId: verdict.modelId }, () => undefined);
           attachment.write({ kind: "turn", text: verdict.text }, send);
         });
       case "abort":
-        return this.#write(params, (send) => attachment.write({ kind: "abort" }, send));
+        return this.#write(params, verdict.action, (send) => attachment.write({ kind: "abort" }, send));
       case "confirm":
         void this.#confirm(params, verdict);
         return;
@@ -254,14 +254,17 @@ export class AhpBridge implements AttachedBridge {
     }
   }
 
-  /** Runs `run`, whose `send` writes the client's action upstream; refusals become an AHP rejection. */
-  #write(params: Dict, run: (send: () => void) => void): void {
+  /**
+   * Runs `run`, whose `send` writes `action` (rebuilt by the policy, never the client's own) upstream on the client's
+   * channel and sequence number; refusals become an AHP rejection.
+   */
+  #write(params: Dict, action: Dict, run: (send: () => void) => void): void {
     if (this.#stopped) return;
     let sent = false;
     try {
       run(() => {
         if (this.#stopped || this.#upstream.readyState !== WebSocket.OPEN) throw new ManagedCopilotError("conflict", "This Copilot CLI attachment ended. Attach again.");
-        this.#upstream.send(JSON.stringify({ jsonrpc: "2.0", method: "dispatchAction", params }));
+        this.#upstream.send(JSON.stringify({ jsonrpc: "2.0", method: "dispatchAction", params: { channel: params["channel"], clientSeq: params["clientSeq"], action } }));
         sent = true;
       });
     } catch (error) {
@@ -284,7 +287,7 @@ export class AhpBridge implements AttachedBridge {
   }
 
   /** A person's answer to a question: an elicitation through the ledger, or an ask_user answer through core's gate. */
-  async #input(params: Dict, verdict: { readonly channel: string; readonly inputId: string; readonly response: string; readonly answers: Dict }): Promise<void> {
+  async #input(params: Dict, verdict: { readonly channel: string; readonly inputId: string; readonly response: string; readonly answers: Dict; readonly action: Dict }): Promise<void> {
     const question = this.#observer.input(verdict.channel, verdict.inputId);
     if (!question) return this.#reject(params, "This question isn't available to Copilot CLI.");
     try {
@@ -301,7 +304,7 @@ export class AhpBridge implements AttachedBridge {
       if (actions.list(this.#options.sessionId, { open: true }).some((action) => action.kind === "elicitation")) {
         throw new ManagedCopilotError("conflict", "Answer this question in your application.");
       }
-      this.#write(params, (send) => this.#options.attachment.write({ kind: "userInput" }, send));
+      this.#write(params, verdict.action, (send) => this.#options.attachment.write({ kind: "userInput" }, send));
     } catch (error) {
       this.#reject(params, reasonOf(error));
     }
