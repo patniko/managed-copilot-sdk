@@ -25,6 +25,7 @@ const DEPLOYMENT = {
   },
 };
 const DISABLED: NetworkPolicy = { access: "disabled", allowedDomains: [] };
+const CREATED_AT = new Date(Date.now() - 3_600_000).toISOString();
 
 type Step = string;
 
@@ -216,7 +217,8 @@ function record(overrides: Partial<SessionRecord> = {}): SessionRecord {
     network: DISABLED,
     environmentRequest: { name: "helper", files: { "data/input.csv": "YSxiCg==" } },
     lastTurn: { turnId: "turn-1", status: "completed" },
-    createdAt: new Date().toISOString(),
+    // Sessions exist before any promotion attempt of theirs (recovery compares the two).
+    createdAt: CREATED_AT,
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
