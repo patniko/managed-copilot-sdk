@@ -1,20 +1,27 @@
 // The Managed Copilot AppHost. `aspire run` starts the platform with the spec's example environments, then the demos.
 import { createBuilder } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot } from "@managed-copilot/aspire";
-import { ASSISTANT_DEMO, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
+import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
+
+// Fixed local ports. MANAGED_COPILOT_PORT_OFFSET (for example 100) runs a second copy beside this one; that copy leaves
+// zero-config discovery to the first. Google sign-in in the assistant expects its default port.
+const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
+const ports = { gateway: 7400 + offset, factory: 7480 + offset, quickstartWebhook: 7485 + offset, assistant: ASSISTANT_PORT + offset };
 
 // Generated once and kept in the AppHost's user secrets, so restarts keep the same values.
 const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue(name, { minLength: 48, special: false }, { secret: true, persist: true });
 
 // The demos bring their own environments (and the assistant its webhook) as plain data.
-const factory = softwareFactory();
+const factory = softwareFactory({ port: ports.factory });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
-const quickstartWebhook = { port: 7485, secret: await generatedSecret("quickstart-webhook-secret") };
+const quickstartWebhook = { port: ports.quickstartWebhook, secret: await generatedSecret("quickstart-webhook-secret") };
 
 const copilot = await addManagedCopilot(builder, "copilot", {
+  port: ports.gateway,
+  discovery: offset === 0,
   environments: {
     chat: {
       type: "shared",
@@ -40,6 +47,8 @@ const copilot = await addManagedCopilot(builder, "copilot", {
       secret: quickstartWebhook.secret,
     },
     ...assistant.webhooks,
+    // The assistant receives its events on its own port.
+    assistant: { ...assistant.webhooks.assistant, url: `http://localhost:${ports.assistant}/api/copilot-events` },
   },
 });
 
@@ -60,7 +69,7 @@ function addDemo(demo: { name: string; workingDirectory: string; script: string;
 await addDemo(factory.app);
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, and Google Calendar.
-const assistantApp = await addDemo(ASSISTANT_DEMO)
+const assistantApp = await addDemo({ ...ASSISTANT_DEMO, port: ports.assistant })
   .withEnvironment("ASSISTANT_WEBHOOK_SECRET", assistant.webhooks.assistant.secret)
   .withEnvironment("ASSISTANT_SEALING_KEY", await generatedSecret("assistant-sealing-key"));
 

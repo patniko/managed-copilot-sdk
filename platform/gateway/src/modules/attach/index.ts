@@ -1,7 +1,7 @@
 // Owner: devloop workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
 // WebSocket that relays the stock CLI's AHP connection to a per-session listener on the session's own runtime.
 import type { IncomingMessage } from "node:http";
-import { ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
+import { ATTACH_CLOSE_CODES, ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
 import { WebSocketServer } from "ws";
 import type { GatewayApp, GatewayModule } from "../../app.js";
 import { AhpHosts } from "./hosts.js";
@@ -51,7 +51,7 @@ function lifecycleReason(type: SessionLifecycleEvent["type"]): string {
     case "deleted":
       return "The session was deleted.";
     case "promoted":
-      return "The session moved into a sandbox. Attach again to continue.";
+      return "The session moved into a sandbox. Reconnecting.";
     case "stopped":
       return "The session's runtime stopped. Attach again to resume it.";
   }
@@ -132,7 +132,9 @@ export const attachModule: GatewayModule = {
     let unsubscribe: (() => void) | undefined;
     app.onStart(() => {
       const sessions = (app.services as Record<string, unknown>).sessions as AttachSessions | undefined;
-      unsubscribe = sessions?.onLifecycle?.((event) => void hosts.release(event.sessionId, lifecycleReason(event.type)));
+      unsubscribe = sessions?.onLifecycle?.((event) =>
+        void hosts.release(event.sessionId, lifecycleReason(event.type), event.type === "promoted" ? { code: ATTACH_CLOSE_CODES.moved } : {}),
+      );
     });
     app.onStop(async () => {
       unsubscribe?.();

@@ -303,6 +303,23 @@ describe("attach module", () => {
     await open("s1", token);
   });
 
+  it("tells attached clients the session moved when it is promoted, then hosts it on the new runtime", async () => {
+    await fresh();
+    const ws = await open("s1", (await material("s1")).token);
+    const closed = once(ws, "close");
+    const sandbox = new FakeRuntime("sandbox:s1#1", listener);
+    sessions.runtimeFor = sandbox;
+    sessions.listener?.({ sessionId: "s1", type: "promoted" });
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect(code).toBe(4307);
+    expect(reason.toString()).toBe("The session moved into a sandbox. Reconnecting.");
+    expect(runtime.count("host.dispose")).toBe(1);
+    const again = await open("s1", (await material("s1")).token);
+    expect(sandbox.count("host.start")).toBe(1);
+    expect(sandbox.requests.find((request) => request.method === "host.publishSession")?.params.sessionId).toBe("s1");
+    again.close();
+  });
+
   it("closes attached clients when the session is deleted or its runtime connection closes", async () => {
     await fresh();
     const ws = await open("s1", (await material("s1")).token);

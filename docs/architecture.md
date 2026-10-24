@@ -639,6 +639,8 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
 - `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
   `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
+  `MANAGED_COPILOT_PORT_OFFSET` shifts all four ports for a second copy, which also sets `discovery: false`
+  (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 
 ### Copilot CLI attach (spec section 14)
 
@@ -661,16 +663,23 @@ sequenceDiagram
 
 - Verified on Copilot CLI 1.0.92 with runtime 1.0.103 (shared placement): the CLI attaches, shows history, and its
   turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
-  after 5 idle minutes, on `deleted`/`promoted`/`stopped` lifecycle events (close code 4410), and when the runtime
-  connection closes. Attachments are capped at 8 hours (4408).
+  after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one alive), on `deleted` and
+  `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on `promoted` or a new
+  runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`).
+- Reconnects: the stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
+  1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
+  into 1012: the CLI reconnects through the relay, which re-verifies its GitHub account and attaches it with a fresh
+  ticket to the same session wherever it now runs (verified for a dropped connection: the conversation continued).
+  The relay refuses a reconnect whose material names a different conversation (spec section 9), and stops after 5
+  platform-requested reconnects in a minute. Generic AHP clients attach again with new material.
 - Tickets are 60-second, single-use, owner- and session-bound, stored as SHA-256 hashes (`attach_tickets`). Upgrades
   re-check ownership and session state. Generic AHP clients may pass the ticket as `?tkn=`.
 - The stock CLI sends its GitHub OAuth token as `Authorization` and in an AHP `authenticate` request. The relay and
   the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
   headers, so no CLI token reaches a runtime or sandbox.
 - Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
-  empty because the host cannot list models without an AHP credential; sandbox sessions need the sandbox module's
-  `connect(sessionId, port)`; GitHub Copilot app publication is not implemented (`github.publish`).
+  empty because the host cannot list models without an AHP credential; GitHub Copilot app publication is not
+  implemented (`github.publish`).
 
 ### CLI and quickstart
 
