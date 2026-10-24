@@ -53,6 +53,8 @@ export class Assistant {
   #viewers = 0;
   #browserTimeZone: string | undefined;
   #detachTimer: NodeJS.Timeout | undefined;
+  #attachTimer: NodeJS.Timeout | undefined;
+  #attachFailures = 0;
   #pollTimer: NodeJS.Timeout | undefined;
   #agendaTimer: NodeJS.Timeout | undefined;
   #schedulesTimer: NodeJS.Timeout | undefined;
@@ -86,11 +88,10 @@ export class Assistant {
       tools: () => this.#tools(),
       systemMessage: async () => {
         const account = this.#requireAccount();
-        const workspace = await this.workspace();
-        return systemInstructions({ name: account.name ?? account.login, timeZone: this.timeZone(), workspaceLabel: workspace.label });
+        return systemInstructions({ name: account.name ?? account.login });
       },
       currentEvent: async (id) => {
-        const event = await (await this.workspace()).calendar.get(id);
+        const event = await (await this.workspace()).calendar.get(id, this.timeZone());
         return { title: event.title, start: event.start, end: event.end };
       },
       timeline: {
@@ -101,6 +102,7 @@ export class Assistant {
       onChanges: (changes) => this.#onTimelineChanges(changes),
       onReset: () => this.#broadcastSnapshot(),
       onStatus: () => this.#broadcastStatus(),
+      onSessionChanged: () => void this.schedules.refresh(),
     });
     this.schedules = new Schedules({
       config,
@@ -108,7 +110,12 @@ export class Assistant {
       platform: this.platform,
       sessionId: () => this.conversation.sessionId,
       timeZone: () => this.timeZone(),
-      onChange: (schedules, error) => this.#broadcast({ type: "schedules", schedules, error }),
+      onChange: (schedules, error) => {
+        this.#broadcast({ type: "schedules", schedules, error });
+        // Trigger pills replayed before the schedules were known get their names now.
+        const changes = this.conversation.timeline.refresh();
+        if (changes.length) this.#onTimelineChanges(changes);
+      },
     });
   }
 
@@ -141,6 +148,7 @@ export class Assistant {
     clearInterval(this.#agendaTimer);
     clearTimeout(this.#detachTimer);
     clearTimeout(this.#schedulesTimer);
+    clearTimeout(this.#attachTimer);
     this.hub.close();
     await this.conversation.detach("server stopping").catch(() => undefined);
     await this.platform.stop();
@@ -154,30 +162,49 @@ export class Assistant {
     if (this.#account?.id !== account.id) this.#demo = undefined;
     this.#account = account;
     this.store.upsertUser({ id: account.id, login: account.login, name: account.name });
+    this.#rememberBrowserTimeZone();
     this.#broadcastStatus();
     this.#broadcast({ type: "connections", connections: this.connections() });
+    // Know the conversation (even with no tab open) before listing its schedules and answering its webhooks.
+    await this.conversation.ensureKnown().catch((error) => this.log.warn("Couldn't find the conversation yet", { error: errorMessage(error) }));
     await this.schedules.refresh();
     void this.refreshAgenda();
-    if (this.#viewers > 0) await this.conversation.attach().catch(() => undefined);
+    if (this.#viewers > 0) this.#ensureAttached();
     else await this.offline.reconcile("platform ready");
   }
 
   #onPlatformEvent(event: VerifiedWebhookEvent): void {
     this.log.info("Platform event", { type: event.type, sessionId: event.sessionId });
-    if (event.type === "schedule.run_started" && this.#viewers > 0 && !this.conversation.live) {
-      void this.conversation.attach().catch(() => undefined);
-    }
+    if (event.type === "schedule.run_started" && !this.conversation.live) this.#ensureAttached();
     if (event.type.startsWith("schedule.") || event.type === "session.idle") void this.schedules.refresh();
     if (event.type === "session.idle") void this.refreshAgenda();
   }
 
   // ---- viewers and attach policy -----------------------------------------------------------------------------------
 
+  /** Attaches while someone is watching, retrying with backoff if it fails (for example, a platform hiccup). */
+  #ensureAttached(): void {
+    clearTimeout(this.#attachTimer);
+    this.#attachTimer = undefined;
+    if (this.#viewers === 0 || this.platform.status.state !== "ready") return;
+    this.conversation.attach().then(
+      () => {
+        this.#attachFailures = 0;
+      },
+      () => {
+        if (this.#viewers === 0 || this.conversation.live) return;
+        const delay = Math.min(60_000, 5_000 * 2 ** this.#attachFailures++);
+        this.#attachTimer = setTimeout(() => this.#ensureAttached(), delay);
+        this.#attachTimer.unref();
+      },
+    );
+  }
+
   #viewerJoined(): void {
     this.#viewers++;
     clearTimeout(this.#detachTimer);
     this.#detachTimer = undefined;
-    if (this.platform.status.state === "ready") void this.conversation.attach().catch(() => undefined);
+    this.#ensureAttached();
   }
 
   #viewerLeft(): void {
@@ -187,11 +214,20 @@ export class Assistant {
     this.#detachTimer = setTimeout(() => {
       if (this.#viewers > 0) return;
       void this.conversation
-        .detach("no open tabs")
-        .then(() => this.offline.reconcile("detached"))
+        .detach("no open tabs", { unless: () => this.#viewers > 0 })
+        .then(() => {
+          if (!this.conversation.live) return this.offline.reconcile("detached");
+        })
         .catch((error) => this.log.warn("Detach failed", { error: errorMessage(error) }));
     }, this.config.detachAfterMs);
     this.#detachTimer.unref();
+  }
+
+  /** Remembers the browser's time zone, so work done with no tab open uses it too. */
+  #rememberBrowserTimeZone(): void {
+    const timeZone = this.#browserTimeZone;
+    if (!timeZone || !this.#account) return;
+    if (this.store.getUser(this.#account.id)?.detectedTimeZone !== timeZone) this.store.setDetectedTimeZone(this.#account.id, timeZone);
   }
 
   // ---- identity, workspace, tools ----------------------------------------------------------------------------------
@@ -202,8 +238,8 @@ export class Assistant {
   }
 
   timeZone(): string {
-    const stored = this.#account ? this.store.getUser(this.#account.id)?.timeZone : undefined;
-    return stored ?? this.#browserTimeZone ?? systemTimeZone();
+    const user = this.#account ? this.store.getUser(this.#account.id) : undefined;
+    return user?.timeZone ?? user?.detectedTimeZone ?? this.#browserTimeZone ?? systemTimeZone();
   }
 
   #demoWorkspace(account: AccountInfo): DemoWorkspace {
@@ -340,15 +376,24 @@ export class Assistant {
 
     router.add("GET", "/healthz", () => ({ ok: true, platform: this.platform.status.state, conversation: this.conversation.state }));
 
-    router.add("GET", "/api/events", (ctx) => {
-      const tz = ctx.url.searchParams.get("tz");
-      if (tz && isValidTimeZone(tz)) this.#browserTimeZone = tz;
-      this.hub.open(ctx.res, () => this.#viewerLeft());
-      this.hub.send(ctx.res, { type: "snapshot", snapshot: this.snapshot() });
-      this.#viewerJoined();
-    });
+    router.add(
+      "GET",
+      "/api/events",
+      (ctx) => {
+        const tz = ctx.url.searchParams.get("tz");
+        if (tz && isValidTimeZone(tz)) {
+          this.#browserTimeZone = tz;
+          this.#rememberBrowserTimeZone();
+        }
+        this.hub.open(ctx.res, () => this.#viewerLeft());
+        this.hub.send(ctx.res, { type: "snapshot", snapshot: this.snapshot() });
+        this.#viewerJoined();
+      },
+      // Opening the stream attaches the conversation and sets the time zone, so only this app's pages may open it.
+      { sameOrigin: true },
+    );
 
-    router.add("GET", "/api/state", () => this.snapshot());
+    router.add("GET", "/api/state", () => this.snapshot(), { sameOrigin: true });
 
     router.add("POST", "/api/messages", async (ctx) =>
       run(async () => {
@@ -401,6 +446,7 @@ export class Assistant {
     );
 
     router.add("POST", "/api/retry", async () => {
+      this.#attachFailures = 0;
       if (this.platform.status.state !== "ready") await this.platform.connect();
       else await this.conversation.attach().catch(() => undefined);
       return { ok: true };
@@ -412,7 +458,8 @@ export class Assistant {
         // Schedules that target the old conversation would fail once it is deleted.
         for (const schedule of this.schedules.list) await this.schedules.remove(schedule.id).catch(() => undefined);
         await this.conversation.startOver();
-        if (this.#viewers > 0) await this.conversation.attach().catch(() => undefined);
+        this.offline.reset();
+        this.#ensureAttached();
         void this.schedules.refresh();
         return { ok: true, previous };
       }),

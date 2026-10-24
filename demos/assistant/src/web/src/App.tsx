@@ -50,6 +50,7 @@ export function App() {
   const pendingUnread = items.filter((item) => isUnread(item, lastReadAt)).length;
   const unread = seeing ? 0 : pendingUnread;
   const markedAt = useRef<string | undefined>(undefined);
+  const conversationLive = snapshot?.conversation.attach === "live";
 
   useEffect(() => {
     document.title = unread > 0 ? `(${unread}) Assistant` : "Assistant";
@@ -57,10 +58,15 @@ export function App() {
 
   useEffect(() => {
     const latest = items[items.length - 1];
-    if (!seeing || pendingUnread === 0 || !latest || markedAt.current === latest.at) return;
-    markedAt.current = latest.at;
-    actions.markRead(latest.at);
-  }, [seeing, pendingUnread, items, actions]);
+    // Only the live conversation counts (a reopened tab first shows the cached one), and only after a moment in view,
+    // so jumping to "New since you were away" doesn't mark everything below it read.
+    if (!seeing || !conversationLive || pendingUnread === 0 || !latest || markedAt.current === latest.at) return;
+    const timer = setTimeout(() => {
+      markedAt.current = latest.at;
+      actions.markRead(latest.at);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [seeing, conversationLive, pendingUnread, items, actions]);
 
   const openSchedule = useCallback((id: string) => {
     setHighlight(id);

@@ -32,6 +32,26 @@ export function encodeWord(text: string): string {
   return `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`;
 }
 
+/**
+ * Unstructured header text such as Subject: printable ASCII is sent as is (commas and parentheses need no quoting
+ * there), anything else as RFC 2047 encoded-words of whole characters, each short enough for one header line.
+ */
+export function encodeHeaderText(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x20-\x7e]*$/.test(text)) return text;
+  const words: string[] = [];
+  let chunk = "";
+  for (const char of text) {
+    if (chunk && Buffer.byteLength(chunk + char, "utf8") > 45) {
+      words.push(chunk);
+      chunk = "";
+    }
+    chunk += char;
+  }
+  if (chunk) words.push(chunk);
+  return words.map((word) => `=?UTF-8?B?${Buffer.from(word, "utf8").toString("base64")}?=`).join("\r\n ");
+}
+
 export interface MimeMessage {
   readonly to: readonly string[];
   readonly cc?: readonly string[];
@@ -51,7 +71,7 @@ export function buildMime(message: MimeMessage): string {
   const headers = [
     `To: ${message.to.map(normalizeAddress).join(", ")}`,
     ...(message.cc && message.cc.length ? [`Cc: ${message.cc.map(normalizeAddress).join(", ")}`] : []),
-    `Subject: ${encodeWord(message.subject)}`,
+    `Subject: ${encodeHeaderText(message.subject)}`,
     "MIME-Version: 1.0",
     'Content-Type: text/plain; charset="UTF-8"',
     "Content-Transfer-Encoding: base64",

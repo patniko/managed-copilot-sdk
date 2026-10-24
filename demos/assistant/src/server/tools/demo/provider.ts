@@ -167,11 +167,13 @@ export class DemoWorkspace implements Workspace {
   readonly #store: Store;
   readonly #owner: DemoOwner;
   readonly #timeZone: () => string;
+  readonly #clock: () => Date;
 
-  constructor(store: Store, owner: DemoOwner, timeZone: () => string) {
+  constructor(store: Store, owner: DemoOwner, timeZone: () => string, clock: () => Date = () => new Date()) {
     this.#store = store;
     this.#owner = owner;
     this.#timeZone = timeZone;
+    this.#clock = clock;
     this.address = owner.address;
     this.mail = {
       search: (search) => this.#search(search),
@@ -188,16 +190,19 @@ export class DemoWorkspace implements Workspace {
     };
   }
 
-  /** When the sample data was generated, seeding it first if needed (and refreshing it once it is a week old). */
-  ensureSeeded(now: Date = new Date()): string {
-    const row = this.#store.db.prepare("SELECT seeded_at FROM demo_meta WHERE account_id = ?").get(this.#owner.accountId) as Row | undefined;
+  /**
+   * When the sample data was generated, seeding it first if needed. It is refreshed once it is a week old, and when the
+   * person's time zone changes (sample meetings sit in local working hours).
+   */
+  ensureSeeded(now: Date = this.#clock()): string {
+    const row = this.#store.db.prepare("SELECT seeded_at, time_zone FROM demo_meta WHERE account_id = ?").get(this.#owner.accountId) as Row | undefined;
     const seededAt = typeof row?.seeded_at === "string" ? row.seeded_at : undefined;
-    if (seededAt && now.getTime() - Date.parse(seededAt) < STALE_AFTER_MS) return seededAt;
+    if (seededAt && now.getTime() - Date.parse(seededAt) < STALE_AFTER_MS && row?.time_zone === this.#timeZone()) return seededAt;
     return this.reset(now);
   }
 
   /** Replaces the sample inbox and calendar with fresh data relative to `now`. */
-  reset(now: Date = new Date()): string {
+  reset(now: Date = this.#clock()): string {
     const timeZone = this.#timeZone();
     const { mail, events } = seedWorkspace(now, timeZone, this.#owner);
     const account = this.#owner.accountId;

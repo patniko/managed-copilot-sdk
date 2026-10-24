@@ -4,7 +4,7 @@ import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
 import { TEMPLATES } from "../shared/templates.js";
 import type { ApiErrorBody, CreateWorkOrderRequest, FactoryState } from "../shared/types.js";
-import { ATTACH_COMMAND_TEMPLATE, canLaunchTerminal, isValidSessionId, launchAttach } from "./attach.js";
+import { attachCommandTemplate, canLaunchTerminal, isValidSessionId, launchAttach } from "./attach.js";
 import type { FactoryConfig } from "./config.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
@@ -155,7 +155,7 @@ export function factoryState(ctx: ApiContext): FactoryState {
     platform: ctx.platform.status,
     workOrders: ctx.factory.list(),
     templates: TEMPLATES,
-    attachCommand: ATTACH_COMMAND_TEMPLATE,
+    attachCommand: attachCommandTemplate(ctx.config.attachUrl),
     canLaunchTerminal: canLaunchTerminal(),
   };
 }
@@ -229,7 +229,7 @@ function buildRouter(ctx: ApiContext): Router {
         factory.get(summary.id)?.stations.some((station) => station.sessionId === sessionId || station.previousSessionIds?.includes(sessionId)),
       );
     if (!known || !isValidSessionId(sessionId)) throw new StationError("not_found", "That session doesn't belong to a work order.");
-    sendJson(res, 200, await launchAttach(sessionId, ctx.config.repoRoot, ctx.platform.status.url));
+    sendJson(res, 200, await launchAttach(sessionId, ctx.config.repoRoot, ctx.platform.status.url, ctx.config.attachUrl));
   });
   return router;
 }

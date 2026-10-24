@@ -63,6 +63,11 @@ export interface ManagedCopilotOptions extends Omit<ConfigInput, "name" | "vault
    * session (progress appears in the gateway's logs). Defaults to true when an isolated or promotable environment exists.
    */
   prepareSandboxes?: boolean;
+  /**
+   * Advertise this gateway for zero-config `ManagedCopilot.connect()` on this machine (default true). Turn it off for a
+   * second copy running beside another, so tools keep finding the first.
+   */
+  discovery?: boolean;
 }
 
 /** A secret the gateway receives through its environment, never through `MANAGED_COPILOT_CONFIG`. */
@@ -87,7 +92,7 @@ export class ManagedCopilotOptionsError extends Error {
   }
 }
 
-const HOSTING_KEYS = ["port", "dataDirectory", "gatewayDirectory", "prepareSandboxes"] as const;
+const HOSTING_KEYS = ["port", "dataDirectory", "gatewayDirectory", "prepareSandboxes", "discovery"] as const;
 
 function envSegment(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");

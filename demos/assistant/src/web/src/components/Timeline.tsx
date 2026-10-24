@@ -79,6 +79,8 @@ export function Timeline(props: TimelineProps) {
   const [atBottom, setAtBottom] = useState(true);
   const stick = useRef(true);
   const initialScrollDone = useRef(false);
+  /** The unread divider already scrolled to (it can arrive after the first render, once the live history loads). */
+  const anchoredTo = useRef<string | undefined>(undefined);
   const blocks = useMemo(() => buildBlocks(items, timeZone, unreadAnchor), [items, timeZone, unreadAnchor]);
   const lastItem = items[items.length - 1];
   const streamingText = lastItem?.kind === "assistant" ? lastItem.text.length : 0;
@@ -97,24 +99,26 @@ export function Timeline(props: TimelineProps) {
   useLayoutEffect(() => {
     const el = scroller.current;
     if (!el || items.length === 0) return;
-    if (!initialScrollDone.current) {
+    if (unreadAnchor && anchoredTo.current !== unreadAnchor && unreadRef.current) {
+      anchoredTo.current = unreadAnchor;
       initialScrollDone.current = true;
-      if (unreadRef.current) {
-        unreadRef.current.scrollIntoView({ block: "start" });
-        el.scrollTop -= 16;
-      } else {
-        el.scrollTop = el.scrollHeight;
-      }
+      unreadRef.current.scrollIntoView({ block: "start" });
+      el.scrollTop -= 16;
+    } else if (!initialScrollDone.current) {
+      initialScrollDone.current = true;
+      el.scrollTop = el.scrollHeight;
     } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
     }
     // Short content never fires a scroll event, so always report the position after layout.
     measure();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items.length, pending.length, streamingText, showTyping]);
+  }, [items.length, pending.length, streamingText, showTyping, unreadAnchor]);
 
   useEffect(() => {
-    if (items.length === 0) initialScrollDone.current = false;
+    if (items.length > 0) return;
+    initialScrollDone.current = false;
+    anchoredTo.current = undefined;
   }, [items.length]);
 
   // Report the position on mount too: the timeline remounts after loading states.

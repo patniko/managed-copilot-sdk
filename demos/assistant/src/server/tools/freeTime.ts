@@ -1,5 +1,5 @@
 /** Free-time search over busy calendar intervals, in the person's time zone and working hours. */
-import { addDays, atTime, startOfDay, zonedParts } from "../time.js";
+import { addDays, atTime, offsetMinutes, startOfDay, zonedParts } from "../time.js";
 
 export interface Interval {
   readonly start: Date;
@@ -45,9 +45,17 @@ export function mergeIntervals(intervals: readonly Interval[]): Interval[] {
   return merged;
 }
 
-function alignUp(date: Date, stepMinutes: number): Date {
+/** The next local day's start, always strictly later so day loops terminate whatever the zone's rules. */
+function nextDay(day: Date, timeZone: string): Date {
+  const next = addDays(day, 1, timeZone);
+  return next.getTime() > day.getTime() ? next : new Date(day.getTime() + 86_400_000);
+}
+
+/** Rounds up to the next step boundary on the local clock, so slots start at :00 and :30 even in UTC+5:45. */
+function alignUp(date: Date, stepMinutes: number, timeZone: string): Date {
   const step = stepMinutes * 60_000;
-  return new Date(Math.ceil(date.getTime() / step) * step);
+  const offset = offsetMinutes(date, timeZone) * 60_000;
+  return new Date(Math.ceil((date.getTime() + offset) / step) * step - offset);
 }
 
 export function findFreeTime(options: FreeTimeOptions): FreeTimeResult {
@@ -63,7 +71,7 @@ export function findFreeTime(options: FreeTimeOptions): FreeTimeResult {
   const suggestions: Interval[] = [];
   const perDay = new Map<string, number>();
 
-  for (let day = startOfDay(options.rangeStart, timeZone); day < options.rangeEnd; day = addDays(day, 1, timeZone)) {
+  for (let day = startOfDay(options.rangeStart, timeZone); day < options.rangeEnd; day = nextDay(day, timeZone)) {
     const weekday = zonedParts(day, timeZone).weekday;
     if (!options.includeWeekends && (weekday === 0 || weekday === 6)) continue;
     const windowStart = new Date(Math.max(atTime(day, startHour, 0, timeZone).getTime(), options.rangeStart.getTime(), notBefore.getTime()));
@@ -84,7 +92,7 @@ export function findFreeTime(options: FreeTimeOptions): FreeTimeResult {
     for (const gap of gaps) {
       if (gap.end.getTime() - gap.start.getTime() < duration) continue;
       windows.push(gap);
-      const slotStart = alignUp(gap.start, step);
+      const slotStart = alignUp(gap.start, step, timeZone);
       const slotEnd = new Date(slotStart.getTime() + duration);
       const dayKey = day.toISOString();
       const count = perDay.get(dayKey) ?? 0;

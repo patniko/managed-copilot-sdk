@@ -1,6 +1,6 @@
 import { Highlight } from "prism-react-renderer";
 import { cx } from "../../lib/cx.js";
-import { codeTheme, LANGUAGE_LABELS, PLAIN, Prism } from "../../lib/highlight.js";
+import { codeTheme, languageLabel, PLAIN, Prism } from "../../lib/highlight.js";
 import { CopyButton } from "../ui/CopyButton.js";
 
 const MAX_HIGHLIGHT_CHARS = 180_000;
@@ -84,7 +84,7 @@ export function CodeBlock({ code, language, className, maxHeightClass = "max-h-9
     <div className={cx("group/code my-3 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950/70", className)}>
       <div className="flex h-7 items-center justify-between border-b border-zinc-800/80 bg-zinc-900/60 pr-1 pl-3">
         <span className="font-mono text-[10.5px] uppercase tracking-wider text-zinc-500">
-          {LANGUAGE_LABELS[language] ?? language}
+          {languageLabel(language)}
         </span>
         <CopyButton text={text} label="Copy code" className="opacity-70 group-hover/code:opacity-100" />
       </div>

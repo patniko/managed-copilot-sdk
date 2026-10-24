@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { Logger } from "../../log.js";
 import type { UpstreamInfo } from "./contracts.js";
-import { RpcEndpoint, RpcError, streamTransport, type IncomingRequestContext, type MessageTransport } from "./rpc.js";
+import { RpcEndpoint, RpcError, streamTransport, type IncomingRequestContext, type MessageTransport, type RequestOptions } from "./rpc.js";
 
 /** Minimum and maximum protocol versions this gateway relays (SDK 1.0.26 speaks version 3). */
 export const MIN_PROTOCOL_VERSION = 3;
@@ -78,7 +78,7 @@ export class RuntimeUpstream {
     }
   }
 
-  request<T = unknown>(method: string, params?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
+  request<T = unknown>(method: string, params?: unknown, options?: RequestOptions): Promise<T> {
     return this.endpoint.request<T>(method, params, options);
   }
 
@@ -219,6 +219,11 @@ export class SharedRuntime {
 
   get workspacesRoot(): string {
     return join(this.#options.root, "workspaces");
+  }
+
+  /** Where the spawned runtime keeps a session's state; undefined for an external runtime. */
+  sessionStateDirectory(sessionId: string): string | undefined {
+    return this.#options.externalUrl ? undefined : join(this.#options.root, "copilot-home", "session-state", sessionId);
   }
 
   get lastError(): string | undefined {
@@ -531,22 +536,27 @@ export async function reapStaleRuntime(root: string, log: Logger): Promise<void>
     log.warn("Another gateway may be using this data directory; leaving its shared runtime alone", { pid, gatewayPid });
     return;
   }
-  rmSync(file, { force: true });
-  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) return;
+  // The record goes only once the recorded runtime is known gone, so a gateway that dies mid-reap leaves it for the next.
+  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) {
+    rmSync(file, { force: true });
+    return;
+  }
   log.warn("Stopping the shared runtime a previous gateway left running", { pid });
   try {
     process.kill(pid);
   } catch {
-    return;
+    // Already gone.
   }
   for (let waited = 0; waited < 5000 && isRunning(pid); waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
-  if (isRunning(pid)) {
+  // Escalate only against the same process: the pid may have been reused while waiting.
+  if (isRunning(pid) && (await processStartTime(pid)) === startTime) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
       // Already gone.
     }
   }
+  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) rmSync(file, { force: true });
 }
 
 function openTcp(host: string, port: number): Promise<MessageTransport> {

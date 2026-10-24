@@ -107,24 +107,52 @@ describe("Google OAuth", () => {
     expect(auth.configured).toBe(false);
     expect(() => auth.beginAuthorization(1)).toThrow(/isn't configured/);
   });
+
+  it("never applies a refresh that finished after Google was reconnected", async () => {
+    let finishRefresh: (response: Response) => void = () => undefined;
+    const fetchImpl = (async (input: string | URL | Request) => {
+      if (String(input).includes("/token")) return new Promise<Response>((resolve) => (finishRefresh = resolve));
+      throw new Error(`unexpected ${String(input)}`);
+    }) as typeof fetch;
+    const { auth, store, sealer } = setupAuth(fetchImpl);
+    const connect = (refresh: string, access: string, expiresAt: Date) =>
+      store.saveGoogle({
+        accountId: 1,
+        scopes: [...REQUESTED_SCOPES],
+        refreshToken: sealer.seal(refresh, "google:1:refresh"),
+        accessToken: sealer.seal(access, "google:1:access"),
+        accessExpiresAt: expiresAt.toISOString(),
+        status: "ok",
+        connectedAt: new Date().toISOString(),
+      });
+    connect("1//old", "ya29.old", new Date(Date.now() - 1000));
+    const pending = auth.accessToken(1);
+    // The person reconnects (perhaps as another Google account) while the old grant's refresh is in flight.
+    connect("1//new", "ya29.new", new Date(Date.now() + 3600_000));
+    finishRefresh(jsonResponse(200, { access_token: "ya29.stale", expires_in: 3599 }));
+    expect(await pending).toBe("ya29.new");
+    expect(sealer.open(store.getGoogle(1)!.accessToken!, "google:1:access")).toBe("ya29.new");
+  });
 });
 
 describe("Router", () => {
   let server: Server | undefined;
   afterEach(() => new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve())));
 
-  async function start() {
-    const router = new Router({ port: 7490, publicUrl: "http://localhost:7490", extraOrigins: [] });
+  async function start(options: { extraHosts?: string[] } = {}) {
+    const router = new Router({ port: 7490, publicUrl: "http://localhost:7490", extraOrigins: [], extraHosts: options.extraHosts });
     router.add("POST", "/api/messages", async (ctx) => ({ got: await ctx.json<{ text: string }>() }));
+    router.add("POST", "/api/abort", () => ({ ok: true }));
+    router.add("GET", "/api/state", () => ({ ok: true }), { sameOrigin: true });
     router.add("POST", "/api/copilot-events", () => ({ ok: true }), { sameOrigin: false });
     server = createServer((req, res) => void router.handle(req, res).then((handled) => (handled ? undefined : res.writeHead(404).end())));
     await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", () => resolve()));
     return (server.address() as AddressInfo).port;
   }
 
-  function post(port: number, path: string, headers: Record<string, string>, body = "{}"): Promise<{ status: number; body: string }> {
+  function send(port: number, method: string, path: string, headers: Record<string, string>, body?: string): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
-      const req = request({ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json", ...headers } }, (res) => {
+      const req = request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
         let data = "";
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => resolve({ status: res.statusCode ?? 0, body: data }));
@@ -132,6 +160,10 @@ describe("Router", () => {
       req.on("error", reject);
       req.end(body);
     });
+  }
+
+  function post(port: number, path: string, headers: Record<string, string>, body = "{}"): Promise<{ status: number; body: string }> {
+    return send(port, "POST", path, { "content-type": "application/json", ...headers }, body);
   }
 
   it("accepts same-origin JSON and rejects cross-origin, rebinding, and form posts", async () => {
@@ -142,5 +174,24 @@ describe("Router", () => {
     expect((await post(port, "/api/messages", { host: "localhost:7490", "content-type": "text/plain" })).status).toBe(415);
     // Signed webhooks come from the platform, not a browser, so they skip the origin check.
     expect((await post(port, "/api/copilot-events", { host: "localhost:7490", origin: "https://gateway.example" })).status).toBe(200);
+  });
+
+  it("rejects cross-site requests without an Origin and non-JSON posts to actions that take no body", async () => {
+    const port = await start();
+    expect((await post(port, "/api/abort", { host: "localhost:7490", "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await post(port, "/api/abort", { host: "localhost:7490", "content-type": "application/x-www-form-urlencoded" }, "a=1")).status).toBe(415);
+    expect((await post(port, "/api/abort", { host: "localhost:7490", origin: "http://localhost:7490", "sec-fetch-site": "same-origin" })).status).toBe(200);
+    expect((await send(port, "GET", "/api/state", { host: "localhost:7490", "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await send(port, "GET", "/api/state", { host: "localhost:7490", "sec-fetch-site": "same-origin" })).status).toBe(200);
+  });
+
+  it("answers configured extra host names (for in-environment webhooks) and *.localhost", async () => {
+    const port = await start({ extraHosts: ["assistant"] });
+    const webhook = (host: string) => post(port, "/api/copilot-events", { host });
+    expect((await webhook("assistant")).status).toBe(200);
+    expect((await webhook("assistant:8080")).status).toBe(200);
+    expect((await webhook("assistant.dev.localhost:7490")).status).toBe(200);
+    expect((await webhook("localhost:9999")).status).toBe(421);
+    expect((await webhook("assistant.evil.example")).status).toBe(421);
   });
 });

@@ -5,7 +5,12 @@ specialized Copilot agents on **Managed Copilot**. Each station is an environmen
 its own custom agent, skills, isolation, and network policy. The app itself is ordinary Node code built on the stock
 `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-<!-- screenshots: floor (hero), station panel, artifacts, deliverable -->
+![The factory floor mid-run: one builder streaming its work in a sandbox while the other task goes to review on a second model](docs/screenshots/floor-building.png)
+
+*A live run of the featured work order: the planner split it into two tasks; one builder is still working in its
+sandbox while the other's finished work goes to review on a different model. The panel streams the selected
+station's activity (skills, commands, file edits, and the agent's text as it's written) and can open the session in
+Copilot CLI.*
 
 ```mermaid
 flowchart LR
@@ -37,7 +42,24 @@ Managed Copilot features in play (see the [developer experience spec](../../docs
 - **Network control** (section 7). Office stations run with `network: false`; workshop sandboxes reach only the allowed hosts.
 - **Agents, skills, and instructions shipped with the environment** (section 10). See [`customizations/office`](customizations/office) and [`customizations/workshop`](customizations/workshop).
 - **Coming back later** (section 11). Work orders survive restarts; in-flight sandbox turns are resumed with `managed.resumeSession`.
-- **Open in Copilot CLI** (section 14). Any station's live session can be attached from a terminal.
+- **Open in Copilot CLI** (section 14). Any station's session can be attached from a terminal: on Windows the station
+  panel opens a console running `npx managed-copilot attach <session>`; elsewhere it shows the command to copy. The
+  CLI and the factory see the same turns.
+
+### A tour
+
+| | |
+| --- | --- |
+| ![Review station sending work back with a blocker finding](docs/screenshots/review.png) | ![Deliverable: release notes, tests, and the bundle](docs/screenshots/deliverable.png) |
+| **Review sends work back.** The reviewer runs on another model family and returns findings with file and line; the builder fixes them in the same sandbox, and the next round is approved. | **The deliverable.** The release station integrates the tasks, adds integration tests and a README, and publishes the bundle, a patch, a test report, and release notes. |
+| ![Artifacts: the release patch in the diff viewer](docs/screenshots/artifacts-patch.png) | ![Home: templates and the new work order form](docs/screenshots/home.png) |
+| **Every artifact, every version.** Each station's published files, per round, with code, diff, Markdown, and test report viewers. | **Start from a template** or describe your own work order; history survives restarts. |
+
+<img src="docs/screenshots/mobile-floor.png" alt="The floor on a phone-sized screen" width="260" align="right">
+
+The floor adapts down to phone widths: stations stack top to bottom and the work order list becomes a drawer.
+
+<br clear="right">
 
 ## Run it
 
@@ -51,8 +73,9 @@ aspire run          # the platform, sandboxes, and the factory; open the "softwa
 ```
 
 The factory floor opens at <http://localhost:7480>. Pick the **CSV ⇄ JSON toolkit** template and press
-**Start work order**: two builders work side by side, the reviewer usually sends one of them back once, and the release
-lands in about eight minutes.
+**Start work order**: two builders work side by side, the reviewer usually sends work back once, and the release
+lands in three to nine minutes. Measured live runs: 2m 52s (51 tests), 3m 34s (44 tests), and 4m 25s (36 tests)
+from `main`, and 3m 55s to 8m 32s while the platform was coming together.
 
 ### Scripted happy path
 
@@ -102,12 +125,14 @@ environments.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `7480` | HTTP port for the floor and API |
+| `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `FACTORY_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
 | `FACTORY_MODEL_PLANNER` / `_BUILDER` / `_REVIEWER` / `_RELEASE` | first available preference | Override a station's model |
 | `FACTORY_MAX_SANDBOXES` | `4` | Sandboxes the factory runs at once |
 | `FACTORY_BUILD_TIMEOUT_MINUTES` and similar | 5 to 20 | Turn timeouts per station |
 | `FACTORY_DATA_DIR` | `.data` | The factory's SQLite store |
 | `FACTORY_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
+| `FACTORY_ATTACH_URL` | none | Gateway URL added to "Open in Copilot CLI" commands (`--url`) when users reach the platform at another address, as in a cloud deployment |
 
 The default models are Claude Haiku for planning, Claude Sonnet for building and release, and a GPT model for review,
 chosen from what your Copilot entitlement offers (`client.listModels()`).

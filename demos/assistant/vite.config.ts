@@ -18,8 +18,8 @@ export default defineConfig({
     port: Number(process.env.ASSISTANT_WEB_PORT ?? 7491),
     strictPort: true,
     proxy: {
-      "/api": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: false },
-      "/healthz": { target: `http://127.0.0.1:${serverPort}` },
+      "/api": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: true },
+      "/healthz": { target: `http://127.0.0.1:${serverPort}`, changeOrigin: true },
     },
   },
 });

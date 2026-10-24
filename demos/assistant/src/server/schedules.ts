@@ -7,7 +7,7 @@ import type { ScheduleView } from "../shared/protocol.js";
 import type { AssistantConfig } from "./config.js";
 import { describeCron } from "./cron.js";
 import { UserFacingError } from "./conversation.js";
-import { humanizeName } from "./describe.js";
+import { scheduleDisplayName } from "./describe.js";
 import { errorMessage, type Logger } from "./log.js";
 import type { Platform } from "./platform.js";
 import { formatWhen } from "./time.js";
@@ -37,7 +37,7 @@ function toView(schedule: ScheduleInfo, timeZone: string): ScheduleView {
       : "Once";
   return {
     id: schedule.id,
-    name: displayName(schedule.name),
+    name: scheduleDisplayName(schedule.name, schedule.prompt),
     cadence,
     cron: schedule.cron,
     runAt: schedule.runAt,
@@ -63,8 +63,6 @@ function friendly(error: unknown): string {
   return errorMessage(error);
 }
 
-const displayName = humanizeName;
-
 export class Schedules {
   readonly #deps: SchedulesDeps;
   #schedules: ScheduleView[] = [];
@@ -89,7 +87,7 @@ export class Schedules {
   nameFor(text: string): string | undefined {
     const normalized = text.trim();
     for (const schedule of this.#raw.values()) {
-      if (schedule.prompt.trim() === normalized) return displayName(schedule.name);
+      if (schedule.prompt.trim() === normalized) return scheduleDisplayName(schedule.name, schedule.prompt);
     }
     return undefined;
   }

@@ -8,10 +8,15 @@ export const ATTACH_TICKET_PREFIX = "mcat_";
 
 /** WebSocket close codes the attach relays use; the reason string explains the outcome. */
 export const ATTACH_CLOSE_CODES = {
-  /** The session was deleted, moved into a sandbox, or its runtime stopped. Attach again to continue. */
+  /** The session was deleted or its runtime stopped. Attach again to continue. */
   sessionGone: 4410,
-  /** The attachment reached its maximum lifetime. Attach again to continue. */
+  /** The attachment reached its maximum lifetime. The SDK launcher renews it; other clients attach again. */
   expired: 4408,
+  /**
+   * The session moved to another runtime (promotion into a sandbox). The SDK launcher reconnects the CLI to the same
+   * session on its new runtime; other clients attach again.
+   */
+  moved: 4307,
 } as const;
 
 export const CREDENTIAL_REFUSAL =

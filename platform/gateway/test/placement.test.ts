@@ -1,90 +1,12 @@
-import { once } from "node:events";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { connect as connectTcp, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
-import { FakeRuntime, RawClient, sleep, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
+import { FakeRuntime, FakeSandboxes, RawClient, sleep, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
 
 const ALICE = "alice-token";
 const MOUNT = "/opt/managed-copilot/customizations";
-
-type Send = (method: string, params?: unknown) => Promise<unknown>;
-
-/**
- * Core's `sandboxes` port backed by the fake runtime: every "sandbox" is its own connection to it. Like the real
- * sandbox module, the runtime receives no GitHub credential until `sessionOpened` installs one, and a requested
- * agent is deferred out of create/resume params and selected after that.
- */
-class FakeSandboxes {
-  readonly log: { op: string; sessionId: string; detail?: Record<string, unknown> }[] = [];
-  readonly streams = new Map<string, Socket>();
-  failCreate: Error | undefined;
-
-  constructor(private readonly runtime: FakeRuntime) {}
-
-  ops(sessionId: string): string[] {
-    return this.log.filter((entry) => entry.sessionId === sessionId).map((entry) => entry.op);
-  }
-
-  detail(sessionId: string, op: string): Record<string, unknown> {
-    return this.log.filter((entry) => entry.sessionId === sessionId && entry.op === op).at(-1)?.detail ?? {};
-  }
-
-  async create(request: { sessionId: string; ownerId: number; environment: string; size: string }): Promise<unknown> {
-    this.log.push({ op: "create", sessionId: request.sessionId, detail: { ...request } });
-    if (this.failCreate) throw this.failCreate;
-    return { sandboxId: `sbx-${request.sessionId}` };
-  }
-
-  async ensureRunning(sessionId: string): Promise<unknown> {
-    this.log.push({ op: "ensureRunning", sessionId });
-    return { sandboxId: `sbx-${sessionId}` };
-  }
-
-  async openRuntime(sessionId: string, options: { resolveToken(): Promise<string> }) {
-    this.log.push({ op: "openRuntime", sessionId });
-    const socket = connectTcp(this.runtime.port, "127.0.0.1");
-    await once(socket, "connect");
-    this.streams.set(sessionId, socket);
-    let send: Send | undefined;
-    const deferred = new Map<string, string>();
-    return {
-      stream: socket,
-      connectionToken: this.runtime.token,
-      handlers: new Map(),
-      initialize: async (upstream: Send) => {
-        send = upstream;
-        this.log.push({ op: "initialize", sessionId });
-      },
-      prepareSessionParams: async (method: string, params: Record<string, unknown>) => {
-        this.log.push({ op: `prepare ${method}`, sessionId, detail: params });
-        const { gitHubToken: _token, gitHubTokenProviderRegistrationId: _registration, agent, ...rest } = params;
-        if (typeof agent === "string") deferred.set(sessionId, agent);
-        return rest;
-      },
-      sessionOpened: async (id: string) => {
-        this.log.push({ op: "sessionOpened", sessionId: id });
-        await options.resolveToken();
-        await send!("session.gitHubAuth.setCredentials", { sessionId: id, credentials: { type: "token", host: "https://github.com", token: "mcrt_placeholder" } });
-        const agent = deferred.get(id);
-        deferred.delete(id);
-        if (agent) await send!("session.agent.select", { sessionId: id, name: agent });
-      },
-      close: () => socket.destroy(),
-    };
-  }
-
-  async delete(sessionId: string): Promise<void> {
-    this.log.push({ op: "delete", sessionId });
-  }
-
-  get(): undefined {
-    return undefined;
-  }
-}
-
 describe("isolated placement through the sandboxes port", () => {
   let runtime: FakeRuntime;
   let github: Awaited<ReturnType<typeof startGitHubStub>>;
@@ -184,6 +106,23 @@ describe("isolated placement through the sandboxes port", () => {
     await client.request("session.sendAndWait", { sessionId: second, prompt: "hello second" });
     expect(runtime.sessions.get(first)!.events.some((event) => event.data["content"] === "echo: hello first")).toBe(true);
     expect(runtime.sessions.get(second)!.events.some((event) => event.data["content"] === "echo: hello second")).toBe(true);
+  });
+
+  it("advertises isolated sandboxes, files, and promotion only while the sandbox backend is available", async () => {
+    const capabilities = async () => ((await (await fetch(`${gateway.url}/v1/info`, { headers: { authorization: `Bearer ${ALICE}` } })).json()) as { capabilities: string[] }).capabilities;
+    const moduleCapabilities = gateway.gateway.app.capabilities;
+    const hadPromotion = moduleCapabilities.has("promotion");
+    moduleCapabilities.add("promotion");
+    try {
+      expect(await capabilities()).toEqual(expect.arrayContaining(["isolated", "files", "promotion"]));
+      sandboxes.available = false;
+      const unavailable = await capabilities();
+      for (const capability of ["isolated", "files", "promotion"]) expect(unavailable).not.toContain(capability);
+      expect(unavailable).toContain("shared");
+    } finally {
+      sandboxes.available = true;
+      if (!hadPromotion) moduleCapabilities.delete("promotion");
+    }
   });
 
   it("cleans up when the sandbox cannot be prepared, and deletes it with the session", async () => {

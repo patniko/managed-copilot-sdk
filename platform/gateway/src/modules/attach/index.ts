@@ -1,7 +1,7 @@
 // Owner: devloop workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
 // WebSocket that relays the stock CLI's AHP connection to a per-session listener on the session's own runtime.
 import type { IncomingMessage } from "node:http";
-import { ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
+import { ATTACH_CLOSE_CODES, ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
 import { WebSocketServer } from "ws";
 import type { GatewayApp, GatewayModule } from "../../app.js";
 import { AhpHosts } from "./hosts.js";
@@ -51,7 +51,7 @@ function lifecycleReason(type: SessionLifecycleEvent["type"]): string {
     case "deleted":
       return "The session was deleted.";
     case "promoted":
-      return "The session moved into a sandbox. Attach again to continue.";
+      return "The session moved into a sandbox. Reconnecting.";
     case "stopped":
       return "The session's runtime stopped. Attach again to resume it.";
   }
@@ -74,13 +74,21 @@ export const attachModule: GatewayModule = {
     const socketBase = app.config.publicUrl.replace(/^http/i, "ws");
     app.capabilities.add("attach.cli");
 
+    /**
+     * The session's current runtime, checked as attachable. Resolved inside the host queue, so a release queued by a
+     * lifecycle event (deleted, promoted) settles first and a host never starts on the runtime the session just left.
+     */
+    const currentRuntime = (accountId: number, sessionId: string) => async () => {
+      const sessions = sessionsOf(app);
+      assertAttachable(await sessions.info(accountId, sessionId));
+      return sessions.runtime(sessionId);
+    };
+
     app.routes.post("/v1/sessions/:id/attach", async (ctx) => {
       const principal = ctx.principal;
       const sessionId = ctx.params.id;
       if (!principal || !sessionId) throw new ManagedCopilotError("authentication_required", "Sign in to attach to a session");
-      const sessions = sessionsOf(app);
-      assertAttachable(await sessions.info(principal.accountId, sessionId));
-      const host = await hosts.ensure(sessionId, await sessions.runtime(sessionId));
+      const host = await hosts.ensure(sessionId, currentRuntime(principal.accountId, sessionId));
       const { token, expiresAt } = tickets.mint(principal.accountId, sessionId, ticketTtlMs);
       const material: AttachMaterial = { transport: "ahp", url: `${socketBase}${ROUTES.attachSocket(sessionId)}`, token, expiresAt, ahpSessionId: host.sessionUri };
       return material;
@@ -98,9 +106,7 @@ export const attachModule: GatewayModule = {
         if (!presented) throw new ManagedCopilotError("authentication_required", `Attach with a ticket from POST ${ROUTES.attach(sessionId)}`);
         const ticket = tickets.redeem(presented, sessionId);
         if (!ticket) throw new ManagedCopilotError("authentication_required", "This attach ticket is invalid, expired, or already used. Request a new one.");
-        const sessions = sessionsOf(app);
-        assertAttachable(await sessions.info(ticket.accountId, sessionId));
-        const host = await hosts.ensure(sessionId, await sessions.runtime(sessionId));
+        const host = await hosts.ensure(sessionId, currentRuntime(ticket.accountId, sessionId));
         let upstream;
         try {
           upstream = await openUpstream(host, protocols);
@@ -132,7 +138,9 @@ export const attachModule: GatewayModule = {
     let unsubscribe: (() => void) | undefined;
     app.onStart(() => {
       const sessions = (app.services as Record<string, unknown>).sessions as AttachSessions | undefined;
-      unsubscribe = sessions?.onLifecycle?.((event) => void hosts.release(event.sessionId, lifecycleReason(event.type)));
+      unsubscribe = sessions?.onLifecycle?.((event) =>
+        void hosts.release(event.sessionId, lifecycleReason(event.type), event.type === "promoted" ? { code: ATTACH_CLOSE_CODES.moved } : {}),
+      );
     });
     app.onStop(async () => {
       unsubscribe?.();

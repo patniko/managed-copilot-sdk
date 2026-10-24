@@ -328,19 +328,12 @@ function Viewer({
   const Icon = fileIcon(file);
 
   let body: ReactNode;
-  if (!file.viewable) {
+  if (!version.viewable) {
+    // The factory keeps text files up to 1 MB; it has no bytes to serve for anything else.
     body = (
-      <EmptyState
-        icon={FileArchive}
-        title="This file can't be previewed"
-        action={
-          <a href={url} download={basename(file.path)} className={buttonClass("secondary", "md")}>
-            <Download className="size-4" aria-hidden />
-            Download {basename(file.path)}
-          </a>
-        }
-      >
-        {formatBytes(version.size)} · {file.contentType}
+      <EmptyState icon={FileArchive} title="This file can't be previewed">
+        {formatBytes(version.size)} · {file.contentType}. The factory keeps text files up to 1 MB, so binary and larger
+        outputs aren't stored here.
       </EmptyState>
     );
   } else if (content.status === "ready") {
@@ -406,19 +399,23 @@ function Viewer({
               {versionLabel(version, now)}
             </span>
           )}
-          <a href={url} target="_blank" rel="noreferrer" className={buttonClass("ghost", "sm")}>
-            <ExternalLink className="size-3.5" aria-hidden />
-            Raw
-          </a>
-          <a
-            href={url}
-            download={basename(file.path)}
-            className={buttonClass("ghost", "sm", "w-7 px-0")}
-            aria-label={`Download ${basename(file.path)}`}
-            title="Download"
-          >
-            <Download className="size-3.5" aria-hidden />
-          </a>
+          {version.viewable ? (
+            <>
+              <a href={url} target="_blank" rel="noreferrer" className={buttonClass("ghost", "sm")}>
+                <ExternalLink className="size-3.5" aria-hidden />
+                Raw
+              </a>
+              <a
+                href={url}
+                download={basename(file.path)}
+                className={buttonClass("ghost", "sm", "w-7 px-0")}
+                aria-label={`Download ${basename(file.path)}`}
+                title="Download"
+              >
+                <Download className="size-3.5" aria-hidden />
+              </a>
+            </>
+          ) : null}
         </div>
       </header>
       <div className="min-h-0 flex-1 overflow-auto">{body}</div>

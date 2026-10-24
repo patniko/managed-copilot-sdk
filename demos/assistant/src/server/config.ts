@@ -33,6 +33,11 @@ export interface AssistantConfig {
   readonly pollIntervalMs: number;
   /** Extra origins allowed to call the API (the Vite dev server). */
   readonly devOrigins: readonly string[];
+  /**
+   * Extra host names this server answers to, besides loopback and `ASSISTANT_PUBLIC_URL`'s host (DNS-rebinding
+   * protection), e.g. the in-environment name the platform delivers webhooks to in a cloud deployment.
+   */
+  readonly allowedHosts: readonly string[];
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -68,5 +73,9 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     detachAfterMs: positiveInt(env.ASSISTANT_DETACH_AFTER_MS, 30_000, "ASSISTANT_DETACH_AFTER_MS"),
     pollIntervalMs: positiveInt(env.ASSISTANT_POLL_INTERVAL_MS, 60_000, "ASSISTANT_POLL_INTERVAL_MS"),
     devOrigins: [`http://localhost:${webPort}`, `http://127.0.0.1:${webPort}`],
+    allowedHosts: (env.ASSISTANT_ALLOWED_HOSTS ?? "")
+      .split(",")
+      .map((host) => host.trim().toLowerCase())
+      .filter(Boolean),
   };
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { defineTool, type SessionConfig } from "@github/copilot-sdk";
+import { isManagedCopilotError, type SessionInfo } from "@managed-copilot/sdk";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, SANDBOX_SIZES } from "../../shared/environments.js";
 import { findTemplate } from "../../shared/templates.js";
 import {
@@ -17,7 +18,6 @@ import {
   type PlanTask,
   type ReleaseSummary,
   type ReviewRecord,
-  type SandboxView,
   type Station,
   type StationKind,
   type StationRole,
@@ -198,7 +198,14 @@ export class Factory {
         file = { stationId: meta.stationId, path: meta.path, contentType: meta.contentType, versions: [], viewable: meta.hasContent };
         files.set(key, file);
       }
-      file.versions.push({ version: meta.version, size: meta.size, digest: meta.digest, publishedAt: meta.publishedAt, round: meta.round });
+      file.versions.push({
+        version: meta.version,
+        size: meta.size,
+        digest: meta.digest,
+        publishedAt: meta.publishedAt,
+        round: meta.round,
+        viewable: meta.hasContent,
+      });
     }
     const sorted = [...files.values()].sort(
       (a, b) => (order.get(a.stationId) ?? 99) - (order.get(b.stationId) ?? 99) || a.path.localeCompare(b.path),
@@ -334,26 +341,59 @@ export class Factory {
 
   /**
    * Reconciles finished work orders with the platform's own session list (`managed.sessions.list()`): each station
-   * shows its session's current state and sandbox, or that the session no longer exists.
+   * shows its session's current state and sandbox, or that the session no longer exists. Pass `workOrderIds` to limit
+   * it to some work orders.
    */
-  async reconcileSessions(): Promise<void> {
-    let sessions: Map<string, Awaited<ReturnType<FactoryPlatform["listSessions"]>>[number]>;
+  async reconcileSessions(workOrderIds?: readonly string[]): Promise<void> {
+    const candidates = (): MWorkOrder[] =>
+      (this.#store.listWorkOrders() as MWorkOrder[]).filter((wo) => !this.#runs.has(wo.id) && (!workOrderIds || workOrderIds.includes(wo.id)));
+    const sessions = new Map<string, SessionInfo>();
     try {
-      sessions = new Map((await this.#platform.listSessions()).map((info) => [info.id, info]));
+      for (const info of await this.#platform.listSessions()) sessions.set(info.id, info);
     } catch (error) {
       log.warn("Couldn't list platform sessions", { error: toFactoryError(error).message });
       return;
     }
-    for (const stored of this.#store.listWorkOrders()) {
-      if (this.#runs.has(stored.id)) continue;
-      const wo = stored as MWorkOrder;
+    // The list is capped, so a missing session isn't necessarily gone: look each one up, and only a definitive
+    // not_found marks it deleted. Confirmed deletions aren't looked up again; older `deleted` markers are rechecked.
+    const missing = new Set<string>();
+    for (const wo of candidates()) {
+      for (const station of wo.stations) {
+        if (station.sessionId && !sessions.has(station.sessionId) && !station.sessionGone) missing.add(station.sessionId);
+      }
+    }
+    const goneIds = new Set<string>();
+    const pending = [...missing];
+    for (let index = 0; index < pending.length; index += 8) {
+      await Promise.all(
+        pending.slice(index, index + 8).map(async (sessionId) => {
+          try {
+            sessions.set(sessionId, await this.#platform.sessionInfo(sessionId));
+          } catch (error) {
+            if (isManagedCopilotError(error, "not_found")) goneIds.add(sessionId);
+            else log.debug("Couldn't look up a session", { sessionId, error: (error as Error).message });
+          }
+        }),
+      );
+    }
+    // No awaits from here on, so a work order can't start running while it's being updated.
+    for (const wo of candidates()) {
       let changed = false;
       for (const station of wo.stations) {
         if (!station.sessionId) continue;
         const info = sessions.get(station.sessionId);
-        const state = info?.state ?? "deleted";
+        const gone = goneIds.has(station.sessionId);
+        const state = info?.state ?? (gone ? "deleted" : station.sessionState);
         if (station.sessionState !== state) {
-          station.sessionState = state;
+          if (state === undefined) delete station.sessionState;
+          else station.sessionState = state;
+          changed = true;
+        }
+        if (gone && !station.sessionGone) {
+          station.sessionGone = true;
+          changed = true;
+        } else if (info && station.sessionGone) {
+          delete station.sessionGone;
           changed = true;
         }
         if (info?.sandbox && station.sandbox && station.sandbox.state !== info.sandbox.state) {
@@ -430,6 +470,10 @@ export class Factory {
     this.#persist(run.wo);
     run.closed = true;
     await Promise.allSettled([...run.sessions.keys()].map((stationId) => this.#closeSession(run, stationId)));
+    // Record where each station's session ended up (sessions replaced or deleted during the run included).
+    if (!this.#stopping) {
+      await this.reconcileSessions([run.wo.id]).catch((error: unknown) => log.debug("Session reconciliation failed", { error: (error as Error).message }));
+    }
   }
 
   #cancelStations(wo: MWorkOrder): void {
@@ -886,8 +930,10 @@ export class Factory {
     if (!station.sessionId) return;
     try {
       const info = await this.#platform.sessionInfo(station.sessionId);
+      if (info.id !== station.sessionId) return;
+      const patch: Partial<MStation> = { sessionState: info.state, sessionGone: undefined };
       if (info.sandbox) {
-        const sandbox: SandboxView = {
+        patch.sandbox = {
           id: info.sandbox.id,
           size: info.sandbox.size,
           state: info.sandbox.state,
@@ -895,8 +941,8 @@ export class Factory {
           network: networkView(info.sandbox.network),
           ...(info.sandbox.startedAt ? { startedAt: info.sandbox.startedAt } : {}),
         };
-        this.#updateStation(run, station, { sandbox });
       }
+      this.#updateStation(run, station, patch);
     } catch (error) {
       log.debug("Sandbox details unavailable", { station: station.id, error: (error as Error).message });
     }
@@ -1092,6 +1138,11 @@ export class Factory {
 
   #updateStation(run: Run, station: MStation, patch: Partial<MStation>): void {
     if (run.closed) return;
+    // Session-derived state describes the old session once the station moves to another one.
+    if ("sessionId" in patch && patch.sessionId !== station.sessionId) {
+      if (!("sessionState" in patch)) delete station.sessionState;
+      if (!("sessionGone" in patch)) delete station.sessionGone;
+    }
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) delete (station as Record<string, unknown>)[key];
       else (station as Record<string, unknown>)[key] = value;

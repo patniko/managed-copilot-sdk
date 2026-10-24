@@ -90,6 +90,8 @@ const MIGRATIONS: readonly string[] = [
      updated_at TEXT NOT NULL
    );
    CREATE INDEX demo_events_account ON demo_events (account_id, start);`,
+  // The browser's time zone, remembered so scheduled runs with no tab open use the same zone.
+  `ALTER TABLE users ADD COLUMN detected_time_zone TEXT;`,
 ];
 
 export interface UserRecord {
@@ -97,7 +99,10 @@ export interface UserRecord {
   readonly login: string;
   readonly name?: string;
   readonly sessionId?: string;
+  /** Chosen in Settings. */
   readonly timeZone?: string;
+  /** Reported by the person's browser. */
+  readonly detectedTimeZone?: string;
   readonly lastReadAt?: string;
 }
 
@@ -172,6 +177,7 @@ export class Store {
       name: str(row.name),
       sessionId: str(row.session_id),
       timeZone: str(row.time_zone),
+      detectedTimeZone: str(row.detected_time_zone),
       lastReadAt: str(row.last_read_at),
     };
   }
@@ -192,6 +198,10 @@ export class Store {
 
   setTimeZone(accountId: number, timeZone: string): void {
     this.db.prepare("UPDATE users SET time_zone = ?, updated_at = ? WHERE account_id = ?").run(timeZone, new Date().toISOString(), accountId);
+  }
+
+  setDetectedTimeZone(accountId: number, timeZone: string): void {
+    this.db.prepare("UPDATE users SET detected_time_zone = ?, updated_at = ? WHERE account_id = ?").run(timeZone, new Date().toISOString(), accountId);
   }
 
   setLastReadAt(accountId: number, at: string): void {
@@ -238,21 +248,30 @@ export class Store {
       );
   }
 
-  updateGoogleAccess(accountId: number, sealedAccessToken: string, expiresAt: string, scopes?: readonly string[]): void {
+  /**
+   * Stores a refreshed access token, but only for the connection it was refreshed for: if Google was disconnected or
+   * reconnected (possibly as another Google account) meanwhile, nothing is written and this returns false.
+   */
+  updateGoogleAccess(accountId: number, sealedRefreshToken: string, sealedAccessToken: string, expiresAt: string, scopes?: readonly string[]): boolean {
     const now = new Date().toISOString();
-    if (scopes) {
-      this.db
-        .prepare("UPDATE google_connections SET access_token = ?, access_expires_at = ?, scopes = ?, status = 'ok', updated_at = ? WHERE account_id = ?")
-        .run(sealedAccessToken, expiresAt, scopes.join(" "), now, accountId);
-    } else {
-      this.db
-        .prepare("UPDATE google_connections SET access_token = ?, access_expires_at = ?, status = 'ok', updated_at = ? WHERE account_id = ?")
-        .run(sealedAccessToken, expiresAt, now, accountId);
-    }
+    const result = scopes
+      ? this.db
+          .prepare("UPDATE google_connections SET access_token = ?, access_expires_at = ?, scopes = ?, status = 'ok', updated_at = ? WHERE account_id = ? AND refresh_token = ?")
+          .run(sealedAccessToken, expiresAt, scopes.join(" "), now, accountId, sealedRefreshToken)
+      : this.db
+          .prepare("UPDATE google_connections SET access_token = ?, access_expires_at = ?, status = 'ok', updated_at = ? WHERE account_id = ? AND refresh_token = ?")
+          .run(sealedAccessToken, expiresAt, now, accountId, sealedRefreshToken);
+    return Number(result.changes) === 1;
   }
 
-  setGoogleStatus(accountId: number, status: "ok" | "needs_reconnect"): void {
-    this.db.prepare("UPDATE google_connections SET status = ?, updated_at = ? WHERE account_id = ?").run(status, new Date().toISOString(), accountId);
+  /** Marks a connection's status; with `sealedRefreshToken`, only if it is still that connection. */
+  setGoogleStatus(accountId: number, status: "ok" | "needs_reconnect", sealedRefreshToken?: string): void {
+    const now = new Date().toISOString();
+    if (sealedRefreshToken === undefined) {
+      this.db.prepare("UPDATE google_connections SET status = ?, updated_at = ? WHERE account_id = ?").run(status, now, accountId);
+    } else {
+      this.db.prepare("UPDATE google_connections SET status = ?, updated_at = ? WHERE account_id = ? AND refresh_token = ?").run(status, now, accountId, sealedRefreshToken);
+    }
   }
 
   deleteGoogle(accountId: number): void {
@@ -328,5 +347,9 @@ export class Store {
   offlineCallIds(): Set<string> {
     const rows = this.db.prepare("SELECT tool_call_id FROM offline_calls").all() as Row[];
     return new Set(rows.map((row) => String(row.tool_call_id)));
+  }
+
+  clearOfflineCalls(): void {
+    this.db.prepare("DELETE FROM offline_calls").run();
   }
 }

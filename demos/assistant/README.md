@@ -82,6 +82,9 @@ For UI work, `pnpm --filter @managed-copilot/demo-assistant dev` restarts the se
 | `ASSISTANT_MODEL` | | Default `claude-sonnet-5` |
 | `ASSISTANT_DATA_DIR` | | Default `demos/assistant/.data` (local SQLite state: conversation pointer, sealed tokens, demo data) |
 | `ASSISTANT_DETACH_AFTER_MS` | | Default `30000`: how long after the last tab closes the server detaches, handing scheduled work to the platform |
+| `ASSISTANT_HOSTS` | | Interfaces to listen on. Default `127.0.0.1,::1` (loopback only); containers set `0.0.0.0` |
+| `ASSISTANT_ALLOWED_HOSTS` | | Extra host names the server answers to, besides loopback and `ASSISTANT_PUBLIC_URL`'s host (DNS-rebinding protection). For example `assistant`, the in-environment name a cloud deployment's gateway delivers webhooks to |
+| `MANAGED_COPILOT_GITHUB_TOKEN` | | Signs in to the platform where `gh` isn't available (containers); locally the `gh` sign-in is used |
 
 ## Connect Google (optional)
 
@@ -97,7 +100,8 @@ For UI work, `pnpm --filter @managed-copilot/demo-assistant dev` restarts the se
    | `https://www.googleapis.com/auth/calendar.events` | Read and change events (no calendar settings or sharing) |
 
 3. Under **Credentials**, create an **OAuth client ID** of type **Web application** with the authorized redirect URI
-   `http://localhost:7490/api/google/callback`.
+   `http://localhost:7490/api/google/callback`. For a deployed assistant it is `<ASSISTANT_PUBLIC_URL>/api/google/callback`
+   instead, for example `https://assistant.<environment domain>/api/google/callback` on Azure Container Apps.
 4. Give the assistant the client ID and secret:
 
    ```powershell
