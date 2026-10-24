@@ -35,6 +35,7 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
     forwarded INTEGER NOT NULL DEFAULT 0,
     forward_attempts INTEGER NOT NULL DEFAULT 0,
     next_forward_at INTEGER,
+    notified_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     completed_at INTEGER,

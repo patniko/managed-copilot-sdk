@@ -221,6 +221,10 @@ export class DurableWebhooks implements WebhooksService {
       const subscription = this.#subscriptions.get(row.webhook);
       if (!subscription) return this.#finish(row, attempt, { ok: false, error: "The webhook is no longer declared in the AppHost", final: true });
       if (!subscription.secret) return this.#finish(row, attempt, { ok: false, error: "The webhook's signing secret is not configured", final: true });
+      // Authorization is checked again at every attempt: a narrowed subscription never receives queued older events.
+      const authorized =
+        row.environment !== null && subscription.environments.includes(row.environment) && (subscription.events.includes(row.event_type) || subscription.events.includes("*"));
+      if (!authorized) return this.#finish(row, attempt, { ok: false, error: "The webhook is no longer authorized for this event's environment or type", final: true });
 
       const event = parseJson<PlatformEvent>(row.event);
       if (!event) return this.#finish(row, attempt, { ok: false, error: "The stored event is unreadable", final: true });

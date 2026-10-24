@@ -8,6 +8,7 @@ import {
   type HandleActionResult,
   type WebhookEnvelope,
 } from "@managed-copilot/protocol";
+import { validateDeploymentUrl } from "../connection.js";
 import { HttpClient } from "../http.js";
 import type { ActionHandlers } from "../types.js";
 import { runActions } from "./actions.js";
@@ -67,10 +68,6 @@ async function readBody(request: ReadableRequest): Promise<Buffer> {
 
 const rejected = (message: string) => new ManagedCopilotError("authentication_required", message);
 
-function normalizeUrl(url: string): string {
-  return url.replace(/\/+$/, "");
-}
-
 /**
  * Verifies a webhook delivery from Managed Copilot: the HMAC-SHA256 signature over `<t>.<raw body>` (timing-safe,
  * any `v1` entry, so secrets can rotate), the timestamp replay window, and the event ID. Throws
@@ -124,12 +121,14 @@ export async function verifyWebhook(request: WebhookRequestLike, secret: string 
       const capability = envelope.capability;
       if (!capability || !envelope.sessionId) return [];
       if (capability.sessionId !== envelope.sessionId) throw rejected("The action capability is for a different session");
-      // Use only an authenticated audience, and only the deployment this worker expects when it is configured.
-      if (expectedDeployment && normalizeUrl(capability.audience) !== normalizeUrl(expectedDeployment)) {
+      // The capability is a bearer credential: only ever send it to a valid deployment URL (HTTPS unless loopback,
+      // no embedded credentials), and only to the deployment this worker expects when one is configured.
+      const audience = validateDeploymentUrl(capability.audience);
+      if (expectedDeployment && audience !== validateDeploymentUrl(expectedDeployment)) {
         throw rejected(`The action capability is for ${capability.audience}, not ${expectedDeployment}`);
       }
       if (Date.parse(capability.expiresAt) <= (options.now?.() ?? Date.now())) return [];
-      return runActions(new HttpClient(capability.audience, capability.token), envelope.sessionId, handlers, { actionIds: capability.actionIds });
+      return runActions(new HttpClient(audience, capability.token), envelope.sessionId, handlers, { actionIds: capability.actionIds });
     },
   });
 }

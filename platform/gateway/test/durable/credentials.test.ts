@@ -1,0 +1,155 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { isManagedCopilotError, ManagedCopilotError } from "@managed-copilot/protocol";
+import { migrate, openDatabase, type Database } from "../../src/db.js";
+import type { Authenticator, Principal } from "../../src/http.js";
+import type { Logger } from "../../src/log.js";
+import type { SchedulesService } from "../../src/modules/durable/contract.js";
+import { DurableCredentials } from "../../src/modules/durable/credentials/service.js";
+import { loadDurableKeys, seal, unseal } from "../../src/modules/durable/keys.js";
+import { DURABLE_MIGRATIONS } from "../../src/modules/durable/migrations.js";
+
+const silent: Logger = { debug() {}, info() {}, warn() {}, error() {}, child: () => silent };
+const ALICE: Principal = { accountId: 7, login: "alice", name: "Alice", token: "gho_alice_secret_token" };
+
+/** GitHub stand-in: tokens map to accounts; `gate` holds verification open to stage races. */
+class FakeAuth implements Authenticator {
+  readonly accounts = new Map<string, Principal>([[ALICE.token, ALICE]]);
+  calls = 0;
+  gate: Promise<void> | undefined;
+  async authenticate(token: string): Promise<Principal> {
+    this.calls++;
+    await this.gate;
+    const principal = this.accounts.get(token);
+    if (!principal) throw new ManagedCopilotError("authentication_required", "Bad credentials");
+    return principal;
+  }
+}
+
+async function expectCode(promise: Promise<unknown>, code: string, message?: RegExp): Promise<void> {
+  const error = await promise.then(
+    () => undefined,
+    (e: unknown) => e,
+  );
+  expect(isManagedCopilotError(error), String(error)).toBe(true);
+  expect((error as { code: string }).code).toBe(code);
+  if (message) expect((error as Error).message).toMatch(message);
+}
+
+describe("background credentials", () => {
+  let db: Database;
+  let auth: FakeAuth;
+  let paused: { ownerId: number; reason: string }[];
+  let synced: string[];
+  let now: number;
+  let credentials: DurableCredentials;
+  const key = Buffer.alloc(32, 3);
+
+  beforeEach(() => {
+    db = openDatabase(":memory:");
+    migrate(db, "durable", DURABLE_MIGRATIONS);
+    auth = new FakeAuth();
+    paused = [];
+    synced = [];
+    now = Date.parse("2026-10-24T12:00:00Z");
+    const schedules = {
+      pauseAllForOwner: (ownerId: number, reason: string) => {
+        paused.push({ ownerId, reason });
+        return 1;
+      },
+      syncAppHost: (account: { login: string }) => synced.push(account.login),
+    } as unknown as SchedulesService;
+    credentials = new DurableCredentials({ db, log: silent, sealKey: key, auth: () => auth, schedules: () => schedules, now: () => now, verifyCacheMs: 60_000 });
+  });
+
+  afterEach(() => db.close());
+
+  it("stores the caller's own credential sealed at rest", () => {
+    const status = credentials.store(ALICE);
+    expect(status).toMatchObject({ account: { id: 7, login: "alice", name: "Alice" }, active: true, createdAt: "2026-10-24T12:00:00.000Z" });
+    const row = db.prepare("SELECT * FROM durable_credentials").get() as Record<string, unknown>;
+    expect(JSON.stringify(row)).not.toContain(ALICE.token);
+    expect(String(row.sealed_token)).toMatch(/^sealed:v1:/);
+    expect(credentials.has(7)).toBe(true);
+    expect(synced).toEqual(["alice"]);
+  });
+
+  it("binds sealed values to their account and detects tampering", () => {
+    const sealed = seal(key, "secret", "account-1");
+    expect(unseal(key, sealed, "account-1")).toBe("secret");
+    expect(() => unseal(key, sealed, "account-2")).toThrow(/could not be unsealed/);
+    expect(() => unseal(Buffer.alloc(32, 9), sealed, "account-1")).toThrow(/could not be unsealed/);
+  });
+
+  it("re-verifies the credential with GitHub on use and reuses a recent verification", async () => {
+    credentials.store(ALICE);
+    now += 120_000;
+    expect(await credentials.principalFor(7)).toEqual(ALICE);
+    expect(await credentials.principalFor(7)).toEqual(ALICE);
+    expect(auth.calls).toBe(1);
+    now += 61_000;
+    await credentials.principalFor(7);
+    expect(auth.calls).toBe(2);
+    expect(credentials.status(ALICE).lastVerifiedAt).toBe(new Date(now).toISOString());
+  });
+
+  it("explains a missing sign-in", async () => {
+    expect(credentials.status(ALICE)).toMatchObject({ active: false, reason: expect.stringMatching(/npx managed-copilot login/) });
+    await expectCode(credentials.principalFor(7), "authentication_required", /npx managed-copilot login/);
+  });
+
+  it("invalidates a credential GitHub rejects and pauses the owner's schedules", async () => {
+    credentials.store(ALICE);
+    now += 120_000;
+    auth.accounts.clear();
+    await expectCode(credentials.principalFor(7), "authentication_required", /no longer valid/);
+    expect(credentials.has(7)).toBe(false);
+    expect(credentials.status(ALICE)).toMatchObject({ active: false, reason: expect.stringMatching(/revoked or expired/) });
+    expect(paused).toEqual([{ ownerId: 7, reason: expect.stringMatching(/^Paused: /) }]);
+  });
+
+  it("never runs one account's work as another account", async () => {
+    credentials.store(ALICE);
+    now += 120_000;
+    auth.accounts.set(ALICE.token, { accountId: 8, login: "mallory", token: ALICE.token });
+    await expectCode(credentials.principalFor(7), "authentication_required", /different account/);
+    expect(credentials.has(7)).toBe(false);
+  });
+
+  it("revokes on logout, pausing schedules with a visible reason", async () => {
+    credentials.store(ALICE);
+    credentials.revoke(ALICE);
+    expect(credentials.status(ALICE)).toMatchObject({ active: false, reason: "Signed out with `managed-copilot logout`." });
+    expect(paused).toEqual([{ ownerId: 7, reason: "Paused: Signed out with `managed-copilot logout`." }]);
+    await expectCode(credentials.principalFor(7), "authentication_required");
+  });
+
+  it("does not hand out a credential that was signed out while GitHub was verifying it", async () => {
+    credentials.store(ALICE);
+    now += 120_000;
+    let release!: () => void;
+    auth.gate = new Promise<void>((done) => (release = done));
+    const pending = credentials.principalFor(7);
+    credentials.revoke(ALICE);
+    release();
+    await expectCode(pending, "authentication_required", /changed while it was being verified/);
+    expect(credentials.has(7)).toBe(false);
+  });
+
+  it("keeps its sealing key across restarts and derives separate keys per purpose", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-durable-keys-"));
+    try {
+      const first = loadDurableKeys(dir, {});
+      const second = loadDurableKeys(dir, {});
+      expect(second.seal.equals(first.seal)).toBe(true);
+      expect(first.seal.equals(first.capability)).toBe(false);
+      const fromEnv = loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: Buffer.alloc(32, 1).toString("base64") });
+      expect(fromEnv.seal.equals(first.seal)).toBe(false);
+      expect(() => loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: "short" })).toThrow(/32 bytes/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

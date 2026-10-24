@@ -103,16 +103,27 @@ export class DurableCredentials implements CredentialsService {
 
     const authenticator = this.#deps.auth();
     if (!authenticator) throw new ManagedCopilotError("capability_unavailable", "Authentication is not configured on this gateway");
-    const token = unseal(this.#deps.sealKey, row.sealed_token, context(accountId));
+    const sealed = row.sealed_token;
+    const token = unseal(this.#deps.sealKey, sealed, context(accountId));
+    // Logout or a new login can happen while GitHub is being asked; only the credential verified may be used.
+    const stillCurrent = () => {
+      const latest = this.#row(accountId);
+      return latest !== undefined && latest.state === "active" && latest.sealed_token === sealed;
+    };
     let principal: Principal;
     try {
       principal = await authenticator.authenticate(token);
     } catch (error) {
       if (error instanceof ManagedCopilotError && (error.code === "authentication_required" || error.code === "forbidden")) {
-        this.#invalidate(accountId, "invalid", error.code === "forbidden" ? `This account is no longer allowed to use this deployment. ${error.message}` : REJECTED_REASON);
+        if (stillCurrent()) {
+          this.#invalidate(accountId, "invalid", error.code === "forbidden" ? `This account is no longer allowed to use this deployment. ${error.message}` : REJECTED_REASON);
+        }
         throw new ManagedCopilotError("authentication_required", `${row.login}'s background sign-in is no longer valid. ${REJECTED_REASON}`);
       }
       throw error;
+    }
+    if (!stillCurrent()) {
+      throw new ManagedCopilotError("authentication_required", `${row.login}'s background sign-in changed while it was being verified. ${LOGIN_HINT}`);
     }
     if (principal.accountId !== accountId) {
       // Never run one person's work as another account.

@@ -183,6 +183,16 @@ describe("SDK durable features", () => {
       const event = await verifyWebhook(request(body, { [WEBHOOK_HEADERS.signature]: sign(body) }), SECRET, { deploymentUrl: base });
       await expectCode(event.handleActions({ tools: [] }), "authentication_required", /not http/);
     });
+
+    it("never sends a capability over plain HTTP to a remote host", async () => {
+      const body = JSON.stringify({
+        ...envelope,
+        type: "session.action_required",
+        capability: { token: "mcc_x", expiresAt: new Date(Date.now() + 60_000).toISOString(), sessionId: "s1", actionIds: ["a"], audience: "http://copilot.contoso.example" },
+      });
+      const event = await verifyWebhook(request(body, { [WEBHOOK_HEADERS.signature]: sign(body) }), SECRET);
+      await expectCode(event.handleActions({ tools: [] }), "invalid_request", /plain HTTP/);
+    });
   });
 
   describe("handleActions", () => {

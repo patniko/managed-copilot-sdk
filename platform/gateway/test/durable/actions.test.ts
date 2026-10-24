@@ -222,6 +222,19 @@ describe("durable actions ledger", () => {
       expect(actions.list(SESSION)[0]).toMatchObject({ state: "failed", error: "boom" });
       expect(sessions.answers()[0]!.params).toEqual({ sessionId: SESSION, requestId: "r1", error: "boom" });
     });
+
+    it("acknowledges a recorded live answer even when the runtime is briefly unreachable", async () => {
+      await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", [])]));
+      sessions.failRequests = 1;
+      const answer = { sessionId: SESSION, connectionId: "c1", responderKind: "sdk" as const, method: "session.permissions.handlePendingPermissionRequest", params: { requestId: "p1", result: { kind: "approve-once" } } };
+      // A failure here would make the stock SDK send a conflicting "user-not-available" fallback.
+      expect(await actions.onClientAnswer(answer)).toEqual({ kind: "respond", response: { success: true } });
+      expect(actions.list(SESSION)[0]).toMatchObject({ state: "completed", result: { kind: "approve-once" } });
+      now += 2_000;
+      await actions.sweep();
+      await sleep(10);
+      expect(sessions.answers()).toHaveLength(2);
+    });
   });
 
   describe("durable responders (webhooks and polling)", () => {
@@ -335,6 +348,25 @@ describe("durable actions ledger", () => {
       await expectCode(actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, result: { kind: "approve-once" } }), "conflict");
     });
 
+    it("announces a released action no notification covered yet, but never re-announces to the webhook that released it", async () => {
+      // A poller grabs the prompt inside the notification debounce window, so nothing announced it.
+      await actions.onSessionEvent(input(permissionEvent("p1")));
+      const [action] = actions.list(SESSION);
+      const first = await actions.claim(user(), SESSION, action!.id);
+      await sleep(20);
+      expect(published).toHaveLength(0);
+      await actions.submit(user(), SESSION, action!.id, { claimToken: first.claimToken, release: true });
+      await sleep(20);
+      expect(published).toHaveLength(1);
+
+      // A webhook worker that saw it and could not decide releases it again: no notification loop.
+      const capability = actions.verifyCapability(actions.mintCapability(SESSION, [action!.id], "orders")!.token);
+      const second = await actions.claim({ type: "capability", capability }, SESSION, action!.id);
+      await actions.submit({ type: "capability", capability }, SESSION, action!.id, { claimToken: second.claimToken, release: true });
+      await sleep(20);
+      expect(published).toHaveLength(1);
+    });
+
     it("never turns a failing permission handler into an approval", async () => {
       await actions.onSessionEvent(input(permissionEvent("p1")));
       const [action] = actions.list(SESSION);
@@ -403,14 +435,46 @@ describe("durable actions ledger", () => {
     });
 
     it("treats a disconnect during a live tool call as uncertain and re-offers prompts", async () => {
+      const changes: string[] = [];
+      actions.onChange((change) => changes.push(`${change.type}:${change.actionId}`));
       await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
       await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", ["lookup_order"])]));
       actions.onDetached("c1");
       const [tool, permission] = actions.list(SESSION);
       expect(tool).toMatchObject({ state: "needs_reconciliation" });
       expect(permission).toMatchObject({ state: "pending" });
+      // Schedule runs follow these changes to show they are waiting on a responder.
+      expect(changes).toEqual([`pending:${tool!.id}`, `pending:${permission!.id}`]);
       await sleep(20);
       expect(published).toHaveLength(1);
+    });
+
+    it("never claims for a connection that closed while its attach was reconciling", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      let resolveList!: () => void;
+      const listed = new Promise<void>((done) => (resolveList = done));
+      const request = sessions.request.bind(sessions);
+      sessions.request = (async <T>(sessionId: string, method: string, params: Record<string, unknown>) => {
+        if (method === "session.tools.listPendingRequests") await listed;
+        return request<T>(sessionId, method, params);
+      }) as typeof sessions.request;
+      const attaching = actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 0, responder: sdk("gone", ["lookup_order"]) });
+      actions.onDetached("gone");
+      resolveList();
+      expect(await attaching).toEqual([]);
+      expect(actions.list(SESSION)[0]!.state).toBe("pending");
+      const replacement = await actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 0, responder: sdk("next", ["lookup_order"]) });
+      expect(replacement).toHaveLength(1);
+    });
+
+    it("announces pending actions whose notification was lost to a crash", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      actions.stop(); // the debounce timer never fires
+      const restarted = build();
+      restarted.recover();
+      await sleep(20);
+      expect(published.map((event) => event.type)).toEqual(["session.action_required"]);
+      restarted.stop();
     });
 
     it("recovers orphaned live claims after a gateway restart", async () => {

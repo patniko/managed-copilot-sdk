@@ -125,6 +125,9 @@ const RUN_EVENT_DATA = (run: RunRow, schedule: Pick<ScheduleRow, "id" | "name">)
 };
 
 const TRANSIENT_CODES = new Set(["capability_unavailable", "timeout", "internal", "session_busy", "inference_unavailable"]);
+const LEDGER_CHECK_INTERVAL_MS = 30_000;
+/** Tolerated clock difference between the gateway and a runtime when matching a prompt in history. */
+const INPUT_CLOCK_SKEW_MS = 5_000;
 
 function occurrenceIdFor(scheduleId: string, trigger: RunTrigger, key: string | number): string {
   return `occ_${createHash("sha256").update(`${scheduleId}:${trigger}:${key}`).digest("base64url").slice(0, 32)}`;
@@ -147,11 +150,13 @@ export class DurableSchedules implements SchedulesService {
   readonly #now: () => number;
   readonly #inFlight = new Set<string>();
   readonly #inFlightSchedules = new Set<string>();
+  readonly #inFlightOwners = new Map<number, number>();
   /** Recent `user.message` IDs per session: a prompt's event can arrive before `send` returns its ID. */
   readonly #recentMessages = new Map<string, string[]>();
   readonly #disposers: (() => void)[] = [];
   #timer: NodeJS.Timeout | undefined;
   #ticking: Promise<void> | undefined;
+  #lastLedgerCheck = 0;
 
   constructor(deps: SchedulesDeps) {
     this.#deps = deps;
@@ -187,6 +192,8 @@ export class DurableSchedules implements SchedulesService {
     this.#timer = undefined;
     for (const dispose of this.#disposers.splice(0)) dispose();
     await this.#ticking;
+    // In-flight dispatches write to the ledger; let them settle before the database closes.
+    await this.idle(10_000);
   }
 
   /** One scheduler pass: materialize due occurrences, enforce run lifetimes, and dispatch queued runs. */
@@ -199,9 +206,10 @@ export class DurableSchedules implements SchedulesService {
     return this.#ticking;
   }
 
-  /** Resolves when every dispatch started so far has settled (tests and graceful shutdown). */
-  async idle(): Promise<void> {
-    while (this.#inFlight.size > 0) await new Promise((resolve) => setTimeout(resolve, 5));
+  /** Resolves when every dispatch started so far has settled (tests and graceful shutdown), or after `timeoutMs`. */
+  async idle(timeoutMs = Number.POSITIVE_INFINITY): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.#inFlight.size > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
   }
 
   async #tickOnce(): Promise<void> {
@@ -213,7 +221,12 @@ export class DurableSchedules implements SchedulesService {
         this.#log.error("Could not materialize a schedule occurrence", { scheduleId: schedule.id, error: (error as Error)?.stack ?? String(error) });
       }
     }
-    this.#expireLongRuns(now);
+    await this.#expireLongRuns(now);
+    // Safety net for turn outcomes that produced no observable event (missed while reconnecting, ephemeral idle).
+    if (now - this.#lastLedgerCheck >= LEDGER_CHECK_INTERVAL_MS) {
+      this.#lastLedgerCheck = now;
+      await this.#recoverActiveRuns();
+    }
     this.#dispatchQueued(now);
   }
 
@@ -494,11 +507,20 @@ export class DurableSchedules implements SchedulesService {
     }
   }
 
-  /** Materializes AppHost schedules for every account that has signed in for background work. */
+  /** Materializes (or removes) AppHost schedules for every account that signed in or already owns one. */
   syncAppHostForKnownAccounts(): void {
-    if (!this.#deps.deployment.schedules) return;
-    const accounts = this.#deps.db.prepare("SELECT account_id, login FROM durable_credentials").all() as { account_id: number; login: string }[];
-    for (const account of accounts) this.syncAppHost({ accountId: account.account_id, login: account.login });
+    const accounts = this.#deps.db
+      .prepare(
+        `SELECT account_id, login FROM durable_credentials
+         UNION SELECT owner_id AS account_id, owner_login AS login FROM durable_schedules WHERE apphost_key IS NOT NULL AND deleted_at IS NULL`,
+      )
+      .all() as { account_id: number; login: string }[];
+    const seen = new Set<number>();
+    for (const account of accounts) {
+      if (seen.has(account.account_id)) continue;
+      seen.add(account.account_id);
+      this.syncAppHost({ accountId: account.account_id, login: account.login });
+    }
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -575,21 +597,24 @@ export class DurableSchedules implements SchedulesService {
   // ---------------------------------------------------------------------------------------------------------
 
   #dispatchQueued(now: number): void {
-    const activeByOwner = new Map<number, number>();
     for (const run of this.#store.runsByStatus(["queued"])) {
       if (this.#inFlight.has(run.id) || this.#inFlightSchedules.has(run.schedule_id)) continue;
       if (run.next_attempt_at !== null && run.next_attempt_at > now) continue;
       if (this.#store.countRuns(run.schedule_id, ACTIVE_RUN_STATUSES) > 0) continue;
-      const active = activeByOwner.get(run.owner_id) ?? this.#store.countOwnerRuns(run.owner_id, ACTIVE_RUN_STATUSES);
+      // Dispatches still creating sessions or sending count against the owner's capacity too.
+      const active = this.#store.countOwnerRuns(run.owner_id, ACTIVE_RUN_STATUSES) + (this.#inFlightOwners.get(run.owner_id) ?? 0);
       if (active >= this.#options.maxActiveRunsPerOwner) continue;
-      activeByOwner.set(run.owner_id, active + 1);
       this.#inFlight.add(run.id);
       this.#inFlightSchedules.add(run.schedule_id);
+      this.#inFlightOwners.set(run.owner_id, (this.#inFlightOwners.get(run.owner_id) ?? 0) + 1);
       void this.#dispatch(run.id)
         .catch((error: unknown) => this.#log.error("Schedule dispatch failed unexpectedly", { runId: run.id, error: (error as Error)?.stack ?? String(error) }))
         .finally(() => {
           this.#inFlight.delete(run.id);
           this.#inFlightSchedules.delete(run.schedule_id);
+          const remaining = (this.#inFlightOwners.get(run.owner_id) ?? 1) - 1;
+          if (remaining > 0) this.#inFlightOwners.set(run.owner_id, remaining);
+          else this.#inFlightOwners.delete(run.owner_id);
         });
     }
   }
@@ -650,7 +675,12 @@ export class DurableSchedules implements SchedulesService {
         // A previous attempt may have reached the runtime: its history decides, never a blind resend.
         const found = await this.#findSubmittedInput(sessions, run, schedule);
         if (found === undefined) return this.#retryLater(run, schedule, new ManagedCopilotError("capability_unavailable", "Could not read the session's history to confirm the prompt"));
-        if (found) return this.#markStarted(run, schedule, found);
+        if (found !== null) {
+          // The prompt is already in the session: its turn may still run, or may have ended while we were away.
+          this.#markStarted(run, schedule, found, true);
+          await this.#settleFromLedger(sessions, run.id);
+          return;
+        }
       }
       const startedAt = this.#now();
       this.#store.updateRun(run.id, ["queued"], { input_state: "submitting", input_started_at: startedAt }, startedAt);
@@ -658,6 +688,9 @@ export class DurableSchedules implements SchedulesService {
       this.#markStarted(this.#store.run(run.id)!, schedule, messageId);
     } catch (error) {
       const latest = this.#store.run(run.id) ?? run;
+      if (isManagedCopilotError(error, "needs_reconciliation")) {
+        return this.#finishRun(latest, "needs_reconciliation", `${error.message}. Check the session before running it again.`, schedule);
+      }
       if (error instanceof ManagedCopilotError && !TRANSIENT_CODES.has(error.code)) {
         if (latest.input_state === "submitting") {
           // The runtime refused the prompt: nothing was accepted, so the failure is certain.
@@ -669,7 +702,10 @@ export class DurableSchedules implements SchedulesService {
     }
   }
 
-  /** `null`: the history shows the prompt was not accepted. `undefined`: the history could not be read. */
+  /**
+   * `null`: the history shows the prompt was not accepted. `undefined`: the history could not be read.
+   * Throws `needs_reconciliation` when the history cannot attribute a message to this occurrence unambiguously.
+   */
   async #findSubmittedInput(sessions: DurableSessionsPort, run: RunRow, schedule: ScheduleRow): Promise<string | null | undefined> {
     let events: RuntimeSessionEvent[] | undefined;
     try {
@@ -678,21 +714,34 @@ export class DurableSchedules implements SchedulesService {
       return undefined;
     }
     if (!Array.isArray(events)) return undefined;
-    const since = (run.input_started_at ?? run.created_at) - 60_000;
-    const match = events.find(
+    // Only messages that arrived after this occurrence's send began (with a little clock skew), and that no other
+    // run already owns, can be this occurrence's prompt.
+    const since = (run.input_started_at ?? run.created_at) - INPUT_CLOCK_SKEW_MS;
+    const owned = new Set(
+      (this.#deps.db.prepare("SELECT message_id FROM durable_schedule_runs WHERE session_id = ? AND message_id IS NOT NULL AND id != ?").all(run.session_id, run.id) as { message_id: string }[]).map(
+        (row) => row.message_id,
+      ),
+    );
+    const candidates = events.filter(
       (event) =>
         event.type === "user.message" &&
+        !event.agentId &&
         Date.parse(event.timestamp) >= since &&
+        !(typeof event.data.messageId === "string" && owned.has(event.data.messageId)) &&
         // A schedule's own session only ever receives its prompt; a shared session must match the prompt text.
         (run.session_mode === "new" || String(event.data.content ?? "").trim() === schedule.prompt.trim()),
     );
-    if (!match) return null;
-    return typeof match.data.messageId === "string" ? match.data.messageId : "";
+    if (candidates.length === 0) return null;
+    if (candidates.length > 1 || typeof candidates[0]!.data.messageId !== "string" || candidates[0]!.data.messageId === "") {
+      throw new ManagedCopilotError("needs_reconciliation", "The session's history cannot show which message is this run's prompt, so it was not sent again");
+    }
+    return candidates[0]!.data.messageId;
   }
 
-  #markStarted(run: RunRow, schedule: ScheduleRow, messageId: string): void {
+  #markStarted(run: RunRow, schedule: ScheduleRow, messageId: string, alreadyInSession = false): void {
     const now = this.#now();
-    const consumed = messageId !== "" && (this.#recentMessages.get(run.session_id!) ?? []).includes(messageId);
+    // The runtime may emit the prompt's user.message before `send` returns, or (after a crash) long before.
+    const consumed = alreadyInSession || (messageId !== "" && (this.#recentMessages.get(run.session_id!) ?? []).includes(messageId));
     const updated = this.#store.updateRun(
       run.id,
       ["queued"],
@@ -729,11 +778,31 @@ export class DurableSchedules implements SchedulesService {
     if (owner) this.#publishRun("schedule.run_completed", finished, owner);
   }
 
-  #expireLongRuns(now: number): void {
+  /**
+   * Bounds run lifetime without breaking no-overlap: the overdue turn is stopped first, and if that cannot be
+   * confirmed the schedule pauses (with a visible reason) instead of admitting another run beside it.
+   */
+  async #expireLongRuns(now: number): Promise<void> {
+    const hours = Math.round(this.#options.maxRunLifetimeMs / 3_600_000);
     for (const run of this.#store.runsByStatus(ACTIVE_RUN_STATUSES)) {
-      if (run.started_at !== null && now - run.started_at > this.#options.maxRunLifetimeMs) {
-        this.#finishRun(run, "failed", `The run did not finish within ${Math.round(this.#options.maxRunLifetimeMs / 3_600_000)} hours`);
+      if (run.started_at === null || now - run.started_at <= this.#options.maxRunLifetimeMs) continue;
+      const sessions = this.#deps.sessions();
+      let stopped = false;
+      if (sessions && run.session_id) {
+        try {
+          await sessions.request(run.session_id, "session.abort", { sessionId: run.session_id });
+          stopped = true;
+        } catch (error) {
+          this.#log.warn("Could not stop an overdue scheduled run", { runId: run.id, sessionId: run.session_id, error: (error as Error).message });
+        }
       }
+      if (stopped) {
+        this.#finishRun(run, "failed", `The run did not finish within ${hours} hours, so its turn was stopped`);
+        continue;
+      }
+      const schedule = this.#store.schedule(run.schedule_id);
+      if (schedule) this.#pauseFor(schedule, `Paused: a run exceeded ${hours} hours and could not be stopped; check session ${run.session_id} before resuming`);
+      this.#finishRun(run, "failed", `The run did not finish within ${hours} hours and could not be stopped`, schedule);
     }
   }
 
@@ -743,6 +812,8 @@ export class DurableSchedules implements SchedulesService {
 
   /** Follows runtime events to move runs to `completed`/`failed` (the turn's recorded outcome, not mere idleness). */
   onSessionEvent(sessionId: string, event: RuntimeSessionEvent): void {
+    // Sub-agents emit their own idle/error events; only the root agent's turn decides a run's outcome.
+    if (event.agentId) return;
     if (event.type === "user.message" && typeof event.data.messageId === "string") {
       const recent = this.#recentMessages.get(sessionId) ?? [];
       recent.push(event.data.messageId);
@@ -769,10 +840,32 @@ export class DurableSchedules implements SchedulesService {
           if (run.consumed) this.#finishRun(run, "failed", "The run's turn was cancelled");
           break;
         case "session.idle":
-          if (run.consumed) this.#finishRun(run, "completed", "The agent finished the run's turn");
+          if (!run.consumed) break;
+          if (event.data.aborted === true) this.#finishRun(run, "failed", "The run's turn was cancelled");
+          else this.#finishRun(run, "completed", "The agent finished the run's turn");
           break;
       }
     }
+  }
+
+  /**
+   * Settles a run from core's session ledger, which records each root turn's outcome keyed by the prompt's message
+   * ID (`lastTurn`). Used after a restart, when the turn may have ended while no event could be observed.
+   */
+  async #settleFromLedger(sessions: DurableSessionsPort, runId: string): Promise<void> {
+    const run = this.#store.run(runId);
+    if (!run || !ACTIVE_RUN_STATUSES.includes(run.status) || !run.session_id) return;
+    const view = await sessions.get(run.session_id);
+    const turn = view?.lastTurn;
+    if (!turn || turn.status === "running") return;
+    // Turns run in order: a later prompt's turn means this run's turn already ended.
+    if (turn.turnId !== undefined && run.message_id && turn.turnId !== run.message_id) {
+      this.#finishRun(run, "completed", "The run's turn finished while the platform was restarting");
+      return;
+    }
+    if (turn.status === "completed") this.#finishRun(run, "completed", "The agent finished the run's turn");
+    else if (turn.status === "cancelled") this.#finishRun(run, "failed", "The run's turn was cancelled");
+    else this.#finishRun(run, "failed", "The run's turn failed");
   }
 
   #onActionChange(change: ActionChange): void {
@@ -789,18 +882,16 @@ export class DurableSchedules implements SchedulesService {
     }
   }
 
-  /** After a restart, settles runs whose turn finished while the gateway was down; the rest keep following events. */
+  /** After a restart (and periodically), settles runs whose turn ended while no event could be observed. */
   async #recoverActiveRuns(): Promise<void> {
     const sessions = this.#deps.sessions();
     if (!sessions) return;
     for (const run of this.#store.runsByStatus(ACTIVE_RUN_STATUSES)) {
+      if (!run.consumed) continue;
       try {
-        const view = await sessions.get(run.session_id!);
-        if (!view) continue;
-        if (view.state === "failed" || view.lastTurn?.status === "failed") this.#finishRun(run, "failed", "The run's turn failed while the platform was restarting");
-        else if (run.consumed && view.state === "idle" && view.lastTurn?.status === "completed") this.#finishRun(run, "completed", "The agent finished the run's turn");
+        await this.#settleFromLedger(sessions, run.id);
       } catch (error) {
-        this.#log.debug("Could not check a run after restart", { runId: run.id, error: (error as Error).message });
+        this.#log.debug("Could not check a run's session", { runId: run.id, error: (error as Error).message });
       }
     }
   }

@@ -37,6 +37,8 @@ export interface ActionRow {
   readonly forwarded: number;
   readonly forward_attempts: number;
   readonly next_forward_at: number | null;
+  /** When the action was first included in a `session.action_required` notification. */
+  readonly notified_at: number | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -289,6 +291,18 @@ export class ActionStore {
 
   deferForward(id: string, nextAt: number, now: number): void {
     this.#db.prepare("UPDATE durable_actions SET forward_attempts = forward_attempts + 1, next_forward_at = ?, updated_at = ? WHERE id = ?").run(nextAt, now, id);
+  }
+
+  markNotified(ids: readonly string[], now: number): void {
+    if (ids.length === 0) return;
+    this.#db.prepare(`UPDATE durable_actions SET notified_at = ? WHERE notified_at IS NULL AND id IN (${placeholders(ids)})`).run(now, ...ids);
+  }
+
+  /** Pending actions created before `createdBefore` that no `session.action_required` announced yet. */
+  listUnnotifiedPending(createdBefore: number): ActionRow[] {
+    return this.#db
+      .prepare("SELECT * FROM durable_actions WHERE state = 'pending' AND notified_at IS NULL AND created_at <= ? ORDER BY created_at, rowid LIMIT 500")
+      .all(createdBefore) as unknown as ActionRow[];
   }
 }
 

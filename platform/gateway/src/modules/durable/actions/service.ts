@@ -106,6 +106,8 @@ const TOOL_RESULT_TYPES = new Set(["success", "failure", "rejected", "denied", "
 const ELICITATION_ACTIONS = new Set(["accept", "decline", "cancel"]);
 /** Reconciliation never closes an action this young: the runtime's lists may lag the event that created it. */
 const RECONCILE_GRACE_MS = 2_000;
+/** A pending action still unannounced after this long lost its notification (for example to a crash). */
+const ANNOUNCE_REPAIR_AFTER_MS = 5_000;
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
 const conflict = (message: string, row?: ActionRow) =>
@@ -199,6 +201,8 @@ export class DurableActions implements ActionsService {
   readonly #notifyTimers = new Map<string, NodeJS.Timeout>();
   readonly #forwarding = new Map<string, Promise<unknown>>();
   readonly #listeners = new Set<(change: ActionChange) => void>();
+  /** Connections that detached (bounded); attach work still in flight for them must not claim anything. */
+  readonly #detached = new Set<string>();
   #sweeper: NodeJS.Timeout | undefined;
   #sweeping = false;
 
@@ -252,6 +256,15 @@ export class DurableActions implements ActionsService {
         const definition = latest?.tool ? this.#deps.platformTools()?.get?.(latest.tool) : undefined;
         if (latest && definition) this.#startPlatformTool(latest, definition);
       }
+    }
+    this.#announceUnnotified(now);
+  }
+
+  /** Pending actions whose `session.action_required` never went out (a crash inside the debounce window). */
+  #announceUnnotified(now: number, olderThanMs = 0): void {
+    for (const row of this.#store.listUnnotifiedPending(now - olderThanMs)) {
+      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      if (!this.#notifyTimers.has(row.session_id)) this.#scheduleNotify(row);
     }
   }
 
@@ -354,7 +367,13 @@ export class DurableActions implements ActionsService {
       throw conflict("This action changed while the answer was being recorded", latest);
     }
     this.#emit({ type: "resolved", sessionId: row.session_id, actionId: row.id });
-    return { kind: "respond", response: await this.#forward(row.id) };
+    try {
+      return { kind: "respond", response: await this.#forward(row.id) };
+    } catch {
+      // The answer is recorded and delivery is retried. Failing the client here would make the stock SDK send a
+      // fallback answer (user-not-available / cancel) that conflicts with the one already recorded.
+      return { kind: "respond", response: { success: true } };
+    }
   }
 
   async onAttached(input: AttachInput): Promise<readonly RuntimeSessionEvent[]> {
@@ -363,6 +382,8 @@ export class DurableActions implements ActionsService {
     } catch (error) {
       this.#log.debug("Reconciliation on attach skipped", { sessionId: input.sessionId, error: (error as Error).message });
     }
+    // The connection may have closed while reconciling; never claim for a connection that can no longer answer.
+    if (this.#detached.has(input.responder.connectionId)) return [];
     const replay: RuntimeSessionEvent[] = [];
     for (const row of this.#store.listBySession(input.sessionId, ["pending"])) {
       if (!isEligible(input.responder, { kind: row.kind, tool: row.tool })) continue;
@@ -377,6 +398,8 @@ export class DurableActions implements ActionsService {
   }
 
   onDetached(connectionId: string): void {
+    this.#detached.add(connectionId);
+    if (this.#detached.size > 10_000) this.#detached.delete(this.#detached.values().next().value!);
     const now = this.#now();
     for (const row of this.#store.listByLiveConnection(connectionId)) {
       this.#orphan(row, "The client handling this action disconnected before it answered", now);
@@ -461,7 +484,13 @@ export class DurableActions implements ActionsService {
 
     if (request.release) {
       if (row.claim_token_hash !== tokenHash || !OWNED_STATES.includes(row.state)) throw conflict("Only the current claim can be released", row);
-      this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "pending", clearClaim: true, now });
+      if (!this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "pending", clearClaim: true, now })) {
+        throw conflict("This action changed while the claim was being released", this.#store.get(row.id));
+      }
+      // Announce it if no notification ever covered it (a poller claimed it first). Re-announcing an action a webhook
+      // already saw would loop: the same handler would release it again.
+      if (row.notified_at === null) this.#scheduleNotify(row);
+      else this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
       return { actionId: row.id, state: "pending" };
     }
 
@@ -594,6 +623,7 @@ export class DurableActions implements ActionsService {
         }
         void this.#forward(row.id).catch(() => undefined);
       }
+      this.#announceUnnotified(now, ANNOUNCE_REPAIR_AFTER_MS);
     } finally {
       this.#sweeping = false;
     }
@@ -628,6 +658,7 @@ export class DurableActions implements ActionsService {
       const reason = `${why}; the tool may have run. Check its effect with the idempotency key, then answer it with a reconcile claim.`;
       if (this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "needs_reconciliation", reason, now })) {
         this.#log.warn("Action needs reconciliation", { actionId: row.id, sessionId: row.session_id, tool: row.tool ?? undefined, reason: why });
+        this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
       }
       return;
     }
@@ -846,6 +877,10 @@ export class DurableActions implements ActionsService {
       },
     };
     this.#log.info("Actions waiting for a responder", { sessionId, count: pending.length });
+    this.#store.markNotified(
+      pending.map((row) => row.id),
+      this.#now(),
+    );
     try {
       this.#deps.publish(event, { ownerId });
     } catch (error) {

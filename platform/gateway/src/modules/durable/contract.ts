@@ -292,7 +292,7 @@ export interface DurableSessionView {
   readonly state: SessionState;
   /** Placement generation (0 until promotion exists). */
   readonly generation: number;
-  readonly lastTurn?: { readonly status: "running" | "completed" | "failed" | "cancelled" };
+  readonly lastTurn?: { readonly turnId?: string; readonly status: "running" | "completed" | "failed" | "cancelled" };
 }
 
 export interface DurableCreateSessionRequest {

@@ -226,4 +226,29 @@ describe("durable webhooks", () => {
     expect(received).toHaveLength(2);
     expect(webhooks.deliveries({ state: "delivered" })).toHaveLength(2);
   });
+
+  it("stops queued deliveries a narrowed subscription is no longer authorized for", async () => {
+    await webhooks.stop();
+    webhooks = build({}, { ORDERS_SECRET: SECRET, AUDIT_SECRET: "other" });
+    webhooks.enqueue(event("session.idle", "coder"), { ownerId: 1 });
+    // The operator narrows "audit" to chat only and restarts before the queued coder event went out.
+    const narrowed = parseConfig({
+      environments: { chat: { type: "shared" }, coder: { type: "isolated" } },
+      webhooks: { audit: { url: `${base}/audit`, environments: ["chat"], events: ["*"], secret: { secretEnv: "AUDIT_SECRET" } } },
+    });
+    webhooks = new DurableWebhooks({ db, log: silent, deployment: narrowed, mode: "local", env: { AUDIT_SECRET: "other" }, actions: () => undefined, now: () => now, options: { pollIntervalMs: 0 } });
+    webhooks.start();
+    await webhooks.pump();
+    expect(received).toHaveLength(0);
+    expect(webhooks.deliveries({ state: "failed" })).toMatchObject([{ webhook: "audit", lastError: "The webhook is no longer authorized for this event's environment or type" }]);
+  });
+
+  it("shows each owner only their own sessions' deliveries", () => {
+    webhooks.enqueue(event("session.idle"), { ownerId: 1 });
+    webhooks.enqueue(event("session.idle"), { ownerId: 2 });
+    expect(webhooks.deliveries({ ownerId: 1 })).toHaveLength(2);
+    expect(webhooks.deliveries({ ownerId: 2 })).toHaveLength(2);
+    expect(webhooks.deliveries({ ownerId: 3 })).toHaveLength(0);
+    expect(webhooks.deliveries()).toHaveLength(4);
+  });
 });
