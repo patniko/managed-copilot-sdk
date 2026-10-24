@@ -671,13 +671,19 @@ export class SandboxService implements SandboxesService {
     this.#log.info("Sandbox stopped", { sessionId, sandboxId: row.id, reason });
   }
 
-  delete(sessionId: string): Promise<void> {
-    return this.#withLock(sessionId, () => this.#delete(sessionId));
+  delete(sessionId: string, options: { readonly sandboxId?: string } = {}): Promise<void> {
+    return this.#withLock(sessionId, () => this.#delete(sessionId, options.sandboxId));
   }
 
-  async #delete(sessionId: string): Promise<void> {
+  async #delete(sessionId: string, expected: string | undefined): Promise<void> {
     const { store, provider } = this.#options;
     const row = store.bySession(sessionId);
+    // Decided inside the lock: a delete that names the sandbox it means (promotion releasing its candidate, retries of
+    // an interrupted delete) never removes a newer sandbox, or a newer session's artifacts, that reuse the session ID.
+    if (expected !== undefined && row?.id !== expected) {
+      if (row) this.#log.info("Skipped a delete for a sandbox that was already replaced", { sessionId, expected, current: row.id });
+      return;
+    }
     if (!row) {
       await this.#artifacts?.deleteSession(sessionId);
       return;
@@ -839,7 +845,7 @@ export class SandboxService implements SandboxesService {
             await this.#unregisterEgress(row);
           });
         } else if (row.state === "deleting") {
-          await this.delete(row.sessionId);
+          await this.delete(row.sessionId, { sandboxId: row.id });
         } else if (row.state === "running" || row.state === "stopping") {
           if (!(await provider.isRunning(row.id))) store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
           else if (row.state === "stopping") {
@@ -886,7 +892,7 @@ export class SandboxService implements SandboxesService {
     this.#timers.push(setInterval(() => this.#sweepIdle(), IDLE_SWEEP_MS).unref());
     this.#timers.push(
       setInterval(() => {
-        for (const row of this.#options.store.inStates(["deleting"])) void this.delete(row.sessionId).catch(() => undefined);
+        for (const row of this.#options.store.inStates(["deleting"])) void this.delete(row.sessionId, { sandboxId: row.id }).catch(() => undefined);
       }, RECONCILE_MS).unref(),
     );
     // Keeps `available` current: a backend that starts later is advertised, one that goes away stops being advertised.
