@@ -7,6 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   EGRESS_PROXY_HOST,
   EGRESS_PROXY_PORT,
+  formatIpAddress,
   isHostAllowed,
   ManagedCopilotError,
   narrowNetwork,
@@ -20,6 +21,7 @@ import {
   type EgressRegistration,
   type EgressReport,
   type EgressSecretRequest,
+  type EnvironmentConfig,
   type EnvironmentType,
   type ManagedCopilotConfig,
   type NetworkPolicy,
@@ -34,7 +36,10 @@ import type { CredentialMeta, VaultRecord, VaultStore } from "./vaults.js";
 export interface SessionBindingInput {
   readonly sessionId: string;
   readonly owner: number;
-  /** Declared environment name; undefined (or `inline-…`) for inline environments. */
+  /**
+   * Declared environment name; undefined (or an `inline-…` name the AppHost does not declare) for inline environments.
+   * A declared name always wins, even one that starts with `inline-`.
+   */
   readonly environment: string | undefined;
   readonly type: EnvironmentType;
   readonly requested: NetworkSetting | undefined;
@@ -57,13 +62,15 @@ export interface SandboxRegistrationInput {
   readonly sessionId: string;
   /** The sandbox's IP on its own network, when already known (see `updateSandbox`). */
   readonly address?: string;
+  /** Where the sandbox reaches the egress proxy, when not at the `mc-egress:3128` alias (for example on Azure). */
+  readonly proxy?: { readonly host: string; readonly port: number };
 }
 
 export interface SandboxEgress {
   readonly sandboxId: string;
   readonly sessionId: string;
   readonly policy: NetworkPolicy;
-  /** `http://<sandboxId>:<credential>@mc-egress:3128`; the credential is only valid for this sandbox. */
+  /** `http://<sandboxId>:<credential>@mc-egress:3128` (or the requested proxy address); valid only for this sandbox. */
   readonly proxyUrl: string;
   /** Set for sandboxd, the runtime, and every workload process: proxy variables and vault placeholders. */
   readonly env: Readonly<Record<string, string>>;
@@ -94,6 +101,16 @@ interface SessionRow {
   requested: string | null;
   policy: string;
   vaults: string;
+  /** JSON `PromotionSnapshot` while a promotion is uncommitted. */
+  promoted_from: string | null;
+}
+
+/** A session's binding before an uncommitted promotion, restored by `revertPromotion`. */
+interface PromotionSnapshot {
+  readonly environment: string | null;
+  readonly type: EnvironmentType;
+  /** The stored policy JSON, exactly as it was. */
+  readonly policy: string;
 }
 
 interface CredentialRow {
@@ -157,10 +174,21 @@ export class PolicyService {
     return normalizeNetwork(this.#options.deployment.network);
   }
 
+  /** The environment's current declaration in the AppHost, if any. */
+  #declared(environment: string | undefined): EnvironmentConfig | undefined {
+    const environments = this.#options.deployment.environments;
+    return environment !== undefined && Object.hasOwn(environments, environment) ? environments[environment] : undefined;
+  }
+
+  /** Inline environments have no name, or an `inline-…` name the AppHost does not declare (declared names always win). */
+  #isInline(environment: string | undefined): boolean {
+    return environment === undefined || (environment.startsWith("inline-") && !this.#declared(environment));
+  }
+
   /** The ceiling of an environment: deployment default, then the environment's own setting. Inline uses the default. */
   ceiling(environment: string | undefined): NetworkPolicy {
-    if (environment === undefined || environment.startsWith("inline-")) return this.deploymentDefault;
-    const config = this.#options.deployment.environments[environment];
+    if (this.#isInline(environment)) return this.deploymentDefault;
+    const config = this.#declared(environment);
     if (!config) throw new ManagedCopilotError("environment_not_found", `Environment "${environment}" is not declared in the AppHost`);
     return normalizeNetwork(config.network, this.deploymentDefault);
   }
@@ -174,7 +202,7 @@ export class PolicyService {
 
   /** Persists the session's effective policy and vault selection. Called once by admission at `session.create`. */
   bindSession(input: SessionBindingInput): NetworkPolicy {
-    const environment = input.environment !== undefined && !input.environment.startsWith("inline-") ? input.environment : undefined;
+    const environment = this.#isInline(input.environment) ? undefined : input.environment;
     const policy = this.effective(environment, input.requested);
     const vaults = this.#resolveVaults(input.owner, environment, input.type, input.vaults ?? []);
     const now = new Date().toISOString();
@@ -185,7 +213,7 @@ export class PolicyService {
           `INSERT INTO network_sessions (session_id, owner_id, environment, type, requested, policy, vaults, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(session_id) DO UPDATE SET owner_id = excluded.owner_id, environment = excluded.environment, type = excluded.type,
-             requested = excluded.requested, policy = excluded.policy, vaults = excluded.vaults, updated_at = excluded.updated_at`,
+             requested = excluded.requested, policy = excluded.policy, vaults = excluded.vaults, promoted_from = NULL, updated_at = excluded.updated_at`,
         )
         .run(input.sessionId, input.owner, environment ?? null, input.type, input.requested === undefined ? null : JSON.stringify(input.requested), JSON.stringify(policy), JSON.stringify(vaults.map((vault) => vault.id)), now, now);
       const insert = this.#db.prepare("INSERT INTO network_credentials (id, session_id, vault_id, credential_key, placeholder, created_at) VALUES (?, ?, ?, ?, ?, ?)");
@@ -198,7 +226,7 @@ export class PolicyService {
   }
 
   #resolveVaults(ownerId: number, environment: string | undefined, type: EnvironmentType, requested: readonly string[]): VaultRecord[] {
-    const declared = environment ? (this.#options.deployment.environments[environment]?.vaults ?? []) : [];
+    const declared = this.#declared(environment)?.vaults ?? [];
     const resolved = new Map<string, VaultRecord>();
     for (const name of declared) {
       const vault = this.#options.vaults.apphost(name);
@@ -236,20 +264,19 @@ export class PolicyService {
 
   #toSession(row: SessionRow): SessionNetwork {
     const stored = JSON.parse(row.policy) as NetworkPolicy;
-    let ceiling: NetworkPolicy;
-    try {
-      ceiling = this.ceiling(row.environment ?? undefined);
-    } catch {
-      // The environment was removed from the AppHost: no further egress for its sessions.
-      ceiling = NETWORK_DISABLED;
-    }
+    const environment = row.environment ?? undefined;
+    const config = this.#declared(environment);
+    // Bindings store declared names only (none for inline). An environment since removed from the AppHost means no
+    // further egress, and AppHost vaults stay bound only while the current environment still grants them.
+    const ceiling = environment === undefined ? this.deploymentDefault : config ? normalizeNetwork(config.network, this.deploymentDefault) : NETWORK_DISABLED;
+    const granted = config?.vaults ?? [];
     return {
       sessionId: row.session_id,
       ownerId: row.owner_id,
-      environment: row.environment ?? undefined,
+      environment,
       type: row.type,
       policy: narrowNetwork(ceiling, stored),
-      vaults: JSON.parse(row.vaults) as string[],
+      vaults: (JSON.parse(row.vaults) as string[]).filter((id) => !this.#options.vaults.apphost(id) || granted.includes(id)),
     };
   }
 
@@ -259,17 +286,47 @@ export class PolicyService {
     return row ? this.#toSession(row) : undefined;
   }
 
-  /** One-way promotion into an isolated environment: the target's ceiling can only narrow the session's policy. */
+  /**
+   * One-way promotion into an isolated environment: the target's ceiling can only narrow the session's current policy.
+   * Until `commitPromotion`, the binding from before the promotion is kept so `revertPromotion` can restore it.
+   */
   promoteSession(sessionId: string, targetEnvironment: string): NetworkPolicy {
     const row = this.#sessionRow(sessionId);
     if (!row) throw new ManagedCopilotError("not_found", `Session ${sessionId} has no network binding`);
-    const target = this.#options.deployment.environments[targetEnvironment];
+    const target = this.#declared(targetEnvironment);
     if (!target || target.type !== "isolated") throw new ManagedCopilotError("invalid_request", `Promotion target "${targetEnvironment}" is not an isolated environment`);
-    const policy = narrowNetwork(this.ceiling(targetEnvironment), JSON.parse(row.policy) as NetworkPolicy);
-    this.#db.prepare("UPDATE network_sessions SET environment = ?, type = 'isolated', policy = ?, updated_at = ? WHERE session_id = ?").run(targetEnvironment, JSON.stringify(policy), new Date().toISOString(), sessionId);
+    // The effective policy, not the stored one: a source ceiling tightened since creation must survive promotion.
+    const policy = narrowNetwork(this.ceiling(targetEnvironment), this.#toSession(row).policy);
+    // A retried promotion keeps the original source, so a rollback always returns to the session as it was.
+    const previous = row.promoted_from ?? JSON.stringify({ environment: row.environment, type: row.type, policy: row.policy } satisfies PromotionSnapshot);
+    this.#db
+      .prepare("UPDATE network_sessions SET environment = ?, type = 'isolated', policy = ?, promoted_from = ?, updated_at = ? WHERE session_id = ?")
+      .run(targetEnvironment, JSON.stringify(policy), previous, new Date().toISOString(), sessionId);
     this.#log.info("Session network promoted", { sessionId, environment: targetEnvironment, access: policy.access });
     this.#pushSession(sessionId);
     return policy;
+  }
+
+  /**
+   * Pre-commit rollback of a promotion (spec 9.5): restores the environment, type, and stored policy from before the
+   * uncommitted `promoteSession` and pushes them. Returns the restored effective policy, or undefined (a no-op) when no
+   * promotion is pending.
+   */
+  revertPromotion(sessionId: string): NetworkPolicy | undefined {
+    const row = this.#sessionRow(sessionId);
+    if (!row?.promoted_from) return undefined;
+    const previous = JSON.parse(row.promoted_from) as PromotionSnapshot;
+    this.#db
+      .prepare("UPDATE network_sessions SET environment = ?, type = ?, policy = ?, promoted_from = NULL, updated_at = ? WHERE session_id = ?")
+      .run(previous.environment, previous.type, previous.policy, new Date().toISOString(), sessionId);
+    this.#log.info("Session network promotion reverted", { sessionId, environment: previous.environment ?? "inline", type: previous.type });
+    this.#pushSession(sessionId);
+    return this.session(sessionId)?.policy;
+  }
+
+  /** The promotion committed: its binding is final, and a later `revertPromotion` is a no-op. */
+  commitPromotion(sessionId: string): void {
+    this.#db.prepare("UPDATE network_sessions SET promoted_from = NULL, updated_at = ? WHERE session_id = ? AND promoted_from IS NOT NULL").run(new Date().toISOString(), sessionId);
   }
 
   /** The session was deleted: revoke its sandboxes, placeholders, MCP routes, and history. */
@@ -289,12 +346,16 @@ export class PolicyService {
     return this.#db.prepare("SELECT * FROM network_credentials WHERE session_id = ? ORDER BY rowid").all(sessionId) as unknown as CredentialRow[];
   }
 
-  /** Live credentials of a session: rows whose vault and credential still exist and still belong to the owner. */
+  /**
+   * Live credentials of a session: rows whose vault and credential still exist, whose user vault still belongs to the
+   * owner, and whose AppHost vault the session's current environment still grants (inline environments grant none).
+   */
   #credentials(session: SessionNetwork): { row: CredentialRow; vault: VaultRecord; meta: CredentialMeta }[] {
+    const granted = this.#declared(session.environment)?.vaults ?? [];
     const out: { row: CredentialRow; vault: VaultRecord; meta: CredentialMeta }[] = [];
     for (const row of this.#credentialRows(session.sessionId)) {
       const vault = this.#options.vaults.find(row.vault_id);
-      if (!vault || (vault.kind === "user" && vault.ownerId !== session.ownerId)) continue;
+      if (!vault || (vault.kind === "user" ? vault.ownerId !== session.ownerId : !granted.includes(vault.id))) continue;
       const meta = vault.credentials.find((credential) => credential.key === row.credential_key);
       if (meta) out.push({ row, vault, meta });
     }
@@ -352,9 +413,10 @@ export class PolicyService {
   async registerSandbox(input: SandboxRegistrationInput): Promise<SandboxEgress> {
     if (!SANDBOX_ID.test(input.sandboxId)) throw new ManagedCopilotError("invalid_request", "sandboxId must be 1-64 letters, digits, dashes, or underscores");
     const address = input.address === undefined ? undefined : canonicalIp(input.address);
+    const authority = proxyAuthority(input.proxy);
     const session = this.session(input.sessionId);
     if (!session) throw new ManagedCopilotError("invalid_request", `Session ${input.sessionId} has no network binding; bind it (policy.bindSession) before allocating a sandbox`);
-    if (session.type === "shared") throw new ManagedCopilotError("policy_violation", `Session ${input.sessionId} is a shared session; promote it before it gets a sandbox`);
+    if (session.type !== "isolated") throw new ManagedCopilotError("policy_violation", `Session ${input.sessionId} is a shared session; promote it before it gets a sandbox`);
     const credentials = this.#credentials(session).filter(({ meta }) => meta.kind === "env");
     const needsEgress = session.policy.access !== "disabled" || credentials.length > 0;
     // When the platform runs the egress proxy, every sandbox waits for it, so the proxy exists before the sandbox
@@ -381,7 +443,7 @@ export class PolicyService {
       )
       .run(input.sandboxId, input.sessionId, sha256(secret), address ?? null, (existing?.revision ?? 0) + 1, now, now);
     this.#pushSandbox(input.sandboxId);
-    const proxyUrl = `http://${input.sandboxId}:${secret}@${EGRESS_PROXY_HOST}:${EGRESS_PROXY_PORT}`;
+    const proxyUrl = `http://${input.sandboxId}:${secret}@${authority}`;
     const env: Record<string, string> = {
       HTTP_PROXY: proxyUrl,
       HTTPS_PROXY: proxyUrl,
@@ -412,8 +474,10 @@ export class PolicyService {
   #registration(row: SandboxRow): EgressRegistration | undefined {
     const session = this.session(row.session_id);
     if (!session) return undefined;
+    // Only isolated sessions have sandbox egress; a sandbox left behind by a reverted promotion gets none.
+    const isolated = session.type === "isolated";
     const credentials: EgressCredentialBinding[] = [];
-    for (const { row: credential, meta } of this.#credentials(session)) {
+    for (const { row: credential, meta } of isolated ? this.#credentials(session) : []) {
       if (meta.kind === "env") {
         credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: meta.destinations, headers: meta.headers });
       } else {
@@ -427,7 +491,7 @@ export class PolicyService {
       sessionId: row.session_id,
       credentialHash: row.credential_hash,
       ...(row.address ? { address: row.address } : {}),
-      policy: session.type === "shared" ? NETWORK_DISABLED : session.policy,
+      policy: isolated ? session.policy : NETWORK_DISABLED,
       credentials,
       revision: row.revision,
     };
@@ -549,6 +613,20 @@ function canonicalIp(value: string): string {
   const parsed = parseIpAddress(value);
   if (!parsed) throw new ManagedCopilotError("invalid_request", `"${value}" is not an IP address`);
   return value.trim().toLowerCase();
+}
+
+const PROXY_HOST_NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
+/** `host:port` of the egress proxy as a sandbox reaches it: the `mc-egress:3128` alias unless the provider says otherwise. */
+function proxyAuthority(proxy: SandboxRegistrationInput["proxy"]): string {
+  if (proxy === undefined) return `${EGRESS_PROXY_HOST}:${EGRESS_PROXY_PORT}`;
+  const { port } = proxy;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new ManagedCopilotError("invalid_request", "proxy.port must be an integer from 1 to 65535");
+  const host = String(proxy.host ?? "").trim().toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  const ip = parseIpAddress(host);
+  if (ip) return ip.version === 6 ? `[${formatIpAddress(ip)}]:${port}` : `${formatIpAddress(ip)}:${port}`;
+  if (!PROXY_HOST_NAME.test(host)) throw new ManagedCopilotError("invalid_request", "proxy.host must be a host name or an IP address");
+  return `${host}:${port}`;
 }
 
 /** Normalizes an MCP URL for matching vault credentials (no fragment, default port, lowercase host). */

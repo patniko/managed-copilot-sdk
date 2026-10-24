@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { createServer as createHttpServer, request, type IncomingMessage, type Server } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { connect as netConnect } from "node:net";
-import { parseConfig, type EgressRegistration } from "@managed-copilot/protocol";
+import { createServer as createNetServer, connect as netConnect, Socket, type Server as NetServer } from "node:net";
+import { gzipSync } from "node:zlib";
+import { NETWORK_ENABLED, parseConfig, type EgressRegistration } from "@managed-copilot/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CertificateAuthority, createCaMaterial } from "../../egress/src/x509.js";
 import { GatewayApp } from "../src/app.js";
@@ -10,7 +11,7 @@ import { loadConfig } from "../src/config.js";
 import { openDatabase } from "../src/db.js";
 import { createLogger } from "../src/log.js";
 import { GatewayEgress } from "../src/modules/network/fetcher.js";
-import { MCP_CAPABILITY_HEADER, McpAdapter } from "../src/modules/network/mcp-adapter.js";
+import { endpointRewriter, MCP_CAPABILITY_HEADER, McpAdapter } from "../src/modules/network/mcp-adapter.js";
 import { PolicyService } from "../src/modules/network/policy.js";
 import { Sealer } from "../src/modules/network/sealing.js";
 import { migrateNetwork } from "../src/modules/network/store.js";
@@ -37,6 +38,17 @@ async function listen(server: Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   return (server.address() as { port: number }).port;
 }
+
+/** Polls until `condition` holds (connection teardown is asynchronous). */
+async function eventually(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+  for (const deadline = Date.now() + timeoutMs; !condition(); ) {
+    if (Date.now() > deadline) throw new Error("condition not met in time");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+const HUGE_GZIP = gzipSync(randomBytes(6 * 1024 * 1024), { level: 1 });
+const SMALL_GZIP = gzipSync(randomBytes(64 * 1024));
 
 describe("gateway-side egress", () => {
   const upstreamCa = new CertificateAuthority(createCaMaterial({ commonName: "Upstream Test CA" }));
@@ -65,6 +77,14 @@ describe("gateway-side egress", () => {
         "/private": () => res.writeHead(302, { location: "http://internal.example.test/" }).end(),
         "/long": () => res.writeHead(200, { "content-type": "text/plain" }).end("0123456789".repeat(100)),
         "/loop": () => res.writeHead(302, { location: "/loop" }).end(),
+        // Compressed bodies that exceed the download limit or stall never end on their own.
+        "/gzip-huge": () => res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "gzip" }).write(HUGE_GZIP),
+        "/gzip-stall": () => res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" }).write(SMALL_GZIP.subarray(0, SMALL_GZIP.length >> 1)),
+        "/gzip-reset": () => {
+          res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" }).write(SMALL_GZIP.subarray(0, SMALL_GZIP.length >> 1));
+          setTimeout(() => res.destroy(), 20);
+        },
+        "/gzip-invalid": () => res.writeHead(200, { "content-type": "text/plain", "content-encoding": "gzip" }).end("this is not gzip"),
       };
       (routes[req.url ?? ""] ?? (() => res.writeHead(404).end()))();
     });
@@ -78,6 +98,16 @@ describe("gateway-side egress", () => {
           res.writeHead(200, { "content-type": "text/event-stream" });
           res.write("event: endpoint\ndata: /messages?session=1\n\n");
           res.end('event: message\ndata: {"jsonrpc":"2.0","method":"ready"}\n\n');
+        } else if (req.method === "GET" && req.url === "/sse-gzip") {
+          res.writeHead(200, { "content-type": "text/event-stream", "content-encoding": "gzip" });
+          res.end(gzipSync("event: endpoint\ndata: https://mcp.contoso.example/messages?session=1\n\n"));
+        } else if (req.method === "GET" && req.url === "/sse-split") {
+          // The two bytes of "é" arrive in separate chunks.
+          const event = Buffer.from("event: endpoint\ndata: /messages?session=caf\u00e9\n\n", "utf8");
+          const split = event.indexOf(0xa9);
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(event.subarray(0, split));
+          setTimeout(() => res.end(event.subarray(split)), 50);
         } else if (req.url === "/redirect") {
           res.writeHead(307, { location: "https://elsewhere.example.test/" }).end();
         } else {
@@ -185,6 +215,31 @@ describe("gateway-side egress", () => {
       expect(htmlToText("<p>a &amp; b &#x263A; &#9731;</p>").text).toBe("a & b ☺ ☃");
       expect(htmlToText('<a href="javascript:alert(1)">x</a>').text).toBe("x");
     });
+
+    it("returns compressed bodies over the download limit promptly, truncated", async () => {
+      const started = Date.now();
+      const result = await fetchFor("s-web", { url: "http://web.example.test/gzip-huge" });
+      expect(result.resultType).toBe("success");
+      expect(result.textResultForLlm).toMatch(/application\/octet-stream content, \d+ bytes, not shown/);
+      expect(result.textResultForLlm).toContain("<download truncated at the size limit>");
+      expect(Date.now() - started).toBeLessThan(4_000);
+    });
+
+    it("ends a compressed body that stalls with a timeout explanation", async () => {
+      const started = Date.now();
+      const result = await webFetch({ url: "http://web.example.test/gzip-stall" }, { sessionId: "s-web" }, { policy, egress, timeoutMs: 300 });
+      expect(result).toMatchObject({ resultType: "failure" });
+      expect(result.textResultForLlm).toMatch(/^Could not fetch http:\/\/web\.example\.test\/gzip-stall: the request timed out after 0\.3 seconds\.$/);
+      expect(Date.now() - started).toBeLessThan(3_000);
+    });
+
+    it("explains bodies that cannot be decoded or that break off, instead of throwing", async () => {
+      const result = await fetchFor("s-web", { url: "http://web.example.test/gzip-invalid" });
+      expect(result).toMatchObject({ resultType: "failure" });
+      expect(result.textResultForLlm).toBe("Could not fetch http://web.example.test/gzip-invalid: the gzip content could not be decoded (incorrect header check).");
+      const reset = await fetchFor("s-web", { url: "http://web.example.test/gzip-reset" });
+      expect(reset.textResultForLlm).toBe("Could not fetch http://web.example.test/gzip-reset: the connection closed before the whole response arrived.");
+    });
   });
 
   describe("MCP adapter", () => {
@@ -250,11 +305,209 @@ describe("gateway-side egress", () => {
       expect(mcpRequests.at(-1)).toMatchObject({ method: "POST", url: "/messages?session=1" });
     });
 
+    it("asks MCP servers for uncompressed responses whatever the runtime accepts", async () => {
+      const adapted = await adapter.adapt("s-chat", "docs", { type: "http", url: "https://mcp.contoso.example/docs" });
+      const capability = (adapted.headers as Record<string, string>)[MCP_CAPABILITY_HEADER]!;
+      const response = await post(String(adapted.url), { [MCP_CAPABILITY_HEADER]: capability, "accept-encoding": "gzip, deflate, br" }, "{}");
+      expect(response.status).toBe(200);
+      expect(mcpRequests.at(-1)!.headers["accept-encoding"]).toBe("identity");
+    });
+
+    it("refuses a compressed event stream it cannot rewrite", async () => {
+      const adapted = await adapter.adapt("s-chat", "compressed", { type: "sse", url: "https://mcp.contoso.example/sse-gzip" });
+      const capability = (adapted.headers as Record<string, string>)[MCP_CAPABILITY_HEADER]!;
+      const stream = await fetch(String(adapted.url), { headers: { [MCP_CAPABILITY_HEADER]: capability, accept: "text/event-stream" } });
+      expect(stream.status).toBe(502);
+      expect(await stream.text()).toMatch(/sent a compressed event stream \(gzip\), which the adapter cannot inspect/);
+    });
+
+    it("rewrites endpoints whose UTF-8 characters arrive split across chunks", async () => {
+      const adapted = await adapter.adapt("s-chat", "split", { type: "sse", url: "https://mcp.contoso.example/sse-split" });
+      const capability = (adapted.headers as Record<string, string>)[MCP_CAPABILITY_HEADER]!;
+      const text = await (await fetch(String(adapted.url), { headers: { [MCP_CAPABILITY_HEADER]: capability, accept: "text/event-stream" } })).text();
+      expect(/event: endpoint\ndata: (.*)\n/.exec(text)?.[1]).toMatch(/^\/internal\/mcp\/mcp_[0-9a-f]{24}\/endpoint\?u=%2Fmessages%3Fsession%3Dcaf%C3%A9$/);
+    });
+
     it("stops serving routes of deleted sessions", async () => {
       const adapted = await adapter.adapt("s-chat", "docs", { type: "http", url: "https://mcp.contoso.example/docs" });
       policy.releaseSession("s-chat");
       const response = await post(String(adapted.url), { [MCP_CAPABILITY_HEADER]: (adapted.headers as Record<string, string>)[MCP_CAPABILITY_HEADER]! }, "{}");
       expect(response.status).toBe(404);
     });
+  });
+});
+
+describe("SSE endpoint rewriting", () => {
+  /** Feeds `chunks` through the rewriter and returns what the runtime would receive. */
+  const rewritten = async (...chunks: Array<string | Buffer>): Promise<string> => {
+    const transform = endpointRewriter((endpoint) => `/adapter?u=${encodeURIComponent(endpoint)}`);
+    const out: Buffer[] = [];
+    transform.on("data", (chunk: Buffer) => out.push(chunk));
+    const done = new Promise((resolve) => transform.on("end", resolve));
+    for (const chunk of chunks) transform.write(typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk);
+    transform.end();
+    await done;
+    return Buffer.concat(out).toString("utf8");
+  };
+  /** The endpoint events an SSE client would dispatch from `stream` (per the HTML event-stream parsing rules). */
+  const dispatchedEndpoints = (stream: string): string[] => {
+    const endpoints: string[] = [];
+    let type = "";
+    let data: string[] = [];
+    for (const line of stream.replace(/^\uFEFF/, "").split(/\r\n|\r|\n/)) {
+      if (line === "") {
+        if (type === "endpoint" && data.length > 0) endpoints.push(data.join("\n"));
+        type = "";
+        data = [];
+        continue;
+      }
+      const colon = line.indexOf(":");
+      if (colon === 0) continue;
+      const field = colon < 0 ? line : line.slice(0, colon);
+      const raw = colon < 0 ? "" : line.slice(colon + 1);
+      const value = raw.startsWith(" ") ? raw.slice(1) : raw;
+      if (field === "event") type = value;
+      else if (field === "data") data.push(value);
+    }
+    return endpoints;
+  };
+
+  it("rewrites endpoint events whatever their line endings", async () => {
+    for (const eol of ["\n", "\r\n", "\r"]) {
+      const out = await rewritten(`event: endpoint${eol}data: https://mcp.contoso.example/messages${eol}${eol}event: message${eol}data: {}${eol}${eol}`);
+      expect(dispatchedEndpoints(out), JSON.stringify(eol)).toEqual(["/adapter?u=https%3A%2F%2Fmcp.contoso.example%2Fmessages"]);
+      expect(out).toContain("event: message\ndata: {}\n\n");
+    }
+  });
+
+  it("handles a CRLF split across chunks and a leading byte order mark", async () => {
+    const out = await rewritten("\uFEFFevent: endpoint\r", "\ndata: /m\r", "\n\r", "\n");
+    expect(dispatchedEndpoints(out)).toEqual(["/adapter?u=%2Fm"]);
+    expect(out).toBe("event: endpoint\ndata: /adapter?u=%2Fm\n\n");
+  });
+
+  it("never lets an endpoint event through unrewritten when its data comes before its type", async () => {
+    const attacks = [
+      "data: https://169.254.169.254/latest\nevent: endpoint\n\n",
+      "data:https://evil.example.test/x\revent:endpoint\r\r",
+      "event: message\ndata: https://evil.example.test/x\nevent: endpoint\n\n",
+      "data\nevent: endpoint\n\n",
+    ];
+    for (const attack of attacks) {
+      const out = await rewritten(attack);
+      expect(dispatchedEndpoints(out), attack).toEqual([]);
+      expect(dispatchedEndpoints(attack).length, attack).toBe(1);
+    }
+  });
+
+  it("rewrites multi-line endpoint data and passes comments and other fields through", async () => {
+    const out = await rewritten(": keep-alive\nid: 7\nevent: endpoint\nretry: 1000\ndata: /a\ndata: /b\n\n");
+    expect(out).toBe(": keep-alive\nid: 7\nevent: endpoint\nretry: 1000\ndata: /adapter?u=%2Fa\ndata: /adapter?u=%2Fb\n\n");
+  });
+});
+
+describe("gateway egress connections", () => {
+  const ca = new CertificateAuthority(createCaMaterial({ commonName: "Handshake Test CA" }));
+  const silentConnections = new Set<Socket>();
+  let silentAccepted = 0;
+  const silentServer: NetServer = createNetServer((socket) => {
+    // Accepts TCP and reads the ClientHello, but never speaks TLS.
+    silentAccepted++;
+    silentConnections.add(socket);
+    socket.resume();
+    socket.on("error", () => undefined);
+    socket.on("close", () => silentConnections.delete(socket));
+  });
+  const goodCertificate = ca.issue("api.example.test");
+  const wrongCertificate = ca.issue("other.example.test");
+  const good = createHttpsServer({ key: goodCertificate.keyPem, cert: goodCertificate.certPem }, (_req, res) => res.writeHead(200).end("ok"));
+  const wrong = createHttpsServer({ key: wrongCertificate.keyPem, cert: wrongCertificate.certPem }, (_req, res) => res.writeHead(200).end("ok"));
+  const SILENT = "93.184.216.40";
+  const GOOD = "93.184.216.41";
+  const WRONG = "93.184.216.42";
+  const NEVER_CONNECTS = "93.184.216.43";
+  const ports = new Map<string, number>();
+  const dialed: string[] = [];
+  const unconnected: Socket[] = [];
+  const url = new URL("https://api.example.test/");
+
+  const egressWith = (addresses: string[], connectTimeoutMs: number) =>
+    new GatewayEgress({
+      destination: {
+        allowedPorts: new Set([443]),
+        privateHosts: new Set(),
+        protectedCidrs: () => [],
+        blockedCidrs: [],
+        dnsTimeoutMs: 1_000,
+        resolve: async () => addresses,
+      },
+      connect: (address) => {
+        dialed.push(address);
+        if (address === NEVER_CONNECTS) {
+          const socket = new Socket();
+          unconnected.push(socket);
+          return socket;
+        }
+        return netConnect({ host: "127.0.0.1", port: ports.get(address) ?? 9 });
+      },
+      extraCa: [ca.certPem],
+      connectTimeoutMs,
+    });
+
+  beforeAll(async () => {
+    await new Promise<void>((resolve) => silentServer.listen(0, "127.0.0.1", () => resolve()));
+    ports.set(SILENT, (silentServer.address() as { port: number }).port);
+    ports.set(GOOD, await listen(good));
+    ports.set(WRONG, await listen(wrong));
+  });
+
+  afterAll(() => {
+    for (const socket of silentConnections) socket.destroy();
+    silentServer.close();
+    for (const server of [good, wrong]) {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+
+  it("gives up on a TLS handshake the server never answers within the connect timeout", async () => {
+    const accepted = silentAccepted;
+    const started = Date.now();
+    await expect(egressWith([SILENT], 200).request(NETWORK_ENABLED, url)).rejects.toThrow("TLS handshake with api.example.test:443 timed out");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(silentAccepted).toBe(accepted + 1);
+    await eventually(() => silentConnections.size === 0);
+  });
+
+  it("settles promptly when the caller aborts a handshake or a dial", async () => {
+    const accepted = silentAccepted;
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const started = Date.now();
+    await expect(egressWith([SILENT, GOOD], 10_000).request(NETWORK_ENABLED, url, { signal: controller.signal })).rejects.toThrow(/aborted/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(silentAccepted).toBe(accepted + 1);
+    await eventually(() => silentConnections.size === 0);
+
+    const dial = new AbortController();
+    setTimeout(() => dial.abort(), 100);
+    dialed.length = 0;
+    await expect(egressWith([NEVER_CONNECTS, GOOD], 10_000).request(NETWORK_ENABLED, url, { signal: dial.signal })).rejects.toThrow(/aborted/);
+    expect(dialed).toEqual([NEVER_CONNECTS]);
+    expect(unconnected.at(-1)?.destroyed).toBe(true);
+  });
+
+  it("moves on to the next validated address after a failed handshake", async () => {
+    dialed.length = 0;
+    const result = await egressWith([SILENT, GOOD], 200).request(NETWORK_ENABLED, url);
+    expect("response" in result && result.response.statusCode).toBe(200);
+    if ("response" in result) result.response.resume();
+    expect(dialed).toEqual([SILENT, GOOD]);
+  });
+
+  it("reports a certificate that fails verification without trying other addresses", async () => {
+    dialed.length = 0;
+    await expect(egressWith([WRONG, GOOD], 2_000).request(NETWORK_ENABLED, url)).rejects.toThrow(/does not match certificate's altnames/);
+    expect(dialed).toEqual([WRONG]);
   });
 });

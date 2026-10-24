@@ -67,12 +67,44 @@ describe("registry", () => {
 
   it("limits concurrent connections per sandbox", () => {
     const registry = new Registry({ staleMs: 1_000, maxConnectionsPerSandbox: 1 });
-    const connection = { host: "github.com", ipLiteral: false, credentialHash: "", close: vi.fn() };
-    const untrack = registry.track("sbx_1", connection);
-    expect(untrack).toBeTypeOf("function");
-    expect(registry.track("sbx_1", { ...connection })).toBeUndefined();
-    untrack!();
+    registry.replaceAll([registration()]);
+    const connection = { host: "github.com", ipLiteral: false, credentialHash: hashCredential("s3cret"), close: vi.fn() };
+    const first = registry.track("sbx_1", connection);
+    expect(first).toMatchObject({ ok: true });
+    expect(registry.track("sbx_1", { ...connection })).toMatchObject({ ok: false, status: 429 });
+    if (first.ok) first.untrack();
     expect(registry.connectionCount("sbx_1")).toBe(0);
+  });
+
+  it("re-checks the registration when admitting a connection", () => {
+    const registry = new Registry({ staleMs: 1_000, maxConnectionsPerSandbox: 10 });
+    const connection = (host: string, credentialHash = hashCredential("s3cret"), ipLiteral = false) => ({ host, ipLiteral, credentialHash, close: vi.fn() });
+    expect(registry.track("sbx_1", connection("github.com"))).toMatchObject({ ok: false, status: 503 });
+    registry.replaceAll([registration()]);
+    expect(registry.track("sbx_1", connection("github.com"))).toMatchObject({ ok: true });
+    expect(registry.track("sbx_1", connection("example.com"))).toMatchObject({ ok: false, status: 403 });
+    expect(registry.track("sbx_1", connection("93.184.216.34", hashCredential("s3cret"), true))).toMatchObject({ ok: false, status: 403 });
+    expect(registry.track("sbx_1", connection("github.com", hashCredential("rotated")))).toMatchObject({ ok: false, status: 403 });
+    expect(registry.track("sbx_2", connection("github.com"))).toMatchObject({ ok: false, status: 403 });
+    registry.remove("sbx_1");
+    expect(registry.track("sbx_1", connection("github.com"))).toMatchObject({ ok: false, status: 403 });
+    expect(registry.connectionCount("sbx_1")).toBe(0);
+  });
+
+  it("closes open connections when the gateway link stays down past the stale deadline", async () => {
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    const registry = new Registry({ staleMs: 60, maxConnectionsPerSandbox: 10 });
+    registry.replaceAll([registration()]);
+    const open = { host: "github.com", ipLiteral: false, credentialHash: hashCredential("s3cret"), close: vi.fn() };
+    expect(registry.track("sbx_1", open)).toMatchObject({ ok: true });
+    registry.markDisconnected();
+    registry.replaceAll([registration()]);
+    await sleep(120);
+    expect(open.close).not.toHaveBeenCalled();
+    registry.markDisconnected();
+    await sleep(120);
+    expect(open.close).toHaveBeenCalledOnce();
+    expect(registry.ready).toBe(false);
   });
 
   it("parses credentials and addresses", () => {

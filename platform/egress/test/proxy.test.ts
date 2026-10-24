@@ -1,6 +1,8 @@
 import { normalizeNetwork, type EgressRegistration, type EgressReport, type EgressSecretRequest } from "@managed-copilot/protocol";
 import { parseCidr } from "@managed-copilot/protocol";
 import type { Server } from "node:http";
+import { connect as netConnect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
+import { connect as tlsConnect } from "node:tls";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { SecretUnavailableError } from "../src/gateway-link.js";
 import { silentLogger } from "../src/log.js";
@@ -393,6 +395,24 @@ describe("egress proxy", () => {
       tunnel.socket!.destroy();
       expect(await waitForReport("tls_client_untrusted")).toMatchObject({ host: "vault.example.test", message: expect.stringContaining("platform CA") });
     });
+
+    it("presents no certificate to vault tunnels without a matching server name or without TLS", async () => {
+      const noSni = await openTunnel(port, "vault.example.test:443", auth("sbx_vault"));
+      await expect(
+        new Promise((resolve, reject) => {
+          const tls = tlsConnect({ socket: noSni.socket!, ca: platformCa.certPem, checkServerIdentity: () => undefined }, () => resolve(tls));
+          tls.once("error", reject);
+          tls.once("close", () => reject(new Error("closed")));
+        }),
+      ).rejects.toThrow();
+      expect(await waitForReport("sni_mismatch")).toMatchObject({ host: "vault.example.test", message: expect.stringContaining("(none)") });
+
+      const plain = await openTunnel(port, "vault.example.test:443", auth("sbx_vault"));
+      plain.socket!.write("SSH-2.0-OpenSSH_9.6\r\n");
+      await closed(plain.socket!);
+      expect(await waitForReport("non_tls_tunnel")).toMatchObject({ host: "vault.example.test" });
+      expect(reports.some((report) => report.reason === "tls_client_untrusted")).toBe(false);
+    });
   });
 
   it("fails closed until the gateway has sent a snapshot", async () => {
@@ -410,6 +430,231 @@ describe("egress proxy", () => {
       expect(response.status).toBe(503);
     } finally {
       await cold.close();
+    }
+  });
+});
+
+describe("egress proxy races and deadlines", () => {
+  const gate = () => {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => (release = resolve));
+    return { promise, release };
+  };
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const until = async (condition: () => boolean, ms = 2_000) => {
+    for (const start = Date.now(); !condition(); await sleep(10)) if (Date.now() - start > ms) throw new Error("condition not met");
+  };
+
+  const plainRecords: EchoRecord[] = [];
+  const vaultRecords: EchoRecord[] = [];
+  const attempts: string[] = [];
+  const lookups: string[] = [];
+  const reports: EgressReport[] = [];
+  const secretRequests: EgressSecretRequest[] = [];
+  const silentSockets: Socket[] = [];
+  const closers: Array<() => unknown> = [];
+  let dnsGate: Promise<void> | undefined;
+  let secretGate: Promise<void> | undefined;
+  let registry: Registry;
+  let port: number;
+
+  const BASE: EgressRegistration[] = [
+    registration("sbx_list", ["plain.example.test", "other.example.test"]),
+    registration("sbx_vault", ["vault.example.test", "silent.example.test"], {
+      credentials: [{ id: "cred_stripe", placeholder: STRIPE, destinations: [{ host: "vault.example.test", port: 443 }, { host: "silent.example.test", port: 443 }], headers: ["authorization"] }],
+    }),
+  ];
+
+  beforeAll(async () => {
+    const plain = httpEcho(plainRecords);
+    const vault = httpsEcho(upstreamCa, "vault.example.test", vaultRecords);
+    const other = httpsEcho(upstreamCa, "other.example.test", []);
+    const silent = createNetServer((socket) => {
+      silentSockets.push(socket);
+      socket.on("error", () => undefined);
+      socket.on("end", () => socket.destroy());
+      socket.resume();
+    });
+    const routes = new Map([
+      ["93.184.216.10:80", await listen(plain)],
+      ["93.184.216.11:443", await listen(vault)],
+      ["93.184.216.12:443", await listen(other)],
+    ]);
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", () => resolve()));
+    routes.set("93.184.216.14:443", (silent.address() as AddressInfo).port);
+    closers.push(() => plain.close(), () => vault.close(), () => other.close(), () => silent.close());
+    const table: Record<string, string> = {
+      "plain.example.test": "93.184.216.10",
+      "vault.example.test": "93.184.216.11",
+      "other.example.test": "93.184.216.12",
+      "silent.example.test": "93.184.216.14",
+    };
+    registry = new Registry({ staleMs: 30_000, maxConnectionsPerSandbox: 32 });
+    const proxy = new EgressProxy({
+      registry,
+      ca: platformCa,
+      log: silentLogger,
+      reporter: { report: (report) => reports.push(report) },
+      secrets: {
+        resolveSecret: async (request) => {
+          secretRequests.push(request);
+          await secretGate;
+          return SECRETS.get(request.placeholder)!;
+        },
+      },
+      destination: {
+        allowedPorts: new Set([80, 443]),
+        privateHosts: new Set(),
+        protectedCidrs: () => [],
+        blockedCidrs: [],
+        dnsTimeoutMs: 5_000,
+        resolve: async (host) => {
+          lookups.push(host);
+          await dnsGate;
+          return [table[host]!];
+        },
+      },
+      dial: routedDialer(routes, attempts),
+      upstreamCa: [upstreamCa.certPem],
+      helloTimeoutMs: 1_000,
+      connectTimeoutMs: 300,
+    });
+    port = (await proxy.listen(0, "127.0.0.1")).port;
+    closers.unshift(() => proxy.close());
+  });
+
+  afterAll(async () => {
+    for (const close of closers) await close();
+  });
+
+  beforeEach(() => {
+    registry.replaceAll(BASE.map((entry) => ({ ...entry, revision: (registry.get(entry.sandboxId)?.revision ?? 0) + 1 })));
+    for (const list of [attempts, lookups, reports, secretRequests]) list.length = 0;
+    dnsGate = undefined;
+    secretGate = undefined;
+  });
+
+  /** Sends a raw proxy request (absolute-form GET or CONNECT) and returns the client socket. */
+  const rawRequest = (head: string) => {
+    const socket = netConnect({ host: "127.0.0.1", port });
+    socket.on("error", () => undefined);
+    socket.write(`${head}\r\nProxy-Authorization: ${auth("sbx_list")}\r\n\r\n`);
+    return socket;
+  };
+
+  it("does not connect for a sandbox revoked while its DNS lookup was in flight", async () => {
+    const dns = gate();
+    dnsGate = dns.promise;
+    const before = plainRecords.length;
+    const pending = forward(port, "http://plain.example.test/after-revoke", { "proxy-authorization": auth("sbx_list") });
+    await until(() => lookups.includes("plain.example.test"));
+    registry.remove("sbx_list");
+    dns.release();
+    expect((await pending).status).toBe(403);
+    const tunnel = openTunnel(port, "other.example.test:443", auth("sbx_list"));
+    expect((await tunnel).status).toBe(407);
+    expect(attempts).toEqual([]);
+    expect(plainRecords.length).toBe(before);
+  });
+
+  it("does not connect for a host the policy stopped allowing while its DNS lookup was in flight", async () => {
+    const dns = gate();
+    dnsGate = dns.promise;
+    const pending = openTunnel(port, "other.example.test:443", auth("sbx_list"));
+    await until(() => lookups.includes("other.example.test"));
+    const current = registry.get("sbx_list")!;
+    registry.upsert({ ...current, policy: normalizeNetwork(["plain.example.test"]), revision: current.revision + 1 });
+    dns.release();
+    expect((await pending).status).toBe(403);
+    expect(attempts).toEqual([]);
+  });
+
+  it("leaks no connection slot when the client hangs up during DNS resolution", async () => {
+    const dns = gate();
+    dnsGate = dns.promise;
+    const forwarded = rawRequest("GET http://plain.example.test/ HTTP/1.1\r\nHost: plain.example.test");
+    const tunneled = rawRequest("CONNECT other.example.test:443 HTTP/1.1\r\nHost: other.example.test:443");
+    await until(() => lookups.length === 2);
+    forwarded.destroy();
+    tunneled.destroy();
+    await sleep(50);
+    dns.release();
+    await sleep(150);
+    // The forward proxy notices the hang-up before dialing; a CONNECT socket is not read until its tunnel starts.
+    expect(attempts).not.toContain("93.184.216.10:80");
+    await until(() => registry.connectionCount("sbx_list") === 0);
+  });
+
+  it("does not send a vault request whose credential is revoked while its secret resolves", async () => {
+    const secret = gate();
+    secretGate = secret.promise;
+    const tunnel = await openTunnel(port, "vault.example.test:443", auth("sbx_vault"));
+    const tls = await tlsOver(tunnel.socket!, "vault.example.test", platformCa.certPem);
+    const before = vaultRecords.length;
+    const pending = httpOver(tls, "/v1/balance", { host: "vault.example.test", authorization: bearer(STRIPE) });
+    await until(() => secretRequests.length === 1);
+    const current = registry.get("sbx_vault")!;
+    registry.upsert({ ...current, credentials: [], revision: current.revision + 1 });
+    secret.release();
+    const response = await pending;
+    tls.destroy();
+    expect(response.status).toBe(403);
+    expect(response.body).toMatch(/revoked/);
+    expect(vaultRecords.length).toBe(before);
+    expect(reports.find((report) => report.reason === "credential_revoked")).toMatchObject({ sandboxId: "sbx_vault", host: "vault.example.test" });
+  });
+
+  it("closes a terminated connection, without sending, when its sandbox is removed while the secret resolves", async () => {
+    const secret = gate();
+    secretGate = secret.promise;
+    const tunnel = await openTunnel(port, "vault.example.test:443", auth("sbx_vault"));
+    const tls = await tlsOver(tunnel.socket!, "vault.example.test", platformCa.certPem);
+    const before = vaultRecords.length;
+    const pending = httpOver(tls, "/v1/balance", { host: "vault.example.test", authorization: bearer(STRIPE) });
+    await until(() => secretRequests.length === 1);
+    registry.remove("sbx_vault");
+    await expect(pending).rejects.toThrow();
+    secret.release();
+    await sleep(100);
+    expect(vaultRecords.length).toBe(before);
+    expect(attempts).toEqual([]);
+    expect(reports.some((report) => report.reason === "tls_client_untrusted")).toBe(false);
+  });
+
+  it("bounds the upstream TLS handshake for vault hosts", async () => {
+    const started = Date.now();
+    const tunnel = await openTunnel(port, "silent.example.test:443", auth("sbx_vault"));
+    const tls = await tlsOver(tunnel.socket!, "silent.example.test", platformCa.certPem);
+    const response = await httpOver(tls, "/", { host: "silent.example.test", authorization: bearer(STRIPE) });
+    tls.destroy();
+    expect(response.status).toBe(504);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    await until(() => silentSockets.length > 0 && silentSockets.every((socket) => socket.destroyed || socket.readableEnded));
+  });
+
+  it("closes open tunnels when the gateway link stays down past the stale deadline", async () => {
+    const stale = new Registry({ staleMs: 100, maxConnectionsPerSandbox: 4 });
+    stale.replaceAll(BASE);
+    const proxy = new EgressProxy({
+      registry: stale,
+      ca: platformCa,
+      log: silentLogger,
+      reporter: { report: () => undefined },
+      secrets: { resolveSecret: async () => "" },
+      destination: { allowedPorts: new Set([443]), privateHosts: new Set(), protectedCidrs: () => [], blockedCidrs: [], dnsTimeoutMs: 1_000, resolve: async () => ["93.184.216.12"] },
+      dial: routedDialer(new Map([["93.184.216.12:443", (await listen(httpsEcho(upstreamCa, "other.example.test", [])))]])),
+      upstreamCa: [upstreamCa.certPem],
+    });
+    const stalePort = (await proxy.listen(0, "127.0.0.1")).port;
+    try {
+      const tunnel = await openTunnel(stalePort, "other.example.test:443", auth("sbx_list"));
+      const tls = await tlsOver(tunnel.socket!, "other.example.test", upstreamCa.certPem);
+      stale.markDisconnected();
+      await closed(tunnel.socket!, 2_000);
+      tls.destroy();
+      expect((await openTunnel(stalePort, "other.example.test:443", auth("sbx_list"))).status).toBe(503);
+    } finally {
+      await proxy.close();
     }
   });
 });

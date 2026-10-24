@@ -26,15 +26,17 @@ export const NETWORK_DISABLED: NetworkPolicy = Object.freeze({ access: "disabled
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /**
- * Normalizes one host pattern (`example.com` or `*.example.com`). Throws on schemes, ports, paths, bad labels, and
- * single-label names such as `localhost` or internal container names, which are never valid egress destinations.
+ * Normalizes one host pattern (`example.com` or `*.example.com`). Throws on schemes, ports, paths, bad labels,
+ * single-label names such as `localhost` or internal container names, and IP addresses or other numeric forms, which
+ * are never valid egress host patterns.
  */
 export function normalizeHostPattern(pattern: string): string {
   const value = pattern.trim().toLowerCase().replace(/\.$/, "");
   const wildcard = value.startsWith("*.");
   const host = wildcard ? value.slice(2) : value;
   const labels = host.split(".");
-  if (!host || labels.length < 2 || !labels.every((label) => HOST_LABEL.test(label))) {
+  const last = labels[labels.length - 1] ?? "";
+  if (!host || labels.length < 2 || !labels.every((label) => HOST_LABEL.test(label)) || /^\d+$/.test(last) || /^0x[0-9a-f]*$/.test(last)) {
     throw new TypeError(`Invalid network host pattern "${pattern}". Use a host name such as "example.com" or "*.example.com".`);
   }
   return wildcard ? `*.${host}` : host;
@@ -415,16 +417,25 @@ export type DestinationDecision =
       readonly port?: number;
     };
 
+/** The IPv4 address an IPv4-mapped (`::ffff:a.b.c.d`) or NAT64 (`64:ff9b::a.b.c.d`) address actually reaches. */
+function embeddedIpv4(address: ParsedAddress): ParsedAddress | undefined {
+  return address.version === 6 && (cidrContains(V4_MAPPED, address) || cidrContains(NAT64, address)) ? { version: 4, bytes: address.bytes.slice(12) } : undefined;
+}
+
+/** True when the address, or the IPv4 address it embeds, falls in any of the ranges. */
 function inAnyCidr(cidrs: readonly Cidr[], address: string): boolean {
   const parsed = parseIpAddress(address);
-  return parsed !== undefined && cidrs.some((cidr) => cidrContains(cidr, parsed));
+  if (!parsed) return false;
+  const embedded = embeddedIpv4(parsed);
+  return cidrs.some((cidr) => cidrContains(cidr, parsed) || (embedded !== undefined && cidrContains(cidr, embedded)));
 }
 
 function addressAllowed(host: string, address: string, options: DestinationCheckOptions): { ok: true } | { ok: false; why: string } {
-  const kind = classifyAddress(address);
   if (inAnyCidr(options.blockedCidrs, address)) return { ok: false, why: "an address blocked by the operator" };
+  if (inAnyCidr(options.protectedCidrs(), address)) return { ok: false, why: "a protected platform address" };
+  const kind = classifyAddress(address);
   if (kind === "public") return { ok: true };
-  if ((kind === "private" || kind === "shared") && options.privateHosts.has(host) && !inAnyCidr(options.protectedCidrs(), address)) return { ok: true };
+  if ((kind === "private" || kind === "shared") && options.privateHosts.has(host)) return { ok: true };
   return { ok: false, why: describeAddressClass(kind) };
 }
 
