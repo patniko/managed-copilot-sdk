@@ -84,7 +84,7 @@ export function UserBubble({ text, at, timeZone, pending }: { text: string; at: 
 
 export function AssistantMessage({ item, timeZone, scheduleLabel }: { item: AssistantItem; timeZone: string; scheduleLabel?: string }) {
   return (
-    <div className="flex animate-rise gap-3">
+    <div className="flex animate-rise gap-3" data-testid="assistant-message" data-streaming={item.streaming ? "true" : "false"} data-proactive={item.proactive ? "true" : "false"}>
       <AssistantAvatar />
       <div className="min-w-0 flex-1 pt-0.5">
         {item.proactive && (
@@ -108,7 +108,7 @@ export function AssistantMessage({ item, timeZone, scheduleLabel }: { item: Assi
 
 export function TriggerPill({ item, timeZone }: { item: TriggerItem; timeZone: string }) {
   return (
-    <div className="flex animate-rise justify-center">
+    <div className="flex animate-rise justify-center" data-testid="trigger">
       <div className="flex max-w-[90%] items-start gap-2 rounded-2xl bg-amber-50 px-3.5 py-2 text-sm text-amber-900 ring-1 ring-amber-200/80 dark:bg-amber-500/10 dark:text-amber-200 dark:ring-amber-500/20">
         <AlarmClock className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
         <div className="min-w-0">
@@ -125,7 +125,7 @@ export function TriggerPill({ item, timeZone }: { item: TriggerItem; timeZone: s
 export function ToolRow({ item, onOpenSchedule }: { item: ToolItem; onOpenSchedule?: (id: string) => void }) {
   const Icon = TOOL_ICONS[item.icon] ?? Wrench;
   return (
-    <li className="flex animate-fade items-start gap-2.5 py-1">
+    <li className="flex animate-fade items-start gap-2.5 py-1" data-testid="tool" data-tool={item.name} data-status={item.status} data-offline={item.handledOffline ? "true" : "false"}>
       <span
         className={`mt-px grid size-6 shrink-0 place-items-center rounded-md ${
           item.status === "failed" ? "bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-400" : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
