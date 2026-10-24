@@ -321,10 +321,15 @@ applies the session's policy and attaches vault credentials. Anything else is re
   uses its own setting, whatever its name), persists it in
   `network_sessions`, and returns it. Every later read re-narrows the stored policy by the environment's *current*
   ceiling (an operator can narrow, never broaden a session; a removed environment means no egress).
-  `promoteSession(id, target)` narrows the session's *current* effective policy by the isolated target's ceiling, so
-  `network: false` (including a source tightened after creation) survives promotion. Until `commitPromotion(id)`,
-  `revertPromotion(id)` restores the pre-promotion environment, type, and policy (spec 9.5 pre-commit rollback; kept
-  in SQLite across restarts). Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
+  `promoteSession(id, target)` keeps the source environment as the owner of the session's ceiling and AppHost vault
+  grants and records the target (`promotedTo`, also in the session's network view). The stored policy is narrowed from
+  the *current* effective policy by the isolated target's ceiling, and every read narrows by both environments'
+  current ceilings. So `network: false`, a source tightened after creation, and later tightening of either environment
+  all survive promotion, and the target neither adds nor removes vaults. Until `commitPromotion(id)`,
+  `revertPromotion(id)` restores the pre-promotion type, policy, and target (spec 9.5 pre-commit rollback; kept
+  in SQLite across restarts). Bindings promoted by earlier versions (target stored as the environment) are converted
+  once at startup: the source comes from a pending snapshot or core's ledger, and fails closed (no access) when only
+  promotion records show the promotion. Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
   promotable sessions, and a sandbox left behind by a reverted promotion is pushed with no access.
 - **Shared decision logic.** `evaluateDestination` in `packages/protocol/src/network.ts` is the single rule set for the
   proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex; IP addresses and
@@ -366,8 +371,8 @@ applies the session's policy and attaches vault credentials. Anything else is re
   (`MANAGED_COPILOT_VAULT_KEY`, else `<data>/network/vault.key`) with the row bound as AAD, and are never returned.
   Binding validates ownership (others' vaults are `not_found`), environment membership for AppHost vaults, and kind
   (sandbox `env` credentials are refused in shared environments). AppHost vault credentials stay usable only while the
-  session's current environment still grants the vault (inline sessions get none), and user vaults only while the
-  owner still owns them. Placeholders (`mcv_placeholder_` + 40 hex) are
+  session's environment (the source environment, also after promotion) still grants the vault (inline sessions get
+  none), and user vaults only while the owner still owns them. Placeholders (`mcv_placeholder_` + 40 hex) are
   stable per session and credential; deleting a vault revokes it from running sandboxes at once.
 - **Substitution.** The proxy terminates TLS (ECDSA P-256 platform CA, key kept in the proxy's volume) only for a
   session's vault hosts on port 443. Per request it re-checks the registration, policy, and `Host`; substitutes a
@@ -375,8 +380,9 @@ applies the session's policy and attaches vault credentials. Anything else is re
   placeholders in URLs, Basic credentials, other headers, other sessions, other hosts, plain HTTP, and WebSocket
   upgrades; asks the gateway to authorize each use; writes nothing upstream until the destination's certificate
   verifies (within the connect deadline) and the registration and binding are re-checked once more; forces
-  `Accept-Encoding: identity` and redacts reflected values (defense in depth only; streamed bodies such as
-  server-sent events pass through immediately, holding back only a tail that could still become a secret). Clients that
+  `Accept-Encoding: identity` and redacts reflected values (defense in depth only; matching is leftmost-longest and
+  covers overlapping secrets, and streamed bodies such as server-sent events pass through immediately, holding back
+  only a tail shorter than the longest secret, in time linear in each chunk). Clients that
   reject the platform CA or pin certificates are reported as `tls_client_untrusted`.
 - **Shared placement.** `web_fetch` (`overridesBuiltInTool`) follows redirects itself, re-evaluating each hop, with
   size/time limits (30 s for the whole call, body included) and HTML-to-text; it explains failures instead of
@@ -516,7 +522,11 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   after `fence()`, against the same session incarnation. Probes fail closed: only the runtime's "session not found"
   (a session it does not hold, therefore idle) is accepted as an answer other than a valid result.
 - **Fence and transfer.** `fence()` makes new requests for the session wait and keeps everything the source emits
-  from clients, durable, observers, and the ledger. A tool promotion calls `session.suspend`, then `sessions.close`.
+  from clients, durable, observers, and the ledger. Paths into the source runtime that core does not see, such as an
+  attached Copilot CLI's AHP relay, are *participants* (`promotion.participate`). They are fenced right after `fence()`
+  (the ledger already says `promoting`, so new attachments are refused), bounded at 15 s (`promotion_busy`
+  otherwise), and before the quiescence re-check, so the re-check sees work they started. They are released once the
+  cutover ends. A tool promotion calls `session.suspend`, then `sessions.close`.
   The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
   data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
   `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
@@ -578,7 +588,11 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   turn.
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
   attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
-  publishes the same session on the sandbox runtime's AHP host.
+  publishes the same session on the sandbox runtime's AHP host. As a participant, attach is told when the cutover ends:
+  `committed`, or aborted `sealed` or unsealed (the source never stopped). Sealed means the source was checkpointed
+  and core resumes it there, right away when a caller's completion is waiting and otherwise on next use. The shared
+  connection and its `connectionId` stay the same, so an AHP host published before the fence is stale and must be
+  disposed, not reused. Attachments already past the `promoting` check when the fence started are attach's to stop.
 - **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
   sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
   so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
@@ -609,7 +623,7 @@ structurally (they may add members).
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
-| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`; registers the `request_sandbox` platform tool and publishes `session.promoted` |
+| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`

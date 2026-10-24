@@ -3,7 +3,8 @@
 // the agent call request_sandbox; the same CopilotSession object and ID continue in the sandbox, the caller's
 // sendAndWait returns only after the continued work finished, outputs/summary.json is published as an artifact, and
 // `session.promoted` arrives with the sandbox ID. Skips cleanly without a GitHub token or a reachable Docker engine.
-// Everything it creates is labelled with a unique instance and removed afterwards.
+// Everything it creates is labelled with a unique instance and removed afterwards; what a killed run left behind is
+// removed by the next run once it is clearly stale.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -37,18 +38,37 @@ const docker = token && built ? dockerReachable() : false;
 if (!token) console.warn("Skipping the G5 promotion test: set GH_TOKEN to a GitHub token with Copilot access.");
 else if (!docker) console.warn("Skipping the G5 promotion test: Docker is not reachable.");
 
-function cleanupDocker(): void {
-  const run = (...args: string[]) => {
-    try {
-      return execFileSync("docker", args, { encoding: "utf8", stdio: "pipe", timeout: 60_000 }).trim();
-    } catch {
-      return "";
-    }
-  };
-  const label = `label=managed-copilot.instance=${instance}`;
-  for (const name of run("ps", "-a", "--filter", label, "--format", "{{.Names}}").split("\n").filter(Boolean)) run("rm", "-f", name);
-  for (const name of run("volume", "ls", "--filter", label, "--format", "{{.Name}}").split("\n").filter(Boolean)) run("volume", "rm", "-f", name);
-  for (const name of run("network", "ls", "--filter", label, "--format", "{{.Name}}").split("\n").filter(Boolean)) run("network", "rm", name);
+function dockerCli(...args: string[]): string {
+  try {
+    return execFileSync("docker", args, { encoding: "utf8", stdio: "pipe", timeout: 60_000 }).trim();
+  } catch {
+    return "";
+  }
+}
+
+function cleanupDocker(owner = instance): void {
+  const label = `label=managed-copilot.instance=${owner}`;
+  for (const name of dockerCli("ps", "-a", "--filter", label, "--format", "{{.Names}}").split("\n").filter(Boolean)) dockerCli("rm", "-f", name);
+  for (const name of dockerCli("volume", "ls", "--filter", label, "--format", "{{.Name}}").split("\n").filter(Boolean)) dockerCli("volume", "rm", "-f", name);
+  for (const name of dockerCli("network", "ls", "--filter", label, "--format", "{{.Name}}").split("\n").filter(Boolean)) dockerCli("network", "rm", name);
+}
+
+/**
+ * A run that was killed never reaches its own cleanup. Removes what earlier runs of this test left behind: only this
+ * test's instances (`mcg5` plus five characters), and only once their containers are older than any run can last.
+ */
+function sweepStaleRuns(maxAgeMs = 90 * 60_000): void {
+  const stale = new Set<string>();
+  for (const line of dockerCli("ps", "-a", "--filter", "label=managed-copilot.instance", "--format", '{{.ID}}|{{.Label "managed-copilot.instance"}}').split("\n").filter(Boolean)) {
+    const [id, owner] = line.split("|");
+    if (!id || !owner || owner === instance || !/^mcg5[a-z0-9]{5}$/.test(owner)) continue;
+    const created = Date.parse(dockerCli("inspect", "--format", "{{.Created}}", id));
+    if (Number.isFinite(created) && Date.now() - created > maxAgeMs) stale.add(owner);
+  }
+  for (const owner of stale) {
+    console.warn(`Removing Docker resources a killed G5 run left behind (instance ${owner})`);
+    cleanupDocker(owner);
+  }
 }
 
 /** Forwards the real token to GitHub; maps INTRUDER to a second, fake account. */
@@ -83,6 +103,7 @@ describe.skipIf(!token || !built || !docker)("G5: promotion with the stock SDK, 
   let model = SNIPPET_MODEL;
 
   beforeAll(async () => {
+    sweepStaleRuns();
     temp = mkdtempSync(join(tmpdir(), "mc-g5-"));
     process.env.MANAGED_COPILOT_HOME = join(temp, "home");
     ({ ManagedCopilot, isManagedCopilotError } = await import("@managed-copilot/sdk"));
