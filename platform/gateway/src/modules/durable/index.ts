@@ -9,7 +9,7 @@ import type { DurableEventsPort, DurablePlatformToolsPort, DurableSessionsPort, 
 import { registerCredentialRoutes } from "./credentials/routes.js";
 import { DurableCredentials } from "./credentials/service.js";
 import { loadDurableKeys } from "./keys.js";
-import { DURABLE_MIGRATIONS } from "./migrations.js";
+import { DURABLE_MIGRATIONS, upgradeDurableSchema } from "./migrations.js";
 import { registerScheduleRoutes } from "./schedules/routes.js";
 import { DurableSchedules } from "./schedules/service.js";
 import { registerScheduleTools } from "./schedules/tools.js";
@@ -26,6 +26,7 @@ export const durableModule: GatewayModule = {
   register(app) {
     const log = app.log.child("durable");
     migrate(app.db, "durable", DURABLE_MIGRATIONS);
+    upgradeDurableSchema(app.db);
     const keys = loadDurableKeys(app.config.dataDir, app.config.env);
     const deployment = app.config.deployment;
     const sessions = () => port<DurableSessionsPort>(app.services, "sessions");

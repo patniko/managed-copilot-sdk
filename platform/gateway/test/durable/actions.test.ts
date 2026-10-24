@@ -12,7 +12,7 @@ import type {
   RuntimeSessionEvent,
 } from "../../src/modules/durable/contract.js";
 import { DurableActions, type ActionsOptions } from "../../src/modules/durable/actions/service.js";
-import { DURABLE_MIGRATIONS } from "../../src/modules/durable/migrations.js";
+import { DURABLE_MIGRATIONS, upgradeDurableSchema } from "../../src/modules/durable/migrations.js";
 
 const OWNER: Principal = { accountId: 1, login: "octocat", token: "gho_owner" };
 const STRANGER: Principal = { accountId: 2, login: "mallory", token: "gho_other" };
@@ -490,6 +490,16 @@ describe("durable actions ledger", () => {
       restarted.recover();
       expect(restarted.list(SESSION)[0]!.state).toBe("needs_reconciliation");
       restarted.stop();
+    });
+
+    it("upgrades ledgers from pre-release builds that lack notified_at", () => {
+      const legacy = openDatabase(":memory:");
+      legacy.exec(DURABLE_MIGRATIONS[0]!.replace(/\s+notified_at INTEGER,/, ""));
+      expect((legacy.prepare("PRAGMA table_info(durable_actions)").all() as { name: string }[]).some((column) => column.name === "notified_at")).toBe(false);
+      upgradeDurableSchema(legacy);
+      upgradeDurableSchema(legacy);
+      expect((legacy.prepare("PRAGMA table_info(durable_actions)").all() as { name: string }[]).some((column) => column.name === "notified_at")).toBe(true);
+      legacy.close();
     });
 
     it("expires unanswered actions at the deadline and tells the runtime without approving anything", async () => {
