@@ -109,13 +109,32 @@ const ELICITATION_ACTIONS = new Set(["accept", "decline", "cancel"]);
 const RECONCILE_GRACE_MS = 2_000;
 /** A pending action still unannounced after this long lost its notification (for example to a crash). */
 const ANNOUNCE_REPAIR_AFTER_MS = 5_000;
-/** Bound for the in-memory fences below (connection IDs and deleted sessions do not outlive the process). */
+/** Bound for the in-memory deleted-session fence (claims also ask the sessions port, so eviction fails closed). */
 const MAX_REMEMBERED = 10_000;
 const MOVED_WHILE_RUNNING =
   "The session moved to a new placement while this tool was running; it may have run. Check its effect with the idempotency key, then answer it with a reconcile claim.";
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
-const fenceKey = (actionId: string, connectionId: string) => `${actionId}\u0000${connectionId}`;
+
+/** Live connections that held an action, with the placement generation each last held it in. */
+function liveClaimants(row: Pick<ActionRow, "live_claimants">): Record<string, number> {
+  const parsed = parseJson<Record<string, number>>(row.live_claimants);
+  return parsed !== null && typeof parsed === "object" ? parsed : {};
+}
+
+function withLiveClaimant(row: Pick<ActionRow, "live_claimants">, connectionId: string, generation: number): string {
+  return JSON.stringify({ ...liveClaimants(row), [connectionId]: generation });
+}
+
+/**
+ * A connection that held this action only under an older placement (its claim voided by a move, or released before
+ * it) may still be running that old callback. The stock protocol cannot tell its late answer from a new one, so it
+ * is never offered the action again and its answers are refused; other responders can answer.
+ */
+function heldBefore(row: Pick<ActionRow, "live_claimants" | "live_connection" | "generation">, connectionId: string): boolean {
+  const generation = liveClaimants(row)[connectionId];
+  return generation !== undefined && generation < row.generation && row.live_connection !== connectionId;
+}
 const conflict = (message: string, row?: ActionRow) =>
   new ManagedCopilotError("conflict", message, row ? { actionId: row.id, state: row.state, ...(row.claimed_by ? { claimedBy: row.claimed_by } : {}) } : undefined);
 
@@ -218,11 +237,6 @@ export class DurableActions implements ActionsService {
   readonly #listeners = new Set<(change: ActionChange) => void>();
   /** Detach counters per connection and per connection+session (bounded); fence attaches that raced a detach. */
   readonly #detachGenerations = new Map<string, number>();
-  /**
-   * Live connections whose claim a placement change voided, per action. Their late answers are refused, and the
-   * request is not offered back to them, because the stock protocol cannot tell a late answer from a new one.
-   */
-  readonly #fencedLive = new Set<string>();
   /** Deleted sessions: nothing may be recorded or claimed for them, even by work that was already in flight. */
   readonly #deletedSessions = new Set<string>();
   #sweeper: NodeJS.Timeout | undefined;
@@ -327,6 +341,8 @@ export class DurableActions implements ActionsService {
 
     const eligible = input.attached.filter((responder) => isEligible(responder, parsed));
     const everyEligible = eligible.map((responder) => responder.connectionId);
+    // A late observation from an older placement (the action has since moved): it changes nothing and runs nowhere.
+    if (row.generation > input.generation) return { actionId: row.id, withhold: everyEligible };
     if (row.state !== "pending") {
       // Re-emission of an action that already has an owner or an outcome: nobody else may execute it.
       if (ANSWERED_STATES.includes(row.state)) {
@@ -345,7 +361,7 @@ export class DurableActions implements ActionsService {
     }
 
     const owner = chooseOwner(
-      eligible.filter((responder) => !this.#fencedLive.has(fenceKey(row.id, responder.connectionId))),
+      eligible.filter((responder) => !heldBefore(row, responder.connectionId)),
       parsed.kind,
     );
     if (owner) {
@@ -380,13 +396,22 @@ export class DurableActions implements ActionsService {
     if (row.state === "pending") {
       // A client answering an action it was not offered (for example from `listPendingRequests`) takes it if eligible.
       if (kind === "tool" && responderType === "cli") throw new ManagedCopilotError("forbidden", "A person cannot run an application's tool; only its app can answer it");
-      if (this.#fencedLive.has(fenceKey(row.id, input.connectionId))) {
+      if (heldBefore(row, input.connectionId)) {
         throw conflict("This answer is for the session's previous placement; the request was offered again", row);
       }
       const claimed = this.#store.claim(
         row.id,
         { states: ["pending"], seq },
-        { state: "executing", tokenHash: hashSecret(newId("mct", 24)), claimedBy: `${responderType}:${input.connectionId}`, responderType, liveConnection: input.connectionId, leaseExpiresAt: null, now: this.#now() },
+        {
+          state: "executing",
+          tokenHash: hashSecret(newId("mct", 24)),
+          claimedBy: `${responderType}:${input.connectionId}`,
+          responderType,
+          liveConnection: input.connectionId,
+          leaseExpiresAt: null,
+          liveClaimants: withLiveClaimant(row, input.connectionId, row.generation),
+          now: this.#now(),
+        },
       );
       if (!claimed) throw conflict("Another responder took this action first", this.#store.get(row.id));
       seq += 1;
@@ -427,7 +452,7 @@ export class DurableActions implements ActionsService {
     for (const row of this.#store.listBySession(input.sessionId, ["pending"])) {
       if (!isEligible(input.responder, { kind: row.kind, tool: row.tool })) continue;
       if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
-      if (this.#fencedLive.has(fenceKey(row.id, input.responder.connectionId))) continue;
+      if (heldBefore(row, input.responder.connectionId)) continue;
       if (this.#claimLive(row, input.responder)) {
         const event = parseJson<RuntimeSessionEvent>(row.event);
         if (event) replay.push(event);
@@ -485,8 +510,8 @@ export class DurableActions implements ActionsService {
    * newer are untouched. Waiting actions move with the session. Carried actions (the new placement still waits for
    * their request) and the gateway's own platform tools keep their claims. Every other claim from the old placement
    * is void, including the standing claim of an uncertain tool's original claimant, so its late results are refused;
-   * tools that may have run need a reconcile claim, and prompts are offered again (but not to the connection whose
-   * claim was voided).
+   * tools that may have run need a reconcile claim, and prompts are offered again. Live connections that held an
+   * action only under an older placement are never offered it again (see `heldBefore`).
    */
   onGenerationChanged(sessionId: string, generation: number, options: GenerationChangeOptions = {}): void {
     const now = this.#now();
@@ -495,13 +520,14 @@ export class DurableActions implements ActionsService {
       if (row.generation >= generation) continue;
       const owned = OWNED_STATES.includes(row.state);
       if (row.state === "pending" || carried.has(row.request_id) || (owned && row.responder_type === "platform")) {
-        this.#store.moveToGeneration(row.id, row.claim_seq, { generation, state: row.state, clearClaim: false, reason: row.reason, now });
+        // A live claim carried into the new placement is held there.
+        const liveClaimants = owned && row.live_connection ? withLiveClaimant(row, row.live_connection, generation) : undefined;
+        this.#store.moveToGeneration(row.id, row.claim_seq, { generation, state: row.state, clearClaim: false, reason: row.reason, ...(liveClaimants ? { liveClaimants } : {}), now });
         continue;
       }
       const state: ActionState = row.kind === "tool" ? "needs_reconciliation" : "pending";
       const reason = row.kind !== "tool" ? null : owned ? MOVED_WHILE_RUNNING : row.reason;
       if (!this.#store.moveToGeneration(row.id, row.claim_seq, { generation, state, clearClaim: true, reason, now })) continue;
-      if (row.live_connection) this.#remember(this.#fencedLive, fenceKey(row.id, row.live_connection));
       if (state === "pending") {
         this.#scheduleNotify(row);
       } else if (owned) {
@@ -509,9 +535,10 @@ export class DurableActions implements ActionsService {
         this.#emit({ type: "pending", sessionId, actionId: row.id });
       }
     }
-    // Answers already recorded for a carried request but not delivered yet go to the new placement.
+    // Recorded answers for carried requests go to the new placement, even ones the old placement acknowledged: the
+    // new one still waits for them.
     for (const row of this.#store.listBySession(sessionId, ANSWERED_STATES)) {
-      if (!row.forwarded && carried.has(row.request_id)) this.#adoptAnswered(row, generation, now);
+      if (carried.has(row.request_id)) this.#adoptAnswered(row, generation, now);
     }
   }
 
@@ -668,8 +695,11 @@ export class DurableActions implements ActionsService {
       withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.tool, { sessionId }), timeout, "The runtime").catch(() => undefined),
       withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.permission, { sessionId }), timeout, "The runtime").catch(() => undefined),
     ]);
-    // The session may have been deleted while the runtime answered: never record or offer anything for it then.
+    // The lists describe the placement asked. If the session was deleted or moved meanwhile, they are obsolete:
+    // never record, offer, or close anything from them.
     if (this.#deletedSessions.has(sessionId)) return;
+    const current = await sessions.get(sessionId);
+    if (!current || current.generation !== view.generation || this.#deletedSessions.has(sessionId)) return;
     const now = this.#now();
     if (tools && Array.isArray(tools.items)) {
       const waiting = new Set<string>();
@@ -773,6 +803,7 @@ export class DurableActions implements ActionsService {
         responderType,
         liveConnection: responder.connectionId,
         leaseExpiresAt: null,
+        liveClaimants: withLiveClaimant(row, responder.connectionId, row.generation),
         now: this.#now(),
       },
     );
@@ -814,6 +845,8 @@ export class DurableActions implements ActionsService {
     if (!requestId) return { withhold: [] };
     const row = this.#store.findByRequest(input.sessionId, kind, requestId);
     if (!row) return { withhold: [] };
+    // A completion observed in an older placement says nothing about the one that now waits for the request.
+    if (row.generation > input.generation) return { actionId: row.id, withhold: [] };
     const now = this.#now();
     if (row.state === "completed" || row.state === "failed" || row.state === "expired") {
       if (!row.forwarded) this.#store.markForwarded(row.id, now);
@@ -906,12 +939,16 @@ export class DurableActions implements ActionsService {
     }
   }
 
-  /** Delivers a recorded answer (or expiry) to the runtime that asked. Concurrent calls share one delivery. */
+  /**
+   * Delivers a recorded answer (or expiry) to the runtime that asked. Concurrent calls for the same placement share
+   * one delivery; an answer adopted by a newer placement gets its own delivery even while an older one is in flight.
+   */
   #forward(actionId: string): Promise<unknown> {
-    const inFlight = this.#forwarding.get(actionId);
+    const key = `${actionId}@${this.#store.get(actionId)?.generation ?? 0}`;
+    const inFlight = this.#forwarding.get(key);
     if (inFlight) return inFlight;
-    const delivery = this.#deliver(actionId).finally(() => this.#forwarding.delete(actionId));
-    this.#forwarding.set(actionId, delivery);
+    const delivery = this.#deliver(actionId).finally(() => this.#forwarding.delete(key));
+    this.#forwarding.set(key, delivery);
     return delivery;
   }
 
@@ -922,7 +959,7 @@ export class DurableActions implements ActionsService {
     const now = this.#now();
     const retryLater = (error: ManagedCopilotError) => {
       const delay = Math.min(5 * 60_000, 1_000 * 2 ** Math.min(row.forward_attempts, 8));
-      this.#store.deferForward(row.id, now + delay, now);
+      this.#store.deferForward(row.id, now + delay, now, row.generation);
       return error;
     };
     if (!sessions) throw retryLater(new ManagedCopilotError("capability_unavailable", "The session router is not available yet; the answer is recorded and will be delivered"));
@@ -946,15 +983,16 @@ export class DurableActions implements ActionsService {
         this.#store.markForwarded(row.id, now, `Not delivered: the session moved to placement generation ${view.generation}, which does not wait for this request`, row.generation);
         return { success: false };
       }
-      // Moved (here, or concurrently by a runtime asking again); either way the row is re-read and delivered once.
-      this.#store.adoptAnswer(row.id, row.generation, view.generation, now);
-      return this.#deliver(actionId);
+      // Moved (here, or concurrently by a runtime asking again); delivered once for that placement.
+      const adopted = this.#store.adoptAnswer(row.id, row.generation, view.generation, now);
+      if (!adopted && this.#store.get(actionId)?.generation === row.generation) return { success: false };
+      return this.#forward(actionId);
     }
     const { method, params } = forwardCall(row);
     try {
       const response = await withTimeout(sessions.request<unknown>(row.session_id, method, params), this.#options.upstreamTimeoutMs, "The runtime");
       const accepted = (response as { success?: unknown } | undefined)?.success;
-      this.#store.markForwarded(row.id, this.#now(), accepted === false ? "The runtime no longer waited for this answer" : undefined);
+      this.#store.markForwarded(row.id, this.#now(), accepted === false ? "The runtime no longer waited for this answer" : undefined, row.generation);
       return response ?? { success: true };
     } catch (error) {
       const managed = error instanceof ManagedCopilotError ? error : new ManagedCopilotError("capability_unavailable", "The runtime did not accept the answer yet; it is recorded and will be retried");

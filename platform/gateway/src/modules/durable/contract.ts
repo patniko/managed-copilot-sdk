@@ -47,9 +47,12 @@
  * - Placement generations: an action belongs to the generation whose runtime asked. On promotion
  *   (`onGenerationChanged`), actions whose request the new placement still awaits (`carried`) and gateway-executed
  *   platform tools keep their claims and move; every other claim from an older generation is void, so late results
- *   from it are `conflict` (tools become `needs_reconciliation`, prompts are offered again). A recorded answer is
- *   delivered to the session's current placement only if that runtime still waits for exactly that request (it was
- *   carried, or the runtime asks again); otherwise it stays recorded but undelivered (reason says why).
+ *   from it are `conflict` (tools become `needs_reconciliation`, prompts are offered again, but never to a live
+ *   connection that held them only under an older placement). A recorded answer is delivered to the session's
+ *   current placement only if that runtime still waits for exactly that request (it was carried, or the runtime asks
+ *   again); otherwise it stays recorded but undelivered (reason says why). Deliveries are per placement: an older
+ *   placement's acknowledgment never counts for a newer one, and its pending lists or completion events never close
+ *   an action that has moved on.
  * - Identity: `idempotencyKey` is `${sessionId}:${toolCallId}` for tools, identical across live callbacks, webhooks,
  *   polling, resume, and restarts.
  */

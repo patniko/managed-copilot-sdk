@@ -393,9 +393,11 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   (`session.promoted` repeats it as a no-op): waiting actions move; actions whose request the new placement still
   awaits (`carried`, kept by `continuePendingWork`) and gateway platform tools keep their claims, so their answers
   resume the turn there; every other claim from the old placement is void (tools become `needs_reconciliation`,
-  prompts are offered again but never back to the client whose claim was voided). A recorded answer reaches the
-  current placement only if its runtime still waits for that exact request. `onDetached(connectionId, sessionId?)`
-  releases only that session's live claims when `sessionId` is given.
+  prompts are offered again but never to a live client that held them only under an older placement, a fence kept
+  in the ledger). A recorded answer reaches the current placement only if its runtime still waits for that exact
+  request (carried answers are re-delivered even if the old placement acknowledged them), deliveries and their
+  acknowledgments are per placement, and an old placement's pending lists or completions never close a moved
+  action. `onDetached(connectionId, sessionId?)` releases only that session's live claims when `sessionId` is given.
 - Durable REST: `GET /v1/sessions/:id/actions[?state=]`, `POST .../actions/:actionId/claim` (`{ claimToken? }` renews,
   `{ reconcile: true }` takes over uncertain actions), `POST .../actions/:actionId/result` (`{ claimToken, result |
   error | release }`), `/v1/schedules` CRUD with runs, pause, resume, and `run` (`{ invocationId }`), and
