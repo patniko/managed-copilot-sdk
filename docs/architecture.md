@@ -226,13 +226,21 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 - **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
   delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the most recently
   attached client able to answer gets them and other eligible clients are withheld. `session.lifecycle` goes only to
-  the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Shared events and responses
-  are stripped of platform host paths (`session.start.context`, `external_tool.requested.workingDirectory`,
-  `workspacePath`).
+  the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Everything a shared session
+  sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
+  rewritten (`/workspace` for the session directory, `/platform` otherwise).
+- **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
+  gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
+  stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
+  requests go to a client that registered that handler.
+- **Sends.** Shared sessions accept only inline (`blob`) attachments; file, directory, and selection attachments
+  name paths the runtime would read on the platform host. Sandbox attachment paths must stay in `/workspace`.
+  Credential and routing model headers and shell agent mode are rejected.
 - **Known gaps** (stock behavior, reported rather than patched): the stock runtime does not re-emit pending tool or
-  permission requests on resume (durable's `onAttached` replay covers it); `session.resume` of a session that is busy
-  in another client's turn re-registers tools for the gateway's single upstream connection, so the last resumer's
-  tool set wins; `models.list` requires the shared runtime even for isolated environments.
+  permission requests on resume (durable's `onAttached` replay covers it); registrations of a client that detached
+  stay registered upstream until the next resume or `tools.set` (calls to them wait for a responder);
+  `models.list` requires the shared runtime even for isolated environments. Verified on runtime 1.0.103: custom
+  agents' and `task` subagents' tool lists cannot escape the session's `availableTools` ceiling.
 
 ## Ports and environment
 
