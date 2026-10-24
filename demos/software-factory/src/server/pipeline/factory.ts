@@ -333,6 +333,39 @@ export class Factory {
   }
 
   /**
+   * Reconciles finished work orders with the platform's own session list (`managed.sessions.list()`): each station
+   * shows its session's current state and sandbox, or that the session no longer exists.
+   */
+  async reconcileSessions(): Promise<void> {
+    let sessions: Map<string, Awaited<ReturnType<FactoryPlatform["listSessions"]>>[number]>;
+    try {
+      sessions = new Map((await this.#platform.listSessions()).map((info) => [info.id, info]));
+    } catch (error) {
+      log.warn("Couldn't list platform sessions", { error: toFactoryError(error).message });
+      return;
+    }
+    for (const stored of this.#store.listWorkOrders()) {
+      if (this.#runs.has(stored.id)) continue;
+      const wo = stored as MWorkOrder;
+      let changed = false;
+      for (const station of wo.stations) {
+        if (!station.sessionId) continue;
+        const info = sessions.get(station.sessionId);
+        const state = info?.state ?? "deleted";
+        if (station.sessionState !== state) {
+          station.sessionState = state;
+          changed = true;
+        }
+        if (info?.sandbox && station.sandbox && station.sandbox.state !== info.sandbox.state) {
+          station.sandbox = { ...station.sandbox, state: info.sandbox.state };
+          changed = true;
+        }
+      }
+      if (changed) this.#persist(wo);
+    }
+  }
+
+  /**
    * Detaches from every running work order without recording failures, so `resumeInterrupted()` picks them up after
    * the next start. Accepted platform turns keep running while the factory is away.
    */
@@ -766,7 +799,7 @@ export class Factory {
       turn: undefined,
     });
     const mapper = this.#newMapper(run, station);
-    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, extra));
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, extra), (text) => mapper.status(text, "warning"));
     const active: ActiveSession = { session, mapper, capture };
     run.sessions.set(station.id, active);
     this.#updateStation(run, station, { sessionId: session.sessionId });
@@ -783,7 +816,7 @@ export class Factory {
       const mapper = this.#newMapper(run, station);
       try {
         this.#updateStation(run, station, { status: "starting", detail: "Reattaching to the sandbox" });
-        const session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}));
+        const session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
         const active: ActiveSession = { session, mapper, capture: {} };
         run.sessions.set(station.id, active);
         await this.#refreshSandbox(run, station);
@@ -822,7 +855,7 @@ export class Factory {
       model: this.#platform.models[station.role],
     });
     const mapper = this.#newMapper(run, station);
-    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}));
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
     const active: ActiveSession = { session, mapper, capture: {} };
     run.sessions.set(station.id, active);
     this.#updateStation(run, station, { sessionId: session.sessionId, seeded: false });
