@@ -154,6 +154,76 @@ describe("turns a lost runtime connection cut", () => {
     expect(client.events("session.error")).toHaveLength(0);
   });
 
+  it("keeps a turn when the restore cannot check it (its connection drops mid-check)", async () => {
+    const client = await connect("coder", (method) => (method === "hooks.invoke" ? { output: {} } : {}));
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true });
+    await client.request("session.send", { sessionId, prompt: "tool:lookup_order" });
+    const requested = await client.waitForEvent("external_tool.requested");
+    runtime.dropConnections();
+    await sleep(100);
+    expect(record(sessionId).lastTurn?.status).toBe("running");
+    // The restore's check goes unanswered, and then that connection drops too: nothing was learned about the turn.
+    const check = runtime.holdNext("session.metadata.isProcessing", sessionId);
+    const restoring = sessions()
+      .request(sessionId, "session.getMessages", {})
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    await check.held;
+    runtime.dropConnections();
+    expect(await restoring).toBeDefined();
+    check.release();
+    await sleep(100);
+    expect(record(sessionId).lastTurn?.status).toBe("running");
+    expect(client.events("session.error")).toHaveLength(0);
+    // The next restore finds the call still pending, and answering it completes the turn.
+    await sessions().request(sessionId, "session.getMessages", {});
+    expect(record(sessionId).lastTurn?.status).toBe("running");
+    runtime.answerTool(String((requested["data"] as Record<string, unknown>)["requestId"]), "Order 1234 shipped yesterday.");
+    await waitUntil(() => record(sessionId).lastTurn?.status === "completed");
+  });
+
+  it("does not report a turn as interrupted when it completed and only its reply was lost", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    const reply = runtime.holdNext("session.sendAndWait", sessionId);
+    const waiting = client.request("session.sendAndWait", { sessionId, prompt: "done" }).then(
+      () => undefined,
+      (error: unknown) => error as { message?: string },
+    );
+    await reply.held;
+    await waitUntil(() => record(sessionId).lastTurn?.status === "completed");
+    runtime.dropConnections();
+    const error = await waiting;
+    expect(error?.message).toBeDefined();
+    expect(error?.message).not.toContain("interrupted");
+    expect(record(sessionId).lastTurn?.status).toBe("completed");
+    expect(client.events("session.error")).toHaveLength(0);
+    reply.release();
+  });
+
+  it("ends a turn an external runtime failed unseen with the runtime's own error, not as a success", async () => {
+    const client = await connect("chat");
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    await client.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+    const turnId = record(sessionId).lastTurn!.turnId;
+    runtime.dropConnections();
+    await sleep(100);
+    // While the gateway is away, the runtime's turn fails (it records the error in the session's history).
+    runtime.emitEvent(sessionId, "session.error", { errorType: "model", message: "The model provider failed" });
+    runtime.emitEvent(sessionId, "session.idle", {});
+    await sessions().request(sessionId, "session.getMessages", {});
+    await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
+    expect(record(sessionId)).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
+    const errors = client.events("session.error").map((event) => (event["data"] as Record<string, unknown>)["message"]);
+    expect(errors).toEqual(["The model provider failed"]);
+  });
+
   it("opens a sandbox runtime again after its sandbox restarted it to free the inference provider", async () => {
     const client = await connect();
     const reopen = () => new ManagedCopilotError("capability_unavailable", "The sandbox restarted its runtime to release a lost connection's inference registration.", { reopen: true });

@@ -234,6 +234,38 @@ describe("placement cutover", () => {
     expect(stored.params).not.toHaveProperty("systemMessage");
   });
 
+  it("re-admits a restoring client resume when the session moves while the restore checks its turn", async () => {
+    const first = await connect();
+    const sessionId = crypto.randomUUID();
+    await first.request("session.create", { sessionId });
+    await first.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => sessions().get(sessionId)?.lastTurn?.status === "running");
+    // A promotion opens its cutover while the session is resident.
+    const cut = await sessions().cutover!(sessionId, { generation: sessions().get(sessionId)!.generation });
+    // A registration fails, and so does the resume that would reconcile it: the session is not resident any more.
+    runtime.failNext("session.tools.set", sessionId);
+    runtime.failNext("session.resume", sessionId);
+    await expect(first.request("session.tools.set", { sessionId, tools: [{ name: "extra_tool" }] })).rejects.toBeDefined();
+    // The next client resume restores it and checks its running turn; the check is answered only after the move.
+    const check = runtime.holdNext("session.metadata.isProcessing", sessionId);
+    const second = await connect();
+    const resuming = second.request("session.resume", { sessionId, tools: [{ name: "late_tool" }] });
+    await check.held;
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    check.release();
+    await resuming;
+    // The resume was repeated on the sandbox, and the stored restore configuration is the sandbox's, not the source's.
+    expect(sessions().get(sessionId)).toMatchObject({ placement: "sandbox" });
+    const lastResume = lastCall("session.resume", sessionId)!;
+    expect(lastResume.connection).not.toBe(sourceConnection(sessionId));
+    expect((lastResume.params["tools"] as { name: string }[]).map((tool) => tool.name)).toContain("late_tool");
+    const row = gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string };
+    expect((JSON.parse(row.admitted) as { params: Record<string, unknown> }).params["workingDirectory"]).toBe("/workspace");
+  });
+
   it("moves remote MCP servers with their original endpoints and carries the caller's option changes", async (ctx) => {
     if (!(gateway.gateway.app.services as Record<string, unknown>)["policy"]) return ctx.skip();
     const client = await connect();
