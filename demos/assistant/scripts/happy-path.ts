@@ -37,6 +37,8 @@ function ok(message: string): void {
 async function shot(page: Page, name: string): Promise<void> {
   if (!screenshots) return;
   mkdirSync(screenshots, { recursive: true });
+  // Let avatars and fonts finish loading.
+  await page.waitForFunction(() => [...document.images].every((image) => image.complete), undefined, { timeout: 10_000 }).catch(() => undefined);
   await page.waitForTimeout(400);
   await page.screenshot({ path: join(screenshots, `${name}.png`) });
   ok(`saved ${name}.png`);
