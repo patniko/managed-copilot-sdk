@@ -754,7 +754,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   time, each from the last one committed, and a tools update changes the client's registration only in the step that
   writes it to the runtime. One that fails leaves the client's registration as it was, and the session is not routable
   again until it was resumed with the registrations in effect (the runtime may have applied the failed one; a cutover
-  that leaves the session on its source keeps it unroutable until then). A client that disconnects while its create or
+  that leaves the session on its source keeps it unroutable until then, and while a registration written there is still
+  unanswered). Restores and cutover destinations register only what committed (the inventory), never a registration
+  still on its way. A client that disconnects while its create or
   resume is in flight is never attached (what it registered stays in the inventory); a deletion waits for queued
   registrations, which then fail with `not_found`.
   Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, and user-input

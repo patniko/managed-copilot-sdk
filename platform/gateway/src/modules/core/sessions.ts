@@ -167,6 +167,8 @@ interface LiveSession {
    * with the registrations in effect (`#reconcile`).
    */
   unreconciled: boolean;
+  /** The runtime a registration was written to and has not answered yet (a cutover's end does not route there before). */
+  inflight: RuntimeUpstream | undefined;
   /** Ensures events of one session are processed in order even when routing awaits the actions hook. */
   queue: Promise<void>;
   /** In-flight create, resume, or restore; concurrent callers wait for it. */
@@ -906,7 +908,7 @@ export class SessionManager implements SessionsService {
       // Registered first, so the destination's requests (inference, credentials) and events route during the open.
       state.destination = { upstream: opened, sandbox: handle, admitted, optionsPatch };
       if (handle.initialize) await handle.initialize((method, params) => opened.request(method, params));
-      const registrations = this.#registrations(live);
+      const registrations = this.#registrations(live, undefined, true);
       const params = await this.#withVaultHeaders(live.id, { ...admitted.params, ...registrations.flags, sessionId: live.id, tools: [...registrations.tools, ...this.#platformToolDeclarations(live, "sandbox")], ...extra }, "sandbox");
       const prepared = handle.prepareSessionParams ? await handle.prepareSessionParams("session.resume", params) : params;
       await opened.request("session.resume", prepared);
@@ -1005,7 +1007,7 @@ export class SessionManager implements SessionsService {
     state.flushed = true;
     if (live.cutover === state) live.cutover = undefined;
     for (const reply of replies) reply.resolve(reply.value);
-    if (state.fenced) live.ready = ready() && !live.unreconciled;
+    if (state.fenced) live.ready = ready() && !live.unreconciled && live.inflight !== live.upstream;
     if (state.gate && live.residency === state.gate) live.residency = undefined;
     state.release?.();
     // Held completions continue from the session's owner; one that is not running is resumed for them.
@@ -1121,20 +1123,25 @@ export class SessionManager implements SessionsService {
       if (present) this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared, change);
       let result: unknown;
+      live.inflight = upstream;
       try {
         result = await this.#resumeUpstream(live, upstream, forwarded);
         await this.#opened(live, upstream, optionsPatch);
       } catch (error) {
         this.#unattach(live, peer.id, previous);
-        if (live.moves !== moves) return MOVED;
-        // The runtime may have applied what this resume registered before failing.
+        // The runtime may have applied what this resume registered before failing (or being overtaken by a move).
         this.#unreconciled(live, upstream);
+        if (live.moves !== moves) return MOVED;
         throw error;
+      } finally {
+        if (live.inflight === upstream) live.inflight = undefined;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
       if (live.moves !== moves) {
-        // Fenced during the resume: the client attaches where the session lives after the cutover, with what it had.
+        // Fenced during the resume: the client attaches where the session lives after the cutover, with what it had,
+        // and a source it leaves keeps what this resume registered only once it is resumed with what is in effect.
         this.#unattach(live, peer.id, previous);
+        this.#unreconciled(live, upstream);
         return MOVED;
       }
       if (change) this.#persistInventory(live, peer.id, change);
@@ -1264,9 +1271,15 @@ export class SessionManager implements SessionsService {
           }
       }
       let result: unknown;
+      // The runtime this attempt wrote a tools update to (set in the write step).
+      let written: RuntimeUpstream | undefined;
       try {
         result = await this.#onOwner(live, placement, (upstream) => {
-          if (build) registration.upstream = upstream;
+          if (build) {
+            registration.upstream = upstream;
+            written = upstream;
+            live.inflight = upstream;
+          }
           return method === "session.sendAndWait" ? this.#sendAndWait(live, upstream, forwarded, signal, placement) : upstream.request(method, build ? build() : forwarded, { signal });
         });
       } catch (error) {
@@ -1274,15 +1287,20 @@ export class SessionManager implements SessionsService {
         if (error === MOVED) continue;
         // Configuration a cutover interrupted (the source closed the session meanwhile) is set on its owner instead.
         if (live.moves !== moves && CONFIG_METHODS.has(method) && error instanceof RpcError && !signal.aborted) {
+          // A tools update the source may have applied before the move does not stay there uncommitted.
+          if (written) this.#unreconciled(live, written);
           await this.#fenceLifted(live);
           continue;
         }
         throw error;
+      } finally {
+        if (written && live.inflight === written) live.inflight = undefined;
       }
       if (method === "session.sendAndWait") return result;
       // A fence went up while configuration was being set: the session's owner after it (the destination, or a source
       // resumed from stored configuration) may not have it, so it is set again there (an idempotent repeat otherwise).
       if (live.moves !== moves && CONFIG_METHODS.has(method)) {
+        if (written) this.#unreconciled(live, written);
         await this.#fenceLifted(live);
         continue;
       }
@@ -1736,6 +1754,7 @@ export class SessionManager implements SessionsService {
       presences: new Map(),
       registrations: Promise.resolve(),
       unreconciled: false,
+      inflight: undefined,
       queue: Promise.resolve(),
       residency: undefined,
       deleting: false,
@@ -1873,8 +1892,9 @@ export class SessionManager implements SessionsService {
       const admitted = this.#ledger.admitted(live.id);
       if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
       const extras = live.resumeExtras;
-      // The session's registrations as the gateway owns them, so callbacks stay required with no client attached.
-      const wire = this.#registrations(live);
+      // The session's committed registrations as the gateway owns them, so callbacks stay required with no client
+      // attached (a registration still on its way, or one that failed, never reaches a restored runtime).
+      const wire = this.#registrations(live, undefined, true);
       const params = await this.#withVaultHeaders(
         live.id,
         {
@@ -2153,15 +2173,16 @@ export class SessionManager implements SessionsService {
    * the gateway's one upstream connection. Upstream registrations are therefore the union of the session's callback
    * inventory (what clients registered, kept while they are away), stored server-side declarations, and attached
    * clients, so one client's resume or disconnect never removes another's tools or handlers. `pending` is a
-   * registration being made now (applied before it is stored).
+   * registration being made now (applied before it is stored). `committed` leaves attached clients out: every
+   * registration that committed is in the inventory, so restores and placement changes register exactly that.
    */
-  #registrations(live: LiveSession, pending?: InventoryChange): WireSettings {
+  #registrations(live: LiveSession, pending?: InventoryChange, committed = false): WireSettings {
     const stored = this.#ledger.admitted(live.id);
     const inventory = this.#inventory(live, pending);
     const byName = new Map<string, Record<string, unknown>>();
     for (const tool of stored?.tools ?? []) byName.set(String(tool["name"]), tool);
     for (const tool of inventory.tools) byName.set(String(tool["name"]), tool);
-    const ordered = [...live.attachments.values()].filter((attachment) => !attachment.peer.closed).sort((a, b) => a.attachedAt - b.attachedAt);
+    const ordered = committed ? [] : [...live.attachments.values()].filter((attachment) => !attachment.peer.closed).sort((a, b) => a.attachedAt - b.attachedAt);
     for (const attachment of ordered) for (const tool of attachment.declarations) byName.set(String(tool["name"]), tool);
     // Every handler flag, set or not: one nobody registers any more is turned off on the runtime, not left as it was.
     const flags: Record<string, unknown> = {};
