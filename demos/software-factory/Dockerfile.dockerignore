@@ -1,0 +1,15 @@
+# Build context for demos/software-factory/Dockerfile (the repository root): only what the factory build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!packages/protocol/**
+!packages/sdk/**
+!demos/software-factory/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+demos/software-factory/customizations

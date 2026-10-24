@@ -1,0 +1,15 @@
+# Build context for demos/assistant/Dockerfile (the repository root): only what the assistant build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!packages/protocol/**
+!packages/sdk/**
+!demos/assistant/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+demos/assistant/docs
