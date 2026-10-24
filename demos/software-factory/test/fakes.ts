@@ -1,5 +1,5 @@
 import type { ResumeSessionConfig, SessionConfig, SessionEvent, Tool } from "@github/copilot-sdk";
-import type { ArtifactInfo, EnvironmentInfo, PublicationResult, SessionInfo } from "@managed-copilot/sdk";
+import { ManagedCopilotError, type ArtifactInfo, type EnvironmentInfo, type PublicationResult, type SessionInfo } from "@managed-copilot/sdk";
 import type { FactoryPlatform, StationArtifacts, StationFiles, StationSession } from "../src/server/platform.js";
 import type { OutputManifest, StationRole, TestReport } from "../src/shared/types.js";
 
@@ -102,6 +102,8 @@ export class FakePlatform implements FactoryPlatform {
   /** Remaining injected failures per artifact path (reads) and workspace path (writes). */
   readonly readFailures = new Map<string, number>();
   readonly writeFailures = new Map<string, number>();
+  /** Like the gateway's list cap: only the newest sessions are listed. */
+  listLimit = Number.POSITIVE_INFINITY;
   createCount = 0;
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
@@ -134,6 +136,7 @@ export class FakePlatform implements FactoryPlatform {
 
   async sessionInfo(sessionId: string): Promise<SessionInfo> {
     const session = this.sessions.get(sessionId);
+    if (!session || this.lost.has(sessionId)) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
     return {
       id: sessionId,
       environment: "fake",
@@ -152,7 +155,7 @@ export class FakePlatform implements FactoryPlatform {
   }
 
   async listSessions(): Promise<SessionInfo[]> {
-    const ids = [...this.sessions.keys()].filter((sessionId) => !this.lost.has(sessionId));
+    const ids = [...this.sessions.keys()].filter((sessionId) => !this.lost.has(sessionId)).reverse().slice(0, this.listLimit);
     return Promise.all(ids.map((sessionId) => this.sessionInfo(sessionId)));
   }
 

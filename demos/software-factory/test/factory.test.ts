@@ -420,6 +420,37 @@ describe("Factory pipeline", () => {
     expect(wo.stations.find((station) => station.id === "build:csv2json")!.sessionState).toBe("idle");
   });
 
+  it("only marks a session deleted when the platform says it's gone, not when the list is capped", async () => {
+    const { platform, factory } = setup({ planner, builder: builder(), reviewer, release });
+    const created = factory.create(CREATE);
+    await settle(factory, created.id);
+    const releaseSession = factory.get(created.id)!.stations.find((station) => station.id === "release")!.sessionId!;
+    platform.lost.add(releaseSession);
+    platform.listLimit = 1;
+    await factory.reconcileSessions();
+    const wo = factory.get(created.id)!;
+    expect(wo.stations.find((station) => station.id === "release")!.sessionState).toBe("deleted");
+    for (const station of wo.stations.filter((candidate) => candidate.id !== "release")) expect(station.sessionState, station.id).toBe("idle");
+  });
+
+  it("gives a retried station's new session its own state instead of the old session's", async () => {
+    const { platform, factory } = setup({ planner, builder: builder({ failing: true }), reviewer, release });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("failed");
+    for (const session of platform.sessionsFor("builder")) platform.lost.add(session.sessionId);
+    await factory.reconcileSessions();
+    expect(factory.get(created.id)!.stations.filter((station) => station.kind === "build").every((station) => station.sessionState === "deleted")).toBe(true);
+
+    platform.scripts.builder = builder();
+    factory.retry(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    for (const station of wo.stations.filter((candidate) => candidate.kind === "build")) {
+      expect(station.previousSessionIds).toHaveLength(1);
+      expect(station.sessionState, station.id).toBe("idle");
+    }
+  });
+
   it("leaves files a builder deleted in a later round out of the release", async () => {
     const shrinking: Script = async (session, prompt, platform) => {
       const task = taskOf(platform, session);
