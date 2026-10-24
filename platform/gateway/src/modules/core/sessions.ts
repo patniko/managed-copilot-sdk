@@ -564,6 +564,10 @@ export class SessionManager implements SessionsService {
     if (placement === "sandbox" && !this.#sandboxes) {
       throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" needs isolated sandboxes, which this deployment does not provide yet`);
     }
+    if (environment.config.inference?.foundry) {
+      // An explicitly selected billing route must never silently fall back to the owner's GitHub entitlement.
+      throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" routes inference to Azure AI Foundry ("${environment.config.inference.foundry}"), which this gateway does not support yet`);
+    }
     const tokenRegistrationId = `mc-${randomUUID()}`;
     const admitted = await this.#admit(environment, placement, input.raw, "create", environment.network, sessionId, tokenRegistrationId, principal);
 

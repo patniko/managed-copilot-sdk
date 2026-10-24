@@ -72,6 +72,16 @@ describe("environment resolution", () => {
     expect(chat.customizations?.root).not.toBe(source);
     expect(bundled.info()[0]?.agents).toEqual(["triage"]);
 
+    // Sandboxes see the bundle at its read-only mount, never at a gateway host path.
+    const isolated = environments({ environments: { coder: { type: "isolated", customizations: source } } }).resolve("coder");
+    const admitted = admitSession({ sessionId: "s3" }, { environment: isolated, placement: "sandbox", network: NETWORK_ENABLED, platformTools: [], workingDirectory: "/workspace", tokenRegistrationId: "r" }, "create");
+    expect(admitted.params).toMatchObject({
+      skillDirectories: ["/opt/managed-copilot/customizations/skills"],
+      agentDirectories: ["/opt/managed-copilot/customizations/agents"],
+      instructionDirectories: ["/opt/managed-copilot/customizations/instructions"],
+      enableSkills: true,
+    });
+
     writeFileSync(join(source, "agents", "danger.agent.md"), "---\nname: danger\nmcp-servers:\n  local:\n    command: sh\n---\n");
     const unsafe = environments({ environments: { chat: { type: "shared", customizations: source } } });
     expect(() => unsafe.resolve("chat")).toThrowError(/executable configuration/);

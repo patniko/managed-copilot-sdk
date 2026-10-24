@@ -21,6 +21,30 @@ export interface AdmissionContext {
   readonly workingDirectory: string;
   /** Gateway-owned `gitHubToken` provider registration for this session. */
   readonly tokenRegistrationId: string;
+  /** Where the customization bundle is mounted read-only inside a sandbox (sandbox placement only). */
+  readonly sandboxCustomizations?: string;
+}
+
+/** The sandbox module mounts deployed customizations here (read-only). */
+export const SANDBOX_CUSTOMIZATIONS_DIR = "/opt/managed-copilot/customizations";
+
+/** Customization directories as the runtime sees them: host paths for shared, mount paths for sandboxes. */
+function bundleDirectories(context: AdmissionContext): { agents?: string; skills?: string; instructions?: string } {
+  const bundle = context.environment.customizations;
+  if (!bundle) return {};
+  if (context.placement === "shared") {
+    return {
+      ...(bundle.agentDirectory ? { agents: bundle.agentDirectory } : {}),
+      ...(bundle.skillDirectory ? { skills: bundle.skillDirectory } : {}),
+      ...(bundle.instructionDirectory ? { instructions: bundle.instructionDirectory } : {}),
+    };
+  }
+  const root = (context.sandboxCustomizations ?? SANDBOX_CUSTOMIZATIONS_DIR).replace(/\/+$/, "");
+  return {
+    ...(bundle.agentDirectory ? { agents: `${root}/agents` } : {}),
+    ...(bundle.skillDirectory ? { skills: `${root}/skills` } : {}),
+    ...(bundle.instructionDirectory ? { instructions: `${root}/instructions` } : {}),
+  };
 }
 
 export interface ClientCapabilities {
@@ -419,6 +443,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
 
   // Environment defaults the platform owns.
   const tools = admitTools(raw["tools"], context);
+  const directories = bundleDirectories(context);
   params["tools"] = tools.declarations;
   params["envValueMode"] = "direct";
   params["mcpOAuthTokenStorage"] = "in-memory";
@@ -440,10 +465,10 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     params["memory"] = { enabled: false };
     params["embeddingCacheStorage"] = "in-memory";
     if (params["systemMessage"] === undefined) params["systemMessage"] = lockSystemMessage(undefined);
-    params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(bundle?.skillDirectory);
-    if (bundle?.skillDirectory) params["skillDirectories"] = [bundle.skillDirectory];
-    if (bundle?.agentDirectory) params["agentDirectories"] = [bundle.agentDirectory];
-    if (bundle?.instructionDirectory) params["instructionDirectories"] = [bundle.instructionDirectory];
+    params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(directories.skills);
+    if (directories.skills) params["skillDirectories"] = [directories.skills];
+    if (directories.agents) params["agentDirectories"] = [directories.agents];
+    if (directories.instructions) params["instructionDirectories"] = [directories.instructions];
     const filters = sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0);
     params["availableTools"] = filters.availableTools;
     if (filters.excludedTools) params["excludedTools"] = filters.excludedTools;
@@ -453,10 +478,10 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     const excluded = stringList(raw["excludedTools"], "excludedTools");
     if (available) params["availableTools"] = available;
     if (excluded && excluded.length > 0) params["excludedTools"] = excluded;
-    if (bundle?.skillDirectory) params["skillDirectories"] = [...((params["skillDirectories"] as string[] | undefined) ?? []), bundle.skillDirectory];
-    if (bundle?.agentDirectory) params["agentDirectories"] = [...((params["agentDirectories"] as string[] | undefined) ?? []), bundle.agentDirectory];
-    if (bundle?.instructionDirectory) params["instructionDirectories"] = [...((params["instructionDirectories"] as string[] | undefined) ?? []), bundle.instructionDirectory];
-    if (bundle?.skillDirectory && params["enableSkills"] === undefined) params["enableSkills"] = true;
+    if (directories.skills) params["skillDirectories"] = [...((params["skillDirectories"] as string[] | undefined) ?? []), directories.skills];
+    if (directories.agents) params["agentDirectories"] = [...((params["agentDirectories"] as string[] | undefined) ?? []), directories.agents];
+    if (directories.instructions) params["instructionDirectories"] = [...((params["instructionDirectories"] as string[] | undefined) ?? []), directories.instructions];
+    if (directories.skills && params["enableSkills"] === undefined) params["enableSkills"] = true;
   }
 
   const optionsPatch: Record<string, unknown> = shared
