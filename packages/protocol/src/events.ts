@@ -19,6 +19,8 @@ export interface PlatformEvent<T = Record<string, unknown>> {
   readonly createdAt: string;
   readonly sessionId?: string;
   readonly environment?: string;
+  /** Set on sandbox-related events such as `session.promoted` (spec section 9: `e.sandboxId`). */
+  readonly sandboxId?: string;
   readonly data: T;
 }
 
