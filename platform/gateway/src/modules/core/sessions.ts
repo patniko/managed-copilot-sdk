@@ -21,6 +21,7 @@ import type { Logger } from "../../log.js";
 import {
   ACTION_EVENT_TYPES,
   ANSWER_METHOD_SET,
+  ANSWER_METHODS,
   type ActionsService,
   type AttachedResponder,
   type RuntimeSessionEvent,
@@ -29,6 +30,8 @@ import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel,
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
+  type CliAttachment,
+  type CliAttachOptions,
   type CreateSessionRequest,
   type NetworkPolicyService,
   type PlacementCutover,
@@ -1872,7 +1875,8 @@ export class SessionManager implements SessionsService {
       live.ready = false;
       // Held completions wait for the owner's events; outside a cutover, losing the owner's runtime fails them.
       if (!live.cutover) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, "The session's runtime connection closed before the turn completed", { code: "state_restore_failed" }));
-      this.#emitLifecycle(live.id, "stopped");
+      // A session being deleted ends with `deleted`, not `stopped`.
+      if (!live.deleting) this.#emitLifecycle(live.id, "stopped");
     }
   }
 
@@ -1952,7 +1956,11 @@ export class SessionManager implements SessionsService {
   /** Detaches one connection from one session; durable releases only that session's live claims of the connection. */
   #detach(live: LiveSession, peerId: string, notifyActions = true): void {
     live.attachments.delete(peerId);
-    if (live.creator === peerId) live.creator = live.attachments.keys().next().value;
+    // The creating connection's preference passes to an SDK client before an attached CLI.
+    if (live.creator === peerId) {
+      const remaining = [...live.attachments.values()];
+      live.creator = (remaining.find((attachment) => attachment.peer.kind === "sdk") ?? remaining[0])?.peer.id;
+    }
     if (notifyActions) this.#actions?.onDetached(peerId, live.id);
   }
 
@@ -2266,6 +2274,119 @@ export class SessionManager implements SessionsService {
     live.presences.set(key, principal);
     return () => {
       live.presences.delete(key);
+    };
+  }
+
+  async attachCli(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment> {
+    const record = this.getOwned(accountId, sessionId);
+    if (options.principal && options.principal.accountId !== accountId) throw new ManagedCopilotError("forbidden", "The attached CLI's credential belongs to another account");
+    const live = this.#liveFor(sessionId);
+    const busy = () => new ManagedCopilotError("session_busy", `Session ${sessionId} is moving into a sandbox. Attach again when the move finishes.`, { sessionId });
+    if (live.cutover?.fenced) throw busy();
+    const upstream = await this.#resident(live);
+    const current = this.get(sessionId);
+    if (!current || current.incarnation !== record.incarnation || live.deleting || this.#live.get(sessionId) !== live) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+    if (live.cutover?.fenced) throw busy();
+    const pinned = { incarnation: record.incarnation, generation: current.generation, placement: live.placement, upstream };
+    let closed = false;
+    const peer: ClientPeer = {
+      id: options.connectionId,
+      kind: "cli",
+      principal: options.principal ?? { accountId, login: record.owner.login, token: "" },
+      environment: live.environment,
+      clientName: "copilot-cli",
+      notify: options.notify,
+      request: (method) => Promise.reject(new ManagedCopilotError("background_callback_unsupported", `An attached Copilot CLI does not answer ${method}`)),
+      get closed() {
+        return closed;
+      },
+    };
+    if (live.attachments.has(peer.id)) throw new ManagedCopilotError("conflict", `Connection ${peer.id} is already attached to session ${sessionId}`);
+    live.attachments.set(peer.id, {
+      peer,
+      attachedAt: options.createdAt ?? Date.now(),
+      tools: new Set(),
+      requestPermission: true,
+      requestUserInput: false,
+      requestElicitation: true,
+      requestExitPlanMode: false,
+      requestAutoModeSwitch: false,
+      hooks: false,
+      skillProvider: false,
+      transforms: false,
+      canvases: false,
+      declarations: [],
+      flags: {},
+    });
+    // The CLI's operations apply only to what it attached to: never queued into another runtime or incarnation.
+    const owned = (): void => {
+      if (closed) throw new ManagedCopilotError("conflict", "This Copilot CLI attachment was closed. Attach again.");
+      if (live.deleting || this.#live.get(sessionId) !== live || this.get(sessionId)?.incarnation !== pinned.incarnation) {
+        throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+      }
+      if (live.cutover?.fenced) throw busy();
+      if (this.get(sessionId)?.generation !== pinned.generation || live.placement !== pinned.placement || live.upstream !== pinned.upstream || !live.ready || pinned.upstream.closed) {
+        throw new ManagedCopilotError("conflict", `Session ${sessionId} moved to another runtime since the CLI attached. Attach again.`, { sessionId });
+      }
+    };
+    return {
+      connectionId: peer.id,
+      incarnation: pinned.incarnation,
+      generation: pinned.generation,
+      write: (operation, send) => {
+        owned();
+        switch (operation.kind) {
+          case "turn": {
+            if (typeof operation.text !== "string" || !operation.text.trim()) throw new ManagedCopilotError("invalid_request", "A Copilot CLI turn needs text");
+            // A turn without the client that answers the session's hooks would run unguarded.
+            this.#assertHooks(live);
+            const latest = this.get(sessionId)!;
+            admitSend(
+              { prompt: operation.text },
+              {
+                environment: live.environment,
+                placement: live.placement,
+                network: latest.network,
+                platformTools: this.#platformToolsFor(live.environment, live.placement),
+                workingDirectory: this.#workingDirectory(live.placement, sessionId),
+                tokenRegistrationId: live.tokenRegistrationId,
+              },
+            );
+            send();
+            return;
+          }
+          case "model":
+            checkModel(live.environment, operation.modelId);
+            send();
+            // Restores select the model the session last had.
+            this.#ledger.update(sessionId, { model: operation.modelId });
+            this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, model: operation.modelId } }));
+            return;
+          case "abort":
+            send();
+            return;
+          default:
+            throw new ManagedCopilotError("invalid_request", `Copilot CLI operation "${String((operation as { kind?: unknown }).kind)}" is not supported`);
+        }
+      },
+      answer: async (method, params) => {
+        if (method !== ANSWER_METHODS.permission && method !== ANSWER_METHODS.elicitation) {
+          throw new ManagedCopilotError("invalid_request", `An attached Copilot CLI answers permission and elicitation prompts only, not ${method}`);
+        }
+        owned();
+        const actions = this.#actions;
+        if (actions) {
+          const decision = await actions.onClientAnswer({ sessionId, ...this.#incarnationOf(sessionId), connectionId: peer.id, responderKind: "cli", method, params });
+          if (decision.kind === "respond") return decision.response;
+        }
+        owned();
+        return pinned.upstream.request(method, { ...params, sessionId });
+      },
+      close: () => {
+        if (closed) return;
+        closed = true;
+        if (live.attachments.get(peer.id)?.peer === peer) this.#detach(live, peer.id);
+      },
     };
   }
 

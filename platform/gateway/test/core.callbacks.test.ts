@@ -93,6 +93,9 @@ describe("callback obligations and runtime credentials", () => {
     // New turns do not start without their hooks, from a client or from the service (schedules, REST).
     await expect(viewer.request("session.send", { sessionId, prompt: "hello" })).rejects.toMatchObject({ data: { code: "background_callback_unsupported" } });
     await expect(sessions().send(alice, sessionId, { prompt: "scheduled" })).rejects.toMatchObject({ code: "background_callback_unsupported" });
+    const cli = await sessions().attachCli!(1001, sessionId, { connectionId: `cli_${sessionId}`, notify: () => undefined });
+    expect(() => cli.write({ kind: "turn", text: "from the terminal" }, () => undefined)).toThrowError(expect.objectContaining({ code: "background_callback_unsupported" }));
+    cli.close();
     // A client without hooks cannot quietly drop them by resuming.
     const late = await connect();
     await expect(late.request("session.resume", { sessionId, requestPermission: true })).rejects.toMatchObject({ data: { code: "background_callback_unsupported" } });
@@ -182,6 +185,59 @@ describe("callback obligations and runtime credentials", () => {
     expect(lastResume(waiting)).toMatchObject({ continuePendingWork: true });
     await sessions().request(idle, "session.getMessages", {});
     expect(lastResume(idle)).not.toHaveProperty("continuePendingWork");
+  });
+
+  it("attaches a Copilot CLI as a cli responder whose writes and answers go through ownership and admission", async () => {
+    const app = gateway.gateway.app;
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true });
+    const notified: string[] = [];
+    const resumesBefore = runtime.calls("session.resume").length;
+    const cli = await sessions().attachCli!(1001, sessionId, { connectionId: "cli_one", notify: (method) => notified.push(method) });
+    // A responder of its own kind, with no tools; attaching sends nothing to the runtime.
+    expect(sessions().attached(sessionId)).toContainEqual(expect.objectContaining({ connectionId: "cli_one", kind: "cli", tools: [], requestPermission: true, requestElicitation: true }));
+    expect(runtime.calls("session.resume").length).toBe(resumesBefore);
+    expect(cli.incarnation).toBe(sessions().get(sessionId)!.incarnation);
+    await expect(sessions().attachCli!(2002, sessionId, { connectionId: "cli_other", notify: () => undefined })).rejects.toMatchObject({ code: "not_found" });
+    runtime.emitEvent(sessionId, "assistant.message", { content: "seen by the CLI responder" });
+    await waitUntil(() => notified.includes("session.event"));
+
+    // Writes run the AHP send in the same step as the checks, or not at all.
+    let sent = 0;
+    cli.write({ kind: "turn", text: "status of order 42?" }, () => sent++);
+    cli.write({ kind: "abort" }, () => sent++);
+    expect(() => cli.write({ kind: "turn", text: "  " }, () => sent++)).toThrow(/needs text/);
+    expect(() => cli.write({ kind: "model", modelId: "gpt-5.4" }, () => sent++)).toThrowError(expect.objectContaining({ code: "policy_violation" }));
+    cli.write({ kind: "model", modelId: "claude-haiku-4.5" }, () => sent++);
+    expect(sent).toBe(3);
+    expect(sessions().get(sessionId)!.model).toBe("claude-haiku-4.5");
+
+    // Answers go through the actions ledger as the CLI, never straight to the runtime.
+    const services = app.services as Record<string, unknown>;
+    const original = services["actions"];
+    const answers: Record<string, unknown>[] = [];
+    services["actions"] = { ...(original as object), onClientAnswer: async (input: Record<string, unknown>) => (answers.push(input), { kind: "respond", response: { success: true, recorded: true } }) };
+    try {
+      await expect(cli.answer("session.permissions.handlePendingPermissionRequest", { requestId: "perm-1", result: { kind: "approved" } })).resolves.toEqual({ success: true, recorded: true });
+      expect(answers[0]).toMatchObject({ sessionId, connectionId: "cli_one", responderKind: "cli", method: "session.permissions.handlePendingPermissionRequest", incarnation: cli.incarnation });
+      await expect(cli.answer("session.tools.handlePendingToolCall", { requestId: "tool-1", result: "x" })).rejects.toMatchObject({ code: "invalid_request" });
+    } finally {
+      services["actions"] = original;
+    }
+    expect(runtime.calls("session.permissions.handlePendingPermissionRequest").filter((call) => call.params["requestId"] === "perm-1")).toHaveLength(0);
+
+    // Closing detaches it; later writes are refused.
+    cli.close();
+    expect(sessions().attached(sessionId).map((responder) => responder.connectionId)).not.toContain("cli_one");
+    expect(() => cli.write({ kind: "abort" }, () => sent++)).toThrowError(expect.objectContaining({ code: "conflict" }));
+
+    // A CLI attached to an earlier incarnation of a reused ID writes nothing into the new session.
+    const reused = await sessions().attachCli!(1001, sessionId, { connectionId: "cli_two", notify: () => undefined });
+    await sessions().delete(1001, sessionId);
+    await sessions().create(alice, { sessionId, environment: "chat" });
+    expect(() => reused.write({ kind: "turn", text: "late" }, () => sent++)).toThrowError(expect.objectContaining({ code: "not_found" }));
+    expect(sent).toBe(3);
   });
 
   it("finishes interrupted deletions, discards interrupted creates, and tells incarnations of one ID apart", async () => {

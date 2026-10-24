@@ -567,7 +567,7 @@ structurally (they may add members).
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
 | `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials); `liveCredential(accountId)` (tokens connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` |
-| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
+| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
 | `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
@@ -704,6 +704,16 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   placeholder the egress proxy swaps for the secret, replacing a caller header of the same name. They are never stored,
   so a revoked credential's header disappears at the next restore, and a credential the proxy cannot substitute fails
   admission with `capability_unavailable`.
+- **Attached Copilot CLI** (`sessions.attachCli`, used by the attach module). The CLI speaks AHP to the runtime, so it is
+  not a `/v1/connect` client; `attachCli` makes it a `cli` responder of one session incarnation (permission and
+  elicitation prompts only; no tools, hooks, or other callbacks, and no change to the runtime's registrations) and pins
+  the incarnation, placement, generation, and runtime it attached to (refused with `session_busy` while fenced).
+  `write(op, send)` admits a native AHP operation (a text-only turn, which also needs any required SDK hooks connected; an
+  allowed model, recorded for restores; an abort) and runs the AHP write in the same synchronous step as the checks,
+  so input is never queued into another runtime or incarnation (`session_busy` while fenced, `conflict` after a move,
+  `not_found` for another incarnation). `answer` sends a permission or elicitation decision through
+  `actions.onClientAnswer` (`responderKind: "cli"`), else to the pinned runtime; `close` detaches the responder. A
+  session being deleted emits `deleted` only, never `stopped` for the runtime connection the delete closes.
 - **Sends.** Shared sessions accept only inline (`blob`) attachments; file, directory, and selection attachments
   name paths the runtime would read on the platform host. Sandbox attachment paths must stay in `/workspace`.
   Credential and routing model headers and shell agent mode are rejected.

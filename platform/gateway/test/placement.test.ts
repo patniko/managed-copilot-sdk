@@ -188,8 +188,19 @@ describe("isolated placement through the sandboxes port", () => {
     expect(gateway.gateway.app.service("sessions").get(sessionId)).toBeUndefined();
 
     await client.request("session.create", { sessionId });
-    await client.request("session.delete", { sessionId });
+    const lifecycle: string[] = [];
+    const off = gateway.gateway.app.service("sessions").onLifecycle((event) => {
+      if (event.sessionId === sessionId) lifecycle.push(event.type);
+    });
+    try {
+      await client.request("session.delete", { sessionId });
+      await sleep(50);
+    } finally {
+      off();
+    }
     expect(sandboxes.ops(sessionId).at(-1)).toBe("delete");
     expect(gateway.gateway.app.service("sessions").get(sessionId)).toBeUndefined();
+    // Closing the sandbox's runtime connection during the delete is not the session stopping.
+    expect(lifecycle).toEqual(["deleted"]);
   });
 });

@@ -212,6 +212,42 @@ export interface CreateSessionRequest {
   readonly clientName?: string;
 }
 
+export interface CliAttachOptions {
+  /** The responder ID the actions ledger sees for this CLI (unique per attachment). */
+  readonly connectionId: string;
+  /** Attach time, for responder ordering (default: now). */
+  readonly createdAt?: number;
+  /** Receives what the session's attachments get: `session.event` (after action routing) and `session.lifecycle`. */
+  readonly notify: (method: string, params: unknown) => void;
+  /** The owner's verified principal, if the CLI should serve as the session's connected credential while attached. */
+  readonly principal?: Principal;
+}
+
+/** A CLI operation the attach module forwards to the runtime over AHP (native turns, not RPC turns). */
+export type CliOperation =
+  | { readonly kind: "turn"; readonly text: string }
+  | { readonly kind: "model"; readonly modelId: string }
+  | { readonly kind: "abort" };
+
+export interface CliAttachment {
+  readonly connectionId: string;
+  readonly incarnation: string;
+  readonly generation: number;
+  /**
+   * Admits a CLI operation under the session's policy (text-only turns that need any required SDK hooks connected,
+   * allowed models, aborts) and runs `send`, the AHP write, in the same synchronous step as the ownership, fence, and
+   * placement checks. Throws (`not_found`, `session_busy`, `conflict`, or the admission error) instead of sending.
+   */
+  write(operation: CliOperation, send: () => void): void;
+  /**
+   * A CLI answer to a pending permission or elicitation request: through the actions ledger as `responderKind: "cli"`
+   * (`onClientAnswer`), else to the pinned runtime. Never a tool result.
+   */
+  answer(method: string, params: Record<string, unknown>): Promise<unknown>;
+  /** Detaches the CLI responder (`actions.onDetached`). Idempotent. */
+  close(): void;
+}
+
 export interface SessionsService {
   get(sessionId: string): SessionRecord | undefined;
   /** Owner-scoped lookup; throws `not_found` for other accounts (existence is not revealed). */
@@ -242,6 +278,12 @@ export interface SessionsService {
    * Returns the release function.
    */
   presence?(sessionId: string, principal: Principal): () => void;
+  /**
+   * Attaches a Copilot CLI (attach module) to one session incarnation as a `cli` responder: no tools or callbacks of
+   * its own beyond permission and elicitation prompts. Pins the incarnation, placement, generation, and runtime it
+   * attached to; its writes are refused once any of them changes or a cutover fences the session. Owner only.
+   */
+  attachCli?(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment>;
   onLifecycle(listener: (event: { readonly sessionId: string; readonly type: "deleted" | "promoted" | "stopped" }) => void): () => void;
   /**
    * Opens a placement cutover (promotion): fails with `conflict` when `generation` is not the session's current one,
