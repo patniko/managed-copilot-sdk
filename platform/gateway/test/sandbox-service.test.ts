@@ -589,33 +589,34 @@ describe("SandboxService lifecycle", () => {
       third.close();
     });
 
-    it("keeps a turn that waits on durable actions across a runtime restart, since continuePendingWork carries them over", async () => {
-      const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
-      const { row, artifacts, emit, open, turnState } = await withRuntime(runtime);
-      const scopes: (string | undefined)[] = [];
-      services["actions"] = {
-        list: (_sessionId: string, options: { readonly incarnation?: string }) => {
-          scopes.push(options.incarnation);
-          return [{ id: "act_1" }];
-        },
-      };
-      const first = await open();
-      await first.initialize(provided);
-      emit({ id: "m1-start", type: "user.message", data: { messageId: "m1" } });
-      first.close();
-      const second = await open();
-      await expect(second.initialize(providerHeld)).rejects.toSatisfy((error: unknown) => (error as ManagedCopilotError).details?.["reopen"] === true);
-      expect(runtime.restarts).toBe(1);
-      expect(turnState("m1")).toBe("running");
-      expect(scopes).toContain("inc-1");
-      // Answering the action continues the turn in the new process, and its completion publishes as usual.
-      second.close();
-      const third = await open();
-      await third.initialize(provided);
-      emit({ id: "m1-idle", type: "session.idle", data: {} });
-      expect((await artifacts.waitForPublication(row.sessionId, { turnId: "m1" })).state).toBe("published");
-      third.close();
-    });
+    for (const [kind, actions] of [
+      // An answer recorded but not yet delivered is no longer listed as open, yet the runtime still waits for it.
+      ["durable's hasOpenActions", (scopes: (string | undefined)[]) => ({ hasOpenActions: (_sessionId: string, options?: { readonly incarnation?: string }) => (scopes.push(options?.incarnation), true), list: () => [] })],
+      ["a list of open actions", (scopes: (string | undefined)[]) => ({ list: (_sessionId: string, options: { readonly incarnation?: string }) => (scopes.push(options.incarnation), [{ id: "act_1" }]) })],
+    ] as const) {
+      it(`keeps a turn that waits on durable actions across a runtime restart, since continuePendingWork carries them over (${kind})`, async () => {
+        const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
+        const { row, artifacts, emit, open, turnState } = await withRuntime(runtime);
+        const scopes: (string | undefined)[] = [];
+        services["actions"] = actions(scopes);
+        const first = await open();
+        await first.initialize(provided);
+        emit({ id: "m1-start", type: "user.message", data: { messageId: "m1" } });
+        first.close();
+        const second = await open();
+        await expect(second.initialize(providerHeld)).rejects.toSatisfy((error: unknown) => (error as ManagedCopilotError).details?.["reopen"] === true);
+        expect(runtime.restarts).toBe(1);
+        expect(turnState("m1")).toBe("running");
+        expect(scopes).toContain("inc-1");
+        // Answering the action continues the turn in the new process, and its completion publishes as usual.
+        second.close();
+        const third = await open();
+        await third.initialize(provided);
+        emit({ id: "m1-idle", type: "session.idle", data: {} });
+        expect((await artifacts.waitForPublication(row.sessionId, { turnId: "m1" })).state).toBe("published");
+        third.close();
+      });
+    }
 
     it("never restarts a runtime that another connection of this gateway holds", async () => {
       const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
@@ -629,7 +630,7 @@ describe("SandboxService lifecycle", () => {
       first.close();
     });
 
-    it("stops a sandbox whose sandboxd cannot restart its runtime, so the reopen starts it with a fresh one", async () => {
+    it("restarts a sandbox whose sandboxd cannot restart its runtime, so the reopen reaches a fresh runtime", async () => {
       const runtime: FakeRuntime = { instance: "instance-0", restarts: 0, restartStatus: 404 };
       const { row, artifacts, emit, open } = await withRuntime(runtime);
       const first = await open();
@@ -639,8 +640,13 @@ describe("SandboxService lifecycle", () => {
       const second = await open();
       await expect(second.initialize(providerHeld)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "capability_unavailable") && (error as ManagedCopilotError).details?.["reopen"] === true);
       expect(provider.stopped).toEqual([row.id]);
-      expect(store.bySession(row.sessionId)?.state).toBe("stopped");
+      expect(provider.running.has(row.id)).toBe(true);
+      expect(store.bySession(row.sessionId)?.state).toBe("running");
       await expect(artifacts.waitForPublication(row.sessionId, { turnId: "m1", timeoutMs: 1_000 })).rejects.toThrow(/runtime was restarted while this turn was running/);
+      // The reopen only opens the runtime again (core does not resume the sandbox between attempts).
+      const third = await open();
+      await third.initialize(provided);
+      third.close();
     });
 
     it("ends a turn when the runtime process changed between connections (sandboxd recovered a crashed runtime)", async () => {
