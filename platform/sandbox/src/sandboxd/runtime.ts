@@ -74,8 +74,16 @@ export class RuntimeSupervisor {
 
   /** Starts the runtime with `env` (idempotent while running) and resolves once it accepts connections. */
   start(env: Record<string, string>): Promise<void> {
-    // Never a second process beside the one a restart is starting.
-    if (this.#restarting) return this.#restarting.catch(() => undefined).then(() => this.start(env));
+    // Never a second process beside the one a restart is starting; a stop issued meanwhile cancels this start.
+    if (this.#restarting) {
+      const stops = this.#stops;
+      return this.#restarting
+        .catch(() => undefined)
+        .then(() => {
+          if (this.#stops !== stops) throw new Error("The Copilot runtime was stopped.");
+          return this.start(env);
+        });
+    }
     this.#env = env;
     this.#stopping = false;
     if (this.#state === "running" && this.#child) return Promise.resolve();

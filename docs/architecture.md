@@ -185,8 +185,8 @@ denies configuration RPCs it does not understand.
      sandboxd to replace the runtime process (`POST /v1/runtime/restart`; session state stays on disk) and fails
      `initialize` with `capability_unavailable` and `details.reopen: true`. Core then reopens the connection (at most
      twice) and resumes the session in the new process. Sandboxes whose sandboxd predates the route (pinned older
-     images) are stopped instead, and the reopen starts them with a fresh runtime. A refusal while another connection
-     of this gateway is open is a real second provider and fails with `conflict`.
+     images) are stopped and started again instead, which also starts a fresh runtime, before the reopen. A refusal
+     while another connection of this gateway is open is a real second provider and fails with `conflict`.
 
   Evidence (2026-10-23, Windows ARM64, both the SDK's `copilot-runtime` and the `@github/copilot` CLI binary, 1.0.103,
   with all direct network egress blocked): session creation without a token succeeded, `GET <endpoints.api>/models` and
@@ -291,12 +291,16 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   runtime process: when the session is resumed in a new process (a recreated or restarted sandbox, sandboxd's crash
   recovery, or a restart for a held inference provider), stock runtimes neither continue nor end it, with or without
   `continuePendingWork`, and `session.abort` emits nothing (verified on 1.0.103). Only a turn waiting on actions
-  durable still owns continues, because `continuePendingWork` carries those over. Otherwise the gateway ends the turn:
+  durable still owns (durable's `hasOpenActions` for the session's incarnation, which includes answers recorded but
+  not yet delivered) continues, because `continuePendingWork` carries those over. Otherwise the gateway ends the turn:
   core emits a root `session.error` (`errorType: "interrupted"`) and `session.idle` and records `lastTurn` as
   `failed`, and the sandbox service fails the turn's publication ("the sandbox runtime was restarted while this turn
   was running…") and stops holding idle stop for it. Each `openRuntime` reads sandboxd's `runtime.instance`, so a
   process change between connections is noticed. Gateway↔sandboxd runtime and tunnel WebSockets are pinged every 30 s
-  and closed after two unanswered pings, so a dead path ends the session's upstream instead of hanging it.
+  and closed after two unanswered pings, so a dead path ends the session's upstream instead of hanging it. Verified
+  live (`test/rollover.e2e.test.ts`, real Docker sandboxes and models): a turn cut mid-stream by a killed gateway, by a
+  graceful gateway shutdown, and on a shared session each ends as `failed` on the next gateway, and a new turn
+  completes; after the kill the same sandbox's runtime was restarted rather than the sandbox recreated.
 - **Promotion import.** `sandboxes.importRuntimeState(sessionId, { sessionStateDir, activeTurnId? })` copies the
   regular files of a gateway-host `session-state/<sessionId>` export (no `*.lock` files; links and special files are
   refused; ≤10,000 files, ≤1 GiB) into the running sandbox runtime's COPILOT_HOME as uid 10001. Files are staged under

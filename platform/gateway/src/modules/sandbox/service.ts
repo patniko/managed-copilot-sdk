@@ -641,7 +641,11 @@ export class SandboxService implements SandboxesService {
         this.#log.info("Restarted a sandbox runtime held by a connection that is gone", { sessionId, sandboxId });
       } catch (error) {
         if (!isManagedCopilotError(error, "not_found")) throw toManaged(error);
+        // An older sandboxd without the route: stopping and starting the sandbox starts a fresh runtime. Started here,
+        // because the reopen only opens the runtime again.
         await this.#stop(sessionId, "its runtime was held by a connection that is gone");
+        await this.#ensureRunning(sessionId);
+        this.#log.info("Restarted a sandbox whose runtime was held by a connection that is gone", { sessionId, sandboxId });
       }
       this.#runtimeReplaced(sessionId);
     });
@@ -973,16 +977,22 @@ export class SandboxService implements SandboxesService {
   }
 
   /**
-   * Whether durable owns open actions of the session's current incarnation: its runtime may be waiting on them, and
-   * `continuePendingWork` carries them into a new runtime process. Read errors count as yes.
+   * Whether durable owns open actions of the session's current incarnation: its runtime may be waiting on them (including
+   * answers recorded but not yet delivered), and `continuePendingWork` carries them into a new runtime process. The same
+   * predicate core uses (`hasOpenActions`); read errors count as yes.
    */
   #hasOpenActions(sessionId: string): boolean {
-    const actions = optional<{ list(sessionId: string, options: { readonly open?: boolean; readonly incarnation?: string }): readonly unknown[] }>(this.#options.app, "actions");
-    if (!actions || typeof actions.list !== "function") return false;
+    const actions = optional<{
+      hasOpenActions?(sessionId: string, options?: { readonly incarnation?: string }): boolean;
+      list?(sessionId: string, options: { readonly open?: boolean; readonly incarnation?: string }): readonly unknown[];
+    }>(this.#options.app, "actions");
+    if (!actions) return false;
     try {
       // This incarnation's: actions an earlier session with the same ID left behind are not this session's work.
       const incarnation = this.#sessions()?.get?.(sessionId)?.incarnation;
-      return actions.list(sessionId, { open: true, ...(incarnation ? { incarnation } : {}) }).length > 0;
+      const scope = incarnation ? { incarnation } : {};
+      if (typeof actions.hasOpenActions === "function") return actions.hasOpenActions(sessionId, scope);
+      return typeof actions.list === "function" && actions.list(sessionId, { open: true, ...scope }).length > 0;
     } catch (error) {
       this.#log.warn("Could not read pending actions; treating the session as waiting on them", { sessionId, error: (error as Error).message });
       return true;

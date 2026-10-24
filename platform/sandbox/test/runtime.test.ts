@@ -123,6 +123,19 @@ describe("RuntimeSupervisor restarts", () => {
     expect(await accepts(port)).toBe(false);
   });
 
+  it("cancels a start that waited for a restart when a stop arrives meanwhile", async () => {
+    const { runtime, port, launches } = await supervised();
+    await runtime.start({});
+    const restarting = runtime.restart(2_000);
+    const starting = runtime.start({});
+    await runtime.stop(2_000);
+    await expect(restarting).rejects.toThrow(/stopping/);
+    await expect(starting).rejects.toThrow(/was stopped/);
+    expect(runtime.state).toBe("stopped");
+    expect(launches).toHaveLength(1);
+    expect(await accepts(port)).toBe(false);
+  });
+
   it("starts the runtime again after a start that failed, with crash recovery back on", async () => {
     // The first process never listens, so its start times out and the supervisor stops it.
     const { runtime, launches } = await supervised({ silentFirst: true, crashLaunch: 2 });
