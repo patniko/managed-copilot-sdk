@@ -21,6 +21,7 @@ interface FakeSession {
   readonly id: string;
   createParams: Record<string, unknown>;
   token?: string;
+  agent?: string;
   readonly events: { id: string; type: string; data: Record<string, unknown> }[];
 }
 
@@ -101,6 +102,14 @@ export class FakeRuntime {
           }
           created.token = answer.accessToken;
         }
+        // Like the stock runtime: custom agents resolve only for a session that is authenticated at construction.
+        if (typeof params["agent"] === "string") {
+          if (!created.token) {
+            this.sessions.delete(id);
+            throw new RpcError(-32603, `session construction failed: Custom agent '${params["agent"]}' not found`);
+          }
+          created.agent = params["agent"];
+        }
         this.#emit(endpoint, created, "session.start", { sessionId: id, context: { cwd: "/platform/host/path" } });
         if (typeof params["workingDirectory"] === "string") this.#emit(endpoint, created, "session.info", { infoType: "cwd", message: `Working in ${params["workingDirectory"]}` });
         endpoint.notify("session.lifecycle", { type: "session.created", sessionId: id, metadata: { startTime: new Date().toISOString(), modifiedTime: new Date().toISOString() } });
@@ -109,8 +118,28 @@ export class FakeRuntime {
       case "session.resume": {
         if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
         session.createParams = { ...session.createParams, ...params };
+        if (typeof params["agent"] === "string") {
+          if (!session.token) throw new RpcError(-32603, `Custom agent '${params["agent"]}' not found`);
+          session.agent = params["agent"];
+        }
         return { sessionId, workspacePath: "/platform/host/session-state", capabilities: {} };
       }
+      case "session.gitHubAuth.setCredentials": {
+        if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
+        session.token = (params["credentials"] as { token?: string } | undefined)?.token;
+        return { success: true };
+      }
+      case "session.agent.select": {
+        if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
+        if (!session.token) throw new RpcError(-32603, `Custom agent '${String(params["name"])}' not found`);
+        session.agent = String(params["name"]);
+        return { agent: this.#agentInfo(session) };
+      }
+      case "session.agent.deselect":
+        if (session) delete session.agent;
+        return {};
+      case "session.agent.getCurrent":
+        return { agent: session?.agent ? this.#agentInfo(session) : null };
       case "session.options.update":
       case "session.tools.set":
       case "session.model.switchTo":
@@ -169,6 +198,11 @@ export class FakeRuntime {
       default:
         throw new RpcError(-32601, `Unhandled method ${method}`);
     }
+  }
+
+  #agentInfo(session: FakeSession): Record<string, unknown> {
+    const directory = (session.createParams["agentDirectories"] as string[] | undefined)?.[0] ?? "/agents";
+    return { name: session.agent, id: session.agent, path: `${directory}/${session.agent}.agent.md`, source: "user" };
   }
 
   async #turn(endpoint: RpcEndpoint, session: FakeSession, prompt: string, messageId: string): Promise<string> {

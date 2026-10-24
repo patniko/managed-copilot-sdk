@@ -12,7 +12,18 @@ describe("gateway skeleton", () => {
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), "mc-gateway-"));
-    gateway = await startGateway(loadConfig({ PORT: "0", MANAGED_COPILOT_DATA_DIR: dataDir, MANAGED_COPILOT_WRITE_DISCOVERY: "0", MANAGED_COPILOT_SHARED_RUNTIME: "0" }));
+    gateway = await startGateway(
+      loadConfig({
+        PORT: "0",
+        MANAGED_COPILOT_DATA_DIR: dataDir,
+        MANAGED_COPILOT_WRITE_DISCOVERY: "0",
+        MANAGED_COPILOT_SHARED_RUNTIME: "0",
+        // Nothing listens here: every GitHub verification fails at the transport level.
+        MANAGED_COPILOT_GITHUB_API_URL: "http://127.0.0.1:9",
+        DOCKER_HOST: "tcp://127.0.0.1:1",
+        MANAGED_COPILOT_EGRESS: "off",
+      }),
+    );
     const address = gateway.server.address();
     if (!address || typeof address === "string") throw new Error("no address");
     base = `http://127.0.0.1:${address.port}`;
@@ -33,5 +44,12 @@ describe("gateway skeleton", () => {
     const response = await fetch(`${base}/v1/nope`);
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ error: { code: "not_found" } });
+  });
+
+  it("reports a GitHub outage as a retryable upstream_unavailable with Retry-After", async () => {
+    const response = await fetch(`${base}/v1/me`, { headers: { authorization: "Bearer some-user-token" } });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("5");
+    expect(await response.json()).toMatchObject({ error: { code: "upstream_unavailable", details: { upstream: "github", retryAfterSeconds: 5 } } });
   });
 });
