@@ -18,8 +18,11 @@ export function dispatchEvent(ctx: ManagedContext, event: PlatformEvent): void {
   }
 }
 
-/** Parses an SSE byte stream into events. */
-export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<{ id?: string; event?: string; data: string }> {
+/**
+ * Parses an SSE byte stream into messages. A block with an `id` but no `data` (a cursor) is yielded without `data`: it
+ * moves the stream's last event ID but is not an event.
+ */
+export async function* parseEventStream(body: ReadableStream<Uint8Array>): AsyncGenerator<{ id?: string; event?: string; data?: string }> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -32,7 +35,7 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
       while ((boundary = buffer.search(/\r?\n\r?\n/)) >= 0) {
         const block = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary).replace(/^\r?\n\r?\n/, "");
-        const message: { id?: string; event?: string; data: string } = { data: "" };
+        const message: { id?: string; event?: string; data?: string } = {};
         const data: string[] = [];
         for (const line of block.split(/\r?\n/)) {
           if (!line || line.startsWith(":")) continue;
@@ -43,8 +46,8 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
           else if (field === "event") message.event = value;
           else if (field === "data") data.push(value);
         }
-        if (data.length === 0) continue;
-        message.data = data.join("\n");
+        if (data.length > 0) message.data = data.join("\n");
+        else if (message.id === undefined) continue;
         yield message;
       }
     }
@@ -80,7 +83,10 @@ export function ensureEventStream(ctx: ManagedContext): void {
         if (!response.body) throw new Error("The event stream has no body");
         delay = timings.eventsRetryMs;
         for await (const message of parseEventStream(response.body)) {
-          if (message.id) lastEventId = message.id;
+          // The gateway starts a stream without a usable cursor with one, so even a stream that ends before its first
+          // event resumes where it began.
+          if (message.id !== undefined) lastEventId = message.id || undefined;
+          if (message.data === undefined) continue;
           try {
             dispatchEvent(ctx, JSON.parse(message.data) as PlatformEvent);
           } catch {

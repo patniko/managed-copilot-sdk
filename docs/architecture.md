@@ -122,7 +122,10 @@ public API:
 - The publication long poll gets its own wait plus 60 s.
 - Streamed uploads and downloads fail after 60 s without progress, however large they are.
 - The event stream reconnects with `Last-Event-ID` after 45 s without a byte, which is three of the gateway's 15 s
-  heartbeats.
+  heartbeats. A stream that has no usable cursor (a new subscription, or an ID the ledger pruned) starts with an
+  id-only SSE block holding the owner's newest event ID, or `start` when the owner has none. The SDK records it
+  without dispatching it, so a stream that ends before its first event still replays everything published after it
+  began.
 
 An expired bound fails with `timeout`, naming the call. A caller's `AbortSignal` rejects with its own reason. Durable
 result submissions are idempotent and retried after a `timeout`.
@@ -709,7 +712,7 @@ structurally (they may add members).
 | --- | --- | --- |
 | `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials, never a live credential); `liveCredential(accountId)` (tokens attached connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` (GitHub rejected it, e.g. a 401 from the Copilot API) |
 | `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
-| `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
+| `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay (a stream without a usable cursor first gets one: an id-only block with the owner's newest event ID, or `start`) |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |

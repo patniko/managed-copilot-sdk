@@ -82,6 +82,9 @@ interface SessionRow {
   avatar_url: string | null;
 }
 
+/** The SSE cursor of a stream that began before the owner had any events: replay starts from its first. */
+export const EVENTS_START = "start";
+
 /** The admitted, credential-free configuration a session is resumed with (no handlers, no tokens). */
 export interface AdmittedConfig {
   /** Admitted `session.create` params minus per-connection fields (tools, request flags, tokens). */
@@ -276,12 +279,31 @@ export class SessionLedger {
     if (existing?.owner_id !== ownerId) throw new Error(`Platform event ${event.id} already exists for another owner`);
   }
 
-  /** Events for an owner after `afterId` (the SSE `Last-Event-ID`), oldest first. */
+  /** Events for an owner after `afterId` (the SSE `Last-Event-ID`), oldest first; none for an ID it does not know. */
   eventsAfter(ownerId: number, afterId: string, limit = 500): { seq: number; event: PlatformEvent }[] {
-    const anchor = this.#db.prepare("SELECT seq FROM core_events WHERE id = ? AND owner_id = ?").get(afterId, ownerId) as { seq: number } | undefined;
-    if (!anchor) return [];
-    const rows = this.#db.prepare("SELECT seq, body FROM core_events WHERE owner_id = ? AND seq > ? ORDER BY seq LIMIT ?").all(ownerId, anchor.seq, limit) as { seq: number; body: string }[];
+    const position = this.eventPosition(ownerId, afterId);
+    return position === undefined ? [] : this.eventsAfterPosition(ownerId, position, limit);
+  }
+
+  /**
+   * Where an SSE cursor points in the owner's events: its stored event, or before all of them for `EVENTS_START`
+   * (a stream that began when the owner had none). Undefined for an ID the owner does not have (pruned, or not its).
+   */
+  eventPosition(ownerId: number, id: string): number | undefined {
+    const anchor = this.#db.prepare("SELECT seq FROM core_events WHERE id = ? AND owner_id = ?").get(id, ownerId) as { seq: number } | undefined;
+    if (anchor) return anchor.seq;
+    return id === EVENTS_START ? 0 : undefined;
+  }
+
+  eventsAfterPosition(ownerId: number, position: number, limit = 500): { seq: number; event: PlatformEvent }[] {
+    const rows = this.#db.prepare("SELECT seq, body FROM core_events WHERE owner_id = ? AND seq > ? ORDER BY seq LIMIT ?").all(ownerId, position, limit) as { seq: number; body: string }[];
     return rows.map((row) => ({ seq: row.seq, event: JSON.parse(row.body) as PlatformEvent }));
+  }
+
+  /** The ID of the owner's newest stored event. */
+  latestEventId(ownerId: number): string | undefined {
+    const row = this.#db.prepare("SELECT id FROM core_events WHERE owner_id = ? ORDER BY seq DESC LIMIT 1").get(ownerId) as { id: string } | undefined;
+    return row?.id;
   }
 
   /** Keeps the most recent events per deployment bounded. */

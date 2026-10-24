@@ -10,7 +10,7 @@ import { admitOptionsUpdate, admitSession, lockSystemMessage, PROMOTABLE_ENVIRON
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
 import { PlatformEvents } from "../src/modules/core/events.js";
-import { SessionLedger } from "../src/modules/core/ledger.js";
+import { EVENTS_START, SessionLedger } from "../src/modules/core/ledger.js";
 import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
 import { pathScrubber } from "../src/modules/core/sessions.js";
 import { createLogger } from "../src/log.js";
@@ -523,6 +523,24 @@ describe("gateway primitives", () => {
 
 describe("platform events", () => {
   const event = (id: string, type: PlatformEvent["type"] = "session.promoted"): PlatformEvent => ({ id, type, createdAt: new Date().toISOString(), sessionId: "s1", data: {} });
+
+  it("gives an event stream a cursor: its owner's newest event, or the start for an owner without any", () => {
+    const db = openDatabase(":memory:");
+    const ledger = new SessionLedger(db);
+    expect(ledger.latestEventId(7)).toBeUndefined();
+    expect(ledger.eventPosition(7, EVENTS_START)).toBe(0);
+    ledger.appendEvent(event("evt_a"), 7);
+    ledger.appendEvent(event("evt_other"), 8);
+    ledger.appendEvent(event("evt_b"), 7);
+    expect(ledger.latestEventId(7)).toBe("evt_b");
+    // From the start, a stream replays all of its owner's events and nobody else's.
+    expect(ledger.eventsAfterPosition(7, ledger.eventPosition(7, EVENTS_START)!).map(({ event: stored }) => stored.id)).toEqual(["evt_a", "evt_b"]);
+    expect(ledger.eventsAfter(7, "evt_a").map(({ event: stored }) => stored.id)).toEqual(["evt_b"]);
+    // An ID the owner does not have (another owner's, or pruned) is no position.
+    expect(ledger.eventPosition(7, "evt_other")).toBeUndefined();
+    expect(ledger.eventPosition(7, "evt_unknown")).toBeUndefined();
+    db.close();
+  });
 
   it("reports whether an event is stored, idempotently for a stable ID, while notifying listeners every time", () => {
     const db = openDatabase(":memory:");
