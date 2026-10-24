@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { Server as HttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Lease, LeaseLostError } from "../src/lease/lease.js";
@@ -118,6 +120,32 @@ describe("compareStamps", () => {
 });
 
 describe("Supervisor", () => {
+  it("survives a late reset of a rejected WebSocket after taking the lease", async () => {
+    const listen = vi.spyOn(HttpServer.prototype, "listen");
+    const dataDir = tempDir();
+    const holder = await start(dataDir, "100");
+    await serving(holder.port);
+    const waiting = await start(dataDir, "100");
+    await standby(waiting.port);
+    const server = listen.mock.contexts.find((context): context is HttpServer => {
+      if (!(context instanceof HttpServer)) return false;
+      const address = context.address();
+      return address !== null && typeof address === "object" && address.port === waiting.port;
+    });
+    expect(server).toBeDefined();
+    const socket = new PassThrough();
+    cleanups.push(() => { socket.destroy(); });
+    server!.emit("upgrade", {}, socket, Buffer.alloc(0));
+    expect(String(socket.read())).toContain("503 Service Unavailable");
+
+    await holder.supervisor.stop();
+    expect((await serving(waiting.port)).generation).toBe("2");
+    const reset = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" });
+    expect(() => socket.emit("error", reset)).not.toThrow();
+    expect((await probe(waiting.port))?.status).toBe(200);
+    expect(waiting.logs.some((entry) => entry.level === "debug" && /Rejected WebSocket/.test(entry.message))).toBe(true);
+  }, 30_000);
+
   it("runs the gateway while holding the lease, and another replica of the same deployment waits", async () => {
     const dataDir = tempDir();
     const a = await start(dataDir, "100");

@@ -1071,8 +1071,9 @@ gateway-only rollover check with the factory process unchanged.
   process's life, a fencing generation with a 5 s heartbeat (losing it kills the gateway), 503 while waiting, and
   handover to strictly newer deployments (`MANAGED_COPILOT_LEASE_STAMP`). The gateway runs in its own process group;
   the lease is released only after every process in it (the shared runtime included) has exited. The demo images use
-  the same supervisor. Live checks cover normal handover and cross-host exclusion, not network partitions or
-  NFS-server lock loss; this is not a multi-writer/HA storage layer.
+  the same supervisor. Socket errors from rejected standby WebSocket upgrades are logged locally, so a late client
+  reset cannot terminate the supervisor after it acquires the lease. Live checks cover normal handover and cross-host
+  exclusion, not network partitions or NFS-server lock loss; this is not a multi-writer/HA storage layer.
 - **Isolated placement.** Azure Container Apps Sandboxes (`Microsoft.App/sandboxGroups`, data plane
   `https://management.<region>.azuredevcompute.io`, api-version `2026-02-01-preview`): one microVM per sandbox,
   a root disk plus three data disks per sandbox within the service's 20 GiB-per-vCPU budget, disks that outlive

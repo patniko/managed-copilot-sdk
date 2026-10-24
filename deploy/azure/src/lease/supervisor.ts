@@ -352,6 +352,7 @@ export class Supervisor {
       res.end(req.method === "HEAD" ? undefined : body);
     });
     server.on("upgrade", (_req: IncomingMessage, socket: Duplex) => {
+      socket.on("error", (error) => this.#log("debug", "Rejected WebSocket connection closed", { error: error.message }));
       socket.end("HTTP/1.1 503 Service Unavailable\r\nretry-after: 5\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
     });
     await new Promise<void>((resolve, reject) => {
