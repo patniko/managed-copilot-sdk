@@ -9,22 +9,29 @@
 //   node fsworker.js read <scope> <relative>          → one JSON header line, then the bytes
 //   node fsworker.js list <scope> <relative> <recursive 0|1> <limit>
 //   node fsworker.js manifest <scope> <count> <fileBytes> <totalBytes>
-// where <scope> is `workspace` (/workspace) or `outputs` (/workspace/outputs).
+//   node fsworker.js import-commit runtime-import <staging> <sessionId>
+//   node fsworker.js import-abort runtime-import <staging>
+// where <scope> is `workspace` (/workspace), `outputs` (/workspace/outputs), or `runtime-import` (the runtime's
+// COPILOT_HOME/.mc-import, where promotion stages a session's state before it replaces session-state/<sessionId>).
 //
 // Prints results on stdout; on failure prints {"code","message"} on stderr and exits with status 2.
 import { createHash, randomBytes } from "node:crypto";
-import { constants, promises as fs, lstatSync, mkdirSync, type Stats } from "node:fs";
+import { constants, promises as fs, lstatSync, mkdirSync, renameSync, type Stats } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { posix } from "node:path";
 import { normalizeWorkspacePath, PathError } from "../shared/paths.js";
 
-/** The workspace mount; every operation starts here. */
-const BASE = "/workspace";
-/** Scopes map to a fixed prefix under the base: the workspace itself, or `outputs/` for artifact publication. */
-const SCOPES: Record<string, { readonly prefix: readonly string[]; readonly root: string }> = {
-  workspace: { prefix: [], root: "/workspace" },
-  outputs: { prefix: ["outputs"], root: "/workspace/outputs" },
+type Scope = { readonly base: string; readonly prefix: readonly string[]; readonly root: string };
+
+const RUNTIME_HOME = "/var/lib/managed-copilot/runtime";
+/** Scopes map to a fixed prefix under a base the workload cannot replace (a volume mount point or its own home). */
+const SCOPES: Record<string, Scope> = {
+  workspace: { base: "/workspace", prefix: [], root: "/workspace" },
+  outputs: { base: "/workspace", prefix: ["outputs"], root: "/workspace/outputs" },
+  "runtime-import": { base: RUNTIME_HOME, prefix: [".mc-import"], root: `${RUNTIME_HOME}/.mc-import` },
 };
+const STAGING = /^[0-9a-f]{16}$/;
+const SESSION_DIRECTORY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 let tempName: string | undefined;
 
@@ -104,11 +111,9 @@ function splitParent(relative: string): { parent: string[]; name: string } {
   return { parent: segments, name };
 }
 
-type Scope = { readonly prefix: readonly string[]; readonly root: string };
-
 async function write(scope: Scope, relative: string, overwrite: boolean, maxBytes: number, expected: number | undefined): Promise<void> {
   const { parent, name } = splitParent(relative);
-  enter(BASE, [...scope.prefix, ...parent], true, relative);
+  enter(scope.base, [...scope.prefix, ...parent], true, relative);
   try {
     const existing = lstatSync(name);
     if (existing.isSymbolicLink()) throw new PathError("forbidden", `"${relative}" is a symbolic link; refusing to replace it.`);
@@ -152,14 +157,14 @@ async function write(scope: Scope, relative: string, overwrite: boolean, maxByte
 }
 
 async function makeDirectory(scope: Scope, relative: string): Promise<void> {
-  enter(BASE, [...scope.prefix, ...segmentsOf(relative)], true, relative);
+  enter(scope.base, [...scope.prefix, ...segmentsOf(relative)], true, relative);
   const stat = await fs.stat(".");
   process.stdout.write(JSON.stringify({ path: relative, type: "directory", size: 0, modifiedAt: stat.mtime.toISOString() }));
 }
 
 async function read(scope: Scope, relative: string): Promise<void> {
   const { parent, name } = splitParent(relative);
-  enter(BASE, [...scope.prefix, ...parent], false, relative);
+  enter(scope.base, [...scope.prefix, ...parent], false, relative);
   const { handle, stat } = await openHere(name, relative);
   try {
     process.stdout.write(`${JSON.stringify({ size: stat.size, modifiedAt: stat.mtime.toISOString() })}\n`);
@@ -188,7 +193,7 @@ async function list(scope: Scope, relative: string, recursive: boolean, limit: n
   const segments = segmentsOf(relative);
   if (segments.length > 0) {
     const { parent, name } = splitParent(relative);
-    enter(BASE, [...scope.prefix, ...parent], false, relative);
+    enter(scope.base, [...scope.prefix, ...parent], false, relative);
     let stat: Stats;
     try {
       stat = lstatSync(name);
@@ -204,7 +209,7 @@ async function list(scope: Scope, relative: string, recursive: boolean, limit: n
   }
   const entries: Entry[] = [];
   const walk = async (dirSegments: readonly string[]): Promise<void> => {
-    enter(BASE, [...scope.prefix, ...dirSegments], false, dirSegments.join("/") || ".");
+    enter(scope.base, [...scope.prefix, ...dirSegments], false, dirSegments.join("/") || ".");
     const names = (await fs.readdir(".", { withFileTypes: true })).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     const subdirectories: string[][] = [];
     for (const dirent of names) {
@@ -237,7 +242,7 @@ async function manifest(scope: Scope, count: number, fileBytes: number, totalByt
   const rejected: { path: string; reason: string }[] = [];
   let total = 0;
   try {
-    enter(BASE, scope.prefix, false, ".");
+    enter(scope.base, scope.prefix, false, ".");
   } catch (error) {
     // A missing outputs folder publishes nothing; a linked or replaced one is rejected.
     if (error instanceof PathError && error.code === "not_found") process.stdout.write(JSON.stringify({ files, rejected }));
@@ -246,7 +251,7 @@ async function manifest(scope: Scope, count: number, fileBytes: number, totalByt
   }
   const walk = async (dirSegments: readonly string[]): Promise<void> => {
     try {
-      enter(BASE, [...scope.prefix, ...dirSegments], false, dirSegments.join("/"));
+      enter(scope.base, [...scope.prefix, ...dirSegments], false, dirSegments.join("/"));
     } catch (error) {
       rejected.push({ path: dirSegments.join("/"), reason: (error as Error).message });
       return;
@@ -315,12 +320,59 @@ async function manifest(scope: Scope, count: number, fileBytes: number, totalByt
   process.stdout.write(JSON.stringify({ files, rejected }));
 }
 
+/**
+ * Replaces `session-state/<sessionId>` in the runtime's COPILOT_HOME with a staged import, so a retried import is safe.
+ * Both directories live on the same volume, so the swap is two renames.
+ */
+async function importCommit(staging: string, sessionId: string): Promise<void> {
+  if (!STAGING.test(staging) || !SESSION_DIRECTORY.test(sessionId)) throw new PathError("invalid_request", "Invalid import staging name or session ID.");
+  const scope = SCOPES["runtime-import"]!;
+  enter(scope.base, scope.prefix, false, ".mc-import");
+  let staged: Stats;
+  try {
+    staged = lstatSync(staging);
+  } catch {
+    throw new PathError("not_found", "The staged runtime state does not exist.");
+  }
+  if (!staged.isDirectory()) throw new PathError("forbidden", "The staged runtime state is not a directory.");
+  const source = posix.join(scope.root, staging);
+  enter(scope.base, ["session-state"], true, "session-state");
+  let previous: string | undefined;
+  try {
+    lstatSync(sessionId);
+    previous = posix.join(scope.root, `replaced-${randomBytes(8).toString("hex")}`);
+    renameSync(sessionId, previous);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  renameSync(source, sessionId);
+  if (previous) await fs.rm(previous, { recursive: true, force: true });
+  process.stdout.write(JSON.stringify({ sessionId }));
+}
+
+async function importAbort(staging: string): Promise<void> {
+  if (!STAGING.test(staging)) throw new PathError("invalid_request", "Invalid import staging name.");
+  const scope = SCOPES["runtime-import"]!;
+  enter(scope.base, scope.prefix, true, ".mc-import");
+  // fs.rm removes links themselves; it never follows them.
+  await fs.rm(staging, { recursive: true, force: true });
+  process.stdout.write("{}");
+}
+
 async function main(): Promise<void> {
   const [op, scopeName, ...rest] = process.argv.slice(2);
   const scope = SCOPES[scopeName ?? ""];
   if (!scope) throw new PathError("invalid_request", `Unknown scope "${scopeName}".`);
   const root = scope.root;
   switch (op) {
+    case "import-commit":
+      if (scopeName !== "runtime-import") break;
+      await importCommit(rest[0] ?? "", rest[1] ?? "");
+      return;
+    case "import-abort":
+      if (scopeName !== "runtime-import") break;
+      await importAbort(rest[0] ?? "");
+      return;
     case "write": {
       const [rawPath, overwrite, maxBytes, expected] = rest;
       await write(scope, normalizeWorkspacePath(rawPath, { root }), overwrite === "1", Number(maxBytes), expected && expected !== "-" ? Number(expected) : undefined);

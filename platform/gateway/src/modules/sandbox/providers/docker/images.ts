@@ -9,7 +9,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
-import type { Logger } from "../../log.js";
+import type { Logger } from "../../../../log.js";
 import type { DockerClient } from "./docker.js";
 
 const execAsync = promisify(exec);
@@ -39,7 +39,7 @@ export interface ImageOptions {
 
 function defaultContextDir(): string {
   // dist/modules/sandbox (or src/modules/sandbox under tsx) → platform/sandbox
-  return fileURLToPath(new URL("../../../../sandbox/", import.meta.url));
+  return fileURLToPath(new URL("../../../../../../sandbox/", import.meta.url));
 }
 
 function hashTree(root: string, include: (relativePath: string) => boolean, hash = createHash("sha256")): ReturnType<typeof createHash> {

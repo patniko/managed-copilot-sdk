@@ -83,6 +83,14 @@ export interface SandboxHandle {
   readonly paths: SandboxPaths;
 }
 
+/** A runtime-state export to place in a sandbox before `session.resume` (promotion). */
+export interface RuntimeStateImport {
+  /** Gateway-host directory holding the session's `session-state/<sessionId>/` files (paths already rewritten, no tokens). */
+  readonly sessionStateDir: string;
+  /** The `messageId` of a turn that started elsewhere and continues in the sandbox. */
+  readonly activeTurnId?: string;
+}
+
 export interface OpenRuntimeOptions {
   /** The session owner's current GitHub token; rejects with `authentication_required` when none is usable. */
   resolveToken(): Promise<string>;
@@ -130,6 +138,13 @@ export interface SandboxesService {
   openRuntime(sessionId: string, options: OpenRuntimeOptions): Promise<SandboxRuntime>;
   /** Raw TCP tunnel to `127.0.0.1:<port>` inside the session's sandbox (CLI attach to an AHP listener). */
   connect(sessionId: string, port: number): Promise<Duplex>;
+  /**
+   * Promotion: copies the regular files of a gateway-host `session-state/<sessionId>` export into the running sandbox
+   * runtime's COPILOT_HOME (replacing that one directory; `*.lock` files are skipped) as the workload identity, before
+   * the session is resumed there. `activeTurnId` (the carried turn's `messageId`) is tracked so the turn's root
+   * `session.idle` in the sandbox publishes its outputs and idle stop waits for it. Limits: 10,000 files, 1 GiB.
+   */
+  importRuntimeState(sessionId: string, options: RuntimeStateImport): Promise<{ readonly files: number; readonly bytes: number }>;
   get(sessionId: string): Promise<SandboxInfo | undefined>;
   /** Stops compute after pending work drains (idle stop). State volumes are kept. */
   stop(sessionId: string, reason?: string): Promise<void>;
@@ -177,11 +192,13 @@ export interface SandboxSessionView {
   readonly id: string;
   readonly ownerId: number;
   readonly environment?: string;
+  /** The ledger's last root turn; survives gateway restarts. */
+  readonly lastTurn?: { readonly turnId: string; readonly status: string };
 }
 
 /** From core: `sessions`. `subscribe` listeners run synchronously, in order, before fan-out to clients. */
 export interface SandboxSessionsPort {
-  get(sessionId: string): SandboxSessionView | undefined | Promise<SandboxSessionView | undefined>;
+  get(sessionId: string): SandboxSessionView | undefined;
   subscribe(listener: (sessionId: string, event: SandboxRuntimeEvent) => void): () => void;
 }
 
@@ -192,7 +209,7 @@ export interface SandboxEventsPort {
 
 /** From network: `policy`. Throws on any failure; never returns a partial registration. */
 export interface SandboxPolicyPort {
-  registerSandbox(request: { readonly sandboxId: string; readonly sessionId: string }): Promise<EgressRegistration> | EgressRegistration;
+  registerSandbox(request: { readonly sandboxId: string; readonly sessionId: string; readonly proxy?: { readonly host: string; readonly port: number } }): Promise<EgressRegistration> | EgressRegistration;
   updateSandbox(sandboxId: string, update: { readonly address: string }): Promise<void> | void;
   unregisterSandbox(sandboxId: string): Promise<void> | void;
 }
