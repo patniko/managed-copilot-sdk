@@ -162,4 +162,9 @@ export interface ManagedContext {
   readonly listeners: Map<PlatformEventType | "*", Set<PlatformEventHandler>>;
   /** Resources to release on `close()` (event streams, timers). */
   readonly disposables: Set<() => void | Promise<void>>;
+  /**
+   * The REST client for the identity that created or resumed a session (`managed.client(env, { gitHubToken })`),
+   * falling back to the connection's own identity. Feature helpers must use it for session-scoped calls.
+   */
+  httpFor(sessionId: string): HttpClient;
 }

@@ -12,7 +12,7 @@ describe("gateway skeleton", () => {
 
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), "mc-gateway-"));
-    gateway = await startGateway(loadConfig({ PORT: "0", MANAGED_COPILOT_DATA_DIR: dataDir, MANAGED_COPILOT_WRITE_DISCOVERY: "0" }));
+    gateway = await startGateway(loadConfig({ PORT: "0", MANAGED_COPILOT_DATA_DIR: dataDir, MANAGED_COPILOT_WRITE_DISCOVERY: "0", MANAGED_COPILOT_SHARED_RUNTIME: "0" }));
     const address = gateway.server.address();
     if (!address || typeof address === "string") throw new Error("no address");
     base = `http://127.0.0.1:${address.port}`;

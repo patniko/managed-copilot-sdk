@@ -2,6 +2,167 @@
 // Owner: core workstream. Spawned by the stock SDK via RuntimeConnection.forStdio({ path: <this file> }).
 // Reads BridgeConfig from MANAGED_COPILOT_BRIDGE, ignores the runtime flags the SDK appends
 // (--headless, --no-auto-update, --stdio, ...), and relays framed JSON-RPC between stdio and the gateway.
-// Must start no local agent and never print credentials.
-process.stderr.write("[managed-copilot bridge] not implemented yet\n");
-process.exit(1);
+// Starts no local agent and never prints credentials.
+import {
+  BRIDGE_ENV,
+  BRIDGE_HELLO,
+  BRIDGE_MAX_FRAME_BYTES,
+  BRIDGE_SUBPROTOCOL,
+  BRIDGE_WELCOME,
+  type BridgeConfig,
+  type BridgeHello,
+  type BridgeWelcome,
+} from "@managed-copilot/protocol";
+import { WebSocket } from "ws";
+
+const PREFIX = "[managed-copilot]";
+
+function fail(message: string): never {
+  process.stderr.write(`${PREFIX} ${message}\n`);
+  process.exit(1);
+}
+
+function readConfig(): BridgeConfig {
+  const raw = process.env[BRIDGE_ENV];
+  delete process.env[BRIDGE_ENV];
+  if (!raw) fail(`This program is started by @managed-copilot/sdk; ${BRIDGE_ENV} is not set.`);
+  let config: Partial<BridgeConfig>;
+  try {
+    config = JSON.parse(raw) as Partial<BridgeConfig>;
+  } catch {
+    fail(`${BRIDGE_ENV} is not valid JSON.`);
+  }
+  if (typeof config.url !== "string" || typeof config.token !== "string" || !config.token || typeof config.environment !== "object" || config.environment === null) {
+    fail(`${BRIDGE_ENV} is incomplete (url, token, and environment are required).`);
+  }
+  return config as BridgeConfig;
+}
+
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+function checkUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    fail("The gateway URL is invalid.");
+  }
+  if (url.username || url.password) fail("The gateway URL must not embed credentials.");
+  if (url.protocol === "wss:") return url;
+  if (url.protocol === "ws:" && (LOOPBACK.has(url.hostname) || /^127\./.test(url.hostname))) return url;
+  fail(`Refusing to send credentials to ${url.origin}: remote deployments must use https.`);
+}
+
+/** Splits LSP frames (`Content-Length: N\r\n\r\n<body>`) from the SDK's stdin. */
+function frameReader(onMessage: (body: string) => void): (chunk: Buffer) => void {
+  let buffer: Buffer = Buffer.alloc(0);
+  return (chunk) => {
+    buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+    for (;;) {
+      const headerEnd = buffer.indexOf("\r\n\r\n");
+      if (headerEnd < 0) {
+        if (buffer.length > 8192) fail("Received a malformed message from the Copilot SDK.");
+        return;
+      }
+      const header = buffer.subarray(0, headerEnd).toString("ascii");
+      const match = /(?:^|\r\n)content-length:\s*(\d+)/i.exec(header);
+      if (!match) fail("Received a malformed message from the Copilot SDK.");
+      const length = Number(match[1]);
+      if (length > BRIDGE_MAX_FRAME_BYTES) fail(`A message from the Copilot SDK exceeds ${BRIDGE_MAX_FRAME_BYTES} bytes; send large files with managed.files(session).`);
+      const end = headerEnd + 4 + length;
+      if (buffer.length < end) return;
+      onMessage(buffer.subarray(headerEnd + 4, end).toString("utf8"));
+      buffer = buffer.subarray(end);
+    }
+  };
+}
+
+function writeFrame(body: string): void {
+  process.stdout.write(`Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`);
+}
+
+/** Close reasons are `<error code>: <message>`. */
+function describeClose(code: number, reason: string): string {
+  const separator = reason.indexOf(": ");
+  const message = separator > 0 ? reason.slice(separator + 2) : reason || "the connection closed";
+  const errorCode = separator > 0 ? reason.slice(0, separator) : `close code ${code}`;
+  return `Managed Copilot closed the connection: ${message} (${errorCode})`;
+}
+
+function main(): void {
+  const config = readConfig();
+  const url = checkUrl(config.url);
+  const ws = new WebSocket(url, [BRIDGE_SUBPROTOCOL], {
+    headers: { authorization: `Bearer ${config.token}` },
+    perMessageDeflate: false,
+    maxPayload: BRIDGE_MAX_FRAME_BYTES,
+    handshakeTimeout: 30_000,
+  });
+  const pending: string[] = [];
+  let ready = false;
+  let stdinEnded = false;
+
+  const send = (body: string) => {
+    if (ready && ws.readyState === WebSocket.OPEN) ws.send(body);
+    else pending.push(body);
+  };
+
+  process.stdin.on("data", frameReader(send));
+  process.stdin.on("end", () => {
+    stdinEnded = true;
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close(1000, "client stopped");
+    setTimeout(() => process.exit(0), 2000).unref();
+  });
+  process.stdout.on("error", () => process.exit(0));
+
+  ws.on("unexpected-response", (_request, response) => {
+    const chunks: Buffer[] = [];
+    response.on("data", (chunk: Buffer) => {
+      if (chunks.reduce((size, item) => size + item.length, 0) < 65536) chunks.push(chunk);
+    });
+    response.on("end", () => {
+      let message = `HTTP ${response.statusCode}`;
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { error?: { code?: string; message?: string } };
+        if (body.error?.message) message = `${body.error.message} (${body.error.code ?? `HTTP ${response.statusCode}`})`;
+      } catch {
+        // Keep the status-only message.
+      }
+      fail(`Managed Copilot rejected the connection: ${message}`);
+    });
+  });
+
+  ws.on("open", () => {
+    const hello: BridgeHello = { type: BRIDGE_HELLO, version: 1, environment: config.environment, ...(config.clientName ? { clientName: config.clientName } : {}) };
+    ws.send(JSON.stringify(hello));
+  });
+
+  ws.on("message", (data, isBinary) => {
+    const text = isBinary ? Buffer.from(data as Buffer).toString("utf8") : data.toString();
+    if (!ready) {
+      let welcome: Partial<BridgeWelcome>;
+      try {
+        welcome = JSON.parse(text) as Partial<BridgeWelcome>;
+      } catch {
+        fail("The gateway answered the handshake with an invalid frame.");
+      }
+      if (welcome.type !== BRIDGE_WELCOME) fail("The gateway answered the handshake with an unexpected frame.");
+      ready = true;
+      for (const body of pending.splice(0)) ws.send(body);
+      return;
+    }
+    writeFrame(text);
+  });
+
+  ws.on("close", (code, reasonBuffer) => {
+    if (stdinEnded || code === 1000) process.exit(0);
+    fail(describeClose(code, reasonBuffer.toString("utf8")));
+  });
+
+  ws.on("error", (error: Error & { code?: string }) => {
+    if (stdinEnded) process.exit(0);
+    fail(`Cannot reach Managed Copilot at ${url.origin}: ${error.code ?? error.message}`);
+  });
+}
+
+main();
