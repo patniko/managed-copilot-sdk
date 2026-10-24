@@ -66,12 +66,16 @@ export interface PlatformTimings {
   readonly retryMaxMs: number;
   /** One connect attempt: the deployment's info and the signed-in account. */
   readonly connectTimeoutMs: number;
-  /** One health probe. */
+  /** One health probe, or one read of a session's status. */
   readonly healthTimeoutMs: number;
   /** Model discovery (starting a client and listing models); the preferred defaults apply when it runs out. */
   readonly discoveryTimeoutMs: number;
   /** A graceful client stop, before the client is forced. */
   readonly stopTimeoutMs: number;
+  /** Reattaching to a session, which can restart (or recreate) its sandbox first. */
+  readonly resumeTimeoutMs: number;
+  /** Interval of keepalive pings on each client's connection: proxies cut silent WebSockets (Azure Container Apps after 240 s). */
+  readonly keepAliveMs: number;
 }
 
 /**
@@ -85,6 +89,8 @@ export const PLATFORM_TIMINGS: PlatformTimings = {
   healthTimeoutMs: 10_000,
   discoveryTimeoutMs: 20_000,
   stopTimeoutMs: 5_000,
+  resumeTimeoutMs: 180_000,
+  keepAliveMs: 60_000,
 };
 
 export interface PlatformOptions {
@@ -136,6 +142,13 @@ function withDeadline<T>(promise: Promise<T>, ms: number, what: string, onLate?:
     timer.unref();
   });
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** A platform call that ran out of time is the platform not answering: the pipeline pauses rather than failing a station. */
+function unanswered<T>(promise: Promise<T>): Promise<T> {
+  return promise.catch((error: unknown) => {
+    throw error instanceof DeadlineError ? new PlatformUnavailableError(error.message) : error;
+  });
 }
 
 /** Stops a client, forcing it when a dropped transport leaves the graceful stop waiting for answers that never come. */
@@ -204,6 +217,9 @@ export class Platform implements FactoryPlatform {
   #models: Record<StationRole, string>;
   #status: PlatformStatus;
   #timer: NodeJS.Timeout | undefined;
+  #keepAliveTimer: NodeJS.Timeout | undefined;
+  /** Clients with a keepalive ping in flight (or still starting): one at a time each. */
+  readonly #pinging = new WeakSet<Promise<CopilotClient>>();
   #stopped = false;
   /** Consecutive failed connect attempts. */
   #attempt = 0;
@@ -242,12 +258,15 @@ export class Platform implements FactoryPlatform {
   }
 
   start(): void {
+    this.#keepAliveTimer ??= setInterval(() => this.#keepAlive(), this.#timings.keepAliveMs);
+    this.#keepAliveTimer.unref();
     void this.#connect();
   }
 
   async stop(): Promise<void> {
     this.#stopped = true;
     if (this.#timer) clearTimeout(this.#timer);
+    if (this.#keepAliveTimer) clearInterval(this.#keepAliveTimer);
     await this.#dispose();
   }
 
@@ -326,6 +345,21 @@ export class Platform implements FactoryPlatform {
     }
   }
 
+  /**
+   * Pings every client's connection. Proxies in front of the gateway close WebSockets that carry nothing for a while
+   * (the Azure Container Apps ingress after 240 s), which would disconnect a station's session while it waits.
+   */
+  #keepAlive(): void {
+    for (const [role, pending] of this.#clients) {
+      if (this.#pinging.has(pending)) continue;
+      this.#pinging.add(pending);
+      void pending
+        .then((client) => withDeadline(client.ping(), this.#timings.healthTimeoutMs, "A keepalive ping"))
+        .catch((error: unknown) => log.debug("Keepalive ping failed", { role, error: errorText(error) }))
+        .finally(() => this.#pinging.delete(pending));
+    }
+  }
+
   async #alive(client: Promise<CopilotClient>): Promise<boolean> {
     try {
       const resolved = await client;
@@ -336,15 +370,27 @@ export class Platform implements FactoryPlatform {
     }
   }
 
-  /** Resumes a session through the station's environment client and makes sure its agent is still the selected one. */
+  /**
+   * Resumes a session through the station's environment client and makes sure its agent is still the selected one.
+   * Bounded: a gateway that never answers (its sandbox runtime unreachable) can't hold a station forever. An abandoned
+   * resume is left alone rather than detached: a detach is per client and session, so it would also detach a newer
+   * resume of the same session on the same client.
+   */
   async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession> {
     const { agent, ...rest } = config;
-    const session = await this.#withClient(role, (client) => client.resumeSession(sessionId, rest));
+    const session = await unanswered(
+      withDeadline(
+        this.#withClient(role, (client) => client.resumeSession(sessionId, rest)),
+        this.#timings.resumeTimeoutMs,
+        `Reattaching to session ${sessionId}`,
+      ),
+    );
     if (agent) {
       try {
-        const current = await session.rpc.agent.getCurrent();
+        const timeoutMs = this.#timings.healthTimeoutMs;
+        const current = await withDeadline(session.rpc.agent.getCurrent(), timeoutMs, "Reading the session's agent");
         if (current.agent?.name !== agent) {
-          await session.rpc.agent.select({ name: agent });
+          await withDeadline(session.rpc.agent.select({ name: agent }), timeoutMs, "Selecting the session's agent");
           note?.(`Re-selected the deployed "${agent}" agent`);
         }
       } catch (error) {
@@ -354,8 +400,8 @@ export class Platform implements FactoryPlatform {
     return session;
   }
 
-  sessionInfo(sessionId: string): Promise<SessionInfo> {
-    return this.#managedOrThrow().sessions.get(sessionId);
+  async sessionInfo(sessionId: string): Promise<SessionInfo> {
+    return unanswered(withDeadline(this.#managedOrThrow().sessions.get(sessionId), this.#timings.healthTimeoutMs, "Reading the session's status"));
   }
 
   /** The signed-in user's sessions in the factory's environments (owner-scoped, newest first, capped per environment). */

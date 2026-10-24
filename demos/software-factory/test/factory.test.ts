@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventHub } from "../src/server/hub.js";
 import { Factory, type FactoryOptions } from "../src/server/pipeline/factory.js";
+import { PlatformUnavailableError } from "../src/server/pipeline/errors.js";
 import { FactoryStore } from "../src/server/store.js";
 import type { ServerEvent, WorkOrder } from "../src/shared/types.js";
 import { FakePlatform, manifest, testReport, type FakeSession, type Script } from "./fakes.js";
@@ -129,6 +130,33 @@ async function until(predicate: () => boolean, timeoutMs = 5_000): Promise<void>
     if (Date.now() > deadline) throw new Error("Timed out waiting for the condition");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/**
+ * A finished work order rewound to its release turn in flight (sent a minute ago), handed to a second factory as after
+ * a restart. The second platform has the first one's sessions, workspaces, and outputs.
+ */
+async function releaseInFlight(overrides: Partial<FactoryOptions> = {}) {
+  const first = setup({ planner, builder: builder(), reviewer, release });
+  const created = first.factory.create(CREATE);
+  await settle(first.factory, created.id);
+  const stored = store.getWorkOrder(created.id)!;
+  const releaseSession = stored.stations.find((station) => station.id === "release")!.sessionId!;
+  const sentAt = new Date(Date.now() - 60_000).toISOString();
+  store.saveWorkOrder({
+    ...stored,
+    status: "releasing",
+    release: undefined,
+    stations: stored.stations.map((station) => (station.id === "release" ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt } } : station)),
+  } as WorkOrder);
+  hub.close();
+  const second = setup({ planner, builder: builder(), reviewer, release }, store, overrides);
+  for (const [map, source] of [
+    [second.platform.sessions, first.platform.sessions],
+    [second.platform.outputs, first.platform.outputs],
+    [second.platform.workspaces, first.platform.workspaces],
+  ] as const) for (const [key, value] of source as Map<string, never>) (map as Map<string, never>).set(key, value);
+  return { ...second, id: created.id, releaseSession };
 }
 
 afterEach(() => {
@@ -338,31 +366,65 @@ describe("Factory pipeline", () => {
   });
 
   it("asks the agent to continue when the platform reports the interrupted turn failed", async () => {
-    const first = setup({ planner, builder: builder(), reviewer, release });
-    const created = first.factory.create(CREATE);
-    await settle(first.factory, created.id);
-    const stored = store.getWorkOrder(created.id)!;
-    const releaseSession = stored.stations.find((station) => station.id === "release")!.sessionId!;
-    store.saveWorkOrder({
-      ...stored,
-      status: "releasing",
-      release: undefined,
-      stations: stored.stations.map((station) =>
-        station.id === "release" ? { ...station, status: "working", turn: { kind: "work", round: 1, sentAt: new Date().toISOString() } } : station,
-      ),
-    } as WorkOrder);
-    hub.close();
-    const second = setup({ planner, builder: builder(), reviewer, release }, store);
-    for (const [map, source] of [
-      [second.platform.sessions, first.platform.sessions],
-      [second.platform.outputs, first.platform.outputs],
-      [second.platform.workspaces, first.platform.workspaces],
-    ] as const) for (const [key, value] of source as Map<string, never>) (map as Map<string, never>).set(key, value);
-    second.platform.lastTurnStatus.set(releaseSession, "failed");
+    const second = await releaseInFlight();
+    second.platform.lastTurnStatus.set(second.releaseSession, "failed");
     second.factory.resumeInterrupted();
-    const wo = await settle(second.factory, created.id);
+    const wo = await settle(second.factory, second.id);
     expect(wo.status).toBe("completed");
-    expect(second.platform.sessions.get(releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
+    expect(second.platform.sessions.get(second.releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
+  });
+
+  it("continues a turn whose sandbox restarted under it, without stopping anything", async () => {
+    // The gateway's ledger still says "running": the recreated runtime never ran the turn, so it never ends.
+    const second = await releaseInFlight({ restartGraceMs: 50, stallMs: 60_000 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    second.platform.sandboxStartedAt.set(second.releaseSession, new Date().toISOString());
+    second.factory.resumeInterrupted();
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    const session = second.platform.sessions.get(second.releaseSession)!;
+    expect(session.prompts).toHaveLength(1);
+    expect(session.prompts[0]).toContain("Your previous turn was interrupted");
+    expect(session.aborted).toBe(false);
+    expect(second.factory.activity(second.id).some((item) => item.text?.startsWith("The sandbox restarted while this turn was running"))).toBe(true);
+  });
+
+  it("stops an in-flight turn that shows no activity, then asks the agent to continue", async () => {
+    const second = await releaseInFlight({ stallMs: 100, restartGraceMs: 60_000 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    // Started before the turn was sent: the runtime that has the turn is still there, but the turn is stuck.
+    second.platform.sandboxStartedAt.set(second.releaseSession, new Date(Date.now() - 10 * 60_000).toISOString());
+    second.factory.resumeInterrupted();
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    const session = second.platform.sessions.get(second.releaseSession)!;
+    expect(session.aborted).toBe(true);
+    expect(session.prompts).toHaveLength(1);
+    expect(session.prompts[0]).toContain("Your previous turn was interrupted");
+    expect(second.factory.activity(second.id).some((item) => item.text?.startsWith("The in-flight turn showed no activity"))).toBe(true);
+  });
+
+  it("keeps waiting for an in-flight turn that shows activity, through a failed status read", async () => {
+    const second = await releaseInFlight({ stallMs: 800, restartGraceMs: 50 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    second.factory.resumeInterrupted();
+    const releaseStation = () => second.factory.get(second.id)!.stations.find((station) => station.id === "release")!;
+    await until(() => releaseStation().detail === "Resuming the in-flight turn");
+    const session = second.platform.sessions.get(second.releaseSession)!;
+    second.platform.sessionInfoErrors.push(new PlatformUnavailableError("Reading the session's status took longer than 10 s."));
+    // The turn keeps working past the stall limit, then finishes on its own.
+    for (const started = Date.now(); Date.now() - started < 1_100; ) {
+      session.emit("assistant.message_delta", { messageId: "m", deltaContent: "." });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(second.platform.sessionInfoErrors).toHaveLength(0);
+    await release(session, "", second.platform);
+    second.platform.lastTurnStatus.set(second.releaseSession, "completed");
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    expect(session.prompts).toHaveLength(0);
+    expect(session.aborted).toBe(false);
+    expect(second.factory.activity(second.id).some((item) => /^Paused|showed no activity|sandbox restarted/.test(item.text ?? ""))).toBe(false);
   });
 
   it("detaches on shutdown without failing work, and resumes it on the next start", async () => {

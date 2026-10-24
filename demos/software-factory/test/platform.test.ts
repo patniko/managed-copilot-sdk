@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
-import type { SessionConfig } from "@github/copilot-sdk";
+import type { ResumeSessionConfig, SessionConfig } from "@github/copilot-sdk";
 import { ManagedCopilotError } from "@managed-copilot/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/server/config.js";
+import { PlatformUnavailableError } from "../src/server/pipeline/errors.js";
 import { isRetryable, Platform, reconnectDelay } from "../src/server/platform.js";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, ROLES } from "../src/shared/environments.js";
 import type { PlatformState, PlatformStatus } from "../src/shared/types.js";
@@ -104,7 +105,16 @@ class FakeGateway {
   }
 }
 
-const TIMINGS = { retryBaseMs: 20, retryMaxMs: 200, connectTimeoutMs: 500, healthTimeoutMs: 300, discoveryTimeoutMs: 5_000, stopTimeoutMs: 500 };
+const TIMINGS = {
+  retryBaseMs: 20,
+  retryMaxMs: 200,
+  connectTimeoutMs: 500,
+  healthTimeoutMs: 300,
+  discoveryTimeoutMs: 5_000,
+  stopTimeoutMs: 500,
+  resumeTimeoutMs: 5_000,
+  keepAliveMs: 60_000,
+};
 
 let gateway: FakeGateway | undefined;
 let platform: Platform | undefined;
@@ -190,6 +200,18 @@ describe("platform connection", () => {
     expect(gateway.upgrades).toBe(1);
     void platform.createSession("planner", {} as SessionConfig).catch(() => undefined);
     await until(() => gateway.upgrades === 2, "a fresh client for the planner session");
+  });
+
+  it("gives up reattaching to a session the gateway never answers for, as an outage rather than a lost session", async () => {
+    const { platform } = await connected({ holdUpgrades: true, timings: { discoveryTimeoutMs: 300, resumeTimeoutMs: 300 } });
+    const started = Date.now();
+    const failure = await platform.resumeSession("builder", "sess-1", {} as ResumeSessionConfig).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PlatformUnavailableError);
+    expect((failure as Error).message).toBe("Reattaching to session sess-1 took longer than 0.3 s.");
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   it("backs off exponentially with jitter, up to the cap, and retries only what retrying can fix", () => {

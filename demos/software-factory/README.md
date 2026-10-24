@@ -118,11 +118,15 @@ environments.
   loads instantly and survives restarts.
 - **Restarts resume work.** A work order that was running when the factory stopped resumes from its last checkpoint.
   Plans and reviews are re-run, because they're cheap. Builders and the release reattach to their sandboxes and wait
-  for the in-flight turn.
+  for the in-flight turn. If that turn can't finish, the agent is asked to continue from its workspace instead. A turn
+  can't finish when its sandbox restarted after the turn began (a gateway handover can recreate sandboxes), or when it
+  shows no activity for 3 minutes; the second kind is stopped first.
 - **Platform outages pause work instead of failing it.** If the factory loses Managed Copilot, for example during a
   gateway handover, it reports `reconnecting` (on the floor and in `/api/health`) and retries with jittered backoff
-  from 1 to 30 seconds. Every step has a deadline, so a request that a proxy holds open can't stall it. Running work
-  orders pause at their last checkpoint and resume the same way as after a restart once the platform is back.
+  from 1 to 30 seconds. Every step has a deadline, so a request that a proxy holds open can't stall it. That includes
+  reattaching to a session, which gets 3 minutes. Running work orders pause at their last checkpoint and resume the
+  same way as after a restart once the platform is back. Idle connections are pinged every minute, so proxies that
+  close quiet WebSockets don't drop them (the Azure Container Apps ingress closes them after 240 seconds).
 
 ## Configuration
 
