@@ -183,6 +183,8 @@ const RESTART_GRACE_MS = 30_000;
 const RESTART_MARGIN_MS = 5_000;
 /** Stopping a stuck turn can go unanswered too. */
 const ABORT_TIMEOUT_MS = 10_000;
+/** Failed reads of an in-flight turn's status in a row (with the platform otherwise up) before the work order pauses. */
+const MAX_READ_FAILURES = 5;
 
 /** Runs work orders through the factory: plan → parallel builds with review loops → release. */
 export class Factory {
@@ -1108,12 +1110,16 @@ export class Factory {
         wake?.();
       }
     });
+    let failedReads = 0;
     const read = async (): Promise<SessionInfo | undefined> => {
       try {
-        return await this.#platform.sessionInfo(active.session.sessionId);
+        const info = await this.#platform.sessionInfo(active.session.sessionId);
+        failedReads = 0;
+        return info;
       } catch (error) {
-        // A slow or failed read while the platform is up is a blip: read again. With the platform down, the work order pauses.
-        if (!isPlatformInterruption(error) || !this.#options.readiness().ready) throw error;
+        // A slow or failed read while the platform is up is a blip: read again. With the platform down, or the reads
+        // failing MAX_READ_FAILURES times in a row, the error (an interruption) pauses the work order.
+        if (!isPlatformInterruption(error) || !this.#options.readiness().ready || ++failedReads >= MAX_READ_FAILURES) throw error;
         log.debug("Couldn't read the in-flight turn's status; reading again", { station: station.id, error: (error as Error).message });
         return undefined;
       }
