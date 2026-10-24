@@ -294,18 +294,19 @@ export class ActionStore {
 
 /** Customer-visible view of an action (`GET /v1/sessions/:id/actions`, `SessionInfo.pendingActions`). */
 export function toPendingAction(row: ActionRow): PendingAction {
-  const event = parseJson<{ data?: Record<string, unknown> }>(row.event);
   const answered = row.state === "completed" || row.state === "failed";
   const owned = row.state === "claimed" || row.state === "executing";
+  const payload = actionPayload(row);
   return {
     id: row.id,
     sessionId: row.session_id,
     kind: row.kind,
     state: row.state,
+    requestId: row.request_id,
     ...(row.tool ? { tool: row.tool } : {}),
     ...(row.tool_call_id ? { toolCallId: row.tool_call_id } : {}),
-    ...(row.arguments !== null ? { arguments: parseJson(row.arguments) } : {}),
-    ...(row.kind === "permission" && event?.data?.permissionRequest !== undefined ? { permissionRequest: event.data.permissionRequest } : {}),
+    ...(row.kind === "tool" && row.arguments !== null ? { arguments: parseJson(row.arguments) } : {}),
+    ...(payload !== undefined ? { payload } : {}),
     idempotencyKey: row.idempotency_key,
     ...(row.turn_id ? { turnId: row.turn_id } : {}),
     createdAt: toIso(row.created_at)!,
@@ -315,4 +316,11 @@ export function toPendingAction(row: ActionRow): PendingAction {
     ...(row.error ? { error: row.error } : {}),
     ...(row.reason ? { reason: row.reason } : {}),
   };
+}
+
+/** What a handler needs besides arguments: the stock `PermissionRequest`, or the elicitation's message and schema. */
+function actionPayload(row: ActionRow): unknown {
+  if (row.kind === "permission") return parseJson<{ data?: Record<string, unknown> }>(row.event)?.data?.permissionRequest;
+  if (row.kind === "elicitation") return parseJson(row.arguments);
+  return undefined;
 }

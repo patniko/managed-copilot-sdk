@@ -87,8 +87,6 @@ export interface PendingAction {
   readonly error?: string;
   /** Why the action is in its current state, e.g. why it needs reconciliation or expired. */
   readonly reason?: string;
-  /** Permission request details (`kind: "permission"`), as the stock SDK passes them to `onPermissionRequest`. */
-  readonly permissionRequest?: unknown;
 }
 
 export interface SessionInfo {
@@ -163,7 +161,11 @@ export interface CreateVaultRequest {
 }
 
 export type ScheduleState = "active" | "paused";
-export type ScheduleRunStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "skipped";
+/**
+ * `needs_reconciliation`: a crash left it unknown whether the runtime accepted the run's input, and the session's
+ * history could not settle it. The platform never resends in that state.
+ */
+export type ScheduleRunStatus = "queued" | "running" | "waiting" | "completed" | "failed" | "skipped" | "needs_reconciliation";
 
 export interface ScheduleRun {
   readonly id: string;

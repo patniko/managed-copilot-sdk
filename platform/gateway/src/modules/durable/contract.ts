@@ -22,6 +22,32 @@
  *    `actions.onAttached(...)` and deliver the returned events to that connection, in order. This replays actions that
  *    were waiting for a responder, already claimed for that connection.
  * 4. When a connection closes or stops (`client.stop`, socket close), call `actions.onDetached(connectionId)`.
+ *
+ * ## Action lifecycle (one ledger for live clients, webhook workers, pollers, attached people, and platform tools)
+ *
+ * - `pending` → `executing`: a responder claims it. Live clients are claimed at emission (or on resume replay);
+ *   webhook workers (`mcc_` capability) and owners (polling) claim over REST; platform tools are claimed by the
+ *   gateway. Every claim enters `executing` at once because the stock SDK runs a handler on receipt; `claimed` is
+ *   reserved. Each claim bumps a claim sequence, so older claim tokens can never commit.
+ * - Lease renewal: REST claims carry a lease; repeat the claim with `claimToken` to renew it (slow but healthy
+ *   handlers keep ownership). Live and platform claims last as long as their connection or process.
+ * - `executing` → `completed` / `failed`: the answer is persisted before it is acknowledged and before it is delivered
+ *   to the runtime. A duplicate (same claim token, same canonical result) returns the recorded state; a different
+ *   result is `conflict`.
+ * - `executing` → `needs_reconciliation`: a tool's lease expired, its live client disconnected, or the gateway
+ *   restarted. Execution may have happened, so it is never re-offered automatically. The original claimant's late
+ *   result is still accepted (it is the true outcome); anyone else must claim with `reconcile: true` after checking
+ *   the downstream effect with the action's `idempotencyKey`, then submit the reconciled result. Prompts
+ *   (permission, elicitation) have no external effect and return to `pending` instead.
+ * - Release: `result { claimToken, release: true }` returns an owned action to `pending` without answering.
+ * - `expired`: the answer deadline (24h) passed. The runtime receives an error (tool), `user-not-available`
+ *   (permission), or `cancel` (elicitation) — never an approval. Late results are `conflict`.
+ * - `cancelled`: the runtime stopped waiting (completion event without a recorded answer, aborted turn, or
+ *   reconciliation against the runtime's pending lists). Late results are `conflict`.
+ * - Placement generations: an action belongs to the generation whose runtime asked. An answer recorded after the
+ *   session moved to a newer generation stays recorded but is not delivered (reason says why).
+ * - Identity: `idempotencyKey` is `${sessionId}:${toolCallId}` for tools, identical across live callbacks, webhooks,
+ *   polling, resume, and restarts.
  */
 import type {
   ActionCapability,

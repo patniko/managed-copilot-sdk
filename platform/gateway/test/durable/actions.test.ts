@@ -317,7 +317,8 @@ describe("durable actions ledger", () => {
       await actions.onSessionEvent(input(permissionEvent("p1")));
       await sleep(20);
       const [action] = actions.list(SESSION);
-      expect(action!.permissionRequest).toMatchObject({ kind: "shell" });
+      expect(action!.payload).toMatchObject({ kind: "shell" });
+      expect(action!.requestId).toBe("p1");
       await actions.claim(user(), SESSION, action!.id, { leaseSeconds: 5 });
       now += 6_000;
       await actions.sweep();
