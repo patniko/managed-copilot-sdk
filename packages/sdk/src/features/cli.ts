@@ -453,7 +453,9 @@ export class AttachRelay {
     upstream.on("pong", () => (heard = Date.now()));
     upstream.on("ping", () => (heard = Date.now()));
     // A pong waits behind a large frame still arriving: every byte received counts, not just whole messages.
-    this.#transports.get(upstream)?.on("data", () => (heard = Date.now()));
+    const transport = this.#transports.get(upstream);
+    const onData = () => (heard = Date.now());
+    transport?.on("data", onData);
     client.on("message", (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
       let filtered: ReturnType<typeof filterAhpClientFrame>;
@@ -477,6 +479,7 @@ export class AttachRelay {
     });
     upstream.on("close", (code: number, reason: Buffer) => {
       clearInterval(keepAlive);
+      transport?.off("data", onData);
       let text = stalled ? STALLED : reason.toString();
       // Moved, renewed, or silent past the keepalive timeout (a dropped network path): the same session, again.
       if (code === ATTACH_CLOSE_CODES.moved || code === ATTACH_CLOSE_CODES.expired || stalled) {

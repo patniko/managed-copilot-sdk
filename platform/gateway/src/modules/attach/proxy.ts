@@ -149,6 +149,9 @@ export class AhpBridge implements AttachedBridge {
   #keepAlive: NodeJS.Timeout | undefined;
   /** When the client last sent anything (a frame, a ping, or a pong). */
   #heard = Date.now();
+  readonly #onTransportData = (): void => {
+    this.#heard = Date.now();
+  };
 
   constructor(client: WebSocket, upstream: WebSocket, options: BridgeOptions) {
     this.#client = client;
@@ -170,7 +173,7 @@ export class AhpBridge implements AttachedBridge {
     client.on("pong", () => (this.#heard = Date.now()));
     client.on("ping", () => (this.#heard = Date.now()));
     // A pong waits behind a large message still arriving: every byte received counts, not just whole messages.
-    options.transport?.on("data", () => (this.#heard = Date.now()));
+    options.transport?.on("data", this.#onTransportData);
 
     client.on("message", (data: RawData, isBinary: boolean) => this.#onClientFrame(data, isBinary));
     upstream.on("message", (data: RawData, isBinary: boolean) => this.#onUpstreamFrame(data, isBinary));
@@ -203,6 +206,7 @@ export class AhpBridge implements AttachedBridge {
     clearTimeout(this.#lifetime);
     clearTimeout(this.#lossTimer);
     clearInterval(this.#keepAlive);
+    this.#options.transport?.off("data", this.#onTransportData);
     this.#upstream.terminate();
     try {
       this.#options.attachment.close();
