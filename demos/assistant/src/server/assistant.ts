@@ -10,6 +10,7 @@ import type { AgendaView, ConnectionsView, DecisionRequest, OfflineView, Schedul
 import { BackgroundWork } from "./background.js";
 import type { AssistantConfig } from "./config.js";
 import { Conversation, UserFacingError } from "./conversation.js";
+import { backgroundReason, isBackgroundWorkError } from "./describe.js";
 import { EffectLedger } from "./effects.js";
 import { EventHub, HttpError, redirect, Router, type RequestContext } from "./http.js";
 import { createLogger, errorMessage, type Logger } from "./log.js";
@@ -127,6 +128,9 @@ export class Assistant {
         // Trigger pills replayed before the schedules were known get their names now.
         const changes = this.conversation.timeline.refresh();
         if (changes.length) this.#onTimelineChanges(changes);
+        // The platform pauses everything when a background sign-in is revoked; don't keep showing it as on.
+        const blocked = isBackgroundWorkError(error) || schedules.some((schedule) => schedule.state === "paused" && backgroundReason(schedule.pausedReason) !== undefined);
+        if (blocked && this.background.view.state === "on" && this.background.due(BACKGROUND_FRESH_MS)) void this.background.refresh("an automation is paused for background work");
       },
     });
   }
@@ -253,6 +257,20 @@ export class Assistant {
     const timeZone = this.#browserTimeZone;
     if (!timeZone || !this.#account) return;
     if (this.store.getUser(this.#account.id)?.detectedTimeZone !== timeZone) this.store.setDetectedTimeZone(this.#account.id, timeZone);
+  }
+
+  /**
+   * Actions that make scheduled work run (adding, resuming, or running an automation) need background work confirmed
+   * on. If one still fails for that reason (it was turned off or revoked elsewhere), the status is checked again.
+   */
+  async #scheduling<T>(action: () => Promise<T>): Promise<T> {
+    await this.background.ensureOn();
+    try {
+      return await action();
+    } catch (error) {
+      if (isBackgroundWorkError(errorMessage(error))) void this.background.refresh("a scheduling action needed background work");
+      throw error;
+    }
   }
 
   // ---- identity, workspace, tools ----------------------------------------------------------------------------------
@@ -492,25 +510,10 @@ export class Assistant {
       }),
     );
 
-    router.add("POST", "/api/schedules/briefing", async () =>
-      run(async () => {
-        await this.background.ensureOn();
-        return this.schedules.addMorningBriefing();
-      }),
-    );
+    router.add("POST", "/api/schedules/briefing", async () => run(() => this.#scheduling(() => this.schedules.addMorningBriefing())));
     router.add("POST", "/api/schedules/:id/pause", async (ctx) => run(() => this.schedules.pause(ctx.params.id!)));
-    router.add("POST", "/api/schedules/:id/resume", async (ctx) =>
-      run(async () => {
-        await this.background.ensureOn();
-        return this.schedules.resume(ctx.params.id!);
-      }),
-    );
-    router.add("POST", "/api/schedules/:id/run", async (ctx) =>
-      run(async () => {
-        await this.background.ensureOn();
-        return this.schedules.runNow(ctx.params.id!, randomUUID());
-      }),
-    );
+    router.add("POST", "/api/schedules/:id/resume", async (ctx) => run(() => this.#scheduling(() => this.schedules.resume(ctx.params.id!))));
+    router.add("POST", "/api/schedules/:id/run", async (ctx) => run(() => this.#scheduling(() => this.schedules.runNow(ctx.params.id!, randomUUID()))));
     router.add("DELETE", "/api/schedules/:id", async (ctx) => run(() => this.schedules.remove(ctx.params.id!)));
 
     // Background work: the person's explicit, one-click consent to the platform's background sign-in.

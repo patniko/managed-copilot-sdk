@@ -226,8 +226,18 @@ export function useAssistant() {
       disconnectGoogle: () => run(() => api.disconnectGoogle(), "Google disconnected. Using the demo workspace."),
       resetDemo: () => run(() => api.resetDemo(), "Demo inbox and calendar reset"),
       startOver: () => run(() => api.startOver(), "Started a new conversation"),
-      enableBackground: () => run(() => api.enableBackground(), "Background work is on. Reminders and automations run even when this tab is closed."),
-      disableBackground: () => run(() => api.disableBackground(), "Background work is off. Your reminders and automations are paused."),
+      enableBackground: async () => {
+        const view = await run(() => api.enableBackground());
+        if (view?.state === "on") toast("success", "Background work is on. Reminders and automations run even when this tab is closed.");
+        else if (view) toast("info", "Background work isn't on yet. Check the side panel in a moment.");
+        return view;
+      },
+      disableBackground: async () => {
+        const view = await run(() => api.disableBackground());
+        if (view?.state === "off") toast("success", "Background work is off. Your reminders and automations are paused.");
+        else if (view) toast("info", "Background work may not be off yet. Check Settings in a moment.");
+        return view;
+      },
       checkBackground: async () => {
         const view = await run(() => api.checkBackground());
         if (view?.state === "on") toast("success", "Background work is on.");

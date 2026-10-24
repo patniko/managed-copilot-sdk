@@ -127,16 +127,77 @@ describe("BackgroundWork", () => {
     expect(background.view.state).toBe("off");
   });
 
-  it("re-checks before refusing an action that needs it, so a terminal login counts right away", async () => {
+  it("requires background work confirmed on before an action that needs it, checking again first", async () => {
     let active = false;
-    const { background, calls } = setup(async () => ({ account: OCTO, active, ...(active ? { createdAt: "x" } : {}) }));
-    await background.ensureOn(); // unknown: let the platform decide
-    expect(calls).toHaveLength(0);
-    await background.refresh("test");
+    let failure: Error | undefined;
+    const now = { value: 1_000_000 };
+    const { background, calls } = setup(async () => {
+      if (failure) throw failure;
+      return { account: OCTO, active, ...(active ? { createdAt: "x" } : {}) };
+    }, now);
+    // Not checked yet: it checks, finds it off, and refuses.
     await expect(background.ensureOn()).rejects.toMatchObject({ code: "background_work_off" });
+    expect(calls).toHaveLength(1);
     active = true; // `npx managed-copilot login` in a terminal
     await expect(background.ensureOn()).resolves.toBeUndefined();
     expect(background.view.state).toBe("on");
+    // A confirmation from moments ago is trusted; an older one is checked again.
+    await background.ensureOn();
+    expect(calls).toHaveLength(2);
+    now.value += 10_000;
+    failure = new ManagedCopilotError("capability_unavailable", "Cannot reach the deployment", { reason: "unreachable" });
+    await expect(background.ensureOn()).rejects.toMatchObject({ code: "background_work_unknown", message: /Couldn't check whether background work is on \(Cannot reach the deployment\)/ });
+    failure = new ManagedCopilotError("not_found", "No route");
+    await expect(background.ensureOn()).rejects.toMatchObject({ code: "background_work_unavailable" });
+  });
+
+  it("starts a fresh read after a change or reset instead of joining one that will be discarded", async () => {
+    const reads: { resolve(value: unknown): void }[] = [];
+    let active = false;
+    const { background, calls } = setup(async (method) => {
+      if (method !== "GET") {
+        active = method === "POST";
+        return { account: OCTO, active, ...(active ? { createdAt: "x" } : {}) };
+      }
+      return new Promise((resolve) => reads.push({ resolve }));
+    });
+    const before = background.refresh("before the change");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await background.enable();
+    // A refresh after the change must ask again, not join the read that started before it.
+    const after = background.refresh("after the change");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.filter((call) => call.startsWith("GET"))).toHaveLength(2);
+    reads[0]!.resolve({ account: OCTO, active: false });
+    reads[1]!.resolve({ account: OCTO, active: true, createdAt: "x" });
+    await Promise.all([before, after]);
+    expect(background.view.state).toBe("on");
+
+    background.reset();
+    const fresh = background.refresh("after a reconnect");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.filter((call) => call.startsWith("GET"))).toHaveLength(3);
+    reads[2]!.resolve({ account: OCTO, active: true, createdAt: "x" });
+    expect((await fresh).state).toBe("on");
+  });
+
+  it("doesn't let a change answered by a replaced connection overwrite the new connection's status", async () => {
+    let releaseChange: (value: unknown) => void = () => undefined;
+    let newConnection = false;
+    const { background } = setup(async (method) => {
+      if (method === "POST") return new Promise((resolve) => (releaseChange = resolve));
+      // The replacement deployment doesn't have background work turned on.
+      return { account: OCTO, active: newConnection ? false : true, ...(newConnection ? {} : { createdAt: "x" }) };
+    });
+    const enabling = background.enable();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    newConnection = true;
+    background.reset();
+    expect((await background.refresh("platform ready")).state).toBe("off");
+    releaseChange({ account: OCTO, active: true, createdAt: "x" });
+    // The old connection's "on" is ignored; the current connection is asked again.
+    expect((await enabling).state).toBe("off");
+    expect(background.view.state).toBe("off");
   });
 
   it("checks more often while it's off, and starts over when the platform connection is replaced", async () => {

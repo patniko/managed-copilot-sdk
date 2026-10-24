@@ -18,10 +18,27 @@ const GOOGLE_RESULTS: Record<string, { tone: "success" | "error" | "info"; text:
   failed: { tone: "error", text: "Google sign-in didn't complete. Check the server log and try again." },
 };
 
+const WIDE = "(min-width: 1280px)";
+
+/** Whether a media query matches, kept current as the window changes. */
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
+  useEffect(() => {
+    const list = window.matchMedia(query);
+    const onChange = () => setMatches(list.matches);
+    onChange();
+    list.addEventListener("change", onChange);
+    return () => list.removeEventListener("change", onChange);
+  }, [query]);
+  return matches;
+}
+
 export function App() {
   const { state, actions } = useAssistant();
   const { snapshot, items, pending, stream } = state;
   const timeZone = snapshot?.settings.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  // The side panel is mounted once: beside the chat on wide screens, or in the drawer, so its element IDs are unique.
+  const wide = useMediaQuery(WIDE);
   const [panelOpen, setPanelOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [highlight, setHighlight] = useState<string>();
@@ -70,7 +87,7 @@ export function App() {
 
   const openSchedule = useCallback((id: string) => {
     setHighlight(id);
-    if (!window.matchMedia("(min-width: 1280px)").matches) setPanelOpen(true);
+    if (!window.matchMedia(WIDE).matches) setPanelOpen(true);
     setTimeout(() => document.getElementById(`schedule-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
     setTimeout(() => setHighlight(undefined), 2600);
   }, []);
@@ -79,7 +96,7 @@ export function App() {
   /** Shows the background-work card (with its consent copy), the one place it can be turned on. */
   const openBackground = useCallback(() => {
     setHighlight("background");
-    if (!window.matchMedia("(min-width: 1280px)").matches) setPanelOpen(true);
+    if (!window.matchMedia(WIDE).matches) setPanelOpen(true);
     setTimeout(() => document.getElementById("background-work")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
     setTimeout(() => setHighlight(undefined), 2600);
   }, []);
@@ -169,9 +186,11 @@ export function App() {
         <Composer disabled={!live} disabledReason={disabledReason} busy={conversation?.busy ?? false} onSend={(text) => void actions.send(text)} onStop={() => void actions.abort()} />
       </main>
 
-      <aside className="hidden w-[360px] shrink-0 overflow-y-auto border-l border-zinc-200/80 bg-zinc-50/60 p-4 scrollbar-thin xl:block dark:border-zinc-800 dark:bg-zinc-950">{rail}</aside>
+      {wide && (
+        <aside className="hidden w-[360px] shrink-0 overflow-y-auto border-l border-zinc-200/80 bg-zinc-50/60 p-4 scrollbar-thin xl:block dark:border-zinc-800 dark:bg-zinc-950">{rail}</aside>
+      )}
 
-      {panelOpen && (
+      {panelOpen && !wide && (
         <div className="fixed inset-0 z-40 flex justify-end bg-zinc-950/40 backdrop-blur-sm xl:hidden" onMouseDown={() => setPanelOpen(false)} role="presentation">
           <div
             className="h-full w-[min(380px,92vw)] animate-rise overflow-y-auto bg-zinc-50 p-4 shadow-xl scrollbar-thin dark:bg-zinc-950"

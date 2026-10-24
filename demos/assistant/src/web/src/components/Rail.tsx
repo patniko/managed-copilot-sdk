@@ -31,6 +31,22 @@ import type { AssistantActions } from "../useAssistant";
 export const NEEDS_BACKGROUND = "Turn on background work first, so this can run while you're away";
 export const LOGIN_COMMAND = "npx managed-copilot login";
 
+/** Why actions that make scheduled work run are disabled, or undefined once background work is confirmed on. */
+export function schedulingBlockedReason(background?: BackgroundView): string | undefined {
+  switch (background?.state) {
+    case "on":
+      return undefined;
+    case "off":
+      return NEEDS_BACKGROUND;
+    case "unavailable":
+      return "This deployment can't run work while you're away";
+    case "error":
+      return "Couldn't check whether background work is on";
+    default:
+      return "Checking background work…";
+  }
+}
+
 function Card({ title, icon, badge, children }: { title: string; icon: ReactNode; badge?: ReactNode; children: ReactNode }) {
   return (
     <section className="card p-4">
@@ -109,7 +125,7 @@ export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; tim
   );
 }
 
-function ScheduleMenu({ schedule, actions, backgroundOff }: { schedule: ScheduleView; actions: AssistantActions; backgroundOff: boolean }) {
+function ScheduleMenu({ schedule, actions, blockedReason }: { schedule: ScheduleView; actions: AssistantActions; blockedReason?: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -130,8 +146,8 @@ function ScheduleMenu({ schedule, actions, backgroundOff }: { schedule: Schedule
           <button
             type="button"
             className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-zinc-800"
-            disabled={backgroundOff}
-            title={backgroundOff ? NEEDS_BACKGROUND : undefined}
+            disabled={blockedReason !== undefined}
+            title={blockedReason}
             onClick={() => {
               setOpen(false);
               void actions.runSchedule(schedule.id);
@@ -238,8 +254,9 @@ export function BackgroundOffNotice({ background, account, ready, highlight, act
   );
 }
 
-function BackgroundStatusLine({ background, actions }: { background?: BackgroundView; actions: AssistantActions }) {
+function BackgroundStatusLine({ background, ready, actions }: { background?: BackgroundView; ready: boolean; actions: AssistantActions }) {
   const [checking, setChecking] = useState(false);
+  if (!ready) return null;
   if (background?.state === "on") {
     return (
       <div data-testid="background" data-state="on" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
@@ -247,6 +264,22 @@ function BackgroundStatusLine({ background, actions }: { background?: Background
         <span>
           Background work is on{background.login ? ` · runs as @${background.login}` : ""} while you're away
         </span>
+      </div>
+    );
+  }
+  if (background?.state === "unavailable") {
+    return (
+      <div data-testid="background" data-state="unavailable" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <CircleAlert className="size-3.5 shrink-0 text-zinc-400" aria-hidden />
+        <span>This deployment can't run work while you're away, so reminders and automations aren't available.</span>
+      </div>
+    );
+  }
+  if (background === undefined || background.state === "unknown") {
+    return (
+      <div data-testid="background" data-state="unknown" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <LoaderCircle className="size-3.5 shrink-0 animate-spin text-zinc-400" aria-hidden />
+        <span>Checking background work…</span>
       </div>
     );
   }
@@ -290,6 +323,7 @@ export function AutomationsCard(props: {
   const { schedules, actions } = props;
   const [busy, setBusy] = useState<string | undefined>();
   const backgroundOff = props.background?.state === "off";
+  const scheduleBlocked = schedulingBlockedReason(props.background);
   const act = async (id: string, fn: () => Promise<unknown>) => {
     setBusy(id);
     try {
@@ -298,7 +332,7 @@ export function AutomationsCard(props: {
       setBusy(undefined);
     }
   };
-  const briefingBlocked = props.error ?? (props.ready ? (backgroundOff ? NEEDS_BACKGROUND : undefined) : "Managed Copilot isn't connected");
+  const briefingBlocked = props.error ?? (props.ready ? scheduleBlocked : "Managed Copilot isn't connected");
   return (
     <Card title="Reminders & automations" icon={<Bell className="size-4" />} badge={schedules.length ? <span className="text-xs text-zinc-400">{schedules.length}</span> : undefined}>
       {props.error && (
@@ -331,7 +365,7 @@ export function AutomationsCard(props: {
             const Icon = schedule.oneShot ? Bell : Repeat;
             const paused = schedule.state === "paused";
             const failed = schedule.lastRun?.status === "failed";
-            const resumeBlocked = paused && backgroundOff;
+            const resumeBlocked = paused ? scheduleBlocked : undefined;
             return (
               <li
                 key={schedule.id}
@@ -360,22 +394,22 @@ export function AutomationsCard(props: {
                     <button
                       type="button"
                       className="btn-ghost px-1.5 py-1"
-                      disabled={!props.ready || resumeBlocked}
+                      disabled={!props.ready || resumeBlocked !== undefined}
                       onClick={() => void act(schedule.id, () => (paused ? actions.resumeSchedule(schedule.id) : actions.pauseSchedule(schedule.id)))}
                       aria-label={paused ? `Resume ${schedule.name}` : `Pause ${schedule.name}`}
-                      title={resumeBlocked ? NEEDS_BACKGROUND : paused ? "Resume" : "Pause"}
+                      title={resumeBlocked ?? (paused ? "Resume" : "Pause")}
                     >
                       {paused ? <Play className="size-4" aria-hidden /> : <Pause className="size-4" aria-hidden />}
                     </button>
                   )}
-                  <ScheduleMenu schedule={schedule} actions={actions} backgroundOff={backgroundOff} />
+                  <ScheduleMenu schedule={schedule} actions={actions} blockedReason={scheduleBlocked} />
                 </div>
               </li>
             );
           })}
         </ul>
       )}
-      <BackgroundStatusLine background={props.background} actions={actions} />
+      <BackgroundStatusLine background={props.background} ready={props.ready} actions={actions} />
     </Card>
   );
 }

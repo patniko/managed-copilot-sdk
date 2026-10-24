@@ -17,6 +17,8 @@ const CHECK_OFF_MS = 30_000;
 /** Re-check while it's on, so a revoked sign-in shows up without a failed reminder first. */
 const CHECK_ON_MS = 5 * 60_000;
 const CHECK_UNAVAILABLE_MS = 10 * 60_000;
+/** A scheduling action trusts an "on" this recent; otherwise it checks again first. */
+const ENSURE_FRESH_MS = 5_000;
 
 /** The platform's background sign-in status (`GET`, `POST`, and `DELETE /v1/credentials/background`). */
 interface CredentialStatus {
@@ -44,7 +46,8 @@ export class BackgroundWork {
   #checkedAt = 0;
   /** Bumped by changes and resets, so a status read that overlapped one is never applied over it. */
   #generation = 0;
-  #changing = false;
+  /** The generation of the change in progress. A reset abandons it, so a late answer can't overwrite newer status. */
+  #changing: number | undefined;
   #refreshing: Promise<BackgroundView> | undefined;
 
   constructor(deps: BackgroundDeps) {
@@ -76,9 +79,14 @@ export class BackgroundWork {
     }
   }
 
-  /** Reads the status from the platform (joining a read in progress). */
+  /** Reads the status from the platform, joining a read in progress (one started after the last change or reset). */
   refresh(reason: string): Promise<BackgroundView> {
-    this.#refreshing ??= this.#refresh(reason).finally(() => (this.#refreshing = undefined));
+    if (!this.#refreshing) {
+      const read: Promise<BackgroundView> = this.#refresh(reason).finally(() => {
+        if (this.#refreshing === read) this.#refreshing = undefined;
+      });
+      this.#refreshing = read;
+    }
     return this.#refreshing;
   }
 
@@ -92,7 +100,7 @@ export class BackgroundWork {
       next = this.#fromError(error);
       this.#deps.log.debug("Couldn't check background work", { reason, error: errorMessage(error) });
     }
-    if (generation === this.#generation && !this.#changing) this.#apply(next);
+    if (generation === this.#generation && this.#changing === undefined) this.#apply(next);
     return this.#view;
   }
 
@@ -108,38 +116,62 @@ export class BackgroundWork {
 
   async #change(method: "POST" | "DELETE", action: string): Promise<BackgroundView> {
     if (!this.#deps.platform.managed) throw new UserFacingError("platform_unavailable", "Managed Copilot isn't connected.");
-    if (this.#changing) throw new UserFacingError("busy", "Background work is already being changed. Try again in a moment.");
-    this.#changing = true;
-    this.#generation++;
+    if (this.#changing !== undefined) throw new UserFacingError("busy", "Background work is already being changed. Try again in a moment.");
+    const generation = ++this.#generation;
+    this.#changing = generation;
+    // A read already in flight is about to be discarded; later callers start a fresh one.
+    this.#refreshing = undefined;
+    let status: CredentialStatus | undefined;
+    let failure: unknown;
     try {
-      const status = await this.#deps.platform.request<CredentialStatus>(method, BACKGROUND_ROUTE, method === "POST" ? {} : undefined);
-      this.#apply(this.#fromStatus(status));
-      this.#deps.log.info(method === "POST" ? "Background work turned on" : "Background work turned off", { login: this.#view.login });
-      return this.#view;
+      status = await this.#deps.platform.request<CredentialStatus>(method, BACKGROUND_ROUTE, method === "POST" ? {} : undefined);
     } catch (error) {
-      this.#deps.log.warn(`Couldn't ${action} background work`, { error: errorMessage(error) });
-      throw new UserFacingError("background_failed", `Couldn't ${action} background work: ${errorMessage(error)}`);
-    } finally {
-      this.#changing = false;
-      this.#generation++;
+      failure = error;
     }
+    const current = this.#changing === generation;
+    if (current) {
+      this.#changing = undefined;
+      // Reads that overlapped the change are discarded too.
+      this.#generation++;
+      this.#refreshing = undefined;
+    }
+    if (failure !== undefined) {
+      this.#deps.log.warn(`Couldn't ${action} background work`, { error: errorMessage(failure) });
+      throw new UserFacingError("background_failed", `Couldn't ${action} background work: ${errorMessage(failure)}`);
+    }
+    // The platform connection was replaced meanwhile: this answer came from the old one, so ask the current one.
+    if (!current) return this.refresh("the connection changed while background work was changing");
+    this.#apply(this.#fromStatus(status!));
+    this.#deps.log.info(method === "POST" ? "Background work turned on" : "Background work turned off", { login: this.#view.login });
+    return this.#view;
   }
 
   /**
-   * For actions that only work with background work on (adding, resuming, or running automations): re-checks when it
-   * looks off, then refuses with a clear message. Unknown or unchecked states pass; the platform still enforces.
+   * For actions that only work with background work on (adding, resuming, or running automations): checks the status
+   * (unless it was confirmed moments ago) and refuses, with a clear reason, unless it is confirmed on.
    */
   async ensureOn(): Promise<void> {
-    if (this.#view.state !== "off") return;
-    await this.refresh("an action needs background work");
-    if (this.#view.state === "off") {
-      throw new UserFacingError("background_work_off", "Turn on background work first, so this can run as you while you're away.");
+    if (this.#view.state !== "on" || this.due(ENSURE_FRESH_MS)) await this.refresh("an action needs background work");
+    switch (this.#view.state) {
+      case "on":
+        return;
+      case "off":
+        throw new UserFacingError("background_work_off", "Turn on background work first, so this can run as you while you're away.");
+      case "unavailable":
+        throw new UserFacingError("background_work_unavailable", "This deployment can't run work while you're away, so reminders and automations aren't available here.");
+      default:
+        throw new UserFacingError(
+          "background_work_unknown",
+          `Couldn't check whether background work is on${this.#view.error ? ` (${this.#view.error.replace(/\.$/, "")})` : ""}. Try again in a moment.`,
+        );
     }
   }
 
   /** The platform connection was lost or replaced; the status is unknown until it's checked again. */
   reset(): void {
     this.#generation++;
+    this.#changing = undefined;
+    this.#refreshing = undefined;
     this.#checkedAt = 0;
     this.#apply({ state: "unknown" });
   }
