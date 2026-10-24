@@ -740,6 +740,27 @@ describe("Factory pipeline", () => {
     expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Managed Copilot lost the connection"))).toBe(true);
   });
 
+  it("pauses, rather than fails, when a turn runs into the gateway's registration deadline", async () => {
+    let timedOut = false;
+    const stalled: Script = async (session, prompt, platform) => {
+      if (!timedOut && taskOf(platform, session).id === "json2csv") {
+        timedOut = true;
+        // The runtime never answered a step that readies the session for this turn: not the agent's own timeout.
+        throw Object.assign(
+          new Error(`The runtime of session ${session.sessionId} did not answer session.resume within 1 minute and its connection stopped responding, so the gateway closed it. Try again; the session reconnects. [timeout]`),
+          { code: -32001, data: { code: "timeout", details: { sessionId: session.sessionId, step: "session.resume" } } },
+        );
+      }
+      await builder()(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: stalled, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(timedOut).toBe(true);
+    expect(wo.status).toBe("completed");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime of session"))).toBe(true);
+  });
+
   it("pauses, keeping the sandbox, when reattaching runs into the gateway's or the SDK's deadline", async () => {
     let dropped = false;
     const dropping: Script = async (session, prompt, platform) => {
