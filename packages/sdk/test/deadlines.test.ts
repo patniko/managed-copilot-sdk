@@ -260,4 +260,36 @@ describe("call deadlines", () => {
       for (const dispose of ctx.disposables) await dispose();
     }
   });
+
+  it("resumes after the cursor a stream began with, even when it ended before its first event", async () => {
+    const lastIds: (string | undefined)[] = [];
+    handler = (req, res) => {
+      lastIds.push(req.headers["last-event-id"] as string | undefined);
+      held.push(res);
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(": connected\n\n");
+      // The gateway's cursor for a stream without one; this stream then ends (a gateway handover) before any event.
+      if (lastIds.length === 1) {
+        res.end("id: evt-0\n\n");
+        return;
+      }
+      res.write(`id: evt-1\nevent: session.created\ndata: ${JSON.stringify({ id: "evt-1", type: "session.created", createdAt: new Date().toISOString(), data: {} })}\n\n`);
+    };
+    timings.eventsRetryMs = 10;
+    const received: string[] = [];
+    const ctx = {
+      http: new HttpClient(base, "t"),
+      listeners: new Map([["*", new Set([(platformEvent: PlatformEvent) => received.push(platformEvent.id)])]]),
+      disposables: new Set<() => void>(),
+    } as unknown as ManagedContext;
+    ensureEventStream(ctx);
+    try {
+      await waitUntil(() => received.includes("evt-1"));
+      // The reconnect asks for what came after the cursor; the cursor itself is not an event.
+      expect(lastIds.slice(0, 2)).toEqual([undefined, "evt-0"]);
+      expect(received).toEqual(["evt-1"]);
+    } finally {
+      for (const dispose of ctx.disposables) await dispose();
+    }
+  });
 });
