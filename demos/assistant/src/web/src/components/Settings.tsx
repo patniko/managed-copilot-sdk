@@ -1,7 +1,14 @@
-import { Bell, Check, Copy, X } from "lucide-react";
+import { Bell, Check, Copy, Monitor, Moon, Sun, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { Snapshot } from "../../../shared/protocol";
+import { getTheme, setTheme, type Theme } from "../theme";
 import type { AssistantActions } from "../useAssistant";
+
+const THEMES: { value: Theme; label: string; icon: typeof Sun }[] = [
+  { value: "system", label: "System", icon: Monitor },
+  { value: "light", label: "Light", icon: Sun },
+  { value: "dark", label: "Dark", icon: Moon },
+];
 
 function timeZones(current: string): string[] {
   let zones: string[] = [];
@@ -28,6 +35,8 @@ export function SettingsDialog({ snapshot, onClose, actions }: { snapshot?: Snap
   const zones = useMemo(() => timeZones(timeZone), [timeZone]);
   const [permission, setPermission] = useState(typeof Notification === "undefined" ? "unsupported" : Notification.permission);
   const [copied, setCopied] = useState(false);
+  const [theme, setThemeState] = useState<Theme>(getTheme);
+  const [confirming, setConfirming] = useState<"armed" | "busy" | undefined>();
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -56,6 +65,28 @@ export function SettingsDialog({ snapshot, onClose, actions }: { snapshot?: Snap
           </button>
         </div>
         <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+          <Row label="Appearance">
+            <div className="inline-flex rounded-lg bg-zinc-100 p-0.5 dark:bg-zinc-800" role="radiogroup" aria-label="Appearance">
+              {THEMES.map(({ value, label, icon: Icon }) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={theme === value}
+                  onClick={() => {
+                    setTheme(value);
+                    setThemeState(value);
+                  }}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                    theme === value ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-50" : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                  }`}
+                >
+                  <Icon className="size-3.5" aria-hidden />
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Row>
           <Row label="Time zone">
             <select
               className="w-full rounded-lg bg-zinc-50 px-2.5 py-1.5 text-sm ring-1 ring-zinc-200 outline-none focus:ring-violet-400 dark:bg-zinc-800 dark:ring-zinc-700"
@@ -131,6 +162,29 @@ export function SettingsDialog({ snapshot, onClose, actions }: { snapshot?: Snap
           Your conversation lives on Managed Copilot and survives restarts of this app and the platform. Open it in a terminal with{" "}
           <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">npx managed-copilot attach</code>.
         </p>
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-xl bg-zinc-50 px-3 py-2.5 ring-1 ring-zinc-200 dark:bg-zinc-800/50 dark:ring-zinc-700">
+          <div className="text-xs text-zinc-600 dark:text-zinc-400">
+            <div className="font-semibold text-zinc-800 dark:text-zinc-200">Start a new conversation</div>
+            Your assistant forgets this chat, and its reminders and automations are deleted.
+          </div>
+          <button
+            type="button"
+            className="btn-secondary shrink-0 text-red-600 ring-red-200 hover:bg-red-50 dark:text-red-400 dark:ring-red-900 dark:hover:bg-red-950"
+            disabled={confirming === "busy"}
+            onClick={async () => {
+              if (confirming !== "armed") {
+                setConfirming("armed");
+                return;
+              }
+              setConfirming("busy");
+              await actions.startOver();
+              setConfirming(undefined);
+              onClose();
+            }}
+          >
+            {confirming === "armed" ? "Confirm" : confirming === "busy" ? "Starting…" : "Start over"}
+          </button>
+        </div>
       </div>
     </div>
   );
