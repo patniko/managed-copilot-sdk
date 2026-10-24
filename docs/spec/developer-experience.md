@@ -1217,8 +1217,8 @@ Its real Gmail and Google Calendar provider is implemented, but it needs the ope
 was not run against real accounts.
 
 These checks use real models, so a check that depends on the model's choices can occasionally miss. On the final
-build, snippet 03 failed once in five runs: the turn completed and published normally, but without the report under
-`outputs/`. The other four runs passed.
+build, snippet 03 failed once in six runs: the turn completed and published normally, but without the report under
+`outputs/`. The other five runs passed.
 
 Still requiring a user decision before the affected behavior is finalized: GitHub App ownership/setup; active-wait
 cost limits and cancellation policy; the initial background callback subset; and concrete retention/schedule
