@@ -11,7 +11,7 @@
     "dev:web": "vite",
     "start": "node dist/server/main.js",
     "test": "vitest run",
-    "screenshots": "tsx scripts/screenshots.ts",
+    "happy-path": "tsx scripts/happy-path.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {

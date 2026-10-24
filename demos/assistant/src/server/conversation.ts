@@ -325,4 +325,18 @@ export class Conversation {
     this.#teardown();
     this.#setState("detached");
   }
+
+  /** Forgets this conversation and starts a new one on the next attach. The old session is deleted on the platform. */
+  async startOver(): Promise<string | undefined> {
+    const accountId = this.#deps.accountId();
+    const old = this.sessionId;
+    await this.detach("starting a new conversation");
+    if (accountId !== undefined) this.#deps.store.setSessionId(accountId, undefined);
+    this.timeline.clear();
+    this.#deps.onReset();
+    if (old) {
+      await this.#deps.platform.managed?.sessions.delete(old).catch((error) => this.#deps.log.warn("Couldn't delete the previous conversation", { sessionId: old, error: errorMessage(error) }));
+    }
+    return old;
+  }
 }
