@@ -100,10 +100,11 @@ export interface ManagedSessions {
 }
 
 export interface ManagedFiles {
-  list(path?: string): Promise<FileEntry[]>;
-  /** Streams a local file into the sandbox workspace. */
-  upload(localPath: string, remotePath: string): Promise<FileEntry>;
-  write(remotePath: string, data: string | Uint8Array): Promise<FileEntry>;
+  /** Lists a workspace directory (default: the workspace root). Symbolic links and special files are omitted. */
+  list(path?: string, options?: { recursive?: boolean }): Promise<FileEntry[]>;
+  /** Streams a local file into the sandbox workspace (atomic replace by default; `overwrite: false` fails if it exists). */
+  upload(localPath: string, remotePath: string, options?: { overwrite?: boolean }): Promise<FileEntry>;
+  write(remotePath: string, data: string | Uint8Array, options?: { overwrite?: boolean }): Promise<FileEntry>;
   download(remotePath: string, localPath: string): Promise<void>;
   read(remotePath: string): Promise<string>;
   readBytes(remotePath: string): Promise<Uint8Array>;
@@ -113,9 +114,10 @@ export interface ManagedArtifacts {
   /** Waits for the most recent completed turn's publication (or `turnId`), not mere runtime idleness. */
   waitForPublication(options?: { turnId?: string; timeoutMs?: number }): Promise<PublicationResult>;
   list(options?: { versions?: "latest" | "all" }): Promise<ArtifactInfo[]>;
-  read(path: string): Promise<string>;
-  readBytes(path: string): Promise<Uint8Array>;
-  download(path: string, localPath: string): Promise<void>;
+  /** Reads the newest published version of a file under `outputs/`, or a specific `version`. */
+  read(path: string, options?: { version?: number }): Promise<string>;
+  readBytes(path: string, options?: { version?: number }): Promise<Uint8Array>;
+  download(path: string, localPath: string, options?: { version?: number }): Promise<void>;
 }
 
 /** Act for a specific GitHub user (for example a backend serving signed-in users); defaults to this connection's account. */
