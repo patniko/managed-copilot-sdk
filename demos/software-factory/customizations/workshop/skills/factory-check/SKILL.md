@@ -33,7 +33,8 @@ line such as `FACTORY_TEST_SUMMARY {"total":9,"passed":9,"failed":0,"skipped":0,
 
 - `0`: tests ran and all passed.
 - `1`: a test failed, a test file failed to load, or the run timed out. Read the failures, fix the code, run again.
-- `2`: no test files were found. Add tests named `*.test.js`.
+- `2`: no tests ran: no test files were found, or the test files define no tests (or skip them all). Add tests in
+  files named `*.test.js`.
 
 Do not edit files under `outputs/` by hand, except `outputs/NOTES.md` (builders, optional) and
 `outputs/RELEASE.md` (release).
