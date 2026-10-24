@@ -16,6 +16,10 @@ coverage/
 .modules/
 obj/
 bin/
+# ...but not package launchers (pnpm links bins at install time, before dist/ exists)
+!packages/*/bin/
+# Machine-specific package feed mapping (see README: "Behind a NuGet proxy")
+NuGet.config
 
 # Demo outputs
 demos/**/.output/
