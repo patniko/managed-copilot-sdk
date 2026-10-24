@@ -10,7 +10,11 @@ async function probeAttach(url: string, sessionId: string): Promise<{ catalog: s
   const material = await new HttpClient(url, await resolveToken()).post<AttachMaterial>(ROUTES.attach(sessionId));
   const socket = new WebSocket(material.url.replace(/^wss?:\/\/[^/]+/, url.replace(/^http/, "ws")), { headers: { authorization: `Bearer ${material.token}` } });
   await new Promise((resolve, reject) => {
-    socket.once("open", resolve);
+    const timer = setTimeout(() => reject(new Error("the attach socket did not open within 30s")), 30_000);
+    socket.once("open", () => {
+      clearTimeout(timer);
+      resolve(undefined);
+    });
     socket.once("error", reject);
     socket.once("unexpected-response", (_request, response) => reject(new Error(`attach refused (HTTP ${response.statusCode})`)));
   });
@@ -21,9 +25,13 @@ async function probeAttach(url: string, sessionId: string): Promise<{ catalog: s
   });
   let nextId = 1;
   const call = (method: string, params: object) =>
-    new Promise<{ result?: any; error?: any }>((resolve) => {
+    new Promise<{ result?: any; error?: any }>((resolve, reject) => {
       const id = nextId++;
-      pending.set(id, resolve);
+      const timer = setTimeout(() => reject(new Error(`no answer to ${method} within 30s`)), 30_000);
+      pending.set(id, (message) => {
+        clearTimeout(timer);
+        resolve(message);
+      });
       socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
     });
   try {
@@ -36,7 +44,11 @@ async function probeAttach(url: string, sessionId: string): Promise<{ catalog: s
   }
 }
 
-export default snippet(import.meta.url, { title: "Open a session in Copilot CLI", section: "spec §14", requires: ["attach.cli"] }, async (t) => {
+export default snippet(
+  import.meta.url,
+  // Interactive attach lasts as long as you use Copilot CLI; the non-interactive probe bounds each step itself.
+  { title: "Open a session in Copilot CLI", section: "spec §14", requires: ["attach.cli"], timeoutMs: 8 * 60 * 60_000 },
+  async (t) => {
   const managed = await ManagedCopilot.connect();
   t.cleanup(() => managed.close());
   const session = await managed.createSession({ environment: "chat", model: "claude-sonnet-5", onPermissionRequest: approveAll });

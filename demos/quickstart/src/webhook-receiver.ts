@@ -5,7 +5,7 @@ import { verifyWebhook } from "@managed-copilot/sdk";
 import { lookupOrder } from "./orders.js";
 
 /** Where the AppHost's `quickstart` webhook delivers (see apphost.mts). */
-export const WEBHOOK_PORT = Number(process.env.QUICKSTART_WEBHOOK_PORT ?? 7495);
+export const WEBHOOK_PORT = Number(process.env.QUICKSTART_WEBHOOK_PORT ?? 7485);
 
 export interface WebhookReceiver {
   readonly deliveries: string[];

@@ -2,13 +2,17 @@
 import { createBuilder } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
+import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
 
 // Generated once and kept in the AppHost's user secrets, so restarts keep the same values.
 const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue(name, { minLength: 48, special: false }, { secret: true, persist: true });
-const quickstartWebhookSecret = await generatedSecret("quickstart-webhook-secret");
+
+// The demos bring their own environments (and the assistant its webhook) as plain data.
+const factory = softwareFactory();
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
+const quickstartWebhook = { port: 7485, secret: await generatedSecret("quickstart-webhook-secret") };
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   environments: {
@@ -20,6 +24,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     },
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
+    ...factory.environments,
     ...assistant.environments,
   },
 
@@ -29,17 +34,17 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   webhooks: {
     // The quickstart's offline snippets answer tool calls here while their app is away (section 12).
     quickstart: {
-      url: "http://localhost:7495/api/copilot-events",
+      url: `http://localhost:${quickstartWebhook.port}/api/copilot-events`,
       environments: ["chat"],
       events: ["session.action_required", "session.idle", "session.failed", "schedule.run_started"],
-      secret: quickstartWebhookSecret,
+      secret: quickstartWebhook.secret,
     },
     ...assistant.webhooks,
   },
 });
 
 /** A demo's built Node server on its fixed port, connected to the platform. */
-function addDemo(demo: { name: string; workingDirectory: string; script: string; port: number; healthPath: string; env?: Record<string, string> }) {
+function addDemo(demo: { name: string; workingDirectory: string; script: string; port: number; healthPath: string; env?: Readonly<Record<string, string>> }) {
   let app = builder
     .addNodeApp(demo.name, demo.workingDirectory, demo.script)
     .withPnpm({ install: false })
@@ -51,14 +56,8 @@ function addDemo(demo: { name: string; workingDirectory: string; script: string;
   return app;
 }
 
-// Every spec snippet as an acceptance check against this platform. Start it from the dashboard.
-await builder
-  .addJavaScriptApp("quickstart", "./demos/quickstart", { runScriptName: "acceptance" })
-  .withPnpm({ install: false })
-  .withEnvironment("MANAGED_COPILOT_URL", copilot.url)
-  .withEnvironment("COPILOT_WEBHOOK_SECRET", quickstartWebhookSecret)
-  .waitFor(copilot.gateway)
-  .withExplicitStart();
+// An AI software factory: plans a work order, builds tasks in parallel sandboxes, reviews, and releases.
+await addDemo(factory.app);
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, and Google Calendar.
 const assistantApp = await addDemo(ASSISTANT_DEMO)
@@ -73,5 +72,15 @@ if (await configuration.exists("Parameters:google-client-id")) {
     .withEnvironment("GOOGLE_CLIENT_ID", await builder.addParameter("google-client-id"))
     .withEnvironment("GOOGLE_CLIENT_SECRET", await builder.addParameter("google-client-secret", { secret: true }));
 }
+
+// Every spec snippet as an acceptance check against this platform. Start it from the dashboard.
+await builder
+  .addJavaScriptApp("quickstart", "./demos/quickstart", { runScriptName: "acceptance" })
+  .withPnpm({ install: false })
+  .withEnvironment("MANAGED_COPILOT_URL", copilot.url)
+  .withEnvironment("COPILOT_WEBHOOK_SECRET", quickstartWebhook.secret)
+  .withEnvironment("QUICKSTART_WEBHOOK_PORT", String(quickstartWebhook.port))
+  .waitFor(copilot.gateway)
+  .withExplicitStart();
 
 await builder.build().run();
