@@ -14,6 +14,7 @@ import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
 import type { Duplex } from "node:stream";
 import {
   ATTACH_CLOSE_CODES,
+  ERROR_HTTP_STATUS,
   ManagedCopilotError,
   ROUTES,
   discoveryDirectory,
@@ -29,6 +30,11 @@ import type { ManagedContext, OpenCliOptions } from "../types.js";
 
 const GITHUB_API_URL = process.env.MANAGED_COPILOT_GITHUB_API_URL ?? "https://api.github.com";
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+/** Close code that makes the stock Copilot CLI reconnect to the same URL (1012, service restart). Private 4xxx codes end its attachment. */
+const CLI_RECONNECT = 1012;
+/** At most this many platform-requested reconnects per window, so a fault can't loop forever. */
+const MAX_RECONNECTS = 5;
+const RECONNECT_WINDOW_MS = 60_000;
 
 /** Why an attachment ended, when the platform or the launcher ended it rather than the user. */
 export interface AttachOutcome {
@@ -155,6 +161,8 @@ export class AttachRelay {
   /** A CLI connection is being verified or connected; reserved before the first await so only one can win. */
   #connecting = false;
   #closed = false;
+  /** When the platform last asked the CLI to reconnect (session moved, attachment renewed). */
+  #reconnects: number[] = [];
   outcome: AttachOutcome | undefined;
 
   constructor(options: RelayOptions) {
@@ -231,6 +239,10 @@ export class AttachRelay {
   async #connectUpstream(protocols: string[]): Promise<WebSocket> {
     for (let attempt = 0; ; attempt++) {
       const material = await this.#material();
+      // Reconnects stay on the conversation the CLI attached to (spec section 9): never switch sessions silently.
+      if (material.ahpSessionId !== this.#options.first.ahpSessionId) {
+        throw new ManagedCopilotError("conflict", "The deployment offered a different conversation for this session; refusing to switch. Attach again.");
+      }
       // The ticket only ever goes to the deployment this process connected to, whatever host the material names.
       const { pathname, search } = new URL(material.url);
       const upstream = new WebSocket(`${socketOrigin(this.#options.deploymentUrl)}${pathname}${search}`, protocols, {
@@ -278,8 +290,9 @@ export class AttachRelay {
       try {
         upstream = await this.#connectUpstream(protocols);
       } catch (error) {
-        this.outcome = { code: "capability_unavailable", message: (error as Error).message };
-        return reject(socket, 502, "capability_unavailable", (error as Error).message);
+        const code: ErrorCode = error instanceof ManagedCopilotError ? error.code : "capability_unavailable";
+        this.outcome = { code, message: (error as Error).message };
+        return reject(socket, code === "capability_unavailable" ? 502 : ERROR_HTTP_STATUS[code], code, (error as Error).message);
       }
       if (socket.destroyed || this.#closed) {
         upstream.terminate();
@@ -301,6 +314,8 @@ export class AttachRelay {
   #bridge(client: WebSocket, upstream: WebSocket): void {
     const active = { client, upstream };
     this.#active = active;
+    // Reflects the latest connection: a refused attempt the CLI recovered from is not the attachment's outcome.
+    this.outcome = undefined;
     client.on("message", (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
       const filtered = filterAhpClientFrame(data.toString());
@@ -316,14 +331,34 @@ export class AttachRelay {
     });
     upstream.on("close", (code: number, reason: Buffer) => {
       const text = reason.toString();
-      if (code === ATTACH_CLOSE_CODES.sessionGone) this.outcome = { code: "session_gone", message: text || "The session ended." };
-      else if (code === ATTACH_CLOSE_CODES.expired) this.outcome = { code: "expired", message: text || "The attachment expired." };
+      if (code === ATTACH_CLOSE_CODES.moved || code === ATTACH_CLOSE_CODES.expired) {
+        if (this.#mayReconnect()) {
+          // The stock CLI reconnects to this relay after 1012 (service restart); the relay then attaches it again with a
+          // fresh ticket, to the same session wherever it now runs. Free the slot now: the CLI redials within milliseconds.
+          if (this.#active === active) this.#active = undefined;
+          if (client.readyState === WebSocket.OPEN) client.close(CLI_RECONNECT, (text || "Reconnecting.").slice(0, 120));
+          setTimeout(() => client.terminate(), 2_000).unref();
+          return;
+        }
+        this.outcome = { code: code === ATTACH_CLOSE_CODES.moved ? "session_gone" : "expired", message: "The attachment was interrupted repeatedly. Attach again." };
+      } else if (code === ATTACH_CLOSE_CODES.sessionGone) {
+        this.outcome = { code: "session_gone", message: text || "The session ended." };
+      }
       if (client.readyState === WebSocket.OPEN) client.close(code === 1000 || (code >= 3000 && code <= 4999) ? code : 1011, text.slice(0, 120));
     });
     client.on("error", () => upstream.terminate());
     upstream.on("error", () => {
       if (client.readyState === WebSocket.OPEN) client.close(1011, "Lost the connection to Managed Copilot.");
     });
+  }
+
+  /** Allows a platform-requested reconnect unless they are happening in a loop. */
+  #mayReconnect(): boolean {
+    const now = Date.now();
+    this.#reconnects = this.#reconnects.filter((at) => now - at < RECONNECT_WINDOW_MS);
+    if (this.#reconnects.length >= MAX_RECONNECTS) return false;
+    this.#reconnects.push(now);
+    return true;
   }
 }
 

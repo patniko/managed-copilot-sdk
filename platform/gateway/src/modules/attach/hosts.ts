@@ -29,8 +29,16 @@ interface HostPublishResult {
   readonly sessionUri: string;
 }
 
-/** WebSocket close code for attachments ended by the platform (deleted, moved, runtime stopped). */
+/** WebSocket close code for attachments ended by the platform (deleted, runtime stopped). */
 export const CLOSE_SESSION_GONE = ATTACH_CLOSE_CODES.sessionGone;
+
+/** How a release ends the session's attached clients. */
+export interface ReleaseOptions {
+  /** Only release this host, not a newer one for the same session. */
+  readonly only?: AhpHost;
+  /** Close code for attached clients: `moved` when the session continues elsewhere. Defaults to `sessionGone`. */
+  readonly code?: number;
+}
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -57,7 +65,7 @@ export class AhpHosts {
     return this.#serialize(sessionId, async () => {
       let host = this.#hosts.get(sessionId);
       if (!host || host.closed || host.runtime.connectionId !== runtime.connectionId) {
-        if (host) await this.#dispose(host, "The session moved to a new runtime connection. Attach again.");
+        if (host) await this.#dispose(host, "The session moved to a new runtime. Reconnecting.", ATTACH_CLOSE_CODES.moved);
         host = await this.#start(sessionId, runtime);
         this.#hosts.set(sessionId, host);
       }
@@ -87,17 +95,17 @@ export class AhpHosts {
     host.idleTimer = undefined;
     if (host.closed || host.sockets.size > 0) return;
     host.idleTimer = setTimeout(() => {
-      if (host.sockets.size === 0) void this.release(host.sessionId, "idle", host);
+      if (host.sockets.size === 0) void this.release(host.sessionId, "idle", { only: host });
     }, this.#idleMs);
     host.idleTimer.unref();
   }
 
-  /** Disposes the session's host (only `only`, when given) and closes its attached clients with `reason`. */
-  release(sessionId: string, reason: string, only?: AhpHost): Promise<void> {
+  /** Disposes the session's host and closes its attached clients with `reason`. */
+  release(sessionId: string, reason: string, { only, code = CLOSE_SESSION_GONE }: ReleaseOptions = {}): Promise<void> {
     return this.#serialize(sessionId, async () => {
       const host = this.#hosts.get(sessionId);
       if (!host || (only && host !== only)) return;
-      await this.#dispose(host, reason);
+      await this.#dispose(host, reason, code);
     });
   }
 
@@ -164,18 +172,18 @@ export class AhpHosts {
     void runtime.closed.then(() => {
       if (host.closed) return;
       this.#log.info("Session runtime connection closed; ending its Copilot CLI attachments", { sessionId, hostId });
-      void this.release(sessionId, "The session's runtime stopped. Attach again to resume it.", host);
+      void this.release(sessionId, "The session's runtime stopped. Attach again to resume it.", { only: host });
     });
     this.#log.info("Started Copilot CLI hosting for session", { sessionId, hostId });
     return host;
   }
 
-  async #dispose(host: AhpHost, reason: string): Promise<void> {
+  async #dispose(host: AhpHost, reason: string, code: number = CLOSE_SESSION_GONE): Promise<void> {
     if (host.closed) return;
     host.closed = true;
     if (this.#hosts.get(host.sessionId) === host) this.#hosts.delete(host.sessionId);
     if (host.idleTimer) clearTimeout(host.idleTimer);
-    for (const socket of host.sockets) socket.close(CLOSE_SESSION_GONE, reason.slice(0, 120));
+    for (const socket of host.sockets) socket.close(code, reason.slice(0, 120));
     host.sockets.clear();
     await Promise.race([host.runtime.request("host.dispose", { hostId: host.hostId }).catch(() => undefined), host.runtime.closed]);
     this.#log.info("Stopped Copilot CLI hosting for session", { sessionId: host.sessionId, hostId: host.hostId, reason });

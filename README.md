@@ -49,7 +49,9 @@ aspire run        # the dashboard, the platform at http://localhost:7400, and th
 
 `aspire run` starts the gateway, the software factory (http://localhost:7480), and the assistant
 (http://localhost:7490). Your code finds the platform with no configuration: `ManagedCopilot.connect()` reads the
-discovery record the local gateway writes. From another terminal:
+discovery record the local gateway writes. To run a second copy beside the first (for example another checkout), set
+`MANAGED_COPILOT_PORT_OFFSET=100`: its ports move to 7500, 7580, and 7590, and it leaves discovery to the first copy,
+so point tools at it with `MANAGED_COPILOT_URL=http://localhost:7500`. From another terminal:
 
 ```powershell
 npx managed-copilot status             # the deployment, your account, and its environments

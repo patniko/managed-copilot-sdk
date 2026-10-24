@@ -102,6 +102,7 @@ export async function addManagedCopilot<B extends AspireBuilder>(
   // Sandboxes are gateway-managed; this only moves the image build and relay start to gateway startup.
   const hasSandboxes = Object.values(config.environments).some((environment) => environment.type !== "shared");
   if (options.prepareSandboxes ?? hasSandboxes) gateway = gateway.withEnvironment("MANAGED_COPILOT_SANDBOX_PREPARE", "1");
+  if (options.discovery === false) gateway = gateway.withEnvironment("MANAGED_COPILOT_WRITE_DISCOVERY", "0");
   for (const secret of secrets) gateway = gateway.withEnvironment(secret.env, secret.value);
 
   const resource = await gateway;
