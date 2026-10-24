@@ -118,6 +118,12 @@ interface LiveSession {
   readonly held: HeldCompletion[];
   /** Extra params for the next resume upstream (after an aborted cutover closed the session on its source). */
   resumeExtras: Record<string, unknown> | undefined;
+  /** Counts fences: a request that started before one may have been admitted for the placement the session left. */
+  moves: number;
+  /** Event IDs history reads must not return (loaded from the ledger on first use). */
+  hidden: Set<string> | undefined;
+  /** After an aborted, sealed cutover: the source, whose output for this session is a handoff artifact until resumed. */
+  sealedSource: RuntimeUpstream | undefined;
 }
 
 interface InflightWait {
@@ -151,10 +157,33 @@ interface CutoverState {
   /** `sendAndWait` replies the source sent before the seal, delivered when the fence lifts. */
   readonly replies: { readonly value: unknown; readonly resolve: (value: unknown) => void }[];
   release: (() => void) | undefined;
-  destination: { readonly upstream: RuntimeUpstream; readonly sandbox: SandboxRuntimeHandle; readonly admitted: AdmittedSession } | undefined;
+  /** The residency promise the fence installed (requests wait on it). */
+  gate: Promise<RuntimeUpstream> | undefined;
+  destination: { readonly upstream: RuntimeUpstream; readonly sandbox: SandboxRuntimeHandle; readonly admitted: AdmittedSession; readonly optionsPatch: Record<string, unknown> } | undefined;
   done: boolean;
   outcome: "committed" | "aborted" | undefined;
+  /** Set once commit/abort delivered everything the cutover held back; the cutover then detaches from the session. */
+  flushed: boolean;
 }
+
+/** Where a notification came from, when it is delivered later than it arrived (flushed after a cutover). */
+interface NotificationOrigin {
+  readonly generation: number;
+  readonly placement: Placement;
+}
+
+/** Thrown inside dispatch when a placement cutover moved the session after the request was admitted. */
+const MOVED = Symbol("moved");
+
+/** Session configuration calls: set again on the new owner when a cutover moved the session while they ran. */
+const CONFIG_METHODS: ReadonlySet<string> = new Set([
+  "session.options.update",
+  "session.tools.set",
+  "session.model.switchTo",
+  "session.model.switchAutoTier",
+  "session.agent.select",
+  "session.agent.deselect",
+]);
 
 /** Runtime → client requests bound to a session and the attachment flag that answers them. */
 const CLIENT_REQUESTS: Record<string, keyof Attachment | undefined> = {
@@ -382,8 +411,39 @@ export class SessionManager implements SessionsService {
 
   async request<T = unknown>(sessionId: string, method: string, params: Record<string, unknown> = {}): Promise<T> {
     const live = this.#liveFor(sessionId);
-    const upstream = await this.#resident(live);
-    return upstream.request<T>(method, { ...params, sessionId });
+    for (;;) {
+      try {
+        const result = await this.#onOwner(live, live.placement, (upstream) => upstream.request<T>(method, { ...params, sessionId }));
+        return method === "session.getMessages" ? this.#withoutHidden(live, result) : result;
+      } catch (error) {
+        // Service calls carry no placement-specific admission: send them where the session lives now.
+        if (error !== MOVED) throw error;
+      }
+    }
+  }
+
+  /**
+   * Sends on the session's owning runtime. The owner is checked and the request written in one synchronous step, so
+   * nothing reaches a runtime after a placement cutover fenced it. Throws MOVED when the session left `placement`.
+   */
+  async #onOwner<T>(live: LiveSession, placement: Placement, send: (upstream: RuntimeUpstream) => Promise<T>): Promise<T> {
+    for (;;) {
+      const upstream = await this.#resident(live);
+      if (live.placement !== placement) throw MOVED;
+      if (live.upstream === upstream && live.ready && !live.cutover?.fenced && !upstream.closed) return send(upstream);
+      if (live.deleting) throw new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id });
+      await Promise.resolve(live.residency).catch(() => undefined);
+    }
+  }
+
+  /** History reads never include events a placement cutover hid (the source's handoff after the seal). */
+  #withoutHidden<T>(live: LiveSession, result: T): T {
+    const events = (result as { events?: unknown } | undefined)?.events;
+    if (!Array.isArray(events)) return result;
+    live.hidden ??= this.#ledger.hiddenEvents(live.id);
+    if (live.hidden.size === 0) return result;
+    const hidden = live.hidden;
+    return { ...(result as Record<string, unknown>), events: events.filter((event) => !hidden.has(String((event as { id?: unknown })?.id))) } as T;
   }
 
   async abort(sessionId: string): Promise<void> {
@@ -398,10 +458,12 @@ export class SessionManager implements SessionsService {
     this.#ledger.update(sessionId, { state: "deleting" });
     // A placement cutover in progress ends here (its owner cleans up the candidate sandbox on `deleted`).
     if (live?.cutover) await this.#abortCutover(live, live.cutover, undefined).catch(() => undefined);
+    if (live) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `Session ${sessionId} was deleted`, { code: "not_found" }));
     // Let an in-flight create/resume settle so it cannot reopen the session after deletion.
     await live?.residency?.catch(() => undefined);
+    const placement = (this.get(sessionId) ?? record).placement;
     try {
-      if (record.placement === "sandbox") {
+      if (placement === "sandbox") {
         const sandboxes = this.#sandboxes;
         if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available, so the sandbox cannot be deleted yet");
         live?.upstream?.close();
@@ -525,14 +587,17 @@ export class SessionManager implements SessionsService {
       destinationBuffer: [],
       replies: [],
       release: undefined,
+      gate: undefined,
       destination: undefined,
       done: false,
       outcome: undefined,
+      flushed: false,
     };
     live.cutover = state;
     const fence = (): void => {
       if (state.done || state.fenced) return;
       state.fenced = true;
+      live.moves++;
       for (const wait of live.waits) wait.fenced = true;
       live.ready = false;
       // Requests wait for commit/abort, then find the session's owner afresh (the destination, or a re-resumed source).
@@ -541,6 +606,7 @@ export class SessionManager implements SessionsService {
       });
       const residency = gate.then(() => this.#resident(live));
       residency.catch(() => undefined);
+      state.gate = residency;
       live.residency = residency;
       this.#ledger.update(sessionId, { state: "promoting" });
     };
@@ -579,19 +645,19 @@ export class SessionManager implements SessionsService {
     if (record.agent) requested["agent"] = record.agent;
     else delete requested["agent"];
     const network = (await this.#policy?.session?.(live.id))?.policy ?? record.network;
-    const admitted = admitSession(
-      requested,
-      {
-        environment: live.environment,
-        placement: "sandbox",
-        network,
-        platformTools: this.#platformToolsFor(live.environment, "sandbox"),
-        workingDirectory: this.#workingDirectory("sandbox", live.id),
-        tokenRegistrationId: live.tokenRegistrationId,
-      },
-      "resume",
-    );
+    const context: AdmissionContext = {
+      environment: live.environment,
+      placement: "sandbox",
+      network,
+      platformTools: this.#platformToolsFor(live.environment, "sandbox"),
+      workingDirectory: this.#workingDirectory("sandbox", live.id),
+      tokenRegistrationId: live.tokenRegistrationId,
+    };
+    const admitted = admitSession(requested, context, "resume");
     delete admitted.params["gitHubTokenProviderRegistrationId"];
+    // Options the caller changed later, admitted for the sandbox too (the model comes from the ledger).
+    const { model: _model, ...callerOptions } = stored.requestedOptions ?? {};
+    const optionsPatch = { ...admitted.optionsPatch, ...(Object.keys(callerOptions).length > 0 ? admitOptionsUpdate(callerOptions, context) : {}) };
     const handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live.ownerId).then((credential) => credential.token) });
     let upstream: RuntimeUpstream | undefined;
     try {
@@ -602,14 +668,14 @@ export class SessionManager implements SessionsService {
       });
       const opened = upstream;
       // Registered first, so the destination's requests (inference, credentials) and events route during the open.
-      state.destination = { upstream: opened, sandbox: handle, admitted };
+      state.destination = { upstream: opened, sandbox: handle, admitted, optionsPatch };
       if (handle.initialize) await handle.initialize((method, params) => opened.request(method, params));
       const registrations = this.#registrations(live);
       const params = { ...admitted.params, ...registrations.flags, sessionId: live.id, tools: [...registrations.tools, ...this.#platformToolDeclarations(live, "sandbox")], ...extra };
       const prepared = handle.prepareSessionParams ? await handle.prepareSessionParams("session.resume", params) : params;
       await opened.request("session.resume", prepared);
       if (handle.sessionOpened) await handle.sessionOpened(live.id);
-      if (Object.keys(admitted.optionsPatch).length > 0) await opened.request("session.options.update", { ...admitted.optionsPatch, sessionId: live.id });
+      if (Object.keys(optionsPatch).length > 0) await opened.request("session.options.update", { ...optionsPatch, sessionId: live.id });
       if (state.done || state.destination?.upstream !== opened) throw new ManagedCopilotError("conflict", "The cutover closed while its destination was opening", { sessionId: live.id });
       return { request: <T,>(method: string, params: Record<string, unknown> = {}) => opened.request<T>(method, { sessionId: live.id, ...params }) };
     } catch (error) {
@@ -631,7 +697,7 @@ export class SessionManager implements SessionsService {
     destination?.sandbox.close?.();
   }
 
-  #commitCutover(live: LiveSession, state: CutoverState): SessionRecord {
+  async #commitCutover(live: LiveSession, state: CutoverState): Promise<SessionRecord> {
     if (state.done) throw cutoverClosed(live.id);
     const destination = state.destination;
     if (!destination || destination.upstream.closed) throw new ManagedCopilotError("invalid_request", "Open the destination before committing the cutover", { sessionId: live.id });
@@ -648,30 +714,26 @@ export class SessionManager implements SessionsService {
       admitted: {
         params: storedParams(destination.admitted.params),
         ...(stored?.tools ? { tools: stored.tools } : {}),
-        optionsPatch: destination.admitted.optionsPatch,
+        optionsPatch: destination.optionsPatch,
         ...(stored?.requested ? { requested: stored.requested } : {}),
+        ...(stored?.requestedOptions ? { requestedOptions: stored.requestedOptions } : {}),
       },
     });
     state.done = true;
     state.outcome = "committed";
-    live.cutover = undefined;
+    const source = live.placement;
     live.placement = "sandbox";
     live.upstream = destination.upstream;
     live.sandbox = destination.sandbox;
-    live.ready = true;
-    // Genuine source events from the fence window first (their generation), then what the destination sent before
-    // the commit, then replies the source gave in the window; later destination events follow in order.
-    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, state.generation);
-    for (const item of state.destinationBuffer.splice(0)) this.#dispatchNotification(live, item.method, item.params, generation);
-    const replies = state.replies.splice(0);
-    live.queue = live.queue.then(() => {
-      for (const reply of replies) reply.resolve(reply.value);
-    });
-    live.residency = undefined;
-    state.release?.();
+    // Genuine source events from the fence window first (their placement and generation), then what the destination
+    // sent before the commit; the fence stays up until they have been delivered.
+    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: source });
+    for (const item of state.destinationBuffer.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation, placement: "sandbox" });
+    await this.#finishCutover(live, state, () => live.upstream === destination.upstream && !destination.upstream.closed);
     this.#log.info("Session moved to its sandbox", { sessionId: live.id, generation });
-    this.#emitLifecycle(live.id, "promoted");
-    return this.get(live.id)!;
+    // Last: listeners (CLI attach, promotion's action carry-over) see the sandbox, a settled state, and every action.
+    if (!live.deleting) this.#emitLifecycle(live.id, "promoted");
+    return this.get(live.id) ?? record;
   }
 
   async #abortCutover(live: LiveSession, state: CutoverState, resume: Record<string, unknown> | undefined): Promise<void> {
@@ -680,27 +742,33 @@ export class SessionManager implements SessionsService {
     state.done = true;
     state.outcome = "aborted";
     this.#closeDestination(state);
-    live.cutover = undefined;
     if (state.sealed) {
-      // The session was suspended and closed on its source: resume it there on next use.
-      live.ready = false;
+      // The session was suspended and closed on its source: resume it there on next use, and until then treat what
+      // the source still sends for it as handoff artifacts.
       live.resumeExtras = resume;
-    } else {
-      live.ready = live.upstream === state.source && !state.source.closed;
+      live.sealedSource = state.source;
     }
-    if (!live.deleting) this.#ledger.update(live.id, { state: state.priorState === "promoting" ? "idle" : state.priorState });
-    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, state.generation);
-    const replies = state.replies.splice(0);
-    live.queue = live.queue.then(() => {
-      for (const reply of replies) reply.resolve(reply.value);
-    });
-    live.residency = undefined;
-    state.release?.();
+    if (!live.deleting && state.fenced) this.#ledger.update(live.id, { state: state.priorState === "promoting" ? "idle" : state.priorState });
+    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: live.placement });
+    await this.#finishCutover(live, state, () => !state.sealed && live.upstream === state.source && !state.source.closed);
     this.#log.info("Session move aborted; it stays on its source", { sessionId: live.id });
-    // Held completions continue from the source once it runs again.
-    if (state.sealed && live.held.length > 0 && !live.deleting) {
-      void this.#resident(live).catch((error: unknown) => this.#log.warn("Resuming the session on its source after an aborted move failed", { sessionId: live.id, error: (error as Error).message }));
-    }
+  }
+
+  /**
+   * Ends a cutover once everything it held back has been delivered: replies the source gave before the seal go out
+   * after the flushed events, the session becomes routable again, and the fence lifts.
+   */
+  async #finishCutover(live: LiveSession, state: CutoverState, ready: () => boolean): Promise<void> {
+    await live.queue.catch(() => undefined);
+    const replies = state.replies.splice(0);
+    state.flushed = true;
+    if (live.cutover === state) live.cutover = undefined;
+    for (const reply of replies) reply.resolve(reply.value);
+    if (state.fenced) live.ready = ready();
+    if (state.gate && live.residency === state.gate) live.residency = undefined;
+    state.release?.();
+    // Held completions continue from the session's owner; one that is not running is resumed for them.
+    this.#driveHeld(live);
   }
 
   // ------------------------------------------------------------------------------------------------------------
@@ -728,64 +796,83 @@ export class SessionManager implements SessionsService {
     }
     if (record.state === "deleting") throw new ManagedCopilotError("conflict", `Session ${sessionId} is being deleted`);
     const live = this.#liveFor(sessionId);
-    // An open placement cutover decides where the session lives next, and so which admission rules apply.
-    if (live.cutover) await live.residency?.catch(() => undefined);
-    const binding = await this.#policy?.session?.(sessionId);
-    const network = binding?.policy ?? record.network;
-    const admitted = await this.#admit(live.environment, live.placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
-    await this.#checkRemoteMcp(admitted, sessionId, live.placement, network);
+    // Taken before admission, which rewrites nested values (remote MCP servers point at the gateway adapter).
+    const requested = requestedParams(params);
+    for (;;) {
+      // An open placement cutover decides where the session lives next, and so which admission rules apply.
+      if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
+      const placement = live.placement;
+      const moves = live.moves;
+      const binding = await this.#policy?.session?.(sessionId);
+      const network = binding?.policy ?? record.network;
+      const admitted = await this.#admit(live.environment, placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
+      await this.#checkRemoteMcp(admitted, sessionId, placement, network);
+      if (live.moves !== moves) continue;
+      const outcome = await this.#resumeClient(live, peer, admitted, moves);
+      // A cutover fenced the session during this resume: admit it again and resume where the session lives after it.
+      if (outcome === MOVED) continue;
+      this.#persist(sessionId, (stored) => {
+        const stable = storedParams(admitted.params);
+        // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
+        const kept = stored.params["agent"];
+        if (stable["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, stable)) stable["agent"] = kept;
+        return {
+          params: stable,
+          ...(stored.tools ? { tools: stored.tools } : {}),
+          optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
+          // Resume params override what the session was created with, as they do in the runtime.
+          requested: { ...stored.requested, ...requested },
+          ...(stored.requestedOptions ? { requestedOptions: stored.requestedOptions } : {}),
+        };
+      });
+      const current = this.get(sessionId) ?? record;
+      this.#ledger.update(sessionId, {
+        state: current.state === "failed" || current.state === "stopped" ? "ready" : current.state,
+        ...(admitted.model ? { model: admitted.model } : {}),
+        ...(admitted.agent ? { agent: admitted.agent } : {}),
+      });
+      return { result: this.#scrub(live, this.#sanitizeResponse(live, outcome.result, placement), placement), after: () => this.#afterAttach(peer, sessionId) };
+    }
+  }
 
-    let result: unknown;
-    const resumeOn = async (upstream: RuntimeUpstream) => {
+  /**
+   * Resumes a client's attachment on the session's owner (restoring the session there if it is not running). Returns
+   * MOVED when a placement cutover fenced the session meanwhile; nothing is sent to a runtime after a fence.
+   */
+  async #resumeClient(live: LiveSession, peer: ClientPeer, admitted: AdmittedSession, moves: number): Promise<{ result: unknown } | typeof MOVED> {
+    const run = async (upstream: RuntimeUpstream): Promise<{ result: unknown } | typeof MOVED> => {
       const extras = live.resumeExtras;
       const prepared = await this.#prepare(live, "session.resume", { ...admitted.params, ...extras });
+      // Checked and sent in one synchronous step.
+      if (live.moves !== moves || live.cutover?.fenced || upstream.closed) return MOVED;
       this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared);
+      let result: unknown;
       try {
         result = await this.#resumeUpstream(live, upstream, forwarded);
         await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
+        if (live.moves !== moves) return MOVED;
         this.#detach(live, peer.id);
         throw error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
+      if (live.moves !== moves) return MOVED;
       live.ready = true;
+      return { result };
     };
     await live.residency?.catch(() => undefined);
-    if (live.upstream && !live.upstream.closed && live.ready) {
-      // Resident already: the runtime re-registers this client's tools and handler flags.
-      await resumeOn(live.upstream);
-    } else {
-      // Not resident: the client's own resume restores it, and concurrent callers wait for it.
-      await this.#serialize(live, async () => {
-        const upstream = await this.#connect(live);
-        await resumeOn(upstream);
-        return upstream;
-      });
-    }
-    this.#persist(sessionId, (stored) => {
-      const params = storedParams(admitted.params);
-      const requested = requestedParams(raw as Record<string, unknown>);
-      // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
-      const kept = stored.params["agent"];
-      if (params["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, params)) {
-        params["agent"] = kept;
-        requested["agent"] ??= kept;
-      }
-      return {
-        params,
-        ...(stored.tools ? { tools: stored.tools } : {}),
-        optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
-        requested,
-      };
+    if (live.moves !== moves) return MOVED;
+    // Resident already: the runtime re-registers this client's tools and handler flags.
+    if (live.upstream && !live.upstream.closed && live.ready) return run(live.upstream);
+    // Not resident: the client's own resume restores it, and concurrent callers wait for it.
+    let outcome: { result: unknown } | typeof MOVED = MOVED;
+    await this.#serialize(live, async () => {
+      const upstream = await this.#connect(live);
+      outcome = await run(upstream);
+      return upstream;
     });
-    const current = this.get(sessionId) ?? record;
-    this.#ledger.update(sessionId, {
-      state: current.state === "failed" || current.state === "stopped" ? "ready" : current.state,
-      ...(admitted.model ? { model: admitted.model } : {}),
-      ...(admitted.agent ? { agent: admitted.agent } : {}),
-    });
-    return { result: this.#scrub(live, this.#sanitizeResponse(live, result)), after: () => this.#afterAttach(peer, sessionId) };
+    return outcome;
   }
 
   async forwardForClient(peer: ClientPeer, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
@@ -795,92 +882,112 @@ export class SessionManager implements SessionsService {
     if (!FORWARDED_SESSION_METHODS.has(method) && method !== "session.options.update" && method !== "session.tools.set" && method !== "session.model.switchTo" && method !== "session.model.switchAutoTier") {
       throw unsupportedMethod(method);
     }
-    // An open placement cutover decides where the session lives next, and so which admission rules apply.
-    if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
-    const record = this.getOwned(peer.principal.accountId, sessionId);
-    let forwarded: Record<string, unknown> = params;
-    let patch: Record<string, unknown> | undefined;
-    const context = (): AdmissionContext => ({
-      environment: live.environment,
-      placement: live.placement,
-      network: record.network,
-      platformTools: this.#platformToolsFor(live.environment, live.placement),
-      workingDirectory: this.#workingDirectory(live.placement, sessionId),
-      tokenRegistrationId: live.tokenRegistrationId,
-      allowMcp: hasRemoteMcp(this.#ledger.admitted(sessionId)?.params),
-    });
-    switch (method) {
-      case "session.send":
-      case "session.sendAndWait":
-        forwarded = { ...admitSend(params, context()), sessionId };
-        break;
-      case "session.options.update":
-        patch = admitOptionsUpdate(params, context());
-        forwarded = { ...patch, sessionId };
-        break;
-      case "session.tools.set": {
-        const admitted = admitToolsSet(params, context());
-        const attachment = live.attachments.get(peer.id);
-        if (attachment) {
-          attachment.tools = new Set(admitted.names);
-          attachment.declarations = (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"])));
-        }
-        live.wire = this.#registrations(live);
-        forwarded = { ...admitted.params, tools: [...live.wire.tools, ...this.#platformToolDeclarations(live)], sessionId };
-        break;
-      }
-      case "session.model.switchTo":
-        checkModel(live.environment, params["modelId"]);
-        break;
-      case "session.model.switchAutoTier":
-        if (live.environment.config.models) throw new ManagedCopilotError("policy_violation", `Environment "${live.environment.name}" restricts models; Auto routing is not available`);
-        break;
-      default:
-        if (ANSWER_METHOD_SET.has(method)) {
-          const actions = this.#actions;
-          if (actions) {
-            const decision = await actions.onClientAnswer({ sessionId, connectionId: peer.id, responderKind: peer.kind, method, params });
-            if (decision.kind === "respond") return decision.response;
-          }
-        }
-    }
-    const upstream = await this.#resident(live);
-    if (method === "session.sendAndWait") return this.#scrub(live, await this.#sendAndWait(live, upstream, forwarded, signal));
-    const result = await upstream.request(method, forwarded, { signal });
-    if (patch && Object.keys(patch).length > 0) {
-      this.#persist(sessionId, (stored) => ({ ...stored, optionsPatch: { ...stored.optionsPatch, ...patch } }));
-      if (typeof patch["model"] === "string") this.#ledger.update(sessionId, { model: patch["model"] });
-    }
-    if (method === "session.model.switchTo" && typeof params["modelId"] === "string") {
-      const model = params["modelId"];
-      this.#ledger.update(sessionId, { model });
-      this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, model } }));
-    }
-    // Restores re-select the agent the session last had, not the one it was created with.
-    if (method === "session.agent.select" && typeof params["name"] === "string" && params["name"]) {
-      const agent = params["name"];
-      this.#ledger.update(sessionId, { agent });
-      this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, agent } }));
-    } else if (method === "session.agent.deselect") {
-      this.#ledger.update(sessionId, { agent: "" });
-      this.#persist(sessionId, (stored) => {
-        const { agent: _agent, ...rest } = stored.params;
-        return { ...stored, params: rest };
+    for (;;) {
+      // An open placement cutover decides where the session lives next, and so which admission rules apply.
+      if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
+      const placement = live.placement;
+      const moves = live.moves;
+      const record = this.getOwned(peer.principal.accountId, sessionId);
+      let forwarded: Record<string, unknown> = params;
+      let patch: Record<string, unknown> | undefined;
+      const context = (): AdmissionContext => ({
+        environment: live.environment,
+        placement,
+        network: record.network,
+        platformTools: this.#platformToolsFor(live.environment, placement),
+        workingDirectory: this.#workingDirectory(placement, sessionId),
+        tokenRegistrationId: live.tokenRegistrationId,
+        allowMcp: hasRemoteMcp(this.#ledger.admitted(sessionId)?.params),
       });
+      switch (method) {
+        case "session.send":
+        case "session.sendAndWait":
+          forwarded = { ...admitSend(params, context()), sessionId };
+          break;
+        case "session.options.update":
+          patch = admitOptionsUpdate(params, context());
+          forwarded = { ...patch, sessionId };
+          break;
+        case "session.tools.set": {
+          const admitted = admitToolsSet(params, context());
+          const attachment = live.attachments.get(peer.id);
+          if (attachment) {
+            attachment.tools = new Set(admitted.names);
+            attachment.declarations = (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"])));
+          }
+          live.wire = this.#registrations(live);
+          forwarded = { ...admitted.params, tools: [...live.wire.tools, ...this.#platformToolDeclarations(live, placement)], sessionId };
+          break;
+        }
+        case "session.model.switchTo":
+          checkModel(live.environment, params["modelId"]);
+          break;
+        case "session.model.switchAutoTier":
+          if (live.environment.config.models) throw new ManagedCopilotError("policy_violation", `Environment "${live.environment.name}" restricts models; Auto routing is not available`);
+          break;
+        default:
+          if (ANSWER_METHOD_SET.has(method)) {
+            const actions = this.#actions;
+            if (actions) {
+              const decision = await actions.onClientAnswer({ sessionId, connectionId: peer.id, responderKind: peer.kind, method, params });
+              if (decision.kind === "respond") return decision.response;
+            }
+          }
+      }
+      let result: unknown;
+      try {
+        result = await this.#onOwner(live, placement, (upstream) =>
+          method === "session.sendAndWait" ? this.#sendAndWait(live, upstream, forwarded, signal, placement) : upstream.request(method, forwarded, { signal }),
+        );
+      } catch (error) {
+        // A cutover moved the session after this call was admitted: admit it again where the session lives now.
+        if (error === MOVED) continue;
+        throw error;
+      }
+      if (method === "session.sendAndWait") return result;
+      // Configuration set on a runtime the session left during the call is set again on its new owner.
+      if (live.moves !== moves && CONFIG_METHODS.has(method)) {
+        if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
+        if (live.placement !== placement) continue;
+      }
+      if (patch && Object.keys(patch).length > 0) {
+        const requested = withoutSessionId(params);
+        this.#persist(sessionId, (stored) => ({ ...stored, optionsPatch: { ...stored.optionsPatch, ...patch }, requestedOptions: { ...stored.requestedOptions, ...requested } }));
+        if (typeof patch["model"] === "string") this.#ledger.update(sessionId, { model: patch["model"] });
+      }
+      if (method === "session.model.switchTo" && typeof params["modelId"] === "string") {
+        const model = params["modelId"];
+        this.#ledger.update(sessionId, { model });
+        this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, model } }));
+      }
+      // Restores re-select the agent the session last had, not the one it was created with.
+      if (method === "session.agent.select" && typeof params["name"] === "string" && params["name"]) {
+        const agent = params["name"];
+        this.#ledger.update(sessionId, { agent });
+        this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, agent } }));
+      } else if (method === "session.agent.deselect") {
+        this.#ledger.update(sessionId, { agent: "" });
+        this.#persist(sessionId, (stored) => {
+          const { agent: _agent, ...rest } = stored.params;
+          return { ...stored, params: rest };
+        });
+      }
+      // Scrubbed for the placement that answered, which a cutover may have changed since.
+      if (method === "session.getMessages" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
+        const visible = this.#withoutHidden(live, result as { events: RuntimeSessionEvent[] });
+        return this.#scrub(live, { ...visible, events: visible.events.map((event) => this.#sanitizeEvent(live, event, placement)) }, placement);
+      }
+      return this.#scrub(live, result, placement);
     }
-    if (method === "session.getMessages" && live.placement === "shared" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
-      const events = (result as { events: RuntimeSessionEvent[] }).events;
-      return this.#scrub(live, { ...(result as Record<string, unknown>), events: events.map((event) => this.#sanitizeEvent(live, event)) });
-    }
-    return this.#scrub(live, result);
   }
 
   /**
    * A client's `sendAndWait`. During a placement cutover, a reply the source sends between the fence and the seal is
    * genuine and is delivered when the fence lifts; a reply or failure after the seal is a handoff artifact of the
-   * suspend, so the call completes from the owning runtime's events instead.
+   * suspend, so the call completes from the owning runtime's events instead. Replies are scrubbed for the placement
+   * that sent them.
    */
-  async #sendAndWait(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
+  async #sendAndWait(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>, signal: AbortSignal, placement: Placement): Promise<unknown> {
     const wait: InflightWait = { fenced: false, sealed: false };
     live.waits.add(wait);
     let reply: unknown;
@@ -892,10 +999,11 @@ export class SessionManager implements SessionsService {
     } finally {
       live.waits.delete(wait);
     }
-    if (wait.sealed) return this.#holdCompletion(live, reply as Record<string, unknown> | undefined, signal);
+    const clean = this.#scrub(live, reply, placement);
+    if (wait.sealed) return this.#holdCompletion(live, clean as Record<string, unknown> | undefined, signal);
     const cutover = live.cutover;
-    if (wait.fenced && cutover && !cutover.done) return new Promise((resolve) => cutover.replies.push({ value: reply, resolve }));
-    return reply;
+    if (wait.fenced && cutover && !cutover.flushed) return new Promise((resolve) => cutover.replies.push({ value: clean, resolve }));
+    return clean;
   }
 
   #holdCompletion(live: LiveSession, reply: Record<string, unknown> | undefined, signal: AbortSignal): Promise<unknown> {
@@ -912,6 +1020,24 @@ export class SessionManager implements SessionsService {
         },
         { once: true },
       );
+      this.#driveHeld(live);
+    });
+  }
+
+  /**
+   * Held completions need their session running somewhere. Outside a cutover: fail them for a deleted session, else
+   * resume the session if it is not running (failing them if that fails), so they never wait on nothing.
+   */
+  #driveHeld(live: LiveSession): void {
+    if (live.held.length === 0 || live.cutover) return;
+    if (live.deleting || this.#live.get(live.id) !== live) {
+      for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `Session ${live.id} was deleted`, { code: "not_found" }));
+      return;
+    }
+    if (live.ready && live.upstream && !live.upstream.closed) return;
+    void this.#resident(live).catch((error: unknown) => {
+      this.#log.warn("Resuming a session with held completions failed", { sessionId: live.id, error: (error as Error).message });
+      for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `The session could not be resumed: ${(error as Error).message}`, { code: "state_restore_failed" }));
     });
   }
 
@@ -991,6 +1117,8 @@ export class SessionManager implements SessionsService {
       throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" routes inference to Azure AI Foundry ("${environment.config.inference.foundry}"), which this gateway does not support yet`);
     }
     const tokenRegistrationId = `mc-${randomUUID()}`;
+    // Taken before admission, which rewrites nested values (remote MCP servers point at the gateway adapter).
+    const requested = requestedParams(input.raw);
     const admitted = await this.#admit(environment, placement, input.raw, "create", environment.network, sessionId, tokenRegistrationId, principal);
 
     // Bind network policy (validates vaults) before anything is allocated.
@@ -1014,7 +1142,7 @@ export class SessionManager implements SessionsService {
         params: storedParams(admitted.params),
         ...(input.peer ? {} : { tools: (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))) }),
         optionsPatch: admitted.optionsPatch,
-        requested: requestedParams(input.raw),
+        requested,
       };
       const record = this.#ledger.insert({
         id: sessionId,
@@ -1127,12 +1255,23 @@ export class SessionManager implements SessionsService {
       throw new ManagedCopilotError("capability_unavailable", "Remote MCP servers in shared environments need the gateway MCP adapter, which this deployment does not provide");
     }
     for (const server of admitted.remoteMcp) {
-      const container = server.agent
-        ? ((admitted.params["customAgents"] as Record<string, unknown>[] | undefined)?.find((agent) => agent["name"] === server.agent)?.["mcpServers"] as Record<string, Record<string, unknown>> | undefined)
-        : (admitted.params["mcpServers"] as Record<string, Record<string, unknown>> | undefined);
-      const entry = container?.[server.name];
-      if (!container || !entry) continue;
-      container[server.name] = await adapt(sessionId, server.name, entry);
+      // Copy on write: the caller's own objects (which `requested` snapshots) keep the original endpoints.
+      if (server.agent) {
+        const agents = admitted.params["customAgents"] as Record<string, unknown>[] | undefined;
+        const index = agents?.findIndex((agent) => agent["name"] === server.agent) ?? -1;
+        const agent = index >= 0 ? agents![index]! : undefined;
+        const servers = agent?.["mcpServers"] as Record<string, Record<string, unknown>> | undefined;
+        const entry = servers?.[server.name];
+        if (!agents || !agent || !servers || !entry) continue;
+        const copy = [...agents];
+        copy[index] = { ...agent, mcpServers: { ...servers, [server.name]: await adapt(sessionId, server.name, entry) } };
+        admitted.params["customAgents"] = copy;
+      } else {
+        const servers = admitted.params["mcpServers"] as Record<string, Record<string, unknown>> | undefined;
+        const entry = servers?.[server.name];
+        if (!servers || !entry) continue;
+        admitted.params["mcpServers"] = { ...servers, [server.name]: await adapt(sessionId, server.name, entry) };
+      }
     }
   }
 
@@ -1169,6 +1308,9 @@ export class SessionManager implements SessionsService {
       waits: new Set(),
       held: [],
       resumeExtras: undefined,
+      moves: 0,
+      hidden: undefined,
+      sealedSource: undefined,
     };
     this.#live.set(record.id, live);
     return live;
@@ -1254,6 +1396,8 @@ export class SessionManager implements SessionsService {
         ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
         ...extras,
       });
+      // A fence that went up during the restore wins: nothing is sent to a runtime after it.
+      if (live.cutover?.fenced) return upstream;
       try {
         await this.#resumeUpstream(live, upstream, prepared);
         await this.#opened(live, upstream, admitted.optionsPatch);
@@ -1261,9 +1405,14 @@ export class SessionManager implements SessionsService {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
-      live.ready = true;
+      // A cutover fenced while this restore ran keeps the session fenced.
+      if (!live.cutover?.fenced) live.ready = true;
       this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
       return upstream;
+    }).then((upstream) => {
+      // A fence that went up during the restore holds this caller too, until the cutover commits or aborts.
+      const fenced = live.cutover?.fenced ? live.residency : undefined;
+      return fenced ?? upstream;
     });
   }
 
@@ -1293,6 +1442,8 @@ export class SessionManager implements SessionsService {
    * with the same ID and configuration. A session whose history the runtime lost still fails.
    */
   async #resumeUpstream(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>): Promise<unknown> {
+    // From this resume on, what the runtime sends for the session is genuine again.
+    if (live.sealedSource === upstream) live.sealedSource = undefined;
     try {
       return await upstream.request("session.resume", params);
     } catch (error) {
@@ -1328,11 +1479,12 @@ export class SessionManager implements SessionsService {
 
   #onUpstreamClosed(upstream: RuntimeUpstream): void {
     for (const live of this.#live.values()) {
-      if (live.cutover?.destination?.upstream === upstream) {
+      const cutover = live.cutover;
+      if (cutover && !cutover.done && cutover.destination?.upstream === upstream) {
         this.#log.warn("A promotion destination closed before commit", { sessionId: live.id });
-        live.cutover.destination.sandbox.close?.();
-        live.cutover.destination = undefined;
-        live.cutover.destinationBuffer.length = 0;
+        cutover.destination.sandbox.close?.();
+        cutover.destination = undefined;
+        cutover.destinationBuffer.length = 0;
         continue;
       }
       if (live.upstream !== upstream) continue;
@@ -1445,15 +1597,21 @@ export class SessionManager implements SessionsService {
     const live = this.#live.get(sessionId);
     if (!live) return;
     const cutover = live.cutover;
-    if (cutover && (method === "session.event" || method === "session.lifecycle")) {
+    if (live.sealedSource === upstream && (method === "session.event" || method === "session.lifecycle")) {
+      // Late output of a suspend whose cutover was aborted: the session runs on this runtime again only once resumed.
+      if (method === "session.event") this.#hide(live, (params as { event?: { id?: unknown } } | undefined)?.event?.id);
+      return;
+    }
+    if (cutover && !cutover.done && (method === "session.event" || method === "session.lifecycle")) {
       if (cutover.destination?.upstream === upstream) {
         cutover.destinationBuffer.push({ method, params });
         return;
       }
       if (cutover.fenced && upstream === cutover.source) {
         // Before the seal the source's events are genuine and wait for commit/abort; after it they are handoff
-        // artifacts of the suspend (interruptions, aborted idles, shutdown) that nobody may see.
+        // artifacts of the suspend (interruptions, aborted idles, shutdown) that nobody may see, now or in history.
         if (!cutover.sealed) cutover.buffered.push({ method, params });
+        else if (method === "session.event") this.#hide(live, (params as { event?: { id?: unknown } } | undefined)?.event?.id);
         return;
       }
     }
@@ -1461,18 +1619,27 @@ export class SessionManager implements SessionsService {
     this.#dispatchNotification(live, method, params);
   }
 
-  #dispatchNotification(live: LiveSession, method: string, params: unknown, generation?: number): void {
+  #hide(live: LiveSession, eventId: unknown): void {
+    if (typeof eventId !== "string" || !eventId) return;
+    live.hidden ??= this.#ledger.hiddenEvents(live.id);
+    live.hidden.add(eventId);
+    this.#ledger.hideEvents(live.id, [eventId]);
+  }
+
+  #dispatchNotification(live: LiveSession, method: string, params: unknown, origin?: NotificationOrigin): void {
     if (method === "session.event") {
       const event = (params as { event?: RuntimeSessionEvent }).event;
       if (!event || typeof event.type !== "string") return;
-      live.queue = live.queue.then(() => this.#deliverEvent(live, event, generation)).catch((error: unknown) => {
+      live.queue = live.queue.then(() => this.#deliverEvent(live, event, origin)).catch((error: unknown) => {
         this.#log.warn("Session event delivery failed", { sessionId: live.id, type: event.type, error: (error as Error).message });
       });
     } else if (method === "session.lifecycle") {
-      live.queue = live.queue.then(() => {
-        const scrubbed = this.#scrub(live, params);
-        for (const attachment of live.attachments.values()) attachment.peer.notify("session.lifecycle", scrubbed);
-      });
+      live.queue = live.queue
+        .then(() => {
+          const scrubbed = this.#scrub(live, params, origin?.placement);
+          for (const attachment of live.attachments.values()) attachment.peer.notify("session.lifecycle", scrubbed);
+        })
+        .catch((error: unknown) => this.#log.warn("Session lifecycle delivery failed", { sessionId: live.id, error: (error as Error).message }));
     }
     // Other notifications (host.event, telemetry) carry runtime-wide or account details and are never relayed.
   }
@@ -1493,9 +1660,11 @@ export class SessionManager implements SessionsService {
     }
   }
 
-  async #deliverEvent(live: LiveSession, event: RuntimeSessionEvent, generation?: number): Promise<void> {
+  async #deliverEvent(live: LiveSession, event: RuntimeSessionEvent, origin?: NotificationOrigin): Promise<void> {
     this.#track(live, event);
-    if (!event.agentId && live.held.length > 0) this.#advanceHeld(live, event);
+    // Sanitized for the placement that emitted it, which a cutover may have changed since.
+    const sanitized = this.#scrub(live, this.#sanitizeEvent(live, event, origin?.placement), origin?.placement);
+    if (!event.agentId && live.held.length > 0) this.#advanceHeld(live, sanitized);
     for (const listener of this.#listeners) {
       try {
         listener(live.id, event);
@@ -1510,13 +1679,12 @@ export class SessionManager implements SessionsService {
         this.#log.warn("Session event listener failed", { error: (error as Error).message });
       }
     }
-    const sanitized = this.#scrub(live, this.#sanitizeEvent(live, event));
     const notification = { sessionId: live.id, event: sanitized };
     if (!ACTION_EVENT_TYPES.has(event.type)) {
       for (const attachment of live.attachments.values()) attachment.peer.notify("session.event", notification);
       return;
     }
-    const decision = await this.#routeAction(live, event, generation);
+    const decision = await this.#routeAction(live, event, origin?.generation);
     for (const attachment of live.attachments.values()) {
       const id = attachment.peer.id;
       if (decision.withhold.includes(id) && decision.owner !== id) continue;
@@ -1608,9 +1776,12 @@ export class SessionManager implements SessionsService {
     throw unsupportedMethod(method, `The gateway does not answer ${method}`);
   }
 
+  /** Sandbox handlers by connection: inference body chunks carry no session ID, and a cutover's destination counts. */
   #sandboxHandlerFor(upstream: RuntimeUpstream, method: string): ((params: unknown) => Promise<unknown>) | undefined {
     for (const live of this.#live.values()) {
       if (live.upstream === upstream) return live.sandbox?.handlers?.get(method);
+      const destination = live.cutover?.destination;
+      if (destination?.upstream === upstream) return destination.sandbox.handlers?.get(method);
     }
     return undefined;
   }
@@ -1690,8 +1861,8 @@ export class SessionManager implements SessionsService {
   }
 
   /** Shared sessions must not leak platform host paths to clients. */
-  #sanitizeEvent(live: LiveSession, event: RuntimeSessionEvent): RuntimeSessionEvent {
-    if (live.placement !== "shared") return event;
+  #sanitizeEvent(live: LiveSession, event: RuntimeSessionEvent, placement: Placement = live.placement): RuntimeSessionEvent {
+    if (placement !== "shared") return event;
     if (event.type === "session.start" && event.data && "context" in event.data) {
       const { context: _context, ...data } = event.data;
       return { ...event, data };
@@ -1703,8 +1874,8 @@ export class SessionManager implements SessionsService {
     return event;
   }
 
-  #sanitizeResponse(live: LiveSession, result: unknown): unknown {
-    if (live.placement !== "shared" || !result || typeof result !== "object") return result;
+  #sanitizeResponse(live: LiveSession, result: unknown, placement: Placement = live.placement): unknown {
+    if (placement !== "shared" || !result || typeof result !== "object") return result;
     const { workspacePath: _workspacePath, ...rest } = result as Record<string, unknown>;
     return rest;
   }
@@ -1713,8 +1884,9 @@ export class SessionManager implements SessionsService {
    * Replaces platform host paths in anything a shared session sends to clients (events, responses, and runtime
    * requests): the session's private directory becomes `/workspace`, any other runtime path `/platform`.
    */
-  #scrub<T>(live: LiveSession, value: T): T {
-    if (live.placement !== "shared") return value;
+  /** `placement`: where the value came from (a cutover may have moved the session since). */
+  #scrub<T>(live: LiveSession, value: T, placement: Placement = live.placement): T {
+    if (placement !== "shared") return value;
     const scrubber = this.#scrubber;
     return scrubber ? (scrubber(value) as T) : value;
   }
@@ -1820,6 +1992,11 @@ function storedParams(params: Record<string, unknown>): Record<string, unknown> 
 
 /** The caller's configuration as requested (no credentials, no per-connection fields), for admission elsewhere. */
 function requestedParams(raw: Record<string, unknown>): Record<string, unknown> {
-  const { gitHubToken: _token, sessionId: _sessionId, ...rest } = raw;
+  const { gitHubToken: _token, sessionId: _sessionId, ...rest } = structuredClone(raw);
   return storedParams(rest);
+}
+
+function withoutSessionId(params: Record<string, unknown>): Record<string, unknown> {
+  const { sessionId: _sessionId, ...rest } = structuredClone(params);
+  return rest;
 }

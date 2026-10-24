@@ -79,6 +79,30 @@ export class FakeRuntime {
     pending.resolve({ requestId, result });
   }
 
+  /** Holds the response to the next request of `method` (optionally for one session) until `release()` (test hook). */
+  holdNext(method: string, sessionId?: string): { readonly held: Promise<void>; release(): void } {
+    let release!: () => void;
+    let arrived!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    this.#holds.push({ method, sessionId, gate, arrived });
+    return { held, release };
+  }
+
+  /** Sends a runtime → gateway request on one connection (1 = the first), as the runtime would (test hook). */
+  requestOn(connection: number, method: string, params: Record<string, unknown>): Promise<unknown> {
+    const endpoint = this.#byConnection.get(connection);
+    if (!endpoint) throw new Error(`No connection ${connection}`);
+    return endpoint.request(method, params);
+  }
+
+  readonly #holds: { method: string; sessionId: string | undefined; gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #byConnection = new Map<number, RpcEndpoint>();
+
   #accept(socket: Socket): void {
     let authenticated = false;
     const connection = ++this.#connections;
@@ -94,9 +118,18 @@ export class FakeRuntime {
           return { ok: true, protocolVersion: 3, version: "1.0.103", taskKinds: ["agent", "shell", "client"] };
         }
         if (!authenticated) throw new RpcError(-32001, "Not connected");
+        const hold = this.#holds.findIndex((candidate) => candidate.method === method && (candidate.sessionId === undefined || candidate.sessionId === body["sessionId"]));
+        if (hold >= 0) {
+          const [entry] = this.#holds.splice(hold, 1);
+          const result = await this.#handle(endpoint, method, body, context.signal);
+          entry!.arrived();
+          await entry!.gate;
+          return result;
+        }
         return this.#handle(endpoint, method, body, context.signal);
       },
     });
+    this.#byConnection.set(connection, endpoint);
     this.#endpoints.add(endpoint);
     endpoint.transport.onClose(() => this.#endpoints.delete(endpoint));
   }
@@ -284,6 +317,10 @@ type Send = (method: string, params?: unknown) => Promise<unknown>;
 export class FakeSandboxes {
   readonly log: { op: string; sessionId: string; detail?: Record<string, unknown> }[] = [];
   readonly streams = new Map<string, Socket>();
+  /** Runtime → gateway requests this "sandbox module" answers itself (like brokered inference). */
+  readonly handlers = new Map<string, (params: unknown) => Promise<unknown>>();
+  /** The backend's readiness, as the real service reports it. */
+  available = true;
   failCreate: Error | undefined;
 
   constructor(private readonly runtime: FakeRuntime) {}
@@ -317,7 +354,7 @@ export class FakeSandboxes {
     return {
       stream: socket,
       connectionToken: this.runtime.token,
-      handlers: new Map(),
+      handlers: this.handlers,
       initialize: async (upstream: Send) => {
         send = upstream;
         this.log.push({ op: "initialize", sessionId });

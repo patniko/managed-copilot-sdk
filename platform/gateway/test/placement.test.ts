@@ -108,6 +108,20 @@ describe("isolated placement through the sandboxes port", () => {
     expect(runtime.sessions.get(second)!.events.some((event) => event.data["content"] === "echo: hello second")).toBe(true);
   });
 
+  it("advertises isolated sandboxes and files only while the sandbox backend is available", async () => {
+    const capabilities = async () => ((await (await fetch(`${gateway.url}/v1/info`, { headers: { authorization: `Bearer ${ALICE}` } })).json()) as { capabilities: string[] }).capabilities;
+    expect(await capabilities()).toEqual(expect.arrayContaining(["isolated", "files"]));
+    sandboxes.available = false;
+    try {
+      const unavailable = await capabilities();
+      expect(unavailable).not.toContain("isolated");
+      expect(unavailable).not.toContain("files");
+      expect(unavailable).toContain("shared");
+    } finally {
+      sandboxes.available = true;
+    }
+  });
+
   it("cleans up when the sandbox cannot be prepared, and deletes it with the session", async () => {
     const client = await connect("coder");
     const sessionId = crypto.randomUUID();

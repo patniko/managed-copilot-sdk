@@ -23,8 +23,13 @@ const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
 export function deploymentInfo(app: GatewayApp, environments: Environments, runtime: SharedRuntime | undefined): DeploymentInfo {
   const capabilities = new Set<string>(["events"]);
   if (runtime) capabilities.add("shared");
+  const services = app.services as Record<string, unknown>;
   for (const [service, provided] of Object.entries(SERVICE_CAPABILITIES)) {
-    if ((app.services as Record<string, unknown>)[service] !== undefined) for (const capability of provided) capabilities.add(capability);
+    const provider = services[service];
+    if (provider === undefined) continue;
+    // Only what works now: the sandbox backend reports readiness (Docker down, Azure not configured or qualified).
+    if (service === "sandboxes" && (provider as { available?: boolean }).available === false) continue;
+    for (const capability of provided) capabilities.add(capability);
   }
   for (const capability of app.capabilities) capabilities.add(capability);
   const deployment = app.config.deployment;

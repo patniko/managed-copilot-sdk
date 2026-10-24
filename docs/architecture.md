@@ -543,9 +543,11 @@ structurally (they may add members).
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
 | `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`; registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
-`/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`),
-`artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background` (`credentials`) when those services are
-registered, and anything a module adds to `app.capabilities` (for example `promotion`, `attach.cli`).
+`/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
+`sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`
+(`credentials`) when those services are registered, and anything a module adds to `app.capabilities` (for example
+`promotion`, `attach.cli`). Stored artifacts stay readable while the sandbox backend is down, so `artifacts` follows
+the artifacts service alone.
 
 ## Core: shared runtime and router
 
@@ -591,17 +593,25 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 - **Placement cutover** (`sessions.cutover`, used by promotion). `fence()` marks the session `promoting`, holds new
   client and service requests behind its residency, and buffers what the source sends; the first
   `source("session.suspend" | "sessions.close")` seals it, after which the source's events, lifecycle notifications,
-  replies, and client-bound requests are handoff artifacts that reach nobody. `open(extra)` admits the session's
-  stored requested configuration (`AdmittedConfig.requested`) for sandbox placement with its current model and agent,
-  attached clients' registrations, and the sandbox platform tools, then runs the sandbox upstream sequence.
-  `commit()` moves placement, generation (+1), and the admitted configuration in one ledger update, switches routing,
-  flushes buffered source events (with the source generation) and early destination events in order, delivers replies
-  the source gave before the seal, lifts the fence, and only then emits `onLifecycle("promoted")`. A `sendAndWait`
-  whose reply arrived after the seal completes from the owner's events (next root `session.idle`, with the last root
-  `assistant.message`; a root `session.error` fails it). `abort({ resume })` closes the destination, flushes the
-  buffer, and leaves the source the owner (resumed there with `resume` extras if it was sealed). Deleting the session
-  aborts an open cutover; rows left `promoting` by a crash return to `idle` at startup. Durable fences actions by
-  generation, so carrying a pending call across the move is the promotion module's job.
+  replies, and client-bound requests are handoff artifacts that reach nobody; their event IDs are recorded
+  (`core_hidden_events`) so history reads (`session.getMessages`, client or service) never return them either.
+  Requests are checked against the fence and written to the runtime in one synchronous step, so nothing reaches the
+  source after a fence. `open(extra)` admits the session's stored requested configuration (`AdmittedConfig.requested`,
+  snapshotted before admission rewrites anything, e.g. MCP servers keep their original endpoints) for sandbox
+  placement with its current model and agent, plus the caller's later option changes (`requestedOptions`), attached
+  clients' registrations, and the sandbox platform tools, then runs the sandbox upstream sequence; the destination's
+  runtime requests (including session-less inference chunks) go to its sandbox handlers before commit.
+  `await commit()` moves placement, generation (+1), and the admitted configuration in one ledger update, switches
+  routing, delivers buffered source events (with the source's placement scrubbing and generation) and early
+  destination events in order, then replies the source gave before the seal, lifts the fence, and only then emits
+  `onLifecycle("promoted")`. A `sendAndWait` whose reply arrived after the seal completes from the owner's events
+  (next root `session.idle`, with the last root `assistant.message`; a root `session.error` fails it; deleting the
+  session fails it; outside a cutover a session that is not running is resumed for it, and fails it if that fails).
+  `abort({ resume })` closes the destination, delivers the buffer, and leaves the source the owner; a sealed session
+  is resumed there right away with the `resume` extras. Client calls and resumes admitted for one placement are
+  admitted again if a cutover moved the session while they ran. Deleting the session aborts an open cutover; rows
+  left `promoting` by a crash return to `idle` at startup. Durable fences actions by generation, so carrying a
+  pending call across the move is the promotion module's job.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
