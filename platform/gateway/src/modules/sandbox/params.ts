@@ -45,3 +45,15 @@ export function rewriteSessionParams(params: Record<string, unknown>, customizat
   }
   return out;
 }
+
+/**
+ * Takes `agent` out of create/resume parameters. The stock runtime resolves a named agent from `agentDirectories`
+ * only when it holds a GitHub credential at construction, and a sandbox runtime receives its brokered credential
+ * after construction, so the gateway selects the agent itself once credentials are installed.
+ */
+export function deferAgentSelection(params: Record<string, unknown>): { params: Record<string, unknown>; agent?: string } {
+  const agent = params["agent"];
+  if (typeof agent !== "string" || !agent) return { params };
+  const { agent: _deferred, ...rest } = params;
+  return { params: rest, agent };
+}

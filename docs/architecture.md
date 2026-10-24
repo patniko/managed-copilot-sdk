@@ -165,8 +165,9 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
   resolves only when setup and the runtime are ready; a failing setup step rejects with `setup_failed` (step, exit code,
-  redacted output) and the session is never reported usable. Sizes map to CPU and memory limits; containers drop all
-  capabilities except what sandboxd needs (CHOWN, DAC_READ_SEARCH, KILL, SETGID, SETUID) and run with
+  redacted output, and the last output lines in the message) and the session is never reported usable; a failed create
+  releases its container, volumes, and subnet. Sizes map to CPU and memory limits; containers drop all capabilities
+  except what sandboxd needs to switch identity and signal (CHOWN, KILL, SETGID, SETUID) and run with
   `no-new-privileges`.
 - **Networks.** Every sandbox gets its **own internal Docker network** on an explicit /28 from `10.213.0.0/16`
   (probing on overlap), so sandboxes can never reach each other's ports and Docker's default pools are not
@@ -179,8 +180,15 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   attach), streamed workspace list/read/write, and output manifests. It starts the SDK's stock headless
   `copilot-runtime` as uid 10001 with cwd `/workspace`, `COPILOT_CONNECTION_TOKEN`, its own `COPILOT_HOME`, the egress
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
-  unexpected exits. Workspace writes run in a short-lived worker as uid 10001; reads use `O_NOFOLLOW` plus
-  `/proc/self/fd` verification, so traversal and symlink escapes are refused.
+  unexpected exits. Every workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a
+  short-lived worker as uid 10001 that walks the path one segment at a time with `chdir`, refuses symbolic links,
+  verifies the real directory after every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root
+  never touches workspace paths, and children enter `/workspace` only after dropping privileges.
+- **Custom agents.** The stock runtime resolves a named `agent` from `agentDirectories` only when it holds a GitHub
+  credential at construction (verified on 1.0.103: without one, `session.create` fails with "Custom agent … not
+  found"). A sandbox runtime gets its brokered credential after construction, so the sandbox module removes `agent`
+  from create/resume parameters and calls `session.agent.select` right after installing credentials, before core
+  replies; an unknown agent still fails the create with `invalid_request`.
 - **Setup** (spec section 5) runs once, in order: pip packages into the persisted venv, npm packages into the
   persisted prefix, setup files (≤64, ≤1 MiB each, ≤8 MiB total), then `setupCommands` (`bash -c` as uid 10001).
   Progress, resolved versions, and file digests are recorded in the gateway ledger (authoritative) and in root-only
@@ -195,8 +203,10 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
   tool/permission/elicitation action is pending, and no file transfer or publication is in flight; it closes runtime
   streams so core resumes on next use. `ensureRunning` restarts (or recreates from the pinned image and existing
-  volumes) and re-registers egress. `delete` marks `deleting`, removes container, volumes, network, and artifacts, and
-  reconciliation finishes after a crash; orphaned resources labelled with the instance are swept on start.
+  volumes) and re-registers egress. Stops close runtime streams, stop the container, then unregister egress and detach
+  the relay and proxy from the sandbox network. `delete` marks `deleting`, removes container, volumes, network, and
+  artifacts, and reconciliation finishes after a crash; orphaned resources labelled with the instance are swept on
+  start.
 - **The sandbox relay** (`<instance>-relay`, same image, uid 65534, read-only rootfs) is on `<instance>-edge`
   (published on 127.0.0.1) and every sandbox network; it forwards `/relay/<sandboxId>/...` HTTP and upgrades to
   `sbx-<id>:7781` after checking the platform key.
@@ -204,15 +214,22 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   sandboxes reach the Internet only through it. It applies each sandbox's effective network policy (fetched from or
   pushed by the gateway), blocks platform internals, loopback/link-local, private, and metadata addresses after DNS
   resolution, and substitutes vault placeholders in permitted HTTPS headers. Per start the gateway calls
-  `policy.registerSandbox` → passes its env and CA to sandboxd → `policy.updateSandbox(id, { address })`; on stop and
-  delete, `policy.unregisterSandbox`. Without a policy service, only `network: false` sandboxes without vaults start.
+  `policy.registerSandbox`, pins the credential with `policy.updateSandbox(id, { address })` as soon as the container
+  has its address (before setup, so setup installs already pass the proxy), then passes the env and CA to sandboxd; on
+  stop and delete, `policy.unregisterSandbox`. Without a policy service, only `network: false` sandboxes without vaults
+  start.
 - **Artifacts** (spec section 6). A turn starts at a root `user.message` (turn ID = its `messageId`) and completes at
   the next root `session.idle`. Completed turns publish: sandboxd hashes the bounded regular files under
   `/workspace/outputs` (symlinks, special files, changing files, and anything over 256 files / 100 MiB each / 512 MiB
   total are rejected with reasons), the gateway downloads and re-verifies each changed file into content-addressed
   storage under `<dataDir>/artifacts/<sessionId>/`, and records versions, digests, and a per-turn manifest. Rejections,
   cancelled turns, and turns that ended in errors are recorded as `failed` publications, never empty successes.
-  `artifact.published` is emitted through core's events.
+  Publications run one at a time per session, and `artifact.published` (through core's events) lists only new
+  versions; a turn that changed nothing under `outputs/` emits no event.
+- **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
+  re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the
+  placeholder); a publication can race a following turn that rewrites a file within its download window, which the
+  digest re-check turns into a `failed` publication rather than a wrong artifact.
 - **REST** (owner-scoped, shared sessions answer `invalid_request`): `GET /v1/sessions/:id/files?path=&recursive=`,
   `GET|PUT /v1/sessions/:id/files/content?path=&overwrite=` (streamed, 512 MiB limit, atomic replace by default),
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per

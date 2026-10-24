@@ -157,6 +157,17 @@ export class InferenceBroker {
     this.#exchanges.clear();
   }
 
+  /** Selects the session's requested custom agent (after `sessionOpened`, when the runtime can resolve it). */
+  async selectAgent(sessionId: string, name: string): Promise<void> {
+    if (!this.#send) throw new ManagedCopilotError("internal", "The sandbox runtime connection was not initialized.");
+    try {
+      await this.#send("session.agent.select", { sessionId, name });
+    } catch (error) {
+      const message = (error as Error)?.message ?? String(error);
+      throw new ManagedCopilotError("invalid_request", /not found/i.test(message) ? `Custom agent '${name}' not found` : `Custom agent '${name}' could not be selected: ${message}`, { agent: name });
+    }
+  }
+
   #learnEndpoints(copilotUser: Record<string, unknown>): void {
     const api = (copilotUser["endpoints"] as Record<string, unknown> | undefined)?.["api"];
     if (typeof api !== "string") return;

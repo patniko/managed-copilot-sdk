@@ -37,7 +37,7 @@ import type {
 import type { DockerClient } from "./docker.js";
 import type { SandboxImages } from "./images.js";
 import type { DockerSandboxProvider } from "./provider.js";
-import { rewriteSessionParams } from "./params.js";
+import { deferAgentSelection, rewriteSessionParams } from "./params.js";
 import type { SandboxRow, SandboxStore } from "./store.js";
 
 const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.requested", "elicitation.requested"]);
@@ -469,16 +469,24 @@ export class SandboxService implements SandboxesService {
     const stream = await this.#agent(row).openStream(SANDBOXD_ROUTES.runtime);
     const live = this.#liveFor(sessionId);
     const broker = new InferenceBroker({ sessionId, placeholder: row.placeholder, resolveToken: () => options.resolveToken(), githubApiUrl: this.#options.app.config.githubApiUrl, log: this.#log });
+    const deferredAgents = new Map<string, string>();
     const runtime: SandboxRuntime = {
       sandboxId: row.id,
       stream,
       connectionToken: row.runtimeToken,
       handlers: broker.handlers,
       initialize: (send) => broker.initialize(send),
-      prepareSessionParams: async (_method, params) => rewriteSessionParams(params, row.customizations),
+      prepareSessionParams: async (_method, params) => {
+        const deferred = deferAgentSelection(rewriteSessionParams(params, row.customizations));
+        if (deferred.agent) deferredAgents.set(typeof params["sessionId"] === "string" ? params["sessionId"] : sessionId, deferred.agent);
+        return deferred.params;
+      },
       sessionOpened: async (id) => {
         live.lastActivity = Date.now();
         await broker.sessionOpened(id);
+        const agent = deferredAgents.get(id);
+        deferredAgents.delete(id);
+        if (agent) await broker.selectAgent(id, agent);
       },
       close: () => {
         broker.close();

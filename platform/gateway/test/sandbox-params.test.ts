@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { isManagedCopilotError } from "@managed-copilot/protocol";
 import { resolveDockerEndpoints } from "../src/modules/sandbox/docker.js";
-import { relativeWithin, rewriteSessionParams } from "../src/modules/sandbox/params.js";
+import { deferAgentSelection, relativeWithin, rewriteSessionParams } from "../src/modules/sandbox/params.js";
+
+describe("deferAgentSelection", () => {
+  it("moves a named agent out of create/resume params so the gateway selects it after credentials are installed", () => {
+    expect(deferAgentSelection({ agent: "builder", model: "m" })).toEqual({ params: { model: "m" }, agent: "builder" });
+    expect(deferAgentSelection({ model: "m" })).toEqual({ params: { model: "m" } });
+    expect(deferAgentSelection({ agent: "", model: "m" })).toEqual({ params: { agent: "", model: "m" } });
+  });
+});
 
 describe("rewriteSessionParams", () => {
   it("strips GitHub credential fields and defaults the working directory", () => {

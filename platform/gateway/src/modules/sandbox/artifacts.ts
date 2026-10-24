@@ -246,6 +246,10 @@ export class ArtifactService implements ArtifactsService {
       const published: ArtifactInfo[] = [];
       const fresh: ArtifactInfo[] = [];
       transaction(db, () => {
+        // A session deleted while its outputs were being downloaded must not regain rows.
+        if (!db.prepare("SELECT 1 FROM sandbox_publications WHERE session_id = ? AND turn_id = ?").get(sessionId, turnId)) {
+          throw new ManagedCopilotError("not_found", "The session was deleted while its outputs were being published.");
+        }
         for (const item of planned) {
           if (item.reuse) {
             artifactIds.push(item.reuse.id);
