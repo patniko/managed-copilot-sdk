@@ -77,14 +77,26 @@ class FakeProvider implements SandboxProvider {
 const SUCCEEDED: SandboxSetupRecord = { state: "succeeded", steps: [], resolved: {}, files: [] };
 let counter = 0;
 
-/** The sandboxd routes these tests need: health, a start stream that reports ready at once, and the outputs manifest. */
-async function fakeSandboxd(options: { manifest?: (res: ServerResponse) => void | Promise<void> } = {}): Promise<{ server: Server; url: string }> {
+/** A fake sandboxd's runtime process: its instance changes when it is restarted (`restartStatus` 404 = an older sandboxd). */
+interface FakeRuntime {
+  instance: string;
+  restarts: number;
+  restartStatus?: number;
+}
+
+/**
+ * The sandboxd routes these tests need: health, a start stream that reports ready at once, and the outputs manifest;
+ * with `runtime`, also runtime restarts and runtime WebSockets (`sockets`).
+ */
+async function fakeSandboxd(options: { manifest?: (res: ServerResponse) => void | Promise<void>; runtime?: FakeRuntime } = {}): Promise<{ server: Server; url: string; sockets?: WebSocketServer }> {
+  const runtime = options.runtime;
+  const status = () => ({ sandboxId: "fake", version: "test", state: "ready", runtime: { state: "running", restarts: runtime?.restarts ?? 0, ...(runtime ? { instance: runtime.instance } : {}) } });
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
       if (req.method === "GET" && req.url === "/v1/health") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ sandboxId: "fake", version: "test", state: "ready", runtime: { state: "running", restarts: 0 } }));
+        res.end(JSON.stringify(status()));
       } else if (req.method === "POST" && req.url === "/v1/start") {
         res.writeHead(200, { "content-type": "application/x-ndjson" });
         res.end(`${JSON.stringify({ type: "ready", setup: SUCCEEDED, runtimePort: 7790 })}\n`);
@@ -92,14 +104,25 @@ async function fakeSandboxd(options: { manifest?: (res: ServerResponse) => void 
         if (options.manifest) return void options.manifest(res);
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ files: [], rejected: [] }));
+      } else if (req.method === "POST" && req.url === "/v1/runtime/restart" && runtime && runtime.restartStatus === undefined) {
+        runtime.restarts++;
+        runtime.instance = `instance-${runtime.restarts}`;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(status()));
       } else {
         res.writeHead(404, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: "not_found", message: `No route for ${req.method} ${req.url}` } }));
       }
     });
   });
+  let sockets: WebSocketServer | undefined;
+  if (runtime) {
+    const accepting = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (req, socket, head) => accepting.handleUpgrade(req, socket, head, () => undefined));
+    sockets = accepting;
+  }
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+  return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, ...(sockets ? { sockets } : {}) };
 }
 
 /** A logger that records what was written at each level. */
@@ -326,8 +349,9 @@ describe("SandboxService lifecycle", () => {
     }
   });
 
-  describe("publications interrupted by deletion or shutdown", () => {
+  describe("turns and publications across deletion, shutdown, and runtime replacement", () => {
     let server: Server | undefined;
+    let sockets: WebSocketServer | undefined;
     let dataDir: string;
 
     beforeEach(() => {
@@ -335,6 +359,10 @@ describe("SandboxService lifecycle", () => {
     });
 
     afterEach(async () => {
+      for (const client of sockets?.clients ?? []) client.terminate();
+      sockets?.close();
+      sockets = undefined;
+      server?.closeAllConnections();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
       server = undefined;
       rmSync(dataDir, { recursive: true, force: true });
@@ -362,7 +390,7 @@ describe("SandboxService lifecycle", () => {
     function sessionsWith(sessionId: string, state: () => string): () => RuntimeEventListener {
       let listener: RuntimeEventListener | undefined;
       services["sessions"] = {
-        get: (id: string) => (id === sessionId ? { id, ownerId: 1, state: state() } : undefined),
+        get: (id: string) => (id === sessionId ? { id, ownerId: 1, state: state(), incarnation: "inc-1" } : undefined),
         subscribe: (next: RuntimeEventListener) => {
           listener = next;
           return () => undefined;
@@ -504,6 +532,140 @@ describe("SandboxService lifecycle", () => {
       expect(failure?.message).toBe("The sandbox connection failed.");
       expect(lines).toContainEqual({ level: "warn", message: "Publication failed" });
       expect(lines.some((line) => /gateway is stopping/.test(line.message))).toBe(false);
+    });
+
+    /** core's upstream as stock runtime 1.0.103 answers a second `llmInference.setProvider` (the first holder never releases it). */
+    const providerHeld = async (method: string): Promise<unknown> => {
+      if (method === "llmInference.setProvider") throw new Error("Request llmInference.setProvider failed with message: Another client is already the LLM inference provider.");
+      return { success: true };
+    };
+    const provided = async (): Promise<unknown> => ({ success: true });
+
+    /** A running sandbox whose fake sandboxd has a runtime process, wired to artifacts and a sessions service. */
+    async function withRuntime(runtime: FakeRuntime) {
+      const fake = await fakeSandboxd({ runtime });
+      server = fake.server;
+      sockets = fake.sockets;
+      provider.sandboxdUrl = fake.url;
+      const row = sandbox("running", { running: true });
+      const emitter = sessionsWith(row.sessionId, () => "running");
+      const sandboxes = createService();
+      const { log, lines } = recordingLogger();
+      const artifacts = withArtifacts(sandboxes, log);
+      await sandboxes.start();
+      return {
+        row,
+        artifacts,
+        lines,
+        emit: (event: { id: string; type: string; data?: unknown }) => emitter()(row.sessionId, event),
+        open: () => sandboxes.openRuntime(row.sessionId, { resolveToken: async () => "gho_test_token" }),
+        turnState: (turnId: string) => (store.db.prepare("SELECT state FROM sandbox_turns WHERE session_id = ? AND turn_id = ?").get(row.sessionId, turnId) as { state: string } | undefined)?.state,
+      };
+    }
+
+    it("restarts a runtime still held by a connection that is gone, ends the turn it was running, and asks the caller to reopen", async () => {
+      const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
+      const { row, artifacts, lines, emit, open } = await withRuntime(runtime);
+      const first = await open();
+      await first.initialize(provided);
+      emit({ id: "m1-start", type: "user.message", data: { messageId: "m1" } });
+      // The gateway's link drops mid-turn; the runtime keeps its provider registration with the dead connection.
+      first.close();
+      const second = await open();
+      const refused = await second.initialize(providerHeld).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(isManagedCopilotError(refused, "capability_unavailable"), String(refused)).toBe(true);
+      expect((refused as ManagedCopilotError).details).toEqual({ sandboxId: row.id, reopen: true });
+      expect(runtime.restarts).toBe(1);
+      await expect(artifacts.waitForPublication(row.sessionId, { turnId: "m1", timeoutMs: 1_000 })).rejects.toThrow(/runtime was restarted while this turn was running/);
+      expect(lines.filter((line) => line.level === "warn")).toEqual([]);
+      // The reopened connection reaches the new process, which takes it as provider: nothing is replaced again.
+      second.close();
+      const third = await open();
+      await third.initialize(provided);
+      expect(runtime.restarts).toBe(1);
+      third.close();
+    });
+
+    for (const [kind, actions] of [
+      // An answer recorded but not yet delivered is no longer listed as open, yet the runtime still waits for it.
+      ["durable's hasOpenActions", (scopes: (string | undefined)[]) => ({ hasOpenActions: (_sessionId: string, options?: { readonly incarnation?: string }) => (scopes.push(options?.incarnation), true), list: () => [] })],
+      ["a list of open actions", (scopes: (string | undefined)[]) => ({ list: (_sessionId: string, options: { readonly incarnation?: string }) => (scopes.push(options.incarnation), [{ id: "act_1" }]) })],
+    ] as const) {
+      it(`keeps a turn that waits on durable actions across a runtime restart, since continuePendingWork carries them over (${kind})`, async () => {
+        const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
+        const { row, artifacts, emit, open, turnState } = await withRuntime(runtime);
+        const scopes: (string | undefined)[] = [];
+        services["actions"] = actions(scopes);
+        const first = await open();
+        await first.initialize(provided);
+        emit({ id: "m1-start", type: "user.message", data: { messageId: "m1" } });
+        first.close();
+        const second = await open();
+        await expect(second.initialize(providerHeld)).rejects.toSatisfy((error: unknown) => (error as ManagedCopilotError).details?.["reopen"] === true);
+        expect(runtime.restarts).toBe(1);
+        expect(turnState("m1")).toBe("running");
+        expect(scopes).toContain("inc-1");
+        // Answering the action continues the turn in the new process, and its completion publishes as usual.
+        second.close();
+        const third = await open();
+        await third.initialize(provided);
+        emit({ id: "m1-idle", type: "session.idle", data: {} });
+        expect((await artifacts.waitForPublication(row.sessionId, { turnId: "m1" })).state).toBe("published");
+        third.close();
+      });
+    }
+
+    it("never restarts a runtime that another connection of this gateway holds", async () => {
+      const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
+      const { open } = await withRuntime(runtime);
+      const first = await open();
+      await first.initialize(provided);
+      const second = await open();
+      await expect(second.initialize(providerHeld)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "conflict") && (error as ManagedCopilotError).details?.["reopen"] === undefined);
+      expect(runtime.restarts).toBe(0);
+      second.close();
+      first.close();
+    });
+
+    it("restarts a sandbox whose sandboxd cannot restart its runtime, so the reopen reaches a fresh runtime", async () => {
+      const runtime: FakeRuntime = { instance: "instance-0", restarts: 0, restartStatus: 404 };
+      const { row, artifacts, emit, open } = await withRuntime(runtime);
+      const first = await open();
+      await first.initialize(provided);
+      emit({ id: "m1-start", type: "user.message", data: { messageId: "m1" } });
+      first.close();
+      const second = await open();
+      await expect(second.initialize(providerHeld)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "capability_unavailable") && (error as ManagedCopilotError).details?.["reopen"] === true);
+      expect(provider.stopped).toEqual([row.id]);
+      expect(provider.running.has(row.id)).toBe(true);
+      expect(store.bySession(row.sessionId)?.state).toBe("running");
+      await expect(artifacts.waitForPublication(row.sessionId, { turnId: "m1", timeoutMs: 1_000 })).rejects.toThrow(/runtime was restarted while this turn was running/);
+      // The reopen only opens the runtime again (core does not resume the sandbox between attempts).
+      const third = await open();
+      await third.initialize(provided);
+      third.close();
+    });
+
+    it("ends a turn when the runtime process changed between connections (sandboxd recovered a crashed runtime)", async () => {
+      const runtime: FakeRuntime = { instance: "instance-0", restarts: 0 };
+      const { row, artifacts, emit, open, turnState } = await withRuntime(runtime);
+      const first = await open();
+      await first.initialize(provided);
+      emit({ id: "m1-start", type: "user.message", data: { messageId: "m1" } });
+      first.close();
+      // The same process: the turn may still be running there.
+      const second = await open();
+      expect(turnState("m1")).toBe("running");
+      second.close();
+      runtime.instance = "instance-recovered";
+      const third = await open();
+      await third.initialize(provided);
+      await expect(artifacts.waitForPublication(row.sessionId, { turnId: "m1", timeoutMs: 1_000 })).rejects.toThrow(/runtime was restarted while this turn was running/);
+      expect(runtime.restarts).toBe(0);
+      third.close();
     });
   });
 

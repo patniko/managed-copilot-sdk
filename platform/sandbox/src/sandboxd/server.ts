@@ -141,6 +141,10 @@ export function createSandboxdServer(options: ServerOptions): Server {
         await agent.abortImport(stagingName(url));
         sendJson(res, 200, {});
         return;
+      case `POST ${ROUTES.runtimeRestart}`:
+        await agent.restartRuntime();
+        sendJson(res, 200, agent.status());
+        return;
       case `POST ${ROUTES.outputsManifest}`:
         sendJson(res, 200, await agent.outputsManifest());
         return;

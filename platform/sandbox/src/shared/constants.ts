@@ -21,6 +21,7 @@ export const ROUTES = {
   runtimeImportContent: "/v1/runtime-import/content",
   runtimeImportCommit: "/v1/runtime-import/commit",
   runtimeImportAbort: "/v1/runtime-import/abort",
+  runtimeRestart: "/v1/runtime/restart",
 } as const;
 
 export const PATHS = {
