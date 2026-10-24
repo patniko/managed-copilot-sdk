@@ -17,7 +17,8 @@ const ALICE = "alice-token";
 const BOB = "bob-token";
 const MALLORY = "mallory-token";
 
-describe.skipIf(!built)("SDK over the bridge (fake runtime)", () => {
+// Each test's clients spawn a bridge process (Node's startup can take seconds on a loaded machine).
+describe.skipIf(!built)("SDK over the bridge (fake runtime)", { timeout: 30_000 }, () => {
   let runtime: FakeRuntime;
   let github: Awaited<ReturnType<typeof startGitHubStub>>;
   let gateway: TestGateway;
