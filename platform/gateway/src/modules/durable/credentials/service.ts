@@ -64,6 +64,7 @@ export class DurableCredentials implements CredentialsService {
       .run(principal.accountId, principal.login, principal.name ?? null, principal.avatarUrl ?? null, seal(this.#deps.sealKey, principal.token, context(principal.accountId)), now, now, now);
     this.#verified.set(principal.accountId, { principal, at: now });
     this.#deps.log.info("Background sign-in stored", { account: principal.login });
+    this.#deps.schedules()?.syncAppHost?.(principal);
     return this.status(principal);
   }
 

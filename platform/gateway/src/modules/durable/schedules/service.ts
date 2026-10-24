@@ -174,6 +174,7 @@ export class DurableSchedules implements SchedulesService {
     if (sessions) this.#disposers.push(sessions.subscribe((sessionId, event) => this.onSessionEvent(sessionId, event)));
     const actions = this.#deps.actions();
     if (actions?.onChange) this.#disposers.push(actions.onChange((change) => this.#onActionChange(change)));
+    this.syncAppHostForKnownAccounts();
     void this.#recoverActiveRuns();
     if (this.#options.tickIntervalMs > 0) {
       this.#timer = setInterval(() => void this.tick(), this.#options.tickIntervalMs);
@@ -414,6 +415,90 @@ export class DurableSchedules implements SchedulesService {
       .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND state = 'active' AND deleted_at IS NULL")
       .run(reason, this.#now(), ownerId);
     return Number(result.changes);
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // AppHost-declared schedules
+  // ---------------------------------------------------------------------------------------------------------
+
+  /**
+   * Materializes the AppHost's schedule declarations whose `runAs` names this account (spec section 13). Naming an
+   * account is not a grant: each declaration appears paused until that account resumes it, which is its explicit
+   * grant for this deployment, environment, and schedule. A changed declaration pauses again for re-approval, and a
+   * removed one is deleted.
+   */
+  syncAppHost(account: { readonly accountId: number; readonly login: string }): void {
+    const now = this.#now();
+    const existing = new Map(this.#store.listAppHost(account.accountId).map((row) => [row.apphost_key!, row]));
+    for (const [key, declaration] of Object.entries(this.#deps.deployment.schedules ?? {})) {
+      if (!declaration.runAs || declaration.runAs.toLowerCase() !== account.login.toLowerCase()) continue;
+      const session: SessionConfig | undefined = declaration.session
+        ? {
+            ...(declaration.session.agent ? { agent: declaration.session.agent } : {}),
+            ...(declaration.session.model ? { model: declaration.session.model } : {}),
+            ...(declaration.session.tools?.length ? { tools: declaration.session.tools } : {}),
+          }
+        : undefined;
+      let nextRunAt: number | null;
+      try {
+        assertTimeZone(declaration.timeZone);
+        if (!this.#deps.deployment.environments[declaration.environment]) throw new ManagedCopilotError("environment_not_found", `Unknown environment "${declaration.environment}"`);
+        this.#validateWebhook(declaration.webhook, declaration.environment, (session?.tools?.length ?? 0) > 0, session?.tools?.[0]?.name);
+        nextRunAt = nextOccurrence(parseCron(declaration.cron), declaration.timeZone, new Date(now))?.getTime() ?? null;
+      } catch (error) {
+        this.#log.error("AppHost schedule is invalid and will not run", { schedule: key, error: describeError(error) });
+        continue;
+      }
+      const definition = { cron: declaration.cron, timeZone: declaration.timeZone, environment: declaration.environment, session, webhook: declaration.webhook, prompt: declaration.prompt, runAs: declaration.runAs };
+      const definitionHash = createHash("sha256").update(canonicalJson(definition)).digest("hex");
+      const fields = {
+        cron: declaration.cron,
+        time_zone: declaration.timeZone,
+        environment: declaration.environment,
+        prompt: declaration.prompt,
+        session_config: session ? JSON.stringify(session) : null,
+        webhook: declaration.webhook ?? null,
+        definition_hash: definitionHash,
+        next_run_at: nextRunAt,
+      };
+      const row = existing.get(key);
+      existing.delete(key);
+      if (!row) {
+        const name = this.#store.byName(account.accountId, key) ? `${key}-apphost` : key;
+        this.#store.insertSchedule({
+          id: newId("sch"),
+          owner_id: account.accountId,
+          owner_login: account.login,
+          name,
+          run_at: null,
+          state: "paused",
+          paused_reason: `Declared by this deployment's AppHost to run as ${account.login}. Resume it to allow it to run as you.`,
+          created_by: "apphost",
+          target_session_id: null,
+          origin_session_id: null,
+          apphost_key: key,
+          origin_key: null,
+          created_at: now,
+          updated_at: now,
+          ...fields,
+        });
+        this.#log.info("AppHost schedule is waiting for its account's approval", { schedule: key, runAs: account.login });
+      } else if (row.definition_hash !== definitionHash) {
+        this.#store.replaceDefinition(row.id, { ...fields, state: "paused", paused_reason: "The AppHost changed this schedule. Resume it to approve the new definition." }, now);
+        this.#log.info("AppHost schedule changed; paused for re-approval", { schedule: key, runAs: account.login });
+      }
+    }
+    for (const row of existing.values()) {
+      this.delete(account.accountId, row.id);
+      this.#log.info("AppHost schedule removed from the declaration", { schedule: row.apphost_key });
+    }
+  }
+
+  /** Materializes AppHost schedules for every account that has signed in for background work. */
+  syncAppHostForKnownAccounts(): void {
+    if (!this.#deps.deployment.schedules) return;
+    const accounts = this.#deps.db.prepare("SELECT account_id, login FROM durable_credentials").all() as { account_id: number; login: string }[];
+    for (const account of accounts) this.syncAppHost({ accountId: account.account_id, login: account.login });
   }
 
   // ---------------------------------------------------------------------------------------------------------

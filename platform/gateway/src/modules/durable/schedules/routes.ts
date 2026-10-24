@@ -5,7 +5,11 @@ import type { DurableSchedules } from "./service.js";
 export function registerScheduleRoutes(app: GatewayApp, schedules: DurableSchedules): void {
   const owner = (ctx: { principal: { accountId: number } | undefined }) => ctx.principal!.accountId;
 
-  app.routes.get(ROUTES.schedules, (ctx) => schedules.list(owner(ctx)));
+  app.routes.get(ROUTES.schedules, (ctx) => {
+    // AppHost declarations naming this account appear here (paused) so the account can approve them.
+    schedules.syncAppHost(ctx.principal!);
+    return schedules.list(owner(ctx));
+  });
 
   app.routes.post(ROUTES.schedules, async (ctx) => {
     const created = await schedules.create(ctx.principal!, await ctx.json());

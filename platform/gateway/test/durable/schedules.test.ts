@@ -476,6 +476,82 @@ describe("durable schedules", () => {
     });
   });
 
+  describe("AppHost-declared schedules", () => {
+    const declared = (prompt = "Triage the issues opened since the last run", runAs = "OctoCat") =>
+      parseConfig({
+        environments: { chat: { type: "shared" } },
+        webhooks: { orders: { url: "https://orders.example/hook", environments: ["chat"], events: ["session.action_required"], secret: { secretEnv: "S" } } },
+        schedules: {
+          "weekday-triage": {
+            cron: "0 9 * * 1-5",
+            timeZone: "America/Los_Angeles",
+            environment: "chat",
+            session: { tools: [{ name: "lookup_order", parameters: { type: "object" } }] },
+            webhook: "orders",
+            prompt,
+            runAs,
+          },
+          unowned: { cron: "0 9 * * *", environment: "chat", prompt: "p" },
+        },
+      });
+
+    function withDeployment(config: ManagedCopilotConfig) {
+      return new DurableSchedules({
+        db,
+        log: createLogger("test", "error"),
+        deployment: config,
+        sessions: () => sessions,
+        credentials: () => credentials,
+        actions: () => undefined,
+        publish: (event) => published.push(event),
+        now: () => now,
+        options: { tickIntervalMs: 0 },
+      });
+    }
+
+    it("waits paused for the named account's explicit approval, then runs as that account", async () => {
+      await schedules.stop();
+      schedules = withDeployment(declared());
+      schedules.syncAppHost(OWNER);
+      schedules.syncAppHost(OTHER);
+      expect(schedules.list(OTHER.accountId)).toHaveLength(0);
+      const [pending] = schedules.list(OWNER.accountId);
+      expect(pending).toMatchObject({ name: "weekday-triage", createdBy: "apphost", state: "paused", webhook: "orders" });
+      expect(pending!.pausedReason).toMatch(/Resume it to allow it to run as you/);
+
+      now = Date.parse("2026-10-26T16:00:00Z");
+      await tick();
+      expect(sessions.creates).toHaveLength(0);
+
+      // Resuming is the account's grant for this deployment, environment, and schedule.
+      now = START;
+      expect(schedules.resume(OWNER.accountId, pending!.id)).toMatchObject({ state: "active", nextRunAt: "2026-10-26T16:00:00.000Z" });
+      now = Date.parse("2026-10-26T16:00:00Z");
+      await tick();
+      expect(sessions.creates).toEqual([expect.objectContaining({ environment: "chat", webhook: "orders", tools: [{ name: "lookup_order", parameters: { type: "object" } }] })]);
+      schedules.syncAppHost(OWNER);
+      expect(schedules.list(OWNER.accountId)[0]!.state).toBe("active");
+    });
+
+    it("pauses again when the operator changes the declaration, and deletes it when removed", async () => {
+      await schedules.stop();
+      schedules = withDeployment(declared());
+      schedules.syncAppHost(OWNER);
+      const [first] = schedules.list(OWNER.accountId);
+      schedules.resume(OWNER.accountId, first!.id);
+
+      schedules = withDeployment(declared("A different prompt"));
+      schedules.syncAppHost(OWNER);
+      const [changed] = schedules.list(OWNER.accountId);
+      expect(changed).toMatchObject({ id: first!.id, state: "paused", prompt: "A different prompt" });
+      expect(changed!.pausedReason).toMatch(/changed this schedule/);
+
+      schedules = withDeployment(declared("A different prompt", "someone-else"));
+      schedules.syncAppHost(OWNER);
+      expect(schedules.list(OWNER.accountId)).toHaveLength(0);
+    });
+  });
+
   describe("agent scheduling tools", () => {
     function tools(): Record<string, PlatformToolDefinition> {
       return Object.fromEntries(scheduleToolDefinitions({ deployment, schedules, credentials: () => credentials, now: () => now }).map((tool) => [tool.name, tool]));

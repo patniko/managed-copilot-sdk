@@ -165,6 +165,26 @@ export class ScheduleStore {
     this.#db.prepare(`UPDATE durable_schedules SET ${sets.join(", ")} WHERE id = ?`).run(...params);
   }
 
+  /** Replaces an AppHost schedule's definition (the operator changed its declaration). */
+  replaceDefinition(
+    id: string,
+    fields: Pick<ScheduleRow, "cron" | "time_zone" | "environment" | "prompt" | "session_config" | "webhook" | "definition_hash" | "state" | "paused_reason" | "next_run_at">,
+    now: number,
+  ): void {
+    this.#db
+      .prepare(
+        `UPDATE durable_schedules SET cron = ?, time_zone = ?, environment = ?, prompt = ?, session_config = ?, webhook = ?, definition_hash = ?, state = ?,
+           paused_reason = ?, next_run_at = ?, updated_at = ? WHERE id = ?`,
+      )
+      .run(fields.cron, fields.time_zone, fields.environment, fields.prompt, fields.session_config, fields.webhook, fields.definition_hash, fields.state, fields.paused_reason, fields.next_run_at, now, id);
+  }
+
+  listAppHost(ownerId: number): ScheduleRow[] {
+    return this.#db
+      .prepare("SELECT * FROM durable_schedules WHERE owner_id = ? AND apphost_key IS NOT NULL AND deleted_at IS NULL ORDER BY created_at, rowid")
+      .all(ownerId) as unknown as ScheduleRow[];
+  }
+
   insertRun(row: Omit<RunRow, "reason" | "session_created" | "input_state" | "input_started_at" | "message_id" | "consumed" | "attempts" | "next_attempt_at" | "started_at" | "completed_at"> & {
     readonly reason?: string | null;
     readonly completed_at?: number | null;

@@ -61,6 +61,14 @@ export const durableModule: GatewayModule = {
     if (tools) registerScheduleTools(tools, { deployment, schedules, credentials: () => credentials });
     else log.warn("No platform tool registry; schedule_task, list_schedules, and cancel_schedule are unavailable");
 
+    for (const [name, declaration] of Object.entries(deployment.schedules ?? {})) {
+      if (!declaration.runAs) {
+        log.error("AppHost schedule has no runAs account, so it cannot run: schedules run as a person who approved them", { schedule: name });
+      } else {
+        log.info("AppHost schedule runs only after its account approves it (managed-copilot login, then resume it)", { schedule: name, runAs: declaration.runAs });
+      }
+    }
+
     const disposers: (() => void)[] = [];
     app.onStart(() => {
       const bus = events();

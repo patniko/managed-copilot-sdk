@@ -262,6 +262,8 @@ export interface SchedulesService {
   runNow(ownerId: number, scheduleId: string, invocationId?: string): Promise<ScheduleRun>;
   /** Pauses every active schedule of an owner with a visible reason (logout, revoked credential). */
   pauseAllForOwner(ownerId: number, reason: string): number;
+  /** Materializes AppHost-declared schedules whose `runAs` is this account (paused until the account approves). */
+  syncAppHost?(account: { readonly accountId: number; readonly login: string }): void;
 }
 
 export interface CredentialsService {
