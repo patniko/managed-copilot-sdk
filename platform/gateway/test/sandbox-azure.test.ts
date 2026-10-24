@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger } from "../src/log.js";
 import { SandboxApi } from "../src/modules/sandbox/providers/azure/api.js";
 import { loadAzureConfig } from "../src/modules/sandbox/providers/azure/config.js";
-import { AzureSandboxProvider, LABELS } from "../src/modules/sandbox/providers/azure/provider.js";
+import { AzureSandboxProvider, LABELS, type AzureProviderOverrides } from "../src/modules/sandbox/providers/azure/provider.js";
 import type { SandboxSpec } from "../src/modules/sandbox/providers/types.js";
 
 const GROUP = "/subscriptions/sub-1/resourceGroups/rg-1/sandboxGroups/grp-1";
@@ -34,9 +34,12 @@ class FakeDataPlane {
   failImages = false;
   /** Polls a deleted sandbox stays in Deleting (holding its disks) before it disappears. */
   deleteLag = 0;
-  /** Creates (sandboxes, disk images) that are carried out but whose responses are lost. */
+  /** Creates (sandboxes, disk images) whose responses are lost. */
   dropSandboxCreates = 0;
   dropImageCreates = 0;
+  /** When a dropped sandbox create takes effect: at once, after this many sandbox listings, or never. */
+  dropCommitAfterLists: number | "never" = 0;
+  readonly #pending: { sandbox: FakeSandbox; lists: number }[] = [];
   #next = 0;
   #server: Server | undefined;
   url = "";
@@ -76,6 +79,12 @@ class FakeDataPlane {
 
     if (path[0] === "sandboxes") {
       if (path.length === 1 && req.method === "GET") {
+        for (const pending of [...this.#pending]) {
+          if (--pending.lists > 0) continue;
+          this.#pending.splice(this.#pending.indexOf(pending), 1);
+          this.sandboxes.set(pending.sandbox.id, pending.sandbox);
+          this.#attach(pending.sandbox, true);
+        }
         const wanted = (url.searchParams.get("labels") ?? "").split(",").filter(Boolean).map((pair) => pair.split("="));
         const value = [...this.sandboxes.values()].filter((sandbox) => wanted.every(([key, value]) => sandbox.labels[key!] === value)).map((sandbox) => this.#view(sandbox));
         return send(200, { value });
@@ -88,13 +97,19 @@ class FakeDataPlane {
         }
         const id = `remote-${++this.#next}`;
         const sandbox: FakeSandbox = { id, state: "Creating", labels: body.labels as Record<string, string>, body, ports: [{ port: 7781, url: `https://${id}-7781.westus2.adcproxy.io/` }], deleteLag: 0 };
-        this.sandboxes.set(id, sandbox);
-        this.#attach(sandbox, true);
         if (this.dropSandboxCreates > 0) {
           this.dropSandboxCreates--;
+          if (this.dropCommitAfterLists === 0) {
+            this.sandboxes.set(id, sandbox);
+            this.#attach(sandbox, true);
+          } else if (this.dropCommitAfterLists !== "never") {
+            this.#pending.push({ sandbox, lists: this.dropCommitAfterLists });
+          }
           req.socket.destroy();
           return;
         }
+        this.sandboxes.set(id, sandbox);
+        this.#attach(sandbox, true);
         return send(201, this.#view(sandbox));
       }
       const sandbox = this.sandboxes.get(path[1] ?? "");
@@ -194,7 +209,7 @@ function env(extra: Record<string, string> = {}): Record<string, string> {
   };
 }
 
-function provider(variables: Record<string, string> = env()): AzureSandboxProvider {
+function provider(variables: Record<string, string> = env(), overrides: AzureProviderOverrides = {}): AzureSandboxProvider {
   const loaded = loadAzureConfig(variables);
   const api = loaded.config
     ? new SandboxApi({ endpoint: loaded.config.endpoint, subscriptionId: "sub-1", resourceGroup: "rg-1", sandboxGroup: "grp-1", apiVersion: loaded.config.apiVersion, tokens, sleep: async () => {} })
@@ -203,7 +218,7 @@ function provider(variables: Record<string, string> = env()): AzureSandboxProvid
     { env: variables, log: createLogger("test", "error"), instance: "mctest", platformKey: "pk", appHostDir: dataDir, dataDir },
     loaded,
     api,
-    { sleep: async () => {}, pollMs: 0 },
+    { sleep: async () => {}, pollMs: 0, ...overrides },
   );
 }
 
@@ -398,6 +413,25 @@ describe("Azure sandbox provider", () => {
     await subject.create(spec({ imageId: image.id }));
     expect(plane.sandboxes.size).toBe(1);
     expect(await subject.isRunning("sbx_0123456789abcdef01234567")).toBe(true);
+  });
+
+  it("keeps looking for a sandbox Azure creates only after the lookup started, without creating it again", async () => {
+    plane.dropSandboxCreates = 1;
+    plane.dropCommitAfterLists = 3;
+    const subject = provider();
+    await subject.create(spec());
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+    expect(plane.sandboxes.size).toBe(1);
+  });
+
+  it("reports an unconfirmed create instead of submitting it twice", async () => {
+    plane.dropSandboxCreates = 1;
+    plane.dropCommitAfterLists = "never";
+    const subject = provider(env(), { timeouts: { reconcileMs: 30 } });
+    const error = await subject.create(spec()).catch((caught: unknown) => caught);
+    expect(isManagedCopilotError(error, "capability_unavailable")).toBe(true);
+    expect((error as Error).message).toMatch(/did not confirm whether the sandbox was created/);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
   });
 
   it("refuses an environment with system packages but no image of its own instead of using the base image", async () => {

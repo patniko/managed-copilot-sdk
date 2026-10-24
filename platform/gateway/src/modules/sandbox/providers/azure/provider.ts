@@ -45,11 +45,15 @@ const FAILED_IMAGE_STATES = new Set(["failed"]);
 const FAILED_SANDBOX_STATES = new Set(["failed", "stopfailed"]);
 /** States from which a sandbox becomes (or is) running without being replaced. */
 const LIVE_SANDBOX_STATES = new Set(["running", "creating", "resuming"]);
-/** Attempts for a create whose outcome Azure did not report. */
-const CREATE_ATTEMPTS = 3;
+
 
 const stateOf = (sandbox: RemoteSandbox): string => sandbox.state?.toLowerCase() ?? "";
 const isDeleting = (sandbox: RemoteSandbox): boolean => stateOf(sandbox) === "deleting";
+
+/** A create whose outcome stayed unknown: retrying later adopts the resource if Azure did create it. */
+function unconfirmed(what: string, cause: unknown): ManagedCopilotError {
+  return unavailable(`Azure did not confirm whether ${what} was created (${(cause as Error)?.message ?? String(cause)}), and it has not appeared yet. Try again in a minute.`, cause);
+}
 
 /** A failure that does not say whether Azure carried out the request (no answer, or a server error). */
 function isAmbiguous(error: unknown): boolean {
@@ -63,7 +67,7 @@ export interface AzureProviderOverrides {
   readonly api?: SandboxApi;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly pollMs?: number;
-  readonly timeouts?: Partial<{ createMs: number; deleteMs: number; imageMs: number }>;
+  readonly timeouts?: Partial<{ createMs: number; deleteMs: number; imageMs: number; reconcileMs: number }>;
 }
 
 function unavailable(message: string, cause?: unknown): ManagedCopilotError {
@@ -91,7 +95,7 @@ export class AzureSandboxProvider implements SandboxProvider {
   readonly #log: Logger;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #pollMs: number;
-  readonly #timeouts: { createMs: number; deleteMs: number; imageMs: number };
+  readonly #timeouts: { createMs: number; deleteMs: number; imageMs: number; reconcileMs: number };
   readonly #remoteIds = new Map<string, string>();
   readonly #images = new Map<string, Promise<SandboxImageRef>>();
   #readyUntil = 0;
@@ -105,7 +109,7 @@ export class AzureSandboxProvider implements SandboxProvider {
     this.#log = deps.log.child("azure");
     this.#sleep = overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#pollMs = overrides.pollMs ?? 2_000;
-    this.#timeouts = { createMs: 10 * 60_000, deleteMs: 5 * 60_000, imageMs: 30 * 60_000, ...overrides.timeouts };
+    this.#timeouts = { createMs: 10 * 60_000, deleteMs: 5 * 60_000, imageMs: 30 * 60_000, reconcileMs: 60_000, ...overrides.timeouts };
   }
 
   #require(): { config: AzureSandboxConfig; api: SandboxApi } {
@@ -195,21 +199,36 @@ export class AzureSandboxProvider implements SandboxProvider {
     }
   }
 
-  /** Creates a disk image; like sandbox creation, adopts one Azure accepted without answering instead of creating a second. */
+  /** Creates a disk image; like sandbox creation, never submits a second create when Azure's answer was lost. */
   async #createDiskImage(ref: string, key: string, config: AzureSandboxConfig): Promise<RemoteDiskImage> {
     const { api } = this.#require();
     const labels = { [LABELS.instance]: this.#instance, [LABELS.image]: key };
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await api.createDiskImage(ref, labels, config.registryIdentity);
-      } catch (error) {
-        if (!isAmbiguous(error) || attempt >= CREATE_ATTEMPTS) throw error;
-        await this.#sleep(this.#pollMs);
-        const adopted = (await api.listDiskImages()).find(
+    try {
+      return await api.createDiskImage(ref, labels, config.registryIdentity);
+    } catch (error) {
+      if (!isAmbiguous(error)) throw error;
+      const adopted = await this.#reconcile(async () =>
+        (await api.listDiskImages()).find(
           (image) => image.labels?.[LABELS.image] === key && image.labels?.[LABELS.instance] === this.#instance && !FAILED_IMAGE_STATES.has(image.status?.state?.toLowerCase() ?? ""),
-        );
-        if (adopted) return adopted;
-      }
+        ),
+      );
+      if (adopted) return adopted;
+      throw unconfirmed(`the disk image for ${ref}`, error);
+    }
+  }
+
+  /**
+   * After a create without a definite answer, looks for the resource by its labels until it appears or the
+   * reconciliation window ends. Azure may still be carrying out the request, so an empty lookup is no reason to create
+   * it again.
+   */
+  async #reconcile<T>(lookup: () => Promise<T | undefined>): Promise<T | undefined> {
+    const deadline = Date.now() + this.#timeouts.reconcileMs;
+    for (;;) {
+      const found = await lookup();
+      if (found) return found;
+      if (Date.now() >= deadline) return undefined;
+      await this.#sleep(Math.max(this.#pollMs * 2, 1));
     }
   }
 
@@ -370,23 +389,19 @@ export class AzureSandboxProvider implements SandboxProvider {
 
   /**
    * Creates the sandbox's compute. A failure without a definite answer (network error, server error) may hide a
-   * request Azure accepted, so before trying again the sandbox is looked up by its labels and adopted if it exists.
+   * request Azure accepted or is still carrying out: the sandbox is looked up by its labels and adopted when it
+   * appears, and never created a second time from this call.
    */
   async #createCompute(spec: SandboxSpec, config: AzureSandboxConfig): Promise<RemoteSandbox> {
     const { api } = this.#require();
-    const body = this.#createBody(spec, config);
-    for (let attempt = 1; ; attempt++) {
-      try {
-        return await api.createSandbox(body);
-      } catch (error) {
-        if (!isAmbiguous(error) || attempt >= CREATE_ATTEMPTS) throw error;
-        await this.#sleep(this.#pollMs);
-        const adopted = (await this.#remotes(spec.sandboxId)).find((sandbox) => !isDeleting(sandbox));
-        if (adopted) {
-          this.#log.warn("Adopted a sandbox whose creation Azure accepted without answering", { sandboxId: spec.sandboxId, remoteId: adopted.id });
-          return adopted;
-        }
-      }
+    try {
+      return await api.createSandbox(this.#createBody(spec, config));
+    } catch (error) {
+      if (!isAmbiguous(error)) throw error;
+      const adopted = await this.#reconcile(async () => (await this.#remotes(spec.sandboxId)).find((sandbox) => !isDeleting(sandbox)));
+      if (!adopted) throw unconfirmed("the sandbox", error);
+      this.#log.warn("Adopted a sandbox whose creation Azure carried out without answering", { sandboxId: spec.sandboxId, remoteId: adopted.id });
+      return adopted;
     }
   }
 

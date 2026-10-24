@@ -98,28 +98,38 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /**
  * Whether any process in a process group is still running. Linux reads /proc so zombies (exited, not yet reaped by
- * their new parent) do not count; elsewhere a zero signal to the group answers.
+ * their new parent) do not count; elsewhere a zero signal to the group answers. Anything it cannot tell counts as
+ * running. Signal the group before asking: a snapshot can miss a process forked while it was taken.
  */
 export function groupAlive(group: number): boolean {
   if (process.platform === "linux" && existsSync("/proc/self/stat")) {
-    for (const entry of readdirSync("/proc")) {
-      if (!/^\d+$/.test(entry)) continue;
-      try {
-        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
-        // "pid (comm) state ppid pgrp ...": comm may contain spaces and parentheses, so parse after the last ")".
-        const [state, , pgrp] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-        if (Number(pgrp) === group && state !== "Z" && state !== "X") return true;
-      } catch {
-        // The process exited while we looked.
-      }
+    let entries: string[] | undefined;
+    try {
+      entries = readdirSync("/proc");
+    } catch {
+      entries = undefined;
     }
-    return false;
+    if (entries) {
+      for (const entry of entries) {
+        if (!/^\d+$/.test(entry)) continue;
+        try {
+          const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+          // "pid (comm) state ppid pgrp ...": comm may contain spaces and parentheses, so parse after the last ")".
+          const [state, , pgrp] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+          if (Number(pgrp) === group && state !== "Z" && state !== "X") return true;
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT" && code !== "ESRCH") return true; // cannot tell: assume it still runs
+        }
+      }
+      return false;
+    }
   }
   try {
     process.kill(-group, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -507,18 +517,21 @@ export class Supervisor {
     if (group === undefined) return;
     const started = Date.now();
     let warned = false;
-    while (groupAlive(group)) {
+    for (;;) {
+      // Signal before looking: a process with a fatal signal pending cannot fork, so once the group is signalled, a
+      // scan that finds no member is final. (A scan alone can miss a child forked while it ran.)
       try {
         process.kill(-group, "SIGKILL");
       } catch {
-        // Exited meanwhile.
+        // No member left to signal.
       }
+      await delay(50);
+      if (!groupAlive(group)) break;
       // Keep the lease until they are gone, however long that takes: a process stuck in I/O may still write.
       if (!warned && Date.now() - started > 10_000) {
         warned = true;
         this.#log("warn", `Processes started by the ${this.#subject} have not exited yet; keeping the lease until they do`, { group });
       }
-      await delay(50);
     }
     if (this.#group === group) this.#group = undefined;
   }
