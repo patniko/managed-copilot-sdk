@@ -6,6 +6,7 @@ import { createReadStream, promises as fs, type Stats } from "node:fs";
 import { join } from "node:path";
 import type { Duplex, Readable } from "node:stream";
 import {
+  isManagedCopilotError,
   isReservedSandboxEnv,
   ManagedCopilotError,
   SANDBOX_LIMITS,
@@ -22,7 +23,7 @@ import type { GatewayApp } from "../../app.js";
 import type { Logger } from "../../log.js";
 import { SandboxAgentClient } from "./agent-client.js";
 import type { ArtifactService } from "./artifacts.js";
-import { InferenceBroker } from "./broker.js";
+import { InferenceBroker, isProviderTaken } from "./broker.js";
 import type {
   CreateSandboxRequest,
   EgressRegistration,
@@ -53,6 +54,9 @@ const SHUTDOWN_DRAIN_MS = 10_000;
 const PROBE_MS = 30_000;
 /** How long a sandbox found running at startup stays protected while the ledger says its last turn was running. */
 const RECOVERY_GRACE_MS = 2 * 60 * 60_000;
+/** Why a turn's outputs were not published when the runtime process running the turn was replaced. */
+const TURN_INTERRUPTED =
+  "The sandbox runtime was restarted while this turn was running, so the turn ended and its outputs were not published. Send the prompt again to continue.";
 
 interface LiveState {
   readonly runtimes: Set<SandboxRuntime>;
@@ -63,6 +67,8 @@ interface LiveState {
   lastActivity: number;
   /** Set when reconciliation found the sandbox running after a gateway restart; cleared once its events flow again. */
   recoveredAt?: number;
+  /** The runtime process (sandboxd's `runtime.instance`) the session's runtime connections last reached. */
+  runtimeInstance?: string;
 }
 
 export interface SandboxServiceOptions {
@@ -556,7 +562,12 @@ export class SandboxService implements SandboxesService {
   async openRuntime(sessionId: string, options: OpenRuntimeOptions): Promise<SandboxRuntime> {
     const row = this.#row(sessionId);
     if (row.state !== "running") throw new ManagedCopilotError("capability_unavailable", `The session's sandbox is ${row.state}; resume the session first.`, { sandboxId: row.id });
-    const stream = await this.#agent(row).openStream(SANDBOXD_ROUTES.runtime);
+    const agent = this.#agent(row);
+    // Which runtime process this connection reaches: a different one than before ended the turn the old one was running.
+    // Best effort; an unreachable sandboxd fails the open below.
+    const status = await agent.health().catch(() => undefined);
+    if (status) this.#observeRuntime(sessionId, status.runtime.instance);
+    const stream = await agent.openStream(SANDBOXD_ROUTES.runtime);
     const live = this.#liveFor(sessionId);
     const broker = new InferenceBroker({
       sessionId,
@@ -572,7 +583,14 @@ export class SandboxService implements SandboxesService {
       stream,
       connectionToken: row.runtimeToken,
       handlers: broker.handlers,
-      initialize: (send) => broker.initialize(send),
+      initialize: async (send) => {
+        try {
+          await broker.initialize(send);
+        } catch (error) {
+          if (!isProviderTaken(error)) throw error;
+          throw await this.#replaceHeldRuntime(sessionId, row.id, runtime);
+        }
+      },
       prepareSessionParams: async (_method, params) => {
         const deferred = deferAgentSelection(rewriteSessionParams(params, row.customizations));
         if (deferred.agent) deferredAgents.set(typeof params["sessionId"] === "string" ? params["sessionId"] : sessionId, deferred.agent);
@@ -598,6 +616,70 @@ export class SandboxService implements SandboxesService {
       live.runtimes.delete(runtime);
     });
     return runtime;
+  }
+
+  /**
+   * Stock runtimes keep their inference-provider registration with the first connection that registered, even after that
+   * connection closed (verified on 1.0.103; nothing releases it), so after a gateway restart or a dropped link the runtime
+   * refuses every new provider. With no other connection of this gateway open to it, the registration belongs to a
+   * connection that is gone: the runtime process is replaced (session state stays on disk) and the caller reopens
+   * (`details.reopen`). Sandboxes on images from before sandboxd could restart its runtime are stopped instead, and the
+   * reopen starts them again.
+   */
+  async #replaceHeldRuntime(sessionId: string, sandboxId: string, runtime: SandboxRuntime): Promise<ManagedCopilotError> {
+    const live = this.#liveFor(sessionId);
+    if ([...live.runtimes].some((other) => other !== runtime)) {
+      return new ManagedCopilotError("conflict", "Another connection of this gateway is the sandbox runtime's inference provider; close it before opening the runtime again.", { sandboxId });
+    }
+    await this.#withLock(sessionId, async () => {
+      const row = this.#row(sessionId);
+      // A stop, delete, or recreate meanwhile replaced the process already.
+      if (row.id !== sandboxId || row.state !== "running") return;
+      try {
+        const status = await this.#agent(row).restartRuntime();
+        live.runtimeInstance = status.runtime.instance;
+        this.#log.info("Restarted a sandbox runtime held by a connection that is gone", { sessionId, sandboxId });
+      } catch (error) {
+        if (!isManagedCopilotError(error, "not_found")) throw toManaged(error);
+        // An older sandboxd without the route: stopping and starting the sandbox starts a fresh runtime. Started here,
+        // because the reopen only opens the runtime again.
+        await this.#stop(sessionId, "its runtime was held by a connection that is gone");
+        await this.#ensureRunning(sessionId);
+        this.#log.info("Restarted a sandbox whose runtime was held by a connection that is gone", { sessionId, sandboxId });
+      }
+      this.#runtimeReplaced(sessionId);
+    });
+    return new ManagedCopilotError("capability_unavailable", "The sandbox's runtime was restarted because a connection that is gone still held it. Reconnect to resume the session.", {
+      sandboxId,
+      reopen: true,
+    });
+  }
+
+  /** Records which runtime process serves the session; a different process than before ended the old one's turn. */
+  #observeRuntime(sessionId: string, instance: string | undefined): void {
+    if (!instance) return;
+    const live = this.#liveFor(sessionId);
+    const previous = live.runtimeInstance;
+    live.runtimeInstance = instance;
+    if (previous !== undefined && previous !== instance) this.#runtimeReplaced(sessionId);
+  }
+
+  /**
+   * The session's runtime process was replaced. A turn the old process was running cannot finish: stock runtimes neither
+   * continue nor end it when the session is resumed in a new process, unless it was waiting on actions durable still owns
+   * (`continuePendingWork` restores those, and answering them continues the turn). Otherwise its outputs are recorded as
+   * interrupted and idle stop stops waiting for it; core ends the turn in its ledger.
+   */
+  #runtimeReplaced(sessionId: string): void {
+    if (this.#hasOpenActions(sessionId)) return;
+    const live = this.#liveFor(sessionId);
+    const turns = this.#artifacts?.turnsInterrupted(sessionId, TURN_INTERRUPTED) ?? [];
+    const wasRunning = live.turnRunning || turns.length > 0;
+    live.turnRunning = false;
+    live.turnFailed = false;
+    live.pending.clear();
+    live.recoveredAt = undefined;
+    if (wasRunning) this.#log.info("A turn ended because the sandbox runtime running it was replaced", { sessionId, turns: turns.length });
   }
 
   /**
@@ -634,6 +716,8 @@ export class SandboxService implements SandboxesService {
     if (status.state !== "ready" || status.runtime.state !== "running") {
       throw new ManagedCopilotError("capability_unavailable", `The sandbox runtime is ${status.runtime.state}; runtime state can only be imported once it is ready.`, { sandboxId: row.id });
     }
+    // The carried turn (`activeTurnId`) runs on this process.
+    this.#observeRuntime(sessionId, status.runtime.instance);
     const staging = randomBytes(8).toString("hex");
     let bytes = 0;
     const upload = async (): Promise<void> => {
@@ -885,17 +969,34 @@ export class SandboxService implements SandboxesService {
    * events are observed again or the recovery grace ends.
    */
   #durablyBusy(sessionId: string, live: LiveState): boolean {
-    const actions = optional<{ list(sessionId: string, options: { readonly open?: boolean }): readonly unknown[] }>(this.#options.app, "actions");
-    try {
-      if (actions && typeof actions.list === "function" && actions.list(sessionId, { open: true }).length > 0) return true;
-    } catch (error) {
-      this.#log.warn("Could not read pending actions; keeping the sandbox running", { sessionId, error: (error as Error).message });
-      return true;
-    }
+    if (this.#hasOpenActions(sessionId)) return true;
     if (live.recoveredAt !== undefined && Date.now() - live.recoveredAt < RECOVERY_GRACE_MS) {
       return this.#sessions()?.get?.(sessionId)?.lastTurn?.status === "running";
     }
     return false;
+  }
+
+  /**
+   * Whether durable owns open actions of the session's current incarnation: its runtime may be waiting on them (including
+   * answers recorded but not yet delivered), and `continuePendingWork` carries them into a new runtime process. The same
+   * predicate core uses (`hasOpenActions`); read errors count as yes.
+   */
+  #hasOpenActions(sessionId: string): boolean {
+    const actions = optional<{
+      hasOpenActions?(sessionId: string, options?: { readonly incarnation?: string }): boolean;
+      list?(sessionId: string, options: { readonly open?: boolean; readonly incarnation?: string }): readonly unknown[];
+    }>(this.#options.app, "actions");
+    if (!actions) return false;
+    try {
+      // This incarnation's: actions an earlier session with the same ID left behind are not this session's work.
+      const incarnation = this.#sessions()?.get?.(sessionId)?.incarnation;
+      const scope = incarnation ? { incarnation } : {};
+      if (typeof actions.hasOpenActions === "function") return actions.hasOpenActions(sessionId, scope);
+      return typeof actions.list === "function" && actions.list(sessionId, { open: true, ...scope }).length > 0;
+    } catch (error) {
+      this.#log.warn("Could not read pending actions; treating the session as waiting on them", { sessionId, error: (error as Error).message });
+      return true;
+    }
   }
 
   /** Finishes interrupted work after a crash or restart and removes backend resources no record owns. */
