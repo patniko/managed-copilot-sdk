@@ -84,6 +84,12 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/** "3 minutes", "30 seconds": for activity notes. */
+function spokenDuration(ms: number): string {
+  const [amount, unit] = ms >= 60_000 ? [Math.round(ms / 60_000), "minute"] : [Math.max(1, Math.round(ms / 1000)), "second"];
+  return `${amount} ${unit}${amount === 1 ? "" : "s"}`;
+}
+
 function networkView(policy: { access: NetworkView["access"]; allowedDomains: readonly string[] } | undefined): NetworkView {
   return { access: policy?.access ?? "enabled", allowedDomains: [...(policy?.allowedDomains ?? [])] };
 }
@@ -159,12 +165,26 @@ export interface FactoryOptions {
   readonly checkPlatform?: () => Promise<boolean>;
   /** First delay before a paused work order resumes on its own; doubles per pause (tests shorten it). */
   readonly resumeBackoffMs?: number;
+  /** How long a resumed in-flight turn may show no activity at all before it is stopped and continued (tests shorten it). */
+  readonly stallMs?: number;
+  /** How long a resumed turn whose sandbox restarted under it may stay silent before the agent is asked to continue. */
+  readonly restartGraceMs?: number;
 }
 
 /** Pauses a work order may take for lost platform connections before the next one fails it instead. */
 const MAX_AUTO_RESUMES = 5;
 /** Detaching a session whose transport dropped can go unanswered; the run moves on after this long. */
 const DETACH_TIMEOUT_MS = 5_000;
+/** A resumed in-flight turn with no session events for this long is stuck (for example on a connection that died with a gateway). */
+const STALL_MS = 3 * 60_000;
+/** Silence allowed after reattaching before a turn whose sandbox restarted under it is taken as gone. */
+const RESTART_GRACE_MS = 30_000;
+/** Clock skew allowed between the factory (turn sent) and the gateway (sandbox started). */
+const RESTART_MARGIN_MS = 5_000;
+/** Stopping a stuck turn can go unanswered too. */
+const ABORT_TIMEOUT_MS = 10_000;
+/** Failed reads of an in-flight turn's status in a row (with the platform otherwise up) before the work order pauses. */
+const MAX_READ_FAILURES = 5;
 
 /** Runs work orders through the factory: plan → parallel builds with review loops → release. */
 export class Factory {
@@ -921,6 +941,8 @@ export class Factory {
         this.#updateStation(run, station, { status: "starting", detail: "Reattaching to the sandbox" });
         session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
       } catch (error) {
+        // Events reaching an abandoned resume (one that answers after its deadline) don't belong on the floor.
+        mapper.close();
         if (run.abort.signal.aborted) throw new CancelledError();
         // A dropped connection isn't a lost sandbox: keep the workspace and its checkpoint, whether the work order pauses
         // or (out of pauses) fails.
@@ -1062,32 +1084,96 @@ export class Factory {
   }
 
   /**
-   * Waits for a turn that was already running when the factory restarted. If the platform reports that it failed or
-   * was cancelled, the agent is asked to continue rather than treating the turn as complete.
+   * Waits for a turn that was already running when the factory lost its connection or restarted. The platform's turn
+   * status decides, except where it can't move on by itself:
+   * - The session's sandbox started after the turn was sent (a gateway handover can recreate it), so the runtime that
+   *   ran the turn is gone. Once nothing has happened for RESTART_GRACE_MS, the agent is asked to continue. Nothing is
+   *   stopped: a turn that did survive finishes first, and the continue prompt queues behind it.
+   * - No session event at all for STALL_MS, as with a turn stuck on a connection that died with the old gateway: the
+   *   turn is stopped and the agent is asked to continue.
+   * A turn the platform reports as failed or cancelled is continued too, rather than treated as complete.
    */
   async #awaitTurn(run: Run, station: MStation, active: ActiveSession, release: boolean): Promise<void> {
     this.#updateStation(run, station, { status: "working", detail: "Resuming the in-flight turn" });
     const deadline = Date.now() + this.#options.config.turnTimeoutMs[station.role];
     const pollMs = this.#options.pollMs ?? 3_000;
+    const stallMs = this.#options.stallMs ?? STALL_MS;
+    const graceMs = this.#options.restartGraceMs ?? RESTART_GRACE_MS;
+    const sentAt = Date.parse(station.turn!.sentAt);
     let idle = false;
-    let outcome: "completed" | "running" | "failed" | "cancelled" | undefined;
+    let lastActivity = Date.now();
+    let wake: (() => void) | undefined;
     const stopListening = active.session.on((event) => {
-      if (event.type === "session.idle") idle = true;
+      lastActivity = Date.now();
+      if (event.type === "session.idle" && !(event as { agentId?: string }).agentId) {
+        idle = true;
+        wake?.();
+      }
     });
+    let failedReads = 0;
+    const read = async (): Promise<SessionInfo | undefined> => {
+      try {
+        const info = await this.#platform.sessionInfo(active.session.sessionId);
+        failedReads = 0;
+        return info;
+      } catch (error) {
+        // A slow or failed read while the platform is up is a blip: read again. With the platform down, or the reads
+        // failing MAX_READ_FAILURES times in a row, the error (an interruption) pauses the work order.
+        if (!isPlatformInterruption(error) || !this.#options.readiness().ready || ++failedReads >= MAX_READ_FAILURES) throw error;
+        log.debug("Couldn't read the in-flight turn's status; reading again", { station: station.id, error: (error as Error).message });
+        return undefined;
+      }
+    };
+    let outcome: "completed" | "running" | "failed" | "cancelled" | undefined;
+    let stuck: "restarted" | "silent" | undefined;
     try {
       for (;;) {
         this.#throwIfCancelled(run);
-        const info = await this.#platform.sessionInfo(active.session.sessionId);
-        outcome = info.lastTurn?.status;
-        if (outcome !== "running" || idle) break;
+        // Read after the idle event, so the platform's verdict on the turn includes it.
+        const sawIdle = idle;
+        const info = await read();
+        if (info) {
+          outcome = info.lastTurn?.status;
+          if (outcome !== "running" || sawIdle) break;
+          const quietMs = Date.now() - lastActivity;
+          const sandboxStartedAt = Date.parse(info.sandbox?.startedAt ?? "");
+          if (sandboxStartedAt > sentAt + RESTART_MARGIN_MS && quietMs >= graceMs) {
+            stuck = "restarted";
+            break;
+          }
+          if (quietMs >= stallMs) {
+            stuck = "silent";
+            break;
+          }
+        }
         if (Date.now() > deadline) throw new StationError("timeout", `The ${station.agent} agent didn't finish its turn in time.`);
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          setTimeout(resolve, pollMs);
+        });
+        wake = undefined;
       }
     } finally {
       stopListening();
     }
+    if (stuck) {
+      this.#activity(
+        run.wo,
+        station.id,
+        stuck === "restarted"
+          ? "The sandbox restarted while this turn was running, so the turn can't finish; asking the agent to check its workspace and continue"
+          : `The in-flight turn showed no activity for ${spokenDuration(stallMs)}; stopping it and asking the agent to check its workspace and continue`,
+        "warning",
+      );
+      log.info("Continuing an in-flight turn that can't finish", { id: run.wo.id, station: station.id, reason: stuck });
+      if (stuck === "silent") {
+        await Promise.race([active.session.abort().catch(() => undefined), new Promise((resolve) => setTimeout(resolve, ABORT_TIMEOUT_MS).unref())]);
+      }
+      await this.#turn(run, station, active, continuePrompt(release), "continue", Math.max(station.round, 1));
+      return;
+    }
     if (outcome === "failed" || outcome === "cancelled") {
-      this.#activity(run.wo, station.id, `The interrupted turn ${outcome === "failed" ? "failed" : "was stopped"}; asking the agent to continue`, "warning");
+      this.#activity(run.wo, station.id, `The interrupted turn ${outcome === "failed" ? "failed" : "was stopped"}; asking the agent to check its workspace and continue`, "warning");
       await this.#turn(run, station, active, continuePrompt(release), "continue", Math.max(station.round, 1));
       return;
     }

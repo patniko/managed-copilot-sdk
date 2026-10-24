@@ -1,10 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
-import type { SessionConfig } from "@github/copilot-sdk";
+import type { ResumeSessionConfig, SessionConfig } from "@github/copilot-sdk";
 import { ManagedCopilotError } from "@managed-copilot/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/server/config.js";
+import { PlatformUnavailableError } from "../src/server/pipeline/errors.js";
 import { isRetryable, Platform, reconnectDelay } from "../src/server/platform.js";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, ROLES } from "../src/shared/environments.js";
 import type { PlatformState, PlatformStatus } from "../src/shared/types.js";
@@ -65,6 +66,11 @@ class FakeGateway {
     this.#standbyConnects = connects;
   }
 
+  /** Ends the held upgrades, as a proxy cutting them would: their clients fail. */
+  dropHeldUpgrades(): void {
+    for (const socket of this.#sockets.splice(0)) socket.destroy();
+  }
+
   async start(): Promise<void> {
     await new Promise<void>((resolve) => this.#server.listen(0, "127.0.0.1", () => resolve()));
     this.url = `http://127.0.0.1:${(this.#server.address() as AddressInfo).port}`;
@@ -104,7 +110,16 @@ class FakeGateway {
   }
 }
 
-const TIMINGS = { retryBaseMs: 20, retryMaxMs: 200, connectTimeoutMs: 500, healthTimeoutMs: 300, discoveryTimeoutMs: 5_000, stopTimeoutMs: 500 };
+const TIMINGS = {
+  retryBaseMs: 20,
+  retryMaxMs: 200,
+  connectTimeoutMs: 500,
+  healthTimeoutMs: 300,
+  discoveryTimeoutMs: 5_000,
+  stopTimeoutMs: 500,
+  resumeTimeoutMs: 5_000,
+  keepAliveMs: 60_000,
+};
 
 let gateway: FakeGateway | undefined;
 let platform: Platform | undefined;
@@ -186,10 +201,34 @@ describe("platform connection", () => {
 
   it("doesn't let a client that never starts hold back later sessions", async () => {
     const { platform, gateway } = await connected({ holdUpgrades: true, timings: { discoveryTimeoutMs: 300 } });
-    // Model discovery's client never got an answer and was abandoned at its deadline.
-    expect(gateway.upgrades).toBe(1);
+    // Model discovery's client never got an answer and was abandoned at its deadline (its bridge may connect later).
+    await until(() => gateway.upgrades === 1, "model discovery's client to connect");
     void platform.createSession("planner", {} as SessionConfig).catch(() => undefined);
     await until(() => gateway.upgrades === 2, "a fresh client for the planner session");
+  });
+
+  it("gives up reattaching to a session the gateway never answers for, as an outage rather than a lost session", async () => {
+    const { platform } = await connected({ holdUpgrades: true, timings: { discoveryTimeoutMs: 300, resumeTimeoutMs: 300 } });
+    const started = Date.now();
+    const failure = await platform.resumeSession("builder", "sess-1", {} as ResumeSessionConfig).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(PlatformUnavailableError);
+    expect((failure as Error).message).toBe("Reattaching to session sess-1 took longer than 0.3 s.");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("makes no further calls for a reattach it gave up on, even when its client fails afterwards", async () => {
+    const { platform, gateway } = await connected({ holdUpgrades: true, timings: { discoveryTimeoutMs: 300, resumeTimeoutMs: 300 } });
+    await expect(platform.resumeSession("builder", "sess-1", {} as ResumeSessionConfig)).rejects.toBeInstanceOf(PlatformUnavailableError);
+    // Model discovery's client and the builder client, both held once their bridges connect (the deadlines don't wait).
+    await until(() => gateway.upgrades === 2, "both clients' bridges to connect");
+    // The builder client now fails. A retry on a fresh client could replace a newer resume of the session there, so the
+    // abandoned reattach must make none.
+    gateway.dropHeldUpgrades();
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(gateway.upgrades).toBe(2);
   });
 
   it("backs off exponentially with jitter, up to the cap, and retries only what retrying can fix", () => {
