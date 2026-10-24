@@ -119,7 +119,8 @@ function main(): void {
     headers: { authorization: `Bearer ${config.token}` },
     perMessageDeflate: false,
     maxPayload: BRIDGE_MAX_FRAME_BYTES,
-    handshakeTimeout: 30_000,
+    // Longer than the gateway's GitHub verification deadline, so its explicit error wins over a generic timeout.
+    handshakeTimeout: 45_000,
   });
   const pending: string[] = [];
   let ready = false;

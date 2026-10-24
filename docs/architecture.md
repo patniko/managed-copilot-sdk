@@ -121,6 +121,13 @@ denies configuration RPCs it does not understand.
   client's session lifecycle events. Owner checks are never weakened to make a helper work.
 - The SDK validates the deployment URL before sending a credential: HTTPS for remote deployments, HTTP only for
   verified loopback, no embedded credentials, and a validated discovery record.
+- **GitHub verification** (`auth`). Tokens are verified against GitHub `/user` (cached 5 minutes) plus the AppHost
+  access rules. Transport errors, timeouts, and 5xx answers are retried with jittered backoff inside a 35 s deadline;
+  rate limits are not retried. While GitHub is unreachable, a token's last successful verification stands in for up
+  to 15 minutes (re-checked in the background every 30 s); a rejection (401, a non-rate-limit 403, or `forbidden`)
+  replaces it, so it never revives a rejected token. Otherwise callers get `upstream_unavailable` (HTTP 503 with
+  `Retry-After` and `details.retryAfterSeconds`), never `authentication_required` for an outage. Long-lived
+  connections re-verify at most once a minute and are closed only for `authentication_required`/`forbidden`.
 
 ### Credentials and inference
 
@@ -408,7 +415,7 @@ structurally (they may add members).
 
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
-| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected); `liveCredential(accountId)` |
+| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity); `liveCredential(accountId)` |
 | `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
 | `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
@@ -452,10 +459,18 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 - **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
   delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the first attached
   client able to answer, in durable's preference order (the creating connection, then by attach time), gets them and
-  other eligible clients are withheld. `session.lifecycle` goes only to
+  other eligible clients are withheld. Replayed actions (`onAttached`) take the same sanitizing path. `session.detach`,
+  deletion, and failed creates call `onDetached(connectionId, sessionId)`; only a closed connection calls
+  `onDetached(connectionId)`. `session.lifecycle` goes only to
   the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Everything a shared session
   sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
-  rewritten (`/workspace` for the session directory, `/platform` otherwise).
+  rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
+  (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
+  else under the data directory (including its resolved form) `/platform`.
+- **Agents.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a restore
+  (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
+  Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
+  create/resume params and selects it in `sessionOpened`.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
@@ -469,11 +484,79 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   `models.list` requires the shared runtime even for isolated environments. Verified on runtime 1.0.103: custom
   agents' and `task` subagents' tool lists cannot escape the session's `availableTools` ceiling.
 
+## Devloop: AppHost, CLI, and Copilot CLI attach
+
+### AppHost (`@managed-copilot/aspire`, root `apphost.mts`)
+
+- `addManagedCopilot(builder, name, options)` validates the declaration with `ManagedCopilotConfigSchema` (all
+  problems reported at once, before anything starts) and runs the gateway as an Aspire Node app on a **fixed,
+  unproxied** port (default 7400) with `/healthz`. Relative `image` and `customizations` paths resolve against the
+  AppHost directory. It refuses publish mode (`aspire deploy`) until gate G3.
+- Secrets must be Aspire secret parameters. Each becomes a `{ secretEnv }` reference in `MANAGED_COPILOT_CONFIG` and
+  an environment variable on the gateway: `MANAGED_COPILOT_SECRET_VAULT_<VAULT>_<HASH>_<INDEX>` and
+  `MANAGED_COPILOT_SECRET_WEBHOOK_<NAME>_<HASH>`, where `<HASH>` is the first 8 hex digits of the SHA-256 of the exact
+  vault or webhook name, so distinct names never share a variable. Literal strings are rejected. Schedule `session.tools` accept stock
+  `defineTool` objects; only the declaration (zod schemas via the same `toJSONSchema()` the SDK sends, flags, and a
+  stable `sha256:` revision) is stored.
+- The gateway gets a generated persistent `<name>-platform-key`, `MANAGED_COPILOT_DATA_DIR`
+  (`<apphost>/.managed-copilot/data`), `MANAGED_COPILOT_APPHOST_DIR`, `MANAGED_COPILOT_NPM_REGISTRY` (from
+  `npm config get registry`), and `MANAGED_COPILOT_INSTANCE` (`mc-<hash of the AppHost path>`, so checkouts sharing one
+  Docker engine never collide). The gateway builds sandbox images and supervises the relay and egress containers
+  itself, so the AppHost declares no containers. When an isolated or promotable environment exists, the AppHost also
+  sets `MANAGED_COPILOT_SANDBOX_PREPARE=1` (opt out with `prepareSandboxes: false`), so the base image builds while
+  the platform starts rather than on the first sandboxed session.
+- The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
+  `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
+  them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
+- `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
+  `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
+
+### Copilot CLI attach (spec section 14)
+
+```mermaid
+sequenceDiagram
+  participant CLI as Copilot CLI (stock)
+  participant Relay as managed-copilot / openCli<br/>loopback relay
+  participant GW as gateway attach module
+  participant RT as session runtime<br/>(AHP host, one-session catalog)
+  Relay->>GW: POST /v1/sessions/:id/attach (owner's GitHub token)
+  GW->>RT: host.start(computeId mc-session-<id>, creation denied) + host.publishSession
+  GW-->>Relay: AttachMaterial (single-use ticket, 60 s)
+  Relay->>CLI: copilot --ahp ws://127.0.0.1:<port>/ahp/<nonce> (no credential in argv)
+  CLI->>Relay: WebSocket (CLI's own GitHub token)
+  Relay->>Relay: CLI's GitHub account must be the session owner
+  Relay->>GW: WebSocket /v1/sessions/:id/ahp, Authorization: Bearer <ticket>
+  GW->>RT: WebSocket via runtime.connect(port), ?tkn=<listener token>
+  CLI-->>RT: AHP 0.9 (authenticate answered locally, never forwarded)
+```
+
+- Verified on Copilot CLI 1.0.92 with runtime 1.0.103 (shared placement): the CLI attaches, shows history, and its
+  turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
+  after 5 idle minutes, on `deleted`/`promoted`/`stopped` lifecycle events (close code 4410), and when the runtime
+  connection closes. Attachments are capped at 8 hours (4408).
+- Tickets are 60-second, single-use, owner- and session-bound, stored as SHA-256 hashes (`attach_tickets`). Upgrades
+  re-check ownership and session state. Generic AHP clients may pass the ticket as `?tkn=`.
+- The stock CLI sends its GitHub OAuth token as `Authorization` and in an AHP `authenticate` request. The relay and
+  the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
+  headers, so no CLI token reaches a runtime or sandbox.
+- Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
+  empty because the host cannot list models without an AHP credential; sandbox sessions need the sandbox module's
+  `connect(sessionId, port)`; GitHub Copilot app publication is not implemented (`github.publish`).
+
+### CLI and quickstart
+
+- `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
+  `attach`, `promote`, `artifacts`, `schedules`. It uses the SDK and `@managed-copilot/sdk/internal` (first-party only:
+  `HttpClient`, URL/token resolution, `launchAttachedCli`). Tokens never come from argv. Errors print the stable code
+  and a hint; usage errors exit 2.
+- `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
+  `/v1/info`, or `capability_unavailable`), or skipped (a local prerequisite such as background sign-in).
+
 ## Ports and environment
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Gateway `PORT` | 7400 | Aspire assigns it in `aspire run`; `0` picks a free port |
+| Gateway `PORT` | 7400 | Fixed and unproxied under `aspire run` (`addManagedCopilot`'s `port` option); `0` picks a free port |
 | `MANAGED_COPILOT_CONFIG` / `_CONFIG_FILE` | dev defaults | Normalized AppHost JSON (`ManagedCopilotConfig`) |
 | `MANAGED_COPILOT_APPHOST_DIR` | config file dir or cwd | Base for relative `customizations` paths |
 | `MANAGED_COPILOT_DATA_DIR` | `./.managed-copilot/data` | SQLite ledger, artifacts, runtime homes, pinned customizations |
@@ -483,6 +566,8 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 | `MANAGED_COPILOT_GITHUB_API_URL` | `https://api.github.com` | Loopback `http://` allowed for test stubs only |
 | `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
+| `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
+| Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` disables it (sandboxes with network access then fail) |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
@@ -512,7 +597,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **sandbox** | `platform/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
 | **network** | `platform/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
-| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `demos/quickstart/**`, SDK `features/cli.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
+| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
 

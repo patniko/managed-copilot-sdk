@@ -14,7 +14,10 @@ export const ROUTES = {
   sessions: "/v1/sessions",
   session: (id: string) => `/v1/sessions/${e(id)}`,
   promote: (id: string) => `/v1/sessions/${e(id)}/promote`,
+  /** `POST` returns short-lived `AttachMaterial` for Copilot CLI attach (spec section 14). */
   attach: (id: string) => `/v1/sessions/${e(id)}/attach`,
+  /** WebSocket (AHP) upgrade for an attach ticket: `Authorization: Bearer <ticket>` or `?tkn=<ticket>`. */
+  attachSocket: (id: string) => `/v1/sessions/${e(id)}/ahp`,
 
   actions: (id: string) => `/v1/sessions/${e(id)}/actions`,
   actionClaim: (id: string, actionId: string) => `/v1/sessions/${e(id)}/actions/${e(actionId)}/claim`,

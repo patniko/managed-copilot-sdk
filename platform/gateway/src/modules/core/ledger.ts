@@ -78,6 +78,11 @@ export interface AdmittedConfig {
   /** Server-side tool declarations for sessions created without a client (schedules). */
   readonly tools?: readonly Record<string, unknown>[];
   readonly optionsPatch: Record<string, unknown>;
+  /**
+   * The caller's requested configuration before admission (no credentials, no per-connection fields), so a placement
+   * change can admit it again for the new placement.
+   */
+  readonly requested?: Record<string, unknown>;
 }
 
 export interface NewSession {
@@ -104,8 +109,12 @@ export class SessionLedger {
   constructor(db: Database) {
     this.#db = db;
     migrate(db, "core", MIGRATIONS);
-    // A create that was in flight when the gateway stopped never completed.
-    db.prepare("UPDATE core_sessions SET state = 'failed', updated_at = ? WHERE state = 'creating'").run(new Date().toISOString());
+    // A create that was in flight when the gateway stopped never completed. A placement cutover that was open did not
+    // commit (a commit moves placement and generation in one transaction): the source placement stays the owner, and
+    // the promotion module reconciles its own operation rows against generation/placement.
+    const now = new Date().toISOString();
+    db.prepare("UPDATE core_sessions SET state = 'failed', updated_at = ? WHERE state = 'creating'").run(now);
+    db.prepare("UPDATE core_sessions SET state = 'idle', updated_at = ? WHERE state = 'promoting'").run(now);
   }
 
   upsertAccount(account: AccountInfo): void {
