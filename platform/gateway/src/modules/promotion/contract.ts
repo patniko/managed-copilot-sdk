@@ -19,7 +19,9 @@
  *    target's image, size, and setup with the source's customizations, policy, vaults, and caller additions. The
  *    source keeps serving while setup runs.
  * 3. Quiesce: an API promotion needs an idle session (`session_busy` otherwise); a tool promotion needs its own
- *    `request_sandbox` call to be the only open work (`promotion_busy` otherwise). Then `fence()`.
+ *    `request_sandbox` call to be the only open work (`promotion_busy` otherwise). Then `fence()`, then fence the
+ *    participants (paths into the source that core's fence does not cover, such as an attached Copilot CLI's AHP
+ *    relay), then check again: what either path started before its fence is visible now.
  * 4. Move the runtime state: `session.suspend` (tool promotion: checkpoints the pending call), `sessions.close`,
  *    copy `session-state/<id>/` (lock files skipped, platform paths rewritten, refused if it holds a GitHub token),
  *    and `importRuntimeState` it into the sandbox runtime's COPILOT_HOME.
@@ -76,6 +78,62 @@ export interface PromotionService {
   promote(principal: Principal, sessionId: string): Promise<PromoteResult>;
   /** The most recent operation for a session, for diagnostics. */
   latest(sessionId: string): PromotionOperation | undefined;
+  /**
+   * Registers a module with its own path into sessions' runtimes, fenced with every promotion (see
+   * `PromotionParticipant`). Register at start (promotion registers after most modules). Returns the unregistration.
+   */
+  participate(participant: PromotionParticipant): () => void;
+}
+
+/** How a cutover a participant was fenced for ended. */
+export interface PromotionParticipantOutcome {
+  /** The session now runs in its sandbox (core's `promoted` lifecycle event has already fired). */
+  readonly committed: boolean;
+  /**
+   * The source runtime was checkpointed (`session.suspend` and/or `sessions.close` were attempted), so after an abort
+   * the source holds the session only once core resumes it there: right away when a caller's completion is waiting,
+   * otherwise on next use (for example `sessions.runtime()`). The shared runtime's connection, and so its
+   * `connectionId`, stays the same: anything bound to the session before the checkpoint (an AHP host's publication) is
+   * stale and must be disposed, not reused because the `connectionId` matches. Publish again only through a fresh
+   * `sessions.runtime()`, which waits for that resume; a `SessionRuntime` obtained before the fence bypasses it. Always
+   * true when `committed`.
+   */
+  readonly sealed: boolean;
+}
+
+/**
+ * A module with its own path into a session's runtime that core's fence does not cover: attach's relay of an attached
+ * Copilot CLI to an AHP host on the source runtime. Promotion fences participants right after core's fence and before
+ * it checks quiescence again and checkpoints the source, and releases them when the cutover ends.
+ *
+ * What a participant must guarantee between `fence` and `release`, given how core's fence works:
+ * - Core's fence sets the ledger state `promoting`, so a later `sessions.info` check refuses new attachments. Work that
+ *   passed that check before the fence (an attach or socket upgrade still starting a host or opening its relay) is the
+ *   participant's to stop: no relay to the source may open, and no frame may reach it, until `release`.
+ * - `fence` must not wait on anything that goes through core's session routing after the fence:
+ *   `sessions.runtime(sessionId)` and session requests wait for the cutover to end, which waits for `fence` (it would
+ *   only end at the bound, failing the promotion). Requests on a `SessionRuntime` obtained earlier go straight to its
+ *   connection and are not held, so `host.dispose` on an existing host works.
+ * - Promotion's re-check uses its own connection to the runtime, not the participant's, so stopping the relay is not
+ *   enough: what the relay already forwarded must have reached the session before `fence` resolves (disposing the AHP
+ *   host, and awaiting that answer, closes the listener the frames arrive on).
+ */
+export interface PromotionParticipant {
+  /** Shown in errors and logs (for example "Copilot CLI attach"). */
+  readonly name: string;
+  /**
+   * Resolve once nothing more from this path can reach the source runtime for the session, and what it already sent
+   * there has been handed to the session, so promotion's check right after sees any work it started (then the move
+   * fails with `session_busy`/`promotion_busy` instead of abandoning that work). Rejecting, or not resolving within the
+   * bound (`signal` aborts), fails the promotion before the checkpoint; `release` follows either way.
+   */
+  fence(sessionId: string, signal: AbortSignal): Promise<void>;
+  /**
+   * Called once for every `fence` call, after the cutover ended: after commit, or after core's abort lifted the fence
+   * (its ledger state restored, its requests flowing again; see `sealed`). Must not throw; may run while a timed-out
+   * `fence` is still settling, and for a session deleted meanwhile (core's `deleted` lifecycle event fires too).
+   */
+  release(sessionId: string, outcome: PromotionParticipantOutcome): void;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

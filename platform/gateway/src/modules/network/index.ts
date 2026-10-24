@@ -120,6 +120,8 @@ export const networkModule: GatewayModule = {
       },
     });
     const service = policy;
+    // Core registers first, so its ledger exists to recover the sources of sessions promoted by earlier versions.
+    service.convertLegacyPromotions();
 
     const settings = egressSettings(env);
     const egress = new GatewayEgress({ destination: destinationOptions(env) });

@@ -678,6 +678,8 @@ export interface SessionNetworkInfo {
   readonly sessionId: string;
   /** Declared environment the policy derives from; absent for inline environments. */
   readonly environment?: string;
+  /** The isolated environment the session was promoted into; its ceiling narrows the policy too. */
+  readonly promotedTo?: string;
   readonly policy: NetworkPolicy;
   readonly vaults: readonly { readonly id: string; readonly name: string; readonly kind: "apphost" | "user" }[];
   /** Newest first. */

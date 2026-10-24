@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import type { SessionEvent } from "@github/copilot-sdk";
 import type { ApprovalItem, ApprovalStatus, AssistantItem, TimelineItem, ToolItem } from "../shared/protocol.js";
-import { describeApproval, describeTool, HIDDEN_TOOLS, scheduleIdFrom } from "./describe.js";
+import { describeApproval, describeTool, HIDDEN_TOOLS, isBackgroundWorkError, scheduleIdFrom } from "./describe.js";
 import { APPROVAL_TOOLS, SCHEDULING_TOOLS } from "./tools/index.js";
 
 export type TimelineChange =
@@ -236,6 +236,9 @@ export class Timeline {
         const content = result?.content;
         const description = describeTool(started.name, started.args, status, content, this.#ctx.timeZone(), started.at);
         const scheduling = SCHEDULING_TOOLS.has(started.name);
+        const failure = success ? undefined : (error?.message ?? content ?? "The tool failed.");
+        // The platform's message suggests a terminal command; this app offers a button instead.
+        const needsBackgroundWork = scheduling && !success && isBackgroundWorkError(failure);
         const item: ToolItem = {
           kind: "tool",
           id: toolCallId,
@@ -245,9 +248,10 @@ export class Timeline {
           title: description.title,
           detail: description.detail,
           status,
-          error: success ? undefined : errorText(error?.message ?? content ?? "The tool failed."),
+          error: failure === undefined ? undefined : needsBackgroundWork ? "Background work is off, so nothing can be scheduled to run while you're away yet." : errorText(failure),
           handledOffline: this.#ctx.isOffline(toolCallId) || undefined,
           scheduleId: scheduling && success && started.name === "schedule_task" ? scheduleIdFrom(content) : undefined,
+          needsBackgroundWork: needsBackgroundWork || undefined,
           endedAt: at,
         };
         const changes: TimelineChange[] = [this.set(item)];
