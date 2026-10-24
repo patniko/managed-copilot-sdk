@@ -71,9 +71,29 @@ export const durableModule: GatewayModule = {
     }
 
     const disposers: (() => void)[] = [];
+    // Session lifecycle that changes what may still be answered: deletion cancels a session's actions and stops their
+    // deliveries; promotion moves them to the new placement generation (stale owners are fenced).
+    const onLifecycle = async (event: PlatformEvent) => {
+      if (!event.sessionId) return;
+      if (event.type === "session.deleted") {
+        actions.onSessionDeleted(event.sessionId);
+        webhooks!.dropSession(event.sessionId);
+        schedules!.onSessionDeleted(event.sessionId);
+      } else if (event.type === "session.promoted") {
+        const generation = typeof event.data.generation === "number" ? event.data.generation : (await sessions()?.get(event.sessionId))?.generation;
+        if (generation !== undefined) actions.onGenerationChanged(event.sessionId, generation);
+      }
+    };
     app.onStart(() => {
       const bus = events();
-      if (bus) disposers.push(bus.subscribe((event, meta) => webhooks!.enqueue(event, meta)));
+      if (bus) {
+        disposers.push(
+          bus.subscribe((event, meta) => {
+            void onLifecycle(event).catch((error: unknown) => log.error("Handling a session lifecycle event failed", { type: event.type, error: (error as Error).message }));
+            webhooks!.enqueue(event, meta);
+          }),
+        );
+      }
       actions.start();
       webhooks!.start();
       schedules!.start();
