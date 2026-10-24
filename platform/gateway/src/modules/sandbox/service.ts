@@ -45,6 +45,8 @@ const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.request
 const ACTION_COMPLETED = new Set(["external_tool.completed", "permission.completed", "elicitation.completed"]);
 const IDLE_SWEEP_MS = Number(process.env.MANAGED_COPILOT_SANDBOX_IDLE_SWEEP_MS ?? 30_000) || 30_000;
 const RECONCILE_MS = 5 * 60_000;
+/** How often the backend's readiness is re-checked for `available`. */
+const PROBE_MS = 30_000;
 /** How long a sandbox found running at startup stays protected while the ledger says its last turn was running. */
 const RECOVERY_GRACE_MS = 2 * 60 * 60_000;
 
@@ -137,8 +139,11 @@ export class SandboxService implements SandboxesService {
   /** Sessions with an active (non-deleted) sandbox; events for anything else are ignored cheaply. */
   readonly #active = new Set<string>();
   #artifacts: ArtifactService | undefined;
-  /** Set once the backend answered, so shutdown only releases shared resources that may exist. */
-  #backendUsed = false;
+  /** Result of the latest backend readiness check; `/v1/info` advertises isolated placement only while true. */
+  #available = false;
+  /** The availability last logged (undefined until the first check finishes). */
+  #reported: boolean | undefined;
+  #probing: Promise<boolean> | undefined;
   /** Aborted at gateway shutdown; cancels slow backend operations. */
   readonly #shutdown = new AbortController();
   #timers: NodeJS.Timeout[] = [];
@@ -160,12 +165,44 @@ export class SandboxService implements SandboxesService {
 
   // Infrastructure helpers -------------------------------------------------------------------------------------
 
+  /**
+   * Whether the sandbox backend answered its latest readiness check (at registration, every 30 s, and before every
+   * backend operation). `/v1/info` advertises `isolated` and `files` only while this is true.
+   */
+  get available(): boolean {
+    return this.#available;
+  }
+
+  /** Checks the backend now (single flight) and records the result. */
+  probe(): Promise<boolean> {
+    this.#probing ??= this.#ready()
+      .then(
+        () => true,
+        () => false,
+      )
+      .finally(() => {
+        this.#probing = undefined;
+      });
+    return this.#probing;
+  }
+
+  #setAvailable(available: boolean, reason?: string): void {
+    this.#available = available;
+    if (this.#reported === available) return;
+    this.#reported = available;
+    const backend = this.#options.provider.kind;
+    if (available) this.#log.info("Isolated sandboxes are available", { backend });
+    else this.#log.warn("Isolated sandboxes are unavailable; /v1/info does not advertise them until the backend answers", { backend, reason });
+  }
+
   async #ready(): Promise<void> {
     try {
       await this.#options.provider.ready();
-      this.#backendUsed = true;
+      this.#setAvailable(true);
     } catch (error) {
-      throw toManaged(error, "capability_unavailable");
+      const managed = toManaged(error, "capability_unavailable");
+      this.#setAvailable(false, managed.message);
+      throw managed;
     }
   }
 
@@ -852,6 +889,8 @@ export class SandboxService implements SandboxesService {
         for (const row of this.#options.store.inStates(["deleting"])) void this.delete(row.sessionId).catch(() => undefined);
       }, RECONCILE_MS).unref(),
     );
+    // Keeps `available` current: a backend that starts later is advertised, one that goes away stops being advertised.
+    this.#timers.push(setInterval(() => void this.probe(), PROBE_MS).unref());
     if (this.#options.prepareOnStart) {
       const { provider } = this.#options;
       void this.#ready()
@@ -878,6 +917,6 @@ export class SandboxService implements SandboxesService {
       ),
     );
     if (running.length > 0) this.#log.info("Stopped sandboxes for shutdown; they resume on next use", { count: running.length });
-    if (this.#backendUsed) await this.#options.provider.shutdown?.().catch(() => undefined);
+    await this.#options.provider.shutdown?.().catch(() => undefined);
   }
 }

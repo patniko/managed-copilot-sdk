@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isManagedCopilotError, NETWORK_DISABLED, type SandboxSetupRecord } from "@managed-copilot/protocol";
+import { isManagedCopilotError, ManagedCopilotError, NETWORK_DISABLED, type SandboxSetupRecord } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../src/app.js";
 import { openDatabase } from "../src/db.js";
 import { createLogger } from "../src/log.js";
@@ -19,7 +19,10 @@ class FakeProvider implements SandboxProvider {
   readonly stopped: string[] = [];
   readonly removed: string[] = [];
   onInventory: (() => void) | undefined;
-  async ready(): Promise<void> {}
+  reachable = true;
+  async ready(): Promise<void> {
+    if (!this.reachable) throw new ManagedCopilotError("capability_unavailable", "The fake backend is down.");
+  }
   async ensureImage() {
     return { ref: "fake:latest", id: "sha256:fake" };
   }
@@ -103,11 +106,12 @@ describe("SandboxService lifecycle", () => {
       placeholder: "mcrt_placeholder",
       workloadEnv: {},
       idleTimeoutSeconds: 1,
-      setup: SUCCEEDED,
     });
+    // Setup records are written by updates during creation, never by the insert.
+    store.update(row.sessionId, { setup: SUCCEEDED });
     provider.existing.add(row.id);
     if (options.running) provider.running.add(row.id);
-    return row;
+    return store.bySession(row.sessionId)!;
   }
 
   it("never sweeps a sandbox that was created while reconciliation ran", async () => {
@@ -174,6 +178,24 @@ describe("SandboxService lifecycle", () => {
     emit!(row.sessionId, { id: "e3", type: "session.idle", data: {} });
     await vi.advanceTimersByTimeAsync(31_000);
     expect(provider.stopped).toEqual([row.id]);
+  });
+
+  it("reports availability only while the backend answers, and keeps it current", async () => {
+    vi.useFakeTimers();
+    provider.reachable = false;
+    const sandboxes = createService();
+    expect(sandboxes.available).toBe(false);
+    expect(await sandboxes.probe()).toBe(false);
+    await sandboxes.start();
+    // A backend that comes up later is noticed by the periodic check, without anyone attempting a create.
+    provider.reachable = true;
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(sandboxes.available).toBe(true);
+    // A failing readiness check before an operation withdraws it immediately.
+    const row = sandbox("stopped");
+    provider.reachable = false;
+    await expect(sandboxes.ensureRunning(row.sessionId)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "capability_unavailable"));
+    expect(sandboxes.available).toBe(false);
   });
 
   it("refuses an empty runtime state import before touching the sandbox", async () => {

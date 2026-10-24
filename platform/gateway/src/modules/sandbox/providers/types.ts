@@ -73,7 +73,11 @@ export interface SandboxProvider {
     /** How long a just-created or just-started sandbox may take until sandboxd answers (default 60 s). */
     readonly startTimeoutMs?: number;
   };
-  /** Verifies the backend is reachable and configured; rejects with `capability_unavailable` and an actionable message. */
+  /**
+   * Verifies the backend is reachable and configured; rejects with `capability_unavailable` and an actionable message.
+   * Also the availability probe behind `/v1/info` (called at registration and every 30 s), so a success may be cached
+   * only briefly: a backend that goes away must start failing within seconds.
+   */
   ready(): Promise<void>;
   /** Optional eager preparation at gateway start (base image, relay). Failures are retried on first use. */
   prepare?(): Promise<void>;
@@ -104,7 +108,10 @@ export interface SandboxProvider {
   reattach?(sandboxId: string): Promise<void>;
   /** IDs of sandboxes with resources for this gateway instance (orphan sweep at start). */
   inventory(): Promise<Set<string>>;
-  /** Releases shared resources at gateway shutdown (running sandboxes are stopped by the service first). */
+  /**
+   * Releases shared resources at gateway shutdown (running sandboxes are stopped by the service first). Only resources
+   * this process started: a probe alone must not tear down what another gateway on the same instance uses.
+   */
   shutdown?(): Promise<void>;
 }
 
