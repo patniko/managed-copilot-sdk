@@ -350,6 +350,9 @@ export class PromotionManager implements PromotionService {
         // Quiesce at a supported checkpoint, then fence the source and re-check what may have started meanwhile.
         if (attempt.trigger === "tool") await this.#drain(progress);
         else await this.#requireIdle(progress);
+        // In the same synchronous step as the fence: a session deleted during the last probe (core then aborted the
+        // cutover, so fencing it is a no-op) stops here, before anything else is fenced for it.
+        this.#current(progress);
         cutover.fence();
         progress.fenced = true;
         // Paths into the source that core's fence does not cover (an attached Copilot CLI) are fenced before the

@@ -796,6 +796,18 @@ describe("participants: paths into the source that core's fence does not cover (
     expect(sessions.steps).not.toContain("source:sessions.close");
   });
 
+  it("does not fence anything for a session deleted during the last probe before the fence", async () => {
+    let tasksProbes = 0;
+    sessions.behavior.sourceFails = (method) => {
+      // The second idle check (after allocation, right before the fence): core's delete aborts the cutover meanwhile.
+      if (method === "session.tasks.list" && ++tasksProbes === 2) sessions.records.set(SESSION, record({ state: "deleting" }));
+      return undefined;
+    };
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "not_found");
+    expect(sessions.steps).not.toContain("fence");
+    expect(sessions.steps.filter((step) => step.startsWith("participant:"))).toEqual([]);
+  });
+
   it("leaves participants alone when the move fails before the fence, and after unregistering", async () => {
     sandboxes.createFails = new ManagedCopilotError("setup_failed", "pip install failed");
     expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "setup_failed");

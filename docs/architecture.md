@@ -554,8 +554,10 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
   attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
   publishes the same session on the sandbox runtime's AHP host. As a participant, attach is told when the cutover ends:
-  `committed`, or aborted `sealed` (the source was checkpointed and core resumed it afresh, so an AHP publication of
-  the earlier session object is stale) or unsealed (the source never stopped).
+  `committed`, or aborted `sealed` or unsealed (the source never stopped). Sealed means the source was checkpointed
+  and core resumes it there, right away when a caller's completion is waiting and otherwise on next use. The shared
+  connection and its `connectionId` stay the same, so an AHP host published before the fence is stale and must be
+  disposed, not reused. Attachments already past the `promoting` check when the fence started are attach's to stop.
 - **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
   sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
   so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
