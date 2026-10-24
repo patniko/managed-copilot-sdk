@@ -29,7 +29,7 @@ export class HttpClient {
   async fetch(method: string, path: string, options: RequestOptions & { rawBody?: RequestInit["body"]; duplex?: "half" } = {}): Promise<Response> {
     const headers: Record<string, string> = { authorization: `Bearer ${this.#token}`, ...options.headers };
     let body: RequestInit["body"] = options.rawBody;
-    if (options.body !== undefined) {
+    if (options.rawBody === undefined && options.body !== undefined) {
       headers["content-type"] = "application/json";
       body = JSON.stringify(options.body);
     }

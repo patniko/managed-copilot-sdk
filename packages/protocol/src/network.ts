@@ -25,16 +25,33 @@ export const NETWORK_DISABLED: NetworkPolicy = Object.freeze({ access: "disabled
 
 const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-/** Normalizes one host pattern (`example.com` or `*.example.com`). Throws on schemes, ports, paths, or bad labels. */
+/**
+ * Normalizes one host pattern (`example.com` or `*.example.com`). Throws on schemes, ports, paths, bad labels, and
+ * single-label names such as `localhost` or internal container names, which are never valid egress destinations.
+ */
 export function normalizeHostPattern(pattern: string): string {
   const value = pattern.trim().toLowerCase().replace(/\.$/, "");
   const wildcard = value.startsWith("*.");
   const host = wildcard ? value.slice(2) : value;
   const labels = host.split(".");
-  if (!host || labels.length < (wildcard ? 2 : 1) || !labels.every((label) => HOST_LABEL.test(label))) {
+  if (!host || labels.length < 2 || !labels.every((label) => HOST_LABEL.test(label))) {
     throw new TypeError(`Invalid network host pattern "${pattern}". Use a host name such as "example.com" or "*.example.com".`);
   }
   return wildcard ? `*.${host}` : host;
+}
+
+/**
+ * Normalizes a request host for matching: lowercase, no trailing dots, no `:port`, and IPv6 brackets removed.
+ * IP literals never match host patterns.
+ */
+export function normalizeHostname(host: string): string {
+  const value = host.trim().toLowerCase();
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    return end > 0 ? value.slice(1, end) : value;
+  }
+  const withPort = /^([^:]+):\d+$/.exec(value);
+  return (withPort ? withPort[1]! : value).replace(/\.+$/, "");
 }
 
 function unique(values: readonly string[]): string[] {
@@ -65,9 +82,9 @@ export function normalizeNetwork(setting: NetworkSetting | undefined, inherited:
   }
 }
 
-/** Returns true when `host` matches `pattern`. Wildcards match subdomains only, never the apex. */
+/** Returns true when `host` (which may carry a port) matches a normalized `pattern`. Wildcards match subdomains only, never the apex. */
 export function hostMatches(pattern: string, host: string): boolean {
-  const normalizedHost = host.trim().toLowerCase().replace(/\.$/, "");
+  const normalizedHost = normalizeHostname(host);
   if (pattern.startsWith("*.")) {
     const suffix = pattern.slice(1);
     return normalizedHost.length > suffix.length && normalizedHost.endsWith(suffix);
@@ -87,10 +104,18 @@ export function isHostAllowed(policy: NetworkPolicy, host: string): boolean {
   }
 }
 
-function patternCovered(ceiling: readonly string[], pattern: string): boolean {
-  if (!pattern.startsWith("*.")) return ceiling.some((allowed) => hostMatches(allowed, pattern));
-  const suffix = pattern.slice(2);
-  return ceiling.some((allowed) => allowed.startsWith("*.") && (allowed.slice(2) === suffix || suffix.endsWith(`.${allowed.slice(2)}`)));
+/** The narrower of two normalized patterns when they overlap, otherwise undefined. */
+function intersectPatterns(requested: string, ceiling: string): string | undefined {
+  const requestedWildcard = requested.startsWith("*.");
+  const ceilingWildcard = ceiling.startsWith("*.");
+  if (!requestedWildcard && !ceilingWildcard) return requested === ceiling ? requested : undefined;
+  if (!requestedWildcard) return hostMatches(ceiling, requested) ? requested : undefined;
+  if (!ceilingWildcard) return hostMatches(requested, ceiling) ? ceiling : undefined;
+  const requestedSuffix = requested.slice(2);
+  const ceilingSuffix = ceiling.slice(2);
+  if (requestedSuffix === ceilingSuffix || requestedSuffix.endsWith(`.${ceilingSuffix}`)) return requested;
+  if (ceilingSuffix.endsWith(`.${requestedSuffix}`)) return ceiling;
+  return undefined;
 }
 
 /**
@@ -103,7 +128,14 @@ export function narrowNetwork(ceiling: NetworkPolicy, requested: NetworkSetting 
   if (wanted.access === "disabled") return NETWORK_DISABLED;
   if (wanted.access === "enabled") return ceiling;
   if (ceiling.access === "enabled") return wanted;
-  return restricted(wanted.allowedDomains.filter((pattern) => patternCovered(ceiling.allowedDomains, pattern)));
+  const overlap: string[] = [];
+  for (const requestedPattern of wanted.allowedDomains) {
+    for (const ceilingPattern of ceiling.allowedDomains) {
+      const narrower = intersectPatterns(requestedPattern, ceilingPattern);
+      if (narrower) overlap.push(narrower);
+    }
+  }
+  return restricted(overlap);
 }
 
 /** One-line description of a policy for messages, e.g. `restricted to github.com, *.githubusercontent.com`. */

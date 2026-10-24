@@ -4,6 +4,7 @@ export type {
   ActionHandlers,
   ConnectOptions,
   CreateScheduleOptions,
+  EnvironmentDescriptor,
   EnvironmentSelector,
   ManagedArtifacts,
   ManagedClientOptions,
