@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { parseConfig, type ManagedCopilotConfig } from "@managed-copilot/protocol";
+import { ManagedCopilotError, parseConfig, type ManagedCopilotConfig } from "@managed-copilot/protocol";
 
 export interface GatewayConfig {
   readonly port: number;
@@ -49,9 +49,26 @@ export const DEV_DEFAULT_CONFIG = {
 } as const;
 
 function readDeployment(env: Readonly<Record<string, string | undefined>>): ManagedCopilotConfig {
-  if (env.MANAGED_COPILOT_CONFIG) return parseConfig(JSON.parse(env.MANAGED_COPILOT_CONFIG));
-  if (env.MANAGED_COPILOT_CONFIG_FILE) return parseConfig(JSON.parse(readFileSync(env.MANAGED_COPILOT_CONFIG_FILE, "utf8")));
-  return parseConfig(DEV_DEFAULT_CONFIG);
+  const deployment = env.MANAGED_COPILOT_CONFIG
+    ? parseConfig(JSON.parse(env.MANAGED_COPILOT_CONFIG))
+    : env.MANAGED_COPILOT_CONFIG_FILE
+      ? parseConfig(JSON.parse(readFileSync(env.MANAGED_COPILOT_CONFIG_FILE, "utf8")))
+      : parseConfig(DEV_DEFAULT_CONFIG);
+  refuseUnsupported(deployment);
+  return deployment;
+}
+
+/** Settings the schema accepts but this gateway cannot honor: refused at startup, never silently ignored. */
+function refuseUnsupported(deployment: ManagedCopilotConfig): void {
+  for (const [name, environment] of Object.entries(deployment.environments)) {
+    if (environment.github?.publish) {
+      throw new ManagedCopilotError(
+        "transport_unsupported",
+        `Environment "${name}" sets github.publish, but publishing sessions to the GitHub Copilot app isn't supported yet (transport_unsupported). Remove it and use \`npx managed-copilot attach\` for Copilot CLI.`,
+        { environment: name },
+      );
+    }
+  }
 }
 
 /** Only loopback GitHub API overrides may use plain HTTP (test stubs). */

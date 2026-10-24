@@ -1022,7 +1022,10 @@ sequenceDiagram
   approval-mode changes are unavailable; `ask_user` answers are user input, not ledger actions; an elicitation
   question the host doesn't link to its runtime request is refused while the ledger holds an open elicitation; the CLI
   asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is empty because the host
-  cannot list models without an AHP credential; GitHub Copilot app publication is not implemented (`github.publish`).
+  cannot list models without an AHP credential. GitHub Copilot app publication is not implemented: a deployment whose
+  environment sets `github.publish: true` is refused at gateway startup with `transport_unsupported`, naming the
+  environment (never silently ignored).
+
 ### CLI and quickstart
 
 - `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,

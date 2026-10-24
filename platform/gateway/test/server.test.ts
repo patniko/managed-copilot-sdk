@@ -5,6 +5,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { startGateway, type RunningGateway } from "../src/server.js";
 
+describe("deployment configuration", () => {
+  const env = (environments: Record<string, unknown>) => ({ PORT: "0", MANAGED_COPILOT_CONFIG: JSON.stringify({ name: "copilot", environments }) });
+
+  it("refuses publishing sessions to the GitHub Copilot app at startup instead of ignoring it", () => {
+    expect(() => loadConfig(env({ chat: { type: "shared", github: { publish: true } } }))).toThrowError(
+      expect.objectContaining({
+        code: "transport_unsupported",
+        message: 'Environment "chat" sets github.publish, but publishing sessions to the GitHub Copilot app isn\'t supported yet (transport_unsupported). Remove it and use `npx managed-copilot attach` for Copilot CLI.',
+      }),
+    );
+    expect(() => loadConfig(env({ chat: { type: "shared", github: { publish: false } } }))).not.toThrow();
+  });
+});
+
 describe("gateway skeleton", () => {
   let gateway: RunningGateway;
   let dataDir: string;
