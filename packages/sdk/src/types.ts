@@ -118,10 +118,18 @@ export interface ManagedArtifacts {
   download(path: string, localPath: string): Promise<void>;
 }
 
+/** Act for a specific GitHub user (for example a backend serving signed-in users); defaults to this connection's account. */
+export interface VaultCallOptions {
+  gitHubToken?: string;
+}
+
 export interface ManagedVaults {
-  create(request: CreateVaultRequest): Promise<VaultInfo>;
-  list(): Promise<VaultInfo[]>;
-  delete(vaultId: string): Promise<void>;
+  /** Creates a vault owned by the caller. Values are sealed by the platform and never returned by any API. */
+  create(request: CreateVaultRequest, options?: VaultCallOptions): Promise<VaultInfo>;
+  /** The caller's vaults plus the deployment's AppHost vaults (names, env names, and hosts only). */
+  list(options?: VaultCallOptions): Promise<VaultInfo[]>;
+  /** Deletes one of the caller's vaults; running sessions lose access to it immediately. */
+  delete(vaultId: string, options?: VaultCallOptions): Promise<void>;
 }
 
 export interface CreateScheduleOptions extends Omit<CreateScheduleRequest, "session"> {

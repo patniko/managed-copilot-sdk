@@ -384,6 +384,111 @@ export function normalizeDestinationHost(host: string): { readonly host: string;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Destination decisions shared by the egress proxy and gateway-side fetches (web_fetch, the MCP adapter): session
+// policy, ports, and platform protections, evaluated on the addresses DNS actually returned. Callers must connect
+// only to the returned addresses so that a later DNS answer (rebinding) cannot redirect the connection.
+// ---------------------------------------------------------------------------------------------------------------
+
+export type DestinationResolver = (host: string) => Promise<string[]>;
+
+export interface DestinationCheckOptions {
+  readonly allowedPorts: ReadonlySet<number>;
+  /** Exact host names the operator allows to resolve to private (RFC 1918 / ULA / CGNAT) addresses. */
+  readonly privateHosts: ReadonlySet<string>;
+  /** Never reachable, even for `privateHosts` (sandbox networks, platform services). Evaluated per decision. */
+  readonly protectedCidrs: () => readonly Cidr[];
+  /** Additional operator blocks. */
+  readonly blockedCidrs: readonly Cidr[];
+  readonly resolve: DestinationResolver;
+  readonly dnsTimeoutMs: number;
+}
+
+export type DestinationDecision =
+  | { readonly ok: true; readonly host: string; readonly port: number; readonly addresses: readonly string[]; readonly ipLiteral: boolean }
+  | {
+      readonly ok: false;
+      /** Policy blocks are reported to the session; resolution failures (`dns_failed`) are not. */
+      readonly reason: EgressBlockReason | "dns_failed";
+      readonly status: number;
+      readonly message: string;
+      readonly host?: string;
+      readonly port?: number;
+    };
+
+function inAnyCidr(cidrs: readonly Cidr[], address: string): boolean {
+  const parsed = parseIpAddress(address);
+  return parsed !== undefined && cidrs.some((cidr) => cidrContains(cidr, parsed));
+}
+
+function addressAllowed(host: string, address: string, options: DestinationCheckOptions): { ok: true } | { ok: false; why: string } {
+  const kind = classifyAddress(address);
+  if (inAnyCidr(options.blockedCidrs, address)) return { ok: false, why: "an address blocked by the operator" };
+  if (kind === "public") return { ok: true };
+  if ((kind === "private" || kind === "shared") && options.privateHosts.has(host) && !inAnyCidr(options.protectedCidrs(), address)) return { ok: true };
+  return { ok: false, why: describeAddressClass(kind) };
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("DNS lookup timed out")), ms);
+    }),
+  ]);
+}
+
+/** Decides whether a workload with `policy` may connect to `rawHost:port`, and to which addresses. */
+export async function evaluateDestination(policy: NetworkPolicy, rawHost: string, port: number, options: DestinationCheckOptions): Promise<DestinationDecision> {
+  const normalized = normalizeDestinationHost(rawHost);
+  const shown = normalized?.host ?? rawHost.slice(0, 100);
+  if (!normalized || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return { ok: false, reason: "invalid_destination", status: 400, message: `"${shown}" is not a valid destination host.`, host: shown, port };
+  }
+  const host = normalized.host;
+  if (policy.access === "disabled") {
+    return { ok: false, reason: "network_disabled", status: 403, message: `Outbound network access is disabled for this session (network: false), so ${host} is unreachable.`, host, port };
+  }
+  if (!options.allowedPorts.has(port)) {
+    const ports = [...options.allowedPorts].sort((a, b) => a - b).join(", ");
+    return { ok: false, reason: "port_not_allowed", status: 403, message: `Port ${port} is not allowed for outbound connections (allowed ports: ${ports}).`, host, port };
+  }
+  if (normalized.ip) {
+    if (policy.access === "restricted") {
+      return { ok: false, reason: "ip_literal_not_allowed", status: 403, message: `Direct IP connections are not allowed when network access is ${describeNetwork(policy)}.`, host, port };
+    }
+    const decision = addressAllowed(host, host, options);
+    if (!decision.ok) return { ok: false, reason: "address_not_allowed", status: 403, message: `${host} is ${decision.why}, which workloads cannot reach.`, host, port };
+    return { ok: true, host, port, addresses: [host], ipLiteral: true };
+  }
+  if (!isHostAllowed(policy, host)) {
+    return { ok: false, reason: "host_not_allowed", status: 403, message: `${host} is not an allowed host for this session (network access is ${describeNetwork(policy)}).`, host, port };
+  }
+  let resolved: string[];
+  try {
+    resolved = await withTimeout(options.resolve(host), options.dnsTimeoutMs);
+  } catch (error) {
+    return { ok: false, reason: "dns_failed", status: 502, message: `Could not resolve ${host}: ${(error as { code?: string }).code ?? (error as Error).message}.`, host, port };
+  }
+  const allowed: string[] = [];
+  let firstBlocked: { address: string; why: string } | undefined;
+  for (const address of resolved) {
+    if (!parseIpAddress(address)) continue;
+    const decision = addressAllowed(host, address, options);
+    if (decision.ok) {
+      if (!allowed.includes(address)) allowed.push(address);
+    } else {
+      firstBlocked ??= { address, why: decision.why };
+    }
+  }
+  if (allowed.length === 0) {
+    if (!firstBlocked) return { ok: false, reason: "dns_failed", status: 502, message: `Could not resolve ${host}: no addresses.`, host, port };
+    return { ok: false, reason: "address_not_allowed", status: 403, message: `${host} resolves to ${firstBlocked.address}, ${firstBlocked.why}, which workloads cannot reach.`, host, port };
+  }
+  return { ok: true, host, port, addresses: allowed, ipLiteral: false };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Vault placeholders and destinations (spec section 8).
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -551,3 +656,18 @@ export interface EgressReport {
 
 /** Platform event type published when a session's egress is blocked. */
 export const NETWORK_BLOCKED_EVENT = "network.blocked";
+
+/** `GET /v1/sessions/:id/network`: a session's effective policy, bound vaults (no values), and recent blocks. */
+export interface SessionNetworkInfo {
+  readonly sessionId: string;
+  /** Declared environment the policy derives from; absent for inline environments. */
+  readonly environment?: string;
+  readonly policy: NetworkPolicy;
+  readonly vaults: readonly { readonly id: string; readonly name: string; readonly kind: "apphost" | "user" }[];
+  /** Newest first. */
+  readonly blocked: readonly EgressReport[];
+}
+
+export const NETWORK_ROUTES = {
+  sessionNetwork: (sessionId: string) => `/v1/sessions/${encodeURIComponent(sessionId)}/network`,
+} as const;
