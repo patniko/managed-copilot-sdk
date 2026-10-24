@@ -9,6 +9,8 @@ import { GOOGLE_SCOPES, GoogleAuth, GoogleAuthError } from "./oauth.js";
 const GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me";
 const CALENDAR = "https://www.googleapis.com/calendar/v3/calendars/primary";
 const MAX_BODY_CHARS = 12_000;
+const CALENDAR_PAGE_SIZE = 250;
+const MAX_CALENDAR_PAGES = 20;
 
 interface GmailHeader {
   name: string;
@@ -41,6 +43,7 @@ interface GoogleEvent {
   htmlLink?: string;
   start?: { dateTime?: string; date?: string; timeZone?: string };
   end?: { dateTime?: string; date?: string; timeZone?: string };
+  transparency?: string;
   attendees?: { email?: string; self?: boolean; responseStatus?: string }[];
   organizer?: { email?: string };
 }
@@ -83,7 +86,19 @@ class GoogleApi {
       }
       if (response.status === 401 && attempt === 0) continue;
       if (response.status === 204) return undefined as T;
-      if (response.ok) return (await response.json()) as T;
+      if (response.ok) {
+        try {
+          return (await response.json()) as T;
+        } catch {
+          // The request succeeded but its answer was lost: for a side effect, that means it probably happened.
+          throw new ToolError(
+            options.sideEffect
+              ? `${this.#service} accepted the request but its reply couldn't be read, so check whether it went through before trying again.`
+              : `${this.#service} sent a reply that couldn't be read. Try again.`,
+            { uncertain: options.sideEffect === true },
+          );
+        }
+      }
       let reason = "";
       try {
         const payload = (await response.json()) as { error?: { message?: string; errors?: { reason?: string }[] } };
@@ -243,12 +258,15 @@ function toCalendarEvent(event: GoogleEvent, calendarTimeZone: string | undefine
     if (value?.date) return parseDateTime(value.date, calendarTimeZone ?? "UTC").toISOString();
     return new Date().toISOString();
   };
+  const declined = (event.attendees ?? []).some((a) => a.self && a.responseStatus === "declined");
   return {
     id: event.id,
     title: event.summary || "(no title)",
     start: instant(event.start),
     end: instant(event.end),
     allDay,
+    ...(allDay ? { startDate: event.start?.date, endDate: event.end?.date } : {}),
+    free: event.transparency === "transparent" || declined,
     location: event.location || undefined,
     description: event.description ? event.description.slice(0, 2000) : undefined,
     attendees: (event.attendees ?? []).filter((a) => !a.self && a.email).map((a) => a.email!),
@@ -265,20 +283,30 @@ class GoogleCalendarProvider implements CalendarProvider {
   }
 
   async list(range: { start: Date; end: Date; query?: string; max?: number }): Promise<CalendarEvent[]> {
-    const params = new URLSearchParams({
-      timeMin: range.start.toISOString(),
-      timeMax: range.end.toISOString(),
-      singleEvents: "true",
-      orderBy: "startTime",
-      maxResults: String(range.max ?? 100),
-    });
-    if (range.query?.trim()) params.set("q", range.query.trim());
-    const result = await this.#api.request<{ items?: GoogleEvent[]; timeZone?: string }>("GET", `${CALENDAR}/events?${params}`);
-    return (result.items ?? []).filter((e) => e.status !== "cancelled").map((e) => toCalendarEvent(e, result.timeZone));
+    // Without a cap (availability checks), every page is read: a missed event would show busy time as free.
+    const limit = range.max ?? Number.POSITIVE_INFINITY;
+    const events: CalendarEvent[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; ; page++) {
+      if (page === MAX_CALENDAR_PAGES) throw new ToolError("There are too many events in that range to read at once. Ask about a shorter range.");
+      const params = new URLSearchParams({
+        timeMin: range.start.toISOString(),
+        timeMax: range.end.toISOString(),
+        singleEvents: "true",
+        orderBy: "startTime",
+        maxResults: String(Math.min(CALENDAR_PAGE_SIZE, limit - events.length)),
+      });
+      if (range.query?.trim()) params.set("q", range.query.trim());
+      if (pageToken) params.set("pageToken", pageToken);
+      const result = await this.#api.request<{ items?: GoogleEvent[]; timeZone?: string; nextPageToken?: string }>("GET", `${CALENDAR}/events?${params}`);
+      for (const item of result.items ?? []) if (item.status !== "cancelled") events.push(toCalendarEvent(item, result.timeZone));
+      pageToken = result.nextPageToken;
+      if (!pageToken || events.length >= limit) return events.slice(0, limit);
+    }
   }
 
-  async get(id: string): Promise<CalendarEvent> {
-    return toCalendarEvent(await this.#api.request<GoogleEvent>("GET", `${CALENDAR}/events/${encodeURIComponent(id)}`), undefined);
+  async get(id: string, timeZone: string): Promise<CalendarEvent> {
+    return toCalendarEvent(await this.#api.request<GoogleEvent>("GET", `${CALENDAR}/events/${encodeURIComponent(id)}`), timeZone);
   }
 
   async create(input: EventInput, timeZone: string): Promise<CalendarEvent> {
@@ -333,7 +361,7 @@ export class GoogleWorkspace implements Workspace {
     };
     this.calendar = {
       list: (range) => (requireScope(GOOGLE_SCOPES.calendarEvents, "your calendar"), calendar.list(range)),
-      get: (id) => (requireScope(GOOGLE_SCOPES.calendarEvents, "your calendar"), calendar.get(id)),
+      get: (id, tz) => (requireScope(GOOGLE_SCOPES.calendarEvents, "your calendar"), calendar.get(id, tz)),
       create: (input, tz) => (requireScope(GOOGLE_SCOPES.calendarEvents, "your calendar"), calendar.create(input, tz)),
       update: (id, patch, tz) => (requireScope(GOOGLE_SCOPES.calendarEvents, "your calendar"), calendar.update(id, patch, tz)),
       remove: (id) => (requireScope(GOOGLE_SCOPES.calendarEvents, "your calendar"), calendar.remove(id)),

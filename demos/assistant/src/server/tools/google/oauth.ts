@@ -59,7 +59,8 @@ export interface GoogleAuthOptions {
 export class GoogleAuth {
   readonly #options: GoogleAuthOptions;
   readonly #fetch: typeof fetch;
-  readonly #refreshing = new Map<number, Promise<string>>();
+  /** In-flight refreshes keyed by the connection's sealed refresh token, so a reconnect never joins a stale one. */
+  readonly #refreshing = new Map<string, Promise<string>>();
 
   constructor(options: GoogleAuthOptions) {
     this.#options = options;
@@ -154,19 +155,24 @@ export class GoogleAuth {
   }
 
   /** A valid access token, refreshing it with the sealed refresh token when it is about to expire. */
-  async accessToken(accountId: number, options: { forceRefresh?: boolean } = {}): Promise<string> {
+  async accessToken(accountId: number, options: { forceRefresh?: boolean } = {}, attempt = 0): Promise<string> {
     const record = this.#options.store.getGoogle(accountId);
     if (!record) throw new GoogleAuthError("not_connected", "Google isn't connected. Connect it from the Connections panel.");
     if (record.status === "needs_reconnect") throw new GoogleAuthError("needs_reconnect", "Google access has expired or was revoked. Reconnect Google from the Connections panel.");
     if (!options.forceRefresh && record.accessToken && record.accessExpiresAt && Date.parse(record.accessExpiresAt) - EXPIRY_SKEW_MS > Date.now()) {
       return this.#options.sealer.open(record.accessToken, `google:${accountId}:access`);
     }
-    let pending = this.#refreshing.get(accountId);
+    const key = record.refreshToken;
+    let pending = this.#refreshing.get(key);
     if (!pending) {
-      pending = this.#refresh(accountId, record.refreshToken).finally(() => this.#refreshing.delete(accountId));
-      this.#refreshing.set(accountId, pending);
+      pending = this.#refresh(accountId, record.refreshToken).finally(() => this.#refreshing.delete(key));
+      this.#refreshing.set(key, pending);
     }
-    return pending;
+    const token = await pending;
+    if (this.#options.store.getGoogle(accountId)?.refreshToken === key) return token;
+    // Google was disconnected or reconnected (maybe as another account) while refreshing: never use the old grant.
+    if (attempt > 0) throw new GoogleAuthError("failed", "Your Google connection changed while this request was running. Try again.");
+    return this.accessToken(accountId, {}, attempt + 1);
   }
 
   async #refresh(accountId: number, sealedRefreshToken: string): Promise<string> {
@@ -176,12 +182,13 @@ export class GoogleAuth {
     try {
       token = await this.#token({ grant_type: "refresh_token", refresh_token: refreshToken });
     } catch (error) {
-      if (error instanceof GoogleAuthError && error.code === "needs_reconnect") store.setGoogleStatus(accountId, "needs_reconnect");
+      if (error instanceof GoogleAuthError && error.code === "needs_reconnect") store.setGoogleStatus(accountId, "needs_reconnect", sealedRefreshToken);
       throw error;
     }
     if (!token.access_token) throw new GoogleAuthError("failed", "Google didn't return an access token.");
     const scopes = token.scope ? token.scope.split(" ").filter(Boolean) : undefined;
-    store.updateGoogleAccess(accountId, sealer.seal(token.access_token, `google:${accountId}:access`), new Date(Date.now() + (token.expires_in ?? 3600) * 1000).toISOString(), scopes);
+    const expiresAt = new Date(Date.now() + (token.expires_in ?? 3600) * 1000).toISOString();
+    store.updateGoogleAccess(accountId, sealedRefreshToken, sealer.seal(token.access_token, `google:${accountId}:access`), expiresAt, scopes);
     return token.access_token;
   }
 

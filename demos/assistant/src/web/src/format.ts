@@ -12,10 +12,24 @@ function formatter(timeZone: string, options: Intl.DateTimeFormatOptions): Intl.
   return value;
 }
 
+const keyFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** `YYYY-MM-DD` of the local calendar day (Latin digits whatever the locale, so keys can be compared and shifted). */
 export function dayKey(iso: string | Date, timeZone: string): string {
-  const parts = formatter(timeZone, { year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(iso));
+  let keyFormatter = keyFormatters.get(timeZone);
+  if (!keyFormatter) {
+    keyFormatter = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+    keyFormatters.set(timeZone, keyFormatter);
+  }
+  const parts = keyFormatter.formatToParts(new Date(iso));
   const get = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/** A day key shifted by whole calendar days (no clock arithmetic, so DST days of 23 or 25 hours don't matter). */
+function shiftDay(key: string, days: number): string {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(Date.UTC(year!, month! - 1, day! + days)).toISOString().slice(0, 10);
 }
 
 export function timeOf(iso: string | Date, timeZone: string): string {
@@ -24,10 +38,11 @@ export function timeOf(iso: string | Date, timeZone: string): string {
 
 export function dayLabel(iso: string | Date, timeZone: string, now = new Date()): string {
   const key = dayKey(iso, timeZone);
-  if (key === dayKey(now, timeZone)) return "Today";
-  if (key === dayKey(new Date(now.getTime() - 86_400_000), timeZone)) return "Yesterday";
-  if (key === dayKey(new Date(now.getTime() + 86_400_000), timeZone)) return "Tomorrow";
-  const sameYear = key.slice(0, 4) === dayKey(now, timeZone).slice(0, 4);
+  const today = dayKey(now, timeZone);
+  if (key === today) return "Today";
+  if (key === shiftDay(today, -1)) return "Yesterday";
+  if (key === shiftDay(today, 1)) return "Tomorrow";
+  const sameYear = key.slice(0, 4) === today.slice(0, 4);
   return formatter(timeZone, { weekday: "short", month: "short", day: "numeric", ...(sameYear ? {} : { year: "numeric" }) }).format(new Date(iso));
 }
 

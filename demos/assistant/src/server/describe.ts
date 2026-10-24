@@ -69,15 +69,22 @@ export function scheduleIdFrom(content: string | undefined): string | undefined 
 
 /** "stretch-water-reminder" → "Stretch water reminder"; names with spaces are kept as written. */
 export function humanizeName(name: string): string {
-  if (/\s/.test(name) || !/[-_]/.test(name)) return name;
   // The platform suffixes duplicate agent schedule names with 4 random characters ("…-2QQq"); drop that for display.
-  const base = name.replace(/-(?=[A-Za-z0-9_-]{4}$)(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]{4}$/, "");
+  const base = name.replace(/-(?=[A-Za-z0-9]{4}$)(?=[a-z0-9]*[A-Z])[A-Za-z0-9]{4}$/, "");
+  if (/\s/.test(base) || !/[-_]/.test(base)) return base;
   const words = base.replace(/[-_]+/g, " ").trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** The platform names unnamed agent schedules `task-<id>`; those read better as their prompt. */
+export function scheduleDisplayName(name: string, prompt: string): string {
+  if (!/^task-[A-Za-z0-9_-]{4,}$/.test(name)) return humanizeName(name);
+  const clean = prompt.replace(/\s+/g, " ").trim().replace(/[.!]$/, "");
+  return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean || humanizeName(name);
+}
+
 export function scheduleSummary(args: Args, timeZone: string, at: Date): string {
-  const name = (text(args.name) && humanizeName(text(args.name)!)) ?? text(args.prompt) ?? "a task";
+  const name = text(args.name) ? humanizeName(text(args.name)!) : (text(args.prompt) ?? "a task");
   const cron = text(args.cron);
   if (cron) return `${quote(name)} · ${describeCron(cron)}`;
   const runAt = text(args.runAt);

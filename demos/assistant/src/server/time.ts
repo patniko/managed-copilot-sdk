@@ -71,14 +71,22 @@ export function offsetMinutes(date: Date, timeZone: string): number {
   return Math.round((asUtc - whole) / 60_000);
 }
 
-/** The instant at which the wall clock in `timeZone` reads the given local time. */
+/**
+ * The instant at which the wall clock in `timeZone` reads the given local time. Like Temporal's "compatible"
+ * disambiguation, a time skipped by a daylight-saving jump moves forward by the jump (02:30 during a 02:00→03:00 jump
+ * is 03:30, and a skipped midnight is 01:00 on the same day), and a repeated time is its first occurrence.
+ */
 export function zonedToUtc(year: number, month: number, day: number, hour: number, minute: number, second: number, timeZone: string): Date {
-  const guess = Date.UTC(year, month - 1, day, hour, minute, second);
-  const first = offsetMinutes(new Date(guess), timeZone);
-  let result = guess - first * 60_000;
-  const second_ = offsetMinutes(new Date(result), timeZone);
-  if (second_ !== first) result = guess - second_ * 60_000;
-  return new Date(result);
+  const wall = Date.UTC(year, month - 1, day, hour, minute, second);
+  // Offsets a day either side bracket any transition near this wall time.
+  const before = offsetMinutes(new Date(wall - 86_400_000), timeZone);
+  const after = offsetMinutes(new Date(wall + 86_400_000), timeZone);
+  const valid = [before, after]
+    .map((offset) => ({ offset, instant: wall - offset * 60_000 }))
+    .filter(({ offset, instant }) => offsetMinutes(new Date(instant), timeZone) === offset)
+    .map(({ instant }) => instant);
+  if (valid.length > 0) return new Date(Math.min(...valid));
+  return new Date(wall - before * 60_000);
 }
 
 const WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
@@ -105,7 +113,11 @@ export function parseDateTime(input: string, timeZone: string): Date {
     const minute = mi === undefined ? 0 : Number(mi);
     const second = s === undefined ? 0 : Number(s);
     if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 59) {
-      return zonedToUtc(Number(y), month, day, hour, minute, second, timeZone);
+      // Reject dates that don't exist (2026-02-31) instead of silently rolling into the next month.
+      const calendarDay = new Date(Date.UTC(Number(y), month - 1, day));
+      if (calendarDay.getUTCMonth() === month - 1 && calendarDay.getUTCDate() === day) {
+        return zonedToUtc(Number(y), month, day, hour, minute, second, timeZone);
+      }
     }
   }
   throw new TimeInputError(`"${input}" is not a valid date-time. Use ISO 8601, for example 2026-10-23T16:00:00-07:00.`);
@@ -127,6 +139,12 @@ export function isoInZone(date: Date, timeZone: string): string {
 export function dayKey(date: Date, timeZone: string): string {
   const parts = zonedParts(date, timeZone);
   return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
+}
+
+/** `YYYY-MM-DD` keys shifted by whole calendar days (pure date arithmetic, no time zone involved). */
+export function shiftDayKey(key: string, days: number): string {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(Date.UTC(year!, month! - 1, day! + days)).toISOString().slice(0, 10);
 }
 
 export function startOfDay(date: Date, timeZone: string): Date {
