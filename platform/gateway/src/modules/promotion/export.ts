@@ -52,13 +52,17 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** The given roots plus their canonical spellings (Windows 8.3 short names, symlinked temp directories). */
+/**
+ * The given roots plus their canonical spellings (Windows 8.3 short names, symlinked temp directories). A network
+ * (UNC) root is used as given: canonicalizing it would cost a round trip to its server.
+ */
 function rootVariants(roots: readonly string[]): string[] {
   const variants = new Set<string>();
   for (const root of roots) {
     const trimmed = root.replace(/[\\/]+$/, "");
     if (!trimmed) continue;
     variants.add(trimmed);
+    if (/^[\\/]{2}/.test(trimmed)) continue;
     try {
       variants.add(realpathSync.native(trimmed).replace(/[\\/]+$/, ""));
     } catch {
@@ -72,30 +76,50 @@ function rootVariants(roots: readonly string[]): string[] {
 const SEGMENT = String.raw`[A-Za-z0-9._~@+=-]+`;
 /**
  * Separator styles. One path is written in one style: plain (`\` or `/`, as in decoded strings and YAML) or
- * JSON-escaped (`\\` or `/`, as inside a nested JSON document). Matching each style on its own keeps a nested `\n`
+ * JSON-escaped (`\\` or `/`, as inside a nested JSON document). Reading each style on its own keeps a nested `\n`
  * escape after an escaped path intact while plain segments such as `\runtime` or `\notes` still continue the path.
  */
-const STYLES = [String.raw`(?:\\\\|/)`, String.raw`(?:\\|/)`] as const;
+const PLAIN = String.raw`(?:\\|/)`;
+const ESCAPED = String.raw`(?:\\\\|/)`;
+/** A backslash that cannot start a JSON escape (`\n`, `\t`, `\u00e9`, …), so the text around it is not JSON-escaped. */
+const NOT_AN_ESCAPE = /\\(?![bfnrt]|u[0-9A-Fa-f]{4})/;
+
+/** A root in one separator style. Leading separators keep their count, so a UNC root (`\\server\share`) stays one. */
+function rootPattern(root: string, separator: string): string {
+  const leading = /^[\\/]*/.exec(root)![0].length;
+  const segments = root.slice(leading).split(/[\\/]+/).filter(Boolean).map(escapeRegExp);
+  return `${separator.repeat(leading)}${segments.join(separator)}`;
+}
 
 /**
  * Rewrites platform paths inside strings: `<root>/runtime/shared/workspaces/<sessionId>` becomes `/workspace`,
  * `<root>/customizations/<environment>/<digest>` the sandbox's customizations mount, and anything else under a root
  * `/platform`. Further segments are kept and re-joined with `/`; sentence punctuation after a path stays outside it.
+ *
+ * Each path is read once, in the style its separators show. A root spelled with forward slashes fits both styles: the
+ * escaped reading wins unless the plain one continues with a backslash that no JSON escape starts with (so
+ * `C:/mc\runtime\shared` stays one plain path, while `C:/mc/a.txt\nls` inside nested JSON keeps its newline escape).
  */
 export function pathRewriter(roots: readonly string[], sessionId: string): { test(text: string): boolean; rewrite(text: string): string } {
   const variants = rootVariants(roots);
   if (variants.length === 0) return { test: () => false, rewrite: (text) => text };
-  const flags = process.platform === "win32" ? "gi" : "g";
+  const insensitive = process.platform === "win32" ? "i" : "";
   // The root must end a directory name (`shared.bak` is a sibling; `shared.` ends a sentence).
   const boundary = String.raw`(?![A-Za-z0-9_~@+=-]|\.[A-Za-z0-9_-])`;
-  const patterns = STYLES.map((separator) => {
-    const alternatives = variants.map((root) => root.split(/[\\/]+/).map(escapeRegExp).join(separator)).join("|");
-    return new RegExp(`(?:${alternatives})${boundary}((?:${separator}${SEGMENT})*)`, flags);
-  });
-  const probe = new RegExp(variants.map((root) => root.split(/[\\/]+/).map(escapeRegExp).join(String.raw`[\\/]+`)).join("|"), flags.replace("g", ""));
+  const rootsIn = (separator: string) => variants.map((root) => rootPattern(root, separator)).join("|");
+  const reading = (separator: string) => new RegExp(`(?:${rootsIn(separator)})${boundary}((?:${separator}${SEGMENT})*)`, `y${insensitive}`);
+  const escaped = reading(ESCAPED);
+  const plain = reading(PLAIN);
+  const finder = new RegExp(`(?:${rootsIn(ESCAPED)}|${rootsIn(PLAIN)})${boundary}`, `g${insensitive}`);
+  const probe = new RegExp(variants.map((root) => root.split(/[\\/]+/).map(escapeRegExp).join(String.raw`[\\/]+`)).join("|"), insensitive);
+  const readAt = (pattern: RegExp, text: string, at: number) => {
+    pattern.lastIndex = at;
+    const match = pattern.exec(text);
+    return match ? { end: at + match[0].length, rest: match[1] ?? "" } : undefined;
+  };
   const fold = process.platform === "win32" ? (value: string) => value.toLowerCase() : (value: string) => value;
   const is = (value: string | undefined, expected: string) => value !== undefined && fold(value) === fold(expected);
-  const replace = (_match: string, rest: string) => {
+  const replace = (rest: string) => {
     const trailing = /\.+$/.exec(rest)?.[0] ?? "";
     const segments = rest.slice(0, rest.length - trailing.length).split(/[\\/]+/).filter(Boolean);
     const join = (base: string, tail: readonly string[]) => `${tail.length > 0 ? `${base.replace(/\/$/, "")}/${tail.join("/")}` : base}${trailing}`;
@@ -106,10 +130,26 @@ export function pathRewriter(roots: readonly string[], sessionId: string): { tes
     if (is(segments[0], "runtime") && is(segments[1], "shared")) return join("/platform", segments.slice(2));
     return join("/platform", segments);
   };
-  return {
-    test: (text) => probe.test(text),
-    rewrite: (text) => patterns.reduce((out, pattern) => out.replace(pattern, replace), text),
+  const rewrite = (text: string): string => {
+    let out = "";
+    let last = 0;
+    finder.lastIndex = 0;
+    for (let found = finder.exec(text); found; found = finder.exec(text)) {
+      const at = found.index;
+      const asEscaped = readAt(escaped, text, at);
+      const asPlain = readAt(plain, text, at);
+      let path = asEscaped ?? asPlain;
+      if (asEscaped && asPlain && asPlain.end > asEscaped.end && NOT_AN_ESCAPE.test(text.slice(asEscaped.end, asPlain.end))) path = asPlain;
+      if (!path) {
+        finder.lastIndex = at + 1;
+        continue;
+      }
+      out += text.slice(last, at) + replace(path.rest);
+      last = finder.lastIndex = path.end;
+    }
+    return last === 0 ? text : out + text.slice(last);
   };
+  return { test: (text) => probe.test(text), rewrite };
 }
 
 function rewriteValue(value: unknown, rewrite: (text: string) => string, depth = 0): unknown {

@@ -61,6 +61,28 @@ describe("pathRewriter", () => {
     // A nested JSON string keeps its `\n` escape after the path.
     expect(rewrite(String.raw`{"cmd":"cat C:\\data\\mc\\runtime\\shared\\workspaces\\${SESSION}\\a.txt\nls"}`)).toBe(String.raw`{"cmd":"cat /workspace/a.txt\nls"}`);
   });
+
+  it("reads each path once, in the style its separators show", () => {
+    const forward = root.replace(/\\/g, "/");
+    const tail = (separator: string, ...rest: string[]) => ["runtime", "shared", "workspaces", SESSION, ...rest].join(separator);
+    // Mixed separators: a forward-slash root continued with plain backslashes is one plain path.
+    expect(rewrite(`${forward}\\${tail("\\", "src", "app.py")}`)).toBe("/workspace/src/app.py");
+    expect(rewrite(`${forward}\\\\${tail("\\\\", "out")}`)).toBe("/workspace/out");
+    // After a forward-slash path inside nested JSON, an escape stays an escape.
+    expect(rewrite(`{"out":"${forward}/${tail("/", "a.txt")}\\nnext"}`)).toBe(`{"out":"/workspace/a.txt\\nnext"}`);
+    expect(rewrite(`{"out":"${forward}/runtime/shared/home\\u00e9"}`)).toBe(`{"out":"/platform/home\\u00e9"}`);
+    // Several paths in one string, in different styles.
+    expect(rewrite(`${at("ledger.db")} and ${forward}\\\\runtime\\\\shared\\\\home`)).toBe("/platform/ledger.db and /platform/home");
+  });
+
+  it("keeps a UNC root's leading separators", () => {
+    const unc = pathRewriter(["\\\\fileserver\\share\\mc"], SESSION);
+    const tail = (separator: string, ...rest: string[]) => ["runtime", "shared", "workspaces", SESSION, ...rest].join(separator);
+    expect(unc.rewrite(`cwd \\\\fileserver\\share\\mc\\${tail("\\", "a.txt")}`)).toBe("cwd /workspace/a.txt");
+    expect(unc.rewrite("//fileserver/share/mc/runtime/shared/home")).toBe("/platform/home");
+    expect(unc.rewrite(`"\\\\\\\\fileserver\\\\share\\\\mc\\\\${tail("\\\\")}"`)).toBe('"/workspace"');
+    expect(unc.rewrite("\\\\otherserver\\share\\mc\\x")).toBe("\\\\otherserver\\share\\mc\\x");
+  });
 });
 
 describe("exportSessionState", () => {
