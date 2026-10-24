@@ -214,6 +214,12 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   bound to the account) under `MANAGED_COPILOT_DURABLE_KEY` or `<dataDir>/durable.key`. `principalFor` re-verifies it
   with GitHub (cached 2 minutes); a rejected token or a different account invalidates it and pauses the owner's
   schedules with a visible reason. No refresh: a revoked or expired token requires `managed-copilot login` again.
+- **Session lifecycle.** Deleting a session cancels its open actions (claims and late results are refused), stops
+  undeliverable answers, fails its pending `session.action_required` deliveries, and pauses schedules that continue
+  it. On `session.promoted` (or `actions.onGenerationChanged`), waiting actions move to the new placement generation;
+  actions owned under the old generation are fenced (their claims are void, tools in flight become
+  `needs_reconciliation`, prompts are offered again). `onDetached(connectionId, sessionId?)` releases only that
+  session's live claims when `sessionId` is given.
 - Durable REST: `GET /v1/sessions/:id/actions[?state=]`, `POST .../actions/:actionId/claim` (`{ claimToken? }` renews,
   `{ reconcile: true }` takes over uncertain actions), `POST .../actions/:actionId/result` (`{ claimToken, result |
   error | release }`), `/v1/schedules` CRUD with runs, pause, resume, and `run` (`{ invocationId }`), and

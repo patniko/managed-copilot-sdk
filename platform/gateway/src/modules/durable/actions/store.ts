@@ -281,6 +281,22 @@ export class ActionStore {
     return changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params));
   }
 
+  /** Moves an open action to a new placement generation; voiding its claim bumps the claim sequence (fencing). */
+  moveToGeneration(
+    id: string,
+    seq: number,
+    change: { readonly generation: number; readonly state: ActionState; readonly clearClaim: boolean; readonly reason: string | null; readonly now: number },
+  ): boolean {
+    const claim = change.clearClaim
+      ? ", claim_seq = claim_seq + 1, claim_token_hash = NULL, claimed_by = NULL, responder_type = NULL, live_connection = NULL, lease_expires_at = NULL"
+      : "";
+    return changed(
+      this.#db
+        .prepare(`UPDATE durable_actions SET generation = ?, state = ?, reason = ?, updated_at = ?${claim} WHERE id = ? AND claim_seq = ? AND state IN (${placeholders(OPEN_STATES)})`)
+        .run(change.generation, change.state, change.reason, change.now, id, seq, ...OPEN_STATES),
+    );
+  }
+
   markForwarded(id: string, now: number, reason?: string): void {
     if (reason === undefined) {
       this.#db.prepare("UPDATE durable_actions SET forwarded = 1, next_forward_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
