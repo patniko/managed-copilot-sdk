@@ -273,10 +273,16 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   storage under `<dataDir>/artifacts/<sessionId>/`, and records versions, digests, and a per-turn manifest. Rejections,
   cancelled turns, and turns that ended in errors are recorded as `failed` publications, never empty successes.
   Publications run one at a time per session. If a later root turn started before a turn's outputs manifest was
-  captured, that publication fails ("cannot be attributed to this turn") rather than label the later turn's bytes;
-  the current outputs publish when the later turn completes. Publications still pending at gateway start are failed
-  with an explicit reason. `artifact.published` (through core's events) lists only new versions; a turn that changed
-  nothing under `outputs/` emits no event.
+  captured, that publication fails ("cannot be attributed to this turn", logged at info since nothing is lost) rather
+  than label the later turn's bytes; the current outputs publish when the later turn completes, so callers that need
+  each turn's outputs wait for its publication before sending the next prompt. Publications still pending at gateway
+  start are failed with an explicit reason. A publication interrupted by the session's deletion is recorded as
+  "deleted" (logged at info), wherever the race lands: the session counts as deleted once core marks it `deleting`, a
+  delete of its sandbox is queued, its sandbox is `deleting`/`deleted`, or the deletion removed the turn's records; a
+  failure is classified only after sandbox operations already queued for the session (such as the delete) have run.
+  Gateway shutdown lets publications under way finish (up to 10 s) before it stops sandboxes; one cut off anyway is
+  recorded as interrupted by the shutdown, also at info. `artifact.published` (through core's events) lists only new
+  versions; a turn that changed nothing under `outputs/` emits no event.
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the
   placeholder); turn attribution relies on the runtime's `user.message` reaching the gateway before the next turn's

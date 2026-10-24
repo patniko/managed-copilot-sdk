@@ -204,6 +204,8 @@ export interface SandboxSessionView {
   readonly id: string;
   readonly ownerId: number;
   readonly environment?: string;
+  /** Core's session state; `deleting` is recorded before core closes the session's runtime or deletes its sandbox. */
+  readonly state?: string;
   /** The ledger's last root turn; survives gateway restarts. */
   readonly lastTurn?: { readonly turnId: string; readonly status: string };
 }

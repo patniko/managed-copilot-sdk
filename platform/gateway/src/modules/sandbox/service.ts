@@ -45,6 +45,10 @@ const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.request
 const ACTION_COMPLETED = new Set(["external_tool.completed", "permission.completed", "elicitation.completed"]);
 const IDLE_SWEEP_MS = Number(process.env.MANAGED_COPILOT_SANDBOX_IDLE_SWEEP_MS ?? 30_000) || 30_000;
 const RECONCILE_MS = 5 * 60_000;
+/** How long a failed publication waits for sandbox operations already queued for its session before classifying. */
+const SETTLE_MS = 5_000;
+/** How long gateway shutdown lets publications under way finish before it stops sandboxes. */
+const SHUTDOWN_DRAIN_MS = 10_000;
 /** How often the backend's readiness is re-checked for `available`. */
 const PROBE_MS = 30_000;
 /** How long a sandbox found running at startup stays protected while the ledger says its last turn was running. */
@@ -149,6 +153,8 @@ export class SandboxService implements SandboxesService {
   #timers: NodeJS.Timeout[] = [];
   #unsubscribe: (() => void) | undefined;
   #stopping = false;
+  /** Deletes requested through `delete()` that have not finished: the sandbox each targets (undefined = the current one). */
+  readonly #pendingDeletes = new Map<string, (string | undefined)[]>();
 
   constructor(options: SandboxServiceOptions) {
     this.#options = options;
@@ -672,7 +678,47 @@ export class SandboxService implements SandboxesService {
   }
 
   delete(sessionId: string, options: { readonly sandboxId?: string } = {}): Promise<void> {
-    return this.#withLock(sessionId, () => this.#delete(sessionId, options.sandboxId));
+    const pending = this.#pendingDeletes.get(sessionId) ?? [];
+    pending.push(options.sandboxId);
+    this.#pendingDeletes.set(sessionId, pending);
+    const done = () => {
+      const index = pending.indexOf(options.sandboxId);
+      if (index >= 0) pending.splice(index, 1);
+      if (pending.length === 0 && this.#pendingDeletes.get(sessionId) === pending) this.#pendingDeletes.delete(sessionId);
+    };
+    return this.#withLock(sessionId, () => this.#delete(sessionId, options.sandboxId)).finally(done);
+  }
+
+  /**
+   * Whether the session is being deleted or is gone, as far as anyone has decided: its sandbox record is missing,
+   * deleting, or deleted; a delete of its current sandbox is queued; or core has started deleting the session (core
+   * records that before it closes the session's runtime or asks for the sandbox's deletion). Work interrupted by a
+   * deletion reports that outcome rather than the transport error the deletion caused.
+   */
+  isGone(sessionId: string): boolean {
+    const row = this.#options.store.bySession(sessionId);
+    if (!row || row.state === "deleting" || row.state === "deleted") return true;
+    if ((this.#pendingDeletes.get(sessionId) ?? []).some((expected) => expected === undefined || expected === row.id)) return true;
+    try {
+      const state = this.#sessions()?.get(sessionId)?.state;
+      return state === "deleting" || state === "deleted";
+    } catch {
+      return false;
+    }
+  }
+
+  /** Resolves once operations already queued for the session (such as a delete) have run, or after `timeoutMs`. */
+  async settled(sessionId: string, timeoutMs = SETTLE_MS): Promise<void> {
+    const queued = this.#locks.get(sessionId);
+    if (!queued) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([queued, new Promise<void>((resolve) => (timer = setTimeout(resolve, timeoutMs)))]);
+    clearTimeout(timer);
+  }
+
+  /** True once gateway shutdown has started. */
+  get stopping(): boolean {
+    return this.#stopping;
   }
 
   async #delete(sessionId: string, expected: string | undefined): Promise<void> {
@@ -790,7 +836,13 @@ export class SandboxService implements SandboxesService {
       // The turn that was running across the restart (if any) has ended.
       live.recoveredAt = undefined;
       const turnIds = artifacts?.turnsCompleted(sessionId, outcome) ?? [];
-      if (artifacts && turnIds.length > 0) void artifacts.publish(sessionId, turnIds, outcome).catch((error: unknown) => this.#log.warn("Publication crashed", { sessionId, error: (error as Error).message }));
+      if (artifacts && turnIds.length > 0) {
+        void artifacts.publish(sessionId, turnIds, outcome).catch((error: unknown) => {
+          // Only possible when the ledger closes under a publication that outlasted the shutdown drain.
+          if (this.#stopping) this.#log.info("A publication was cut off by gateway shutdown", { sessionId, error: (error as Error).message });
+          else this.#log.warn("Publication crashed", { sessionId, error: (error as Error).message });
+        });
+      }
     }
   }
 
@@ -911,6 +963,11 @@ export class SandboxService implements SandboxesService {
     this.#unsubscribe?.();
     for (const timer of this.#timers) clearInterval(timer);
     this.#timers = [];
+    // A turn that completed just before shutdown still publishes: publications under way finish (bounded) before
+    // compute stops beneath them.
+    if (this.#artifacts && !(await this.#artifacts.drain(SHUTDOWN_DRAIN_MS))) {
+      this.#log.info("Stopping sandboxes while turn outputs are still being published; those publications are recorded as interrupted");
+    }
     const running = this.#options.store.inStates(["running"]);
     for (const live of this.#live.values()) for (const runtime of [...live.runtimes]) runtime.close();
     await Promise.all(
@@ -922,6 +979,8 @@ export class SandboxService implements SandboxesService {
         }).catch(() => undefined),
       ),
     );
+    // Publications that outlasted the drain fail fast once compute is gone; let them record that while the ledger is open.
+    await this.#artifacts?.drain(5_000);
     if (running.length > 0) this.#log.info("Stopped sandboxes for shutdown; they resume on next use", { count: running.length });
     await this.#options.provider.shutdown?.().catch(() => undefined);
   }
