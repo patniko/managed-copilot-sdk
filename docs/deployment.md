@@ -389,7 +389,9 @@ estimates, not a spending cap: sandbox usage, additional network/bandwidth charg
 authorized GitHub account are separate.
 
 The probe resource group was created at 15:31 UTC and confirmed deleted by 16:28 UTC on 2026-10-24.
-Cost Management had not posted its usage at the 21:18 UTC check; its **actual cost is unavailable**, not zero.
+At 22:30 UTC, Cost Management reported **$0.0032710244 USD pretax posted so far** for `mc-azure-probe`.
+Earlier empty results were unposted usage, not evidence of zero cost. This is a posted subtotal, not a settled
+invoice; delayed usage charges can still arrive.
 
 ## Teardown
 
