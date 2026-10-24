@@ -32,7 +32,7 @@ import { log } from "../log.js";
 import type { FactoryPlatform, StationSession } from "../platform.js";
 import type { StoredArtifact, FactoryStore } from "../store.js";
 import { StationActivityMapper } from "./activity.js";
-import { CancelledError, isPlatformInterruption, StationError, toFactoryError } from "./errors.js";
+import { CancelledError, isPlatformInterruption, PlatformUnavailableError, StationError, toFactoryError } from "./errors.js";
 import { factoryPermissions } from "./permissions.js";
 import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, validateReview, type ValidReview } from "./plan.js";
 import {
@@ -923,8 +923,13 @@ export class Factory {
       } catch (error) {
         if (run.abort.signal.aborted) throw new CancelledError();
         // A dropped connection isn't a lost sandbox: keep the workspace and its checkpoint, whether the work order pauses
-        // or (out of pauses) fails. Starting over discards work, so it also needs a platform that answers right now.
-        if (this.#isInterruption(error) || !(await this.#platformAnswers())) throw error;
+        // or (out of pauses) fails.
+        if (this.#isInterruption(error)) throw error;
+        // Starting over discards work, so it also needs a platform that answers right now. When it doesn't, the failure
+        // is the outage's, and stays classified that way (the platform may be back by the time the station fails).
+        if (!(await this.#platformAnswers())) throw new PlatformUnavailableError(toFactoryError(error).message);
+        if (run.abort.signal.aborted) throw new CancelledError();
+        if (this.#stopping) throw error;
         mapper.status(`Couldn't reattach to session ${station.sessionId} (${toFactoryError(error).message}); starting a fresh sandbox`, "warning");
         // The new sandbox starts over: its artifact versions restart at 1 and its rounds need fresh reviews.
         this.#store.deleteStationArtifacts(run.wo.id, station.id);
@@ -1201,7 +1206,10 @@ export class Factory {
   }
 
   async #failStation(run: Run, station: MStation, error: unknown): Promise<void> {
-    if (await this.#interruptedBy(run, error)) {
+    const interrupted = await this.#interruptedBy(run, error);
+    // A cancel (or shutdown) that came while the platform was being checked decides instead.
+    if (run.abort.signal.aborted || this.#stopping) return;
+    if (interrupted) {
       // Not a failure: the work order pauses at its checkpoint and resumes when the platform is back (#pauseRun).
       run.interrupted = true;
       return;

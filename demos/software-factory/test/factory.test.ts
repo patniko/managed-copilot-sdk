@@ -684,6 +684,56 @@ describe("Factory pipeline", () => {
     expect(wo.stations.find((station) => station.id === "build:csv2json")!.error?.message).toBe("The runtime went away");
   });
 
+  it("doesn't replace a sandbox when the work order is cancelled while the platform is being checked", async () => {
+    const probes: ((answer: boolean) => void)[] = [];
+    let deferProbes = false;
+    const { platform, factory } = setup({ planner, builder: builder({ failing: true }), reviewer, release }, undefined, {
+      checkPlatform: () => (deferProbes ? new Promise<boolean>((resolve) => probes.push(resolve)) : Promise.resolve(true)),
+    });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("failed");
+    const builds = () => factory.get(created.id)!.stations.filter((station) => station.kind === "build");
+    const sessions = builds().map((station) => station.sessionId);
+    const artifacts = factory.artifactIndex(created.id).files.length;
+    for (const session of platform.sessionsFor("builder")) platform.lost.add(session.sessionId);
+    platform.scripts.builder = builder();
+    deferProbes = true;
+    factory.retry(created.id);
+    // Both reattaches failed, and the factory is checking the platform before starting over.
+    await until(() => probes.length === 2);
+    const cancelling = factory.cancel(created.id);
+    for (const resolve of probes) resolve(true);
+    await cancelling;
+    expect((await settle(factory, created.id)).status).toBe("cancelled");
+    expect(builds().map((station) => station.sessionId)).toEqual(sessions);
+    expect(builds().every((station) => !station.previousSessionIds)).toBe(true);
+    expect(factory.artifactIndex(created.id).files.length).toBe(artifacts);
+    expect(platform.sessionsFor("builder")).toHaveLength(2);
+  });
+
+  it("keeps a failed platform check's verdict, even when the platform is back before the station gives up", async () => {
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        platform.resumeErrors.push(new Error("The runtime went away"));
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    // Resuming finds the platform answering; the failed reattach finds it down; after that it's back for good.
+    const answers = [true, false];
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, {
+      resumeBackoffMs: 10,
+      checkPlatform: async () => answers.shift() ?? true,
+    });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    expect(answers).toEqual([]);
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime went away)"))).toBe(true);
+  });
+
   it("leaves files a builder deleted in a later round out of the release", async () => {
     const shrinking: Script = async (session, prompt, platform) => {
       const task = taskOf(platform, session);
