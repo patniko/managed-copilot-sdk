@@ -165,13 +165,22 @@ export class DurableWebhooks implements WebhooksService {
     return queued;
   }
 
-  deliveries(options: { readonly state?: WebhookDeliveryState; readonly limit?: number } = {}): WebhookDeliveryInfo[] {
+  deliveries(options: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number } = {}): WebhookDeliveryInfo[] {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
-    const rows = (
-      options.state
-        ? this.#deps.db.prepare("SELECT * FROM durable_webhook_deliveries WHERE state = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(options.state, limit)
-        : this.#deps.db.prepare("SELECT * FROM durable_webhook_deliveries ORDER BY created_at DESC, rowid DESC LIMIT ?").all(limit)
-    ) as unknown as DeliveryRow[];
+    const conditions: string[] = [];
+    const params: (string | number)[] = [];
+    if (options.state) {
+      conditions.push("state = ?");
+      params.push(options.state);
+    }
+    if (options.ownerId !== undefined) {
+      conditions.push("owner_id = ?");
+      params.push(options.ownerId);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.#deps.db
+      .prepare(`SELECT * FROM durable_webhook_deliveries ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`)
+      .all(...params, limit) as unknown as DeliveryRow[];
     return rows.map(toDeliveryInfo);
   }
 

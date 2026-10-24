@@ -248,7 +248,7 @@ export interface WebhooksService {
   enqueue(event: PlatformEvent, meta: PlatformEventMeta): number;
   /** Names of AppHost webhooks that cover an environment and event type. */
   subscribers(environment: string, eventType: string): string[];
-  deliveries(options?: { readonly state?: WebhookDeliveryState; readonly limit?: number }): WebhookDeliveryInfo[];
+  deliveries(options?: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number }): WebhookDeliveryInfo[];
 }
 
 export interface SchedulesService {
