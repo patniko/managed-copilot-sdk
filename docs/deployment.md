@@ -5,13 +5,18 @@ Apps: the gateway (with its stock shared runtime) behind HTTPS/WSS ingress, your
 Azure Container Apps Sandboxes group for isolated sessions. Customer code does not change: `ManagedCopilot.connect()`
 reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public URL.
 
-> **Status.** The root AppHost and both demos have passed live qualification in westus2 (2026-10-24), using stock
+> **Status.** The root AppHost deploys and both demo happy paths pass in westus2 (2026-10-24), using stock
 > SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
 > with the deployed assistant's webhook and reminder journeys checked separately. NFS locking, revision recovery,
 > and persistent proxy trust have been exercised. This is a single-writer deployment, not a partition-tolerant HA
 > claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for example
 > isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
 > requests for them fail with `capability_unavailable` naming what is missing.
+>
+> **Remaining rollout gate.** A factory reconnect after gateway handover waited for the ingress's 240-second HTTP
+> 504 before retrying successfully. The factory stayed unavailable for over four minutes even though the new gateway
+> was serving. Bounded reconnect operations and a gateway-only rollover check, with the factory process left running,
+> are pending. The successful persistence checks do not yet qualify prompt factory-client recovery during rollout.
 
 ## What gets deployed
 
@@ -326,7 +331,7 @@ Alternatives when an address allowlist does not fit:
 | Promotion (shared → isolated) | Yes | Explicit promotion and continuation pass; broader interactive CLI continuity is a separate gate |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
-| Demos (software factory, assistant) | Yes | Both deployed happy paths pass; assistant uses clearly labelled demo Google data, not a live Google account |
+| Demos (software factory, assistant) | Yes | Both deployed happy paths pass; factory REST recovery after gateway rollover remains a qualification gate; assistant uses labelled demo Google data |
 
 ## Live qualification
 
@@ -343,7 +348,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Gateway revision canaries | One shared conversation retained its marker; two isolated sessions retained different files at the same path and their distinct sandbox identities |
 | Scheduled recovery | A one-shot schedule created before redeployment automatically completed exactly once on the replacement gateway, using the renewed same-account background credential |
 | Proxy trust | Identical CA fingerprint across two real proxy revisions; NFS directory owned by uid 1000 with mode 0700; proxy remains non-root |
-| Software factory | CSV/JSON work order completed two parallel builds and a reviewer-requested fix/review loop; release contained **9 files, 37/37 tests**, with a downloadable patch bundle (319 seconds) |
+| Software factory | Happy path passed: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). **Rollout recovery pending:** a later gateway handover caused a four-minute REST stall before natural recovery; bounded retries and a gateway-only rollover check are required |
 | Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
 
 The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real
