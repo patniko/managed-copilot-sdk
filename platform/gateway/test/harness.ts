@@ -57,10 +57,14 @@ export class FakeRuntime {
     await new Promise<void>((resolve) => this.#server?.close(() => resolve()) ?? resolve());
   }
 
-  /** Drops every connection, as if the runtime crashed. */
+  /** Drops every connection, as if the runtime crashed: turns in flight are lost, pending tool calls are kept. */
   dropConnections(): void {
+    this.#processing.clear();
     for (const endpoint of this.#endpoints) endpoint.close();
   }
+
+  /** Sessions whose turn is running (between its root `user.message` and `session.idle`). */
+  readonly #processing = new Set<string>();
 
   calls(method: string): RecordedRequest[] {
     return this.requests.filter((request) => request.method === method);
@@ -290,6 +294,8 @@ export class FakeRuntime {
         };
       case "session.permissions.pendingRequests":
         return { items: [] };
+      case "session.metadata.isProcessing":
+        return { processing: this.#processing.has(String(sessionId)) || [...this.#pendingTools.values()].some((pending) => pending.sessionId === sessionId) };
       case "session.permissions.handlePendingPermissionRequest":
         return { success: true };
       case "session.getMessages":
@@ -317,6 +323,12 @@ export class FakeRuntime {
 
   async #turn(endpoint: RpcEndpoint, session: FakeSession, prompt: string, messageId: string): Promise<string> {
     this.#emit(endpoint, session, "user.message", { content: prompt, messageId });
+    this.#processing.add(session.id);
+    // `stall` stays mid-inference until the runtime "crashes" (`dropConnections`), which loses the turn.
+    if (prompt === "stall") {
+      this.#emit(endpoint, session, "assistant.turn_start", { turnId: "0" });
+      return new Promise<string>(() => undefined);
+    }
     // `tool:<name>` calls a tool, optionally with JSON arguments: `tool:web_fetch {"url":"https://example.com"}`.
     const call = /tool:([a-z_]+)(?:\s+(\{[\s\S]*\}))?/.exec(prompt);
     const tool = call?.[1];
@@ -334,6 +346,7 @@ export class FakeRuntime {
     }
     this.#emit(endpoint, session, "assistant.message_delta", { messageId: "m1", deltaContent: content.slice(0, 5) });
     this.#emit(endpoint, session, "assistant.message", { messageId: "m1", content, originatingMessageId: messageId });
+    this.#processing.delete(session.id);
     return this.#emit(endpoint, session, "session.idle", {});
   }
 }
@@ -355,6 +368,8 @@ export class FakeSandboxes {
   failCreate: Error | undefined;
   /** Fails the next `prepareSessionParams` (test hook). */
   failNextPrepare: Error | undefined;
+  /** Errors the next `initialize` calls throw, in order (test hook; e.g. a runtime restart asking to reopen). */
+  readonly initializeFailures: Error[] = [];
 
   constructor(private readonly runtime: FakeRuntime) {}
 
@@ -391,6 +406,8 @@ export class FakeSandboxes {
       initialize: async (upstream: Send) => {
         send = upstream;
         this.log.push({ op: "initialize", sessionId });
+        const failure = this.initializeFailures.shift();
+        if (failure) throw failure;
       },
       prepareSessionParams: async (method: string, params: Record<string, unknown>) => {
         this.log.push({ op: `prepare ${method}`, sessionId, detail: params });

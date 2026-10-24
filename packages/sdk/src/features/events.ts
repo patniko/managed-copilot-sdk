@@ -1,5 +1,6 @@
 // Owner: core workstream. Subscribes to `GET /v1/events` (server-sent events) for `managed.on(...)`.
 import { ROUTES, type PlatformEvent } from "@managed-copilot/protocol";
+import { timings } from "../http.js";
 import type { ManagedContext } from "../types.js";
 
 const streams = new WeakMap<ManagedContext, AbortController>();
@@ -52,7 +53,11 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
   }
 }
 
-/** Starts the event stream on first subscription; reconnects with backoff and `Last-Event-ID`. Never throws. */
+/**
+ * Starts the event stream on first subscription; reconnects with backoff and `Last-Event-ID`. The connection is
+ * bounded, and a stream that stays silent for three of the gateway's 15 s heartbeats (a gateway being replaced, a
+ * proxy holding a dead connection) is dropped and resumed. Never throws.
+ */
 export function ensureEventStream(ctx: ManagedContext): void {
   if (streams.has(ctx)) return;
   const controller = new AbortController();
@@ -63,15 +68,17 @@ export function ensureEventStream(ctx: ManagedContext): void {
   });
   void (async () => {
     let lastEventId: string | undefined;
-    let delay = 1000;
+    let delay = timings.eventsRetryMs;
     while (!controller.signal.aborted) {
       try {
         const response = await ctx.http.fetch("GET", ROUTES.events, {
           headers: { accept: "text/event-stream", ...(lastEventId ? { "last-event-id": lastEventId } : {}) },
           signal: controller.signal,
+          timeoutMs: timings.connectMs,
+          idleTimeoutMs: timings.eventsIdleMs,
         });
         if (!response.body) throw new Error("The event stream has no body");
-        delay = 1000;
+        delay = timings.eventsRetryMs;
         for await (const message of parseEventStream(response.body)) {
           if (message.id) lastEventId = message.id;
           try {
