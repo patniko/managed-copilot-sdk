@@ -1046,9 +1046,10 @@ conversation history over the same three data disks. The two
 local-quickstart webhook snippets are skipped; the deployed assistant's webhook/reminder journeys were checked
 separately. Precise evidence and limits (including no partition-tolerant HA or live Google OAuth claim) are in the
 deployment guide.
-Factory REST recovery remains a rollout qualification gate: one post-handover request waited for a 240-second
-ingress 504 before reconnecting. The factory owner is bounding reconnect operations; the fix still needs a live
-gateway-only rollover check with the factory process unchanged.
+Bounded factory reconnect operations fixed a 240-second ingress timeout: a gateway-only rollover recovered both
+services in 28.8 seconds without restarting the factory. Active-work recovery remains gated: a shared review in the
+in-flight work order failed with `Completion wait cancelled` instead of pausing. The factory owner is addressing
+that case before the rollout qualification can close.
 
 - **Publish path.** In publish mode `addManagedCopilot` calls `publishManagedCopilot`: a Container Apps environment in
   a new VNet (`platform` and `sandboxes` /23 subnets, `egress` /24) with an Azure Files NFS 4.1 share, and the gateway as a

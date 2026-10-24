@@ -13,10 +13,11 @@ reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public U
 > isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
 > requests for them fail with `capability_unavailable` naming what is missing.
 >
-> **Remaining rollout gate.** A factory reconnect after gateway handover waited for the ingress's 240-second HTTP
-> 504 before retrying successfully. The factory stayed unavailable for over four minutes even though the new gateway
-> was serving. Bounded reconnect operations and a gateway-only rollover check, with the factory process left running,
-> are pending. The successful persistence checks do not yet qualify prompt factory-client recovery during rollout.
+> **Remaining rollout gate.** Bounded reconnect operations fixed an earlier 240-second HTTP 504 stall: a real
+> gateway-only rollover recovered both services in 28.8 seconds, with the same factory replica and no restart.
+> An in-flight work order still failed a shared review with `Completion wait cancelled` during that rollover,
+> rather than pausing. The active-work recovery fix and repeat live check are pending; idle-client recovery alone
+> does not qualify uninterrupted factory work across deployments.
 
 ## What gets deployed
 
@@ -331,7 +332,7 @@ Alternatives when an address allowlist does not fit:
 | Promotion (shared → isolated) | Yes | Explicit promotion and continuation pass; broader interactive CLI continuity is a separate gate |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
-| Demos (software factory, assistant) | Yes | Both deployed happy paths pass; factory REST recovery after gateway rollover remains a qualification gate; assistant uses labelled demo Google data |
+| Demos (software factory, assistant) | Yes | Both deployed happy paths and factory connection recovery pass; in-flight factory work across rollover remains gated; assistant uses labelled demo Google data |
 
 ## Live qualification
 
@@ -348,7 +349,8 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Gateway revision canaries | One shared conversation retained its marker; two isolated sessions retained different files at the same path and their distinct sandbox identities |
 | Scheduled recovery | A one-shot schedule created before redeployment automatically completed exactly once on the replacement gateway, using the renewed same-account background credential |
 | Proxy trust | Identical CA fingerprint across two real proxy revisions; NFS directory owned by uid 1000 with mode 0700; proxy remains non-root |
-| Software factory | Happy path passed: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). **Rollout recovery pending:** a later gateway handover caused a four-minute REST stall before natural recovery; bounded retries and a gateway-only rollover check are required |
+| Gateway-only rollover | Gateway interruption about 18 seconds; factory recovered 10.5 seconds after the gateway served (28.8 seconds total), then stayed healthy for 20 seconds. Same factory replica, zero restarts |
+| Software factory | Happy path passed: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). **Active-work recovery pending:** a shared review failed with `Completion wait cancelled` during the gateway-only rollover rather than pausing |
 | Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
 
 The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real
