@@ -136,7 +136,7 @@ class FakeSessions {
 interface FakeSandbox {
   readonly id: string;
   readonly size: "medium";
-  readonly state: "running" | "failed";
+  readonly state: "running" | "failed" | "deleting";
   readonly network: NetworkPolicy;
 }
 
@@ -149,6 +149,8 @@ class FakeSandboxes {
   readonly created: Record<string, unknown>[] = [];
   readonly imports: { sessionId: string; sessionStateDir: string; activeTurnId?: string; files: string[] }[] = [];
   readonly deleted: string[] = [];
+  /** The options each delete was given (like today's sandbox service, the fake deletes unconditionally). */
+  readonly deleteOptions: unknown[] = [];
   readonly registered = new Map<string, FakeSandbox>();
   /** Starts and ends of creates and deletes, in order. */
   readonly log: string[] = [];
@@ -189,11 +191,12 @@ class FakeSandboxes {
     return { files: files.length, bytes: 1 };
   }
 
-  async delete(sessionId: string) {
+  async delete(sessionId: string, options?: { sandboxId?: string }) {
     this.log.push("delete:start");
     if (this.deleteDelayMs) await new Promise((resolve) => setTimeout(resolve, this.deleteDelayMs));
     this.log.push("delete:end");
     this.deleted.push(sessionId);
+    this.deleteOptions.push(options);
     this.registered.delete(sessionId);
   }
 
@@ -409,6 +412,8 @@ describe("API promotion (managed.promote)", () => {
     expect(sessions.steps).not.toContain("source:sessions.close");
     expect(policy.calls).toEqual([`promote:${SESSION}:coder`, `revert:${SESSION}`]);
     expect(sandboxes.deleted).toEqual([SESSION]);
+    // Only this attempt's candidate, by its ID (the sandbox service confirms it under its lock).
+    expect(sandboxes.deleteOptions).toEqual([{ sandboxId: "sbx_test" }]);
     expect(existsSync(stateDir)).toBe(true);
     expect(sessions.get(SESSION)).toMatchObject({ placement: "shared", generation: 0 });
     expect(manager.latest(SESSION)).toMatchObject({ state: "failed", errorCode: "session_busy" });
@@ -826,21 +831,48 @@ describe("recovery after a restart", () => {
     expect(store.get("prm_i")).toMatchObject({ cleanupPending: true });
   });
 
-  it("releases an interrupted attempt's candidate without a recorded ID only while the ID names its own session or none", async () => {
+  it("releases an interrupted attempt's candidate without a recorded ID only when nothing else can own it", async () => {
     store.insert({ id: "prm_k", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
     store.update("prm_k", { state: "failed", cleanupPending: true });
-    // The session was deleted and a new shared session reused the ID; what is registered under it is not provably ours.
-    sessions.records.set(SESSION, record({ createdAt: new Date(Date.now() + 60_000).toISOString() }));
+    // A new isolated session reused the ID: what is registered under it may be its own sandbox. Kept, and still owed.
+    sessions.records.set(SESSION, record({ environment: "coder", type: "isolated", placement: "sandbox", createdAt: new Date(Date.now() + 60_000).toISOString() }));
     sandboxes.registered.set(SESSION, sandbox("sbx_unknown"));
     await manager.recover();
     expect(sandboxes.deleted).toEqual([]);
-    expect(store.get("prm_k")).toMatchObject({ cleanupPending: false });
+    expect(store.get("prm_k")).toMatchObject({ cleanupPending: true });
 
-    // With no session under the ID, nothing else can own the sandbox: core records a session before allocating one.
-    store.update("prm_k", { cleanupPending: true });
+    // A shared session owns no sandbox (its own promotions are serialized with this), so the leftover goes.
+    sessions.records.set(SESSION, record({ createdAt: new Date(Date.now() + 60_000).toISOString() }));
+    await manager.recover();
+    expect(sandboxes.deleted).toEqual([SESSION]);
+    expect(sandboxes.deleteOptions).toEqual([{ sandboxId: "sbx_unknown" }]);
+    expect(store.get("prm_k")).toMatchObject({ cleanupPending: false });
+  });
+
+  it("keeps a recorded candidate while a newer session in sandbox placement holds the ID, and releases it once none does", async () => {
+    store.insert({ id: "prm_m", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_m", { state: "failed", cleanupPending: true, sandboxId: "sbx_old" });
+    sandboxes.registered.set(SESSION, sandbox("sbx_old"));
+    // The new session's own sandbox creation may already be queued behind anything deleted now.
+    sessions.records.set(SESSION, record({ ownerId: 202, owner: { id: 202, login: "other" }, environment: "coder", type: "isolated", placement: "sandbox", createdAt: new Date(Date.now() + 60_000).toISOString() }));
+    await manager.recover();
+    expect(sandboxes.deleted).toEqual([]);
+    expect(store.get("prm_m")).toMatchObject({ cleanupPending: true });
+
     sessions.records.delete(SESSION);
     await manager.recover();
     expect(sandboxes.deleted).toEqual([SESSION]);
+    expect(sandboxes.deleteOptions).toEqual([{ sandboxId: "sbx_old" }]);
+    expect(store.get("prm_m")).toMatchObject({ cleanupPending: false });
+  });
+
+  it("treats a candidate that is already being deleted as released", async () => {
+    store.insert({ id: "prm_n", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_n", { state: "failed", cleanupPending: true, sandboxId: "sbx_old" });
+    sandboxes.registered.set(SESSION, { ...sandbox("sbx_old"), state: "deleting" });
+    await manager.recover();
+    expect(sandboxes.deleted).toEqual([]);
+    expect(store.get("prm_n")).toMatchObject({ cleanupPending: false });
   });
 
   it("does not revert the policy of a session that reused the ID", () => {

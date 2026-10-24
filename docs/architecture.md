@@ -521,11 +521,14 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
 - **Session IDs can be reused.** A deleted session's ID can name a new session, even another owner's, so every step
   that touches a session by ID first confirms it is the incarnation the attempt was made for (same creation time).
   The check right before allocation runs in the same synchronous step as the narrowing, and reverts apply only to
-  that incarnation. Candidates are released by identity: sandbox IDs are unique per creation, so the recorded
-  candidate is matched by ID. Without one (creation failed, and the sandbox module released what it had allocated),
-  the registered sandbox is released only while the ID names no session or a shared session of that incarnation,
-  because core records a session before allocating its sandbox. A promoted session's sandbox and a new session's
-  sandbox are never touched.
+  that incarnation. Candidates are released only when provably theirs: the recorded candidate by its ID (unique per
+  creation); after a failed creation only a `failed` row (the sandbox module released the rest); after a restart
+  during creation whatever is registered. A sandbox already being deleted counts as released. Nothing is deleted
+  while the ID names a session in sandbox placement: the promoted session's home, or a new session's sandbox, whose
+  creation may already be queued in the sandbox service. A candidate still registered then is retried at the next
+  start. Otherwise the check and the queued delete happen in one synchronous step, and core records a session before
+  allocating its sandbox, so no other session's creation can be queued ahead of it. The expected sandbox ID goes along
+  so the sandbox service can confirm it under its lock.
 - **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
   core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
   generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried

@@ -69,6 +69,8 @@ interface Progress {
   cutover?: PlacementCutover;
   narrowed: boolean;
   allocated: boolean;
+  /** The candidate sandbox's ID, as soon as creation returned it. */
+  candidate?: string;
   fenced: boolean;
   /** `session.suspend` or `sessions.close` was attempted: the source may no longer hold the session. */
   sourceTouched: boolean;
@@ -326,6 +328,7 @@ export class PromotionManager implements PromotionService {
             resolved: this.#resolved(record, targetConfig),
           });
           // Recorded at once: rollback and recovery release this candidate by its ID, never another sandbox.
+          progress.candidate = handle.sandboxId;
           this.#update(progress, { state: "quiescing", sandboxId: handle.sandboxId });
           return { network: narrowed, sandboxId: handle.sandboxId };
         });
@@ -587,8 +590,9 @@ export class PromotionManager implements PromotionService {
     let released = !progress.allocated;
     if (progress.allocated) {
       try {
-        await this.#releaseIfCandidate(progress.operation);
-        released = true;
+        // Without a candidate ID, creation failed: the sandbox module already released what it had allocated.
+        const operation = progress.candidate ? { ...progress.operation, sandboxId: progress.candidate } : progress.operation;
+        released = await this.#releaseIfCandidate(operation, { createFailed: !progress.candidate });
       } catch (deleteError) {
         this.#log.warn("Could not release the candidate sandbox yet; it is retried at the next start", { sessionId: record.id, error: (deleteError as Error).message });
       }
@@ -604,22 +608,30 @@ export class PromotionManager implements PromotionService {
   }
 
   /**
-   * Deletes the sandbox registered under an attempt's session ID only if it is that attempt's candidate. Sandbox IDs
-   * are unique per creation, so a recorded candidate is matched by ID. Without one (creation failed, and the sandbox
-   * module released what it had allocated, or a restart cut it short), the registered sandbox can only be the attempt's
-   * while the ID names no session, or a shared session of the attempt's incarnation: core records a session before it
-   * allocates the session's sandbox, so a session that reused the ID is visible. A session in sandbox placement of the
-   * attempt's incarnation was promoted, and that sandbox is its home: never touched.
+   * Releases an attempt's candidate if it is still registered under the session ID, and reports whether that
+   * obligation is settled (false: not decidable now; retried at the next start). A deleted session's ID can name a new
+   * session, even another owner's, so only a provable candidate is deleted:
+   * - Which sandbox can be the candidate: the recorded one, by its ID (unique per creation); after a failed creation
+   *   only a `failed` row (the sandbox module released the rest); after a restart during creation, whatever is there.
+   *   A sandbox already being deleted is someone else's release in progress.
+   * - Never while the ID names a session in sandbox placement: the promoted incarnation's home, or a new session's own
+   *   sandbox, whose creation may already be queued in the sandbox service behind anything deleted now. A candidate
+   *   still registered then is retried once the ID names no such session.
+   * - Otherwise (no session, or a shared one, which owns no sandbox but promotion candidates, and promotion work for
+   *   the ID is serialized with this) it is deleted. Core records a session before allocating its sandbox, and this
+   *   check and the queued delete happen in one synchronous step, so no other session's creation can be queued ahead;
+   *   the expected ID goes along for the sandbox service to confirm under its lock.
    */
-  async #releaseIfCandidate(operation: PromotionOperation): Promise<void> {
+  async #releaseIfCandidate(operation: PromotionOperation, options: { readonly createFailed?: boolean } = {}): Promise<boolean> {
     const sandboxes = this.#sandboxes();
     const info = await sandboxes?.get(operation.sessionId);
-    if (!sandboxes || !info || info.state === "deleted") return;
+    if (!sandboxes || !info || info.state === "deleted" || info.state === "deleting") return true;
+    const candidate = operation.sandboxId !== undefined ? info.id === operation.sandboxId : !options.createFailed || info.state === "failed";
+    if (!candidate) return true;
     const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
-    const incarnation = current !== undefined && current.createdAt <= operation.createdAt;
-    if (incarnation && current.placement === "sandbox") return;
-    const candidate = operation.sandboxId ? info.id === operation.sandboxId : current === undefined || incarnation;
-    if (candidate) await sandboxes.delete(operation.sessionId);
+    if (current?.placement === "sandbox") return current.createdAt <= operation.createdAt || info.state === "failed";
+    await sandboxes.delete(operation.sessionId, { sandboxId: info.id });
+    return true;
   }
 
   /** Synchronous post-commit steps, so durable sees the carried call at the new generation before anything replays. */
@@ -711,9 +723,9 @@ export class PromotionManager implements PromotionService {
   async #releaseCandidate(operationId: string): Promise<void> {
     const operation = this.#store.get(operationId);
     if (!operation || operation.state !== "failed" || !operation.cleanupPending) return;
-    await this.#releaseIfCandidate(operation);
+    const settled = await this.#releaseIfCandidate(operation);
     await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
-    this.#store.update(operation.id, { cleanupPending: false });
+    if (settled) this.#store.update(operation.id, { cleanupPending: false });
   }
 
   // Recovery -------------------------------------------------------------------------------------------------------

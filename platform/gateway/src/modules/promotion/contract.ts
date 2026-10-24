@@ -95,7 +95,11 @@ export interface PromotionSandboxesPort {
    * sandbox, so its `outputs/` publish when it completes.
    */
   importRuntimeState?(sessionId: string, input: { readonly sessionStateDir: string; readonly activeTurnId?: string }): Promise<{ readonly files: number; readonly bytes: number }>;
-  delete(sessionId: string): Promise<void>;
+  /**
+   * Deletes the session's sandbox. With `sandboxId`, only while that is still the session's sandbox (checked under
+   * the session lock); implementations without the option delete unconditionally.
+   */
+  delete(sessionId: string, options?: { readonly sandboxId?: string }): Promise<void>;
   get(sessionId: string): Promise<SandboxInfo | undefined> | SandboxInfo | undefined;
 }
 
