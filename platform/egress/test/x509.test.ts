@@ -1,4 +1,4 @@
-import { createHash, randomBytes, X509Certificate } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:https";
 import { tmpdir } from "node:os";
@@ -94,6 +94,11 @@ describe("certificate authority", () => {
     const one = createCaMaterial({ commonName: "One" });
     const two = createCaMaterial({ commonName: "Two" });
     expect(() => new CertificateAuthority({ certPem: one.certPem, keyPem: two.keyPem })).toThrow(/does not match/);
+  });
+
+  it("rejects CA keys it cannot sign leaf certificates with", () => {
+    const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    expect(() => new CertificateAuthority({ certPem: createCaMaterial({ commonName: "One" }).certPem, keyPem: rsa })).toThrow(/must use an ECDSA key/);
   });
 });
 
