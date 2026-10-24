@@ -427,10 +427,42 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
 - `PendingAction.requestId` is the runtime request ID the answer RPC is keyed on; `payload` carries the stock
   `PermissionRequest` or the elicitation's message and schema. `idempotencyKey` is `${sessionId}:${toolCallId}` for
   tools, the same identity a live handler sees in its `ToolInvocation`, across webhooks, polling, resume, restarts,
-  and placement changes.
+  and placement changes. A runtime that restarts without suspending rebuilds a waiting tool call under a new request
+  ID with the same tool call ID: the existing action takes the new ID (its owner, outcome, or uncertainty stays, and
+  a recorded answer is delivered again), so the tool never runs twice. Its earlier request IDs stay aliases, so a
+  client still answering under one of them is recorded and delivered under the latest. A gateway platform tool the
+  stopped runtime ended runs again instead of becoming uncertain: platform tools are idempotent by key, and nobody
+  else can reconcile them.
+- **Session incarnations.** Session IDs are reusable after deletion, so every action belongs to the incarnation that
+  asked (`SessionRecord.incarnation`; until core reports one, the session's creation time stands in and is re-keyed
+  at startup once it does). Listing, claiming, answering, capabilities (`inc` claim), replay, delivery,
+  announcements (to the current incarnation's owner and environment), and deletion only ever see the current
+  incarnation, and answers and runtime reads carry the incarnation they are for (`sessions.request(..., { incarnation
+  })`; core refuses them for another one, and the answer is then recorded as not delivered). Schedules that continue a
+  session are bound to its incarnation, and every run to the incarnation it continues. Startup closes the open
+  actions of an incarnation that no longer exists (a deletion no event announced), and binds schedule targets and runs
+  recorded before incarnations only to a session that is provably the same one (alive, the owner's, created within
+  the row's window); anything else is retired and its schedule paused.
+  `actions.hasOpenActions(sessionId)` tells core whether a resume should continue pending work.
+- **Permission authority.** A decision is checked against who answers and what the prompt requires: a webhook
+  capability may approve once, reject, or report that nobody is available, never attest a person
+  (`approvedInteractively`, `denied-interactively-by-user`) or grant standing approvals; a prompt that managed policy
+  reserves for a person (`managedApprovalRequired`, read the way the stock SDK documents it) is approved only by an
+  attached Copilot CLI, or by the owner's client or poller attesting a person (`approve-once` with
+  `approvedInteractively: true`), and an attached CLI gets such prompts first. A prompt the ledger missed is rebuilt
+  from the runtime's pending list and the session history, keeping its requirements; one known only from its derived
+  form (no raw request) is a person's to answer, whatever its kind.
+- **Copilot CLI attach.** `actions.promptVisibility(...)` tells attach whether a prompt its CLI saw on the raw runtime
+  channel is answerable there: it waits until core's event stream recorded and arbitrated the request, claims a
+  waiting prompt for the CLI, and returns `actionable` only for the CLI holding the claim (`observe` when an app,
+  worker, or another CLI holds it; `hidden` otherwise, including for a CLI that detached while it waited). Its answers
+  go through `onClientAnswer` with `requireRecorded: true`: unknown requests and answers from anyone but the claim
+  holder are refused, never forwarded. An answer for a session that no longer exists is refused for every client.
 - **Results before acknowledgment.** Answers (live, REST, platform) are persisted, then delivered to the runtime by
-  the ledger through `sessions.request`, retried with backoff if the runtime is unavailable. Duplicates (same claim,
-  same canonical result) return the recorded state; different results are `conflict`.
+  the ledger through `sessions.request`, retried with backoff if the runtime is unavailable. A delivery and its
+  acknowledgment belong to one placement and one runtime request ID: an answer rebound to a rebuilt request gets its
+  own delivery even while one to the old request is in flight, whose late acknowledgment never covers it. Duplicates
+  (same claim, same canonical result) return the recorded state; different results are `conflict`.
 - **Uncertainty is explicit.** A tool whose live client disconnects, whose REST lease expires, or that was in flight
   across a gateway restart becomes `needs_reconciliation` and is never re-offered; the original claimant's late result
   is still accepted, anyone else must claim with `reconcile: true`. Prompts have no external effect and return to
@@ -445,10 +477,21 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   per attempt for the session's actions that are still pending (15 min, audience = this deployment's public URL).
 - **Schedules.** Cron (IANA zones; nonexistent DST slots skipped, repeated slots run once at the earliest instant)
   and one-shot `runAt`. Each occurrence is persisted with a stable occurrence ID before anything happens upstream; a
-  new-session run uses a session ID derived from the occurrence (so a retried create finds the same session), and the
+  new-session run uses a session ID derived from the occurrence (so a retried create finds the same session, which it
+  adopts only if this schedule created it: core records `scheduleId` only for its server-side create, so a session the
+  owner made under that ID after the run's own was deleted is never used, and the run fails without sending), and the
   prompt is sent with `source: "system"` only after `input_state = submitting` is persisted. After a crash the
-  session's history (`session.getMessages`) decides whether the prompt was accepted; if it cannot be read after
-  bounded retries the run ends `needs_reconciliation` and is never resent. Runs of one schedule never overlap (one
+  session's history (`session.getMessages`) decides whether the prompt was accepted; while the runtime may still hold
+  it unrecorded (queued work per `session.queue.hasPending`/`pendingItems`, or a running turn) the run waits rather
+  than resending, then reads the history again; if acceptance cannot be established the run ends
+  `needs_reconciliation` and is never resent. Right before any send, the run (still queued), its schedule (not
+  deleted, not paused), and its session (still the incarnation the run continues) are checked again in the same
+  synchronous step, and the send carries that incarnation (`sessions.send(..., { incarnation })`), so core refuses it
+  for a session that reuses the ID. History and queue reads and stopping an overdue turn are fenced the same way, and
+  a run's turn is followed only in its own incarnation; a run whose session is gone ends (`skipped` before it
+  started, `failed` after) and a schedule continuing it pauses. A session whose SDK hooks have no connected handler
+  refuses unattended sends (`background_callback_unsupported`), which pauses the schedule. Runs of one schedule never
+  overlap (one
   occurrence may wait; more are skipped), owners have a concurrency cap, occurrences later than the grace window (5 min
   cron, 60 min one-shot) are `skipped` with a recorded reason, and delegation, environment policy, webhook routes, and
   the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`, which
@@ -461,8 +504,10 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   most every 5 minutes; retries are idempotent by the tool call's key.
 - **Background sign-in.** `POST /v1/credentials/background` seals the caller's own GitHub token (AES-256-GCM, AAD
   bound to the account) under `MANAGED_COPILOT_DURABLE_KEY` or `<dataDir>/durable.key`. `principalFor` re-verifies it
-  with GitHub (cached 2 minutes); a rejected token or a different account invalidates it and pauses the owner's
-  schedules with a visible reason. No refresh: a revoked or expired token requires `managed-copilot login` again.
+  with GitHub (cached 2 minutes, as background work: never recorded as the account's live credential); a rejected
+  token or a different account invalidates it and pauses the owner's schedules with a visible reason. Logout,
+  invalidation, and a new sign-in tell core to forget the removed token (`auth.forgetCredential`), so background
+  inference stops using it. No refresh: a revoked or expired token requires `managed-copilot login` again.
 - **Session lifecycle.** Deleting a session cancels its open actions (claims and late results are refused), stops
   undeliverable answers, fails its pending `session.action_required` deliveries, and pauses schedules that continue
   it; nothing is recorded or claimed for it afterwards, even by a reconciliation already in flight. Promotion calls
@@ -485,6 +530,13 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   again for re-approval, and a removed one is deleted. Declarations without `runAs` are logged as unrunnable.
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
+- **Known limitations, pending core (fail closed).** Durable passes the expected incarnation to `sessions.send` and
+  `sessions.request` and reads `SessionRecord.incarnation`, `create(...).incarnation`, `authenticate(token, {
+  background })`, and `auth.forgetCredential`, all additive and optional. Until core's builds with them are on
+  `main`: durable rechecks the incarnation synchronously right before each send or answer, but a session deleted and
+  recreated under the same ID while core itself awaits (for example restoring its placement) before writing could
+  still receive the prompt or answer; incarnations are the session's creation time; a background verification may be
+  recorded as the account's live credential, and logout cannot make core drop a token it holds.
 
 ### Promotion (as built)
 
@@ -623,10 +675,10 @@ structurally (they may add members).
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for an isolated session's sandbox MCP servers, `undefined` when none apply, throws `capability_unavailable` for servers the proxy cannot substitute for; shared placement uses the adapter) |
-| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits |
+| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions` (current incarnation), `hasOpenActions(sessionId)` for `continuePendingWork` on resume, `promptVisibility(...)` for Copilot CLI attach, REST claim/result, capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits |
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
-| `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
+| `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified as background work, never another account); tells core `auth.forgetCredential(token)` when a credential is removed or replaced |
 | `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while

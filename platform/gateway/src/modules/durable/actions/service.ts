@@ -1,4 +1,5 @@
 import {
+  isManagedCopilotError,
   ManagedCopilotError,
   type ActionCapability,
   type ActionClaim,
@@ -24,18 +25,21 @@ import {
   type ClientAnswerDecision,
   type ClientAnswerInput,
   type DurablePlatformToolsPort,
+  type DurableSessionView,
   type DurableSessionsPort,
   type GenerationChangeOptions,
   type PlatformEventMeta,
   type PlatformToolDefinition,
+  type PromptVisibility,
+  type PromptVisibilityInput,
   type RuntimeSessionEvent,
   type SessionEventDecision,
   type SessionEventInput,
   type VerifiedCapability,
 } from "../contract.js";
-import { canonicalJson, hashSecret, newId, parseJson, toIso } from "../ids.js";
+import { canonicalJson, hashSecret, incarnationOf, isGone, newId, parseJson, toIso } from "../ids.js";
 import { mintCapabilityToken, verifyCapabilityToken } from "./capability.js";
-import { ActionStore, ANSWERED_STATES, OPEN_STATES, OWNED_STATES, toPendingAction, type ActionRow, type Outcome } from "./store.js";
+import { ActionStore, ANSWERED_STATES, OPEN_STATES, OWNED_STATES, runtimeRequestId, toPendingAction, type ActionRow, type DeliveryAttempt, type Outcome } from "./store.js";
 
 export interface ActionsOptions {
   /** Answer deadline for every action (spec: proposed 24 hours). */
@@ -109,12 +113,21 @@ const ELICITATION_ACTIONS = new Set(["accept", "decline", "cancel"]);
 const RECONCILE_GRACE_MS = 2_000;
 /** A pending action still unannounced after this long lost its notification (for example to a crash). */
 const ANNOUNCE_REPAIR_AFTER_MS = 5_000;
-/** Bound for the in-memory deleted-session fence (claims also ask the sessions port, so eviction fails closed). */
+/** Bound for in-memory per-connection and per-incarnation counters. */
 const MAX_REMEMBERED = 10_000;
 const MOVED_WHILE_RUNNING =
   "The session moved to a new placement while this tool was running; it may have run. Check its effect with the idempotency key, then answer it with a reconcile claim.";
+const RESTARTED_WHILE_RUNNING =
+  "The runtime restarted while this tool was being handled; it may have run. Check its effect with the idempotency key, then answer it with a reconcile claim.";
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
+/** The runtime event an action was recorded from. */
+const eventData = (row: Pick<ActionRow, "event">): Record<string, unknown> | undefined => parseJson<RuntimeSessionEvent>(row.event)?.data;
+/**
+ * A permission action recorded from the runtime's pending list alone carries only the derived prompt: an
+ * application's handler needs the raw request, so only a person (an attached CLI) can answer it.
+ */
+const lacksRawRequest = (row: Pick<ActionRow, "kind" | "event">) => row.kind === "permission" && eventData(row)?.permissionRequest === undefined;
 
 /** Live connections that held an action, with the placement generation each last held it in. */
 function liveClaimants(row: Pick<ActionRow, "live_claimants">): Record<string, number> {
@@ -163,7 +176,8 @@ function parseExecutionEvent(event: RuntimeSessionEvent): ParsedAction | undefin
     case "permission.requested": {
       // A permissionRequest hook already decided; nothing waits for a responder.
       if (data.resolvedByHook === true) return undefined;
-      const request = data.permissionRequest as Record<string, unknown> | undefined;
+      // A prompt reconstructed from the runtime's pending list may carry only its derived form.
+      const request = (data.permissionRequest ?? data.promptRequest) as Record<string, unknown> | undefined;
       return {
         kind: "permission",
         requestId,
@@ -197,10 +211,80 @@ function isEligible(responder: AttachedResponder, action: { readonly kind: Actio
 
 /**
  * Preference order (shared with core's fallback): the creating connection, then the others by attach time. An
- * attached person answers prompts only when no application handler is attached.
+ * attached person answers prompts only when no application handler is attached, except prompts that managed policy
+ * reserves for a person: an attached Copilot CLI gets those first.
  */
-function chooseOwner(eligible: readonly AttachedResponder[], kind: ActionKind): AttachedResponder | undefined {
-  return eligible.find((responder) => responder.kind === "sdk") ?? (kind === "tool" ? undefined : eligible.find((responder) => responder.kind === "cli"));
+function chooseOwner(eligible: readonly AttachedResponder[], kind: ActionKind, personRequired = false): AttachedResponder | undefined {
+  const person = kind === "tool" ? undefined : eligible.find((responder) => responder.kind === "cli");
+  if (personRequired && person) return person;
+  return eligible.find((responder) => responder.kind === "sdk") ?? person;
+}
+
+/** Prompt kinds whose derived `promptRequest` decides whether a person is still required (stock SDK guidance). */
+const STANDARD_PROMPT_KINDS: ReadonlySet<string> = new Set(["commands", "read", "write", "url", "workflow"]);
+const marked = (value: unknown) => value !== undefined && value !== false;
+
+/**
+ * Whether managed policy requires a person to answer a permission prompt (`managedApprovalRequired`, read the way the
+ * stock SDK documents it: the derived `promptRequest` decides for standard prompt kinds, the raw request otherwise).
+ * A prompt known only from its derived form, without the raw request, always needs a person, whatever its kind: the
+ * derived form alone cannot prove that no person is required.
+ */
+export function needsPerson(data: Record<string, unknown> | undefined): boolean {
+  const raw = data?.permissionRequest as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object") return true;
+  const prompt = data?.promptRequest as Record<string, unknown> | undefined;
+  if (prompt && typeof prompt.kind === "string" && STANDARD_PROMPT_KINDS.has(prompt.kind)) return marked(prompt.managedApprovalRequired);
+  return marked(raw.managedApprovalRequired);
+}
+
+/** Who answers a permission prompt: a webhook capability (application policy), the owner's poller or client, or a person at an attached CLI. */
+type DecisionResponder = "webhook" | "poll" | "live" | "cli";
+const ONE_SHOT_APPROVALS: ReadonlySet<string> = new Set(["approve-once", "approved"]);
+/** Approvals that also change what the session may do later, without asking again. */
+const STANDING_APPROVALS: ReadonlySet<string> = new Set([
+  "approve-for-session",
+  "approve-read-only-for-session",
+  "approve-for-location",
+  "approve-permanently",
+  "approved-for-session",
+  "approved-for-location",
+]);
+const DENIALS: ReadonlySet<string> = new Set([
+  "reject",
+  "user-not-available",
+  "denied-interactively-by-user",
+  "denied-by-rules",
+  "denied-no-approval-rule-and-could-not-request-from-user",
+  "denied-by-content-exclusion-policy",
+  "denied-by-permission-request-hook",
+  "cancelled",
+]);
+/** All a webhook capability may decide: it is application policy, never a person and never a change of policy. */
+const CAPABILITY_DECISIONS: ReadonlySet<string> = new Set(["approve-once", "reject", "user-not-available"]);
+
+/**
+ * Checks a permission decision against who answers and what the prompt requires; returns why it is refused.
+ * - Only the owner's own paths may say a person decided (`approvedInteractively`, `denied-interactively-by-user`).
+ * - A webhook capability approves once, rejects, or reports that nobody is available; it never grants standing
+ *   approvals or answers for a person.
+ * - A prompt that managed policy reserves for a person accepts an approval only from an attached Copilot CLI, or from
+ *   the owner's client or poller attesting that a person approved it (`approvedInteractively: true`).
+ */
+export function permissionDecisionProblem(decision: Record<string, unknown>, responder: DecisionResponder, personRequired: boolean): string | undefined {
+  const kind = String(decision.kind);
+  const approval = ONE_SHOT_APPROVALS.has(kind) || STANDING_APPROVALS.has(kind);
+  if (!approval && !DENIALS.has(kind)) return `"${kind}" is not a permission decision`;
+  if (responder === "webhook") {
+    if (decision.approvedInteractively === true || kind === "denied-interactively-by-user") return "A webhook cannot answer on a person's behalf";
+    if (!CAPABILITY_DECISIONS.has(kind)) return `A webhook can approve this request once, reject it, or report that nobody is available; "${kind}" needs the session's owner`;
+  }
+  if (personRequired && approval && responder !== "cli") {
+    // Away from an attached CLI, only the owner's client or poller may attest that a person approved this one request.
+    const attested = responder !== "webhook" && kind === "approve-once" && decision.approvedInteractively === true;
+    if (!attested) return "Managed policy requires a person to approve this request; reject it, or leave it for a person to answer";
+  }
+  return undefined;
 }
 
 /** Mirrors the stock SDK: nullish → "", strings and `ToolResultObject`s unchanged, anything else JSON-encoded. */
@@ -237,13 +321,13 @@ export class DurableActions implements ActionsService {
   readonly #listeners = new Set<(change: ActionChange) => void>();
   /** Detach counters per connection and per connection+session (bounded); fence attaches that raced a detach. */
   readonly #detachGenerations = new Map<string, number>();
-  /** Deleted sessions: nothing may be recorded or claimed for them, even by work that was already in flight. */
-  readonly #deletedSessions = new Set<string>();
   /**
-   * Latest placement generation the ledger applied per session (bounded). Updated synchronously by
+   * Latest placement generation the ledger applied per session incarnation (bounded). Updated synchronously by
    * `onGenerationChanged`, so work that awaited across a move can tell before it changes anything.
    */
   readonly #placements = new Map<string, number>();
+  /** `promptVisibility` calls waiting for core's event stream to record a request, per session. */
+  readonly #recordWaiters = new Map<string, Set<() => void>>();
   #sweeper: NodeJS.Timeout | undefined;
   #sweeping = false;
 
@@ -265,10 +349,40 @@ export class DurableActions implements ActionsService {
 
   /** Recovers claims orphaned by a restart, then starts the lease/deadline/forwarding sweeper. */
   start(): void {
+    this.assignIncarnations();
     this.recover();
     if (this.#options.sweepIntervalMs > 0) {
       this.#sweeper = setInterval(() => void this.sweep(), this.#options.sweepIntervalMs);
       this.#sweeper.unref?.();
+    }
+  }
+
+  /**
+   * Startup repair of incarnations. Actions recorded before incarnations existed join their session's current
+   * incarnation if they are that owner's and not older than it, and the rest are retired. Actions recorded under a
+   * provisional incarnation (the session's creation time, before core reported real ones) are re-keyed. Actions of
+   * an incarnation that no longer exists are closed as deleted: a deletion the ledger could not observe (a crash, or
+   * one core finished at startup).
+   */
+  assignIncarnations(): void {
+    const sessions = this.#deps.sessions();
+    if (!sessions) return;
+    for (const sessionId of this.#store.sessionsWithoutIncarnation()) {
+      const current = this.#current(sessionId);
+      const createdAtMs = current?.view.createdAt ? Date.parse(current.view.createdAt) : undefined;
+      this.#store.assignIncarnation(
+        sessionId,
+        current ? { incarnation: current.incarnation, ownerId: current.view.ownerId, ...(Number.isFinite(createdAtMs) ? { createdAtMs: createdAtMs! } : {}) } : undefined,
+      );
+    }
+    for (const { session_id: sessionId, incarnation } of this.#store.provisionalIncarnations()) {
+      const current = this.#current(sessionId);
+      if (current?.view.incarnation && current.view.createdAt && incarnation === incarnationOf({ createdAt: current.view.createdAt })) {
+        this.#store.rekeyIncarnation(sessionId, incarnation, current.incarnation);
+      }
+    }
+    for (const { session_id: sessionId, incarnation } of this.#store.liveIncarnations()) {
+      if (this.#current(sessionId)?.incarnation !== incarnation) this.onSessionDeleted(sessionId, incarnation);
     }
   }
 
@@ -305,8 +419,17 @@ export class DurableActions implements ActionsService {
   #announceUnnotified(now: number, olderThanMs = 0): void {
     for (const row of this.#store.listUnnotifiedPending(now - olderThanMs)) {
       if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      // Only the session's current incarnation is ever announced (older ones are closed at startup).
+      if (this.#current(row.session_id)?.incarnation !== row.incarnation) continue;
       if (!this.#notifyTimers.has(row.session_id)) this.#scheduleNotify(row);
     }
+  }
+
+  /** The session's current incarnation as core records it; undefined once it is being deleted or gone. */
+  #current(sessionId: string): { readonly view: DurableSessionView; readonly incarnation: string } | undefined {
+    const view = this.#deps.sessions()?.get(sessionId);
+    if (!view || isGone(view)) return undefined;
+    return { view, incarnation: incarnationOf(view) };
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -318,30 +441,64 @@ export class DurableActions implements ActionsService {
     const completionKind = COMPLETION_KIND[event.type];
     if (completionKind) return this.#onCompletion(input, completionKind);
     if (!EXECUTION_TYPES.has(event.type)) return { withhold: [] };
+    try {
+      return this.#arbitrate(input);
+    } finally {
+      // Recorded and arbitrated: attach can now tell its CLI whether the prompt is answerable (`promptVisibility`).
+      this.#signalRecorded(input.sessionId);
+    }
+  }
+
+  /** Records an execution-bearing request and decides who may execute it (claim before emission). Synchronous. */
+  #arbitrate(input: SessionEventInput): SessionEventDecision {
+    const { event } = input;
     const parsed = parseExecutionEvent(event);
     if (!parsed) return { withhold: [] };
-    // A deleted session's requests can never be answered: record nothing, and nobody may execute them.
-    if (this.#deletedSessions.has(input.sessionId)) return { withhold: input.attached.map((responder) => responder.connectionId) };
+    // Only the session's current incarnation records actions: a deleted (or replaced) session's requests can never be
+    // answered, so nothing is recorded and nobody may execute them.
+    const current = this.#current(input.sessionId);
+    if (!current || (input.incarnation !== undefined && input.incarnation !== current.incarnation)) {
+      return { withhold: input.attached.map((responder) => responder.connectionId) };
+    }
+    const incarnation = current.incarnation;
 
     const now = this.#now();
-    const { row, created } = this.#store.insertIfAbsent({
-      id: newId("act"),
-      sessionId: input.sessionId,
-      ownerId: input.ownerId,
-      environment: input.environment,
-      kind: parsed.kind,
-      requestId: parsed.requestId,
-      toolCallId: parsed.toolCallId,
-      tool: parsed.tool,
-      providerId: parsed.providerId,
-      agentId: event.agentId,
-      arguments: parsed.arguments,
-      event,
-      generation: input.generation,
-      idempotencyKey: idempotencyKeyFor(input.sessionId, parsed),
-      deadlineAt: now + this.#options.answerTimeoutMs,
-      now,
-    });
+    // A runtime that restarted without suspending rebuilds a waiting call with a new request ID but the same tool call:
+    // it is the same action, never a second one to execute.
+    const known = this.#store.findByRequest(input.sessionId, incarnation, parsed.kind, parsed.requestId);
+    const rebound =
+      !known && parsed.kind === "tool" && parsed.toolCallId ? this.#rebind(input.sessionId, incarnation, parsed.toolCallId, parsed.requestId, event, input.generation, now) : undefined;
+    const existing = known ?? rebound;
+    // The runtime asked again with the full request for a prompt recorded from its pending list alone: keep it.
+    if (known && lacksRawRequest(known) && event.type === "permission.requested" && event.data?.permissionRequest !== undefined) {
+      this.#store.updateEvent(known.id, event);
+    }
+    const { row, created } = existing
+      ? { row: this.#store.get(existing.id) ?? existing, created: false }
+      : this.#store.insertIfAbsent({
+          id: newId("act"),
+          sessionId: input.sessionId,
+          incarnation,
+          ownerId: input.ownerId,
+          environment: input.environment,
+          kind: parsed.kind,
+          requestId: parsed.requestId,
+          toolCallId: parsed.toolCallId,
+          tool: parsed.tool,
+          providerId: parsed.providerId,
+          agentId: event.agentId,
+          arguments: parsed.arguments,
+          event,
+          generation: input.generation,
+          idempotencyKey: idempotencyKeyFor(input.sessionId, parsed),
+          deadlineAt: now + this.#options.answerTimeoutMs,
+          now,
+        });
+    if (row.incarnation !== incarnation) {
+      // A reused session ID whose runtime also reused a request ID: fail closed rather than mix the two sessions.
+      this.#log.error("A runtime request ID collides with an earlier session's action; nobody will execute it", { sessionId: input.sessionId, requestId: parsed.requestId });
+      return { withhold: input.attached.map((responder) => responder.connectionId) };
+    }
     if (created) this.#log.debug("Action recorded", { actionId: row.id, sessionId: row.session_id, kind: row.kind, tool: row.tool ?? undefined });
 
     const eligible = input.attached.filter((responder) => isEligible(responder, parsed));
@@ -368,6 +525,7 @@ export class DurableActions implements ActionsService {
     const owner = chooseOwner(
       eligible.filter((responder) => !heldBefore(row, responder.connectionId)),
       parsed.kind,
+      parsed.kind === "permission" && needsPerson(event.data),
     );
     if (owner) {
       const claimToken = this.#claimLive(row, owner);
@@ -385,9 +543,26 @@ export class DurableActions implements ActionsService {
   async onClientAnswer(input: ClientAnswerInput): Promise<ClientAnswerDecision> {
     const kind = METHOD_KIND[input.method];
     const requestId = str(input.params.requestId);
-    if (!kind || !requestId) return { kind: "forward" };
-    const row = this.#store.findByRequest(input.sessionId, kind, requestId);
-    if (!row) return { kind: "forward" };
+    const strict = input.requireRecorded === true;
+    if (!kind || !requestId) {
+      if (strict) throw new ManagedCopilotError("invalid_request", "An answer needs a known answer method and its requestId");
+      return { kind: "forward" };
+    }
+    // A person can approve a prompt but cannot supply an application's tool result.
+    if (kind === "tool" && input.responderKind === "cli") throw new ManagedCopilotError("forbidden", "A person cannot run an application's tool; only its app can answer it");
+    const current = this.#current(input.sessionId)?.incarnation;
+    // An answer for a session that no longer exists, or that its ID no longer names, never reaches a runtime.
+    if (current === undefined || (input.incarnation !== undefined && input.incarnation !== current)) throw conflict("This answer is for a session that no longer exists");
+    const incarnation = input.incarnation ?? current;
+    const row = this.#store.findByRequest(input.sessionId, incarnation, kind, requestId);
+    if (!row) {
+      // The ledger does not track it. A stock client's answer goes to the runtime as usual; attach fails closed.
+      if (strict) throw conflict("This prompt is not waiting for this client");
+      return { kind: "forward" };
+    }
+    if (input.generation !== undefined && input.generation !== row.generation) {
+      throw conflict("This answer is for the session's previous placement; the request was offered again", row);
+    }
 
     const outcome = this.#outcomeFromLiveAnswer(kind, input.params);
     const responderType = input.responderKind === "cli" ? "cli" : "live";
@@ -396,11 +571,16 @@ export class DurableActions implements ActionsService {
       throw conflict("This action already has a different recorded answer", row);
     }
     if (row.state === "expired" || row.state === "cancelled") throw conflict(`This action was ${row.state}${row.reason ? `: ${row.reason}` : ""}`, row);
+    if (kind === "permission") {
+      const problem = permissionDecisionProblem((outcome.result ?? {}) as Record<string, unknown>, responderType, needsPerson(eventData(row)));
+      if (problem) throw new ManagedCopilotError("forbidden", problem, { actionId: row.id });
+    }
 
     let seq = row.claim_seq;
     if (row.state === "pending") {
-      // A client answering an action it was not offered (for example from `listPendingRequests`) takes it if eligible.
-      if (kind === "tool" && responderType === "cli") throw new ManagedCopilotError("forbidden", "A person cannot run an application's tool; only its app can answer it");
+      // A client answering an action it was not offered (for example from `listPendingRequests`) takes it if eligible;
+      // attach answers only what its CLI holds (it claims through `promptVisibility` first).
+      if (strict) throw conflict("This prompt is not held by this client; it was offered again", row);
       if (heldBefore(row, input.connectionId)) {
         throw conflict("This answer is for the session's previous placement; the request was offered again", row);
       }
@@ -442,9 +622,9 @@ export class DurableActions implements ActionsService {
   }
 
   async onAttached(input: AttachInput): Promise<readonly RuntimeSessionEvent[]> {
-    const connectionKey = input.responder.connectionId;
-    const attachmentKey = `${input.responder.connectionId}\u0000${input.sessionId}`;
-    const before = [this.#detachGenerations.get(connectionKey) ?? 0, this.#detachGenerations.get(attachmentKey) ?? 0];
+    const detached = this.#detachedSince(input.responder.connectionId, input.sessionId);
+    const attached = this.#current(input.sessionId);
+    if (!attached || (input.incarnation !== undefined && input.incarnation !== attached.incarnation)) return [];
     try {
       await this.reconcile(input.sessionId);
     } catch (error) {
@@ -452,11 +632,14 @@ export class DurableActions implements ActionsService {
     }
     // The connection (or just this attachment) may have gone away while reconciling: never claim for it then.
     // A later attach of the same connection captures the new generation and replays normally.
-    if ((this.#detachGenerations.get(connectionKey) ?? 0) !== before[0] || (this.#detachGenerations.get(attachmentKey) ?? 0) !== before[1]) return [];
+    if (detached()) return [];
+    // Nor for a session that was deleted (or replaced by a new one with the same ID) meanwhile.
+    if (this.#current(input.sessionId)?.incarnation !== attached.incarnation) return [];
     const replay: RuntimeSessionEvent[] = [];
-    for (const row of this.#store.listBySession(input.sessionId, ["pending"])) {
+    for (const row of this.#store.listBySession(input.sessionId, attached.incarnation, ["pending"])) {
       if (!isEligible(input.responder, { kind: row.kind, tool: row.tool })) continue;
       if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      if (input.responder.kind === "sdk" && lacksRawRequest(row)) continue;
       if (heldBefore(row, input.responder.connectionId)) continue;
       if (this.#claimLive(row, input.responder)) {
         const event = parseJson<RuntimeSessionEvent>(row.event);
@@ -484,30 +667,37 @@ export class DurableActions implements ActionsService {
     if (this.#detachGenerations.size > MAX_REMEMBERED) this.#detachGenerations.delete(this.#detachGenerations.keys().next().value!);
   }
 
-  #remember(set: Set<string>, key: string): void {
-    set.delete(key);
-    set.add(key);
-    if (set.size > MAX_REMEMBERED) set.delete(set.values().next().value!);
+  /** Snapshots a connection's detach counters; the returned check is true once it (or this attachment) detached since. */
+  #detachedSince(connectionId: string, sessionId: string): () => boolean {
+    const connectionKey = connectionId;
+    const attachmentKey = `${connectionId}\u0000${sessionId}`;
+    const before = [this.#detachGenerations.get(connectionKey) ?? 0, this.#detachGenerations.get(attachmentKey) ?? 0];
+    return () => (this.#detachGenerations.get(connectionKey) ?? 0) !== before[0] || (this.#detachGenerations.get(attachmentKey) ?? 0) !== before[1];
   }
 
   /**
    * The session was deleted: its open actions can never be answered. They are cancelled (later claims and results
-   * are refused) and recorded answers that were never delivered stop being retried.
+   * are refused) and recorded answers that were never delivered stop being retried. Only the deleted incarnation is
+   * affected: a session that later reuses the ID records its own actions.
    */
-  onSessionDeleted(sessionId: string): void {
-    this.#remember(this.#deletedSessions, sessionId);
+  onSessionDeleted(sessionId: string, incarnation?: string): void {
     const now = this.#now();
-    for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
+    const current = this.#current(sessionId)?.incarnation;
+    const deleted = (row: ActionRow) => (incarnation !== undefined ? row.incarnation === incarnation : row.incarnation !== current);
+    for (const row of this.#store.listByAnyIncarnation(sessionId, OPEN_STATES)) {
+      if (!deleted(row)) continue;
       if (this.#store.transition(row.id, { states: OPEN_STATES, seq: row.claim_seq }, { state: "cancelled", reason: "The session was deleted", clearClaim: true, forwarded: true, now })) {
         this.#emit({ type: "resolved", sessionId, actionId: row.id });
       }
     }
-    for (const row of this.#store.listBySession(sessionId, ["completed", "failed", "expired"])) {
-      if (!row.forwarded) this.#store.markForwarded(row.id, now, "Not delivered: the session was deleted");
+    for (const row of this.#store.listByAnyIncarnation(sessionId, ANSWERED_STATES)) {
+      if (deleted(row) && !row.forwarded) this.#store.markForwarded(row.id, now, "Not delivered: the session was deleted");
     }
-    const timer = this.#notifyTimers.get(sessionId);
-    if (timer) clearTimeout(timer);
-    this.#notifyTimers.delete(sessionId);
+    if (current === undefined) {
+      const timer = this.#notifyTimers.get(sessionId);
+      if (timer) clearTimeout(timer);
+      this.#notifyTimers.delete(sessionId);
+    }
   }
 
   /**
@@ -519,17 +709,20 @@ export class DurableActions implements ActionsService {
    * action only under an older placement are never offered it again (see `heldBefore`).
    */
   onGenerationChanged(sessionId: string, generation: number, options: GenerationChangeOptions = {}): void {
+    const current = this.#current(sessionId);
+    if (!current) return;
     const now = this.#now();
     const carried = new Set(options.carried ?? []);
-    if ((this.#placements.get(sessionId) ?? -1) < generation) {
-      this.#placements.delete(sessionId);
-      this.#placements.set(sessionId, generation);
+    const epochKey = `${sessionId}\u0000${current.incarnation}`;
+    if ((this.#placements.get(epochKey) ?? -1) < generation) {
+      this.#placements.delete(epochKey);
+      this.#placements.set(epochKey, generation);
       if (this.#placements.size > MAX_REMEMBERED) this.#placements.delete(this.#placements.keys().next().value!);
     }
-    for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
+    for (const row of this.#store.listBySession(sessionId, current.incarnation, OPEN_STATES)) {
       if (row.generation >= generation) continue;
       const owned = OWNED_STATES.includes(row.state);
-      if (row.state === "pending" || carried.has(row.request_id) || (owned && row.responder_type === "platform")) {
+      if (row.state === "pending" || carried.has(runtimeRequestId(row)) || (owned && row.responder_type === "platform")) {
         // A live claim carried into the new placement is held there.
         const liveClaimants = owned && row.live_connection ? withLiveClaimant(row, row.live_connection, generation) : undefined;
         this.#store.moveToGeneration(row.id, row.claim_seq, { generation, state: row.state, clearClaim: false, reason: row.reason, ...(liveClaimants ? { liveClaimants } : {}), now });
@@ -547,8 +740,8 @@ export class DurableActions implements ActionsService {
     }
     // Recorded answers for carried requests go to the new placement, even ones the old placement acknowledged: the
     // new one still waits for them.
-    for (const row of this.#store.listBySession(sessionId, ANSWERED_STATES)) {
-      if (carried.has(row.request_id)) this.#adoptAnswered(row, generation, now);
+    for (const row of this.#store.listBySession(sessionId, current.incarnation, ANSWERED_STATES)) {
+      if (carried.has(runtimeRequestId(row))) this.#adoptAnswered(row, generation, now);
     }
   }
 
@@ -573,20 +766,34 @@ export class DurableActions implements ActionsService {
   // REST and service API
   // ---------------------------------------------------------------------------------------------------------
 
-  list(sessionId: string, options: { readonly open?: boolean } = {}): PendingAction[] {
-    return this.#store.listBySession(sessionId, options.open ? OPEN_STATES : undefined).map(toPendingAction);
+  list(sessionId: string, options: { readonly open?: boolean; readonly incarnation?: string } = {}): PendingAction[] {
+    const incarnation = options.incarnation ?? this.#current(sessionId)?.incarnation;
+    if (incarnation === undefined) return [];
+    return this.#store.listBySession(sessionId, incarnation, options.open ? OPEN_STATES : undefined).map(toPendingAction);
+  }
+
+  /**
+   * True while the session's runtime may still wait on something the ledger owns: an action that is pending,
+   * executing, or uncertain, or an answer recorded but not delivered yet. A runtime that resumes such a session
+   * should continue its pending work (`continuePendingWork: true`) rather than treat it as interrupted.
+   */
+  hasOpenActions(sessionId: string, options: { readonly incarnation?: string } = {}): boolean {
+    const incarnation = options.incarnation ?? this.#current(sessionId)?.incarnation;
+    if (incarnation === undefined) return false;
+    return this.#store.hasOpenWork(sessionId, incarnation);
   }
 
   async listFor(caller: ActionCaller, sessionId: string, options: { readonly open?: boolean } = {}): Promise<PendingAction[]> {
-    await this.#authorize(caller, sessionId);
-    const actions = this.list(sessionId, options);
+    const incarnation = this.#authorize(caller, sessionId);
+    // A capability for a session that no longer exists covers nothing.
+    if (incarnation === undefined) return [];
+    const actions = this.list(sessionId, { ...options, incarnation });
     if (caller.type === "capability") return actions.filter((action) => caller.capability.actionIds.includes(action.id));
     return actions;
   }
 
   async claim(caller: ActionCaller, sessionId: string, actionId: string, options: ClaimOptions = {}): Promise<ActionClaim> {
-    await this.#authorize(caller, sessionId, actionId);
-    const row = this.#requireAction(sessionId, actionId);
+    const row = this.#requireAction(sessionId, actionId, this.#authorize(caller, sessionId, actionId));
     const now = this.#now();
     const leaseMs = Math.min(
       this.#options.maxLeaseMs,
@@ -609,8 +816,6 @@ export class DurableActions implements ActionsService {
     if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) {
       throw new ManagedCopilotError("forbidden", `${row.tool} is a platform tool; the gateway answers it`);
     }
-    // Nothing executes for a session that no longer exists (its history stays listable).
-    if (await this.#sessionGone(sessionId)) throw conflict("The session no longer exists, so its actions cannot be executed", row);
     const label =
       caller.type === "capability"
         ? `webhook:${options.responder ?? caller.capability.webhook}`
@@ -630,11 +835,11 @@ export class DurableActions implements ActionsService {
   }
 
   async submit(caller: ActionCaller, sessionId: string, actionId: string, request: ActionResultRequest): Promise<HandleActionResult> {
-    await this.#authorize(caller, sessionId, actionId);
+    const incarnation = this.#authorize(caller, sessionId, actionId);
     if (typeof request?.claimToken !== "string" || request.claimToken.length === 0) {
       throw new ManagedCopilotError("invalid_request", "claimToken is required; claim the action first");
     }
-    const row = this.#requireAction(sessionId, actionId);
+    const row = this.#requireAction(sessionId, actionId, incarnation);
     const tokenHash = hashSecret(request.claimToken);
     const now = this.#now();
 
@@ -651,7 +856,9 @@ export class DurableActions implements ActionsService {
     }
 
     if (row.state === "expired" || row.state === "cancelled") throw conflict(`This action was ${row.state}${row.reason ? `: ${row.reason}` : ""}`, row);
-    const outcome = this.#outcomeFromSubmission(row, request, now);
+    // A claim taken with a capability stays a webhook's answer whoever submits it.
+    const responder: DecisionResponder = caller.type === "capability" || row.responder_type === "webhook" ? "webhook" : "poll";
+    const outcome = this.#outcomeFromSubmission(row, request, now, responder);
     if (row.state === "completed" || row.state === "failed") {
       if (row.claim_token_hash === tokenHash && row.result_hash === outcome.resultHash) return { actionId: row.id, state: row.state };
       throw conflict("This action already has a different recorded answer", row);
@@ -679,46 +886,66 @@ export class DurableActions implements ActionsService {
   }
 
   mintCapability(sessionId: string, actionIds: readonly string[], webhook: string): ActionCapability | undefined {
+    const current = this.#current(sessionId);
+    if (!current) return undefined;
     const pending = actionIds.filter((id) => {
       const row = this.#store.get(id);
-      return row !== undefined && row.session_id === sessionId && row.state === "pending";
+      return row !== undefined && row.session_id === sessionId && row.incarnation === current.incarnation && row.state === "pending";
     });
     if (pending.length === 0) return undefined;
     const expiresAt = this.#now() + this.#options.capabilityTtlMs;
-    const token = mintCapabilityToken(this.#deps.capabilityKey, { sid: sessionId, aids: pending, aud: this.#deps.publicUrl, exp: expiresAt, wh: webhook });
+    const token = mintCapabilityToken(this.#deps.capabilityKey, { sid: sessionId, inc: current.incarnation, aids: pending, aud: this.#deps.publicUrl, exp: expiresAt, wh: webhook });
     return { token, expiresAt: toIso(expiresAt)!, sessionId, actionIds: pending, audience: this.#deps.publicUrl };
   }
 
   /**
-   * Compares the ledger with what the runtime still awaits: records tool calls the ledger missed (for example events
-   * emitted while the gateway was down) and closes actions the runtime no longer waits for.
+   * Compares the ledger with what the runtime still awaits: records tool calls and permission prompts the ledger
+   * missed (for example ones emitted while the gateway was down), keeps one action per tool call when a restarted
+   * runtime rebuilt it under a new request ID, and closes actions the runtime no longer waits for.
    */
   async reconcile(sessionId: string): Promise<void> {
     const sessions = this.#deps.sessions();
-    if (!sessions) return;
-    const view = await sessions.get(sessionId);
-    if (!view) return;
+    const start = this.#current(sessionId);
+    if (!sessions || !start) return;
+    const { view, incarnation } = start;
     const timeout = this.#options.upstreamTimeoutMs;
     // Actions recorded after this point may not be in the lists yet; never close those.
     const listedAt = this.#now();
+    // Fenced to the incarnation read above: a session that reused the ID answers nothing here.
+    const fence = { incarnation };
     const [tools, permissions] = await Promise.all([
-      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.tool, { sessionId }), timeout, "The runtime").catch(() => undefined),
-      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.permission, { sessionId }), timeout, "The runtime").catch(() => undefined),
+      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.tool, { sessionId }, fence), timeout, "The runtime").catch(() => undefined),
+      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.permission, { sessionId }, fence), timeout, "The runtime").catch(() => undefined),
     ]);
-    // The lists describe the placement asked. If the session was deleted or moved meanwhile, they are obsolete:
-    // never record, offer, or close anything from them. The ledger's own placement epoch is checked last and
-    // synchronously, so a move applied while the re-read was pending is seen before anything changes.
-    const current = await sessions.get(sessionId);
-    if (!current || current.generation !== view.generation || this.#deletedSessions.has(sessionId)) return;
-    if ((this.#placements.get(sessionId) ?? view.generation) > view.generation) return;
+    const toolItems = Array.isArray(tools?.items) ? (tools.items as Record<string, unknown>[]) : undefined;
+    const permissionItems = Array.isArray(permissions?.items) ? (permissions.items as Record<string, unknown>[]) : undefined;
+    // A prompt the runtime still waits for but the ledger never recorded keeps its full request (and with it the
+    // authority it requires) from the session's history.
+    const unrecorded = (permissionItems ?? []).filter((item) => {
+      const requestId = str(item.requestId);
+      return requestId !== undefined && !this.#store.findByRequest(sessionId, incarnation, "permission", requestId);
+    });
+    const history =
+      unrecorded.length === 0
+        ? undefined
+        : await withTimeout(sessions.request<{ events?: unknown }>(sessionId, "session.getMessages", { sessionId }, fence), timeout, "The runtime")
+            .then((result) => (Array.isArray(result?.events) ? (result.events as RuntimeSessionEvent[]) : undefined))
+            .catch(() => undefined);
+    // The lists describe the incarnation and placement asked. If the session was deleted, replaced, or moved
+    // meanwhile, they are obsolete: never record, offer, or close anything from them. The ledger's own placement
+    // epoch is checked last and synchronously, so a move applied while the re-read was pending is seen first.
+    const current = this.#current(sessionId);
+    if (!current || current.incarnation !== incarnation || current.view.generation !== view.generation) return;
+    if ((this.#placements.get(`${sessionId}\u0000${incarnation}`) ?? view.generation) > view.generation) return;
     const now = this.#now();
-    if (tools && Array.isArray(tools.items)) {
+    if (toolItems) {
       const waiting = new Set<string>();
-      for (const item of tools.items as Record<string, unknown>[]) {
+      for (const item of toolItems) {
         const requestId = str(item.requestId);
         const toolName = str(item.toolName);
         if (!requestId || !toolName) continue;
         waiting.add(requestId);
+        const toolCallId = str(item.toolCallId);
         const event: RuntimeSessionEvent = {
           id: newId("evt"),
           type: "external_tool.requested",
@@ -727,10 +954,16 @@ export class DurableActions implements ActionsService {
           data: { requestId, sessionId, toolName, toolCallId: item.toolCallId, arguments: item.arguments, ...(item.providerId ? { providerId: item.providerId } : {}) },
           ...(str(item.agentId) ? { agentId: str(item.agentId)! } : {}),
         };
-        const toolCallId = str(item.toolCallId);
+        const known = this.#store.findByRequest(sessionId, incarnation, "tool", requestId);
+        if (known) {
+          this.#adoptAnswered(known, view.generation, now);
+          continue;
+        }
+        if (toolCallId && this.#rebind(sessionId, incarnation, toolCallId, requestId, event, view.generation, now)) continue;
         const { row, created } = this.#store.insertIfAbsent({
           id: newId("act"),
           sessionId,
+          incarnation,
           ownerId: view.ownerId,
           environment: view.environment,
           kind: "tool",
@@ -746,25 +979,136 @@ export class DurableActions implements ActionsService {
           deadlineAt: now + this.#options.answerTimeoutMs,
           now,
         });
-        if (created) {
-          this.#log.info("Recorded a waiting tool call the ledger had not seen", { sessionId, actionId: row.id, tool: toolName });
-          const platformTool = this.#deps.platformTools()?.get?.(toolName);
-          if (platformTool) this.#startPlatformTool(row, platformTool);
-          else this.#scheduleNotify(row);
-        } else {
-          this.#adoptAnswered(row, view.generation, now);
+        if (row.incarnation !== incarnation || !created) continue;
+        this.#log.info("Recorded a waiting tool call the ledger had not seen", { sessionId, actionId: row.id, tool: toolName });
+        const platformTool = this.#deps.platformTools()?.get?.(toolName);
+        if (platformTool) this.#startPlatformTool(row, platformTool);
+        else this.#scheduleNotify(row);
+      }
+      this.#closeNotAwaited(sessionId, incarnation, "tool", waiting, listedAt, now, view.generation);
+    }
+    if (permissionItems) {
+      const waiting = new Set<string>();
+      for (const item of permissionItems) {
+        const requestId = str(item.requestId);
+        if (!requestId) continue;
+        waiting.add(requestId);
+        const known = this.#store.findByRequest(sessionId, incarnation, "permission", requestId);
+        if (known) {
+          this.#adoptAnswered(known, view.generation, now);
+          continue;
         }
+        const recorded = history?.find((event) => event?.type === "permission.requested" && event.data?.requestId === requestId);
+        const event: RuntimeSessionEvent = recorded ?? {
+          id: newId("evt"),
+          type: "permission.requested",
+          timestamp: new Date(now).toISOString(),
+          parentId: null,
+          // Only the derived prompt is known: without the raw request a person must answer it (see needsPerson).
+          data: { requestId, ...(item.request !== undefined ? { promptRequest: item.request } : {}), ...(str(item.recoveryEpisodeId) ? { recoveryEpisodeId: item.recoveryEpisodeId } : {}) },
+        };
+        const parsed = parseExecutionEvent(event);
+        if (!parsed) continue;
+        const { row, created } = this.#store.insertIfAbsent({
+          id: newId("act"),
+          sessionId,
+          incarnation,
+          ownerId: view.ownerId,
+          environment: view.environment,
+          kind: "permission",
+          requestId,
+          toolCallId: parsed.toolCallId,
+          tool: parsed.tool,
+          agentId: event.agentId,
+          event,
+          generation: view.generation,
+          idempotencyKey: idempotencyKeyFor(sessionId, parsed),
+          deadlineAt: now + this.#options.answerTimeoutMs,
+          now,
+        });
+        if (row.incarnation !== incarnation || !created) continue;
+        this.#log.info("Recorded a waiting permission prompt the ledger had not seen", { sessionId, actionId: row.id, tool: row.tool ?? undefined, fromHistory: recorded !== undefined });
+        this.#scheduleNotify(row);
       }
-      this.#closeNotAwaited(sessionId, "tool", waiting, listedAt, now, view.generation);
+      this.#closeNotAwaited(sessionId, incarnation, "permission", waiting, listedAt, now, view.generation);
     }
-    if (permissions && Array.isArray(permissions.items)) {
-      const waiting = new Set((permissions.items as Record<string, unknown>[]).map((item) => str(item.requestId)).filter((id): id is string => !!id));
-      for (const requestId of waiting) {
-        const row = this.#store.findByRequest(sessionId, "permission", requestId);
-        if (row) this.#adoptAnswered(row, view.generation, now);
-      }
-      this.#closeNotAwaited(sessionId, "permission", waiting, listedAt, now, view.generation);
+    this.#signalRecorded(sessionId);
+  }
+
+  /**
+   * Copilot CLI attach: whether a prompt the CLI saw on its raw runtime channel is answerable by that CLI. The raw
+   * channel can run ahead of core's event stream, so this waits until the ledger recorded and arbitrated the request
+   * (then reconciles once with the runtime); a request the ledger cannot account for is never answerable.
+   */
+  async promptVisibility(input: PromptVisibilityInput): Promise<PromptVisibility> {
+    const { responder } = input;
+    if (responder.kind !== "cli") return { status: "hidden", reason: "Only an attached Copilot CLI answers prompts this way" };
+    if (input.kind === "tool") return { status: "hidden", reason: "A person cannot run an application's tool; only its app can answer it" };
+    const stale = (): PromptVisibility | undefined => {
+      const current = this.#current(input.sessionId);
+      if (!current || current.incarnation !== input.incarnation) return { status: "hidden", reason: "The session this client is attached to no longer exists" };
+      if (current.view.generation !== input.generation) return { status: "hidden", reason: "The session moved to another placement; reattach to answer its prompts" };
+      return undefined;
+    };
+    const early = stale();
+    if (early) return early;
+    // A CLI that detaches while this waits must not be handed the prompt afterwards.
+    const detached = this.#detachedSince(responder.connectionId, input.sessionId);
+    let row = await this.#waitForRequest(input.sessionId, input.incarnation, input.kind, input.requestId, input.waitMs ?? 5_000);
+    if (!row) {
+      // Core may have missed the event (for example around a reconnect): the runtime's pending lists decide.
+      await this.reconcile(input.sessionId).catch(() => undefined);
+      row = this.#store.findByRequest(input.sessionId, input.incarnation, input.kind, input.requestId);
     }
+    // From here on everything is synchronous: these checks hold through the claim below.
+    const late = stale();
+    if (late) return late;
+    if (detached()) return { status: "hidden", reason: "This client detached from the session; reattach to answer its prompts" };
+    if (!row) return { status: "hidden", reason: "The ledger has no record of this request, so it cannot be answered here" };
+    if (row.generation !== input.generation) return { status: "hidden", reason: "This request belongs to another placement of the session" };
+    if (!isEligible(responder, { kind: row.kind, tool: row.tool })) return { status: "hidden", reason: "This client cannot answer this kind of request" };
+    if (row.state === "pending" && !heldBefore(row, responder.connectionId)) {
+      // Waiting for any responder: the person who is here takes it (the same compare-and-set every responder uses).
+      this.#claimLive(row, responder);
+      row = this.#store.get(row.id)!;
+    }
+    if (OWNED_STATES.includes(row.state) && row.live_connection === responder.connectionId) return { status: "actionable", actionId: row.id };
+    if (OPEN_STATES.includes(row.state)) {
+      return { status: "observe", actionId: row.id, state: row.state, ...(row.claimed_by && OWNED_STATES.includes(row.state) ? { claimedBy: row.claimed_by } : {}) };
+    }
+    return { status: "hidden", reason: `This request was already ${row.state === "completed" || row.state === "failed" ? "answered" : row.state}` };
+  }
+
+  /** Resolves once the ledger has the request, or after `waitMs` without it (real time: it waits for core's events). */
+  async #waitForRequest(sessionId: string, incarnation: string, kind: ActionKind, requestId: string, waitMs: number): Promise<ActionRow | undefined> {
+    const deadline = Date.now() + Math.max(0, waitMs);
+    for (;;) {
+      const row = this.#store.findByRequest(sessionId, incarnation, kind, requestId);
+      if (row) return row;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return undefined;
+      await new Promise<void>((resolve) => {
+        const waiters = this.#recordWaiters.get(sessionId) ?? new Set<() => void>();
+        const done = () => {
+          clearTimeout(timer);
+          waiters.delete(done);
+          if (waiters.size === 0 && this.#recordWaiters.get(sessionId) === waiters) this.#recordWaiters.delete(sessionId);
+          resolve();
+        };
+        const timer = setTimeout(done, remaining);
+        timer.unref?.();
+        waiters.add(done);
+        this.#recordWaiters.set(sessionId, waiters);
+      });
+    }
+  }
+
+  /** Wakes `promptVisibility` calls waiting for this session's requests to be recorded. */
+  #signalRecorded(sessionId: string): void {
+    const waiters = this.#recordWaiters.get(sessionId);
+    if (!waiters) return;
+    this.#recordWaiters.delete(sessionId);
+    for (const wake of [...waiters]) wake();
   }
 
   /** One sweep: lease expiry, answer deadlines, and retrying answers the runtime has not acknowledged. */
@@ -786,7 +1130,10 @@ export class DurableActions implements ActionsService {
       }
       for (const row of this.#store.listUnforwarded(now)) {
         if (row.forward_attempts >= this.#options.maxForwardAttempts) {
-          this.#store.markForwarded(row.id, now, "The answer was recorded but could not be delivered to the runtime");
+          this.#store.markForwarded(row.id, now, "The answer was recorded but could not be delivered to the runtime", {
+            generation: row.generation,
+            requestId: runtimeRequestId(row),
+          });
           continue;
         }
         void this.#forward(row.id).catch(() => undefined);
@@ -837,9 +1184,9 @@ export class DurableActions implements ActionsService {
   }
 
   /** Closes actions of one placement that its runtime no longer lists; a move since the lists were read voids it. */
-  #closeNotAwaited(sessionId: string, kind: ActionKind, waiting: ReadonlySet<string>, listedAt: number, now: number, generation: number): void {
-    for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
-      if (row.kind !== kind || row.generation !== generation || waiting.has(row.request_id) || row.created_at >= listedAt - RECONCILE_GRACE_MS) continue;
+  #closeNotAwaited(sessionId: string, incarnation: string, kind: ActionKind, waiting: ReadonlySet<string>, listedAt: number, now: number, generation: number): void {
+    for (const row of this.#store.listBySession(sessionId, incarnation, OPEN_STATES)) {
+      if (row.kind !== kind || row.generation !== generation || waiting.has(runtimeRequestId(row)) || row.created_at >= listedAt - RECONCILE_GRACE_MS) continue;
       if (
         this.#store.transition(
           row.id,
@@ -852,16 +1199,68 @@ export class DurableActions implements ActionsService {
     }
   }
 
+  /**
+   * A runtime that restarted without suspending rebuilds a waiting tool call under a new request ID with the same tool
+   * call ID. The existing action takes the new ID and keeps its owner, outcome, or uncertainty, so the tool never runs
+   * twice: a recorded answer is delivered again under the new ID, and an action cancelled when the old runtime stopped
+   * comes back as uncertain if someone held it (it may have run) or as waiting if nobody did. The gateway's own
+   * platform tools are idempotent by key and nobody else can reconcile them, so one the old runtime stopped waiting for
+   * runs again. A call the ledger already tracks under a newer placement is returned unchanged (never a second action).
+   */
+  #rebind(sessionId: string, incarnation: string, toolCallId: string, requestId: string, event: RuntimeSessionEvent, generation: number, now: number): ActionRow | undefined {
+    const row = this.#store.findByToolCall(sessionId, incarnation, toolCallId);
+    if (!row) return undefined;
+    if (runtimeRequestId(row) === requestId || row.generation > generation) return row;
+    const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
+    const platform = platformTool !== undefined || row.responder_type === "platform";
+    const answered = ANSWERED_STATES.includes(row.state);
+    const revived = row.state === "cancelled" || (platform && row.state === "needs_reconciliation");
+    const uncertain = revived && !platform && row.claimed_by !== null;
+    const state: ActionState = revived ? (uncertain ? "needs_reconciliation" : "pending") : row.state;
+    const reason = revived ? (uncertain ? RESTARTED_WHILE_RUNNING : null) : row.reason;
+    const stored = parseJson<RuntimeSessionEvent>(row.event);
+    const rebound = stored ? { ...stored, data: { ...stored.data, requestId } } : event;
+    if (
+      !this.#store.rebindRequest(row.id, {
+        from: runtimeRequestId(row),
+        to: requestId,
+        event: rebound,
+        state,
+        reason,
+        redeliver: answered,
+        clearClaim: revived && !uncertain,
+        generation,
+        now,
+      })
+    ) {
+      return undefined;
+    }
+    this.#log.warn("A restarted runtime asked again for a tool call the ledger already tracks; it stays one action", {
+      actionId: row.id,
+      sessionId,
+      tool: row.tool ?? undefined,
+      state,
+    });
+    const latest = this.#store.get(row.id)!;
+    if (answered) void this.#forward(row.id).catch(() => undefined);
+    else if (latest.state === "pending" && platformTool) this.#startPlatformTool(latest, platformTool);
+    else if (state === "pending" && revived) this.#scheduleNotify(latest);
+    else if (uncertain) this.#emit({ type: "pending", sessionId, actionId: row.id });
+    return this.#store.get(row.id)!;
+  }
+
   #onCompletion(input: SessionEventInput, kind: ActionKind): SessionEventDecision {
     const requestId = str(input.event.data?.requestId);
     if (!requestId) return { withhold: [] };
-    const row = this.#store.findByRequest(input.sessionId, kind, requestId);
+    const incarnation = input.incarnation ?? this.#current(input.sessionId)?.incarnation;
+    const row = incarnation === undefined ? undefined : this.#store.findByRequest(input.sessionId, incarnation, kind, requestId);
     if (!row) return { withhold: [] };
-    // A completion observed in an older placement says nothing about the one that now waits for the request.
-    if (row.generation > input.generation) return { actionId: row.id, withhold: [] };
+    // A completion observed in an older placement, or for a request ID a restarted runtime replaced, says nothing
+    // about the request the runtime waits for now.
+    if (row.generation > input.generation || runtimeRequestId(row) !== requestId) return { actionId: row.id, withhold: [] };
     const now = this.#now();
     if (row.state === "completed" || row.state === "failed" || row.state === "expired") {
-      if (!row.forwarded) this.#store.markForwarded(row.id, now);
+      if (!row.forwarded) this.#store.markForwarded(row.id, now, undefined, { generation: row.generation, requestId });
     } else if (OPEN_STATES.includes(row.state)) {
       // The runtime resolved this request without an answer the ledger recorded: an aborted turn or another path.
       if (
@@ -921,7 +1320,7 @@ export class DurableActions implements ActionsService {
     return { state: "completed", result: params.result, resultHash: canonicalJson({ result: params.result, error: undefined }), now };
   }
 
-  #outcomeFromSubmission(row: ActionRow, request: ActionResultRequest, now: number): Outcome {
+  #outcomeFromSubmission(row: ActionRow, request: ActionResultRequest, now: number, responder: DecisionResponder): Outcome {
     const error = request.error === undefined || request.error === null ? undefined : String(request.error);
     switch (row.kind) {
       case "tool": {
@@ -934,6 +1333,10 @@ export class DurableActions implements ActionsService {
           throw new ManagedCopilotError("invalid_request", 'A permission answer needs a decision such as { "kind": "approve-once" } or { "kind": "reject" }');
         }
         if (result?.kind === "no-result") throw new ManagedCopilotError("invalid_request", "A permission handler that makes no decision should release its claim instead");
+        if (error === undefined) {
+          const problem = permissionDecisionProblem(result!, responder, needsPerson(eventData(row)));
+          if (problem) throw new ManagedCopilotError("forbidden", problem, { actionId: row.id });
+        }
         // A failing permission handler is never an approval: the runtime receives "user-not-available".
         const decision = error === undefined ? result : { kind: "user-not-available" };
         return { state: error === undefined ? "completed" : "failed", result: decision, error, resultHash: canonicalJson({ result: decision, error }), now };
@@ -952,11 +1355,13 @@ export class DurableActions implements ActionsService {
   }
 
   /**
-   * Delivers a recorded answer (or expiry) to the runtime that asked. Concurrent calls for the same placement share
-   * one delivery; an answer adopted by a newer placement gets its own delivery even while an older one is in flight.
+   * Delivers a recorded answer (or expiry) to the runtime that asked. Concurrent calls for the same delivery (action,
+   * placement, and runtime request ID) share it; an answer adopted by a newer placement, or rebound to a request ID a
+   * restarted runtime rebuilt, gets its own delivery even while an older one is in flight.
    */
   #forward(actionId: string): Promise<unknown> {
-    const key = `${actionId}@${this.#store.get(actionId)?.generation ?? 0}`;
+    const row = this.#store.get(actionId);
+    const key = row ? `${actionId}@${row.generation}@${runtimeRequestId(row)}` : actionId;
     const inFlight = this.#forwarding.get(key);
     if (inFlight) return inFlight;
     const delivery = this.#deliver(actionId).finally(() => this.#forwarding.delete(key));
@@ -969,18 +1374,21 @@ export class DurableActions implements ActionsService {
     if (!row || row.forwarded) return { success: true };
     const sessions = this.#deps.sessions();
     const now = this.#now();
+    // Acknowledgments and retries count only for this delivery: this placement and this runtime request ID.
+    const attempt: DeliveryAttempt = { generation: row.generation, requestId: runtimeRequestId(row) };
     const retryLater = (error: ManagedCopilotError) => {
       const delay = Math.min(5 * 60_000, 1_000 * 2 ** Math.min(row.forward_attempts, 8));
-      this.#store.deferForward(row.id, now + delay, now, row.generation);
+      this.#store.deferForward(row.id, now + delay, now, attempt);
       return error;
     };
     if (!sessions) throw retryLater(new ManagedCopilotError("capability_unavailable", "The session router is not available yet; the answer is recorded and will be delivered"));
-    const view = await sessions.get(row.session_id);
-    if (!view) {
-      // Nothing can receive it any more (deleted session); stop retrying.
+    const current = this.#current(row.session_id);
+    if (!current || current.incarnation !== row.incarnation) {
+      // Nothing can receive it any more (deleted, or its ID now names a different session); stop retrying.
       this.#store.markForwarded(row.id, now, "Not delivered: the session no longer exists");
       return { success: false };
     }
+    const { view } = current;
     if (view.generation !== row.generation) {
       if (view.generation < row.generation) {
         throw retryLater(new ManagedCopilotError("capability_unavailable", "The session's placement is not current yet; the answer is recorded and will be delivered"));
@@ -992,7 +1400,7 @@ export class DurableActions implements ActionsService {
         throw retryLater(new ManagedCopilotError("capability_unavailable", "The session's new placement could not say whether it still waits for this answer; it will be retried"));
       }
       if (!awaited) {
-        this.#store.markForwarded(row.id, now, `Not delivered: the session moved to placement generation ${view.generation}, which does not wait for this request`, row.generation);
+        this.#store.markForwarded(row.id, now, `Not delivered: the session moved to placement generation ${view.generation}, which does not wait for this request`, attempt);
         return { success: false };
       }
       // Moved (here, or concurrently by a runtime asking again); delivered once for that placement.
@@ -1002,11 +1410,16 @@ export class DurableActions implements ActionsService {
     }
     const { method, params } = forwardCall(row);
     try {
-      const response = await withTimeout(sessions.request<unknown>(row.session_id, method, params), this.#options.upstreamTimeoutMs, "The runtime");
+      // Fenced to the incarnation that asked: a session that reuses the ID never receives this answer.
+      const response = await withTimeout(sessions.request<unknown>(row.session_id, method, params, { incarnation: current.incarnation }), this.#options.upstreamTimeoutMs, "The runtime");
       const accepted = (response as { success?: unknown } | undefined)?.success;
-      this.#store.markForwarded(row.id, this.#now(), accepted === false ? "The runtime no longer waited for this answer" : undefined, row.generation);
+      this.#store.markForwarded(row.id, this.#now(), accepted === false ? "The runtime no longer waited for this answer" : undefined, attempt);
       return response ?? { success: true };
     } catch (error) {
+      if (isManagedCopilotError(error, "not_found") && this.#current(row.session_id)?.incarnation !== row.incarnation) {
+        this.#store.markForwarded(row.id, this.#now(), "Not delivered: the session no longer exists", attempt);
+        return { success: false };
+      }
       const managed = error instanceof ManagedCopilotError ? error : new ManagedCopilotError("capability_unavailable", "The runtime did not accept the answer yet; it is recorded and will be retried");
       this.#log.warn("Delivering an answer to the runtime failed; will retry", { actionId: row.id, sessionId: row.session_id, error: (error as Error).message });
       throw retryLater(managed);
@@ -1020,62 +1433,69 @@ export class DurableActions implements ActionsService {
     if (!method) return false;
     const sessions = this.#deps.sessions();
     if (!sessions) return undefined;
+    // Only the incarnation that asked can still wait for it.
+    const current = this.#current(row.session_id);
+    if (!current || current.incarnation !== row.incarnation) return false;
     try {
-      const list = await withTimeout(sessions.request<{ items?: unknown[] }>(row.session_id, method, { sessionId: row.session_id }), this.#options.upstreamTimeoutMs, "The runtime");
+      const list = await withTimeout(
+        sessions.request<{ items?: unknown[] }>(row.session_id, method, { sessionId: row.session_id }, { incarnation: current.incarnation }),
+        this.#options.upstreamTimeoutMs,
+        "The runtime",
+      );
       if (!Array.isArray(list?.items)) return undefined;
-      return list.items.some((item) => typeof item === "object" && item !== null && (item as Record<string, unknown>).requestId === row.request_id);
-    } catch {
+      return list.items.some((item) => typeof item === "object" && item !== null && (item as Record<string, unknown>).requestId === runtimeRequestId(row));
+    } catch (error) {
+      // The session that asked is gone (its ID may now name another session): nothing there waits for this answer.
+      if (isManagedCopilotError(error, "not_found") && this.#current(row.session_id)?.incarnation !== row.incarnation) return false;
       return undefined;
     }
   }
 
-  async #sessionGone(sessionId: string): Promise<boolean> {
-    if (this.#deletedSessions.has(sessionId)) return true;
-    const sessions = this.#deps.sessions();
-    return sessions ? (await sessions.get(sessionId)) === undefined : false;
-  }
-
-  async #authorize(caller: ActionCaller, sessionId: string, actionId?: string): Promise<void> {
+  /**
+   * Who may act on a session's actions, and in which incarnation. Owners must own the session's current incarnation
+   * (not found otherwise, so other accounts learn nothing). A capability covers only its session and listed actions;
+   * it covers nothing (undefined) once its session is gone or its ID names a newer session.
+   */
+  #authorize(caller: ActionCaller, sessionId: string, actionId?: string): string | undefined {
+    const current = this.#current(sessionId);
     if (caller.type === "capability") {
       if (caller.capability.sessionId !== sessionId) throw new ManagedCopilotError("forbidden", "This capability is for a different session");
       if (actionId !== undefined && !caller.capability.actionIds.includes(actionId)) {
         throw new ManagedCopilotError("forbidden", "This capability does not cover that action");
       }
-      return;
+      if (!current || (caller.capability.incarnation !== undefined && caller.capability.incarnation !== current.incarnation)) return undefined;
+      return current.incarnation;
     }
-    const ownerId = await this.#ownerOf(sessionId);
-    // Not found rather than forbidden: callers learn nothing about other owners' sessions.
-    if (ownerId === undefined || ownerId !== caller.principal.accountId) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
+    if (!current || current.view.ownerId !== caller.principal.accountId) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
+    return current.incarnation;
   }
 
-  async #ownerOf(sessionId: string): Promise<number | undefined> {
-    const view = await this.#deps.sessions()?.get(sessionId);
-    if (view) return view.ownerId;
-    const row = this.#deps.db.prepare("SELECT owner_id FROM durable_actions WHERE session_id = ? LIMIT 1").get(sessionId) as { owner_id: number } | undefined;
-    return row?.owner_id;
-  }
-
-  #requireAction(sessionId: string, actionId: string): ActionRow {
+  #requireAction(sessionId: string, actionId: string, incarnation: string | undefined): ActionRow {
+    if (incarnation === undefined) throw conflict("The session no longer exists, so its actions cannot be executed");
     const row = this.#store.get(actionId);
-    if (!row || row.session_id !== sessionId) throw new ManagedCopilotError("not_found", `Action ${actionId} was not found in session ${sessionId}`);
+    if (!row || row.session_id !== sessionId || row.incarnation !== incarnation) throw new ManagedCopilotError("not_found", `Action ${actionId} was not found in session ${sessionId}`);
     return row;
   }
 
-  #scheduleNotify(row: Pick<ActionRow, "session_id" | "owner_id" | "environment" | "id">): void {
+  #scheduleNotify(row: Pick<ActionRow, "session_id" | "id">): void {
     // Offered (again): it counts as announced only once this offer is published, so a failure stays repairable.
     this.#store.clearNotified(row.id);
     this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
     if (this.#notifyTimers.has(row.session_id)) return;
     const timer = setTimeout(() => {
       this.#notifyTimers.delete(row.session_id);
-      this.#publishActionRequired(row.session_id, row.owner_id, row.environment);
+      this.#publishActionRequired(row.session_id);
     }, this.#options.notifyDebounceMs);
     timer.unref?.();
     this.#notifyTimers.set(row.session_id, timer);
   }
 
-  #publishActionRequired(sessionId: string, ownerId: number, environment: string): void {
-    const pending = this.#store.listBySession(sessionId, ["pending"]);
+  /** Announces the current incarnation's waiting actions, to its owner and environment (an ID may be reused). */
+  #publishActionRequired(sessionId: string): void {
+    const current = this.#current(sessionId);
+    if (!current) return;
+    const { ownerId, environment } = current.view;
+    const pending = this.#store.listBySession(sessionId, current.incarnation, ["pending"]);
     if (pending.length === 0) return;
     const event: PlatformEvent = {
       id: newId("evt"),
@@ -1138,7 +1558,7 @@ function describeUnclaimable(row: ActionRow): string {
 
 /** The runtime RPC that delivers a recorded outcome. Expiry and failures never become approvals. */
 function forwardCall(row: ActionRow): { method: string; params: Record<string, unknown> } {
-  const base = { sessionId: row.session_id, requestId: row.request_id };
+  const base = { sessionId: row.session_id, requestId: runtimeRequestId(row) };
   const result = parseJson(row.result);
   switch (row.kind) {
     case "tool":

@@ -20,6 +20,8 @@ export interface ScheduleRow {
   readonly paused_reason: string | null;
   readonly created_by: ScheduleCreator;
   readonly target_session_id: string | null;
+  /** The incarnation of the target session the schedule continues (session IDs are reusable after deletion). */
+  readonly target_incarnation: string | null;
   readonly origin_session_id: string | null;
   readonly session_config: string | null;
   readonly webhook: string | null;
@@ -43,6 +45,8 @@ export interface RunRow {
   readonly reason: string | null;
   readonly session_mode: "new" | "target";
   readonly session_id: string | null;
+  /** The incarnation of the session the run continues: bound when the run is queued (target) or creates it (new). */
+  readonly session_incarnation: string | null;
   readonly session_created: number;
   readonly input_state: InputState;
   readonly input_started_at: number | null;
@@ -83,8 +87,8 @@ export class ScheduleStore {
     this.#db
       .prepare(
         `INSERT INTO durable_schedules (id, owner_id, owner_login, name, cron, run_at, time_zone, environment, prompt, state, paused_reason, created_by,
-           target_session_id, origin_session_id, session_config, webhook, next_run_at, definition_hash, apphost_key, origin_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           target_session_id, target_incarnation, origin_session_id, session_config, webhook, next_run_at, definition_hash, apphost_key, origin_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -100,6 +104,7 @@ export class ScheduleStore {
         row.paused_reason,
         row.created_by,
         row.target_session_id,
+        row.target_incarnation,
         row.origin_session_id,
         row.session_config,
         row.webhook,
@@ -134,6 +139,18 @@ export class ScheduleStore {
       .all(sessionId) as unknown as ScheduleRow[];
   }
 
+  /** Every schedule that continues an existing session. */
+  listTargeted(): ScheduleRow[] {
+    return this.#db.prepare("SELECT * FROM durable_schedules WHERE target_session_id IS NOT NULL AND deleted_at IS NULL ORDER BY created_at, rowid").all() as unknown as ScheduleRow[];
+  }
+
+  /** Unfinished runs recorded before runs were bound to a session incarnation. */
+  unboundRuns(): RunRow[] {
+    return this.#db
+      .prepare("SELECT * FROM durable_schedule_runs WHERE session_incarnation IS NULL AND status IN ('queued', 'running', 'waiting') ORDER BY created_at, rowid")
+      .all() as unknown as RunRow[];
+  }
+
   countActiveByOrigin(sessionId: string): number {
     const row = this.#db
       .prepare("SELECT COUNT(*) AS n FROM durable_schedules WHERE origin_session_id = ? AND created_by = 'agent' AND deleted_at IS NULL AND state = 'active'")
@@ -154,7 +171,7 @@ export class ScheduleStore {
     return row.at ?? undefined;
   }
 
-  updateSchedule(id: string, fields: Partial<Pick<ScheduleRow, "state" | "paused_reason" | "next_run_at" | "deleted_at">>, now: number): void {
+  updateSchedule(id: string, fields: Partial<Pick<ScheduleRow, "state" | "paused_reason" | "next_run_at" | "deleted_at" | "target_incarnation">>, now: number): void {
     const sets: string[] = ["updated_at = ?"];
     const params: Bindable[] = [now];
     for (const [key, value] of Object.entries(fields)) {
@@ -185,15 +202,21 @@ export class ScheduleStore {
       .all(ownerId) as unknown as ScheduleRow[];
   }
 
-  insertRun(row: Omit<RunRow, "reason" | "session_created" | "input_state" | "input_started_at" | "message_id" | "consumed" | "attempts" | "next_attempt_at" | "started_at" | "completed_at"> & {
-    readonly reason?: string | null;
-    readonly completed_at?: number | null;
-  }): boolean {
+  insertRun(
+    row: Omit<
+      RunRow,
+      "reason" | "session_incarnation" | "session_created" | "input_state" | "input_started_at" | "message_id" | "consumed" | "attempts" | "next_attempt_at" | "started_at" | "completed_at"
+    > & {
+      readonly reason?: string | null;
+      readonly session_incarnation?: string | null;
+      readonly completed_at?: number | null;
+    },
+  ): boolean {
     const result = this.#db
       .prepare(
         `INSERT OR IGNORE INTO durable_schedule_runs (id, schedule_id, owner_id, occurrence_id, trigger, scheduled_for, status, reason, session_mode, session_id,
-           completed_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           session_incarnation, completed_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         row.id,
@@ -206,6 +229,7 @@ export class ScheduleStore {
         row.reason ?? null,
         row.session_mode,
         row.session_id,
+        row.session_incarnation ?? null,
         row.completed_at ?? null,
         row.created_at,
         row.updated_at,

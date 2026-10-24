@@ -62,3 +62,28 @@ export function parseJson<T = unknown>(text: string | null | undefined): T | und
     return undefined;
   }
 }
+
+/**
+ * The incarnation of a session as core reports it: its immutable `incarnation`, or (until core provides one) its
+ * creation time, which also changes whenever a deleted session's ID is reused.
+ */
+export function incarnationOf(view: { readonly incarnation?: string; readonly createdAt?: string }): string {
+  return view.incarnation ?? (view.createdAt ? `created:${view.createdAt}` : "");
+}
+
+/** A session that is being or has been deleted accepts no new work. */
+export function isGone(view: { readonly state: string } | undefined): boolean {
+  return view === undefined || view.state === "deleting" || view.state === "deleted";
+}
+
+/**
+ * Whether a stored incarnation still names the session's current incarnation. A provisional one (its creation time,
+ * recorded while core reported no incarnations) keeps naming the same session after core reports its real one.
+ */
+export function sameIncarnation(
+  bound: string | null | undefined,
+  view: { readonly state: string; readonly incarnation?: string; readonly createdAt?: string } | undefined,
+): boolean {
+  if (!bound || isGone(view)) return false;
+  return bound === incarnationOf(view!) || (view!.createdAt !== undefined && bound === `created:${view!.createdAt}`);
+}

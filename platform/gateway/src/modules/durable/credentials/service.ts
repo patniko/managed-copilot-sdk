@@ -1,8 +1,8 @@
 import { ManagedCopilotError, type AccountInfo, type BackgroundCredentialStatus } from "@managed-copilot/protocol";
 import type { Database } from "../../../db.js";
-import type { Authenticator, Principal } from "../../../http.js";
+import type { Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
-import type { CredentialsService, SchedulesService } from "../contract.js";
+import type { CredentialsService, DurableAuthPort, SchedulesService } from "../contract.js";
 import { toIso } from "../ids.js";
 import { seal, unseal } from "../keys.js";
 
@@ -23,7 +23,7 @@ export interface CredentialsDeps {
   readonly db: Database;
   readonly log: Logger;
   readonly sealKey: Buffer;
-  readonly auth: () => Authenticator | undefined;
+  readonly auth: () => DurableAuthPort | undefined;
   readonly schedules: () => SchedulesService | undefined;
   readonly now?: () => number;
   /** How long a successful verification is reused before GitHub is asked again. */
@@ -53,6 +53,16 @@ export class DurableCredentials implements CredentialsService {
 
   store(principal: Principal): BackgroundCredentialStatus {
     const now = this.#now();
+    // A new sign-in replaces the previous credential: core forgets the old one, as on logout.
+    const previous = this.#row(principal.accountId)?.sealed_token ?? null;
+    if (previous !== null) {
+      try {
+        const old = unseal(this.#deps.sealKey, previous, context(principal.accountId));
+        if (old !== principal.token) this.#deps.auth()?.forgetCredential?.(old);
+      } catch (error) {
+        this.#deps.log.warn("Could not tell core to forget a replaced background sign-in", { accountId: principal.accountId, error: (error as Error).message });
+      }
+    }
     this.#deps.db
       .prepare(
         `INSERT INTO durable_credentials (account_id, login, name, avatar_url, sealed_token, state, reason, created_at, updated_at, last_verified_at)
@@ -112,7 +122,8 @@ export class DurableCredentials implements CredentialsService {
     };
     let principal: Principal;
     try {
-      principal = await authenticator.authenticate(token);
+      // A background verification never becomes the account's live credential in core.
+      principal = await authenticator.authenticate(token, { background: true });
     } catch (error) {
       if (error instanceof ManagedCopilotError && (error.code === "authentication_required" || error.code === "forbidden")) {
         if (stillCurrent()) {
@@ -138,6 +149,15 @@ export class DurableCredentials implements CredentialsService {
   #invalidate(accountId: number, state: "revoked" | "invalid", reason: string): void {
     const now = this.#now();
     this.#verified.delete(accountId);
+    const sealed = this.#row(accountId)?.sealed_token ?? null;
+    if (sealed !== null) {
+      // Core may still answer background inference with it; dropping it first ends that before the token is gone.
+      try {
+        this.#deps.auth()?.forgetCredential?.(unseal(this.#deps.sealKey, sealed, context(accountId)));
+      } catch (error) {
+        this.#deps.log.warn("Could not tell core to forget a removed background sign-in", { accountId, error: (error as Error).message });
+      }
+    }
     this.#deps.db.prepare("UPDATE durable_credentials SET sealed_token = NULL, state = ?, reason = ?, updated_at = ? WHERE account_id = ?").run(state, reason, now, accountId);
     const paused = this.#deps.schedules()?.pauseAllForOwner(accountId, `Paused: ${reason}`) ?? 0;
     this.#deps.log.warn("Background sign-in removed", { accountId, state, pausedSchedules: paused });

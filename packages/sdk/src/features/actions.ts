@@ -59,7 +59,8 @@ export async function runActions(http: HttpClient, sessionId: string, handlers: 
       action.state === "pending" &&
       (!options.actionIds || options.actionIds.includes(action.id)) &&
       ((action.kind === "tool" && action.tool !== undefined && tools.has(action.tool)) ||
-        (action.kind === "permission" && handlers.onPermissionRequest !== undefined)),
+        // A prompt known only from its derived form has no request to hand a handler; it is a person's to answer.
+        (action.kind === "permission" && handlers.onPermissionRequest !== undefined && action.payload !== undefined)),
   );
   return Promise.all(eligible.map((action) => runOne(http, sessionId, action, handlers, tools, options)));
 }

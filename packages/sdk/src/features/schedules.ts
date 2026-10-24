@@ -35,8 +35,9 @@ function canonical(value: unknown): unknown {
 }
 
 /**
- * The standard declaration of a `defineTool` tool: name, description, JSON schema, and a content revision. The
- * handler closure is never uploaded; a scheduled run's calls are answered by the schedule's webhook route.
+ * The standard declaration of a `defineTool` tool: name, description, JSON schema, the stock flags the runtime honors
+ * (`overridesBuiltInTool`, `skipPermission`), and a content revision. The handler closure is never uploaded; a
+ * scheduled run's calls are answered by the schedule's webhook route.
  */
 export function toToolDeclaration(tool: Tool<any>): ToolDeclaration {
   if (!tool || typeof tool.name !== "string" || !VALID_TOOL_NAME.test(tool.name)) {
@@ -49,7 +50,13 @@ export function toToolDeclaration(tool: Tool<any>): ToolDeclaration {
     if (error instanceof ManagedCopilotError) throw new ManagedCopilotError("invalid_request", `Tool ${tool.name}: ${error.message}`);
     throw new ManagedCopilotError("invalid_request", `Tool ${tool.name}: its parameters could not be converted to JSON schema (${(error as Error).message})`);
   }
-  const declaration = { name: tool.name, ...(tool.description ? { description: tool.description } : {}), ...(parameters ? { parameters } : {}) };
+  const declaration = {
+    name: tool.name,
+    ...(tool.description ? { description: tool.description } : {}),
+    ...(parameters ? { parameters } : {}),
+    ...(typeof tool.overridesBuiltInTool === "boolean" ? { overridesBuiltInTool: tool.overridesBuiltInTool } : {}),
+    ...(typeof tool.skipPermission === "boolean" ? { skipPermission: tool.skipPermission } : {}),
+  };
   const revision = createHash("sha256").update(JSON.stringify(canonical(declaration))).digest("hex").slice(0, 16);
   return { ...declaration, revision };
 }

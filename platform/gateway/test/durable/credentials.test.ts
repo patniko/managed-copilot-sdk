@@ -6,6 +6,7 @@ import { isManagedCopilotError, ManagedCopilotError } from "@managed-copilot/pro
 import { migrate, openDatabase, type Database } from "../../src/db.js";
 import type { Authenticator, Principal } from "../../src/http.js";
 import type { Logger } from "../../src/log.js";
+import { GitHubAuthenticator } from "../../src/modules/core/auth.js";
 import type { SchedulesService } from "../../src/modules/durable/contract.js";
 import { DurableCredentials } from "../../src/modules/durable/credentials/service.js";
 import { loadDurableKeys, seal, unseal } from "../../src/modules/durable/keys.js";
@@ -17,14 +18,20 @@ const ALICE: Principal = { accountId: 7, login: "alice", name: "Alice", token: "
 /** GitHub stand-in: tokens map to accounts; `gate` holds verification open to stage races. */
 class FakeAuth implements Authenticator {
   readonly accounts = new Map<string, Principal>([[ALICE.token, ALICE]]);
+  readonly options: ({ readonly background?: boolean } | undefined)[] = [];
+  readonly forgotten: string[] = [];
   calls = 0;
   gate: Promise<void> | undefined;
-  async authenticate(token: string): Promise<Principal> {
+  async authenticate(token: string, options?: { readonly background?: boolean }): Promise<Principal> {
     this.calls++;
+    this.options.push(options);
     await this.gate;
     const principal = this.accounts.get(token);
     if (!principal) throw new ManagedCopilotError("authentication_required", "Bad credentials");
     return principal;
+  }
+  forgetCredential(token: string): void {
+    this.forgotten.push(token);
   }
 }
 
@@ -74,6 +81,28 @@ describe("background credentials", () => {
     expect(String(row.sealed_token)).toMatch(/^sealed:v1:/);
     expect(credentials.has(7)).toBe(true);
     expect(synced).toEqual(["alice"]);
+  });
+
+  it("verifies as background work and has core forget every credential it removes", async () => {
+    credentials.store(ALICE);
+    now += 120_000;
+    await credentials.principalFor(7);
+    expect(auth.options).toEqual([{ background: true }]);
+    // A new sign-in replaces the old credential; logout removes the new one.
+    const renewed = { ...ALICE, token: "gho_alice_renewed" };
+    auth.accounts.set(renewed.token, renewed);
+    credentials.store(renewed);
+    credentials.store(renewed);
+    credentials.revoke(renewed);
+    expect(auth.forgotten).toEqual([ALICE.token, renewed.token]);
+  });
+
+  it("has core forget a credential GitHub rejects", async () => {
+    credentials.store(ALICE);
+    auth.accounts.delete(ALICE.token);
+    now += 120_000;
+    await expectCode(credentials.principalFor(7), "authentication_required");
+    expect(auth.forgotten).toEqual([ALICE.token]);
   });
 
   it("binds sealed values to their account and detects tampering", () => {
@@ -151,5 +180,44 @@ describe("background credentials", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Core's authenticator learns background verification and forgetCredential in its incarnation batch; until that is
+  // on this branch, these run against FakeAuth above only.
+  const coreSupportsBackground = typeof (GitHubAuthenticator.prototype as { forgetCredential?: unknown }).forgetCredential === "function";
+
+  it.skipIf(!coreSupportsBackground)("with core's GitHub authenticator, never makes a background verification the live credential, and logout drops it", async () => {
+    const users = new Map<string, unknown>([
+      [ALICE.token, { id: 7, login: "alice", name: "Alice" }],
+      ["gho_alice_app", { id: 7, login: "alice", name: "Alice" }],
+    ]);
+    // GitHub's REST API stand-in: GET /user resolves a token to its account.
+    const github = new GitHubAuthenticator({
+      apiUrl: "https://github.invalid/api",
+      log: silent,
+      retryDelaysMs: [],
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const token = (new Headers(init?.headers).get("authorization") ?? "").replace(/^(bearer|token)\s+/i, "");
+        const user = users.get(token);
+        if (!url.endsWith("/user")) return new Response(null, { status: 404 });
+        return user ? Response.json(user) : Response.json({ message: "Bad credentials" }, { status: 401 });
+      }) as typeof fetch,
+    });
+    const schedules = { pauseAllForOwner: () => 0, syncAppHost: () => undefined } as unknown as SchedulesService;
+    const real = new DurableCredentials({ db, log: silent, sealKey: key, auth: () => github, schedules: () => schedules, now: () => now, verifyCacheMs: 60_000 });
+    real.store(ALICE);
+    expect(await real.principalFor(7)).toMatchObject({ accountId: 7, login: "alice" });
+    expect(github.liveCredential(7)).toBeUndefined();
+    // The owner's CLI presents the same token: it is the live credential until logout removes it.
+    await github.authenticate(ALICE.token);
+    expect(github.liveCredential(7)?.token).toBe(ALICE.token);
+    real.revoke(ALICE);
+    expect(github.liveCredential(7)).toBeUndefined();
+    // A connected app's own token is not the background credential, so logout leaves it alone.
+    await github.authenticate("gho_alice_app");
+    real.store(ALICE);
+    real.revoke(ALICE);
+    expect(github.liveCredential(7)?.token).toBe("gho_alice_app");
   });
 });
