@@ -83,6 +83,8 @@ interface Attachment {
   declarations: Record<string, unknown>[];
   /** This client's handler flags (`requestPermission`, `hooks`, ...). */
   flags: Record<string, unknown>;
+  /** The inventory revisions this connection's stored registrations got (what it may withdraw). */
+  readonly registered: { readonly tools: Record<string, number>; readonly flags: Record<string, number> };
 }
 
 /** Handler flags the runtime registers per connection; the gateway sends the union across attached clients. */
@@ -98,9 +100,12 @@ interface WireSettings {
 interface InventoryChange {
   readonly tools: readonly Record<string, unknown>[];
   readonly flags: Readonly<Record<string, unknown>>;
-  /** Tools and flags the registering connection itself had registered and now withdraws (no other client has them). */
-  readonly removeTools: readonly string[];
-  readonly removeFlags: readonly string[];
+  /**
+   * What the registering connection itself had registered and now withdraws (no other attached client has it), with
+   * the revision its registration got: a registration made since by anyone else is not withdrawn.
+   */
+  readonly removeTools: readonly { readonly name: string; readonly revision: number }[];
+  readonly removeFlags: readonly { readonly key: string; readonly revision: number }[];
 }
 
 /** How long past the runtime's one-hour refresh threshold a GitHub token answer stays valid (the gateway decides again after). */
@@ -340,8 +345,10 @@ export class SessionManager implements SessionsService {
   readonly #upstreamHandlers: UpstreamHandlers;
   /** Session IDs reserved by in-flight creates. */
   readonly #creating = new Map<string, { ownerId: number; done: Promise<unknown> }>();
-  /** Session IDs whose deletion is running in this process. */
+  /** Session IDs whose deletion (or interrupted-create cleanup) is running in this process. */
   readonly #deletions = new Set<string>();
+  /** Interrupted-create cleanups in flight, by session ID. */
+  readonly #discards = new Map<string, Promise<void>>();
   /** Set once the gateway stops. */
   #stopped = false;
   readonly #scrubber: ((value: unknown) => unknown) | undefined;
@@ -550,7 +557,10 @@ export class SessionManager implements SessionsService {
     if (this.#deletions.has(sessionId)) throw new ManagedCopilotError("conflict", `Session ${sessionId} is already being deleted`);
     this.#deletions.add(sessionId);
     try {
-      await this.#deleteOwned(record);
+      // Only the incarnation this deletion is for: an ID deleted and created again since belongs to a new session.
+      const current = this.#ledger.get(sessionId);
+      if (!current || current.incarnation !== record.incarnation) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+      await this.#deleteOwned(current);
     } finally {
       this.#deletions.delete(sessionId);
     }
@@ -612,30 +622,50 @@ export class SessionManager implements SessionsService {
    */
   async recover(): Promise<void> {
     for (const record of this.#ledger.byState("deleting")) {
-      if (this.#deletions.has(record.id)) continue;
+      // A snapshot: each row is checked again under its reservation, so a session deleted and created since is safe.
+      if (this.#deletions.has(record.id) || this.#ledger.get(record.id)?.incarnation !== record.incarnation) continue;
       this.#log.info("Finishing a session deletion the gateway stopped in the middle of", { sessionId: record.id });
       await this.#deleteRecord(record).catch((error: unknown) => this.#log.warn("Finishing an interrupted deletion failed; delete the session again", { sessionId: record.id, error: (error as Error).message }));
     }
     for (const record of this.#ledger.byState("creating")) {
-      if (this.#creating.has(record.id)) continue;
       await this.#discardInterrupted(record).catch((error: unknown) => this.#log.warn("Cleaning up an interrupted create failed", { sessionId: record.id, error: (error as Error).message }));
     }
   }
 
   /** Removes what a create the gateway stopped in the middle of allocated; the session never existed for its owner. */
-  async #discardInterrupted(record: SessionRecord): Promise<void> {
-    this.#log.warn("Cleaning up a session whose creation was interrupted", { sessionId: record.id, environment: record.environment });
-    if (record.placement === "sandbox") {
-      const sandboxes = this.#sandboxes;
-      if (!sandboxes) {
-        this.#ledger.update(record.id, { state: "failed" });
-        throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available, so the interrupted session's sandbox cannot be removed yet");
+  #discardInterrupted(record: SessionRecord): Promise<void> {
+    // Concurrent callers (startup recovery, a retried create) share one cleanup.
+    const running = this.#discards.get(record.id);
+    if (running) return running;
+    const done = this.#discard(record).finally(() => {
+      if (this.#discards.get(record.id) === done) this.#discards.delete(record.id);
+    });
+    this.#discards.set(record.id, done);
+    return done;
+  }
+
+  async #discard(record: SessionRecord): Promise<void> {
+    const sessionId = record.id;
+    // Only that reservation, still interrupted: never a session that was created or deleted since.
+    const current = this.#ledger.get(sessionId);
+    if (!current || current.incarnation !== record.incarnation || current.state !== "creating" || this.#creating.has(sessionId) || this.#deletions.has(sessionId)) return;
+    this.#deletions.add(sessionId);
+    try {
+      this.#log.warn("Cleaning up a session whose creation was interrupted", { sessionId, environment: record.environment });
+      if (record.placement === "sandbox") {
+        const sandboxes = this.#sandboxes;
+        if (!sandboxes) {
+          this.#ledger.update(sessionId, { state: "failed" });
+          throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available, so the interrupted session's sandbox cannot be removed yet");
+        }
+        // While the row exists no other session can hold the ID, so its sandbox is the interrupted one's.
+        await sandboxes.delete(sessionId);
       }
-      await sandboxes.delete(record.id);
+      await Promise.resolve(this.#policy?.releaseSession?.(sessionId)).catch((error: unknown) => this.#log.warn("Policy release failed", { sessionId, error: (error as Error).message }));
+      if (this.#ledger.get(sessionId)?.incarnation === record.incarnation) this.#ledger.remove(sessionId);
+    } finally {
+      this.#deletions.delete(sessionId);
     }
-    await Promise.resolve(this.#policy?.releaseSession?.(record.id)).catch((error: unknown) => this.#log.warn("Policy release failed", { sessionId: record.id, error: (error as Error).message }));
-    // Only the interrupted reservation itself: a newer row with the same ID is someone else's session.
-    if (this.#ledger.get(record.id)?.incarnation === record.incarnation) this.#ledger.remove(record.id);
   }
 
   subscribe(listener: SessionEventListener): () => void {
@@ -1019,7 +1049,7 @@ export class SessionManager implements SessionsService {
         this.#unattach(live, peer.id, previous);
         return MOVED;
       }
-      this.#persistInventory(live.id, change);
+      this.#persistInventory(live, peer.id, change);
       live.ready = true;
       return { result };
     };
@@ -1129,7 +1159,7 @@ export class SessionManager implements SessionsService {
         this.#persist(sessionId, (stored) => ({ ...stored, optionsPatch: { ...stored.optionsPatch, ...patch }, requestedOptions: { ...stored.requestedOptions, ...requested } }));
         if (typeof patch["model"] === "string") this.#ledger.update(sessionId, { model: patch["model"] });
       }
-      if (toolsChange) this.#persistInventory(sessionId, toolsChange);
+      if (toolsChange) this.#persistInventory(live, peer.id, toolsChange);
       if (method === "session.model.switchTo" && typeof params["modelId"] === "string") {
         const model = params["modelId"];
         this.#ledger.update(sessionId, { model });
@@ -1350,7 +1380,7 @@ export class SessionManager implements SessionsService {
         params: storedParams(admitted.params),
         // Without a client, the declarations are the service's own; a client's are its callback registrations.
         ...(input.peer ? {} : { tools: registration.tools }),
-        callbacks: { tools: input.peer ? registration.tools : [], flags: trueFlags(registration.flags) },
+        callbacks: applyInventory(undefined, { tools: input.peer ? registration.tools : [], flags: registration.flags, removeTools: [], removeFlags: [] }),
         optionsPatch: admitted.optionsPatch,
         requested,
       };
@@ -1400,7 +1430,20 @@ export class SessionManager implements SessionsService {
           created.upstream = upstream;
         }
         const forwarded = await this.#prepare(created, "session.create", await this.#withVaultHeaders(sessionId, admitted.params, placement));
-        if (input.peer) this.#attach(created, input.peer, admitted, forwarded);
+        if (input.peer) {
+          this.#attach(created, input.peer, admitted, forwarded);
+          // The creating client may later withdraw what it registered at create (and only that).
+          const attachment = created.attachments.get(input.peer.id)!;
+          const revisions = stored.callbacks?.revisions;
+          for (const tool of attachment.declarations) {
+            const revision = revisions?.tools[String(tool["name"])];
+            if (revision !== undefined) attachment.registered.tools[String(tool["name"])] = revision;
+          }
+          for (const key of WIRE_FLAGS) {
+            const revision = revisions?.flags[key];
+            if (attachment.flags[key] === true && revision !== undefined) attachment.registered.flags[key] = revision;
+          }
+        }
         result = await upstream.request("session.create", forwarded);
         await this.#opened(created, upstream, admitted.optionsPatch);
         created.ready = true;
@@ -1821,7 +1864,7 @@ export class SessionManager implements SessionsService {
     } else {
       this.#log.warn("No connected client answers the session's hooks; the hook fails closed", { sessionId: live.id, hookType: params["hookType"] });
     }
-    return this.#hookClosed(live, params, hooksUnavailable(live.id));
+    return this.#hookClosed(live.id, params, hooksUnavailable(live.id));
   }
 
   /**
@@ -1829,11 +1872,11 @@ export class SessionManager implements SessionsService {
    * hook fails closed with an explicit answer: a denied tool call, a blocked prompt. Other hooks have no blocking
    * answer; turns that would need them are refused before they start (`#assertHooks`).
    */
-  #hookClosed(live: LiveSession, params: Record<string, unknown>, reason: string): unknown {
+  #hookClosed(sessionId: string, params: Record<string, unknown>, reason: string): unknown {
     const hookType = String(params["hookType"] ?? "");
     const closed = FAIL_CLOSED_HOOKS[hookType];
     if (closed) return { output: closed(reason) };
-    throw new ManagedCopilotError("background_callback_unsupported", `No connected client answers the ${hookType || "requested"} hook for session ${live.id}.`);
+    throw new ManagedCopilotError("background_callback_unsupported", `No connected client answers the ${hookType || "requested"} hook for session ${sessionId}.`);
   }
 
   async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>): Promise<void> {
@@ -1886,6 +1929,7 @@ export class SessionManager implements SessionsService {
   #attach(live: LiveSession, peer: ClientPeer, admitted: AdmittedSession, forwarded: Record<string, unknown>): void {
     const flag = (key: string) => forwarded[key] === true;
     const sections = (forwarded["systemMessage"] as { sections?: Record<string, { action?: unknown }> } | undefined)?.sections ?? {};
+    const before = live.attachments.get(peer.id);
     live.attachments.delete(peer.id);
     live.attachments.set(peer.id, {
       peer,
@@ -1902,6 +1946,7 @@ export class SessionManager implements SessionsService {
       canvases: (Array.isArray(forwarded["canvases"]) && forwarded["canvases"].length > 0) || forwarded["requestCanvasRenderer"] !== undefined || forwarded["canvasProvider"] !== undefined,
       declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))),
       flags: Object.fromEntries([...WIRE_FLAGS, "streaming"].filter((key) => forwarded[key] !== undefined).map((key) => [key, forwarded[key]])),
+      registered: { tools: { ...before?.registered.tools }, flags: { ...before?.registered.flags } },
     });
     live.creator ??= peer.id;
   }
@@ -1943,14 +1988,43 @@ export class SessionManager implements SessionsService {
     const named = new Set(next.tools.map((tool) => String(tool["name"])));
     const removeTools = (previous?.declarations ?? [])
       .map((tool) => String(tool["name"]))
-      .filter((name) => !named.has(name) && !others.some((attachment) => attachment.declarations.some((tool) => tool["name"] === name)));
+      .filter((name) => !named.has(name) && !others.some((attachment) => attachment.declarations.some((tool) => tool["name"] === name)))
+      .flatMap((name) => {
+        const revision = previous?.registered.tools[name];
+        return revision === undefined ? [] : [{ name, revision }];
+      });
     const removeFlags =
-      scope === "all" && previous ? WIRE_FLAGS.filter((key) => previous.flags[key] === true && next.flags[key] !== true && !others.some((attachment) => attachment.flags[key] === true)) : [];
+      scope === "all" && previous
+        ? WIRE_FLAGS.filter((key) => previous.flags[key] === true && next.flags[key] !== true && !others.some((attachment) => attachment.flags[key] === true)).flatMap((key) => {
+            const revision = previous.registered.flags[key];
+            return revision === undefined ? [] : [{ key, revision }];
+          })
+        : [];
     return { tools: next.tools, flags: scope === "all" ? next.flags : {}, removeTools, removeFlags };
   }
 
-  #persistInventory(sessionId: string, change: InventoryChange): void {
-    this.#persist(sessionId, (stored) => ({ ...stored, callbacks: applyInventory(inventoryOf(stored), change) }));
+  /**
+   * Stores a registration that succeeded. Withdrawals apply only to the registrations they saw (a newer registration of
+   * the same tool or flag by another client stays), and the registering attachment learns its revisions.
+   */
+  #persistInventory(live: LiveSession, peerId: string | undefined, change: InventoryChange): void {
+    let applied: CallbackInventory | undefined;
+    this.#persist(live.id, (stored) => {
+      applied = applyInventory(inventoryOf(stored), change);
+      return { ...stored, callbacks: applied };
+    });
+    const attachment = peerId === undefined ? undefined : live.attachments.get(peerId);
+    if (!applied || !attachment) return;
+    for (const { name } of change.removeTools) delete attachment.registered.tools[name];
+    for (const { key } of change.removeFlags) delete attachment.registered.flags[key];
+    for (const tool of change.tools) {
+      const revision = applied.revisions?.tools[String(tool["name"])];
+      if (revision !== undefined) attachment.registered.tools[String(tool["name"])] = revision;
+    }
+    for (const key of Object.keys(trueFlags(change.flags))) {
+      const revision = applied.revisions?.flags[key];
+      if (revision !== undefined) attachment.registered.flags[key] = revision;
+    }
   }
 
   /** Detaches one connection from one session; durable releases only that session's live claims of the connection. */
@@ -2173,7 +2247,18 @@ export class SessionManager implements SessionsService {
     const sessionId = (params as { sessionId?: unknown } | undefined)?.sessionId;
     const live = typeof sessionId === "string" ? this.#live.get(sessionId) : undefined;
     const destination = live?.cutover?.destination?.upstream === upstream ? live.cutover.destination : undefined;
-    if (live && live.upstream !== upstream && live.residency === undefined && !destination) throw new RpcError(-32000, "Stale runtime connection", { code: "conflict" });
+    const stale = live !== undefined && live.upstream !== upstream && live.residency === undefined && !destination;
+    // The runtime carries on after an error from hooks.invoke, so a hook nobody may answer gets the closed answer.
+    if (method === "hooks.invoke") {
+      const body = (params ?? {}) as Record<string, unknown>;
+      const id = typeof sessionId === "string" ? sessionId : "(unknown)";
+      if (!live) return this.#hookClosed(id, body, `Session ${id} is not running on this runtime.`);
+      if (stale || (live.cutover?.fenced && upstream === live.cutover.source) || live.sealedSource?.upstream === upstream) {
+        return this.#hookClosed(id, body, `Session ${id} is moving to another runtime.`);
+      }
+      return this.#invokeHook(live, body, context);
+    }
+    if (stale) throw new RpcError(-32000, "Stale runtime connection", { code: "conflict" });
     const sandboxHandler =
       (destination ? destination.sandbox.handlers?.get(method) : live?.sandbox?.handlers?.get(method)) ?? (upstream.info.kind === "sandbox" ? this.#sandboxHandlerFor(upstream, method) : undefined);
     if (sandboxHandler) return sandboxHandler(params);
@@ -2186,10 +2271,8 @@ export class SessionManager implements SessionsService {
       // A fenced source asks nobody: the session is moving, and after the seal its requests are handoff artifacts
       // (as they are from a source an aborted cutover sealed, until the session's resume there is answered).
       if ((live.cutover?.fenced && upstream === live.cutover.source) || live.sealedSource?.upstream === upstream) {
-        if (method === "hooks.invoke") return this.#hookClosed(live, params as Record<string, unknown>, `Session ${live.id} is moving to another runtime.`);
         throw new RpcError(-32000, "The session is moving to another runtime", { code: "promotion_busy" });
       }
-      if (method === "hooks.invoke") return this.#invokeHook(live, (params ?? {}) as Record<string, unknown>, context);
       const flag = CLIENT_REQUESTS[method];
       const attachments = [...live.attachments.values()].sort((a, b) => b.attachedAt - a.attachedAt);
       const target = attachments.find((attachment) => !attachment.peer.closed && (flag === undefined || attachment[flag] === true));
@@ -2240,17 +2323,18 @@ export class SessionManager implements SessionsService {
    */
   async #ownerToken(live: LiveSession): Promise<{ token: string; expiresAt?: number }> {
     const auth = this.#options.auth;
-    const present = [
+    // Each candidate must still be connected (or present) once its verification finishes.
+    const present: { readonly principal: Principal; readonly current: () => boolean }[] = [
       ...this.#preferred(live)
         .filter((attachment) => !attachment.peer.closed)
-        .map((attachment) => attachment.peer.principal),
-      ...live.presences.values(),
+        .map((attachment) => ({ principal: attachment.peer.principal, current: () => live.attachments.get(attachment.peer.id) === attachment && !attachment.peer.closed })),
+      ...[...live.presences.entries()].map(([key, principal]) => ({ principal, current: () => live.presences.get(key) === principal })),
     ];
-    for (const principal of present) {
+    for (const { principal, current } of present) {
       if (principal.accountId !== live.ownerId) continue;
       try {
         const verified = await auth.authenticate(principal.token);
-        if (verified.accountId !== live.ownerId) continue;
+        if (verified.accountId !== live.ownerId || !current() || live.deleting) continue;
         const expiresAt = auth.tokenExpiration(principal.token);
         return { token: principal.token, ...(expiresAt !== undefined ? { expiresAt } : {}) };
       } catch (error) {
@@ -2317,6 +2401,7 @@ export class SessionManager implements SessionsService {
       canvases: false,
       declarations: [],
       flags: {},
+      registered: { tools: {}, flags: {} },
     });
     // The CLI's operations apply only to what it attached to: never queued into another runtime or incarnation.
     const owned = (): void => {
@@ -2365,6 +2450,13 @@ export class SessionManager implements SessionsService {
           case "abort":
             send();
             return;
+          case "userInput":
+            // A person never races the app's onUserInputRequest for the same question.
+            if ([...live.attachments.values()].some((attachment) => attachment.peer.kind === "sdk" && attachment.requestUserInput && !attachment.peer.closed)) {
+              throw new ManagedCopilotError("conflict", `An app connected to session ${sessionId} answers its questions (onUserInputRequest); answer there.`, { sessionId });
+            }
+            send();
+            return;
           default:
             throw new ManagedCopilotError("invalid_request", `Copilot CLI operation "${String((operation as { kind?: unknown }).kind)}" is not supported`);
         }
@@ -2376,8 +2468,12 @@ export class SessionManager implements SessionsService {
         owned();
         const actions = this.#actions;
         if (actions) {
-          const decision = await actions.onClientAnswer({ sessionId, ...this.#incarnationOf(sessionId), connectionId: peer.id, responderKind: "cli", method, params });
+          // The ledger's decision for the incarnation and generation the CLI attached to; nothing it does not record
+          // reaches the runtime.
+          const pin = { incarnation: pinned.incarnation, generation: pinned.generation, requireRecorded: true as const };
+          const decision = await actions.onClientAnswer({ sessionId, ...pin, connectionId: peer.id, responderKind: "cli", method, params });
           if (decision.kind === "respond") return decision.response;
+          throw new ManagedCopilotError("not_found", `No recorded prompt of session ${sessionId} matches this answer, so it is not sent.`, { sessionId });
         }
         owned();
         return pinned.upstream.request(method, { ...params, sessionId });
@@ -2498,13 +2594,33 @@ function inventoryOf(stored: AdmittedConfig): CallbackInventory {
 function applyInventory(base: CallbackInventory | undefined, change: InventoryChange | undefined): CallbackInventory {
   const tools = new Map((base?.tools ?? []).map((tool) => [String(tool["name"]), tool] as const));
   const flags: Record<string, true> = { ...base?.flags };
+  const revisions = { tools: { ...base?.revisions?.tools }, flags: { ...base?.revisions?.flags } };
+  let revision = base?.revision ?? 0;
   if (change) {
-    for (const name of change.removeTools) tools.delete(name);
-    for (const key of change.removeFlags) delete flags[key];
-    for (const tool of change.tools) tools.set(String(tool["name"]), tool);
-    Object.assign(flags, trueFlags(change.flags));
+    for (const { name, revision: seen } of change.removeTools) {
+      if (revisions.tools[name] !== seen) continue;
+      tools.delete(name);
+      delete revisions.tools[name];
+    }
+    for (const { key, revision: seen } of change.removeFlags) {
+      if (revisions.flags[key] !== seen) continue;
+      delete flags[key];
+      delete revisions.flags[key];
+    }
+    const added = trueFlags(change.flags);
+    if (change.tools.length > 0 || Object.keys(added).length > 0) {
+      revision += 1;
+      for (const tool of change.tools) {
+        tools.set(String(tool["name"]), tool);
+        revisions.tools[String(tool["name"])] = revision;
+      }
+      for (const key of Object.keys(added)) {
+        flags[key] = true;
+        revisions.flags[key] = revision;
+      }
+    }
   }
-  return { tools: [...tools.values()], flags };
+  return { tools: [...tools.values()], flags, revisions, revision };
 }
 
 /** The registration in create/resume params: the client's tool declarations (no platform tools) and handler flags. */
