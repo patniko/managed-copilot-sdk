@@ -1073,7 +1073,8 @@ export class Factory {
       await active.session.sendAndWait({ prompt }, timeoutMs);
     } catch (error) {
       if (run.abort.signal.aborted) throw new CancelledError();
-      if (/timeout|timed out/i.test((error as Error).message ?? "")) {
+      // The agent's own time running out. A platform deadline ("… [timeout]" from a registration step) is an interruption.
+      if (!isPlatformInterruption(error) && /timeout|timed out/i.test((error as Error).message ?? "")) {
         await active.session.abort().catch(() => undefined);
         throw new StationError("timeout", `The ${station.agent} agent didn't finish within ${Math.round(timeoutMs / 60_000)} minutes.`);
       }

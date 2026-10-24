@@ -372,8 +372,25 @@ export class FakeSandboxes {
   failNextPrepare: Error | undefined;
   /** Errors the next `initialize` calls throw, in order (test hook; e.g. a runtime restart asking to reopen). */
   readonly initializeFailures: Error[] = [];
+  /** Fails the next `delete` (test hook). */
+  failNextDelete: Error | undefined;
+  readonly #openHolds: { gate: Promise<void>; arrived: () => void }[] = [];
 
   constructor(private readonly runtime: FakeRuntime) {}
+
+  /** Holds the next `openRuntime` until `release()` (test hook). */
+  holdNextOpen(): { readonly held: Promise<void>; release(): void } {
+    let release!: () => void;
+    let arrived!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    this.#openHolds.push({ gate, arrived });
+    return { held, release };
+  }
 
   ops(sessionId: string): string[] {
     return this.log.filter((entry) => entry.sessionId === sessionId).map((entry) => entry.op);
@@ -396,6 +413,11 @@ export class FakeSandboxes {
 
   async openRuntime(sessionId: string, options: { resolveToken(): Promise<string> }) {
     this.log.push({ op: "openRuntime", sessionId });
+    const hold = this.#openHolds.shift();
+    if (hold) {
+      hold.arrived();
+      await hold.gate;
+    }
     const socket = connectTcp(this.runtime.port, "127.0.0.1");
     await once(socket, "connect");
     this.streams.set(sessionId, socket);
@@ -434,6 +456,9 @@ export class FakeSandboxes {
 
   async delete(sessionId: string): Promise<void> {
     this.log.push({ op: "delete", sessionId });
+    const failure = this.failNextDelete;
+    this.failNextDelete = undefined;
+    if (failure) throw failure;
   }
 
   get(): undefined {
