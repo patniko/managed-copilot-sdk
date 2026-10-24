@@ -121,6 +121,13 @@ denies configuration RPCs it does not understand.
   client's session lifecycle events. Owner checks are never weakened to make a helper work.
 - The SDK validates the deployment URL before sending a credential: HTTPS for remote deployments, HTTP only for
   verified loopback, no embedded credentials, and a validated discovery record.
+- **GitHub verification** (`auth`). Tokens are verified against GitHub `/user` (cached 5 minutes) plus the AppHost
+  access rules. Transport errors, timeouts, and 5xx answers are retried with jittered backoff inside a 35 s deadline;
+  rate limits are not retried. While GitHub is unreachable, a token's last successful verification stands in for up
+  to 15 minutes (re-checked in the background every 30 s); a rejection (401, a non-rate-limit 403, or `forbidden`)
+  replaces it, so it never revives a rejected token. Otherwise callers get `upstream_unavailable` (HTTP 503 with
+  `Retry-After` and `details.retryAfterSeconds`), never `authentication_required` for an outage. Long-lived
+  connections re-verify at most once a minute and are closed only for `authentication_required`/`forbidden`.
 
 ### Credentials and inference
 
@@ -379,7 +386,7 @@ structurally (they may add members).
 
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
-| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected); `liveCredential(accountId)` |
+| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity); `liveCredential(accountId)` |
 | `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
 | `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
@@ -423,10 +430,18 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 - **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
   delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the first attached
   client able to answer, in durable's preference order (the creating connection, then by attach time), gets them and
-  other eligible clients are withheld. `session.lifecycle` goes only to
+  other eligible clients are withheld. Replayed actions (`onAttached`) take the same sanitizing path. `session.detach`,
+  deletion, and failed creates call `onDetached(connectionId, sessionId)`; only a closed connection calls
+  `onDetached(connectionId)`. `session.lifecycle` goes only to
   the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Everything a shared session
   sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
-  rewritten (`/workspace` for the session directory, `/platform` otherwise).
+  rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
+  (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
+  else under the data directory (including its resolved form) `/platform`.
+- **Agents.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a restore
+  (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
+  Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
+  create/resume params and selects it in `sessionOpened`.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
