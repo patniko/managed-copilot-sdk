@@ -8,6 +8,8 @@
  *   --fresh              Start a new conversation first (Settings → Start over)
  *   --reminder           Ask for a reminder one minute out and wait for the proactive message (needs schedules)
  *   --offline            Close the tab, let a scheduled check-in use the calendar through the webhook, then reopen
+ *   --enable-background  If background work is off, turn it on with the side panel's one-click button (your consent
+ *                        to keep a sealed copy of your GitHub sign-in on the deployment for scheduled work)
  *   --screenshots <dir>  Save screenshots (light, dark, and mobile) into <dir>
  *   --headed             Show the browser window
  */
@@ -79,8 +81,31 @@ async function lastReply(page: Page): Promise<string> {
   return text.replace(/\s+/g, " ").slice(0, 160);
 }
 
-async function state(page: Page): Promise<{ schedulesError?: string; offline: { webhookConfigured: boolean } }> {
+async function state(page: Page): Promise<{ schedulesError?: string; offline: { webhookConfigured: boolean }; background: { state: string } }> {
   return page.evaluate(async () => (await fetch("/api/state")).json());
+}
+
+/** Scheduled steps need background work; with --enable-background the script clicks the side panel's button. */
+async function ensureBackgroundWork(page: Page): Promise<void> {
+  let current = (await state(page)).background.state;
+  for (let i = 0; current === "unknown" && i < 20; i++) {
+    await page.waitForTimeout(500);
+    current = (await state(page)).background.state;
+  }
+  if (current !== "off") {
+    ok(`background work is ${current}`);
+    return;
+  }
+  if (!flag("enable-background")) {
+    throw new Error("Background work is off. Turn it on in the side panel (or run `npx managed-copilot login`), or pass --enable-background.");
+  }
+  step("Turn on background work (one click, with consent)");
+  const card = page.locator('#background-work[data-state="off"]');
+  await card.waitFor({ timeout: 10_000 });
+  await shot(page, "background");
+  await card.getByRole("button", { name: /Turn (on background work|background work back on)/ }).click();
+  await page.locator('[data-testid="background"][data-state="on"]').waitFor({ timeout: 30_000 });
+  ok("background work is on");
 }
 
 async function main(): Promise<void> {
@@ -101,8 +126,15 @@ async function main(): Promise<void> {
       await page.getByText("Triage my inbox").waitFor({ timeout: 120_000 });
       await waitOnline(page);
       ok("fresh conversation ready");
-      await shot(page, "welcome");
     }
+
+    // Like a first run: reminders and check-ins need background work, so it's turned on before anything else.
+    if (flag("reminder") || flag("offline")) {
+      const { schedulesError } = await state(page);
+      if (schedulesError) throw new Error(`Schedules are unavailable: ${schedulesError}`);
+      await ensureBackgroundWork(page);
+    }
+    if (flag("fresh")) await shot(page, "welcome");
 
     step("Triage the demo inbox");
     await send(page, "Triage my unread email: what needs a reply, what's FYI, and what can wait?");
@@ -124,9 +156,7 @@ async function main(): Promise<void> {
     ok(`reply: ${await lastReply(page)}…`);
     await shot(page, "meeting");
 
-    const current = await state(page);
     if (flag("reminder")) {
-      if (current.schedulesError) throw new Error(`Schedules are unavailable: ${current.schedulesError}`);
       step("Ask for a reminder one minute from now");
       await send(page, "Remind me in 1 minute to stretch and grab some water.");
       await waitTurn(page);
@@ -140,7 +170,6 @@ async function main(): Promise<void> {
     }
 
     if (flag("offline")) {
-      if (current.schedulesError) throw new Error(`Schedules are unavailable: ${current.schedulesError}`);
       step("Schedule a check-in that needs the calendar, then close the tab");
       await send(page, "In 2 minutes, check my calendar for the next business day and tell me when my first meeting starts and what it is.");
       await waitTurn(page);

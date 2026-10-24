@@ -3,6 +3,7 @@ import {
   CalendarDays,
   Check,
   CircleAlert,
+  Copy,
   Ellipsis,
   LoaderCircle,
   Mail,
@@ -10,18 +11,41 @@ import {
   Pause,
   Play,
   Plus,
+  Power,
   Repeat,
   RotateCcw,
   Satellite,
+  ShieldAlert,
   ShieldCheck,
+  Terminal,
   Trash,
   Unplug,
   Zap,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import type { AgendaView, ConnectionsView, OfflineView, PlatformStatus, ScheduleView } from "../../../shared/protocol";
+import type { AccountView, AgendaView, BackgroundView, ConnectionsView, OfflineView, PlatformStatus, ScheduleView } from "../../../shared/protocol";
 import { dayLabel, fullDate, relativeTime, timeOf, timeRange, whenLabel } from "../format";
 import type { AssistantActions } from "../useAssistant";
+
+/** Shown on scheduling controls that need background work. */
+export const NEEDS_BACKGROUND = "Turn on background work first, so this can run while you're away";
+export const LOGIN_COMMAND = "npx managed-copilot login";
+
+/** Why actions that make scheduled work run are disabled, or undefined once background work is confirmed on. */
+export function schedulingBlockedReason(background?: BackgroundView): string | undefined {
+  switch (background?.state) {
+    case "on":
+      return undefined;
+    case "off":
+      return NEEDS_BACKGROUND;
+    case "unavailable":
+      return "This deployment can't run work while you're away";
+    case "error":
+      return "Couldn't check whether background work is on";
+    default:
+      return "Checking background work…";
+  }
+}
 
 function Card({ title, icon, badge, children }: { title: string; icon: ReactNode; badge?: ReactNode; children: ReactNode }) {
   return (
@@ -101,7 +125,7 @@ export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; tim
   );
 }
 
-function ScheduleMenu({ schedule, actions }: { schedule: ScheduleView; actions: AssistantActions }) {
+function ScheduleMenu({ schedule, actions, blockedReason }: { schedule: ScheduleView; actions: AssistantActions; blockedReason?: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -121,7 +145,9 @@ function ScheduleMenu({ schedule, actions }: { schedule: ScheduleView; actions: 
         <div className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-xl bg-white py-1 text-sm shadow-lg ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-700">
           <button
             type="button"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-zinc-800"
+            disabled={blockedReason !== undefined}
+            title={blockedReason}
             onClick={() => {
               setOpen(false);
               void actions.runSchedule(schedule.id);
@@ -145,16 +171,159 @@ function ScheduleMenu({ schedule, actions }: { schedule: ScheduleView; actions: 
   );
 }
 
+/**
+ * Background work is off: explain what turning it on means (the consent), then offer one click, or the terminal.
+ * This is the only place the app turns it on.
+ */
+export function BackgroundOffNotice({ background, account, ready, highlight, actions }: { background: BackgroundView; account?: AccountView; ready: boolean; highlight?: boolean; actions: AssistantActions }) {
+  const [busy, setBusy] = useState<"enable" | "check" | undefined>();
+  const [copied, setCopied] = useState(false);
+  const stopped = background.reason !== undefined;
+  const login = background.login ?? account?.login;
+  const act = async (key: "enable" | "check", fn: () => Promise<unknown>) => {
+    setBusy(key);
+    try {
+      await fn();
+    } finally {
+      setBusy(undefined);
+    }
+  };
+  return (
+    <section
+      id="background-work"
+      data-testid="background"
+      data-state="off"
+      aria-label="Background work"
+      className={`rounded-2xl bg-amber-50 p-4 ring-1 transition-shadow dark:bg-amber-500/10 ${
+        highlight ? "ring-2 ring-violet-400 dark:ring-violet-400" : "ring-amber-200/80 dark:ring-amber-500/25"
+      }`}
+    >
+      <div className="flex items-start gap-2.5">
+        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+        <div className="min-w-0 text-xs text-amber-950 dark:text-amber-100">
+          <div className="text-[13px] font-semibold">{stopped ? "Background work stopped" : "Background work is off"}</div>
+          <p className="mt-0.5 opacity-90">
+            {stopped ? `${background.reason} ` : ""}
+            Reminders and automations can't run while this tab is closed until you turn it on.
+          </p>
+        </div>
+      </div>
+      <p className="mt-2.5 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-300" id="background-consent">
+        Turning it on lets Managed Copilot keep a sealed copy of your GitHub sign-in{login ? ` (@${login})` : ""} on this deployment, so your scheduled work runs
+        as you while you're away. It covers all your scheduled work on this deployment, and you can turn it off anytime in Settings.
+      </p>
+      <button
+        type="button"
+        className="btn-primary mt-2.5 w-full"
+        aria-describedby="background-consent"
+        disabled={!ready || busy !== undefined}
+        title={ready ? undefined : "Managed Copilot isn't connected"}
+        onClick={() => void act("enable", () => actions.enableBackground())}
+      >
+        {busy === "enable" ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <Power className="size-4" aria-hidden />}
+        {stopped ? "Turn background work back on" : "Turn on background work"}
+      </button>
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+        <Terminal className="size-3.5 shrink-0" aria-hidden />
+        <span>Prefer a terminal? Run</span>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 rounded bg-white/80 px-1.5 py-0.5 font-mono text-[11px] text-zinc-700 ring-1 ring-zinc-200 hover:bg-white dark:bg-zinc-900/60 dark:text-zinc-200 dark:ring-zinc-700"
+          title="Copy the command"
+          onClick={() => {
+            void navigator.clipboard?.writeText(LOGIN_COMMAND).then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            });
+          }}
+        >
+          {LOGIN_COMMAND}
+          {copied ? <Check className="size-3 text-emerald-500" aria-label="Copied" /> : <Copy className="size-3" aria-hidden />}
+        </button>
+        <span>then</span>
+        <button
+          type="button"
+          className="font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
+          disabled={!ready || busy !== undefined}
+          onClick={() => void act("check", () => actions.checkBackground())}
+        >
+          {busy === "check" ? "checking…" : "check again"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function BackgroundStatusLine({ background, ready, actions }: { background?: BackgroundView; ready: boolean; actions: AssistantActions }) {
+  const [checking, setChecking] = useState(false);
+  if (!ready) return null;
+  if (background?.state === "on") {
+    return (
+      <div data-testid="background" data-state="on" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <ShieldCheck className="size-3.5 shrink-0 text-emerald-500" aria-hidden />
+        <span>
+          Background work is on{background.login ? ` · runs as @${background.login}` : ""} while you're away
+        </span>
+      </div>
+    );
+  }
+  if (background?.state === "unavailable") {
+    return (
+      <div data-testid="background" data-state="unavailable" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <CircleAlert className="size-3.5 shrink-0 text-zinc-400" aria-hidden />
+        <span>This deployment can't run work while you're away, so reminders and automations aren't available.</span>
+      </div>
+    );
+  }
+  if (background === undefined || background.state === "unknown") {
+    return (
+      <div data-testid="background" data-state="unknown" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <LoaderCircle className="size-3.5 shrink-0 animate-spin text-zinc-400" aria-hidden />
+        <span>Checking background work…</span>
+      </div>
+    );
+  }
+  if (background?.state === "error") {
+    return (
+      <div data-testid="background" data-state="error" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
+        <CircleAlert className="size-3.5 shrink-0 text-amber-500" aria-hidden />
+        <span className="min-w-0 flex-1 truncate" title={background.error}>
+          Couldn't check background work
+        </span>
+        <button
+          type="button"
+          className="font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
+          disabled={checking}
+          onClick={async () => {
+            setChecking(true);
+            try {
+              await actions.checkBackground();
+            } finally {
+              setChecking(false);
+            }
+          }}
+        >
+          {checking ? "Checking…" : "Retry"}
+        </button>
+      </div>
+    );
+  }
+  return null;
+}
+
 export function AutomationsCard(props: {
   schedules: readonly ScheduleView[];
   error?: string;
   timeZone: string;
   highlight?: string;
   ready: boolean;
+  background?: BackgroundView;
   actions: AssistantActions;
 }) {
   const { schedules, actions } = props;
   const [busy, setBusy] = useState<string | undefined>();
+  const backgroundOff = props.background?.state === "off";
+  const scheduleBlocked = schedulingBlockedReason(props.background);
   const act = async (id: string, fn: () => Promise<unknown>) => {
     setBusy(id);
     try {
@@ -163,6 +332,7 @@ export function AutomationsCard(props: {
       setBusy(undefined);
     }
   };
+  const briefingBlocked = props.error ?? (props.ready ? scheduleBlocked : "Managed Copilot isn't connected");
   return (
     <Card title="Reminders & automations" icon={<Bell className="size-4" />} badge={schedules.length ? <span className="text-xs text-zinc-400">{schedules.length}</span> : undefined}>
       {props.error && (
@@ -173,12 +343,16 @@ export function AutomationsCard(props: {
       )}
       {schedules.length === 0 ? (
         <div className="text-sm text-zinc-500 dark:text-zinc-400">
-          <p>Ask me to remind you about something, or to do a task on a schedule. They run on Managed Copilot even when this tab is closed.</p>
+          <p>
+            {backgroundOff
+              ? "Once background work is on, ask me to remind you about something or to do a task on a schedule."
+              : "Ask me to remind you about something, or to do a task on a schedule. They run on Managed Copilot even when this tab is closed."}
+          </p>
           <button
             type="button"
             className="btn-secondary mt-3 w-full"
-            disabled={!props.ready || props.error !== undefined || busy === "briefing"}
-            title={props.error ?? (props.ready ? undefined : "Managed Copilot isn't connected")}
+            disabled={briefingBlocked !== undefined || busy === "briefing"}
+            title={briefingBlocked}
             onClick={() => void act("briefing", () => actions.addBriefing())}
           >
             {busy === "briefing" ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <Plus className="size-4" aria-hidden />}
@@ -191,6 +365,7 @@ export function AutomationsCard(props: {
             const Icon = schedule.oneShot ? Bell : Repeat;
             const paused = schedule.state === "paused";
             const failed = schedule.lastRun?.status === "failed";
+            const resumeBlocked = paused ? scheduleBlocked : undefined;
             return (
               <li
                 key={schedule.id}
@@ -205,9 +380,9 @@ export function AutomationsCard(props: {
                     {schedule.name}
                   </div>
                   <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">{schedule.cadence}</div>
-                  <div className="truncate text-[11px] text-zinc-400">
-                    {paused ? "Paused" : schedule.nextRunAt ? `Next: ${whenLabel(schedule.nextRunAt, props.timeZone)}` : schedule.lastRun ? "Finished" : "Waiting to run"}
-                    {failed && <span className="ml-1 text-red-500">· Last run failed{schedule.lastRun?.reason ? `: ${schedule.lastRun.reason}` : ""}</span>}
+                  <div className="truncate text-[11px] text-zinc-400" title={paused ? schedule.pausedReason : undefined}>
+                    {paused ? (schedule.pausedReason ? `Paused · ${schedule.pausedReason}` : "Paused") : schedule.nextRunAt ? `Next: ${whenLabel(schedule.nextRunAt, props.timeZone)}` : schedule.lastRun ? "Finished" : "Waiting to run"}
+                    {failed && !(paused && schedule.pausedReason) && <span className="ml-1 text-red-500">· Last run failed{schedule.lastRun?.reason ? `: ${schedule.lastRun.reason}` : ""}</span>}
                     {!failed && schedule.lastRun?.completedAt && <span> · Last ran {relativeTime(schedule.lastRun.completedAt)}</span>}
                     {schedule.createdBy === "agent" && <span> · Set by your assistant</span>}
                   </div>
@@ -219,26 +394,27 @@ export function AutomationsCard(props: {
                     <button
                       type="button"
                       className="btn-ghost px-1.5 py-1"
-                      disabled={!props.ready}
+                      disabled={!props.ready || resumeBlocked !== undefined}
                       onClick={() => void act(schedule.id, () => (paused ? actions.resumeSchedule(schedule.id) : actions.pauseSchedule(schedule.id)))}
                       aria-label={paused ? `Resume ${schedule.name}` : `Pause ${schedule.name}`}
-                      title={paused ? "Resume" : "Pause"}
+                      title={resumeBlocked ?? (paused ? "Resume" : "Pause")}
                     >
                       {paused ? <Play className="size-4" aria-hidden /> : <Pause className="size-4" aria-hidden />}
                     </button>
                   )}
-                  <ScheduleMenu schedule={schedule} actions={actions} />
+                  <ScheduleMenu schedule={schedule} actions={actions} blockedReason={scheduleBlocked} />
                 </div>
               </li>
             );
           })}
         </ul>
       )}
+      <BackgroundStatusLine background={props.background} ready={props.ready} actions={actions} />
     </Card>
   );
 }
 
-export function AwayCard({ offline, platform }: { offline?: OfflineView; platform?: PlatformStatus }) {
+export function AwayCard({ offline, platform, background }: { offline?: OfflineView; platform?: PlatformStatus; background?: BackgroundView }) {
   const ready = platform?.state === "ready";
   return (
     <Card title="Works while you're away" icon={<Satellite className="size-4" />}>
@@ -247,6 +423,12 @@ export function AwayCard({ offline, platform }: { offline?: OfflineView; platfor
         signed webhook, so your Google credentials never leave it.
       </p>
       <ul className="mt-3 space-y-1.5 text-xs">
+        {background && (background.state === "on" || background.state === "off") && (
+          <li className="flex items-center gap-2">
+            {background.state === "on" ? <Check className="size-3.5 text-emerald-500" aria-hidden /> : <CircleAlert className="size-3.5 text-amber-500" aria-hidden />}
+            <span className="text-zinc-600 dark:text-zinc-300">{background.state === "on" ? "Background work on" : "Background work off (reminders can't run while you're away)"}</span>
+          </li>
+        )}
         <li className="flex items-center gap-2">
           {offline?.webhookConfigured ? <Check className="size-3.5 text-emerald-500" aria-hidden /> : <CircleAlert className="size-3.5 text-amber-500" aria-hidden />}
           <span className="text-zinc-600 dark:text-zinc-300">{offline?.webhookConfigured ? "Webhook configured" : "Webhook secret not set (falls back to polling)"}</span>
@@ -362,6 +544,8 @@ export function Rail(props: {
   schedules: readonly ScheduleView[];
   schedulesError?: string;
   offline?: OfflineView;
+  background?: BackgroundView;
+  account?: AccountView;
   platform?: PlatformStatus;
   connections?: ConnectionsView;
   timeZone: string;
@@ -372,10 +556,22 @@ export function Rail(props: {
   const demo = props.connections?.provider !== "google";
   return (
     <div className="flex flex-col gap-3">
+      {/* While it's off, background work is the one thing here that needs the person, so it comes first. */}
+      {props.background?.state === "off" && (
+        <BackgroundOffNotice background={props.background} account={props.account} ready={ready} highlight={props.highlightSchedule === "background"} actions={props.actions} />
+      )}
       <TodayCard agenda={props.agenda} timeZone={props.timeZone} demo={demo} />
-      <AutomationsCard schedules={props.schedules} error={props.schedulesError} timeZone={props.timeZone} highlight={props.highlightSchedule} ready={ready} actions={props.actions} />
+      <AutomationsCard
+        schedules={props.schedules}
+        error={props.schedulesError}
+        timeZone={props.timeZone}
+        highlight={props.highlightSchedule}
+        ready={ready}
+        background={props.background}
+        actions={props.actions}
+      />
       <ConnectionsCard connections={props.connections} ready={ready} actions={props.actions} />
-      <AwayCard offline={props.offline} platform={props.platform} />
+      <AwayCard offline={props.offline} platform={props.platform} background={props.background} />
     </div>
   );
 }

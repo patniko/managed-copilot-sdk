@@ -1,4 +1,4 @@
-import type { ApiError } from "../../shared/protocol";
+import type { ApiError, BackgroundView } from "../../shared/protocol";
 
 export class ApiRequestError extends Error {
   readonly code: string;
@@ -50,4 +50,8 @@ export const api = {
   disconnectGoogle: () => request("POST", "/api/google/disconnect", {}),
   resetDemo: () => request("POST", "/api/demo/reset", {}),
   startOver: () => request("POST", "/api/conversation/reset", {}),
+  /** Only after the person agreed to the consent copy shown next to the button. */
+  enableBackground: () => request<BackgroundView>("POST", "/api/background/enable", { consent: true }),
+  disableBackground: () => request<BackgroundView>("POST", "/api/background/disable", {}),
+  checkBackground: () => request<BackgroundView>("POST", "/api/background/refresh", {}),
 };
