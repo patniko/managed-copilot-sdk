@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isManagedCopilotError, NETWORK_ENABLED, parseConfig } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
 import { redact } from "../src/log.js";
-import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
+import { admitOptionsUpdate, admitSession, lockSystemMessage, PROMOTABLE_ENVIRONMENT_CONTEXT, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
 import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
@@ -199,6 +199,9 @@ describe("shared admission", () => {
       sections: { environment_context: environment, code_change_rules: { action: "preserve" } },
     });
     expect(lockSystemMessage({ mode: "replace", content: "Only this." })).toEqual({ mode: "replace", content: "Only this." });
+    // Promotable sessions are pointed at request_sandbox for work that needs a shell or files.
+    expect(lockSystemMessage(undefined, { promotable: true })).toMatchObject({ sections: { environment_context: { action: "replace", content: PROMOTABLE_ENVIRONMENT_CONTEXT } } });
+    expect(PROMOTABLE_ENVIRONMENT_CONTEXT).toContain("call request_sandbox first");
   });
 
   it("allows workload capabilities in sandbox placement but keeps credentials and billing platform-owned", () => {

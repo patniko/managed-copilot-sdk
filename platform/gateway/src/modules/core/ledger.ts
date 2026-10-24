@@ -180,7 +180,7 @@ export class SessionLedger {
     return rows.map(toRecord);
   }
 
-  update(id: string, fields: Partial<{ state: SessionState; title: string; model: string; agent: string; network: NetworkPolicy; admitted: AdmittedConfig; generation: number; lastTurn: SessionRecord["lastTurn"] }>): void {
+  update(id: string, fields: Partial<{ state: SessionState; title: string; model: string; agent: string; network: NetworkPolicy; admitted: AdmittedConfig; generation: number; placement: Placement; lastTurn: SessionRecord["lastTurn"] }>): void {
     const sets: string[] = ["updated_at = ?"];
     const args: (string | number | null)[] = [new Date().toISOString()];
     const map: Record<string, [string, (value: unknown) => string | number | null]> = {
@@ -191,6 +191,7 @@ export class SessionLedger {
       network: ["network", (value) => JSON.stringify(value)],
       admitted: ["admitted", (value) => JSON.stringify(value)],
       generation: ["generation", (value) => value as number],
+      placement: ["placement", (value) => value as string],
       lastTurn: ["last_turn", (value) => (value === undefined ? null : JSON.stringify(value))],
     };
     for (const [key, value] of Object.entries(fields)) {

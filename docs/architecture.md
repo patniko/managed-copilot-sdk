@@ -387,7 +387,7 @@ structurally (they may add members).
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
 | `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity); `liveCredential(accountId)` |
-| `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
+| `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
 | `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
@@ -442,6 +442,24 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
   Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
   create/resume params and selects it in `sessionOpened`.
+- **Restores.** The stock runtime persists a session with its first turn, so a restarted runtime does not know a
+  session that never ran one: it is created again with the same ID and stored configuration. A session whose history
+  the runtime lost fails with `state_restore_failed`. A shared runtime left running by a dead gateway (recorded with its
+  pid and start time in `<data>/runtime/shared/runtime.json`) is stopped before a new one starts.
+- **Placement cutover** (`sessions.cutover`, used by promotion). `fence()` marks the session `promoting`, holds new
+  client and service requests behind its residency, and buffers what the source sends; the first
+  `source("session.suspend" | "sessions.close")` seals it, after which the source's events, lifecycle notifications,
+  replies, and client-bound requests are handoff artifacts that reach nobody. `open(extra)` admits the session's
+  stored requested configuration (`AdmittedConfig.requested`) for sandbox placement with its current model and agent,
+  attached clients' registrations, and the sandbox platform tools, then runs the sandbox upstream sequence.
+  `commit()` moves placement, generation (+1), and the admitted configuration in one ledger update, switches routing,
+  flushes buffered source events (with the source generation) and early destination events in order, delivers replies
+  the source gave before the seal, lifts the fence, and only then emits `onLifecycle("promoted")`. A `sendAndWait`
+  whose reply arrived after the seal completes from the owner's events (next root `session.idle`, with the last root
+  `assistant.message`; a root `session.error` fails it). `abort({ resume })` closes the destination, flushes the
+  buffer, and leaves the source the owner (resumed there with `resume` extras if it was sealed). Deleting the session
+  aborts an open cutover; rows left `promoting` by a crash return to `idle` at startup. Durable fences actions by
+  generation, so carrying a pending call across the move is the promotion module's job.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
