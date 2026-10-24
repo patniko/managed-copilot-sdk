@@ -6,6 +6,7 @@ import { isManagedCopilotError, ManagedCopilotError } from "@managed-copilot/pro
 import { migrate, openDatabase, type Database } from "../../src/db.js";
 import type { Authenticator, Principal } from "../../src/http.js";
 import type { Logger } from "../../src/log.js";
+import { GitHubAuthenticator } from "../../src/modules/core/auth.js";
 import type { SchedulesService } from "../../src/modules/durable/contract.js";
 import { DurableCredentials } from "../../src/modules/durable/credentials/service.js";
 import { loadDurableKeys, seal, unseal } from "../../src/modules/durable/keys.js";
@@ -179,5 +180,44 @@ describe("background credentials", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Core's authenticator learns background verification and forgetCredential in its incarnation batch; until that is
+  // on this branch, these run against FakeAuth above only.
+  const coreSupportsBackground = typeof (GitHubAuthenticator.prototype as { forgetCredential?: unknown }).forgetCredential === "function";
+
+  it.skipIf(!coreSupportsBackground)("with core's GitHub authenticator, never makes a background verification the live credential, and logout drops it", async () => {
+    const users = new Map<string, unknown>([
+      [ALICE.token, { id: 7, login: "alice", name: "Alice" }],
+      ["gho_alice_app", { id: 7, login: "alice", name: "Alice" }],
+    ]);
+    // GitHub's REST API stand-in: GET /user resolves a token to its account.
+    const github = new GitHubAuthenticator({
+      apiUrl: "https://github.invalid/api",
+      log: silent,
+      retryDelaysMs: [],
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        const token = (new Headers(init?.headers).get("authorization") ?? "").replace(/^(bearer|token)\s+/i, "");
+        const user = users.get(token);
+        if (!url.endsWith("/user")) return new Response(null, { status: 404 });
+        return user ? Response.json(user) : Response.json({ message: "Bad credentials" }, { status: 401 });
+      }) as typeof fetch,
+    });
+    const schedules = { pauseAllForOwner: () => 0, syncAppHost: () => undefined } as unknown as SchedulesService;
+    const real = new DurableCredentials({ db, log: silent, sealKey: key, auth: () => github, schedules: () => schedules, now: () => now, verifyCacheMs: 60_000 });
+    real.store(ALICE);
+    expect(await real.principalFor(7)).toMatchObject({ accountId: 7, login: "alice" });
+    expect(github.liveCredential(7)).toBeUndefined();
+    // The owner's CLI presents the same token: it is the live credential until logout removes it.
+    await github.authenticate(ALICE.token);
+    expect(github.liveCredential(7)?.token).toBe(ALICE.token);
+    real.revoke(ALICE);
+    expect(github.liveCredential(7)).toBeUndefined();
+    // A connected app's own token is not the background credential, so logout leaves it alone.
+    await github.authenticate("gho_alice_app");
+    real.store(ALICE);
+    real.revoke(ALICE);
+    expect(github.liveCredential(7)?.token).toBe("gho_alice_app");
   });
 });
