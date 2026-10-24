@@ -66,6 +66,13 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
   session from copied session state without one uses its default prompt, although earlier prompts remain in history
   as `system.message` events; an explicit `systemMessage` on `session.resume` applies. So shared admission sends its locked
   prompt on every resume, and a promoted session's destination only gets what `open()` sends.
+- Suspend, close, and resume on the wire (verified live on 1.0.103, a turn waiting on an external tool or streaming):
+  between `session.suspend` and its answer the runtime sends only what the suspend causes (`external_tool.completed`,
+  `agent.interrupted`, `model.call_finished`, `model.telemetry`, `model.turn_failed`, `model.turn_ended`,
+  `assistant.turn_end`, `session.updated` lifecycle); after the answer come `session.usage_checkpoint`, the aborted
+  `session.idle`, and the in-flight `sendAndWait`'s `{ aborted: true }` reply. `sessions.close` sends `session.shutdown`
+  before its answer. A later `session.resume` (with `continuePendingWork`, the pending call stays pending and is not
+  requested again) is answered before the resumed session's first event (`session.resume`).
 
 ## Components
 
@@ -478,27 +485,37 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   the runtime lost fails with `state_restore_failed`. A shared runtime left running by a dead gateway (recorded with its
   pid and start time in `<data>/runtime/shared/runtime.json`) is stopped before a new one starts.
 - **Placement cutover** (`sessions.cutover`, used by promotion). `fence()` marks the session `promoting`, holds new
-  client and service requests behind its residency, and buffers what the source sends; the first
-  `source("session.suspend" | "sessions.close")` seals it, after which the source's events, lifecycle notifications,
-  replies, and client-bound requests are handoff artifacts that reach nobody; their event IDs are recorded
-  (`core_hidden_events`) so history reads (`session.getMessages`, client or service) never return them either.
-  Requests are checked against the fence and written to the runtime in one synchronous step, so nothing reaches the
-  source after a fence. `open(extra)` admits the session's stored requested configuration (`AdmittedConfig.requested`,
-  snapshotted before admission rewrites anything, e.g. MCP servers keep their original endpoints) for sandbox
-  placement with its current model and agent, plus the caller's later option changes (`requestedOptions`), attached
-  clients' registrations, and the sandbox platform tools, then runs the sandbox upstream sequence; the destination's
-  runtime requests (including session-less inference chunks) go to its sandbox handlers before commit.
-  `await commit()` moves placement, generation (+1), and the admitted configuration in one ledger update, switches
-  routing, delivers buffered source events (with the source's placement scrubbing and generation) and early
-  destination events in order, then replies the source gave before the seal, lifts the fence, and only then emits
-  `onLifecycle("promoted")`. A `sendAndWait` whose reply arrived after the seal completes from the owner's events
-  (next root `session.idle`, with the last root `assistant.message`; a root `session.error` fails it; deleting the
-  session fails it; outside a cutover a session that is not running is resumed for it, and fails it if that fails).
-  `abort({ resume })` closes the destination, delivers the buffer, and leaves the source the owner; a sealed session
-  is resumed there right away with the `resume` extras. Client calls and resumes admitted for one placement are
-  admitted again if a cutover moved the session while they ran. Deleting the session aborts an open cutover; rows
-  left `promoting` by a crash return to `idle` at startup. Durable fences actions by generation, so carrying a
-  pending call across the move is the promotion module's job.
+  client and service requests behind its residency, and buffers what the source sends. The first
+  `source("session.suspend" | "sessions.close")` seals it: until a sealing call is answered, what the suspend causes
+  (the wire facts above) is a handoff artifact and anything else was already on its way and is buffered; once one is
+  answered, all of the source's events, lifecycle notifications, and client-bound requests for the session are handoff
+  artifacts that reach nobody. Their event IDs are recorded (`core_hidden_events`) so history reads
+  (`session.getMessages`, `session.eventLog.read`; client or service) never return them either. Requests are checked
+  against the fence and written to the runtime in one synchronous step, so nothing reaches the source after a fence.
+  `open(extra)` admits
+  the session's stored requested configuration (`AdmittedConfig.requested`, snapshotted before admission rewrites
+  anything, e.g. MCP servers keep their original endpoints; a client resume replaces it, like the stored params) for
+  sandbox placement with its current model and agent, plus the caller's later option changes (`requestedOptions`,
+  minus what a later resume set again), attached clients' registrations, and the sandbox platform tools, then runs
+  the sandbox upstream sequence; the destination's runtime requests (including session-less inference chunks) go to
+  its sandbox handlers before commit. `await commit()` moves placement, generation (+1), and the admitted
+  configuration in one ledger update, switches routing, delivers buffered source events (with the source's placement
+  scrubbing and generation) and early destination events in order, then replies the source gave before the seal,
+  lifts the fence, and only then emits `onLifecycle("promoted")`. A `sendAndWait` the seal caught in flight is held
+  from the seal: if the source's reply is aborted (or fails), the call completes from the owner's events after the
+  seal (next root `session.idle`, with the last root `assistant.message`, even when the reply arrives after it; a root
+  `session.error` fails it; deleting the session fails it; outside a cutover a session that is not running is resumed
+  for it, and fails it if that fails), never from what the source said before the seal; a completed reply means the
+  turn ended on the source first and is delivered as is. `abort({ resume })` closes the destination, delivers the
+  buffer, and leaves the source the owner; a sealed session is resumed there right away with the `resume` extras, once
+  the sealing calls were answered, and what the source sends for it until that resume is answered is still handoff.
+  Configuration calls and client resumes a fence overtook are sent again (admitted again for a new placement) to the
+  session's owner once the fence lifts; an overtaken resume's client keeps only the attachment it had before until its
+  resume succeeds. Deleting the session aborts an open cutover; rows left `promoting` by a crash return to `idle` at
+  startup. Durable fences actions by generation, so carrying a pending call across the move is the promotion module's
+  job.
+- **History scrubbing.** A promotable session's history began on shared placement, so its history reads and action
+  replays are scrubbed with shared rules wherever it runs; the actions ledger receives events already sanitized.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input

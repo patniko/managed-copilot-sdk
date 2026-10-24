@@ -156,7 +156,12 @@ describe("placement cutover", () => {
       expect(history.events.map((event) => event.type)).not.toContain("session.shutdown");
       expect(history.events.map((event) => event.type)).not.toContain("agent.interrupted");
       expect(history.events.some((event) => event.data["content"] === "artifact after the seal")).toBe(false);
-      expect(history.events.some((event) => String(event.data["content"]).startsWith("said during the fence"))).toBe(true);
+      // History from the session's shared placement stays scrubbed after the move.
+      expect(history.events.find((event) => String(event.data["content"]).startsWith("said during the fence"))?.data["content"]).toBe("said during the fence, see /workspace/private.txt");
+      expect(history.events.find((event) => event.type === "session.start")?.data).not.toHaveProperty("context");
+      const log = await client.request<{ events: { type: string; data: Record<string, unknown> }[] }>("session.eventLog.read", { sessionId });
+      expect(log.events.find((event) => String(event.data["content"]).startsWith("said during the fence"))?.data["content"]).toBe("said during the fence, see /workspace/private.txt");
+      expect(log.events.map((event) => event.type)).not.toContain("session.shutdown");
     } finally {
       unsubscribe();
       off();
@@ -318,6 +323,206 @@ describe("placement cutover", () => {
     expect(await stranded).toMatchObject({ data: { code: "state_restore_failed" } });
   });
 
+  it("tells what the suspend caused from output already on its way while the seal is unanswered", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    // The source answers the suspend late: its interruption artifacts are already out, and so is genuine output.
+    const hold = runtime.holdNext("session.suspend", sessionId);
+    const suspending = cut.source("session.suspend");
+    await hold.held;
+    runtime.emitEvent(sessionId, "assistant.message", { content: "already on its way" });
+    runtime.emitEvent(sessionId, "model.turn_failed", { reason: "suspended" });
+    await sleep(50);
+    hold.release();
+    await suspending;
+    runtime.emitEvent(sessionId, "assistant.message", { content: "after the answer" });
+    await sleep(50);
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    await waitUntil(() => messages(client, sessionId).includes("already on its way"));
+    expect(messages(client, sessionId)).not.toContain("after the answer");
+    const history = await client.request<{ events: { type: string; data: Record<string, unknown> }[] }>("session.getMessages", { sessionId });
+    const types = history.events.map((event) => event.type);
+    expect(history.events.map((event) => event.data["content"])).toContain("already on its way");
+    expect(history.events.map((event) => event.data["content"])).not.toContain("after the answer");
+    for (const handoff of ["model.turn_failed", "agent.interrupted", "session.shutdown"]) expect(types).not.toContain(handoff);
+    expect(history.events.some((event) => event.type === "session.idle" && event.data["aborted"] === true)).toBe(false);
+    const log = await sessions().request<{ events: { type: string; data: Record<string, unknown> }[] }>(sessionId, "session.eventLog.read", {});
+    expect(log.events.map((event) => event.data["content"])).toContain("already on its way");
+    expect(log.events.map((event) => event.data["content"])).not.toContain("after the answer");
+    expect(log.events.map((event) => event.type)).not.toContain("model.turn_failed");
+  });
+
+  it("delivers a reply whose turn completed on the source just before the seal instead of holding it", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order" }] });
+    const hold = runtime.holdNext("session.sendAndWait", sessionId);
+    const waiting = client.request<{ response?: { data?: { content?: string } }; aborted?: boolean }>("session.sendAndWait", { sessionId, prompt: "tool:lookup_order" });
+    await waitUntil(() => client.events("external_tool.requested").some((event) => runtimeSessionOf(event) === sessionId));
+    const requested = client.events("external_tool.requested").find((event) => runtimeSessionOf(event) === sessionId)!;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    // The turn ends on the source, but its reply is still on the way when the seal goes out.
+    runtime.answerTool(String((requested["data"] as Record<string, unknown>)["requestId"]), "done before the seal");
+    await hold.held;
+    await cut.source("session.suspend");
+    hold.release();
+    await sleep(50);
+    await cut.abort({ resume: { continuePendingWork: true } });
+    const reply = await waiting;
+    expect(reply.response?.data?.content).toBe("tool said: done before the seal");
+    expect(reply.aborted).toBeUndefined();
+    expect(messages(client, sessionId)).toContain("tool said: done before the seal");
+  });
+
+  it("completes a call the seal caught from the owner's events, never from what the source said before the seal", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order" }] });
+    const requestIds = () => client.events("external_tool.requested").filter((event) => runtimeSessionOf(event) === sessionId).map((event) => String((event["data"] as Record<string, unknown>)["requestId"]));
+    // One turn is sent, another is awaited; both wait on a tool.
+    await client.request("session.send", { sessionId, prompt: "tool:lookup_order" });
+    await waitUntil(() => requestIds().length === 1);
+    const waiting = client.request<{ response?: { data?: { content?: string } }; aborted?: boolean }>("session.sendAndWait", { sessionId, prompt: "tool:lookup_order" });
+    await waitUntil(() => requestIds().length === 2);
+    const [first, second] = requestIds();
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    // The first turn ends on the source before the seal: its idle is genuine but belongs to the source.
+    runtime.answerTool(first!, "first turn");
+    await sleep(50);
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    await waitUntil(() => messages(client, sessionId).includes("tool said: first turn"));
+    // The awaited turn continues in the sandbox and completes there.
+    runtime.answerTool(second!, "second turn");
+    const reply = await waiting;
+    expect(reply.response?.data?.content).toBe("tool said: second turn");
+    expect(reply.aborted).toBe(false);
+  });
+
+  it("completes a held call whose source reply arrives after the sandbox finished the turn", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order" }] });
+    const hold = runtime.holdNext("session.sendAndWait", sessionId);
+    const waiting = client.request<{ response?: { data?: { content?: string } }; aborted?: boolean; completionEventId?: string }>("session.sendAndWait", { sessionId, prompt: "tool:lookup_order" });
+    await waitUntil(() => client.events("external_tool.requested").some((event) => runtimeSessionOf(event) === sessionId));
+    const requested = client.events("external_tool.requested").find((event) => runtimeSessionOf(event) === sessionId)!;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    // The source's aborted reply is delayed past the whole move and the turn's end in the sandbox.
+    await hold.held;
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    runtime.answerTool(String((requested["data"] as Record<string, unknown>)["requestId"]), "finished in the sandbox");
+    await waitUntil(() => messages(client, sessionId).includes("tool said: finished in the sandbox"));
+    hold.release();
+    const reply = await waiting;
+    expect(reply.response?.data?.content).toBe("tool said: finished in the sandbox");
+    expect(reply.aborted).toBe(false);
+    const idles = client.events("session.idle").filter((event) => runtimeSessionOf(event) === sessionId);
+    expect(reply.completionEventId).toBe(idles.at(-1)?.["id"]);
+  });
+
+  it("keeps a sealed source's late handoff hidden until it answers the session's resume, and refuses its requests", async () => {
+    const client = await connect();
+    client.answer = () => ({ answer: "from the client" });
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestUserInput: true });
+    const waiting = client.request<{ response?: { data?: { content?: string } }; aborted?: boolean }>("session.sendAndWait", { sessionId, prompt: "tool:lookup_order" });
+    await waitUntil(() => client.events("external_tool.requested").some((event) => runtimeSessionOf(event) === sessionId));
+    const requested = client.events("external_tool.requested").find((event) => runtimeSessionOf(event) === sessionId)!;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    const hold = runtime.holdNext("session.resume", sessionId);
+    await cut.abort({ resume: { continuePendingWork: true } });
+    await hold.held;
+    // Still the suspended instance: a straggling aborted idle and a client-bound request.
+    runtime.emitEvent(sessionId, "session.idle", { aborted: true });
+    await expect(runtime.requestOn(sourceConnection(sessionId), "userInput.request", { sessionId, question: "still there?" })).rejects.toMatchObject({ data: { code: "promotion_busy" } });
+    await sleep(50);
+    expect(client.events("session.idle").some((event) => runtimeSessionOf(event) === sessionId && (event["data"] as Record<string, unknown>)["aborted"] === true)).toBe(false);
+    hold.release();
+    await waitUntil(() => lastCall("session.resume", sessionId)?.params["continuePendingWork"] === true);
+    await sleep(50);
+    // The resumed session continues the turn on its source.
+    runtime.answerTool(String((requested["data"] as Record<string, unknown>)["requestId"]), "after the abort");
+    const reply = await waiting;
+    expect(reply.response?.data?.content).toBe("tool said: after the abort");
+    expect(reply.aborted).toBe(false);
+    const history = await client.request<{ events: { type: string; data: Record<string, unknown> }[] }>("session.getMessages", { sessionId });
+    expect(history.events.some((event) => event.type === "session.idle" && event.data["aborted"] === true)).toBe(false);
+  });
+
+  it("does not leave a client attached when its resume, overtaken by a move, fails where the session moved", async () => {
+    const first = await connect();
+    const sessionId = crypto.randomUUID();
+    await first.request("session.create", { sessionId });
+    const second = await connect();
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const resuming = second.request("session.resume", { sessionId, tools: [{ name: "late_tool" }] }).catch((error: unknown) => error);
+    await hold.held;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    sandboxes.failNextPrepare = new Error("The sandbox could not prepare the resume");
+    hold.release();
+    expect(await resuming).toBeInstanceOf(Error);
+    const attached = sessions().attached(sessionId);
+    expect(attached.map((responder) => responder.connectionId)).not.toContain(second.welcome.connectionId);
+    expect(attached.flatMap((responder) => responder.tools)).not.toContain("late_tool");
+  });
+
+  it("sets configuration again on the source an aborted, sealed cutover resumed while the change was in flight", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const hold = runtime.holdNext("session.options.update", sessionId);
+    const updating = client.request("session.options.update", { sessionId, reasoningEffort: "high" });
+    await hold.held;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.source("sessions.close");
+    await cut.abort({ resume: { continuePendingWork: true } });
+    await waitUntil(() => lastCall("session.resume", sessionId)?.params["continuePendingWork"] === true);
+    hold.release();
+    await updating;
+    const calls = runtime.requests.filter((request) => request.params["sessionId"] === sessionId);
+    const resumedAt = calls.findLastIndex((call) => call.method === "session.resume");
+    expect(calls.slice(resumedAt).some((call) => call.method === "session.options.update" && call.params["reasoningEffort"] === "high")).toBe(true);
+    const row = gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string };
+    expect((JSON.parse(row.admitted) as { requestedOptions?: Record<string, unknown> }).requestedOptions).toMatchObject({ reasoningEffort: "high" });
+  });
+
+  it("lets a resume replace earlier option changes and the configuration a move carries", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, systemMessage: { mode: "append", content: "Old instructions." } });
+    await client.request("session.options.update", { sessionId, reasoningEffort: "high" });
+    await client.request("session.resume", { sessionId, reasoningEffort: "low" });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    const resumed = sandboxes.detail(sessionId, "prepare session.resume");
+    expect(resumed["reasoningEffort"]).toBe("low");
+    expect(JSON.stringify(resumed["systemMessage"] ?? null)).not.toContain("Old instructions.");
+    const onDestination = runtime.calls("session.options.update").filter((call) => call.params["sessionId"] === sessionId && call.connection !== sourceConnection(sessionId));
+    expect(onDestination.some((call) => call.params["reasoningEffort"] === "high")).toBe(false);
+  });
+
   it("refuses stale generations and a second cutover, and ends an open cutover when the session is deleted", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();
@@ -330,4 +535,35 @@ describe("placement cutover", () => {
     await expect(cut.commit()).rejects.toThrow(/already closed/);
     expect(sessions().get(sessionId)).toBeUndefined();
   });
+
+  // Last: it drops the shared runtime's connections.
+  it("holds every caller of a restore that a fence overtook until the cutover ends", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    let stopped = false;
+    const off = sessions().onLifecycle((event) => {
+      if (event.sessionId === sessionId && event.type === "stopped") stopped = true;
+    });
+    const connects = runtime.calls("connect").length;
+    runtime.dropConnections();
+    await waitUntil(() => stopped);
+    off();
+    // Both callers find the session not running; the first starts a restore, which waits for the runtime to return.
+    const first = sessions().runtime(sessionId);
+    let secondSettled = false;
+    const second = sessions().runtime(sessionId).finally(() => {
+      secondSettled = true;
+    });
+    cut.fence();
+    await waitUntil(() => runtime.calls("connect").length > connects, 10_000);
+    await sleep(200);
+    expect(secondSettled).toBe(false);
+    expect(lastCall("session.resume", sessionId)).toBeUndefined();
+    await cut.abort();
+    const [restored, joined] = await Promise.all([first, second]);
+    expect(joined.connectionId).toBe(restored.connectionId);
+    expect(lastCall("session.resume", sessionId)).toBeDefined();
+  }, 20_000);
 });
