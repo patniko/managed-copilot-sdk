@@ -418,12 +418,26 @@ export interface DurableCreateSessionRequest {
 export interface DurableSessionsPort {
   /** Synchronous ledger read (core's `sessions.get`); undefined once the session is deleted. */
   get(sessionId: string): DurableSessionView | undefined;
-  /** Server-side create as `principal` with a caller-chosen ID. Resolves `{ created: false }` when the ID already exists for that owner. */
-  create(principal: Principal, request: DurableCreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean }>;
-  /** Server-side send as the owner, `mode: "enqueue"` (queued behind a running turn, never steering it). Resumes placement if needed. */
-  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string }): Promise<{ readonly messageId: string }>;
-  /** Forwards a session-scoped RPC to the runtime that currently owns the session (answers, pending lists, history). */
-  request<T = unknown>(sessionId: string, method: string, params: Record<string, unknown>): Promise<T>;
+  /**
+   * Server-side create as `principal` with a caller-chosen ID. Resolves `{ created: false }` when the ID already exists
+   * for that owner, with the incarnation created (or found).
+   */
+  create(principal: Principal, request: DurableCreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
+  /**
+   * Server-side send as the owner, `mode: "enqueue"` (queued behind a running turn, never steering it). Resumes placement
+   * if needed. With `incarnation`, fails `not_found` unless the session is still that incarnation when the prompt is written.
+   */
+  send(
+    principal: Principal,
+    sessionId: string,
+    input: { readonly prompt: string; readonly source?: string },
+    options?: { readonly incarnation?: string },
+  ): Promise<{ readonly messageId: string }>;
+  /**
+   * Forwards a session-scoped RPC to the runtime that currently owns the session (answers, pending lists, history).
+   * With `incarnation`, fails `not_found` unless the session is still that incarnation when the request is written.
+   */
+  request<T = unknown>(sessionId: string, method: string, params: Record<string, unknown>, options?: { readonly incarnation?: string }): Promise<T>;
   /** Subscribes to runtime events of every session. Returns an unsubscribe function. */
   subscribe(listener: (sessionId: string, event: RuntimeSessionEvent) => void): () => void;
 }

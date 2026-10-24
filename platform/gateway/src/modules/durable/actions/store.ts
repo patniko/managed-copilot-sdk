@@ -1,5 +1,5 @@
 import type { ActionKind, ActionState, PendingAction } from "@managed-copilot/protocol";
-import type { Database } from "../../../db.js";
+import { transaction, type Database } from "../../../db.js";
 import { parseJson, toIso } from "../ids.js";
 
 /** States in which an action still needs (or may still receive) an answer. */
@@ -97,6 +97,12 @@ export interface Outcome {
   readonly now: number;
 }
 
+/** One delivery of an answer: the placement and the runtime request ID it was sent to. */
+export interface DeliveryAttempt {
+  readonly generation: number;
+  readonly requestId: string;
+}
+
 type Bindable = string | number | null;
 const n = (value: string | number | undefined | null): Bindable => (value === undefined ? null : value);
 const changed = (result: { changes: number | bigint }) => Number(result.changes) === 1;
@@ -154,13 +160,21 @@ export class ActionStore {
   }
 
   findByRequest(sessionId: string, incarnation: string, kind: ActionKind, requestId: string): ActionRow | undefined {
-    // The request ID it was recorded under or the one a restarted runtime uses now; the current one wins.
-    return this.#db
+    // The request ID it was recorded under or the one a restarted runtime uses now (the current one wins), else any
+    // request ID it had in between: a client may still be answering under one of those.
+    const direct = this.#db
       .prepare(
         `SELECT * FROM durable_actions WHERE session_id = ? AND incarnation = ? AND kind = ? AND (request_id = ? OR runtime_request_id = ?)
          ORDER BY CASE WHEN COALESCE(runtime_request_id, request_id) = ? THEN 0 ELSE 1 END, rowid LIMIT 1`,
       )
       .get(sessionId, incarnation, kind, requestId, requestId, requestId) as ActionRow | undefined;
+    if (direct) return direct;
+    return this.#db
+      .prepare(
+        `SELECT a.* FROM durable_action_aliases x JOIN durable_actions a ON a.id = x.action_id
+         WHERE x.session_id = ? AND x.incarnation = ? AND x.kind = ? AND x.request_id = ?`,
+      )
+      .get(sessionId, incarnation, kind, requestId) as ActionRow | undefined;
   }
 
   /** The (latest) tool action for a model tool call: rebuilt requests keep the tool call ID. */
@@ -188,16 +202,22 @@ export class ActionStore {
       readonly now: number;
     },
   ): boolean {
-    const sets = ["runtime_request_id = ?", "event = ?", "state = ?", "reason = ?", "updated_at = ?"];
-    const params: Bindable[] = [change.to, JSON.stringify(change.event), change.state, change.reason, change.now];
-    if (change.redeliver) {
-      sets.push("forwarded = 0", "next_forward_at = NULL", "forward_attempts = 0", "generation = MAX(generation, ?)");
-      params.push(change.generation);
-    }
+    const sets = ["runtime_request_id = ?", "event = ?", "state = ?", "reason = ?", "updated_at = ?", "generation = MAX(generation, ?)"];
+    const params: Bindable[] = [change.to, JSON.stringify(change.event), change.state, change.reason, change.now, change.generation];
+    if (change.redeliver) sets.push("forwarded = 0", "next_forward_at = NULL", "forward_attempts = 0");
     if (OPEN_STATES.includes(change.state)) sets.push("completed_at = NULL", "forwarded = 0", "next_forward_at = NULL");
     if (change.clearClaim) sets.push("claim_seq = claim_seq + 1", "claim_token_hash = NULL", "claimed_by = NULL", "responder_type = NULL", "live_connection = NULL", "lease_expires_at = NULL");
     params.push(id, change.from);
-    return changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE id = ? AND COALESCE(runtime_request_id, request_id) = ?`).run(...params));
+    return transaction(this.#db, () => {
+      const moved = changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE id = ? AND COALESCE(runtime_request_id, request_id) = ?`).run(...params));
+      // The previous request ID stays an alias: a client may still be answering under it.
+      if (moved) {
+        this.#db
+          .prepare("INSERT OR IGNORE INTO durable_action_aliases (session_id, incarnation, kind, request_id, action_id) SELECT session_id, incarnation, kind, ?, id FROM durable_actions WHERE id = ?")
+          .run(change.from, id);
+      }
+      return moved;
+    });
   }
 
   /** Whether an incarnation's runtime may still wait on the ledger: an open action or an undelivered answer. */
@@ -469,10 +489,11 @@ export class ActionStore {
   }
 
   /**
-   * Marks an undelivered answer as delivered (or as never deliverable, with a reason). `generation` scopes it to the
-   * placement that was attempted, so a late acknowledgment from an older placement never covers a newer one.
+   * Marks an undelivered answer as delivered (or as never deliverable, with a reason). `attempt` scopes it to the
+   * placement and runtime request ID that were attempted, so a late acknowledgment from an older placement, or for a
+   * request ID a restarted runtime replaced, never covers the current one.
    */
-  markForwarded(id: string, now: number, reason?: string, generation?: number): void {
+  markForwarded(id: string, now: number, reason?: string, attempt?: DeliveryAttempt): void {
     const sets = ["forwarded = 1", "next_forward_at = NULL", "updated_at = ?"];
     const params: Bindable[] = [now];
     if (reason !== undefined) {
@@ -481,18 +502,18 @@ export class ActionStore {
     }
     const conditions = ["id = ?", "forwarded = 0"];
     params.push(id);
-    if (generation !== undefined) {
-      conditions.push("generation = ?");
-      params.push(generation);
+    if (attempt !== undefined) {
+      conditions.push("generation = ?", "COALESCE(runtime_request_id, request_id) = ?");
+      params.push(attempt.generation, attempt.requestId);
     }
     this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params);
   }
 
-  deferForward(id: string, nextAt: number, now: number, generation?: number): void {
-    const scope = generation === undefined ? "" : " AND generation = ?";
+  deferForward(id: string, nextAt: number, now: number, attempt?: DeliveryAttempt): void {
+    const scope = attempt === undefined ? "" : " AND generation = ? AND COALESCE(runtime_request_id, request_id) = ?";
     this.#db
       .prepare(`UPDATE durable_actions SET forward_attempts = forward_attempts + 1, next_forward_at = ?, updated_at = ? WHERE id = ? AND forwarded = 0${scope}`)
-      .run(nextAt, now, id, ...(generation === undefined ? [] : [generation]));
+      .run(nextAt, now, id, ...(attempt === undefined ? [] : [attempt.generation, attempt.requestId]));
   }
 
   markNotified(ids: readonly string[], now: number): void {

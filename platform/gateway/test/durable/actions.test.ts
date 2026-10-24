@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isManagedCopilotError, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
+import { ManagedCopilotError, isManagedCopilotError, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { migrate, openDatabase, type Database } from "../../src/db.js";
 import { createLogger, type Logger } from "../../src/log.js";
 import type { Principal } from "../../src/http.js";
@@ -15,7 +15,8 @@ import type {
   RuntimeSessionEvent,
 } from "../../src/modules/durable/contract.js";
 import { DurableActions, needsPerson, type ActionsOptions } from "../../src/modules/durable/actions/service.js";
-import { announcer } from "../../src/modules/durable/index.js";
+import { incarnationOf, isGone } from "../../src/modules/durable/ids.js";
+import { announcer, ownsPendingDeliveries } from "../../src/modules/durable/index.js";
 import { DURABLE_MIGRATIONS, upgradeDurableSchema } from "../../src/modules/durable/migrations.js";
 import { DurableWebhooks } from "../../src/modules/durable/webhooks/service.js";
 
@@ -29,6 +30,8 @@ class FakeSessions implements DurableSessionsPort {
   readonly views = new Map<string, DurableSessionView>();
   /** Every runtime call, with the placement generation that was current when it was sent. */
   readonly requests: { sessionId: string; method: string; params: Record<string, unknown>; generation: number }[] = [];
+  /** The incarnation each runtime call expected (core refuses a call for another one). */
+  readonly fences: { method: string; incarnation?: string }[] = [];
   readonly pendingTools = new Map<string, unknown[]>();
   readonly pendingPermissions = new Map<string, unknown[]>();
   /** The session's event log (`session.getMessages`). */
@@ -46,7 +49,16 @@ class FakeSessions implements DurableSessionsPort {
   async send() {
     return { messageId: "m1" };
   }
-  async request<T>(sessionId: string, method: string, params: Record<string, unknown>): Promise<T> {
+  /** Like core: with an expected incarnation, a call reaches the runtime only while the session is still that one. */
+  #fence(sessionId: string, options: { readonly incarnation?: string } | undefined): void {
+    const view = this.views.get(sessionId);
+    if (options?.incarnation !== undefined && (isGone(view) || incarnationOf(view!) !== options.incarnation)) {
+      throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
+    }
+  }
+  async request<T>(sessionId: string, method: string, params: Record<string, unknown>, options?: { readonly incarnation?: string }): Promise<T> {
+    this.fences.push({ method, ...(options?.incarnation !== undefined ? { incarnation: options.incarnation } : {}) });
+    if (method === "session.tools.listPendingRequests" || method === "session.permissions.pendingRequests" || method === "session.getMessages") this.#fence(sessionId, options);
     if (method === "session.tools.listPendingRequests") return { items: this.pendingTools.get(sessionId) ?? [] } as T;
     if (method === "session.permissions.pendingRequests") return { items: this.pendingPermissions.get(sessionId) ?? [] } as T;
     if (method === "session.getMessages") return { events: this.history.get(sessionId) ?? [] } as T;
@@ -56,6 +68,8 @@ class FakeSessions implements DurableSessionsPort {
       this.holdNextAnswer = undefined;
       await hold;
     }
+    // Checked where the answer is written, after anything that happened while it was in flight.
+    this.#fence(sessionId, options);
     if (this.failRequests > 0) {
       this.failRequests--;
       throw new Error("runtime unavailable");
@@ -1094,6 +1108,54 @@ describe("durable actions ledger", () => {
       expect(restarted.hasOpenActions(SESSION)).toBe(false);
       restarted.stop();
     });
+
+    it("announces waiting actions to the session's current owner and environment, even after its ID was reused", async () => {
+      const owners: number[] = [];
+      actions.stop();
+      actions = build({ notifyDebounceMs: 20 }, { publish: (event, meta) => (published.push(event), owners.push(meta.ownerId)) });
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      // Deleted and the ID reused by another account before the announcement went out (the deletion is announced late).
+      sessions.views.set(SESSION, { id: SESSION, ownerId: STRANGER.accountId, environment: "other", state: "running", generation: 0, incarnation: "inc-2" });
+      await actions.onSessionEvent({ ...input(toolEvent("r2")), ownerId: STRANGER.accountId, environment: "other" });
+      await sleep(50);
+      expect(owners).toEqual([STRANGER.accountId]);
+      expect(published.map((event) => [event.environment, (event.data.actions as { idempotencyKey: string }[]).map((action) => action.idempotencyKey)])).toEqual([
+        ["other", [`${SESSION}:call-r2`]],
+      ]);
+    });
+
+    it("refuses answers and stops deliveries for a session that no longer exists", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      const [action] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, action!.id);
+      let release!: () => void;
+      sessions.holdNextAnswer = new Promise<void>((resolve) => (release = resolve));
+      const submitting = actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, result: "ok" });
+      await sleep(5);
+      // Deleted and the ID reused while the answer was on its way: core refuses it for the old incarnation.
+      sessions.views.set(SESSION, { id: SESSION, ownerId: OWNER.accountId, environment: "chat", state: "running", generation: 0, incarnation: "inc-2" });
+      release();
+      await submitting;
+      expect(actions.store.get(action!.id)).toMatchObject({ forwarded: 1, reason: "Not delivered: the session no longer exists" });
+      expect(sessions.fences.filter((call) => call.method.includes("handlePending"))).toEqual([{ method: "session.tools.handlePendingToolCall", incarnation: "inc-1" }]);
+      now += 60_000;
+      await actions.sweep();
+      expect(sessions.answers()).toHaveLength(1);
+      // With no session at all, a client's answer is refused rather than passed to a runtime.
+      sessions.views.delete(SESSION);
+      await expectCode(
+        actions.onClientAnswer({ sessionId: SESSION, connectionId: "c1", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "r9", result: "x" } }),
+        "conflict",
+      );
+    });
+
+    it("drops a deleted session's pending announcements only while its ID names no newer session", () => {
+      expect(ownsPendingDeliveries(undefined, "inc-1")).toBe(true);
+      expect(ownsPendingDeliveries({ id: SESSION, ownerId: 1, environment: "chat", state: "deleting", generation: 0, incarnation: "inc-1" }, "inc-1")).toBe(true);
+      expect(ownsPendingDeliveries({ id: SESSION, ownerId: 1, environment: "chat", state: "idle", generation: 0, incarnation: "inc-1" }, "inc-1")).toBe(true);
+      expect(ownsPendingDeliveries({ id: SESSION, ownerId: 2, environment: "chat", state: "idle", generation: 0, incarnation: "inc-2" }, "inc-1")).toBe(false);
+      expect(ownsPendingDeliveries({ id: SESSION, ownerId: 2, environment: "chat", state: "idle", generation: 0, incarnation: "inc-2" }, undefined)).toBe(false);
+    });
   });
 
   describe("permission authority", () => {
@@ -1159,6 +1221,26 @@ describe("durable actions ledger", () => {
       expect(needsPerson({ permissionRequest: { kind: "custom-tool", managedApprovalRequired: true }, promptRequest: { kind: "custom-tool" } })).toBe(true);
       expect(needsPerson({ permissionRequest: { kind: "shell" } })).toBe(false);
       expect(needsPerson({ promptRequest: { kind: "custom-tool", toolName: "lookup_order" } })).toBe(true);
+      // Without the raw request, the derived form alone never proves that no person is needed, whatever its kind.
+      for (const kind of ["commands", "read", "write", "url", "workflow"]) expect(needsPerson({ promptRequest: { kind, managedApprovalRequired: false } })).toBe(true);
+    });
+
+    it("lets no responder but a person approve a standard prompt known only from its derived form", async () => {
+      for (const kind of ["commands", "read", "write", "url", "workflow"]) {
+        const requestId = `p-${kind}`;
+        sessions.pendingPermissions.set(SESSION, [{ requestId, request: { kind, managedApprovalRequired: false } }]);
+        await actions.reconcile(SESSION);
+        const action = actions.list(SESSION).find((candidate) => candidate.requestId === requestId)!;
+        expect(action).toMatchObject({ kind: "permission", state: "pending" });
+        const caller = capabilityFor(action.id);
+        const webhook = await actions.claim(caller, SESSION, action.id);
+        await expectCode(actions.submit(caller, SESSION, action.id, { claimToken: webhook.claimToken, result: { kind: "approve-once" } }), "forbidden");
+        await actions.submit(caller, SESSION, action.id, { claimToken: webhook.claimToken, release: true });
+        const poll = await actions.claim(user(), SESSION, action.id);
+        await expectCode(actions.submit(user(), SESSION, action.id, { claimToken: poll.claimToken, result: { kind: "approve-once" } }), "forbidden");
+        expect(await actions.submit(user(), SESSION, action.id, { claimToken: poll.claimToken, result: { kind: "reject" } })).toMatchObject({ state: "completed" });
+      }
+      expect(sessions.answers().map((sent) => sent.params.result)).toEqual(Array.from({ length: 5 }, () => ({ kind: "reject" })));
     });
 
     it("records a waiting prompt the ledger missed from the session's history and replays it to a person who attaches", async () => {
@@ -1291,6 +1373,106 @@ describe("durable actions ledger", () => {
       await sleep(10);
       expect(actions.hasOpenActions(SESSION)).toBe(false);
     });
+
+    it("delivers an answer under a rebuilt request ID even while its delivery under the old one is in flight", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      const [action] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, action!.id);
+      let release!: () => void;
+      sessions.holdNextAnswer = new Promise<void>((resolve) => (release = resolve));
+      const submitting = actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, result: "shipped" });
+      await sleep(5); // sent under r1, not acknowledged yet
+      // The runtime restarts and rebuilds the call under r2; the first delivery there fails.
+      sessions.failRequests = 1;
+      now += 5_000;
+      sessions.pendingTools.set(SESSION, [rebuilt("r2")]);
+      await actions.reconcile(SESSION);
+      await sleep(10);
+      release(); // r1's late acknowledgment says nothing about r2
+      await submitting;
+      expect(actions.hasOpenActions(SESSION)).toBe(true);
+      expect(actions.store.get(action!.id)).toMatchObject({ forwarded: 0 });
+      now += 2_000;
+      await actions.sweep();
+      await sleep(10);
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([
+        ["r1", "shipped"],
+        ["r2", "shipped"],
+        ["r2", "shipped"],
+      ]);
+      expect(actions.hasOpenActions(SESSION)).toBe(false);
+    });
+
+    it("takes a client's answer under any request ID the call had, and delivers it under the latest", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      now += 5_000;
+      sessions.pendingTools.set(SESSION, [rebuilt("r2")]);
+      await actions.reconcile(SESSION);
+      // A client resumes and is handed the call under r2.
+      const replay = await actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 0, responder: sdk("c1", ["lookup_order"]) });
+      expect(replay.map((event) => event.data.requestId)).toEqual(["r2"]);
+      // The runtime restarts again while c1 runs the tool, and rebuilds the call under r3.
+      now += 5_000;
+      sessions.pendingTools.set(SESSION, [rebuilt("r3")]);
+      await actions.reconcile(SESSION);
+      expect(states()).toEqual({ r3: "executing" });
+      await actions.onClientAnswer({ sessionId: SESSION, connectionId: "c1", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "r2", result: "done" } });
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["r3", "done"]]);
+      expect(states()).toEqual({ r3: "completed" });
+    });
+
+    it("runs a platform tool again, idempotently, when a restarted runtime rebuilds a call the stopped one ended", async () => {
+      const keys: string[] = [];
+      /** Holds the next run of the handler until it settles. */
+      let gate: Promise<void> | undefined;
+      const hold = () => {
+        let open!: () => void;
+        gate = new Promise<void>((resolve) => (open = resolve));
+        return open;
+      };
+      tools.set("schedule_task", {
+        name: "schedule_task",
+        description: "",
+        parameters: {},
+        enabledFor: () => true,
+        handler: async (_args, context) => {
+          keys.push(context.idempotencyKey);
+          const wait = gate;
+          gate = undefined;
+          if (wait) await wait;
+          return `scheduled with ${context.idempotencyKey}`;
+        },
+      });
+      let finish = hold();
+      await actions.onSessionEvent(input(toolEvent("t1", "schedule_task", { prompt: "hi" })));
+      // The runtime stops without suspending: its waiting call ends while the gateway's handler still runs.
+      await actions.onSessionEvent(input(completedEvent("external_tool.completed", "t1")));
+      finish(); // that result has nobody to go to
+      await sleep(5);
+      expect(states()).toEqual({ t1: "cancelled" });
+      // The restarted runtime rebuilds the call: nobody else could reconcile it, so the gateway runs it again.
+      const again = toolEvent("t1-rebuilt", "schedule_task", { prompt: "hi" });
+      const decision = await actions.onSessionEvent(input({ ...again, data: { ...again.data, toolCallId: "call-t1" } }, [sdk("c1", ["schedule_task"])]));
+      expect(decision.owner).toBeUndefined();
+      await sleep(10);
+      expect(keys).toEqual([`${SESSION}:call-t1`, `${SESSION}:call-t1`]);
+      expect(states()).toEqual({ "t1-rebuilt": "completed" });
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["t1-rebuilt", `scheduled with ${SESSION}:call-t1`]]);
+      // Found by reconciliation instead (the restarted runtime only lists it): the same applies.
+      finish = hold();
+      await actions.onSessionEvent(input(toolEvent("t2", "schedule_task", { prompt: "later" })));
+      await actions.onSessionEvent(input(completedEvent("external_tool.completed", "t2")));
+      finish();
+      await sleep(5);
+      expect(states()).toMatchObject({ t2: "cancelled" });
+      now += 5_000;
+      sessions.pendingTools.set(SESSION, [{ requestId: "t2-rebuilt", toolCallId: "call-t2", toolName: "schedule_task", arguments: { prompt: "later" } }]);
+      await actions.reconcile(SESSION);
+      await sleep(10);
+      expect(states()).toMatchObject({ "t2-rebuilt": "completed" });
+      expect(keys.slice(2)).toEqual([`${SESSION}:call-t2`, `${SESSION}:call-t2`]);
+      expect(sessions.answers().at(-1)!.params).toEqual({ sessionId: SESSION, requestId: "t2-rebuilt", result: `scheduled with ${SESSION}:call-t2` });
+    });
   });
 
   describe("attached person (Copilot CLI attach)", () => {
@@ -1365,6 +1547,22 @@ describe("durable actions ledger", () => {
       promote(1);
       await expectCode(cliAnswer("p1", "person", { kind: "approve-once" }), "conflict");
       expect(sessions.answers()).toHaveLength(0);
+    });
+
+    it("never hands a prompt to a CLI that detached while it waited for the prompt to be recorded", async () => {
+      for (const [requestId, detach] of [
+        ["p1", () => actions.onDetached("person", SESSION)],
+        ["p2", () => actions.onDetached("person")],
+      ] as const) {
+        const shown = visibility(requestId, cli("person"), { waitMs: 5_000 });
+        await sleep(5);
+        detach();
+        await actions.onSessionEvent(input(permissionEvent(requestId)));
+        expect(await shown).toMatchObject({ status: "hidden", reason: expect.stringMatching(/detached/) });
+        expect(actions.list(SESSION).find((action) => action.requestId === requestId)).toMatchObject({ state: "pending" });
+      }
+      // Attached again, the person can take it.
+      expect(await visibility("p1")).toMatchObject({ status: "actionable" });
     });
 
     it("never lets a person's attach take a prompt an application holds", async () => {

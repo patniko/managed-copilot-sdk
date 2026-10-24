@@ -5,9 +5,10 @@ import type { GatewayModule } from "../../app.js";
 import { migrate } from "../../db.js";
 import { DurableActions } from "./actions/service.js";
 import { registerActionRoutes } from "./actions/routes.js";
-import type { DurableEventsPort, DurablePlatformToolsPort, DurableSessionsPort, PlatformEventMeta } from "./contract.js";
+import type { DurableEventsPort, DurablePlatformToolsPort, DurableSessionView, DurableSessionsPort, PlatformEventMeta } from "./contract.js";
 import { registerCredentialRoutes } from "./credentials/routes.js";
 import { DurableCredentials } from "./credentials/service.js";
+import { incarnationOf, isGone } from "./ids.js";
 import { loadDurableKeys } from "./keys.js";
 import { DURABLE_MIGRATIONS, upgradeDurableSchema } from "./migrations.js";
 import { registerScheduleRoutes } from "./schedules/routes.js";
@@ -35,6 +36,14 @@ export function announcer(
     webhooks()?.enqueue(event, meta);
     events()?.publish(event, meta);
   };
+}
+
+/**
+ * Whether a deleted session's still-pending announcements may be dropped: only while its ID does not name a newer
+ * session (whose announcements they may be).
+ */
+export function ownsPendingDeliveries(live: DurableSessionView | undefined, deletedIncarnation: string | undefined): boolean {
+  return isGone(live) || (deletedIncarnation !== undefined && incarnationOf(live!) === deletedIncarnation);
 }
 
 export const durableModule: GatewayModule = {
@@ -76,6 +85,14 @@ export const durableModule: GatewayModule = {
     app.provide("schedules", schedules);
     app.provide("credentials", credentials);
 
+    // Incarnations are repaired before any client can reach the ledger: the HTTP server (and core's start hooks) run
+    // before this module's start hook. Repeated at start for deletions core finishes then.
+    try {
+      actions.assignIncarnations();
+    } catch (error) {
+      log.error("Assigning action incarnations failed; retrying at start", { error: (error as Error).message });
+    }
+
     registerActionRoutes(app, actions);
     registerScheduleRoutes(app, schedules);
     registerCredentialRoutes(app, credentials);
@@ -103,7 +120,8 @@ export const durableModule: GatewayModule = {
         // Only the deleted incarnation: a later session that reuses the ID is a different session.
         const incarnation = typeof event.data.incarnation === "string" ? event.data.incarnation : undefined;
         actions.onSessionDeleted(event.sessionId, incarnation);
-        webhooks!.dropSession(event.sessionId);
+        // Pending announcements stop too, unless a new session already reuses the ID (they may be its own).
+        if (ownsPendingDeliveries(sessions()?.get(event.sessionId), incarnation)) webhooks!.dropSession(event.sessionId);
         schedules!.onSessionDeleted(event.sessionId, incarnation);
       } else if (event.type === "session.promoted") {
         // Promotion normally calls actions.onGenerationChanged directly first; repeating it here is a no-op.

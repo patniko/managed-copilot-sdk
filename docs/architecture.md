@@ -404,11 +404,20 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   tools, the same identity a live handler sees in its `ToolInvocation`, across webhooks, polling, resume, restarts,
   and placement changes. A runtime that restarts without suspending rebuilds a waiting tool call under a new request
   ID with the same tool call ID: the existing action takes the new ID (its owner, outcome, or uncertainty stays, and
-  a recorded answer is delivered again), so the tool never runs twice.
+  a recorded answer is delivered again), so the tool never runs twice. Its earlier request IDs stay aliases, so a
+  client still answering under one of them is recorded and delivered under the latest. A gateway platform tool the
+  stopped runtime ended runs again instead of becoming uncertain: platform tools are idempotent by key, and nobody
+  else can reconcile them.
 - **Session incarnations.** Session IDs are reusable after deletion, so every action belongs to the incarnation that
-  asked (`SessionRecord.incarnation`). Listing, claiming, answering, capabilities (`inc` claim), replay, delivery,
-  and deletion only ever see the current incarnation; schedules that continue a session are bound to its incarnation
-  too. Startup closes the open actions of an incarnation that no longer exists (a deletion no event announced).
+  asked (`SessionRecord.incarnation`; until core reports one, the session's creation time stands in and is re-keyed
+  at startup once it does). Listing, claiming, answering, capabilities (`inc` claim), replay, delivery,
+  announcements (to the current incarnation's owner and environment), and deletion only ever see the current
+  incarnation, and answers and runtime reads carry the incarnation they are for (`sessions.request(..., { incarnation
+  })`; core refuses them for another one, and the answer is then recorded as not delivered). Schedules that continue a
+  session are bound to its incarnation, and every run to the incarnation it continues. Startup closes the open
+  actions of an incarnation that no longer exists (a deletion no event announced), and binds schedule targets and runs
+  recorded before incarnations only to a session that is provably the same one (alive, the owner's, created within
+  the row's window); anything else is retired and its schedule paused.
   `actions.hasOpenActions(sessionId)` tells core whether a resume should continue pending work.
 - **Permission authority.** A decision is checked against who answers and what the prompt requires: a webhook
   capability may approve once, reject, or report that nobody is available, never attest a person
@@ -417,16 +426,18 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   attached Copilot CLI, or by the owner's client or poller attesting a person (`approve-once` with
   `approvedInteractively: true`), and an attached CLI gets such prompts first. A prompt the ledger missed is rebuilt
   from the runtime's pending list and the session history, keeping its requirements; one known only from its derived
-  form is a person's to answer.
+  form (no raw request) is a person's to answer, whatever its kind.
 - **Copilot CLI attach.** `actions.promptVisibility(...)` tells attach whether a prompt its CLI saw on the raw runtime
   channel is answerable there: it waits until core's event stream recorded and arbitrated the request, claims a
   waiting prompt for the CLI, and returns `actionable` only for the CLI holding the claim (`observe` when an app,
-  worker, or another CLI holds it; `hidden` otherwise). Its answers go through `onClientAnswer` with
-  `requireRecorded: true`: unknown requests and answers from anyone but the claim holder are refused, never
-  forwarded.
+  worker, or another CLI holds it; `hidden` otherwise, including for a CLI that detached while it waited). Its answers
+  go through `onClientAnswer` with `requireRecorded: true`: unknown requests and answers from anyone but the claim
+  holder are refused, never forwarded. An answer for a session that no longer exists is refused for every client.
 - **Results before acknowledgment.** Answers (live, REST, platform) are persisted, then delivered to the runtime by
-  the ledger through `sessions.request`, retried with backoff if the runtime is unavailable. Duplicates (same claim,
-  same canonical result) return the recorded state; different results are `conflict`.
+  the ledger through `sessions.request`, retried with backoff if the runtime is unavailable. A delivery and its
+  acknowledgment belong to one placement and one runtime request ID: an answer rebound to a rebuilt request gets its
+  own delivery even while one to the old request is in flight, whose late acknowledgment never covers it. Duplicates
+  (same claim, same canonical result) return the recorded state; different results are `conflict`.
 - **Uncertainty is explicit.** A tool whose live client disconnects, whose REST lease expires, or that was in flight
   across a gateway restart becomes `needs_reconciliation` and is never re-offered; the original claimant's late result
   is still accepted, anyone else must claim with `reconcile: true`. Prompts have no external effect and return to
@@ -446,8 +457,14 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   session's history (`session.getMessages`) decides whether the prompt was accepted; while the runtime may still hold
   it unrecorded (queued work per `session.queue.hasPending`/`pendingItems`, or a running turn) the run waits rather
   than resending, then reads the history again; if acceptance cannot be established the run ends
-  `needs_reconciliation` and is never resent. A session whose SDK hooks have no connected handler refuses unattended
-  sends (`background_callback_unsupported`), which pauses the schedule. Runs of one schedule never overlap (one
+  `needs_reconciliation` and is never resent. Right before any send, the run (still queued), its schedule (not
+  deleted, not paused), and its session (still the incarnation the run continues) are checked again in the same
+  synchronous step, and the send carries that incarnation (`sessions.send(..., { incarnation })`), so core refuses it
+  for a session that reuses the ID. History and queue reads and stopping an overdue turn are fenced the same way, and
+  a run's turn is followed only in its own incarnation; a run whose session is gone ends (`skipped` before it
+  started, `failed` after) and a schedule continuing it pauses. A session whose SDK hooks have no connected handler
+  refuses unattended sends (`background_callback_unsupported`), which pauses the schedule. Runs of one schedule never
+  overlap (one
   occurrence may wait; more are skipped), owners have a concurrency cap, occurrences later than the grace window (5 min
   cron, 60 min one-shot) are `skipped` with a recorded reason, and delegation, environment policy, webhook routes, and
   the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`, which
@@ -486,6 +503,13 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   again for re-approval, and a removed one is deleted. Declarations without `runAs` are logged as unrunnable.
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
+- **Known limitations, pending core (fail closed).** Durable passes the expected incarnation to `sessions.send` and
+  `sessions.request` and reads `SessionRecord.incarnation`, `create(...).incarnation`, `authenticate(token, {
+  background })`, and `auth.forgetCredential`, all additive and optional. Until core's builds with them are on
+  `main`: durable rechecks the incarnation synchronously right before each send or answer, but a session deleted and
+  recreated under the same ID while core itself awaits (for example restoring its placement) before writing could
+  still receive the prompt or answer; incarnations are the session's creation time; a background verification may be
+  recorded as the account's live credential, and logout cannot make core drop a token it holds.
 
 ### Promotion (as built)
 

@@ -169,9 +169,19 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
 
   // 7: session IDs are reusable after deletion: actions and schedule targets belong to one session incarnation.
   // Rows from before this migration have none; the actions service assigns them once core is available. A restarted
-  // runtime can rebuild a waiting request under a new ID: the action keeps its identity and records the new one.
+  // runtime can rebuild a waiting request under a new ID: the action keeps its identity, records the new one, and
+  // remembers every earlier one (a client may still answer under any of them).
   `ALTER TABLE durable_actions ADD COLUMN incarnation TEXT;
   ALTER TABLE durable_actions ADD COLUMN runtime_request_id TEXT;
   CREATE INDEX durable_actions_incarnation ON durable_actions (session_id, incarnation);
-  ALTER TABLE durable_schedules ADD COLUMN target_incarnation TEXT;`,
+  CREATE TABLE durable_action_aliases (
+    session_id TEXT NOT NULL,
+    incarnation TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    PRIMARY KEY (session_id, incarnation, kind, request_id)
+  );
+  ALTER TABLE durable_schedules ADD COLUMN target_incarnation TEXT;
+  ALTER TABLE durable_schedule_runs ADD COLUMN session_incarnation TEXT;`,
 ];

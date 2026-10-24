@@ -1,4 +1,5 @@
 import {
+  isManagedCopilotError,
   ManagedCopilotError,
   type ActionCapability,
   type ActionClaim,
@@ -38,7 +39,7 @@ import {
 } from "../contract.js";
 import { canonicalJson, hashSecret, incarnationOf, isGone, newId, parseJson, toIso } from "../ids.js";
 import { mintCapabilityToken, verifyCapabilityToken } from "./capability.js";
-import { ActionStore, ANSWERED_STATES, OPEN_STATES, OWNED_STATES, runtimeRequestId, toPendingAction, type ActionRow, type Outcome } from "./store.js";
+import { ActionStore, ANSWERED_STATES, OPEN_STATES, OWNED_STATES, runtimeRequestId, toPendingAction, type ActionRow, type DeliveryAttempt, type Outcome } from "./store.js";
 
 export interface ActionsOptions {
   /** Answer deadline for every action (spec: proposed 24 hours). */
@@ -226,13 +227,14 @@ const marked = (value: unknown) => value !== undefined && value !== false;
 /**
  * Whether managed policy requires a person to answer a permission prompt (`managedApprovalRequired`, read the way the
  * stock SDK documents it: the derived `promptRequest` decides for standard prompt kinds, the raw request otherwise).
- * A prompt known only from its derived form, without the raw request, always needs a person.
+ * A prompt known only from its derived form, without the raw request, always needs a person, whatever its kind: the
+ * derived form alone cannot prove that no person is required.
  */
 export function needsPerson(data: Record<string, unknown> | undefined): boolean {
   const raw = data?.permissionRequest as Record<string, unknown> | undefined;
+  if (!raw || typeof raw !== "object") return true;
   const prompt = data?.promptRequest as Record<string, unknown> | undefined;
   if (prompt && typeof prompt.kind === "string" && STANDARD_PROMPT_KINDS.has(prompt.kind)) return marked(prompt.managedApprovalRequired);
-  if (!raw || typeof raw !== "object") return true;
   return marked(raw.managedApprovalRequired);
 }
 
@@ -550,9 +552,9 @@ export class DurableActions implements ActionsService {
     if (kind === "tool" && input.responderKind === "cli") throw new ManagedCopilotError("forbidden", "A person cannot run an application's tool; only its app can answer it");
     const current = this.#current(input.sessionId)?.incarnation;
     // An answer for a session that no longer exists, or that its ID no longer names, never reaches a runtime.
-    if (input.incarnation !== undefined && input.incarnation !== current) throw conflict("This answer is for a session that no longer exists");
+    if (current === undefined || (input.incarnation !== undefined && input.incarnation !== current)) throw conflict("This answer is for a session that no longer exists");
     const incarnation = input.incarnation ?? current;
-    const row = incarnation === undefined ? undefined : this.#store.findByRequest(input.sessionId, incarnation, kind, requestId);
+    const row = this.#store.findByRequest(input.sessionId, incarnation, kind, requestId);
     if (!row) {
       // The ledger does not track it. A stock client's answer goes to the runtime as usual; attach fails closed.
       if (strict) throw conflict("This prompt is not waiting for this client");
@@ -620,9 +622,7 @@ export class DurableActions implements ActionsService {
   }
 
   async onAttached(input: AttachInput): Promise<readonly RuntimeSessionEvent[]> {
-    const connectionKey = input.responder.connectionId;
-    const attachmentKey = `${input.responder.connectionId}\u0000${input.sessionId}`;
-    const before = [this.#detachGenerations.get(connectionKey) ?? 0, this.#detachGenerations.get(attachmentKey) ?? 0];
+    const detached = this.#detachedSince(input.responder.connectionId, input.sessionId);
     const attached = this.#current(input.sessionId);
     if (!attached || (input.incarnation !== undefined && input.incarnation !== attached.incarnation)) return [];
     try {
@@ -632,7 +632,7 @@ export class DurableActions implements ActionsService {
     }
     // The connection (or just this attachment) may have gone away while reconciling: never claim for it then.
     // A later attach of the same connection captures the new generation and replays normally.
-    if ((this.#detachGenerations.get(connectionKey) ?? 0) !== before[0] || (this.#detachGenerations.get(attachmentKey) ?? 0) !== before[1]) return [];
+    if (detached()) return [];
     // Nor for a session that was deleted (or replaced by a new one with the same ID) meanwhile.
     if (this.#current(input.sessionId)?.incarnation !== attached.incarnation) return [];
     const replay: RuntimeSessionEvent[] = [];
@@ -665,6 +665,14 @@ export class DurableActions implements ActionsService {
     this.#detachGenerations.delete(key);
     this.#detachGenerations.set(key, next);
     if (this.#detachGenerations.size > MAX_REMEMBERED) this.#detachGenerations.delete(this.#detachGenerations.keys().next().value!);
+  }
+
+  /** Snapshots a connection's detach counters; the returned check is true once it (or this attachment) detached since. */
+  #detachedSince(connectionId: string, sessionId: string): () => boolean {
+    const connectionKey = connectionId;
+    const attachmentKey = `${connectionId}\u0000${sessionId}`;
+    const before = [this.#detachGenerations.get(connectionKey) ?? 0, this.#detachGenerations.get(attachmentKey) ?? 0];
+    return () => (this.#detachGenerations.get(connectionKey) ?? 0) !== before[0] || (this.#detachGenerations.get(attachmentKey) ?? 0) !== before[1];
   }
 
   /**
@@ -903,9 +911,11 @@ export class DurableActions implements ActionsService {
     const timeout = this.#options.upstreamTimeoutMs;
     // Actions recorded after this point may not be in the lists yet; never close those.
     const listedAt = this.#now();
+    // Fenced to the incarnation read above: a session that reused the ID answers nothing here.
+    const fence = { incarnation };
     const [tools, permissions] = await Promise.all([
-      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.tool, { sessionId }), timeout, "The runtime").catch(() => undefined),
-      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.permission, { sessionId }), timeout, "The runtime").catch(() => undefined),
+      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.tool, { sessionId }, fence), timeout, "The runtime").catch(() => undefined),
+      withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.permission, { sessionId }, fence), timeout, "The runtime").catch(() => undefined),
     ]);
     const toolItems = Array.isArray(tools?.items) ? (tools.items as Record<string, unknown>[]) : undefined;
     const permissionItems = Array.isArray(permissions?.items) ? (permissions.items as Record<string, unknown>[]) : undefined;
@@ -918,7 +928,7 @@ export class DurableActions implements ActionsService {
     const history =
       unrecorded.length === 0
         ? undefined
-        : await withTimeout(sessions.request<{ events?: unknown }>(sessionId, "session.getMessages", { sessionId }), timeout, "The runtime")
+        : await withTimeout(sessions.request<{ events?: unknown }>(sessionId, "session.getMessages", { sessionId }, fence), timeout, "The runtime")
             .then((result) => (Array.isArray(result?.events) ? (result.events as RuntimeSessionEvent[]) : undefined))
             .catch(() => undefined);
     // The lists describe the incarnation and placement asked. If the session was deleted, replaced, or moved
@@ -1042,14 +1052,18 @@ export class DurableActions implements ActionsService {
     };
     const early = stale();
     if (early) return early;
+    // A CLI that detaches while this waits must not be handed the prompt afterwards.
+    const detached = this.#detachedSince(responder.connectionId, input.sessionId);
     let row = await this.#waitForRequest(input.sessionId, input.incarnation, input.kind, input.requestId, input.waitMs ?? 5_000);
     if (!row) {
       // Core may have missed the event (for example around a reconnect): the runtime's pending lists decide.
       await this.reconcile(input.sessionId).catch(() => undefined);
       row = this.#store.findByRequest(input.sessionId, input.incarnation, input.kind, input.requestId);
     }
+    // From here on everything is synchronous: these checks hold through the claim below.
     const late = stale();
     if (late) return late;
+    if (detached()) return { status: "hidden", reason: "This client detached from the session; reattach to answer its prompts" };
     if (!row) return { status: "hidden", reason: "The ledger has no record of this request, so it cannot be answered here" };
     if (row.generation !== input.generation) return { status: "hidden", reason: "This request belongs to another placement of the session" };
     if (!isEligible(responder, { kind: row.kind, tool: row.tool })) return { status: "hidden", reason: "This client cannot answer this kind of request" };
@@ -1116,7 +1130,10 @@ export class DurableActions implements ActionsService {
       }
       for (const row of this.#store.listUnforwarded(now)) {
         if (row.forward_attempts >= this.#options.maxForwardAttempts) {
-          this.#store.markForwarded(row.id, now, "The answer was recorded but could not be delivered to the runtime");
+          this.#store.markForwarded(row.id, now, "The answer was recorded but could not be delivered to the runtime", {
+            generation: row.generation,
+            requestId: runtimeRequestId(row),
+          });
           continue;
         }
         void this.#forward(row.id).catch(() => undefined);
@@ -1186,14 +1203,19 @@ export class DurableActions implements ActionsService {
    * A runtime that restarted without suspending rebuilds a waiting tool call under a new request ID with the same tool
    * call ID. The existing action takes the new ID and keeps its owner, outcome, or uncertainty, so the tool never runs
    * twice: a recorded answer is delivered again under the new ID, and an action cancelled when the old runtime stopped
-   * comes back as uncertain if someone held it (it may have run) or as waiting if nobody did.
+   * comes back as uncertain if someone held it (it may have run) or as waiting if nobody did. The gateway's own
+   * platform tools are idempotent by key and nobody else can reconcile them, so one the old runtime stopped waiting for
+   * runs again. A call the ledger already tracks under a newer placement is returned unchanged (never a second action).
    */
   #rebind(sessionId: string, incarnation: string, toolCallId: string, requestId: string, event: RuntimeSessionEvent, generation: number, now: number): ActionRow | undefined {
     const row = this.#store.findByToolCall(sessionId, incarnation, toolCallId);
-    if (!row || runtimeRequestId(row) === requestId || row.generation > generation) return undefined;
+    if (!row) return undefined;
+    if (runtimeRequestId(row) === requestId || row.generation > generation) return row;
+    const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
+    const platform = platformTool !== undefined || row.responder_type === "platform";
     const answered = ANSWERED_STATES.includes(row.state);
-    const revived = row.state === "cancelled";
-    const uncertain = revived && row.claimed_by !== null;
+    const revived = row.state === "cancelled" || (platform && row.state === "needs_reconciliation");
+    const uncertain = revived && !platform && row.claimed_by !== null;
     const state: ActionState = revived ? (uncertain ? "needs_reconciliation" : "pending") : row.state;
     const reason = revived ? (uncertain ? RESTARTED_WHILE_RUNNING : null) : row.reason;
     const stored = parseJson<RuntimeSessionEvent>(row.event);
@@ -1221,9 +1243,10 @@ export class DurableActions implements ActionsService {
     });
     const latest = this.#store.get(row.id)!;
     if (answered) void this.#forward(row.id).catch(() => undefined);
+    else if (latest.state === "pending" && platformTool) this.#startPlatformTool(latest, platformTool);
     else if (state === "pending" && revived) this.#scheduleNotify(latest);
     else if (uncertain) this.#emit({ type: "pending", sessionId, actionId: row.id });
-    return latest;
+    return this.#store.get(row.id)!;
   }
 
   #onCompletion(input: SessionEventInput, kind: ActionKind): SessionEventDecision {
@@ -1237,7 +1260,7 @@ export class DurableActions implements ActionsService {
     if (row.generation > input.generation || runtimeRequestId(row) !== requestId) return { actionId: row.id, withhold: [] };
     const now = this.#now();
     if (row.state === "completed" || row.state === "failed" || row.state === "expired") {
-      if (!row.forwarded) this.#store.markForwarded(row.id, now);
+      if (!row.forwarded) this.#store.markForwarded(row.id, now, undefined, { generation: row.generation, requestId });
     } else if (OPEN_STATES.includes(row.state)) {
       // The runtime resolved this request without an answer the ledger recorded: an aborted turn or another path.
       if (
@@ -1332,11 +1355,13 @@ export class DurableActions implements ActionsService {
   }
 
   /**
-   * Delivers a recorded answer (or expiry) to the runtime that asked. Concurrent calls for the same placement share
-   * one delivery; an answer adopted by a newer placement gets its own delivery even while an older one is in flight.
+   * Delivers a recorded answer (or expiry) to the runtime that asked. Concurrent calls for the same delivery (action,
+   * placement, and runtime request ID) share it; an answer adopted by a newer placement, or rebound to a request ID a
+   * restarted runtime rebuilt, gets its own delivery even while an older one is in flight.
    */
   #forward(actionId: string): Promise<unknown> {
-    const key = `${actionId}@${this.#store.get(actionId)?.generation ?? 0}`;
+    const row = this.#store.get(actionId);
+    const key = row ? `${actionId}@${row.generation}@${runtimeRequestId(row)}` : actionId;
     const inFlight = this.#forwarding.get(key);
     if (inFlight) return inFlight;
     const delivery = this.#deliver(actionId).finally(() => this.#forwarding.delete(key));
@@ -1349,9 +1374,11 @@ export class DurableActions implements ActionsService {
     if (!row || row.forwarded) return { success: true };
     const sessions = this.#deps.sessions();
     const now = this.#now();
+    // Acknowledgments and retries count only for this delivery: this placement and this runtime request ID.
+    const attempt: DeliveryAttempt = { generation: row.generation, requestId: runtimeRequestId(row) };
     const retryLater = (error: ManagedCopilotError) => {
       const delay = Math.min(5 * 60_000, 1_000 * 2 ** Math.min(row.forward_attempts, 8));
-      this.#store.deferForward(row.id, now + delay, now, row.generation);
+      this.#store.deferForward(row.id, now + delay, now, attempt);
       return error;
     };
     if (!sessions) throw retryLater(new ManagedCopilotError("capability_unavailable", "The session router is not available yet; the answer is recorded and will be delivered"));
@@ -1373,7 +1400,7 @@ export class DurableActions implements ActionsService {
         throw retryLater(new ManagedCopilotError("capability_unavailable", "The session's new placement could not say whether it still waits for this answer; it will be retried"));
       }
       if (!awaited) {
-        this.#store.markForwarded(row.id, now, `Not delivered: the session moved to placement generation ${view.generation}, which does not wait for this request`, row.generation);
+        this.#store.markForwarded(row.id, now, `Not delivered: the session moved to placement generation ${view.generation}, which does not wait for this request`, attempt);
         return { success: false };
       }
       // Moved (here, or concurrently by a runtime asking again); delivered once for that placement.
@@ -1383,11 +1410,16 @@ export class DurableActions implements ActionsService {
     }
     const { method, params } = forwardCall(row);
     try {
-      const response = await withTimeout(sessions.request<unknown>(row.session_id, method, params), this.#options.upstreamTimeoutMs, "The runtime");
+      // Fenced to the incarnation that asked: a session that reuses the ID never receives this answer.
+      const response = await withTimeout(sessions.request<unknown>(row.session_id, method, params, { incarnation: current.incarnation }), this.#options.upstreamTimeoutMs, "The runtime");
       const accepted = (response as { success?: unknown } | undefined)?.success;
-      this.#store.markForwarded(row.id, this.#now(), accepted === false ? "The runtime no longer waited for this answer" : undefined, row.generation);
+      this.#store.markForwarded(row.id, this.#now(), accepted === false ? "The runtime no longer waited for this answer" : undefined, attempt);
       return response ?? { success: true };
     } catch (error) {
+      if (isManagedCopilotError(error, "not_found") && this.#current(row.session_id)?.incarnation !== row.incarnation) {
+        this.#store.markForwarded(row.id, this.#now(), "Not delivered: the session no longer exists", attempt);
+        return { success: false };
+      }
       const managed = error instanceof ManagedCopilotError ? error : new ManagedCopilotError("capability_unavailable", "The runtime did not accept the answer yet; it is recorded and will be retried");
       this.#log.warn("Delivering an answer to the runtime failed; will retry", { actionId: row.id, sessionId: row.session_id, error: (error as Error).message });
       throw retryLater(managed);
@@ -1401,11 +1433,20 @@ export class DurableActions implements ActionsService {
     if (!method) return false;
     const sessions = this.#deps.sessions();
     if (!sessions) return undefined;
+    // Only the incarnation that asked can still wait for it.
+    const current = this.#current(row.session_id);
+    if (!current || current.incarnation !== row.incarnation) return false;
     try {
-      const list = await withTimeout(sessions.request<{ items?: unknown[] }>(row.session_id, method, { sessionId: row.session_id }), this.#options.upstreamTimeoutMs, "The runtime");
+      const list = await withTimeout(
+        sessions.request<{ items?: unknown[] }>(row.session_id, method, { sessionId: row.session_id }, { incarnation: current.incarnation }),
+        this.#options.upstreamTimeoutMs,
+        "The runtime",
+      );
       if (!Array.isArray(list?.items)) return undefined;
       return list.items.some((item) => typeof item === "object" && item !== null && (item as Record<string, unknown>).requestId === runtimeRequestId(row));
-    } catch {
+    } catch (error) {
+      // The session that asked is gone (its ID may now name another session): nothing there waits for this answer.
+      if (isManagedCopilotError(error, "not_found") && this.#current(row.session_id)?.incarnation !== row.incarnation) return false;
       return undefined;
     }
   }
@@ -1436,22 +1477,24 @@ export class DurableActions implements ActionsService {
     return row;
   }
 
-  #scheduleNotify(row: Pick<ActionRow, "session_id" | "owner_id" | "environment" | "id">): void {
+  #scheduleNotify(row: Pick<ActionRow, "session_id" | "id">): void {
     // Offered (again): it counts as announced only once this offer is published, so a failure stays repairable.
     this.#store.clearNotified(row.id);
     this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
     if (this.#notifyTimers.has(row.session_id)) return;
     const timer = setTimeout(() => {
       this.#notifyTimers.delete(row.session_id);
-      this.#publishActionRequired(row.session_id, row.owner_id, row.environment);
+      this.#publishActionRequired(row.session_id);
     }, this.#options.notifyDebounceMs);
     timer.unref?.();
     this.#notifyTimers.set(row.session_id, timer);
   }
 
-  #publishActionRequired(sessionId: string, ownerId: number, environment: string): void {
+  /** Announces the current incarnation's waiting actions, to its owner and environment (an ID may be reused). */
+  #publishActionRequired(sessionId: string): void {
     const current = this.#current(sessionId);
     if (!current) return;
+    const { ownerId, environment } = current.view;
     const pending = this.#store.listBySession(sessionId, current.incarnation, ["pending"]);
     if (pending.length === 0) return;
     const event: PlatformEvent = {
