@@ -401,21 +401,24 @@ export function findVaultPlaceholders(text: string): string[] {
 }
 
 export interface VaultDestination {
-  /** Exact lowercase host name; wildcards and IP literals are not allowed. */
+  /** Exact lowercase host name; wildcards, IP literals, and single-label names are not allowed. */
   readonly host: string;
-  /** HTTPS port, 443 unless written as `host:port`. */
+  /** Always 443: vault credentials are only substituted over HTTPS on the default port. */
   readonly port: number;
 }
 
-/** Parses a vault credential destination: `api.stripe.com` or `api.example.com:8443` (HTTPS only). */
+/** Parses a vault credential destination: an exact HTTPS host name such as `api.stripe.com`. */
 export function parseVaultDestination(value: string): VaultDestination {
-  const match = /^([^:]+)(?::(\d{1,5}))?$/.exec(value.trim());
-  const port = match?.[2] === undefined ? 443 : Number(match[2]);
-  const host = match ? normalizeDestinationHost(match[1]!) : undefined;
-  if (!match || !host || host.ip || match[1]!.includes("*") || !(port >= 1 && port <= 65535)) {
-    throw new TypeError(`Invalid vault host "${value}". Use an exact HTTPS host name such as "api.stripe.com" (optionally ":port"); wildcards and IP addresses are not allowed.`);
+  let pattern: string | undefined;
+  try {
+    pattern = value.trim().startsWith("*.") ? undefined : normalizeHostPattern(value);
+  } catch {
+    pattern = undefined;
   }
-  return { host: host.host, port };
+  if (!pattern || /^[\d.]+$/.test(pattern) || !normalizeDestinationHost(pattern)) {
+    throw new TypeError(`Invalid vault host "${value}". Use an exact HTTPS host name such as "api.stripe.com"; wildcards, ports, and IP addresses are not allowed.`);
+  }
+  return { host: pattern, port: 443 };
 }
 
 /** Header names the proxy never substitutes into (framing, routing, and proxy control). */

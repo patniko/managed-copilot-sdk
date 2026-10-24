@@ -118,8 +118,8 @@ describe("vault helpers", () => {
 
   it("parses exact HTTPS destinations", () => {
     expect(parseVaultDestination("api.stripe.com")).toEqual({ host: "api.stripe.com", port: 443 });
-    expect(parseVaultDestination("API.example.com:8443")).toEqual({ host: "api.example.com", port: 8443 });
-    for (const bad of ["*.stripe.com", "https://api.stripe.com", "10.0.0.1", "api.stripe.com:0", "api.stripe.com:99999", "api.stripe.com/v1"]) {
+    expect(parseVaultDestination("API.example.com.")).toEqual({ host: "api.example.com", port: 443 });
+    for (const bad of ["*.stripe.com", "https://api.stripe.com", "10.0.0.1", "api.stripe.com:8443", "api.stripe.com/v1", "localhost", "vault-echo"]) {
       expect(() => parseVaultDestination(bad), bad).toThrow(/Invalid vault host/);
     }
   });

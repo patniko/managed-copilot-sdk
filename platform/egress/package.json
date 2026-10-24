@@ -1,0 +1,25 @@
+{
+  "name": "@managed-copilot/egress",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Managed Copilot egress proxy: per-sandbox network policy enforcement and vault credential substitution.",
+  "type": "module",
+  "main": "./dist/egress.mjs",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit && node scripts/bundle.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/egress.mjs",
+    "test": "vitest run",
+    "test:docker": "vitest run --config vitest.docker.config.ts",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@managed-copilot/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}
