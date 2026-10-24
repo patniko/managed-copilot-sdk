@@ -539,6 +539,29 @@ describe("placement cutover", () => {
     expect(client.events("session.usage_checkpoint").map((event) => event["id"])).not.toContain(late);
   });
 
+  it("answers hooks from a runtime that no longer owns the session with the closed answer, not an error", async () => {
+    const client = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(client);
+    client.answer = (method) => (method === "hooks.invoke" ? { output: {} } : {});
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const source = sourceConnection(sessionId);
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    // A straggler from the shared source after the move: an error would let that runtime run the tool.
+    const late = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "preToolUse", input: { toolName: "bash", toolArgs: {} } })) as { output?: Record<string, unknown> };
+    expect(late.output).toMatchObject({ permissionDecision: "deny" });
+    const prompt = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "userPromptSubmitted", input: {} })) as { output?: Record<string, unknown> };
+    expect(prompt.output).toMatchObject({ decision: "block" });
+    // A session the gateway does not run at all.
+    const unknown = (await runtime.requestOn(source, "hooks.invoke", { sessionId: crypto.randomUUID(), hookType: "preToolUse", input: {} })) as { output?: Record<string, unknown> };
+    expect(unknown.output).toMatchObject({ permissionDecision: "deny" });
+    expect(client.requests.filter((request) => request.method === "hooks.invoke")).toHaveLength(0);
+  });
+
   it("refuses an attached CLI's writes while the session is fenced and after it moved", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();

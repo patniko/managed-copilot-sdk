@@ -709,18 +709,22 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   registered (tool declarations and `requestPermission`, `requestUserInput`, `requestElicitation`,
   `requestExitPlanMode`, `requestAutoModeSwitch`, `hooks`, `hasSkillProvider`); a disconnect never removes anything, so
   a restore with no client attached keeps the tools declared and the callbacks required. Only the connection that
-  registered something can withdraw it (by registering again without it). Sessions stored before the inventory existed
-  restore with `requestPermission`. Transform, canvas, and user-input requests go to the newest connected client that
-  registered that handler, else fail with `background_callback_unsupported` (no fabricated answer).
+  registered something can withdraw it (by registering again without it), and only that registration: each tool and
+  flag records the revision it was registered at, so a withdrawal never removes what another client registered since.
+  Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, and user-input
+  requests go to the newest connected client that registered that handler, else fail with
+  `background_callback_unsupported` (no fabricated answer).
 - **SDK hooks** fail closed. The stock wire says only whether a client has hooks, not which, so a session has one
   hooks handler: the connected client that registered them. Another connected client registering hooks is refused
-  with `conflict`; `hooks.invoke` goes to the handler only. Without a connected handler (or its answer), and from a
-  fenced source, gating hooks get an explicit closed answer, because runtime 1.0.103 treats an error from
-  `hooks.invoke` as "no output" and carries on (verified): `preToolUse` denies the tool call, `userPromptSubmitted`
-  blocks the prompt; other hooks fail with `background_callback_unsupported`. While hooks are required and no handler is
-  connected, new turns (client or service `send`/`sendAndWait`) and resumes without hooks are refused with
-  `background_callback_unsupported`. A client that resumes with hooks takes them over (and can withdraw them by
-  resuming again without).
+  with `conflict`; `hooks.invoke` goes to the handler only. Without a connected handler (or its answer), and for a
+  runtime that does not own the session (a fenced, sealed, or former source, or an unknown session), gating hooks get
+  an explicit closed answer, because runtime 1.0.103 treats an error from `hooks.invoke` as "no output" and carries on
+  (verified): `preToolUse` denies the tool call, `userPromptSubmitted` blocks the prompt; other hooks fail with
+  `background_callback_unsupported`. While hooks are required and no handler is connected, new turns (client, service,
+  or attached CLI) and resumes without hooks are refused with `background_callback_unsupported`. A client that resumes
+  with hooks takes them over (and can withdraw them by resuming again without). A connected handler's own answer is
+  passed through unchanged, including the stock SDK's empty answer when one of its hook callbacks throws (native
+  callback semantics).
 - **Sandbox MCP vault headers.** Whenever params go to a sandbox runtime (create, client resume, restore, promotion
   `open()`), each remote MCP server, custom agents' included, gets `vaults.mcpHeaders(id, url, "sandbox")`, a vault
   placeholder the egress proxy swaps for the secret, replacing a caller header of the same name. They are never stored,
@@ -731,11 +735,16 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   elicitation prompts only; no tools, hooks, or other callbacks, and no change to the runtime's registrations) and pins
   the incarnation, placement, generation, and runtime it attached to (refused with `session_busy` while fenced).
   `write(op, send)` admits a native AHP operation (a text-only turn, which also needs any required SDK hooks connected; an
-  allowed model, recorded for restores; an abort) and runs the AHP write in the same synchronous step as the checks,
+  allowed model, recorded for restores; an abort; an answer to `ask_user`, refused with `conflict` while a connected app
+  answers questions) and runs the AHP write in the same synchronous step as the checks,
   so input is never queued into another runtime or incarnation (`session_busy` while fenced, `conflict` after a move,
   `not_found` for another incarnation). `answer` sends a permission or elicitation decision through
-  `actions.onClientAnswer` (`responderKind: "cli"`), else to the pinned runtime; `close` detaches the responder. A
-  session being deleted emits `deleted` only, never `stopped` for the runtime connection the delete closes.
+  `actions.onClientAnswer` (`responderKind: "cli"`, the pinned incarnation and generation, `requireRecorded`); an answer
+  the ledger does not record fails with `not_found` and is never forwarded (only without an actions service does it go
+  to the pinned runtime). `close` detaches the responder. Recovery, deletion, and discarding an interrupted create each
+  re-check the row's incarnation and state under a per-ID reservation before touching anything, so they never act on a
+  session created or deleted since. A session being deleted emits `deleted` only, never `stopped` for the runtime
+  connection the delete closes.
 - **Sends.** Shared sessions accept only inline (`blob`) attachments; file, directory, and selection attachments
   name paths the runtime would read on the platform host. Sandbox attachment paths must stay in `/workspace`.
   Credential and routing model headers and shell agent mode are rejected.

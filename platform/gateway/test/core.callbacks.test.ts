@@ -217,15 +217,31 @@ describe("callback obligations and runtime credentials", () => {
     const services = app.services as Record<string, unknown>;
     const original = services["actions"];
     const answers: Record<string, unknown>[] = [];
-    services["actions"] = { ...(original as object), onClientAnswer: async (input: Record<string, unknown>) => (answers.push(input), { kind: "respond", response: { success: true, recorded: true } }) };
+    let recorded = true;
+    services["actions"] = {
+      ...(original as object),
+      onClientAnswer: async (input: Record<string, unknown>) => (answers.push(input), recorded ? { kind: "respond", response: { success: true, recorded: true } } : { kind: "forward" }),
+    };
     try {
       await expect(cli.answer("session.permissions.handlePendingPermissionRequest", { requestId: "perm-1", result: { kind: "approved" } })).resolves.toEqual({ success: true, recorded: true });
-      expect(answers[0]).toMatchObject({ sessionId, connectionId: "cli_one", responderKind: "cli", method: "session.permissions.handlePendingPermissionRequest", incarnation: cli.incarnation });
+      expect(answers[0]).toMatchObject({ sessionId, connectionId: "cli_one", responderKind: "cli", method: "session.permissions.handlePendingPermissionRequest", incarnation: cli.incarnation, generation: 0, requireRecorded: true });
+      // An answer the ledger does not record fails closed instead of reaching the runtime.
+      recorded = false;
+      await expect(cli.answer("session.permissions.handlePendingPermissionRequest", { requestId: "perm-2", result: { kind: "approved" } })).rejects.toMatchObject({ code: "not_found" });
       await expect(cli.answer("session.tools.handlePendingToolCall", { requestId: "tool-1", result: "x" })).rejects.toMatchObject({ code: "invalid_request" });
     } finally {
       services["actions"] = original;
     }
-    expect(runtime.calls("session.permissions.handlePendingPermissionRequest").filter((call) => call.params["requestId"] === "perm-1")).toHaveLength(0);
+    expect(runtime.calls("session.permissions.handlePendingPermissionRequest").filter((call) => ["perm-1", "perm-2"].includes(String(call.params["requestId"])))).toHaveLength(0);
+
+    // A person answers ask_user from the CLI only when no connected app answers questions.
+    cli.write({ kind: "userInput" }, () => sent++);
+    expect(sent).toBe(4);
+    const app2 = await connect();
+    await app2.request("session.resume", { sessionId, requestPermission: true, requestUserInput: true });
+    expect(() => cli.write({ kind: "userInput" }, () => sent++)).toThrowError(expect.objectContaining({ code: "conflict" }));
+    await app2.close();
+    await waitUntil(() => !sessions().attached(sessionId).some((responder) => responder.connectionId === app2.welcome.connectionId));
 
     // Closing detaches it; later writes are refused.
     cli.close();
@@ -237,7 +253,54 @@ describe("callback obligations and runtime credentials", () => {
     await sessions().delete(1001, sessionId);
     await sessions().create(alice, { sessionId, environment: "chat" });
     expect(() => reused.write({ kind: "turn", text: "late" }, () => sent++)).toThrowError(expect.objectContaining({ code: "not_found" }));
-    expect(sent).toBe(3);
+    expect(sent).toBe(4);
+  });
+
+  it("keeps a registration another client made while a withdrawal was in flight", async () => {
+    const first = await connect((method) => (method === "hooks.invoke" ? { output: {} } : {}));
+    const sessionId = crypto.randomUUID();
+    await first.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    // The handler withdraws its hooks, but its resume is still on its way when another client registers hooks.
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const withdrawing = first.request("session.resume", { sessionId, requestPermission: true });
+    await hold.held;
+    const second = await connect((method) => (method === "hooks.invoke" ? { output: {} } : {}));
+    await second.request("session.resume", { sessionId, hooks: true, requestPermission: true });
+    hold.release();
+    await withdrawing;
+    const stored = JSON.parse((gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string }).admitted) as { callbacks: { flags: Record<string, boolean> } };
+    expect(stored.callbacks.flags["hooks"]).toBe(true);
+    // The second client's hooks stay required after it leaves.
+    await second.close();
+    await waitUntil(() => !sessions().attached(sessionId).some((responder) => responder.connectionId === second.welcome.connectionId));
+    await expect(first.request("session.send", { sessionId, prompt: "unguarded?" })).rejects.toMatchObject({ data: { code: "background_callback_unsupported" } });
+  });
+
+  it("gives a runtime credential only to a client still connected when its verification finishes", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    const registrationId = runtime.sessions.get(sessionId)!.createParams["gitHubTokenProviderRegistrationId"] as string;
+    const auth = gateway.gateway.app.service("auth") as unknown as { authenticate: (token: string, options?: unknown) => Promise<Principal> };
+    const original = auth.authenticate;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let verifying = false;
+    auth.authenticate = async (token: string, options?: unknown) => {
+      verifying = true;
+      await gate;
+      return original.call(auth, token, options);
+    };
+    try {
+      const answer = runtime.requestOn(upstreamOf(sessionId), "gitHubToken.getToken", { registrationId, sessionId, host: "https://github.com", reason: "refresh" });
+      await waitUntil(() => verifying);
+      await client.close();
+      await waitUntil(() => sessions().attached(sessionId).length === 0);
+      release();
+      await expect(answer).resolves.toEqual({ kind: "cancelled" });
+    } finally {
+      delete (auth as { authenticate?: unknown }).authenticate;
+    }
   });
 
   it("finishes interrupted deletions, discards interrupted creates, and tells incarnations of one ID apart", async () => {
@@ -282,6 +345,28 @@ describe("callback obligations and runtime credentials", () => {
       await expect(sessions().create(alice, { sessionId: retried, environment: "chat" })).resolves.toEqual({ sessionId: retried, created: true });
       expect(sessions().get(retried)).toMatchObject({ state: "ready" });
       expect(sessions().get(retried)!.incarnation).not.toBe(stale);
+
+      // Recovery works from a snapshot: a session deleted or created again meanwhile is never touched.
+      const slow = crypto.randomUUID();
+      const deletedMeanwhile = crypto.randomUUID();
+      const createdMeanwhile = crypto.randomUUID();
+      for (const id of [slow, deletedMeanwhile, createdMeanwhile]) await sessions().create(alice, { sessionId: id, environment: "chat" });
+      db.prepare("UPDATE core_sessions SET state = 'deleting' WHERE id IN (?, ?)").run(slow, deletedMeanwhile);
+      db.prepare("UPDATE core_sessions SET state = 'creating' WHERE id = ?").run(createdMeanwhile);
+      const hold = runtime.holdNext("session.delete", slow);
+      const recovering = sessions().recover();
+      await hold.held;
+      await sessions().delete(1001, deletedMeanwhile);
+      await sessions().create(alice, { sessionId: deletedMeanwhile, environment: "chat" });
+      await sessions().create(alice, { sessionId: createdMeanwhile, environment: "chat" });
+      const fresh = [sessions().get(deletedMeanwhile)!.incarnation, sessions().get(createdMeanwhile)!.incarnation];
+      const deletesBefore = runtime.calls("session.delete").length;
+      hold.release();
+      await recovering;
+      expect(sessions().get(slow)).toBeUndefined();
+      expect([sessions().get(deletedMeanwhile)?.incarnation, sessions().get(createdMeanwhile)?.incarnation]).toEqual(fresh);
+      expect(sessions().get(deletedMeanwhile)!.state).toBe("ready");
+      expect(runtime.calls("session.delete").slice(deletesBefore).map((call) => call.params["sessionId"])).not.toContain(deletedMeanwhile);
     } finally {
       off();
     }

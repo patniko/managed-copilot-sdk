@@ -106,6 +106,12 @@ export interface AdmittedConfig {
 export interface CallbackInventory {
   readonly tools: readonly Record<string, unknown>[];
   readonly flags: Readonly<Record<string, true>>;
+  /**
+   * The registration revision of each tool and flag: a client's withdrawal applies only to the registration it made,
+   * never to one another client made since.
+   */
+  readonly revisions?: { readonly tools: Readonly<Record<string, number>>; readonly flags: Readonly<Record<string, number>> };
+  readonly revision?: number;
 }
 
 export interface NewSession {

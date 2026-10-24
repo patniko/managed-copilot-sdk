@@ -227,7 +227,9 @@ export interface CliAttachOptions {
 export type CliOperation =
   | { readonly kind: "turn"; readonly text: string }
   | { readonly kind: "model"; readonly modelId: string }
-  | { readonly kind: "abort" };
+  | { readonly kind: "abort" }
+  /** The person's answer to an `ask_user` question (AHP `chat/inputCompleted`). */
+  | { readonly kind: "userInput" };
 
 export interface CliAttachment {
   readonly connectionId: string;
@@ -235,13 +237,15 @@ export interface CliAttachment {
   readonly generation: number;
   /**
    * Admits a CLI operation under the session's policy (text-only turns that need any required SDK hooks connected,
-   * allowed models, aborts) and runs `send`, the AHP write, in the same synchronous step as the ownership, fence, and
-   * placement checks. Throws (`not_found`, `session_busy`, `conflict`, or the admission error) instead of sending.
+   * allowed models, aborts, answers to `ask_user` unless a connected app answers questions) and runs `send`, the AHP
+   * write, in the same synchronous step as the ownership, fence, and placement checks. Throws (`not_found`,
+   * `session_busy`, `conflict`, or the admission error) instead of sending.
    */
   write(operation: CliOperation, send: () => void): void;
   /**
-   * A CLI answer to a pending permission or elicitation request: through the actions ledger as `responderKind: "cli"`
-   * (`onClientAnswer`), else to the pinned runtime. Never a tool result.
+   * A CLI answer to a pending permission or elicitation request, through the actions ledger as `responderKind: "cli"`
+   * for the pinned incarnation and generation (`requireRecorded`): an answer the ledger does not record is refused, not
+   * forwarded. Without an actions service it goes to the pinned runtime. Never a tool result.
    */
   answer(method: string, params: Record<string, unknown>): Promise<unknown>;
   /** Detaches the CLI responder (`actions.onDetached`). Idempotent. */
