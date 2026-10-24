@@ -309,6 +309,8 @@ export class FakeRuntime {
         return { success: true };
       case "session.abort":
         return {};
+      case "ping":
+        return { message: params["message"] ?? "pong", timestamp: Date.now(), protocolVersion: 3 };
       case "runtime.shutdown":
         return {};
       default:

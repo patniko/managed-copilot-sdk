@@ -130,6 +130,12 @@ public API:
 An expired bound fails with `timeout`, naming the call. A caller's `AbortSignal` rejects with its own reason. Durable
 result submissions are idempotent and retried after a `timeout`.
 
+**Bridge keepalive.** Proxies close WebSockets that carry nothing for a while (Azure Container Apps ingress closes
+them after 240 s with code 1006), and a half-open connection never reports itself closed. The bridge therefore pings
+the gateway every 30 s. A gateway that answers nothing (no pong, no message) for 90 s ends the bridge with "The
+connection to Managed Copilot at … stopped responding", which the stock client reports. The gateway's `/v1/connect`
+server answers pings itself (`ws` `autoPong`). The event stream stays busy with the gateway's 15 s `: ping` comments.
+
 ### Client mode and safe defaults
 
 The stock `mode: "empty"` validates on the client before transmission (it requires `baseDirectory`/`sessionFs` and an
@@ -800,19 +806,34 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   ephemeral root `session.error` (`errorType: "interrupted"`, "This turn was interrupted because the platform lost the
   connection to the session's runtime … Send your message again to continue.") and a root `session.idle`. The ledger
   records `lastTurn` `failed` (state `idle`) and emits `session.failed` and `session.idle` (`status: "failed"`), so
-  `SessionInfo` shows it, and a `sendAndWait` the connection cut rejects with the same message
-  (`capability_unavailable`). The session stays resumable; the next turn restores it. A turn waiting on work durable
+  `SessionInfo` shows it. A `sendAndWait` whose own turn core ended this way rejects with the same message
+  (`capability_unavailable`). One whose turn completed (only the reply was lost), or whose turn pending work carries,
+  gets the connection error. The session stays resumable; the next turn restores it. A turn waiting on work durable
   owns (`hasOpenActions`) is kept, because `continuePendingWork` keeps the runtime's pending tool call or permission
   and answering it continues the turn. On every restore, a turn the ledger still has running is checked against the
-  runtime: it continues while `session.metadata.isProcessing` is true, or while durable has open actions and the
-  runtime still lists pending tool or permission requests; otherwise it ends. An external shared runtime
-  (`MANAGED_COPILOT_RUNTIME_URL`) keeps running its turns, so nothing ends while its connection is down, and a turn it
-  finished unseen gets only a root `session.idle`.
+  runtime that now owns the session. It ends only on answers: `session.metadata.isProcessing` is `false`, and, while
+  durable has open actions, the runtime lists no pending tool or permission requests. A check the runtime answers
+  with an error leaves the turn running. A connection that is gone or silent fails the restore, and the next request
+  retries it. The end applies only while that runtime still owns the session, so a cutover that commits meanwhile
+  wins, and a client resume overtaken that way is admitted again where the session moved. An external shared runtime
+  (`MANAGED_COPILOT_RUNTIME_URL`) keeps running its turns, so nothing ends while its connection is down. A turn it
+  finished unseen ends as its history records: its own root `session.error`, an abort (`cancelled`), or neither
+  (`completed`).
 - **Reopening a sandbox runtime.** Because the stock runtime refuses `llmInference.setProvider` while a lost
   connection holds the registration, the sandbox module restarts the runtime (session state stays on disk) and its
   handle's `initialize` throws `capability_unavailable` with `details.reopen: true`. Core then opens the runtime again,
   at most twice, for restores and for a promotion's destination alike. A refusal while another handle of this gateway
   is open is a `conflict` and is never reopened.
+- **Registration path deadlines.** A session's registration changes run one at a time, so a runtime answer that never
+  comes would hold every later resume of the session (seen on Azure: a resume on a dead gateway→sandbox stream, with
+  the client's retry queued behind it). Each runtime answer on the path therefore gets 60 s (`upstreamTimings` in
+  `sessions.ts`). The bounded steps are `session.create`, `session.resume` (client resumes, restores, and a cutover's
+  destination), the sandbox handle's `initialize` and `sessionOpened`, `session.options.update`, `session.tools.set`,
+  and a restore's turn checks. When one expires, the connection is probed with `ping` (10 s). One that does not answer
+  is closed: a sandbox session opens a fresh stream on its next request, and the shared runtime's supervisor restarts
+  it. The caller fails with `timeout` (`details: { sessionId, step }`), which it can retry. `RuntimeUpstream.open`
+  already bounds the runtime handshake (30 s); starting a sandbox (`ensureRunning`, `openRuntime`) is bounded by the
+  sandbox module.
 - **Interrupted creates and deletions.** At startup (in the background) and on the next request for the session,
   rows a stopped gateway left `deleting` finish their deletion (sandbox, runtime state, policy, `session.deleted`,
   ledger), and rows left `creating` are discarded (sandbox and policy released), so a schedule retrying its

@@ -68,6 +68,8 @@ describe("call deadlines", () => {
       details: { method: "GET", path: "/v1/sessions", timeoutMs: 150, stage: "answer" },
     });
     expect(Date.now() - started).toBeLessThan(3_000);
+    // The next call gets an ordinary budget: what it shows is that nothing is stuck, not how fast a loaded machine is.
+    timings.requestMs = 5_000;
     await expect(http.get("/v1/sessions")).resolves.toEqual({ ok: true });
   });
 
@@ -84,6 +86,7 @@ describe("call deadlines", () => {
     };
     timings.connectMs = 150;
     await expect(ManagedCopilot.connect({ url: base, gitHubToken: "t" })).rejects.toMatchObject({ code: "timeout", message: expect.stringContaining("did not answer GET /v1/me within 150 ms") });
+    timings.connectMs = 5_000;
     const managed = await ManagedCopilot.connect({ url: base, gitHubToken: "t" });
     expect(managed.account).toEqual({ id: 1, login: "alice" });
     await managed.close();
@@ -126,23 +129,25 @@ describe("call deadlines", () => {
     handler = (req, res) => {
       res.writeHead(200, { "content-type": "application/octet-stream" });
       if (req.url === "/steady") {
+        // 1.5 s in all, longer than both bounds, but never 1 s without progress.
         let sent = 0;
         const timer = setInterval(() => {
           res.write("x".repeat(10));
-          if (++sent === 8) {
+          if (++sent === 15) {
             clearInterval(timer);
             res.end();
           }
-        }, 50);
+        }, 100);
         return;
       }
       res.write("partial");
       held.push(res);
     };
-    timings.requestMs = 100;
-    timings.streamIdleMs = 300;
+    // Budgets with room for a loaded machine: the answer's headers are not what this test is about.
+    timings.requestMs = 1_000;
+    timings.streamIdleMs = 1_000;
     const http = new HttpClient(base, "t");
-    expect(await (await http.fetch("GET", "/steady")).text()).toBe("x".repeat(80));
+    expect(await (await http.fetch("GET", "/steady")).text()).toBe("x".repeat(150));
     const stalled = await http.fetch("GET", "/stalled");
     await expect(stalled.text()).rejects.toMatchObject({ code: "timeout", message: expect.stringContaining("Reading the answer to GET /stalled") });
   });
@@ -162,18 +167,19 @@ describe("call deadlines", () => {
       }
       json(res, 200, { size });
     };
-    timings.requestMs = 100;
-    timings.streamIdleMs = 300;
+    // Budgets with room for a loaded machine; the steady upload takes 1.2 s, longer than both, with progress every 100 ms.
+    timings.requestMs = 1_000;
+    timings.streamIdleMs = 1_000;
     const http = new HttpClient(base, "t");
     let chunks = 0;
     const steady = new ReadableStream<Uint8Array>({
       async pull(controller) {
-        if (chunks++ === 6) return controller.close();
-        await new Promise((resolve) => setTimeout(resolve, 60));
+        if (chunks++ === 12) return controller.close();
+        await new Promise((resolve) => setTimeout(resolve, 100));
         controller.enqueue(new Uint8Array(10));
       },
     });
-    expect(await (await http.fetch("PUT", "/upload", { rawBody: steady })).json()).toEqual({ size: 60 });
+    expect(await (await http.fetch("PUT", "/upload", { rawBody: steady })).json()).toEqual({ size: 120 });
     const stalledSource = { cancelled: false };
     const stalled = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -186,13 +192,13 @@ describe("call deadlines", () => {
     await expect(http.fetch("PUT", "/upload", { rawBody: stalled })).rejects.toMatchObject({
       code: "timeout",
       message: expect.stringContaining("Sending PUT /upload"),
-      details: { method: "PUT", path: "/upload", timeoutMs: 300, stage: "send" },
+      details: { method: "PUT", path: "/upload", timeoutMs: 1_000, stage: "send" },
     });
     // The stalled source is released (a file stream's descriptor closes), not left locked.
     await waitUntil(() => stalledSource.cancelled);
     await expect(http.fetch("PUT", "/silent", { rawBody: new Uint8Array(1_000) })).rejects.toMatchObject({
       code: "timeout",
-      message: expect.stringContaining("did not answer PUT /silent within 100 ms"),
+      message: expect.stringContaining("did not answer PUT /silent within 1 s"),
     });
   });
 
@@ -242,8 +248,9 @@ describe("call deadlines", () => {
       // The second sends an event and then falls silent (no heartbeats); the third continues after it.
       res.write(event(lastIds.length === 2 ? "evt-1" : "evt-2"));
     };
-    timings.connectMs = 150;
-    timings.eventsIdleMs = 200;
+    // The held first connection waits out its connect bound; the answered ones have room for a loaded machine.
+    timings.connectMs = 1_000;
+    timings.eventsIdleMs = 500;
     timings.eventsRetryMs = 10;
     const received: string[] = [];
     const ctx = {

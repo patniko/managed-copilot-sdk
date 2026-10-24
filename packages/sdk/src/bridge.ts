@@ -17,6 +17,16 @@ import { WebSocket } from "ws";
 
 const PREFIX = "[managed-copilot]";
 
+/**
+ * Pings the gateway this often (`MANAGED_COPILOT_BRIDGE_PING_MS` overrides it for tests). Proxies in front of a
+ * deployment close WebSockets that carry nothing for a while (Azure Container Apps ingress after 240 s), and a
+ * half-open connection never reports itself closed: a gateway that answers nothing for three intervals is gone.
+ */
+const PING_INTERVAL_MS = (() => {
+  const override = Number(process.env["MANAGED_COPILOT_BRIDGE_PING_MS"]);
+  return Number.isSafeInteger(override) && override > 0 ? override : 30_000;
+})();
+
 function fail(message: string): never {
   process.stderr.write(`${PREFIX} ${message}\n`);
   process.exit(1);
@@ -159,6 +169,24 @@ function main(): void {
   ws.on("open", () => {
     const hello: BridgeHello = { type: BRIDGE_HELLO, version: 1, environment: config.environment, ...(config.clientName ? { clientName: config.clientName } : {}) };
     ws.send(JSON.stringify(hello));
+    let heard = Date.now();
+    const alive = () => {
+      heard = Date.now();
+    };
+    ws.on("pong", alive);
+    ws.on("message", alive);
+    const keepalive = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - heard > PING_INTERVAL_MS * 3) {
+        clearInterval(keepalive);
+        ws.terminate();
+        const silence = PING_INTERVAL_MS * 3;
+        fail(`The connection to Managed Copilot at ${url.origin} stopped responding (no answer for ${silence < 1000 ? `${silence} ms` : `${Math.round(silence / 1000)} s`}).`);
+      }
+      ws.ping();
+    }, PING_INTERVAL_MS);
+    keepalive.unref();
+    ws.once("close", () => clearInterval(keepalive));
   });
 
   ws.on("message", (data, isBinary) => {

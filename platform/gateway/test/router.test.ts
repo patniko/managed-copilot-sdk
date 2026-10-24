@@ -286,6 +286,15 @@ describe("core router with a stock-protocol runtime", () => {
     expect((await read({ "last-event-id": anchor.id }, 2)).ids).toEqual(missed.map((event) => event.id));
   });
 
+  it("answers WebSocket pings on /v1/connect, so a bridge's keepalive keeps its connection busy", async () => {
+    const client = await connect(ALICE);
+    const pong = new Promise<string>((resolve) => client.ws.once("pong", (data) => resolve(data.toString())));
+    client.ws.ping("keepalive");
+    expect(await pong).toBe("keepalive");
+    // The connection carries JSON-RPC as before.
+    await expect(client.request("ping", { message: "hi" })).resolves.toBeDefined();
+  });
+
   it("scopes sessions to their owner", async () => {
     const alice = await connect(ALICE);
     const sessionId = crypto.randomUUID();
