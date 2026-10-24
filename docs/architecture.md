@@ -471,7 +471,9 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
 - **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
   sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
   so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
-  Promotion is one-way.
+  Promotion is one-way. The stock SDK's `sendAndWait` times out after 60 s by default (the work continues); a turn that
+  may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
+  (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
 
 ## Gateway extension points
 
