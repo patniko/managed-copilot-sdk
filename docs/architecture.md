@@ -236,9 +236,17 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   derived image layer at environment preparation, never installed per session.
 - **Images.** The gateway builds the base image from `platform/sandbox/image/Dockerfile` (content-hash tag
   `managed-copilot-sandbox:<hash>`, also tagged `ghcr.io/patniko/managed-copilot-sandbox:0.1.0` for customer `FROM`
-  lines) with the operator's npm registry and pip index baked in as session defaults. Environment images are built
-  FROM it, must carry the base label, and are pinned by image ID per sandbox, so a resume never changes the toolchain.
-  `warm > 0` fails gateway start: this backend cannot keep warm sandboxes safely.
+  lines) with the operator's npm registry and pip index baked in as session defaults. Those URLs reach every
+  workload's npm and pip configuration and are recorded as build arguments in the image history, so they must not
+  carry credentials: user info (`user:password@`, `token@`), query strings, fragments, and spaces, backslashes, or
+  control characters (which could smuggle in a configuration line such as an `_authToken`) are refused, both by the
+  gateway before any build (a clear `capability_unavailable` naming the setting, and a startup warning when an
+  explicit setting is refused) and by the image's own guard for builds outside the gateway. Credentials hidden in a
+  URL's path cannot be detected and must not be used; error messages show only the scheme and host. Authenticated
+  registries are not supported yet; they need build secrets for image preparation and vault-scoped credentials for
+  session-time installs. Environment images are built FROM the base, must carry the base label, and are pinned by
+  image ID per sandbox, so a resume never changes the toolchain. `warm > 0` fails gateway start: this backend cannot
+  keep warm sandboxes safely.
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
   tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
   no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
@@ -787,8 +795,8 @@ sequenceDiagram
 | `MANAGED_COPILOT_MCP_ADAPTER_URL` | `http://127.0.0.1:<port>` | Base URL the shared runtime uses for the MCP adapter |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix and `managed-copilot.instance` label for Docker networks, containers, and volumes (use a unique value per parallel gateway) |
-| `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs |
-| `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images |
+| `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs; must not contain credentials, a query, a fragment, or spaces, backslashes, or control characters (refused) |
+| `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images (empty: pip's default index); same restrictions as the npm registry |
 | `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `platform/sandbox` | Use a prebuilt base image instead (must carry the base label) |
 | `MANAGED_COPILOT_SANDBOX_PROVIDER` | `docker` | Sandbox backend: `docker` (local) or `azure` |
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |

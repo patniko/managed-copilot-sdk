@@ -35,6 +35,8 @@ export interface ImageOptions {
   readonly appHostDir: string;
   /** Override for the base image build context (defaults to platform/sandbox next to the gateway). */
   readonly contextDir?: string;
+  /** Reads host tool configuration (`npm config get registry`, `pip config list`); replaceable in tests. */
+  readonly hostConfig?: (command: string) => Promise<string | undefined>;
 }
 
 function defaultContextDir(): string {
@@ -73,31 +75,112 @@ async function hostConfig(command: string): Promise<string | undefined> {
   }
 }
 
+/**
+ * Validates a registry or package-index URL before it is baked into sandbox images. The URL becomes a Docker build
+ * argument (on the build's command line and in the image history) and is written to every sandbox's npm or pip
+ * configuration, which workloads can read, so it must never carry credentials: user info (`user:password@`,
+ * `token@`), query strings, and fragments are refused, and so are spaces, backslashes, and control characters (a line
+ * break, or an escape a shell's `echo` expands, would add a configuration line of its own, such as an `_authToken`).
+ * Authenticated registries need their own mechanism (build secrets for image preparation, vaults for session-time
+ * installs), which is not available yet. Returns the trimmed URL. Messages show only the scheme and host, never the
+ * credential or the path (which some registries use for tokens). Mirrors the image's guard
+ * (platform/sandbox/image/check-registry-url.sh), so a URL accepted here also passes there.
+ */
+export function checkRegistryUrl(value: string, source: { readonly setting: string; readonly fix: string }): string {
+  const candidate = value.trim();
+  const refuse = (problem: string): never => {
+    throw new ManagedCopilotError("capability_unavailable", `${source.setting} ${problem} ${source.fix}`);
+  };
+  if (/[\s\p{Cc}\\]/u.test(candidate)) refuse("must be a single URL without spaces, line breaks, backslashes, or control characters.");
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return refuse("is not a valid URL.");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") refuse(`must be an http(s) URL, not ${url.protocol}.`);
+  // Also judged as written: URL parsing drops an empty `@`, but the image's guard (and npm or pip) see the raw value.
+  const written = /^[a-z][a-z0-9+.-]*:\/\/([^/]*)/i.exec(candidate)?.[1] ?? "";
+  if (url.username || url.password || written.includes("@")) {
+    refuse(
+      `contains credentials (${url.protocol}//<credentials>@${url.host}). Sandbox images never receive registry credentials: they would reach every sandbox's package configuration and the image history. Authenticated registries are not supported yet.`,
+    );
+  }
+  if (!/^https?:\/\//i.test(candidate)) refuse("must start with http:// or https://.");
+  if (url.search || url.hash || /[?#]/.test(candidate)) {
+    refuse(`has a query string or fragment (${url.protocol}//${url.host}), which can carry credentials; use the registry's plain URL.`);
+  }
+  return candidate;
+}
+
+export interface ImageRegistries {
+  readonly npm: string;
+  readonly pip: string | undefined;
+}
+
+const NPM_FIX = "Set MANAGED_COPILOT_NPM_REGISTRY to a registry URL without credentials (for example a proxy that the sandboxes' network policy allows).";
+const PIP_FIX = "Set MANAGED_COPILOT_PIP_INDEX_URL to an index URL without credentials, or to an empty value to use pip's default index.";
+
+/**
+ * Explicitly configured registry settings that would be refused at the first image build, so the gateway can warn at
+ * startup. Returns the problem messages (never the credentials).
+ */
+export function registrySettingProblems(env: Readonly<Record<string, string | undefined>>): string[] {
+  const problems: string[] = [];
+  const settings: [string | undefined, { setting: string; fix: string }][] = [
+    [env.MANAGED_COPILOT_NPM_REGISTRY, { setting: "MANAGED_COPILOT_NPM_REGISTRY", fix: NPM_FIX }],
+    [env.MANAGED_COPILOT_PIP_INDEX_URL || undefined, { setting: "MANAGED_COPILOT_PIP_INDEX_URL", fix: PIP_FIX }],
+  ];
+  for (const [value, source] of settings) {
+    if (value === undefined) continue;
+    try {
+      checkRegistryUrl(value, source);
+    } catch (error) {
+      problems.push((error as Error).message);
+    }
+  }
+  return problems;
+}
+
 export class SandboxImages {
   readonly #options: ImageOptions;
   readonly #inflight = new Map<string, Promise<ImageRef>>();
-  #registry: Promise<{ npm: string; pip: string | undefined }> | undefined;
+  #registry: Promise<ImageRegistries> | undefined;
 
   constructor(options: ImageOptions) {
     this.#options = options;
   }
 
-  /** The npm registry (and optional pip index) baked into images as session-time defaults. */
-  registries(): Promise<{ npm: string; pip: string | undefined }> {
-    this.#registry ??= (async () => {
+  /**
+   * The npm registry (and optional pip index) baked into images as session-time defaults. Credential-bearing URLs are
+   * refused (see `checkRegistryUrl`), whether configured explicitly or found in the host's npm or pip configuration.
+   */
+  registries(): Promise<ImageRegistries> {
+    if (this.#registry) return this.#registry;
+    const resolving = (async () => {
       const env = this.#options.env;
-      const npm = env.MANAGED_COPILOT_NPM_REGISTRY ?? (await hostConfig("npm config get registry"));
-      if (!npm || !/^https?:\/\//.test(npm)) {
+      const read = this.#options.hostConfig ?? hostConfig;
+      const explicitNpm = env.MANAGED_COPILOT_NPM_REGISTRY;
+      const configuredNpm = explicitNpm ?? (await read("npm config get registry"));
+      if (!configuredNpm) {
         throw new ManagedCopilotError("capability_unavailable", "Set MANAGED_COPILOT_NPM_REGISTRY (or configure `npm config get registry`) so the sandbox image can install the Copilot runtime.");
       }
+      const npm = checkRegistryUrl(configuredNpm, { setting: explicitNpm !== undefined ? "MANAGED_COPILOT_NPM_REGISTRY" : "The host's npm registry (`npm config get registry`)", fix: NPM_FIX });
       let pip = env.MANAGED_COPILOT_PIP_INDEX_URL;
+      const explicitPip = pip !== undefined;
       if (pip === undefined) {
-        const listed = await hostConfig("python -m pip config list");
+        const listed = await read("python -m pip config list");
         pip = listed?.split(/\r?\n/).map((line) => /^global\.index-url='(.*)'$/.exec(line.trim())?.[1]).find(Boolean);
       }
+      if (pip) pip = checkRegistryUrl(pip, { setting: explicitPip ? "MANAGED_COPILOT_PIP_INDEX_URL" : "The host's pip index (`pip config` global.index-url)", fix: PIP_FIX });
       return { npm, pip: pip || undefined };
     })();
-    return this.#registry;
+    this.#registry = resolving;
+    // A refused configuration is read again on the next attempt, after the operator fixed it.
+    resolving.catch(() => {
+      if (this.#registry === resolving) this.#registry = undefined;
+    });
+    return resolving;
   }
 
   /** Ensures the base sandbox image exists (building it from platform/sandbox when needed). */
