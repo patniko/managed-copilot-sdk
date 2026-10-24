@@ -955,9 +955,9 @@ sequenceDiagram
     resume, working directories, customizations and MCP servers, automations, host configuration, unknown extensions,
     and on shared placement host slash commands other than `/compact` (`/chronicle` reads every session on the runtime).
 - **What the CLI sees.** Runtime frames go through core's `pathScrubber` (with every escape in a `file:` URI decoded
-  first, `%3A` and `%23` included, and the URI re-encoded), so working directories, plan paths, and context read
-  `/workspace`, `/platform/...`, or `/opt/managed-copilot/customizations/...`; state nested deeper than 128 levels is
-  replaced rather than passed on unscrubbed. Every result loses the host's `terminalCommandPrefix` and
+  first, `%3A` and `%23` included, a URI's server read as a UNC path, and the URI re-encoded), so working directories,
+  plan paths, and context read `/workspace`, `/platform/...`, or `/opt/managed-copilot/customizations/...`; state nested
+  deeper than 128 levels is replaced rather than passed on unscrubbed. Every result loses the host's `terminalCommandPrefix` and
   `defaultDirectory`, shared sessions' completions lose host commands they can't run, the host's requests to the
   client (its resources) are answered with an error, and OTLP telemetry is not forwarded. A message the relay can't
   handle ends only its own attachment (1008 for the client's, including messages nested deeper than 64 levels; 1011
@@ -976,13 +976,15 @@ sequenceDiagram
   `stopped`) end only hosts whose runtime lookup started before the event, so a host already on the new runtime stays.
   The fence ends the attached CLIs' attachments, and with them their credential, but the person is still there (the
   CLI reconnects after the move) and may be the session's only credential, which the destination needs to open the
-  session: before closing the relays, the fence keeps each attached CLI's principal present on the session
-  (`sessions.presence`) until `release`.
+  session and the resumed turn needs for every model call: before closing the relays, the fence keeps each attached
+  CLI's principal present on the session (`sessions.presence`) until a CLI attaches to the session again, or at most
+  `MANAGED_COPILOT_ATTACH_RECONNECT_GRACE_MS` (60 s) after `release`.
 - **Reconnects.** The stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
   1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
   into 1012 and reconnects the CLI with a fresh ticket to the same session wherever it now runs; while a move is under
   way it retries `session_busy` (ticket or socket) with backoff for up to 2 minutes as long as the CLI waits (then
-  reports `session_busy`). A dial the CLI abandons ends at once, even mid-handshake, and its redial takes over. The
+  reports `session_busy`). A dial the CLI abandons ends at once, even mid-handshake, and its redial takes over; a
+  message the relay can't filter ends only that CLI connection, never the launcher. The
   relay refuses a reconnect whose material names a different
   conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
   attach again with new material.
@@ -1045,6 +1047,7 @@ sequenceDiagram
 | `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
+| `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
 | Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |

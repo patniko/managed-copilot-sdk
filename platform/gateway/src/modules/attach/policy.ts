@@ -405,6 +405,8 @@ export class AhpObserver {
 
 /** State fields the runtime stores as a client, the model, or a tool wrote them (and `_meta`, read in place). */
 const NOT_RUNTIME_STATE: ReadonlySet<string> = new Set([
+  // Replayed action envelopes are read one by one in `observe` (client-originated ones never teach a prompt).
+  "actions",
   "message",
   "draft",
   "queuedMessages",
@@ -478,8 +480,17 @@ export function uriAwareScrubber(scrub: (value: unknown) => unknown): (value: un
   const FILE_URI = /file:\/\/[^\s"'<>]*/gi;
   const scrubUri = (uri: string): string => {
     const path = fileUriPath(uri);
-    // `file:///C:/x` names `C:/x`; `file:///home/x` names `/home/x`.
-    const local = /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
+    let local: string;
+    if (path.startsWith("/")) {
+      // `file:///C:/x` names `C:/x`; `file:///home/x` names `/home/x`.
+      local = /^\/[A-Za-z]:[\\/]/.test(path) ? path.slice(1) : path;
+    } else {
+      // An authority: `file://localhost/x` is local; `file://server/share/x` names the UNC path `//server/share/x`.
+      const slash = path.indexOf("/");
+      const authority = slash === -1 ? path : path.slice(0, slash);
+      const rest = slash === -1 ? "" : path.slice(slash);
+      local = authority.toLowerCase() === "localhost" ? (/^\/[A-Za-z]:[\\/]/.test(rest) ? rest.slice(1) : rest) : `//${path}`;
+    }
     const scrubbed = scrub(local) as string;
     if (scrubbed === local) return uri;
     return `file://${scrubbed.startsWith("/") ? "" : "/"}${encodePath(scrubbed)}`;

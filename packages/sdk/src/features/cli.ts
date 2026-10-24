@@ -422,7 +422,14 @@ export class AttachRelay {
     this.outcome = undefined;
     client.on("message", (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
-      const filtered = filterAhpClientFrame(data.toString());
+      let filtered: ReturnType<typeof filterAhpClientFrame>;
+      try {
+        filtered = filterAhpClientFrame(data.toString());
+      } catch {
+        // A message the credential filter can't re-serialize (nested past what JSON allows) ends this connection only.
+        client.close(1008, "Copilot CLI attach could not handle a message.");
+        return;
+      }
       for (const reply of filtered.replies) client.send(reply);
       if (filtered.forward !== undefined && upstream.readyState === WebSocket.OPEN) upstream.send(filtered.forward);
     });

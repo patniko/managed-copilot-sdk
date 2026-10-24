@@ -86,6 +86,7 @@ export const attachModule: GatewayModule = {
     const idleMs = setting(app, "MANAGED_COPILOT_ATTACH_IDLE_MS", 5 * 60_000);
     const maxLifetimeMs = setting(app, "MANAGED_COPILOT_ATTACH_MAX_LIFETIME_MS", 8 * 60 * 60_000);
     const ledgerWaitMs = setting(app, "MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS", LEDGER_WAIT_MS);
+    const reconnectGraceMs = setting(app, "MANAGED_COPILOT_ATTACH_RECONNECT_GRACE_MS", 60_000);
     const tickets = new AttachTickets(app.db);
     const hosts = new AhpHosts(log, idleMs);
     const socketBase = app.config.publicUrl.replace(/^http/i, "ws");
@@ -96,31 +97,49 @@ export const attachModule: GatewayModule = {
 
     /** The principals of each session's attached Copilot CLIs, by connection (each is the session's credential). */
     const attachedPrincipals = new Map<string, Map<string, Principal>>();
-    /** Presences kept for a fenced session's attached CLIs until its move ends. */
-    const heldPresences = new Map<string, (() => void)[]>();
+    /**
+     * Presences kept for the CLIs a fence ended: from the fence until a CLI attaches to the session again, or for
+     * `reconnectGraceMs` after the move ends (`timer`), whichever comes first.
+     */
+    const heldPresences = new Map<string, { readonly releases: (() => void)[]; timer: NodeJS.Timeout | undefined }>();
 
     /**
      * A fence ends the attached CLIs' attachments, and with them their credential, but the person is still there (the
      * CLI reconnects once the move ends) and may be the session's only credential: the destination needs one to open
-     * the session. Each attached CLI's principal stays present on the session until the move ends.
+     * the session, and the resumed turn needs one for every model call until the CLI is back. Each attached CLI's
+     * principal stays present on the session until then.
      */
     const holdCredentials = (sessionId: string): void => {
+      let held = heldPresences.get(sessionId);
+      // Another move before the CLIs came back: what the last one kept stays until this one ends too.
+      if (held?.timer) clearTimeout(held.timer);
+      if (held) held.timer = undefined;
       const principals = attachedPrincipals.get(sessionId);
       const sessions = (app.services as Record<string, unknown>).sessions as AttachSessions | undefined;
       if (!principals?.size || !sessions?.presence) return;
-      const held = heldPresences.get(sessionId) ?? [];
+      if (!held) heldPresences.set(sessionId, (held = { releases: [], timer: undefined }));
       for (const principal of principals.values()) {
         try {
-          held.push(sessions.presence(sessionId, principal));
+          held.releases.push(sessions.presence(sessionId, principal));
         } catch (error) {
           log.warn("Could not keep an attached Copilot CLI's credential through a move", { sessionId, error: (error as Error).message });
         }
       }
-      heldPresences.set(sessionId, held);
+    };
+    /** The move ended: the kept credential stays until a CLI attaches again, at most `reconnectGraceMs`. */
+    const releaseCredentialsLater = (sessionId: string): void => {
+      const held = heldPresences.get(sessionId);
+      if (!held) return;
+      if (held.timer) clearTimeout(held.timer);
+      held.timer = setTimeout(() => dropCredentials(sessionId), reconnectGraceMs);
+      held.timer.unref();
     };
     const dropCredentials = (sessionId: string): void => {
-      for (const release of heldPresences.get(sessionId) ?? []) release();
+      const held = heldPresences.get(sessionId);
+      if (!held) return;
       heldPresences.delete(sessionId);
+      if (held.timer) clearTimeout(held.timer);
+      for (const release of held.releases) release();
     };
 
     /**
@@ -215,6 +234,8 @@ export const attachModule: GatewayModule = {
               principals.delete(connectionId);
               if (principals.size === 0 && attachedPrincipals.get(sessionId) === principals) attachedPrincipals.delete(sessionId);
             });
+            // Back after a move: its own attachment is the session's credential again.
+            if (heldPresences.get(sessionId)?.timer) dropCredentials(sessionId);
           });
           // A refused handshake leaves nothing to own the upstream.
           if (!attached) upstream.terminate();
@@ -234,6 +255,7 @@ export const attachModule: GatewayModule = {
         // the new runtime afterwards (a host resolved on the old one but still starting is released too).
         const resolvedBy = event.type === "deleted" ? undefined : hosts.mark();
         void hosts.release(event.sessionId, lifecycleReason(event.type), { ...(resolvedBy !== undefined ? { resolvedBy } : {}), ...(event.type === "promoted" ? { code: ATTACH_CLOSE_CODES.moved } : {}) });
+        if (event.type === "deleted") dropCredentials(event.sessionId);
       });
       // Promotion registers after attach, so its participant hook is only available once the gateway starts.
       const promotion = (app.services as Record<string, unknown>).promotion as { participate?(participant: PromotionParticipant): () => void } | undefined;
@@ -246,7 +268,7 @@ export const attachModule: GatewayModule = {
         },
         release: (sessionId) => {
           hosts.unfence(sessionId);
-          dropCredentials(sessionId);
+          releaseCredentialsLater(sessionId);
         },
       });
     });

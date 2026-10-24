@@ -739,7 +739,7 @@ describe("attach module", () => {
     await waitFor(() => listener.dispatched("chat/turnStarted").length === 1);
   });
 
-  it("keeps an attached CLI's credential on the session through a move, until the move ends", async () => {
+  it("keeps an attached CLI's credential on the session through a move, until the CLI is back or the grace ends", async () => {
     await fresh();
     // Nothing attached: nothing to keep.
     await participant!.fence("s2", new AbortController().signal);
@@ -754,9 +754,26 @@ describe("attach module", () => {
     await fencing;
     await closed;
     expect(attachment.closed).toBe(true);
-    expect(sessions.presences[0]!.released).toBe(false);
+    // The move ended, but the resumed turn's model calls need a credential until the CLI is back (Argon).
     participant!.release("s1", { committed: true, sealed: true });
+    expect(sessions.presences[0]!.released).toBe(false);
+    await connect();
     expect(sessions.presences[0]!.released).toBe(true);
+  });
+
+  it("drops a kept credential after the reconnect grace when the CLI doesn't come back", async () => {
+    await fresh({ MANAGED_COPILOT_ATTACH_RECONNECT_GRACE_MS: "50" });
+    const { ws } = await connect();
+    const closed = once(ws, "close");
+    await participant!.fence("s1", new AbortController().signal);
+    await closed;
+    // A second move before the CLI is back keeps it through that one too.
+    participant!.release("s1", { committed: false, sealed: false });
+    await participant!.fence("s1", new AbortController().signal);
+    await sleep(120);
+    expect(sessions.presences.map((presence) => presence.released)).toEqual([false]);
+    participant!.release("s1", { committed: true, sealed: true });
+    await waitFor(() => sessions.presences[0]!.released);
   });
 
   it("waits for a host still starting on the source, disposes it, and refuses that attach", async () => {

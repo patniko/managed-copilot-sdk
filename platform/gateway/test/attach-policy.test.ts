@@ -190,6 +190,9 @@ describe("attach policy: what the runtime sends", () => {
     // Any envelope still retires a prompt.
     observer.observe({ method: "action", params: { channel: CHAT, serverSeq: 5, origin: { clientId: "c", clientSeq: 2 }, action: { type: "chat/toolCallComplete", toolCallId: "tc-real" } } });
     expect(observer.permission(CHAT, "tc-real")).toBeUndefined();
+    // A client's action replayed in a reconnect result, walked as state too (Argon re-review).
+    observer.observe({ id: 7, result: { serverSeq: 6, actions: [{ channel: CHAT, serverSeq: 6, origin: { clientId: "c", clientSeq: 3 }, action: { type: "chat/toolCallReady", ...planted("tc-replayed") } }] } });
+    expect(observer.permission(CHAT, "tc-replayed")).toBeUndefined();
   });
 
   it("learns questions, linked to a runtime request when the host says so", () => {
@@ -259,6 +262,19 @@ describe("attach policy: what the runtime sends", () => {
     expect(out.stray).toBe("file:///workspace/a%23b.md%25ZZ");
     expect(out.surrogate?.startsWith("file:///workspace/a%23b.md")).toBe(true);
     expect(JSON.stringify(out)).not.toContain("mc%20repo");
+  });
+
+  it("scrubs a UNC data directory's file URIs, whose server is the URI's authority (Astra re-review)", () => {
+    // Core's scrubber matches the UNC root with its leading separators (`\\server\share\...`); a stand-in keeps this
+    // test off the network (resolving a UNC path waits on SMB).
+    const root = /[\\/]{2}file-server[\\/]+share[\\/]+mc repo#1[\\/]+gateway[\\/]+runtime[\\/]+shared[\\/]+workspaces[\\/]+s1/gi;
+    const scrub = uriAwareScrubber((value) => (typeof value === "string" ? value.replace(root, "/workspace") : value));
+    const out = scrub({
+      unc: "file://file-server/share/mc%20repo%231/gateway/runtime/shared/workspaces/s1/a.md",
+      localhost: "file://localhost/opt/elsewhere/x.txt",
+      other: "file://another-server/share/x.txt",
+    }) as Record<string, string>;
+    expect(out).toEqual({ unc: "file:///workspace/a.md", localhost: "file://localhost/opt/elsewhere/x.txt", other: "file://another-server/share/x.txt" });
   });
 
   it("never passes on state nested too deeply to scrub", () => {

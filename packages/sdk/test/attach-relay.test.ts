@@ -151,6 +151,19 @@ describe("Copilot CLI attach relay", () => {
     cli.close();
   });
 
+  it("ends only the CLI connection when a message can't be filtered, never the launcher (Astra)", async () => {
+    const { url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    const closed = once(cli, "close") as Promise<[number, Buffer]>;
+    // Removing `authenticate` re-serializes the rest of the batch, which this nesting makes impossible.
+    cli.send(`[{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}},{"jsonrpc":"2.0","id":2,"method":"ping","params":${"[".repeat(100_000)}${"]".repeat(100_000)}}]`);
+    expect((await closed)[0]).toBe(1008);
+    const again = await connect(url, "gho_owner");
+    again.send(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "initialize", params: {} }));
+    expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
+    again.close();
+  });
+
   it("refuses a CLI signed in as someone else, or not signed in, with a clear reason", async () => {
     const { relay, url } = await startRelay();
     await expect(connect(url, "gho_other")).rejects.toMatchObject({ status: 403 });
