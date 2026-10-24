@@ -518,6 +518,14 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   promotion so its call can still be answered there with the failure), deletes the candidate sandbox and staging,
   and records the attempt `failed`; the source is the only owner. After commit, nothing undoes the move: later steps
   only log, and core recovers the destination.
+- **Session IDs can be reused.** A deleted session's ID can name a new session, even another owner's, so every step
+  that touches a session by ID first confirms it is the incarnation the attempt was made for (same creation time).
+  The check right before allocation runs in the same synchronous step as the narrowing, and reverts apply only to
+  that incarnation. Candidates are released by identity: sandbox IDs are unique per creation, so the recorded
+  candidate is matched by ID. Without one (creation failed, and the sandbox module released what it had allocated),
+  the registered sandbox is released only while the ID names no session or a shared session of that incarnation,
+  because core records a session before allocating its sandbox. A promoted session's sandbox and a new session's
+  sandbox are never touched.
 - **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
   core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
   generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried

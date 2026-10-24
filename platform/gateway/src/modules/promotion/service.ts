@@ -305,6 +305,9 @@ export class PromotionManager implements PromotionService {
         // releasing what earlier attempts left behind, so a release never undoes this attempt's candidate.
         const allocated = await this.#candidateWork(record.id, async () => {
           await this.#releaseLeftovers(record.id, operation.id);
+          // The session may have been deleted, and its ID reused, while this attempt waited its turn: confirm it is the
+          // same incarnation in the same synchronous step that narrows its policy.
+          this.#current(progress);
           const narrowed = this.#narrow(progress, target);
           this.#update(progress, { state: "allocating" });
           progress.allocated = true;
@@ -322,11 +325,12 @@ export class PromotionManager implements PromotionService {
             },
             resolved: this.#resolved(record, targetConfig),
           });
+          // Recorded at once: rollback and recovery release this candidate by its ID, never another sandbox.
+          this.#update(progress, { state: "quiescing", sandboxId: handle.sandboxId });
           return { network: narrowed, sandboxId: handle.sandboxId };
         });
         network = allocated.network;
         sandboxId = allocated.sandboxId;
-        this.#update(progress, { state: "quiescing", sandboxId });
 
         // Quiesce at a supported checkpoint, then fence the source and re-check what may have started meanwhile.
         if (attempt.trigger === "tool") await this.#drain(progress);
@@ -472,8 +476,11 @@ export class PromotionManager implements PromotionService {
   #current(progress: Progress): SessionRecord {
     const { record } = progress.attempt;
     const current = this.#sessions().get(record.id);
-    if (!current || current.state === "deleting" || current.state === "deleted") throw new ManagedCopilotError("not_found", `Session ${record.id} was deleted while it was being promoted`, { sessionId: record.id });
-    if (current.generation !== record.generation || current.placement !== "shared" || current.createdAt !== record.createdAt) {
+    // Another creation time is a new session that reused the ID after this one was deleted.
+    if (!current || current.state === "deleting" || current.state === "deleted" || current.createdAt !== record.createdAt) {
+      throw new ManagedCopilotError("not_found", `Session ${record.id} was deleted while it was being promoted`, { sessionId: record.id });
+    }
+    if (current.generation !== record.generation || current.placement !== "shared") {
       throw new ManagedCopilotError("conflict", `Session ${record.id} changed placement while it was being promoted`, { sessionId: record.id });
     }
     return current;
@@ -561,7 +568,7 @@ export class PromotionManager implements PromotionService {
   async #rollback(progress: Progress, error: ManagedCopilotError): Promise<void> {
     const { record, trigger } = progress.attempt;
     this.#log.warn("Promotion failed before commit; the session stays on shared placement", { sessionId: record.id, operation: progress.operation.id, state: progress.operation.state, code: error.code, error: error.message });
-    if (progress.narrowed) {
+    if (progress.narrowed && this.#sameIncarnation(progress.operation)) {
       try {
         this.#policy()?.revertPromotion?.(record.id);
       } catch (revertError) {
@@ -578,13 +585,9 @@ export class PromotionManager implements PromotionService {
       }
     }
     let released = !progress.allocated;
-    // Sandboxes are keyed by session ID: once a new session reusing the ID runs in sandbox placement, that sandbox is
-    // its own and is never deleted here.
-    const current = this.#sessions().get(record.id);
-    if (progress.allocated && current && current.placement !== "shared") released = true;
-    else if (progress.allocated) {
+    if (progress.allocated) {
       try {
-        await this.#sandboxes()?.delete(record.id);
+        await this.#releaseIfCandidate(progress.operation);
         released = true;
       } catch (deleteError) {
         this.#log.warn("Could not release the candidate sandbox yet; it is retried at the next start", { sessionId: record.id, error: (deleteError as Error).message });
@@ -592,6 +595,31 @@ export class PromotionManager implements PromotionService {
     }
     await rm(progress.staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
     this.#update(progress, { state: "failed", errorCode: error.code, error: error.message, cleanupPending: !released });
+  }
+
+  /** Whether the session ID still names the incarnation an attempt was made for, or nothing (it was deleted). */
+  #sameIncarnation(operation: PromotionOperation): boolean {
+    const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
+    return !current || current.createdAt <= operation.createdAt;
+  }
+
+  /**
+   * Deletes the sandbox registered under an attempt's session ID only if it is that attempt's candidate. Sandbox IDs
+   * are unique per creation, so a recorded candidate is matched by ID. Without one (creation failed, and the sandbox
+   * module released what it had allocated, or a restart cut it short), the registered sandbox can only be the attempt's
+   * while the ID names no session, or a shared session of the attempt's incarnation: core records a session before it
+   * allocates the session's sandbox, so a session that reused the ID is visible. A session in sandbox placement of the
+   * attempt's incarnation was promoted, and that sandbox is its home: never touched.
+   */
+  async #releaseIfCandidate(operation: PromotionOperation): Promise<void> {
+    const sandboxes = this.#sandboxes();
+    const info = await sandboxes?.get(operation.sessionId);
+    if (!sandboxes || !info || info.state === "deleted") return;
+    const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
+    const incarnation = current !== undefined && current.createdAt <= operation.createdAt;
+    if (incarnation && current.placement === "sandbox") return;
+    const candidate = operation.sandboxId ? info.id === operation.sandboxId : current === undefined || incarnation;
+    if (candidate) await sandboxes.delete(operation.sessionId);
   }
 
   /** Synchronous post-commit steps, so durable sees the carried call at the new generation before anything replays. */
@@ -683,9 +711,7 @@ export class PromotionManager implements PromotionService {
   async #releaseCandidate(operationId: string): Promise<void> {
     const operation = this.#store.get(operationId);
     if (!operation || operation.state !== "failed" || !operation.cleanupPending) return;
-    const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
-    // A session in sandbox placement owns its sandbox (a new session that reused the ID): never touched.
-    if (!current || current.placement === "shared") await this.#sandboxes()?.delete(operation.sessionId);
+    await this.#releaseIfCandidate(operation);
     await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
     this.#store.update(operation.id, { cleanupPending: false });
   }
@@ -708,10 +734,13 @@ export class PromotionManager implements PromotionService {
         continue;
       }
       this.#log.warn("A promotion was interrupted by a restart before it committed; the session stays on shared placement", { sessionId: operation.sessionId, operation: operation.id, state: operation.state });
-      try {
-        this.#policy()?.revertPromotion?.(operation.sessionId);
-      } catch (error) {
-        this.#log.warn("Could not restore the network policy of an interrupted promotion", { sessionId: operation.sessionId, error: (error as Error).message });
+      // A session that reused the ID was bound afresh, and its policy is its own.
+      if (!record || record.createdAt <= operation.createdAt) {
+        try {
+          this.#policy()?.revertPromotion?.(operation.sessionId);
+        } catch (error) {
+          this.#log.warn("Could not restore the network policy of an interrupted promotion", { sessionId: operation.sessionId, error: (error as Error).message });
+        }
       }
       this.#store.update(operation.id, {
         state: "failed",
