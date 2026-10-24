@@ -52,8 +52,17 @@ export class OfflineWorker {
       webhookConfigured: this.#deps.config.webhookSecret !== undefined,
       lastWebhookAt: this.#deps.store.lastWebhookAt(),
       handledOffline: this.#offlineIds.size,
-      waitingApprovals: this.#waitingApprovals,
+      // While a tab is open, waiting approvals are cards in the chat instead.
+      waitingApprovals: this.#deps.live() ? 0 : this.#waitingApprovals,
     };
+  }
+
+  /** Forgets offline activity for a conversation that was replaced by a new one. */
+  reset(): void {
+    this.#deps.store.clearOfflineCalls();
+    this.#offlineIds = new Set();
+    this.#waitingApprovals = 0;
+    this.#deps.onChange(this.view());
   }
 
   isOffline(toolCallId: string): boolean {
@@ -72,10 +81,8 @@ export class OfflineWorker {
     const rawBody = await ctx.raw(MAX_WEBHOOK_BYTES);
     let event: VerifiedWebhookEvent;
     try {
-      // The action capability must be for the deployment this server is connected to. (Cast: `deploymentUrl` is part
-      // of the durable SDK surface and older builds don't declare it.)
-      const options = { deploymentUrl: this.#deps.platform.managed?.url } as unknown as Parameters<typeof verifyWebhook>[2];
-      event = await verifyWebhook({ headers: ctx.req.headers, rawBody }, secret, options);
+      // The action capability must be for the deployment this server is connected to.
+      event = await verifyWebhook({ headers: ctx.req.headers, rawBody }, secret, { deploymentUrl: this.#deps.platform.managed?.url });
     } catch (error) {
       if (isManagedCopilotError(error, "capability_unavailable")) throw new HttpError(501, "capability_unavailable", errorMessage(error));
       this.#deps.log.warn("Rejected a webhook delivery", { error: errorMessage(error) });
@@ -95,8 +102,8 @@ export class OfflineWorker {
           const answered = this.#offlineIds.size - before;
           if (answered > 0) this.#deps.log.info("Answered tool calls through the webhook", { sessionId: event.sessionId, answered });
         } catch (error) {
-          // For example a capability issued for a different deployment URL (localhost vs 127.0.0.1). Retrying the
-          // delivery won't help; polling with this server's own credentials answers the actions instead.
+          // For example an expired or mismatched capability. Retrying the delivery won't help; polling with this
+          // server's own credentials answers the actions instead.
           this.#deps.log.warn("Couldn't answer actions through the webhook; polling instead", { error: errorMessage(error) });
           void this.reconcile("webhook could not answer");
         }
@@ -134,16 +141,12 @@ export class OfflineWorker {
     try {
       const info = await managed.sessions.get(sessionId);
       const pending = info.pendingActions.filter((action) => action.state === "pending");
-      const waiting = pending.filter((action) => action.kind === "permission").length;
-      const changed = waiting !== this.#waitingApprovals;
-      this.#waitingApprovals = waiting;
+      this.#waitingApprovals = pending.filter((action) => action.kind === "permission").length;
       if (pending.some((action) => action.kind === "tool")) {
         const results = await managed.sessions.handleActions(sessionId, { tools: this.#deps.tools("poll") });
         if (results.length) this.#deps.log.info("Answered pending tool calls by polling", { sessionId, reason, answered: results.length });
-        this.#deps.onChange(this.view());
-      } else if (changed) {
-        this.#deps.onChange(this.view());
       }
+      this.#deps.onChange(this.view());
     } catch (error) {
       if (isManagedCopilotError(error, "capability_unavailable")) return;
       this.#deps.log.debug("Polling for pending actions failed", { reason, error: errorMessage(error) });

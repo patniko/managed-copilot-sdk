@@ -58,35 +58,49 @@ function parseHelloBody(body: Buffer): ClientHelloResult {
   if (!need(2)) return MALFORMED;
   const end = p + 2 + body.readUInt16BE(p);
   p += 2;
-  if (end > body.length) return MALFORMED;
+  // Parse strictly to the end, like TLS servers do, so no other parser can see a different server name: every
+  // extension is well formed, nothing trails them, and no extension type (server_name in particular) repeats.
+  if (end !== body.length) return MALFORMED;
+  const seen = new Set<number>();
+  let serverName: string | undefined;
   while (p + 4 <= end) {
     const type = body.readUInt16BE(p);
     const length = body.readUInt16BE(p + 2);
     p += 4;
-    if (p + length > end) return MALFORMED;
-    if (type === 0x0000) return parseServerName(body.subarray(p, p + length));
+    if (p + length > end || seen.has(type)) return MALFORMED;
+    seen.add(type);
+    if (type === 0x0000) {
+      const parsed = parseServerName(body.subarray(p, p + length));
+      if (!parsed) return MALFORMED;
+      serverName = parsed.name;
+    }
     p += length;
   }
-  return p === end ? { kind: "tls" } : MALFORMED;
+  if (p !== end) return MALFORMED;
+  return serverName === undefined ? { kind: "tls" } : { kind: "tls", serverName };
 }
 
-function parseServerName(data: Buffer): ClientHelloResult {
-  if (data.length < 2) return MALFORMED;
+/** Parses a server_name extension (RFC 6066): a non-empty list with at most one host_name entry. */
+function parseServerName(data: Buffer): { readonly name?: string } | undefined {
+  if (data.length < 2) return undefined;
   const end = 2 + data.readUInt16BE(0);
-  if (end > data.length) return MALFORMED;
+  if (end !== data.length || end === 2) return undefined;
   let p = 2;
+  let name: string | undefined;
   while (p + 3 <= end) {
     const type = data[p]!;
     const length = data.readUInt16BE(p + 1);
     p += 3;
-    if (p + length > end) return MALFORMED;
+    if (p + length > end) return undefined;
     if (type === 0) {
-      const name = data.toString("latin1", p, p + length);
-      return /^[\x21-\x7e]+$/.test(name) ? { kind: "tls", serverName: name } : MALFORMED;
+      if (name !== undefined) return undefined;
+      name = data.toString("latin1", p, p + length);
+      if (!/^[\x21-\x7e]+$/.test(name)) return undefined;
     }
     p += length;
   }
-  return { kind: "tls" };
+  if (p !== end) return undefined;
+  return name === undefined ? {} : { name };
 }
 
 /**

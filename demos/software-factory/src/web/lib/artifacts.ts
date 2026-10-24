@@ -153,7 +153,7 @@ export function useArtifactContent(
   version: ArtifactVersionView | undefined,
 ): { readonly content: ContentState; readonly retry: () => void } {
   const key =
-    file && version && file.viewable
+    file && version && version.viewable
       ? `${workOrderId}\n${file.stationId}\n${file.path}\n${version.version}\n${version.digest}`
       : undefined;
   const [result, setResult] = useState<{ readonly key: string; readonly error?: string; readonly text?: string }>();
@@ -197,6 +197,31 @@ function isNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+const TEST_STATUSES: ReadonlySet<unknown> = new Set(["passed", "failed", "skipped"]);
+
+type TestCase = TestReport["tests"][number];
+
+/** Agents write the report, so every rendered field is checked; anything malformed falls back to the raw viewer. */
+function parseTestCase(value: unknown): TestCase | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const { name, status, file, durationMs, error } = value as Record<string, unknown>;
+  if (typeof name !== "string" || !TEST_STATUSES.has(status)) return undefined;
+  let message: string | undefined;
+  if (typeof error === "string") message = error;
+  else if (error !== undefined && error !== null) message = JSON.stringify(error, null, 2);
+  return {
+    name,
+    status: status as TestCase["status"],
+    ...(typeof file === "string" ? { file } : {}),
+    ...(isNumber(durationMs) ? { durationMs } : {}),
+    ...(message !== undefined ? { error: message } : {}),
+  };
+}
+
 export function parseTestReport(text: string): TestReport | undefined {
   let parsed: unknown;
   try {
@@ -204,25 +229,31 @@ export function parseTestReport(text: string): TestReport | undefined {
   } catch {
     return undefined;
   }
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const candidate = parsed as Partial<TestReport>;
-  const summary = candidate.summary;
-  if (!summary || !isNumber(summary.total) || !isNumber(summary.passed) || !isNumber(summary.failed)) return undefined;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+  const candidate = parsed as Record<string, unknown>;
+  const summary = candidate.summary as Record<string, unknown> | null | undefined;
+  if (typeof summary !== "object" || summary === null) return undefined;
+  if (!isNumber(summary.total) || !isNumber(summary.passed) || !isNumber(summary.failed)) return undefined;
   if (!Array.isArray(candidate.tests)) return undefined;
+  const tests: TestCase[] = [];
+  for (const value of candidate.tests) {
+    const test = parseTestCase(value);
+    if (!test) return undefined;
+    tests.push(test);
+  }
+  const taskId = optionalString(candidate.taskId);
+  const output = optionalString(candidate.output);
   return {
     schema: "factory.test-report/v1",
     mode: candidate.mode === "release" ? "release" : "task",
-    taskId: candidate.taskId,
-    command: typeof candidate.command === "string" ? candidate.command : "",
-    startedAt: typeof candidate.startedAt === "string" ? candidate.startedAt : "",
+    ...(taskId !== undefined ? { taskId } : {}),
+    command: optionalString(candidate.command) ?? "",
+    startedAt: optionalString(candidate.startedAt) ?? "",
     durationMs: isNumber(candidate.durationMs) ? candidate.durationMs : 0,
     exitCode: isNumber(candidate.exitCode) ? candidate.exitCode : 0,
     summary: { total: summary.total, passed: summary.passed, failed: summary.failed, skipped: isNumber(summary.skipped) ? summary.skipped : 0 },
     files: Array.isArray(candidate.files) ? candidate.files.filter((file): file is string => typeof file === "string") : [],
-    tests: candidate.tests.filter(
-      (test): test is TestReport["tests"][number] =>
-        typeof test === "object" && test !== null && typeof (test as { name?: unknown }).name === "string",
-    ),
-    output: typeof candidate.output === "string" ? candidate.output : undefined,
+    tests,
+    ...(output !== undefined ? { output } : {}),
   };
 }

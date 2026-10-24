@@ -64,6 +64,8 @@ export const NETWORK_MIGRATIONS: readonly string[] = [
      created_at TEXT NOT NULL,
      UNIQUE (session_id, name, url)
    );`,
+  // The binding before an uncommitted promotion, so a pre-commit rollback can restore it (spec 9.5).
+  `ALTER TABLE network_sessions ADD COLUMN promoted_from TEXT;`,
 ];
 
 export function migrateNetwork(db: Database): void {

@@ -84,6 +84,20 @@ describe("destination decisions", () => {
     expect(await evaluateDestination(enabled, "loopback.example.test", 443, allowCorp)).toMatchObject({ ok: false, reason: "address_not_allowed" });
   });
 
+  it("applies protected and blocked ranges to IPv4-mapped and NAT64 forms, and to public addresses", async () => {
+    const mapped = options({
+      privateHosts: new Set(["mapped.example.test"]),
+      resolve: async () => ["::ffff:10.213.0.18", "64:ff9b::ad5:12"],
+    });
+    expect(await evaluateDestination(enabled, "mapped.example.test", 443, mapped)).toMatchObject({ ok: false, reason: "address_not_allowed", message: expect.stringContaining("protected") });
+    const blocked = options({ blockedCidrs: [parseCidr("93.184.216.0/24")] });
+    expect(await evaluateDestination(enabled, "[::ffff:93.184.216.34]", 443, blocked)).toMatchObject({ ok: false, reason: "address_not_allowed", message: expect.stringContaining("blocked by the operator") });
+    expect(await evaluateDestination(enabled, "[64:ff9b::5db8:d822]", 443, blocked)).toMatchObject({ ok: false, reason: "address_not_allowed" });
+    const protectedPublic = options({ protectedCidrs: () => [parseCidr("151.101.0.0/16")] });
+    expect(await evaluateDestination(enabled, "pypi.org", 443, protectedPublic)).toMatchObject({ ok: true, addresses: ["2a04:4e42::223"] });
+    expect(await evaluateDestination(enabled, "151.101.0.223", 443, protectedPublic)).toMatchObject({ ok: false, reason: "address_not_allowed" });
+  });
+
   it("applies operator block lists to public addresses", async () => {
     const blocked = options({ blockedCidrs: [parseCidr("151.101.0.0/16"), parseCidr("2a04:4e42::/32")] });
     expect(await evaluateDestination(enabled, "pypi.org", 443, blocked)).toMatchObject({ ok: false, reason: "address_not_allowed" });

@@ -25,6 +25,10 @@ export interface NetworkPolicyApi {
   bindSession(binding: SessionBindingInput): NetworkPolicy;
   session(sessionId: string): SessionNetwork | undefined;
   promoteSession(sessionId: string, targetEnvironment: string): NetworkPolicy;
+  /** Pre-commit rollback: restores the binding from before the uncommitted promotion (undefined when none is pending). */
+  revertPromotion(sessionId: string): NetworkPolicy | undefined;
+  /** Makes the promoted binding final. */
+  commitPromotion(sessionId: string): void;
   releaseSession(sessionId: string): void;
   adaptMcpServer(sessionId: string, name: string, server: Record<string, unknown>, options?: { readonly baseUrl?: string }): Promise<Record<string, unknown>>;
   registerSandbox(input: SandboxRegistrationInput): Promise<SandboxEgress>;
@@ -99,6 +103,7 @@ export const networkModule: GatewayModule = {
       egress: hub,
       log,
       alwaysWaitForEgress: mode !== "off",
+      egressMode: mode,
       onBlocked: (session, report) => {
         if (!events || !canPublish) return;
         const key = `${session.sessionId}|${report.reason}|${report.host ?? ""}`;
@@ -157,6 +162,8 @@ export const networkModule: GatewayModule = {
       bindSession: (binding) => service.bindSession(binding),
       session: (sessionId) => service.session(sessionId),
       promoteSession: (sessionId, target) => service.promoteSession(sessionId, target),
+      revertPromotion: (sessionId) => service.revertPromotion(sessionId),
+      commitPromotion: (sessionId) => service.commitPromotion(sessionId),
       releaseSession: (sessionId) => service.releaseSession(sessionId),
       adaptMcpServer: (sessionId, name, server, options) => adapter.adapt(sessionId, name, server, options),
       registerSandbox: (input) => service.registerSandbox(input),

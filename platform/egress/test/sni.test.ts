@@ -27,6 +27,21 @@ async function captureClientHello(servername: string | undefined): Promise<Buffe
   }
 }
 
+const u16 = (value: number) => Buffer.from([value >> 8, value & 0xff]);
+
+function serverNameExtension(names: ReadonlyArray<readonly [number, string]>): Buffer {
+  const list = Buffer.concat(names.map(([type, name]) => Buffer.concat([Buffer.from([type]), u16(name.length), Buffer.from(name, "latin1")])));
+  return Buffer.concat([u16(list.length), list]);
+}
+
+/** A minimal ClientHello record with the given extensions; `rawExtensions` and `trailing` model malformed framing. */
+function syntheticHello(extensions: ReadonlyArray<readonly [number, Buffer]>, rawExtensions?: Buffer, trailing?: Buffer): Buffer {
+  const block = Buffer.concat([...extensions.map(([type, data]) => Buffer.concat([u16(type), u16(data.length), data])), ...(rawExtensions ? [rawExtensions] : [])]);
+  const body = Buffer.concat([Buffer.from([0x03, 0x03]), Buffer.alloc(32), Buffer.from([0]), u16(2), Buffer.from([0x13, 0x01]), Buffer.from([1, 0]), u16(block.length), block, ...(trailing ? [trailing] : [])]);
+  const handshake = Buffer.concat([Buffer.from([0x01, body.length >> 16, (body.length >> 8) & 0xff, body.length & 0xff]), body]);
+  return Buffer.concat([Buffer.from([0x16, 0x03, 0x01]), u16(handshake.length), handshake]);
+}
+
 describe("ClientHello parsing", () => {
   let hello: Buffer;
   beforeAll(async () => {
@@ -61,6 +76,31 @@ describe("ClientHello parsing", () => {
     const corrupt = Buffer.from(hello);
     corrupt.writeUInt16BE(0xffff, 5 + 4 + 2 + 32 + 1 + corrupt[5 + 4 + 2 + 32]!);
     expect(parseClientHello(corrupt).kind).toBe("malformed");
+  });
+
+  it("rejects ambiguous or trailing extensions instead of trusting the first server name", () => {
+    const sni = (...names: Array<readonly [number, string]>) => serverNameExtension(names);
+    expect(parseClientHello(syntheticHello([[0x0000, sni([0, "api.example.test"])]]))).toEqual({ kind: "tls", serverName: "api.example.test" });
+    expect(parseClientHello(syntheticHello([[0x0000, sni([7, "other"], [0, "api.example.test"])], [0x000a, Buffer.from([0, 2, 0, 0x1d])]]))).toEqual({
+      kind: "tls",
+      serverName: "api.example.test",
+    });
+    const cases: Record<string, Buffer> = {
+      "two server_name extensions": syntheticHello([
+        [0x0000, sni([0, "api.example.test"])],
+        [0x0000, sni([0, "evil.example.test"])],
+      ]),
+      "two host names in one extension": syntheticHello([[0x0000, sni([0, "api.example.test"], [0, "evil.example.test"])]]),
+      "an empty server name list": syntheticHello([[0x0000, Buffer.from([0, 0])]]),
+      "a repeated extension type": syntheticHello([
+        [0x000a, Buffer.from([0, 2, 0, 0x1d])],
+        [0x0000, sni([0, "api.example.test"])],
+        [0x000a, Buffer.from([0, 2, 0, 0x17])],
+      ]),
+      "a truncated extension after the server name": syntheticHello([[0x0000, sni([0, "api.example.test"])]], Buffer.from([0x00, 0x0a, 0x00, 0x09, 0x00])),
+      "bytes after the extensions": syntheticHello([[0x0000, sni([0, "api.example.test"])]], undefined, Buffer.from([0x00])),
+    };
+    for (const [name, hello] of Object.entries(cases)) expect(parseClientHello(hello).kind, name).toBe("malformed");
   });
 
   it("reads a ClientHello that arrives one byte at a time", async () => {

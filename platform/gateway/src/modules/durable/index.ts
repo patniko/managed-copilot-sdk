@@ -21,6 +21,22 @@ function port<T>(services: object, key: string): T | undefined {
   return (services as Record<string, unknown>)[key] as T | undefined;
 }
 
+/**
+ * How the ledger announces actions. Core's bus isolates subscriber errors, so a bus publish cannot prove the webhook
+ * deliveries were queued: the outbox rows are written first and a failure reaches the ledger, which then leaves the
+ * action unannounced for the sweeper to repair. The bus still fans the event out (SSE); its webhook subscriber finds
+ * the rows already queued (one per webhook and event ID).
+ */
+export function announcer(
+  webhooks: () => Pick<DurableWebhooks, "enqueue"> | undefined,
+  events: () => DurableEventsPort | undefined,
+): (event: PlatformEvent, meta: PlatformEventMeta) => void {
+  return (event, meta) => {
+    webhooks()?.enqueue(event, meta);
+    events()?.publish(event, meta);
+  };
+}
+
 export const durableModule: GatewayModule = {
   name: "durable",
   register(app) {
@@ -41,7 +57,15 @@ export const durableModule: GatewayModule = {
       else webhooks?.enqueue(event, meta);
     };
 
-    const actions = new DurableActions({ db: app.db, log: log.child("actions"), capabilityKey: keys.capability, publicUrl: app.config.publicUrl, sessions, platformTools, publish });
+    const actions = new DurableActions({
+      db: app.db,
+      log: log.child("actions"),
+      capabilityKey: keys.capability,
+      publicUrl: app.config.publicUrl,
+      sessions,
+      platformTools,
+      publish: announcer(() => webhooks, events),
+    });
     webhooks = new DurableWebhooks({ db: app.db, log: log.child("webhooks"), deployment, mode: app.config.mode, env: app.config.env, actions: () => actions });
     let schedules: DurableSchedules | undefined;
     const credentials = new DurableCredentials({ db: app.db, log: log.child("credentials"), sealKey: keys.seal, auth: () => app.services.auth, schedules: () => schedules });
@@ -80,8 +104,10 @@ export const durableModule: GatewayModule = {
         webhooks!.dropSession(event.sessionId);
         schedules!.onSessionDeleted(event.sessionId);
       } else if (event.type === "session.promoted") {
+        // Promotion normally calls actions.onGenerationChanged directly first; repeating it here is a no-op.
         const generation = typeof event.data.generation === "number" ? event.data.generation : (await sessions()?.get(event.sessionId))?.generation;
-        if (generation !== undefined) actions.onGenerationChanged(event.sessionId, generation);
+        const carried = Array.isArray(event.data.carried) ? event.data.carried.filter((id): id is string => typeof id === "string") : undefined;
+        if (generation !== undefined) actions.onGenerationChanged(event.sessionId, generation, carried ? { carried } : {});
       }
     };
     app.onStart(() => {

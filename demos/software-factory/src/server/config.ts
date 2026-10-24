@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAttachUrl } from "./attach.js";
 import type { StationRole } from "../shared/types.js";
 
 export interface FactoryConfig {
@@ -16,6 +17,8 @@ export interface FactoryConfig {
   readonly webRoot: string;
   /** Monorepo root, used as the working directory for `npx managed-copilot attach`. */
   readonly repoRoot: string;
+  /** Gateway URL for attach commands when users reach the platform at another address (`FACTORY_ATTACH_URL`). */
+  readonly attachUrl?: string;
   readonly modelOverrides: Partial<Record<StationRole, string>>;
   /** Isolated sessions (sandboxes) the factory runs at once, across all work orders. */
   readonly maxSandboxes: number;
@@ -43,6 +46,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
   const here = fileURLToPath(import.meta.url);
   const packageRoot = findPackageRoot(dirname(here));
   const maxSandboxes = Number(env.FACTORY_MAX_SANDBOXES ?? 4);
+  const attachUrl = parseAttachUrl(env.FACTORY_ATTACH_URL);
   return {
     port: Number(env.PORT ?? env.FACTORY_PORT ?? 7480),
     host: env.HOST ?? "127.0.0.1",
@@ -51,6 +55,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     packageRoot,
     webRoot: join(packageRoot, "dist", "web"),
     repoRoot: resolve(packageRoot, "..", ".."),
+    ...(attachUrl ? { attachUrl } : {}),
     modelOverrides: {
       ...(env.FACTORY_MODEL_PLANNER ? { planner: env.FACTORY_MODEL_PLANNER } : {}),
       ...(env.FACTORY_MODEL_BUILDER ? { builder: env.FACTORY_MODEL_BUILDER } : {}),

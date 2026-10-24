@@ -68,7 +68,8 @@ export const codeTheme: PrismTheme = {
   ],
 };
 
-const EXTENSION_LANGUAGES: Readonly<Record<string, string>> = {
+// Maps, not object literals: names come from untrusted artifacts and markdown (`__proto__`, `constructor`, ...).
+const EXTENSION_LANGUAGES: ReadonlyMap<string, string> = new Map(Object.entries({
   js: "javascript",
   mjs: "javascript",
   cjs: "javascript",
@@ -95,9 +96,9 @@ const EXTENSION_LANGUAGES: Readonly<Record<string, string>> = {
   markdown: "markdown",
   patch: "diff",
   diff: "diff",
-};
+}));
 
-const FENCE_ALIASES: Readonly<Record<string, string>> = {
+const FENCE_ALIASES: ReadonlyMap<string, string> = new Map(Object.entries({
   js: "javascript",
   javascript: "javascript",
   node: "javascript",
@@ -130,7 +131,7 @@ const FENCE_ALIASES: Readonly<Record<string, string>> = {
   markdown: "markdown",
   diff: "diff",
   patch: "diff",
-};
+}));
 
 export const PLAIN = "plain";
 
@@ -143,15 +144,15 @@ export function fileExtension(path: string): string {
 export function languageForPath(path: string): string {
   const name = (path.split("/").pop() ?? path).toLowerCase();
   if (name === "dockerfile" || name.endsWith(".env") || name === ".npmrc" || name === ".gitignore") return "bash";
-  return EXTENSION_LANGUAGES[fileExtension(path)] ?? PLAIN;
+  return EXTENSION_LANGUAGES.get(fileExtension(path)) ?? PLAIN;
 }
 
 export function languageForFence(fence: string | undefined): string {
   if (!fence) return PLAIN;
-  return FENCE_ALIASES[fence.toLowerCase()] ?? PLAIN;
+  return FENCE_ALIASES.get(fence.toLowerCase()) ?? PLAIN;
 }
 
-export const LANGUAGE_LABELS: Readonly<Record<string, string>> = {
+const LANGUAGE_LABELS: ReadonlyMap<string, string> = new Map(Object.entries({
   javascript: "JavaScript",
   jsx: "JSX",
   typescript: "TypeScript",
@@ -165,4 +166,8 @@ export const LANGUAGE_LABELS: Readonly<Record<string, string>> = {
   markdown: "Markdown",
   diff: "Diff",
   plain: "Text",
-};
+}));
+
+export function languageLabel(language: string): string {
+  return LANGUAGE_LABELS.get(language) ?? language;
+}

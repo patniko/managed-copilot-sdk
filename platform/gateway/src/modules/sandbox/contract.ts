@@ -132,6 +132,13 @@ export interface FileDownload {
 }
 
 export interface SandboxesService {
+  /**
+   * True while the backend answered its latest readiness check (at registration, every 30 s, and before every backend
+   * operation). `/v1/info` advertises `isolated` and `files` only while this is true.
+   */
+  readonly available: boolean;
+  /** Re-checks the backend now and returns the new `available`. */
+  probe(): Promise<boolean>;
   create(request: CreateSandboxRequest): Promise<SandboxHandle>;
   /** Idempotent; restarts stopped compute and restores declared state without replaying setup. */
   ensureRunning(sessionId: string): Promise<SandboxHandle>;
@@ -148,8 +155,13 @@ export interface SandboxesService {
   get(sessionId: string): Promise<SandboxInfo | undefined>;
   /** Stops compute after pending work drains (idle stop). State volumes are kept. */
   stop(sessionId: string, reason?: string): Promise<void>;
-  /** Marks `deleting`, removes compute, volumes, and artifacts; reconciliation finishes after a crash. */
-  delete(sessionId: string): Promise<void>;
+  /**
+   * Marks `deleting`, removes compute, volumes, and artifacts; reconciliation finishes after a crash. With `sandboxId`
+   * (from `get(sessionId).id`), the delete applies only if that is still the session's sandbox when it runs (checked
+   * under the session lock); otherwise it does nothing, so a stale delete never removes a newer sandbox or a newer
+   * session's artifacts that reuse the session ID.
+   */
+  delete(sessionId: string, options?: { readonly sandboxId?: string }): Promise<void>;
   /** Records activity that should postpone idle stop. */
   touch(sessionId: string): void;
   setupRecord(sessionId: string): SandboxSetupRecord | undefined;

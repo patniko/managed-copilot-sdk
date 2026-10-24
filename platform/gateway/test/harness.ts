@@ -1,9 +1,10 @@
 // Test harness: a fake runtime that speaks the stock runtime's JSON-RPC over TCP (LSP framing), a GitHub API stub,
 // a gateway wired to both, and a raw bridge-protocol client. Used by router/integration tests; never by demos.
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { createServer, type Server, type Socket } from "node:net";
+import { connect as connectTcp, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, type EnvironmentRequest } from "@managed-copilot/protocol";
@@ -15,6 +16,8 @@ import { startGateway, type RunningGateway } from "../src/server.js";
 export interface RecordedRequest {
   readonly method: string;
   readonly params: Record<string, unknown>;
+  /** Which connection to the fake runtime sent it (1 = the first). */
+  readonly connection?: number;
 }
 
 interface FakeSession {
@@ -22,6 +25,10 @@ interface FakeSession {
   createParams: Record<string, unknown>;
   token?: string;
   agent?: string;
+  /** The connection that last created or resumed the session: where its events go. */
+  endpoint?: RpcEndpoint;
+  /** Answers an in-flight `sendAndWait` as aborted (what `session.suspend` does). */
+  suspend?: () => void;
   readonly events: { id: string; type: string; data: Record<string, unknown> }[];
 }
 
@@ -33,6 +40,7 @@ export class FakeRuntime {
   readonly sessions = new Map<string, FakeSession>();
   readonly #pendingTools = new Map<string, { sessionId: string; toolName: string; toolCallId: string; arguments: unknown; resolve: (answer: Record<string, unknown>) => void }>();
   readonly #endpoints = new Set<RpcEndpoint>();
+  #connections = 0;
   #server: Server | undefined;
   port = 0;
 
@@ -56,23 +64,83 @@ export class FakeRuntime {
     return this.requests.filter((request) => request.method === method);
   }
 
+  /** Emits a session event from the runtime, on the connection that owns the session (test hook). */
+  emitEvent(sessionId: string, type: string, data: Record<string, unknown> = {}): string {
+    const session = this.sessions.get(sessionId);
+    if (!session?.endpoint) throw new Error(`No open session ${sessionId}`);
+    return this.#emit(session.endpoint, session, type, data);
+  }
+
+  /** Emits a session event on one runtime connection (1 = the first), whichever connection the session is open on (test hook). */
+  emitEventOn(connection: number, sessionId: string, type: string, data: Record<string, unknown> = {}): string {
+    const endpoint = this.#byConnection.get(connection);
+    const session = this.sessions.get(sessionId);
+    if (!endpoint || !session) throw new Error(`No connection ${connection} or session ${sessionId}`);
+    const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data };
+    session.events.push(event);
+    endpoint.notify("session.event", { sessionId, event });
+    return event.id;
+  }
+
+  /** Answers a pending tool call inside the runtime, as if a responder had (test hook). */
+  answerTool(requestId: string, result: unknown): void {
+    const pending = this.#pendingTools.get(requestId);
+    if (!pending) throw new Error(`No pending tool call ${requestId}`);
+    this.#pendingTools.delete(requestId);
+    pending.resolve({ requestId, result });
+  }
+
+  /** Holds the response to the next request of `method` (optionally for one session) until `release()` (test hook). */
+  holdNext(method: string, sessionId?: string): { readonly held: Promise<void>; release(): void } {
+    let release!: () => void;
+    let arrived!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    this.#holds.push({ method, sessionId, gate, arrived });
+    return { held, release };
+  }
+
+  /** Sends a runtime → gateway request on one connection (1 = the first), as the runtime would (test hook). */
+  requestOn(connection: number, method: string, params: Record<string, unknown>): Promise<unknown> {
+    const endpoint = this.#byConnection.get(connection);
+    if (!endpoint) throw new Error(`No connection ${connection}`);
+    return endpoint.request(method, params);
+  }
+
+  readonly #holds: { method: string; sessionId: string | undefined; gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #byConnection = new Map<number, RpcEndpoint>();
+
   #accept(socket: Socket): void {
     let authenticated = false;
+    const connection = ++this.#connections;
     const endpoint: RpcEndpoint = new RpcEndpoint(streamTransport(socket), {
       name: "fake runtime",
-      onNotification: (method, params) => this.notifications.push({ method, params: (params ?? {}) as Record<string, unknown> }),
+      onNotification: (method, params) => this.notifications.push({ method, params: (params ?? {}) as Record<string, unknown>, connection }),
       onRequest: async (method, params, context) => {
         const body = (params ?? {}) as Record<string, unknown>;
-        this.requests.push({ method, params: body });
+        this.requests.push({ method, params: body, connection });
         if (method === "connect") {
           if (body["token"] !== this.token) throw new RpcError(-32001, "Invalid connection token");
           authenticated = true;
           return { ok: true, protocolVersion: 3, version: "1.0.103", taskKinds: ["agent", "shell", "client"] };
         }
         if (!authenticated) throw new RpcError(-32001, "Not connected");
+        const hold = this.#holds.findIndex((candidate) => candidate.method === method && (candidate.sessionId === undefined || candidate.sessionId === body["sessionId"]));
+        if (hold >= 0) {
+          const [entry] = this.#holds.splice(hold, 1);
+          const result = await this.#handle(endpoint, method, body, context.signal);
+          entry!.arrived();
+          await entry!.gate;
+          return result;
+        }
         return this.#handle(endpoint, method, body, context.signal);
       },
     });
+    this.#byConnection.set(connection, endpoint);
     this.#endpoints.add(endpoint);
     endpoint.transport.onClose(() => this.#endpoints.delete(endpoint));
   }
@@ -80,7 +148,8 @@ export class FakeRuntime {
   #emit(endpoint: RpcEndpoint, session: FakeSession, type: string, data: Record<string, unknown>): string {
     const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data };
     session.events.push(event);
-    endpoint.notify("session.event", { sessionId: session.id, event });
+    // Events follow the session to the connection that opened it last (a turn continues where it was resumed).
+    (session.endpoint ?? endpoint).notify("session.event", { sessionId: session.id, event });
     return event.id;
   }
 
@@ -92,7 +161,7 @@ export class FakeRuntime {
         return { models: [{ id: "claude-haiku-4.5", name: "Claude Haiku 4.5" }, { id: "gpt-5.4", name: "GPT-5.4" }] };
       case "session.create": {
         const id = sessionId ?? randomUUID();
-        const created: FakeSession = { id, createParams: params, events: [] };
+        const created: FakeSession = { id, createParams: params, endpoint, events: [] };
         this.sessions.set(id, created);
         if (typeof params["gitHubTokenProviderRegistrationId"] === "string") {
           const answer = (await endpoint.request("gitHubToken.getToken", { registrationId: params["gitHubTokenProviderRegistrationId"], host: "https://github.com", sessionId: id, reason: "initial" })) as { kind: string; accessToken?: string };
@@ -118,12 +187,25 @@ export class FakeRuntime {
       case "session.resume": {
         if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
         session.createParams = { ...session.createParams, ...params };
+        session.endpoint = endpoint;
         if (typeof params["agent"] === "string") {
           if (!session.token) throw new RpcError(-32603, `Custom agent '${params["agent"]}' not found`);
           session.agent = params["agent"];
         }
         return { sessionId, workspacePath: "/platform/host/session-state", capabilities: {} };
       }
+      case "session.suspend": {
+        // Like the stock runtime: the in-flight request answers aborted, pending tool calls stay pending, and the
+        // session emits its handoff artifacts.
+        if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
+        session.suspend?.();
+        this.#emit(endpoint, session, "agent.interrupted", {});
+        this.#emit(endpoint, session, "session.idle", { aborted: true });
+        this.#emit(endpoint, session, "session.shutdown", {});
+        return { success: true };
+      }
+      case "sessions.close":
+        return { success: true };
       case "session.gitHubAuth.setCredentials": {
         if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
         session.token = (params["credentials"] as { token?: string } | undefined)?.token;
@@ -154,9 +236,17 @@ export class FakeRuntime {
       case "session.sendAndWait": {
         if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
         if (params["prompt"] !== "slow") {
-          const completionEventId = await this.#turn(endpoint, session, String(params["prompt"] ?? ""), randomUUID());
-          const response = [...session.events].reverse().find((event) => event.type === "assistant.message");
-          return { completionEventId, response };
+          const messageId = randomUUID();
+          const lastResponse = () => [...session.events].reverse().find((event) => event.type === "assistant.message");
+          const finished = this.#turn(endpoint, session, String(params["prompt"] ?? ""), messageId).then((completionEventId) => ({ messageId, completionEventId, response: lastResponse() }));
+          const suspended = new Promise<Record<string, unknown>>((resolve) => {
+            session.suspend = () => resolve({ messageId, aborted: true, completionEventId: randomUUID(), response: lastResponse() });
+          });
+          try {
+            return await Promise.race([finished, suspended]);
+          } finally {
+            session.suspend = undefined;
+          }
         }
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, 60_000);
@@ -186,6 +276,8 @@ export class FakeRuntime {
         return { success: true };
       case "session.getMessages":
         return { events: session?.events ?? [] };
+      case "session.eventLog.read":
+        return { events: session?.events ?? [], cursor: `cursor-${session?.events.length ?? 0}` };
       case "session.detach":
         return { success: true };
       case "session.delete":
@@ -225,6 +317,90 @@ export class FakeRuntime {
     this.#emit(endpoint, session, "assistant.message_delta", { messageId: "m1", deltaContent: content.slice(0, 5) });
     this.#emit(endpoint, session, "assistant.message", { messageId: "m1", content, originatingMessageId: messageId });
     return this.#emit(endpoint, session, "session.idle", {});
+  }
+}
+
+type Send = (method: string, params?: unknown) => Promise<unknown>;
+
+/**
+ * Core's `sandboxes` port backed by the fake runtime: every "sandbox" is its own connection to it. Like the real
+ * sandbox module, the runtime receives no GitHub credential until `sessionOpened` installs one, and a requested
+ * agent is deferred out of create/resume params and selected after that.
+ */
+export class FakeSandboxes {
+  readonly log: { op: string; sessionId: string; detail?: Record<string, unknown> }[] = [];
+  readonly streams = new Map<string, Socket>();
+  /** Runtime → gateway requests this "sandbox module" answers itself (like brokered inference). */
+  readonly handlers = new Map<string, (params: unknown) => Promise<unknown>>();
+  /** The backend's readiness, as the real service reports it. */
+  available = true;
+  failCreate: Error | undefined;
+  /** Fails the next `prepareSessionParams` (test hook). */
+  failNextPrepare: Error | undefined;
+
+  constructor(private readonly runtime: FakeRuntime) {}
+
+  ops(sessionId: string): string[] {
+    return this.log.filter((entry) => entry.sessionId === sessionId).map((entry) => entry.op);
+  }
+
+  detail(sessionId: string, op: string): Record<string, unknown> {
+    return this.log.filter((entry) => entry.sessionId === sessionId && entry.op === op).at(-1)?.detail ?? {};
+  }
+
+  async create(request: { sessionId: string; ownerId: number; environment: string; size: string }): Promise<unknown> {
+    this.log.push({ op: "create", sessionId: request.sessionId, detail: { ...request } });
+    if (this.failCreate) throw this.failCreate;
+    return { sandboxId: `sbx-${request.sessionId}` };
+  }
+
+  async ensureRunning(sessionId: string): Promise<unknown> {
+    this.log.push({ op: "ensureRunning", sessionId });
+    return { sandboxId: `sbx-${sessionId}` };
+  }
+
+  async openRuntime(sessionId: string, options: { resolveToken(): Promise<string> }) {
+    this.log.push({ op: "openRuntime", sessionId });
+    const socket = connectTcp(this.runtime.port, "127.0.0.1");
+    await once(socket, "connect");
+    this.streams.set(sessionId, socket);
+    let send: Send | undefined;
+    const deferred = new Map<string, string>();
+    return {
+      stream: socket,
+      connectionToken: this.runtime.token,
+      handlers: this.handlers,
+      initialize: async (upstream: Send) => {
+        send = upstream;
+        this.log.push({ op: "initialize", sessionId });
+      },
+      prepareSessionParams: async (method: string, params: Record<string, unknown>) => {
+        this.log.push({ op: `prepare ${method}`, sessionId, detail: params });
+        const failure = this.failNextPrepare;
+        this.failNextPrepare = undefined;
+        if (failure) throw failure;
+        const { gitHubToken: _token, gitHubTokenProviderRegistrationId: _registration, agent, ...rest } = params;
+        if (typeof agent === "string") deferred.set(sessionId, agent);
+        return rest;
+      },
+      sessionOpened: async (id: string) => {
+        this.log.push({ op: "sessionOpened", sessionId: id });
+        await options.resolveToken();
+        await send!("session.gitHubAuth.setCredentials", { sessionId: id, credentials: { type: "token", host: "https://github.com", token: "mcrt_placeholder" } });
+        const agent = deferred.get(id);
+        deferred.delete(id);
+        if (agent) await send!("session.agent.select", { sessionId: id, name: agent });
+      },
+      close: () => socket.destroy(),
+    };
+  }
+
+  async delete(sessionId: string): Promise<void> {
+    this.log.push({ op: "delete", sessionId });
+  }
+
+  get(): undefined {
+    return undefined;
   }
 }
 

@@ -48,7 +48,7 @@ export interface FactoryPlatform {
   createSession(role: StationRole, config: SessionConfig, note?: (text: string) => void): Promise<StationSession>;
   resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession>;
   sessionInfo(sessionId: string): Promise<SessionInfo>;
-  /** The signed-in user's sessions on the platform (owner-scoped). */
+  /** The signed-in user's sessions in the factory's environments; may be capped, so absent doesn't mean deleted. */
   listSessions(): Promise<SessionInfo[]>;
   deleteSession(sessionId: string): Promise<void>;
   files(sessionId: string): StationFiles;
@@ -212,8 +212,12 @@ export class Platform implements FactoryPlatform {
     return this.#managedOrThrow().sessions.get(sessionId);
   }
 
-  listSessions(): Promise<SessionInfo[]> {
-    return this.#managedOrThrow().sessions.list({ limit: 1000 });
+  /** The signed-in user's sessions in the factory's environments (owner-scoped, newest first, capped per environment). */
+  async listSessions(): Promise<SessionInfo[]> {
+    const managed = this.#managedOrThrow();
+    const environments = [...new Set(ROLES.map((role) => FACTORY_ENVIRONMENTS[role]))];
+    const lists = await Promise.all(environments.map((environment) => managed.sessions.list({ environment, limit: 1000 })));
+    return lists.flat();
   }
 
   deleteSession(sessionId: string): Promise<void> {

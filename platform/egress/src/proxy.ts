@@ -308,20 +308,35 @@ export class EgressProxy {
       sendText(res, 403, message);
       return;
     }
+    // The client can hang up while DNS resolution and the dial are in flight; a "close" emitted then is not repeated.
+    let gone = false;
+    res.once("close", () => {
+      gone = true;
+    });
     const decision = await evaluateDestination(registration.policy, url.hostname, port, this.#options.destination);
+    if (gone) return;
     if (!decision.ok) {
       this.#reportDecision(registration, decision, method, path);
       sendText(res, decision.status, decision.message);
+      return;
+    }
+    const current = this.#options.registry.check(registration.sandboxId, registration.credentialHash, decision.host, decision.ipLiteral);
+    if (!current.ok) {
+      sendText(res, current.status, current.message);
       return;
     }
     let upstreamSocket: Socket;
     try {
       upstreamSocket = await dialValidated(decision.addresses, port, this.#dial, this.#connectTimeoutMs);
     } catch (error) {
-      sendText(res, 502, `Could not connect to ${decision.host}:${port}: ${(error as Error).message}`);
+      if (!gone) sendText(res, 502, `Could not connect to ${decision.host}:${port}: ${(error as Error).message}`);
       return;
     }
-    const untrack = this.#options.registry.track(registration.sandboxId, {
+    if (gone) {
+      upstreamSocket.destroy();
+      return;
+    }
+    const tracked = this.#options.registry.track(registration.sandboxId, {
       host: decision.host,
       ipLiteral: decision.ipLiteral,
       credentialHash: registration.credentialHash,
@@ -330,13 +345,13 @@ export class EgressProxy {
         res.destroy();
       },
     });
-    if (!untrack) {
+    if (!tracked.ok) {
       upstreamSocket.destroy();
-      sendText(res, 429, "Too many concurrent connections from this sandbox.");
+      sendText(res, tracked.status, tracked.message);
       return;
     }
     res.once("close", () => {
-      untrack();
+      tracked.untrack();
       upstreamSocket.destroy();
     });
     const headers = filterHeaders(req.rawHeaders, new Set(["host", "expect"]));
@@ -369,14 +384,20 @@ export class EgressProxy {
       return;
     }
     const decision = await evaluateDestination(registration.policy, authority.host, authority.port, this.#options.destination);
+    if (socket.destroyed) return;
     if (!decision.ok) {
       this.#reportDecision(registration, decision, "CONNECT");
       writeConnectFailure(socket, decision.status, decision.message);
       return;
     }
-    const vaultHost = !decision.ipLiteral && registration.credentials.some((credential) => credential.destinations.some((d) => d.host === decision.host && d.port === decision.port));
-    if (vaultHost) this.#terminate(socket, head, registration, decision);
-    else await this.#tunnel(socket, head, registration, decision);
+    const current = this.#options.registry.check(registration.sandboxId, registration.credentialHash, decision.host, decision.ipLiteral);
+    if (!current.ok) {
+      writeConnectFailure(socket, current.status, current.message);
+      return;
+    }
+    const vaultHost = !decision.ipLiteral && current.registration.credentials.some((credential) => credential.destinations.some((d) => d.host === decision.host && d.port === decision.port));
+    if (vaultHost) await this.#terminate(socket, head, current.registration, decision);
+    else await this.#tunnel(socket, head, current.registration, decision);
   }
 
   async #tunnel(socket: Socket, head: Buffer, registration: EgressRegistration, decision: Extract<Decision, { ok: true }>): Promise<void> {
@@ -387,7 +408,12 @@ export class EgressProxy {
       writeConnectFailure(socket, 502, `Could not connect to ${decision.host}:${decision.port}: ${(error as Error).message}`);
       return;
     }
+    if (socket.destroyed) {
+      upstream.destroy();
+      return;
+    }
     let closed = false;
+    let untrack: (() => void) | undefined;
     const close = () => {
       if (closed) return;
       closed = true;
@@ -395,12 +421,13 @@ export class EgressProxy {
       socket.destroy();
       upstream.destroy();
     };
-    const untrack = this.#options.registry.track(registration.sandboxId, { host: decision.host, ipLiteral: decision.ipLiteral, credentialHash: registration.credentialHash, close });
-    if (!untrack) {
+    const tracked = this.#options.registry.track(registration.sandboxId, { host: decision.host, ipLiteral: decision.ipLiteral, credentialHash: registration.credentialHash, close });
+    if (!tracked.ok) {
       upstream.destroy();
-      writeConnectFailure(socket, 429, "Too many concurrent connections from this sandbox.");
+      writeConnectFailure(socket, tracked.status, tracked.message);
       return;
     }
+    untrack = tracked.untrack;
     socket.once("close", close);
     upstream.once("close", close);
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -438,23 +465,52 @@ export class EgressProxy {
 
   // --- Vault TLS termination -------------------------------------------------------------------------------------
 
-  #terminate(socket: Socket, head: Buffer, registration: EgressRegistration, decision: Extract<Decision, { ok: true }>): void {
+  async #terminate(socket: Socket, head: Buffer, registration: EgressRegistration, decision: Extract<Decision, { ok: true }>): Promise<void> {
     let closed = false;
+    let revoked = false;
     let tlsSocket: TLSSocket | undefined;
+    let untrack: (() => void) | undefined;
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
     const close = () => {
       if (closed) return;
       closed = true;
+      if (handshakeTimer) clearTimeout(handshakeTimer);
       untrack?.();
       tlsSocket?.destroy();
       socket.destroy();
     };
-    const untrack = this.#options.registry.track(registration.sandboxId, { host: decision.host, ipLiteral: false, credentialHash: registration.credentialHash, close });
-    if (!untrack) {
-      writeConnectFailure(socket, 429, "Too many concurrent connections from this sandbox.");
+    const revoke = () => {
+      revoked = true;
+      close();
+    };
+    const tracked = this.#options.registry.track(registration.sandboxId, { host: decision.host, ipLiteral: false, credentialHash: registration.credentialHash, close: revoke });
+    if (!tracked.ok) {
+      writeConnectFailure(socket, tracked.status, tracked.message);
       return;
     }
+    untrack = tracked.untrack;
+    socket.once("close", close);
     socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-    if (head.length > 0) socket.unshift(head);
+    const target = { host: decision.host, port: decision.port, method: "CONNECT" };
+    // Check the ClientHello before presenting any certificate: OpenSSL only consults SNICallback when the client sends
+    // a server name, so a client without SNI would otherwise get a vault host certificate.
+    const { result, data } = await readClientHello(socket, head, { timeoutMs: this.#helloTimeoutMs });
+    if (closed) return;
+    if (result.kind !== "tls") {
+      if (data.length > 0) {
+        this.#report(registration, "non_tls_tunnel", `The tunnel to ${decision.host}:${decision.port} did not start with a TLS handshake; CONNECT tunnels must carry TLS.`, target);
+      }
+      close();
+      return;
+    }
+    const helloName = result.serverName === undefined ? undefined : normalizeDestinationHost(result.serverName)?.host;
+    if (helloName !== decision.host) {
+      this.#report(registration, "sni_mismatch", `The TLS server name ${helloName ?? "(none)"} does not match the authorized host ${decision.host}.`, target);
+      close();
+      return;
+    }
+    // TLSSocket feeds bytes already buffered on the socket to the TLS engine before reading from its handle.
+    socket.unshift(data);
     const context = this.#options.ca.contextFor(decision.host);
     let mismatchedName: string | undefined;
     tlsSocket = new TLSSocket(socket, {
@@ -474,15 +530,26 @@ export class EgressProxy {
     let securedAt = 0;
     let requested = false;
     let reported = false;
-    const target = { host: decision.host, port: decision.port, method: "CONNECT" };
     const untrusted = (message: string) => {
       if (reported) return;
       reported = true;
       this.#report(registration, "tls_client_untrusted", message, target);
     };
+    handshakeTimer = setTimeout(() => {
+      if (!secured) close();
+    }, this.#helloTimeoutMs);
+    handshakeTimer.unref?.();
     tlsSocket.once("secure", () => {
+      const servername = typeof tlsSocket!.servername === "string" ? normalizeDestinationHost(tlsSocket!.servername)?.host : undefined;
+      if (servername !== decision.host) {
+        reported = true;
+        this.#report(registration, "sni_mismatch", `The TLS server name ${servername ?? "(none)"} does not match the authorized host ${decision.host}.`, target);
+        close();
+        return;
+      }
       secured = true;
       securedAt = Date.now();
+      if (handshakeTimer) clearTimeout(handshakeTimer);
       this.#terminated.set(tlsSocket!, {
         sandboxId: registration.sandboxId,
         sessionId: registration.sessionId,
@@ -511,6 +578,10 @@ export class EgressProxy {
     });
     tlsSocket.once("close", () => {
       // Clients that verify certificates outside the TLS library (Node, for example) hang up without a TLS alert.
+      if (revoked) {
+        close();
+        return;
+      }
       if (!secured && socket.bytesRead > 0) {
         untrusted(
           `A client in this sandbox abandoned the TLS handshake with ${decision.host}. It probably does not trust the platform CA certificate (or pins certificates), so its vault credential could not be used.`,
@@ -539,6 +610,15 @@ export class EgressProxy {
     const method = req.method ?? "GET";
     const host = connection.host;
     const port = connection.port;
+    // A "close" emitted while this handler awaits the gateway or the upstream is not repeated, so note it now.
+    let gone = false;
+    res.once("close", () => {
+      gone = true;
+    });
+    if (!this.#options.registry.ready) {
+      sendText(res, 503, "The egress proxy cannot reach the Managed Copilot gateway, so outbound access is paused.");
+      return;
+    }
     const registration = this.#options.registry.get(connection.sandboxId);
     if (!registration || registration.credentialHash !== connection.credentialHash) {
       sendText(res, 403, "This sandbox's egress registration is no longer active.");
@@ -591,11 +671,29 @@ export class EgressProxy {
         if (/[\r\n\0]/.test(value)) throw new SecretUnavailableError("credential_revoked", "The vault credential contains characters that are not valid in an HTTP header.");
         values.set(use.placeholder, value);
       } catch (error) {
+        if (gone) return;
         const reason = error instanceof SecretUnavailableError ? error.reason : "policy_unavailable";
         report(reason, (error as Error).message, reason === "credential_revoked" ? 403 : 503);
         return;
       }
     }
+    // The registration can be revoked, rotated, or narrowed (including its vault bindings) while the gateway resolves
+    // secrets or the upstream connects; check again, synchronously, before anything is sent.
+    const stillAuthorized = (): boolean => {
+      if (gone) return false;
+      const current = this.#options.registry.check(connection.sandboxId, connection.credentialHash, host, false);
+      if (!current.ok) {
+        sendText(res, current.status, current.message);
+        return false;
+      }
+      const replanned = planSubstitution(current.registration, host, port, path, req.rawHeaders);
+      if (!replanned.ok || replanned.uses.some((use) => !values.has(use.placeholder))) {
+        report("credential_revoked", "A vault credential this request uses was revoked while the request was being prepared; it was not sent.", 403);
+        return false;
+      }
+      return true;
+    };
+    if (!stillAuthorized()) return;
     const secrets = [...values.values()];
     // Exactly one Host header, the authority this connection was authorized for: a second Host could steer a shared
     // front end (CDN) to another virtual host after the credential was substituted.
@@ -607,7 +705,11 @@ export class EgressProxy {
     try {
       raw = await dialValidated(connection.addresses, port, this.#dial, this.#connectTimeoutMs);
     } catch (error) {
-      sendText(res, 502, `Could not connect to ${host}:${port}: ${(error as Error).message}`);
+      if (!gone) sendText(res, 502, `Could not connect to ${host}:${port}: ${(error as Error).message}`);
+      return;
+    }
+    if (gone) {
+      raw.destroy();
       return;
     }
     const upstreamTls = tlsConnect({
@@ -617,23 +719,38 @@ export class EgressProxy {
       ALPNProtocols: ["http/1.1"],
       checkServerIdentity: (_name, certificate) => checkServerIdentity(host, certificate),
     });
+    upstreamTls.on("error", () => undefined);
+    res.once("close", () => upstreamTls.destroy());
+    const handshake = new AbortController();
+    const deadline = setTimeout(() => handshake.abort(), this.#connectTimeoutMs);
+    const abandon = () => handshake.abort();
+    res.once("close", abandon);
     try {
       // Nothing, and certainly no secret, is written before the upstream certificate verifies for `host`.
-      await once(upstreamTls, "secureConnect");
+      await once(upstreamTls, "secureConnect", { signal: handshake.signal });
     } catch (error) {
+      upstreamTls.destroy();
       raw.destroy();
+      if (gone) return;
       const failure = error as NodeJS.ErrnoException;
-      if (isCertificateError(failure)) {
+      if (handshake.signal.aborted) {
+        sendText(res, 504, `The TLS handshake with ${host}:${port} did not complete in time; the request was not sent.`);
+      } else if (isCertificateError(failure)) {
         report("upstream_tls_failed", `The certificate presented by ${host} could not be verified (${failure.code ?? failure.message}); the request was not sent.`, 502);
       } else {
         sendText(res, 502, `TLS connection to ${host}:${port} failed: ${failure.message}`);
       }
       return;
+    } finally {
+      clearTimeout(deadline);
+      res.off("close", abandon);
     }
-    upstreamTls.on("error", () => undefined);
+    if (!stillAuthorized()) {
+      upstreamTls.destroy();
+      return;
+    }
     const upstream = httpsRequest({ method, path, headers, setHost: false, createConnection: () => upstreamTls });
     upstream.setTimeout(this.#idleTimeoutMs, () => upstream.destroy(new Error("The upstream server timed out")));
-    res.once("close", () => upstreamTls.destroy());
     upstream.on("response", (upstreamRes) => {
       const status = upstreamRes.statusCode ?? 502;
       const encoding = String(upstreamRes.headers["content-encoding"] ?? "identity").toLowerCase();

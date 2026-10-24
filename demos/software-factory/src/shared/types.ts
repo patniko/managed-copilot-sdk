@@ -176,6 +176,8 @@ export interface Station {
   readonly seeded?: boolean;
   /** The platform's view of `sessionId`, reconciled with `managed.sessions.list()`; `deleted` when it no longer exists. */
   readonly sessionState?: string;
+  /** Set once the platform answered `not_found` for `sessionId`, so reconciliation stops looking it up. */
+  readonly sessionGone?: boolean;
   readonly error?: FactoryError;
 }
 
@@ -317,6 +319,8 @@ export interface ArtifactVersionView {
   readonly publishedAt: string;
   /** The build/review round that produced this version. */
   readonly round: number;
+  /** False when this version is binary or too large for the factory to keep (no preview or download). */
+  readonly viewable: boolean;
 }
 
 export interface ArtifactFileView {
@@ -326,7 +330,7 @@ export interface ArtifactFileView {
   readonly contentType: string;
   /** Newest first. */
   readonly versions: readonly ArtifactVersionView[];
-  /** False for binary or oversized files the viewer cannot show. */
+  /** The newest version's `viewable`. */
   readonly viewable: boolean;
 }
 

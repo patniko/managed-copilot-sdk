@@ -62,6 +62,17 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
   (the experimental public request-handler hook), `sessionFs.*`, `workflow.*`, `tasks.cancel`, and `host.*` (AHP).
 - AHP: the runtime exposes `host.start`, `host.publishSession`, `host.unpublishSession`, `host.setSessionCreationPolicy`;
   the SDK exposes `AhpHost`. Copilot CLI attaches with `copilot --ahp <url>` (interactive only).
+- `systemMessage` is per-resume configuration, not session state (verified live on 1.0.103): a runtime that resumes a
+  session from copied session state without one uses its default prompt, although earlier prompts remain in history
+  as `system.message` events; an explicit `systemMessage` on `session.resume` applies. So shared admission sends its locked
+  prompt on every resume, and a promoted session's destination only gets what `open()` sends.
+- Suspend, close, and resume on the wire (verified live on 1.0.103, a turn waiting on an external tool or streaming):
+  between `session.suspend` and its answer the runtime sends only what the suspend causes (`external_tool.completed`,
+  `agent.interrupted`, `model.call_finished`, `model.telemetry`, `model.turn_failed`, `model.turn_ended`,
+  `assistant.turn_end`, `session.updated` lifecycle); after the answer come `session.usage_checkpoint`, the aborted
+  `session.idle`, and the in-flight `sendAndWait`'s `{ aborted: true }` reply. `sessions.close` sends `session.shutdown`
+  before its answer. A later `session.resume` (with `continuePendingWork`, the pending call stays pending and is not
+  requested again) is answered before the resumed session's first event (`session.resume`).
 
 ## Components
 
@@ -179,6 +190,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   (`providers/azure/`, owned by the azure workstream). Providers must keep: sandboxd as root with only CHOWN, KILL,
   SETGID, and SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, `/var/lib/managed-copilot`; no
   route between sandboxes and no Internet except through the egress proxy; sandboxd reachable only through `endpoint`.
+  `sandboxes.available` is the result of the provider's latest `ready()` (checked at module registration with a 2 s
+  bound, every 30 s, and before every backend operation); `/v1/info` should advertise `isolated` and `files` only while
+  it is true, so a deployment whose backend is missing or unqualified never advertises a capability that cannot work.
+  Docker trusts a successful ping for 15 s.
 - **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
@@ -200,7 +215,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
   unexpected exits. Every workload process (the runtime, setup commands, file workers) starts through `setpriv`:
   uid/gid 10001, cleared groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so the
-  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. Every
+  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. The
+  launcher runs as root with only a fixed `PATH`; the workload's environment is installed by `env -i` after the drop,
+  so loader variables such as `LD_AUDIT` or `GLIBC_TUNABLES` never reach a root process (the gated e2e probes this
+  with `LD_DEBUG_OUTPUT`). Every
   workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a short-lived worker as uid 10001
   that walks the path one segment at a time with `chdir`, refuses symbolic links, verifies the real directory after
   every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root never touches workspace paths, and
@@ -224,8 +242,9 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
   tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
   no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
-  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until its
-  events flow again), and idle sweeps begin only after that reconciliation. `ensureRunning` restarts (or recreates
+  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until a root
+  `user.message` or `session.idle` re-establishes turn tracking), and idle sweeps begin only after that
+  reconciliation. A stop that a restart interrupted is finished. `ensureRunning` restarts (or recreates
   from the pinned image and existing volumes) and re-registers egress. Stops close runtime streams, stop the
   container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
   `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources
@@ -277,17 +296,25 @@ applies the session's policy and attaches vault credentials. Anything else is re
 ### Network policy, egress, and vaults (as built)
 
 - **Effective policy.** `policy.bindSession` computes `narrowNetwork(ceiling, caller request)` where the ceiling is the
-  environment's `network` over the deployment default (`inline-*` environments use the default), persists it in
+  environment's `network` over the deployment default (inline sessions use the default; a declared environment always
+  uses its own setting, whatever its name), persists it in
   `network_sessions`, and returns it. Every later read re-narrows the stored policy by the environment's *current*
   ceiling (an operator can narrow, never broaden a session; a removed environment means no egress).
-  `promoteSession(id, target)` narrows by the isolated target's ceiling, so `network: false` survives promotion.
+  `promoteSession(id, target)` narrows the session's *current* effective policy by the isolated target's ceiling, so
+  `network: false` (including a source tightened after creation) survives promotion. Until `commitPromotion(id)`,
+  `revertPromotion(id)` restores the pre-promotion environment, type, and policy (spec 9.5 pre-commit rollback; kept
+  in SQLite across restarts). Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
+  promotable sessions, and a sandbox left behind by a reverted promotion is pushed with no access.
 - **Shared decision logic.** `evaluateDestination` in `packages/protocol/src/network.ts` is the single rule set for the
-  proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex), ports (default
+  proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex; IP addresses and
+  numeric final labels are not patterns), ports (default
   80/443), canonical hosts (numeric forms such as `2130706433` or `0x7f.1` are rejected before DNS), IP literals
   (refused under host lists), and the address classes allowed after DNS (public only; operator-named private hosts may
   reach RFC 1918/ULA/CGNAT space outside protected ranges; loopback, link-local, metadata including Azure
-  `168.63.129.16`, IPv6 transition forms, multicast, and reserved space never). Callers connect only to the returned
-  addresses, so rebinding cannot redirect them. `.invalid`, `.local`, and `.onion` fail without a lookup.
+  `168.63.129.16`, IPv6 transition forms, multicast, and reserved space never). Operator-blocked and protected ranges
+  apply to every address, public ones included, and to the IPv4 address inside IPv4-mapped and NAT64 forms. Callers
+  connect only to the returned addresses, so rebinding cannot redirect them. `.invalid`, `.local`, and `.onion` fail
+  without a lookup.
 - **Egress proxy** (`platform/egress`, one bundled file, image `managed-copilot-egress:<content hash>`). The gateway's
   supervisor runs it as `${MANAGED_COPILOT_INSTANCE:-mc}-egress` (read-only root, no capabilities, CA volume
   `${instance}-egress-data`) on `${instance}-egress-wan` (its default route) and `${instance}-sandboxes`; the sandbox
@@ -295,14 +322,18 @@ applies the session's policy and attaches vault credentials. Anything else is re
   gateway at `http://host.docker.internal:<port>` with an egress-scoped key (never the platform key). Every connection
   needs the sandbox's proxy credential (Basic, `sandboxId:secret`; the proxy only holds its SHA-256), optionally
   pinned to the sandbox's address; until the first registration snapshot, or 30 s after the gateway stream drops, it
-  fails closed with 503. CONNECT tunnels must start with a TLS ClientHello whose SNI equals the authorized host.
+  fails closed with 503, and at that 30 s deadline it also closes every open connection. Registrations are re-checked
+  after DNS and before each connection is admitted, so revocation or narrowing during a lookup or dial still applies.
+  CONNECT tunnels, vault tunnels included, must start with a TLS ClientHello whose SNI equals the authorized host
+  (parsed strictly: repeated extensions or server names are refused) before any certificate is presented.
   Blocks answer 403 with the reason in the status line and body and are reported to the gateway (no credentials, no
   query strings). The subnets of its non-default interfaces and `10.213.0.0/16` are always protected.
 - **Internal API** (`EGRESS_ROUTES`): `hello` (instance and CA certificate), `stream` (SSE `snapshot`/`upsert`/`remove`/
   `ping`), `secrets/resolve` (authorizes one vault use), `reports`. Registrations carry the policy, credential hash,
   pinned address, and vault bindings (placeholder, exact destinations, header names), never values.
-- **Sandbox registration.** `await policy.registerSandbox({ sandboxId, sessionId })` rotates the proxy credential and
-  returns `{ proxyUrl, env, caCertificate, policy }`. `env` holds `HTTP(S)_PROXY`/`http(s)_proxy` (both cases),
+- **Sandbox registration.** `await policy.registerSandbox({ sandboxId, sessionId, proxy? })` rotates the proxy
+  credential and returns `{ proxyUrl, env, caCertificate, policy }`. `proxyUrl` points at `mc-egress:3128` unless the
+  provider passes `proxy: { host, port }` (for example on Azure). `env` holds `HTTP(S)_PROXY`/`http(s)_proxy` (both cases),
   `NO_PROXY=localhost,127.0.0.1,::1`, `NODE_USE_ENV_PROXY=1`, and one placeholder per vault environment variable.
   The sandbox installs `caCertificate` into the system store (`update-ca-certificates`) and sets `NODE_EXTRA_CA_CERTS`,
   `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, and `PIP_CERT`. With the platform-managed proxy every registration waits for
@@ -313,20 +344,27 @@ applies the session's policy and attaches vault credentials. Anything else is re
   (`POST/GET/DELETE /v1/vaults`, `managed.vaults`) belong to the creating account, are sealed with AES-256-GCM
   (`MANAGED_COPILOT_VAULT_KEY`, else `<data>/network/vault.key`) with the row bound as AAD, and are never returned.
   Binding validates ownership (others' vaults are `not_found`), environment membership for AppHost vaults, and kind
-  (sandbox `env` credentials are refused in shared environments). Placeholders (`mcv_placeholder_` + 40 hex) are
+  (sandbox `env` credentials are refused in shared environments). AppHost vault credentials stay usable only while the
+  session's current environment still grants the vault (inline sessions get none), and user vaults only while the
+  owner still owns them. Placeholders (`mcv_placeholder_` + 40 hex) are
   stable per session and credential; deleting a vault revokes it from running sandboxes at once.
 - **Substitution.** The proxy terminates TLS (ECDSA P-256 platform CA, key kept in the proxy's volume) only for a
   session's vault hosts on port 443. Per request it re-checks the registration, policy, and `Host`; substitutes a
   placeholder only as literal text in that credential's named headers (default `authorization`); rejects
   placeholders in URLs, Basic credentials, other headers, other sessions, other hosts, plain HTTP, and WebSocket
   upgrades; asks the gateway to authorize each use; writes nothing upstream until the destination's certificate
-  verifies; forces `Accept-Encoding: identity` and redacts reflected values (defense in depth only). Clients that
+  verifies (within the connect deadline) and the registration and binding are re-checked once more; forces
+  `Accept-Encoding: identity` and redacts reflected values (defense in depth only). Clients that
   reject the platform CA or pin certificates are reported as `tls_client_untrusted`.
 - **Shared placement.** `web_fetch` (`overridesBuiltInTool`) follows redirects itself, re-evaluating each hop, with
-  size/time limits and HTML-to-text. `adaptMcpServer` rewrites a server to `http://127.0.0.1:<port>/internal/mcp/<route>`
-  plus an HMAC capability header; the adapter re-checks policy per request, does not follow redirects, rewrites legacy
-  SSE `endpoint` events, and attaches the vault MCP credential (`Bearer` unless the vault names a header) at request
-  time. For sandbox placement, `vaults.mcpHeaders(id, url, "sandbox")` returns placeholder headers the proxy fills.
+  size/time limits (30 s for the whole call, body included) and HTML-to-text; it explains failures instead of
+  throwing. `adaptMcpServer` rewrites a server to `http://127.0.0.1:<port>/internal/mcp/<route>`
+  plus an HMAC capability header; the adapter re-checks policy per request, does not follow redirects, asks upstreams
+  for `Accept-Encoding: identity` (a compressed event stream fails with 502), rewrites legacy SSE `endpoint` events
+  (parsed as SSE clients parse them; an event that only becomes `endpoint` after its data passed is renamed so clients
+  ignore it), and attaches the vault MCP credential (`Bearer` unless the vault names a header) at request
+  time. Gateway-side dials and TLS handshakes are bounded by the connect timeout and the caller's cancellation. For
+  sandbox placement, `vaults.mcpHeaders(id, url, "sandbox")` returns placeholder headers the proxy fills.
 - **Visibility.** Blocks are stored per session (`GET /v1/sessions/:id/network`: policy, vaults, newest blocks) and
   published as `network.blocked` platform events (rate-limited).
 - **Limits.** Vault destinations are exact host names on port 443; request bodies, query strings, Basic encodings,
@@ -374,7 +412,8 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   bounded retries the run ends `needs_reconciliation` and is never resent. Runs of one schedule never overlap (one
   occurrence may wait; more are skipped), owners have a concurrency cap, occurrences later than the grace window (5 min
   cron, 60 min one-shot) are `skipped` with a recorded reason, and delegation, environment policy, webhook routes, and
-  the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`).
+  the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`, which
+  blocks every run, including manual ones, and takes over a person's pause until the owner resumes).
   `schedule.run_started` / `schedule.run_completed` carry `{ scheduleId, scheduleName, runId, occurrenceId, status,
   sessionId, scheduledFor, messageId?, reason? }`.
 - **Agent scheduling.** With operator-approved `scheduling: true`, sessions get `schedule_task` (`prompt` plus exactly
@@ -387,10 +426,16 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   schedules with a visible reason. No refresh: a revoked or expired token requires `managed-copilot login` again.
 - **Session lifecycle.** Deleting a session cancels its open actions (claims and late results are refused), stops
   undeliverable answers, fails its pending `session.action_required` deliveries, and pauses schedules that continue
-  it. On `session.promoted` (or `actions.onGenerationChanged`), waiting actions move to the new placement generation;
-  actions owned under the old generation are fenced (their claims are void, tools in flight become
-  `needs_reconciliation`, prompts are offered again). `onDetached(connectionId, sessionId?)` releases only that
-  session's live claims when `sessionId` is given.
+  it; nothing is recorded or claimed for it afterwards, even by a reconciliation already in flight. Promotion calls
+  `actions.onGenerationChanged(sessionId, generation, { carried })` right after committing the new generation
+  (`session.promoted` repeats it as a no-op): waiting actions move; actions whose request the new placement still
+  awaits (`carried`, kept by `continuePendingWork`) and gateway platform tools keep their claims, so their answers
+  resume the turn there; every other claim from the old placement is void (tools become `needs_reconciliation`,
+  prompts are offered again but never to a live client that held them only under an older placement, a fence kept
+  in the ledger). A recorded answer reaches the current placement only if its runtime still waits for that exact
+  request (carried answers are re-delivered even if the old placement acknowledged them), deliveries and their
+  acknowledgments are per placement, and an old placement's pending lists or completions never close a moved
+  action. `onDetached(connectionId, sessionId?)` releases only that session's live claims when `sessionId` is given.
 - Durable REST: `GET /v1/sessions/:id/actions[?state=]`, `POST .../actions/:actionId/claim` (`{ claimToken? }` renews,
   `{ reconcile: true }` takes over uncertain actions), `POST .../actions/:actionId/result` (`{ claimToken, result |
   error | release }`), `/v1/schedules` CRUD with runs, pause, resume, and `run` (`{ invocationId }`), and
@@ -402,6 +447,116 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
 
+### Promotion (as built)
+
+A promotable session moves once, from the shared runtime into its own sandbox, with the same session ID, history,
+and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, contract in `contract.ts`; core's
+`PlacementCutover` in `modules/core/contracts.ts`; acceptance in `platform/gateway/test/promotion.e2e.test.ts`).
+
+- **Stock mechanism (verified on runtime 1.0.103).** A session's whole runtime state is the
+  `session-state/<sessionId>/` directory of its runtime's `COPILOT_HOME` (`events.jsonl`, `workspace.yaml`,
+  `checkpoints/`). After `sessions.close` on the source (flushes, releases the in-use lock), a copy of that directory
+  in another runtime's `COPILOT_HOME` resumes with `session.resume` and full history, even when that runtime was
+  already running. `session.suspend` while an external tool call is pending checkpoints it: resuming with
+  `continuePendingWork: true` lists the same `requestId` and `toolCallId` in `session.tools.listPendingRequests`
+  (`external_tool.requested` is not re-emitted), and `session.tools.handlePendingToolCall` on the new runtime
+  continues the very same turn there. Nothing else under `COPILOT_HOME` is needed; consent and settings files are not
+  carried, so nothing is broadened.
+- **Triggers.** `POST /v1/sessions/:id/promote` (`managed.promote(session)`, `managed-copilot promote <id>`) promotes an
+  idle session as its owner. The agent asks with the `request_sandbox` platform tool, injected only into promotable
+  sessions on shared placement with `skipPermission: false`, so the session's permission policy approves it before
+  anything is allocated. Both return or report the same `PromoteResult { sessionId, placement, sandboxId, generation }`.
+- **Admission** (`promotion_operations`, one open attempt per session by a partial unique index; concurrent and
+  repeated API calls join it, a second `request_sandbox` call gets `promotion_busy` at once so the first can drain,
+  and an already promoted session returns its result): owned and promotable, the `promoteTo` target is an isolated
+  environment that does not route inference to Foundry (a different billing route is incompatible), the router
+  supports cutovers, sandboxes import state, at most 4 attempts in flight, and (API) no running turn
+  (`session_busy`); a tool call must come from the main agent's still-running turn. All of this is checked before
+  anything is allocated.
+- **Policy never broadens.** Before allocation, `policy.promoteSession(id, target)` narrows the session's current
+  effective network policy by the target's ceiling (`network: false` stays false), and the sandbox is created from the
+  target's image, size, setup, and idle policy with the *source's* pinned customizations (no new persona), the
+  session's vault bindings, and the caller's recorded additions (`files`, `packages`, `env`). The target supplies
+  compute only: model and approval ceilings stay the promotable environment's (core re-admits the caller's requested
+  configuration for the sandbox), so the target's `models` list does not apply to promoted sessions.
+- **Quiesce.** The source keeps serving while setup runs. API promotions then require an idle session
+  (`session.metadata.isProcessing`, no open actions, no running or idle background tasks); otherwise `session_busy`
+  and nothing was interrupted. Tool promotions wait up to 20 s until their own `request_sandbox` call (a root-agent
+  call) is the only open work: no other pending tool calls, permission prompts, durable actions, background tasks,
+  or queued messages; otherwise `promotion_busy` reaches the agent as a failed tool result. The checks run again right
+  after `fence()`, against the same session incarnation. Probes fail closed: only the runtime's "session not found"
+  (a session it does not hold, therefore idle) is accepted as an answer other than a valid result.
+- **Fence and transfer.** `fence()` makes new requests for the session wait and keeps everything the source emits
+  from clients, durable, observers, and the ledger. A tool promotion calls `session.suspend`, then `sessions.close`.
+  The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
+  data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
+  `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
+  each path is read once, in the style its separators show, so nested `\n` escapes survive: plain or JSON-escaped,
+  a forward-slash root continued with backslashes that cannot be JSON escapes is one plain path, a UNC root keeps its
+  `\\` prefix, and punctuation after a path stays outside it); JSONL split on `\n` only, with only lines that mention
+  a path re-serialized; JSON and text files up to 32 MiB rewritten, other files copied byte for byte; refused with
+  `policy_violation` if any file holds a GitHub token (`gh[pousr]_…`, `github_pat_…`, also inside Markdown emphasis,
+  or the owner's live token); at most 10,000 files and 1 GiB; any read or write failure fails the export.
+  `sandboxes.importRuntimeState` writes it into the sandbox runtime's `COPILOT_HOME` as uid 10001; a tool promotion
+  passes `activeTurnId` so the carried turn's `outputs/` publish when it completes.
+- **Open and commit.** `cutover.open({ continuePendingWork })` resumes the session on the sandbox runtime with the
+  sandbox admission and the union of attached clients' registrations; a tool promotion verifies the carried call is
+  pending there and records its request ID. The destination does not keep the shared prompt's `request_sandbox`
+  section: `systemMessage` is per-resume configuration (see the stock facts above), so it gets only what `open()`
+  sends. `await commit()` moves placement and generation in one ledger update, switches routing, delivers what the
+  cutover held back, and lifts the fence; the old owner never runs again, and nothing after the ledger update can roll
+  the move back (a commit that reports an error after it is finished, not undone). Then:
+  `policy.commitPromotion`, `actions.onGenerationChanged(id, generation, { carried: [requestId] })` (the carried call
+  keeps its platform claim and its answer is delivered into the new generation), the `session.promoted` platform
+  event (id `evt_promoted_<operation>`, top-level `sessionId` and `sandboxId`; `data: SessionPromotedData` with
+  `generation`, `target`, `trigger`, `toolCallId`, `network`, `durationMs`; published again with the same ID at the
+  next start if the event ledger reports it did not store it), and removal of the source's copy of the state, so the
+  fenced owner can never be reactivated. Only then does `request_sandbox` return; durable delivers its result to the
+  sandbox runtime and the turn continues there with the shell.
+- **One `sendAndWait` across the move.** The caller's in-flight `session.sendAndWait` is answered by the source with
+  `aborted: true` when it is suspended; core holds that reply and completes the request from the owning runtime's
+  events exactly as the stock runtime does (next root `session.idle`; `response` is that message's last root
+  `assistant.message`; `aborted` and `completionEventId` from that idle; a root `session.error` becomes the error), so
+  the call returns after the continued work in the sandbox, with ordered events and genuine cancellation. The
+  source's suspend artifacts (`agent.interrupted`, `model.turn_failed`, `session.idle {aborted}`, `session.shutdown`)
+  never reach clients; they remain in the persisted history, followed by the sandbox's `session.resume`.
+- **Failures.** Before commit, any failure reverts the network narrowing (`policy.revertPromotion`), aborts the
+  cutover (once suspend or close was attempted the source resumes on next use, with `continuePendingWork` for a tool
+  promotion so its call can still be answered there with the failure), deletes the candidate sandbox and staging,
+  and records the attempt `failed`; the source is the only owner. After commit, nothing undoes the move: later steps
+  only log, and core recovers the destination.
+- **Session IDs can be reused.** A deleted session's ID can name a new session, even another owner's, so every step
+  that touches a session by ID first confirms it is the incarnation the attempt was made for (same creation time).
+  The check right before allocation runs in the same synchronous step as the narrowing, and reverts apply only to
+  that incarnation. Candidates are released only when provably theirs: the recorded candidate by its ID (unique per
+  creation); after a failed creation only a `failed` row (the sandbox module released the rest); after a restart
+  during creation whatever is registered. A sandbox already being deleted counts as released. Nothing is deleted
+  while the ID names a session in sandbox placement: the promoted session's home, or a new session's sandbox, whose
+  creation may already be queued in the sandbox service. A candidate still registered then is retried at the next
+  start. Otherwise the check and the queued delete happen in one synchronous step, and core records a session before
+  allocating its sandbox, so no other session's creation can be queued ahead of it. The sandbox service also confirms
+  the expected sandbox ID under its session lock and skips a delete whose sandbox was replaced.
+- **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
+  core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
+  generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried
+  `request_sandbox` call re-applies that before answering); any other is marked failed and its network narrowing
+  reverted (core returns `promoting` rows to `idle`). Candidate sandboxes left behind are released at start (in the
+  background, so the gateway is ready without waiting) or by the session's next attempt before it allocates: releases
+  and allocations run one at a time per session, and a release happens only while it is still owed, so it never
+  undoes a newer attempt's candidate. Committed attempts then finish what they owe (the event, staging, the source's
+  copy of the state) for the incarnation that was promoted, or after that session was deleted; a session ID reused by
+  a new session is never touched. A restart still interrupts the turn that was moving, as it interrupts any running
+  turn.
+- **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
+  attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
+  publishes the same session on the sandbox runtime's AHP host.
+- **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
+  sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
+  so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
+  Promotion is one-way. The stock SDK's `sendAndWait` times out after 60 s by default (the work continues); a turn that
+  may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
+  (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
+
 ## Gateway extension points
 
 Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
@@ -412,23 +567,26 @@ structurally (they may add members).
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
 | `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity); `liveCredential(accountId)` |
-| `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
-| `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
+| `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
+| `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
-| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
+| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
-| `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy`. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
+| `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |
-| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation |
+| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits |
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
+| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`; registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
-`/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`),
-`artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background` (`credentials`) when those services are
-registered, and anything a module adds to `app.capabilities` (for example `promotion`, `attach.cli`).
+`/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
+`sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`
+(`credentials`) when those services are registered, and anything a module adds to `app.capabilities` (for example
+`promotion`, `attach.cli`); sandbox-backed module capabilities (`promotion`) appear only while `isolated` does. Stored
+artifacts stay readable while the sandbox backend is down, so `artifacts` follows the artifacts service alone.
 
 ## Core: shared runtime and router
 
@@ -467,6 +625,42 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
   Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
   create/resume params and selects it in `sessionOpened`.
+- **Restores.** The stock runtime persists a session with its first turn, so a restarted runtime does not know a
+  session that never ran one: it is created again with the same ID and stored configuration. A session whose history
+  the runtime lost fails with `state_restore_failed`. A shared runtime left running by a dead gateway (recorded with its
+  pid and start time in `<data>/runtime/shared/runtime.json`) is stopped before a new one starts.
+- **Placement cutover** (`sessions.cutover`, used by promotion). `fence()` marks the session `promoting`, holds new
+  client and service requests behind its residency, and buffers what the source sends. The first
+  `source("session.suspend" | "sessions.close")` seals it: until a sealing call is answered, what the suspend causes
+  (the wire facts above) is a handoff artifact and anything else was already on its way and is buffered; once one is
+  answered, all of the source's events, lifecycle notifications, and client-bound requests for the session are handoff
+  artifacts that reach nobody. Their event IDs are recorded (`core_hidden_events`) so history reads
+  (`session.getMessages`, `session.eventLog.read`; client or service) never return them either. Requests are checked
+  against the fence and written to the runtime in one synchronous step, so nothing reaches the source after a fence.
+  `open(extra)` admits
+  the session's stored requested configuration (`AdmittedConfig.requested`, snapshotted before admission rewrites
+  anything, e.g. MCP servers keep their original endpoints; a client resume replaces it, like the stored params) for
+  sandbox placement with its current model and agent, plus the caller's later option changes (`requestedOptions`,
+  minus what a later resume set again), attached clients' registrations, and the sandbox platform tools, then runs
+  the sandbox upstream sequence; the destination's runtime requests (including session-less inference chunks) go to
+  its sandbox handlers before commit. `await commit()` moves placement, generation (+1), and the admitted
+  configuration in one ledger update, switches routing, delivers buffered source events (with the source's placement
+  scrubbing and generation) and early destination events in order, then replies the source gave before the seal,
+  lifts the fence, and only then emits `onLifecycle("promoted")`. A `sendAndWait` the seal caught in flight is held
+  from the seal: if the source's reply is aborted (or fails), the call completes from the owner's events after the
+  seal (next root `session.idle`, with the last root `assistant.message`, even when the reply arrives after it; a root
+  `session.error` fails it; deleting the session fails it; outside a cutover a session that is not running is resumed
+  for it, and fails it if that fails), never from what the source said before the seal; a completed reply means the
+  turn ended on the source first and is delivered as is. `abort({ resume })` closes the destination, delivers the
+  buffer, and leaves the source the owner; a sealed session is resumed there right away with the `resume` extras, once
+  the sealing calls were answered, and what the source sends for it until that resume is answered is still handoff.
+  Configuration calls and client resumes a fence overtook are sent again (admitted again for a new placement) to the
+  session's owner once the fence lifts; an overtaken resume's client keeps only the attachment it had before until its
+  resume succeeds. Deleting the session aborts an open cutover; rows left `promoting` by a crash return to `idle` at
+  startup. Durable fences actions by generation, so carrying a pending call across the move is the promotion module's
+  job.
+- **History scrubbing.** A promotable session's history began on shared placement, so its history reads and action
+  replays are scrubbed with shared rules wherever it runs; the actions ledger receives events already sanitized.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
@@ -506,6 +700,8 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
 - `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
   `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
+  `MANAGED_COPILOT_PORT_OFFSET` shifts all four ports for a second copy, which also sets `discovery: false`
+  (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 
 ### Copilot CLI attach (spec section 14)
 
@@ -528,16 +724,27 @@ sequenceDiagram
 
 - Verified on Copilot CLI 1.0.92 with runtime 1.0.103 (shared placement): the CLI attaches, shows history, and its
   turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
-  after 5 idle minutes, on `deleted`/`promoted`/`stopped` lifecycle events (close code 4410), and when the runtime
-  connection closes. Attachments are capped at 8 hours (4408).
+  after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one alive), on `deleted` and
+  `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on `promoted` or a new
+  runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the listener
+  connection drops abnormally, the client stays open for 500 ms so the lifecycle event that usually follows closes it
+  with its own code and reason; otherwise it closes with 1011. Host starts and releases for a session run in order,
+  and each start resolves the session's runtime only after earlier releases, so it never lands on a runtime the session
+  just left.
+- Reconnects: the stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
+  1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
+  into 1012: the CLI reconnects through the relay, which re-verifies its GitHub account and attaches it with a fresh
+  ticket to the same session wherever it now runs (verified for a dropped connection: the conversation continued).
+  The relay refuses a reconnect whose material names a different conversation (spec section 9), and stops after 5
+  platform-requested reconnects in a minute. Generic AHP clients attach again with new material.
 - Tickets are 60-second, single-use, owner- and session-bound, stored as SHA-256 hashes (`attach_tickets`). Upgrades
   re-check ownership and session state. Generic AHP clients may pass the ticket as `?tkn=`.
 - The stock CLI sends its GitHub OAuth token as `Authorization` and in an AHP `authenticate` request. The relay and
   the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
   headers, so no CLI token reaches a runtime or sandbox.
 - Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
-  empty because the host cannot list models without an AHP credential; sandbox sessions need the sandbox module's
-  `connect(sessionId, port)`; GitHub Copilot app publication is not implemented (`github.publish`).
+  empty because the host cannot list models without an AHP credential; GitHub Copilot app publication is not
+  implemented (`github.publish`).
 
 ### CLI and quickstart
 
@@ -596,7 +803,7 @@ capability matrix in [deployment.md](deployment.md). Not yet qualified on a live
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
-| `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` disables it (sandboxes with network access then fail) |
+| `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
 | `MANAGED_COPILOT_EGRESS_KEY` | generated, sealed in the ledger | Egress-scoped internal API key (set it on both sides for `external`) |
 | `MANAGED_COPILOT_EGRESS_ALLOWED_PORTS` / `_PRIVATE_HOSTS` / `_PROTECTED_CIDRS` / `_BLOCKED_CIDRS` | `80,443` / none / `10.213.0.0/16` / none | Operator destination rules shared by the proxy and gateway-side fetches |
@@ -627,6 +834,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
+| **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 
-Later workstreams: promotion (G5, SDK `features/promote.ts`) and end-to-end polish.
+Later workstreams: end-to-end polish.

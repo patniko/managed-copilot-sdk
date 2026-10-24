@@ -1,18 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isManagedCopilotError, type PlatformEvent } from "@managed-copilot/protocol";
+import { isManagedCopilotError, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { migrate, openDatabase, type Database } from "../../src/db.js";
 import { createLogger, type Logger } from "../../src/log.js";
 import type { Principal } from "../../src/http.js";
 import type {
   AttachedResponder,
   DurableCreateSessionRequest,
+  DurableEventsPort,
   DurableSessionView,
   DurableSessionsPort,
   PlatformToolDefinition,
   RuntimeSessionEvent,
 } from "../../src/modules/durable/contract.js";
 import { DurableActions, type ActionsOptions } from "../../src/modules/durable/actions/service.js";
+import { announcer } from "../../src/modules/durable/index.js";
 import { DURABLE_MIGRATIONS, upgradeDurableSchema } from "../../src/modules/durable/migrations.js";
+import { DurableWebhooks } from "../../src/modules/durable/webhooks/service.js";
 
 const OWNER: Principal = { accountId: 1, login: "octocat", token: "gho_owner" };
 const STRANGER: Principal = { accountId: 2, login: "mallory", token: "gho_other" };
@@ -22,10 +25,13 @@ const KEY = Buffer.alloc(32, 7);
 
 class FakeSessions implements DurableSessionsPort {
   readonly views = new Map<string, DurableSessionView>();
-  readonly requests: { sessionId: string; method: string; params: Record<string, unknown> }[] = [];
+  /** Every runtime call, with the placement generation that was current when it was sent. */
+  readonly requests: { sessionId: string; method: string; params: Record<string, unknown>; generation: number }[] = [];
   readonly pendingTools = new Map<string, unknown[]>();
   readonly pendingPermissions = new Map<string, unknown[]>();
   failRequests = 0;
+  /** Holds the next answer delivery in flight (after it was sent) until this settles. */
+  holdNextAnswer: Promise<void> | undefined;
 
   get(sessionId: string) {
     return this.views.get(sessionId);
@@ -39,7 +45,12 @@ class FakeSessions implements DurableSessionsPort {
   async request<T>(sessionId: string, method: string, params: Record<string, unknown>): Promise<T> {
     if (method === "session.tools.listPendingRequests") return { items: this.pendingTools.get(sessionId) ?? [] } as T;
     if (method === "session.permissions.pendingRequests") return { items: this.pendingPermissions.get(sessionId) ?? [] } as T;
-    this.requests.push({ sessionId, method, params });
+    this.requests.push({ sessionId, method, params, generation: this.views.get(sessionId)?.generation ?? 0 });
+    const hold = method.includes("handlePending") ? this.holdNextAnswer : undefined;
+    if (hold) {
+      this.holdNextAnswer = undefined;
+      await hold;
+    }
     if (this.failRequests > 0) {
       this.failRequests--;
       throw new Error("runtime unavailable");
@@ -84,6 +95,7 @@ function completedEvent(type: string, requestId: string): RuntimeSessionEvent {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {}, child: () => quiet };
 
 async function expectCode(promise: Promise<unknown>, code: string): Promise<void> {
   const error = await promise.then(
@@ -102,15 +114,15 @@ describe("durable actions ledger", () => {
   let tools: Map<string, PlatformToolDefinition>;
   let actions: DurableActions;
 
-  function build(options: Partial<ActionsOptions> = {}) {
+  function build(options: Partial<ActionsOptions> = {}, overrides: { publish?: (event: PlatformEvent, meta: { ownerId: number }) => void; log?: Logger } = {}) {
     return new DurableActions({
       db,
-      log: createLogger("test", "error"),
+      log: overrides.log ?? createLogger("test", "error"),
       capabilityKey: KEY,
       publicUrl: URL,
       sessions: () => sessions,
       platformTools: () => ({ register: (definition) => tools.set(definition.name, definition), get: (name) => tools.get(name) }),
-      publish: (event) => published.push(event),
+      publish: overrides.publish ?? ((event) => published.push(event)),
       now: () => now,
       options: { sweepIntervalMs: 0, notifyDebounceMs: 1, ...options },
     });
@@ -121,6 +133,26 @@ describe("durable actions ledger", () => {
   }
 
   const user = (principal: Principal = OWNER) => ({ type: "user" as const, principal });
+
+  /** Core committed a move to `generation`; promotion then tells the ledger which requests the new placement carries. */
+  function promote(generation: number, carried?: string[]) {
+    sessions.views.set(SESSION, { ...sessions.views.get(SESSION)!, generation });
+    actions.onGenerationChanged(SESSION, generation, carried ? { carried } : {});
+  }
+
+  /** Holds the runtime's pending-list answers (reconciliation in flight) until the returned function is called. */
+  function holdPendingLists(): () => void {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const request = sessions.request.bind(sessions);
+    sessions.request = (async <T,>(sessionId: string, method: string, params: Record<string, unknown>): Promise<T> => {
+      if (method === "session.tools.listPendingRequests" || method === "session.permissions.pendingRequests") await gate;
+      return request<T>(sessionId, method, params);
+    }) as typeof sessions.request;
+    return release;
+  }
+
+  const states = () => Object.fromEntries(actions.list(SESSION).map((action) => [action.requestId, action.state]));
 
   beforeEach(() => {
     db = openDatabase(":memory:");
@@ -192,7 +224,7 @@ describe("durable actions ledger", () => {
       const decision = await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
       const answer = { sessionId: SESSION, connectionId: "c1", responderKind: "sdk" as const, method: "session.tools.handlePendingToolCall", params: { sessionId: SESSION, requestId: "r1", result: "shipped" } };
       expect(await actions.onClientAnswer(answer)).toEqual({ kind: "respond", response: { success: true } });
-      expect(sessions.answers()).toEqual([{ sessionId: SESSION, method: "session.tools.handlePendingToolCall", params: { sessionId: SESSION, requestId: "r1", result: "shipped" } }]);
+      expect(sessions.answers()).toEqual([{ sessionId: SESSION, method: "session.tools.handlePendingToolCall", params: { sessionId: SESSION, requestId: "r1", result: "shipped" }, generation: 0 }]);
       expect(actions.list(SESSION)[0]).toMatchObject({ id: decision.actionId, state: "completed", result: "shipped" });
 
       expect(await actions.onClientAnswer(answer)).toEqual({ kind: "respond", response: { success: true } });
@@ -473,6 +505,20 @@ describe("durable actions ledger", () => {
       expect(replacement).toHaveLength(1);
     });
 
+    it("never claims for a client that detached again while resuming the same session", async () => {
+      await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", [])]));
+      actions.onDetached("c1", SESSION);
+      const first = await actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 0, responder: sdk("c1", []) });
+      expect(first).toHaveLength(1);
+      actions.onDetached("c1", SESSION);
+      const release = holdPendingLists();
+      const attaching = actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 0, responder: sdk("c1", []) });
+      actions.onDetached("c1", SESSION);
+      release();
+      expect(await attaching).toEqual([]);
+      expect(actions.list(SESSION)[0]!.state).toBe("pending");
+    });
+
     it("announces pending actions whose notification was lost to a crash", async () => {
       await actions.onSessionEvent(input(toolEvent("r1")));
       actions.stop(); // the debounce timer never fires
@@ -486,20 +532,12 @@ describe("durable actions ledger", () => {
     it("keeps an announcement repairable when publishing it fails", async () => {
       let fail = true;
       actions.stop();
-      const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {}, child: () => quiet };
-      actions = new DurableActions({
-        db,
+      actions = build({}, {
         log: quiet,
-        capabilityKey: KEY,
-        publicUrl: URL,
-        sessions: () => sessions,
-        platformTools: () => undefined,
         publish: (event) => {
           if (fail) throw new Error("outbox unavailable");
           published.push(event);
         },
-        now: () => now,
-        options: { sweepIntervalMs: 0, notifyDebounceMs: 1 },
       });
       await actions.onSessionEvent(input(toolEvent("r1")));
       await sleep(20);
@@ -509,6 +547,63 @@ describe("durable actions ledger", () => {
       await actions.sweep();
       await sleep(20);
       expect(published.map((event) => event.type)).toEqual(["session.action_required"]);
+    });
+
+    it("keeps a re-offered action repairable when its new announcement fails", async () => {
+      let fail = false;
+      actions.stop();
+      actions = build({}, {
+        log: quiet,
+        publish: (event) => {
+          if (fail) throw new Error("outbox unavailable");
+          published.push(event);
+        },
+      });
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      await sleep(20);
+      expect(published).toHaveLength(1);
+      const [action] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, action!.id);
+      fail = true;
+      await actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, release: true });
+      await sleep(20);
+      expect(published).toHaveLength(1);
+      fail = false;
+      now += 10_000;
+      await actions.sweep();
+      await sleep(20);
+      expect(published).toHaveLength(2);
+    });
+
+    it("announces only once the webhook outbox has queued it, even behind an event bus that isolates errors", async () => {
+      const deployment = parseConfig({
+        environments: { chat: { type: "shared" } },
+        webhooks: { orders: { url: "http://127.0.0.1:9/hook", environments: ["chat"], events: ["session.action_required"], secret: { secretEnv: "ORDERS_SECRET" } } },
+      });
+      const webhooks = new DurableWebhooks({ db, log: quiet, deployment, mode: "local", env: { ORDERS_SECRET: "secret" }, actions: () => actions, now: () => now, options: { pollIntervalMs: 0 } });
+      await webhooks.stop(); // queue only: nothing is sent in this test
+      // Like core's PlatformEvents: a failing subscriber never reaches the publisher.
+      const bus: DurableEventsPort = {
+        publish: (event, meta) => {
+          try {
+            webhooks.enqueue(event, meta);
+          } catch {
+            // isolated
+          }
+        },
+        subscribe: () => () => undefined,
+      };
+      actions.stop();
+      actions = build({}, { log: quiet, publish: announcer(() => webhooks, () => bus) });
+      db.exec("CREATE TRIGGER outbox_down BEFORE INSERT ON durable_webhook_deliveries BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END;");
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      await sleep(20);
+      expect(webhooks.deliveries()).toHaveLength(0);
+      db.exec("DROP TRIGGER outbox_down");
+      now += 10_000;
+      await actions.sweep();
+      await sleep(20);
+      expect(webhooks.deliveries().map((delivery) => delivery.eventType)).toEqual(["session.action_required"]);
     });
 
     it("names the tool a permission prompt is for", async () => {
@@ -589,6 +684,202 @@ describe("durable actions ledger", () => {
       await actions.submit(user(), SESSION, waiting!.id, { claimToken: fresh.claimToken, result: "ok" });
       expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["waiting"]);
       void running;
+    });
+
+    it("keeps carried claims and the gateway's own platform tool across a move, and answers the new placement", async () => {
+      let finish!: (value: string) => void;
+      tools.set("request_sandbox", {
+        name: "request_sandbox",
+        description: "",
+        parameters: {},
+        enabledFor: () => true,
+        handler: () => new Promise<string>((resolve) => (finish = resolve)),
+      });
+      await actions.onSessionEvent(input(toolEvent("sandbox", "request_sandbox", {})));
+      await actions.onSessionEvent(input(toolEvent("carried"), [sdk("c1", ["lookup_order"])]));
+      await actions.onSessionEvent(input(toolEvent("fenced")));
+      const fenced = actions.list(SESSION).find((action) => action.requestId === "fenced")!;
+      const stale = await actions.claim(user(), SESSION, fenced.id);
+
+      promote(1, ["carried"]);
+      promote(1); // the session.promoted event that follows the direct call changes nothing
+      expect(states()).toEqual({ sandbox: "executing", carried: "executing", fenced: "needs_reconciliation" });
+
+      finish("sandbox ready");
+      await sleep(10);
+      await actions.onClientAnswer({ sessionId: SESSION, connectionId: "c1", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "carried", result: "found" } });
+      await expectCode(actions.submit(user(), SESSION, fenced.id, { claimToken: stale.claimToken, result: "late" }), "conflict");
+      expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["sandbox", "carried"]);
+      expect(states()).toEqual({ sandbox: "completed", carried: "completed", fenced: "needs_reconciliation" });
+    });
+
+    it("voids an uncertain tool's standing claim when the session moves, unless the new placement carries it", async () => {
+      await actions.onSessionEvent(input(toolEvent("uncertain")));
+      await actions.onSessionEvent(input(toolEvent("kept")));
+      const [uncertain, kept] = actions.list(SESSION);
+      const first = await actions.claim(user(), SESSION, uncertain!.id, { leaseSeconds: 5 });
+      const second = await actions.claim(user(), SESSION, kept!.id, { leaseSeconds: 5 });
+      now += 6_000;
+      await actions.sweep();
+      expect(states()).toEqual({ uncertain: "needs_reconciliation", kept: "needs_reconciliation" });
+
+      promote(1, ["kept"]);
+      // The original claimant's late result is the true outcome only within its placement...
+      await expectCode(actions.submit(user(), SESSION, uncertain!.id, { claimToken: first.claimToken, result: "late" }), "conflict");
+      // ...or for a request the new placement still waits for.
+      await actions.submit(user(), SESSION, kept!.id, { claimToken: second.claimToken, result: "late but carried" });
+      const reconcile = await actions.claim(user(), SESSION, uncertain!.id, { reconcile: true });
+      await actions.submit(user(), SESSION, uncertain!.id, { claimToken: reconcile.claimToken, result: "reconciled" });
+      expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["kept", "uncertain"]);
+    });
+
+    it("refuses a fenced live client's late answer and offers the prompt to someone else", async () => {
+      await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", [])]));
+      promote(1);
+      expect(states()).toEqual({ p1: "pending" });
+      const approve = {
+        sessionId: SESSION,
+        connectionId: "c1",
+        responderKind: "sdk" as const,
+        method: "session.permissions.handlePendingPermissionRequest",
+        params: { requestId: "p1", result: { kind: "approve-once" } },
+      };
+      await expectCode(actions.onClientAnswer(approve), "conflict");
+      expect(await actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 1, responder: sdk("c1", []) })).toEqual([]);
+      // Asked again by the new placement, the prompt goes to another eligible client and never back to c1.
+      const decision = await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", []), sdk("c2", [])], 1));
+      expect(decision).toMatchObject({ owner: "c2", withhold: ["c1"] });
+      await actions.onClientAnswer({ ...approve, connectionId: "c2" });
+      expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["p1"]);
+    });
+
+    it("delivers an answer recorded before a move only to a placement that still waits for that request", async () => {
+      await actions.onSessionEvent(input(toolEvent("awaited")));
+      await actions.onSessionEvent(input(permissionEvent("asked-again")));
+      const [tool, prompt] = actions.list(SESSION);
+      const toolClaim = await actions.claim(user(), SESSION, tool!.id);
+      const promptClaim = await actions.claim(user(), SESSION, prompt!.id);
+      // Core committed the move; the ledger has not been told yet.
+      sessions.views.set(SESSION, { ...sessions.views.get(SESSION)!, generation: 1 });
+      sessions.pendingTools.set(SESSION, [{ requestId: "awaited", toolCallId: "call-awaited", toolName: "lookup_order", arguments: {} }]);
+      await actions.submit(user(), SESSION, tool!.id, { claimToken: toolClaim.claimToken, result: "ok" });
+      await actions.submit(user(), SESSION, prompt!.id, { claimToken: promptClaim.claimToken, result: { kind: "approve-once" } });
+      expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["awaited"]);
+      expect(actions.list(SESSION)[1]!.reason).toMatch(/generation 1, which does not wait/);
+      // The new placement asks for the prompt again: it receives the recorded decision, and nobody is asked twice.
+      const decision = await actions.onSessionEvent(input(permissionEvent("asked-again"), [sdk("c2", [])], 1));
+      expect(decision.owner).toBeUndefined();
+      await sleep(10);
+      expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["awaited", "asked-again"]);
+      expect(actions.list(SESSION)[1]!.reason).toBeUndefined();
+    });
+
+    it("never records or hands out actions of a session deleted while reconciling", async () => {
+      sessions.pendingTools.set(SESSION, [{ requestId: "late", toolCallId: "call-late", toolName: "lookup_order", arguments: {} }]);
+      const release = holdPendingLists();
+      const reconciling = actions.reconcile(SESSION);
+      sessions.views.delete(SESSION);
+      actions.onSessionDeleted(SESSION);
+      release();
+      await reconciling;
+      await sleep(10);
+      expect(actions.list(SESSION)).toEqual([]);
+      expect(published).toHaveLength(0);
+      const decision = await actions.onSessionEvent(input(toolEvent("after"), [sdk("c1", ["lookup_order"])]));
+      expect(decision).toEqual({ withhold: ["c1"] });
+      expect(actions.list(SESSION)).toEqual([]);
+    });
+
+    it("refuses to hand out an action whose session no longer exists", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      sessions.views.delete(SESSION); // deleted without the lifecycle event reaching the ledger
+      await expectCode(actions.claim(user(), SESSION, actions.list(SESSION)[0]!.id), "conflict");
+    });
+
+    it("never lets a late acknowledgment from the old placement stand in for delivery to the new one", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      const [action] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, action!.id);
+      let release!: () => void;
+      sessions.holdNextAnswer = new Promise<void>((resolve) => (release = resolve));
+      const submitting = actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, result: "ok" });
+      await sleep(5); // sent to placement 0, not acknowledged yet
+      sessions.failRequests = 1; // the first delivery to placement 1 fails
+      promote(1, ["r1"]);
+      await sleep(10);
+      release(); // placement 0 acknowledges late
+      await submitting;
+      now += 2_000;
+      await actions.sweep();
+      await sleep(10);
+      expect(sessions.answers().map((answer) => [answer.params.requestId, answer.generation])).toEqual([
+        ["r1", 0],
+        ["r1", 1],
+        ["r1", 1],
+      ]);
+      expect(actions.store.get(action!.id)).toMatchObject({ generation: 1, forwarded: 1 });
+    });
+
+    it("delivers a carried answer to the new placement even after the old one acknowledged it", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      const [action] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, action!.id);
+      await actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, result: "ok" });
+      promote(1, ["r1"]);
+      await sleep(10);
+      expect(sessions.answers().map((answer) => [answer.params.requestId, answer.generation])).toEqual([
+        ["r1", 0],
+        ["r1", 1],
+      ]);
+    });
+
+    it("never hands a prompt back to a client that held it before the session moved", async () => {
+      await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", [])]));
+      actions.onDetached("c1", SESSION); // its permission callback may still be running
+      promote(1);
+      const attach = (connectionId: string) => actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 1, responder: sdk(connectionId, []) });
+      expect(await attach("c1")).toEqual([]);
+      const late = { sessionId: SESSION, connectionId: "c1", responderKind: "sdk" as const, method: "session.permissions.handlePendingPermissionRequest", params: { requestId: "p1", result: { kind: "approve-once" } } };
+      await expectCode(actions.onClientAnswer(late), "conflict");
+      expect((await attach("c2")).map((event) => event.data.requestId)).toEqual(["p1"]);
+      // The fence is ledger state, not an evictable cache.
+      actions.stop();
+      actions = build();
+      await expectCode(actions.onClientAnswer(late), "conflict");
+    });
+
+    it("ignores what the old placement reports once the session has moved", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
+      now += 5_000;
+      const release = holdPendingLists();
+      const reconciling = actions.reconcile(SESSION); // asks placement 0, which no longer lists r1
+      promote(1, ["r1"]);
+      release();
+      await reconciling;
+      // A completion that placement 0 emitted arrives late.
+      await actions.onSessionEvent(input(completedEvent("external_tool.completed", "r1"), [sdk("c1", ["lookup_order"])], 0));
+      expect(states()).toEqual({ r1: "executing" });
+      await actions.onClientAnswer({ sessionId: SESSION, connectionId: "c1", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "r1", result: "found" } });
+      expect(sessions.answers().map((answer) => [answer.params.requestId, answer.generation])).toEqual([["r1", 1]]);
+    });
+
+    it("applies nothing from reconciliation when the session moves while it re-reads the session", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
+      now += 5_000;
+      // Placement 0's lists no longer include r1 and name a call the destination does not have.
+      sessions.pendingTools.set(SESSION, [{ requestId: "ghost", toolCallId: "call-ghost", toolName: "lookup_order", arguments: {} }]);
+      const get = sessions.get.bind(sessions);
+      let reads = 0;
+      sessions.get = (sessionId: string) => {
+        const view = get(sessionId);
+        // The move lands after the re-read returned placement 0, before reconciliation continues.
+        if (++reads === 2) queueMicrotask(() => promote(1, ["r1"]));
+        return view;
+      };
+      await actions.reconcile(SESSION);
+      await sleep(10);
+      expect(states()).toEqual({ r1: "executing" });
+      expect(published).toHaveLength(0);
     });
 
     it("recovers orphaned live claims after a gateway restart", async () => {

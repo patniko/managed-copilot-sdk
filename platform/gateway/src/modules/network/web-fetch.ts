@@ -5,8 +5,8 @@
  * re-evaluated hop by hop.
  */
 import type { IncomingMessage } from "node:http";
+import { pipeline, type Readable } from "node:stream";
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
-import type { Readable } from "node:stream";
 import type { GatewayEgress } from "./fetcher.js";
 import type { PolicyService } from "./policy.js";
 
@@ -44,10 +44,10 @@ const failure = (message: string): WebFetchResult => ({ textResultForLlm: messag
 
 async function readBody(response: IncomingMessage, signal: AbortSignal): Promise<{ body: Buffer; truncated: boolean }> {
   const encoding = String(response.headers["content-encoding"] ?? "").toLowerCase().trim();
-  let stream: Readable = response;
-  if (encoding === "gzip" || encoding === "x-gzip") stream = response.pipe(createGunzip());
-  else if (encoding === "deflate") stream = response.pipe(createInflate());
-  else if (encoding === "br") stream = response.pipe(createBrotliDecompress());
+  const decoder =
+    encoding === "gzip" || encoding === "x-gzip" ? createGunzip() : encoding === "deflate" ? createInflate() : encoding === "br" ? createBrotliDecompress() : undefined;
+  // pipeline (unlike pipe) destroys the decoder when the response fails or is destroyed, so reading always ends.
+  const stream: Readable = decoder ? pipeline(response, decoder, () => undefined) : response;
   const chunks: Buffer[] = [];
   let size = 0;
   let raw = 0;
@@ -59,6 +59,12 @@ async function readBody(response: IncomingMessage, signal: AbortSignal): Promise
       response.destroy();
     }
   });
+  const stop = () => {
+    response.destroy();
+    decoder?.destroy();
+  };
+  if (signal.aborted) stop();
+  else signal.addEventListener("abort", stop, { once: true });
   try {
     for await (const chunk of stream) {
       if (signal.aborted) throw new Error("The request was cancelled");
@@ -72,9 +78,15 @@ async function readBody(response: IncomingMessage, signal: AbortSignal): Promise
       chunks.push(buffer);
     }
   } catch (error) {
-    if (!truncated) throw error;
+    if (!truncated) {
+      if (signal.aborted) throw error;
+      if ((error as NodeJS.ErrnoException).code === "ECONNRESET") throw new Error("the connection closed before the whole response arrived");
+      if (decoder) throw new Error(`the ${encoding} content could not be decoded (${(error as Error).message})`);
+      throw error;
+    }
   } finally {
-    response.destroy();
+    signal.removeEventListener("abort", stop);
+    stop();
   }
   return { body: Buffer.concat(chunks), truncated };
 }
@@ -143,6 +155,8 @@ export function htmlToText(html: string, baseUrl?: string): { readonly title?: s
 export interface WebFetchDependencies {
   readonly policy: PolicyService;
   readonly egress: GatewayEgress;
+  /** Deadline for the whole call, redirects and body included (default 30 s; tests shorten it). */
+  readonly timeoutMs?: number;
 }
 
 export interface WebFetchArgs {
@@ -167,9 +181,15 @@ export async function webFetch(args: WebFetchArgs, context: { readonly sessionId
   const session = deps.policy.session(context.sessionId);
   if (!session) return failure("Web access is unavailable: this session has no network policy binding.");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timeoutMs = deps.timeoutMs ?? TIMEOUT_MS;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   const abort = () => controller.abort();
   context.signal?.addEventListener("abort", abort, { once: true });
+  const why = (error: unknown) => (timedOut ? `the request timed out after ${timeoutMs / 1000} seconds` : controller.signal.aborted ? "the request was cancelled" : (error as Error).message);
   try {
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       let result;
@@ -179,7 +199,7 @@ export async function webFetch(args: WebFetchArgs, context: { readonly sessionId
           signal: controller.signal,
         });
       } catch (error) {
-        return failure(`Could not fetch ${url.toString()}: ${controller.signal.aborted ? "the request timed out or was cancelled" : (error as Error).message}.`);
+        return failure(`Could not fetch ${url.toString()}: ${why(error)}.`);
       }
       if (!result.decision.ok) {
         const decision = result.decision;
@@ -213,7 +233,13 @@ export async function webFetch(args: WebFetchArgs, context: { readonly sessionId
         continue;
       }
       const contentType = String(response.headers["content-type"] ?? "");
-      const { body, truncated } = await readBody(response, controller.signal);
+      let body: Buffer;
+      let truncated: boolean;
+      try {
+        ({ body, truncated } = await readBody(response, controller.signal));
+      } catch (error) {
+        return failure(`Could not fetch ${url.toString()}: ${why(error)}.`);
+      }
       let text: string;
       let title: string | undefined;
       if (/^(text\/|application\/(json|xml|xhtml\+xml|javascript|ld\+json|rss\+xml|atom\+xml))/i.test(contentType) || contentType === "") {

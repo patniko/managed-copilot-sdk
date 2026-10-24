@@ -368,6 +368,35 @@ describe("core router across gateway restarts", () => {
     }
   });
 
+  it("re-applies the session's option changes when a client's resume restores it", async () => {
+    const runtime = new FakeRuntime();
+    await runtime.start();
+    const github = await startGitHubStub({ [ALICE]: { id: 1001, login: "alice" } });
+    const gateway = await startTestGateway({ runtime, githubUrl: github.url });
+    try {
+      const client = await RawClient.connect(gateway.url, ALICE, "chat");
+      const sessionId = crypto.randomUUID();
+      await client.request("session.create", { sessionId });
+      await client.request("session.options.update", { sessionId, reasoningEffort: "high", reasoningSummary: "detailed" });
+      runtime.dropConnections();
+      await sleep(1500);
+      // The client's own resume restores the session; it sets the summary style again but not the reasoning effort.
+      await client.request("session.resume", { sessionId, reasoningSummary: "concise" });
+      const calls = runtime.requests.filter((request) => request.params["sessionId"] === sessionId);
+      const resumedAt = calls.findLastIndex((call) => call.method === "session.resume");
+      expect(resumedAt).toBeGreaterThan(0);
+      expect(calls[resumedAt]!.params["reasoningSummary"]).toBe("concise");
+      const after = calls.slice(resumedAt + 1).filter((call) => call.method === "session.options.update");
+      expect(after.some((call) => call.params["reasoningEffort"] === "high")).toBe(true);
+      expect(after.some((call) => call.params["reasoningSummary"] === "detailed")).toBe(false);
+      await client.close();
+    } finally {
+      await gateway.close();
+      await runtime.close();
+      await github.close();
+    }
+  });
+
   it("re-creates a session the restarted runtime forgot if it never ran a turn, and never papers over lost history", async () => {
     const runtime = new FakeRuntime();
     await runtime.start();

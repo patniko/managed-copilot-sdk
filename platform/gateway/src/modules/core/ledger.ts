@@ -44,6 +44,12 @@ const MIGRATIONS = [
      created_at TEXT NOT NULL
    );
    CREATE INDEX core_events_owner ON core_events (owner_id, seq);`,
+  // Runtime events a placement cutover hid (the source's handoff after the seal): never shown in history reads.
+  `CREATE TABLE core_hidden_events (
+     session_id TEXT NOT NULL,
+     event_id TEXT NOT NULL,
+     PRIMARY KEY (session_id, event_id)
+   );`,
 ];
 
 interface SessionRow {
@@ -83,6 +89,8 @@ export interface AdmittedConfig {
    * change can admit it again for the new placement.
    */
   readonly requested?: Record<string, unknown>;
+  /** The caller's `session.options.update` patches as requested (merged), re-admitted after a placement change. */
+  readonly requestedOptions?: Record<string, unknown>;
 }
 
 export interface NewSession {
@@ -180,7 +188,7 @@ export class SessionLedger {
     return rows.map(toRecord);
   }
 
-  update(id: string, fields: Partial<{ state: SessionState; title: string; model: string; agent: string; network: NetworkPolicy; admitted: AdmittedConfig; generation: number; lastTurn: SessionRecord["lastTurn"] }>): void {
+  update(id: string, fields: Partial<{ state: SessionState; title: string; model: string; agent: string; network: NetworkPolicy; admitted: AdmittedConfig; generation: number; placement: Placement; lastTurn: SessionRecord["lastTurn"] }>): void {
     const sets: string[] = ["updated_at = ?"];
     const args: (string | number | null)[] = [new Date().toISOString()];
     const map: Record<string, [string, (value: unknown) => string | number | null]> = {
@@ -191,6 +199,7 @@ export class SessionLedger {
       network: ["network", (value) => JSON.stringify(value)],
       admitted: ["admitted", (value) => JSON.stringify(value)],
       generation: ["generation", (value) => value as number],
+      placement: ["placement", (value) => value as string],
       lastTurn: ["last_turn", (value) => (value === undefined ? null : JSON.stringify(value))],
     };
     for (const [key, value] of Object.entries(fields)) {
@@ -205,6 +214,19 @@ export class SessionLedger {
 
   remove(id: string): void {
     this.#db.prepare("DELETE FROM core_sessions WHERE id = ?").run(id);
+    this.#db.prepare("DELETE FROM core_hidden_events WHERE session_id = ?").run(id);
+  }
+
+  /** Records runtime events of a session that history reads must not return. */
+  hideEvents(sessionId: string, eventIds: readonly string[]): void {
+    if (eventIds.length === 0) return;
+    const insert = this.#db.prepare("INSERT OR IGNORE INTO core_hidden_events (session_id, event_id) VALUES (?, ?)");
+    for (const eventId of eventIds) insert.run(sessionId, eventId);
+  }
+
+  hiddenEvents(sessionId: string): Set<string> {
+    const rows = this.#db.prepare("SELECT event_id FROM core_hidden_events WHERE session_id = ?").all(sessionId) as { event_id: string }[];
+    return new Set(rows.map((row) => row.event_id));
   }
 
   /** Sessions that were active when the gateway stopped; they are resumed lazily. */
@@ -213,11 +235,17 @@ export class SessionLedger {
     return rows.map(toRecord);
   }
 
-  appendEvent(event: PlatformEvent, ownerId: number): number {
+  /**
+   * Stores a platform event. Storing an ID again is a no-op for the same owner (a publisher retrying with a stable ID)
+   * and an error for another owner.
+   */
+  appendEvent(event: PlatformEvent, ownerId: number): void {
     const result = this.#db
-      .prepare("INSERT INTO core_events (id, owner_id, type, session_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO core_events (id, owner_id, type, session_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
       .run(event.id, ownerId, event.type, event.sessionId ?? null, JSON.stringify(event), event.createdAt);
-    return Number(result.lastInsertRowid);
+    if (Number(result.changes) > 0) return;
+    const existing = this.#db.prepare("SELECT owner_id FROM core_events WHERE id = ?").get(event.id) as { owner_id: number } | undefined;
+    if (existing?.owner_id !== ownerId) throw new Error(`Platform event ${event.id} already exists for another owner`);
   }
 
   /** Events for an owner after `afterId` (the SSE `Last-Event-ID`), oldest first. */

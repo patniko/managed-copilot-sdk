@@ -18,6 +18,8 @@ const gatewaySockets = new Set<WebSocket>();
 const upgradeHeaders: Record<string, unknown>[] = [];
 /** GitHub tokens the fake API now rejects, as if their owner revoked them. */
 const revoked = new Set<string>();
+/** The conversation the fake deployment offers in attach material. */
+let offeredConversation = "ahp-session:/s1";
 
 async function listen(server: Server): Promise<string> {
   server.listen(0, "127.0.0.1");
@@ -38,7 +40,7 @@ beforeAll(async () => {
     if (req.method === "POST" && req.url === "/v1/sessions/s1/attach") {
       const token = `mcat_ticket${minted.length}`;
       minted.push(token);
-      const material: AttachMaterial = { transport: "ahp", url: "ws://elsewhere.example:1/v1/sessions/s1/ahp", token, expiresAt: new Date(Date.now() + 60_000).toISOString(), ahpSessionId: "ahp-session:/s1" };
+      const material: AttachMaterial = { transport: "ahp", url: "ws://elsewhere.example:1/v1/sessions/s1/ahp", token, expiresAt: new Date(Date.now() + 60_000).toISOString(), ahpSessionId: offeredConversation };
       res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(material));
       return;
     }
@@ -222,5 +224,70 @@ describe("Copilot CLI attach relay", () => {
     expect(code).toBe(4410);
     expect(reason.toString()).toBe("The session was deleted.");
     expect(relay.outcome).toEqual({ code: "session_gone", message: "The session was deleted." });
+  });
+
+  /** Ends the current attachment from the platform side and returns the close code the CLI saw. */
+  async function platformCloses(cli: WebSocket, code: number, reason: string): Promise<number> {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const closed = once(cli, "close");
+    for (const socket of gatewaySockets) socket.close(code, reason);
+    return ((await closed) as [number])[0];
+  }
+
+  it("has the CLI reconnect when the session moves or its attachment is renewed, with a fresh ticket", async () => {
+    const { relay, url } = await startRelay();
+    const before = minted.length;
+    const cli = await connect(url, "gho_owner");
+    // 1012 (service restart) is the close the stock CLI answers by redialing the same URL.
+    expect(await platformCloses(cli, 4307, "The session moved into a sandbox. Reconnecting.")).toBe(1012);
+    const again = await connect(url, "gho_owner");
+    again.send(JSON.stringify({ jsonrpc: "2.0", id: 9, method: "initialize", params: {} }));
+    expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
+    expect(await platformCloses(again, 4408, "Attachment expired.")).toBe(1012);
+    const renewed = await connect(url, "gho_owner");
+    expect(minted.length).toBe(before + 2);
+    expect(relay.outcome).toBeUndefined();
+    renewed.close();
+  });
+
+  it("stops reconnecting a CLI the platform keeps interrupting", async () => {
+    const { relay, url } = await startRelay();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect(await platformCloses(await connect(url, "gho_owner"), 4408, "Attachment expired.")).toBe(1012);
+    }
+    const last = await connect(url, "gho_owner");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const closed = once(last, "close");
+    for (const socket of gatewaySockets) socket.close(4408, "Attachment expired.");
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect(code).toBe(4408);
+    expect(reason.toString()).toBe("The attachment was interrupted repeatedly. Attach again.");
+    expect(relay.outcome).toEqual({ code: "expired", message: "The attachment was interrupted repeatedly. Attach again." });
+  });
+
+  it("shuts down promptly while a CLI is still closing after a reconnect request", async () => {
+    const { relay, url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    cli.pause(); // this CLI hasn't answered the close frame yet
+    for (const socket of gatewaySockets) socket.close(4307, "The session moved into a sandbox. Reconnecting.");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    await relay.close();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    cli.terminate();
+  });
+
+  it("refuses to reconnect the CLI to a different conversation", async () => {
+    const { relay, url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    expect(await platformCloses(cli, 4307, "The session moved into a sandbox. Reconnecting.")).toBe(1012);
+    offeredConversation = "ahp-session:/someone-else";
+    try {
+      await expect(connect(url, "gho_owner")).rejects.toMatchObject({ status: 409 });
+      expect(relay.outcome).toEqual({ code: "conflict", message: expect.stringContaining("refusing to switch") });
+    } finally {
+      offeredConversation = "ahp-session:/s1";
+    }
   });
 });

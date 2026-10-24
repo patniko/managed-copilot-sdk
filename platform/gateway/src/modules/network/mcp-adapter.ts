@@ -48,27 +48,71 @@ function sendError(res: ServerResponse, status: number, message: string): void {
   res.end(body);
 }
 
-/** Rewrites legacy SSE `endpoint` events so the runtime posts messages back through the adapter. */
-function endpointRewriter(rewrite: (endpoint: string) => string): Transform {
+/**
+ * Rewrites legacy SSE `endpoint` events so the runtime posts messages back through the adapter. Lines are parsed the
+ * way SSE clients parse them (CRLF, LF, or CR endings; fields in any order), and the output always uses LF, so no
+ * endpoint can reach the runtime unrewritten: data lines are rewritten while the event's type is `endpoint`, and an
+ * event that only becomes `endpoint` after some of its data passed through is renamed so clients ignore it.
+ */
+export function endpointRewriter(rewrite: (endpoint: string) => string): Transform {
+  // Streaming decode keeps a multi-byte character split across chunks intact, and drops a leading BOM as SSE parsers
+  // do, so a BOM cannot hide the first event from this rewriter.
+  const decoder = new TextDecoder();
   let buffer = "";
-  let event = "";
+  let skipLf = false;
+  let endpoint = false;
+  let passedData = false;
+  const line = (text: string): string => {
+    if (text === "") {
+      endpoint = false;
+      passedData = false;
+      return "\n";
+    }
+    const colon = text.indexOf(":");
+    if (colon === 0) return `${text}\n`;
+    const field = colon < 0 ? text : text.slice(0, colon);
+    const raw = colon < 0 ? "" : text.slice(colon + 1);
+    const value = raw.startsWith(" ") ? raw.slice(1) : raw;
+    if (field === "event") {
+      const isEndpoint = value.trim() === "endpoint";
+      if (isEndpoint && passedData) return "event: managed-copilot-blocked-endpoint\n";
+      endpoint = isEndpoint;
+    } else if (field === "data") {
+      if (endpoint) return `data: ${rewrite(value.trim())}\n`;
+      passedData = true;
+    }
+    return `${text}\n`;
+  };
+  const take = (text: string): string => {
+    buffer += text;
+    let out = "";
+    let start = 0;
+    for (let i = 0; i < buffer.length; i++) {
+      const code = buffer.charCodeAt(i);
+      if (skipLf) {
+        skipLf = false;
+        if (code === 10) {
+          start = i + 1;
+          continue;
+        }
+      }
+      if (code === 10 || code === 13) {
+        out += line(buffer.slice(start, i));
+        skipLf = code === 13;
+        start = i + 1;
+      }
+    }
+    buffer = buffer.slice(start);
+    return out;
+  };
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      buffer += chunk.toString("utf8");
-      let out = "";
-      for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
-        const line = buffer.slice(0, newline + 1);
-        buffer = buffer.slice(newline + 1);
-        const content = line.replace(/\r?\n$/, "");
-        if (content === "") event = "";
-        else if (content.startsWith("event:")) event = content.slice(6).trim();
-        if (event === "endpoint" && content.startsWith("data:")) out += `data: ${rewrite(content.slice(5).trim())}\n`;
-        else out += line;
-      }
-      callback(null, out);
+      callback(null, take(decoder.decode(chunk, { stream: true })));
     },
     flush(callback) {
-      callback(null, buffer);
+      // SSE clients discard an unterminated last line, so it can pass through as is.
+      const out = take(decoder.decode());
+      callback(null, out + buffer);
     },
   });
 }
@@ -175,6 +219,8 @@ export class McpAdapter {
     }
     const contentLength = req.headers["content-length"];
     if (contentLength !== undefined) headers["content-length"] = contentLength;
+    // The adapter must read event streams to rewrite their endpoints, so it never accepts a compressed response.
+    headers["accept-encoding"] = "identity";
     let credential: { header: string; value: string } | undefined;
     try {
       credential = this.#options.policy.mcpCredential(session.sessionId, row.url);
@@ -208,7 +254,14 @@ export class McpAdapter {
     for (const [key, value] of Object.entries(response.headers)) {
       if (value !== undefined && !HOP_BY_HOP.has(key)) responseHeaders[key] = value;
     }
-    const sse = /text\/event-stream/i.test(String(response.headers["content-type"] ?? "")) && !response.headers["content-encoding"];
+    const sse = /text\/event-stream/i.test(String(response.headers["content-type"] ?? ""));
+    const encoding = String(response.headers["content-encoding"] ?? "").trim().toLowerCase();
+    if (sse && encoding !== "" && encoding !== "identity") {
+      // Fail closed: an event stream the adapter cannot read would carry its endpoint events past the rewriter.
+      response.destroy();
+      sendError(res, 502, `MCP server "${row.name}" sent a compressed event stream (${encoding}), which the adapter cannot inspect`);
+      return undefined;
+    }
     if (!sse && response.headers["content-length"] !== undefined) responseHeaders["content-length"] = response.headers["content-length"];
     res.writeHead(status, response.statusMessage, responseHeaders);
     const base = `${ROUTE_PREFIX}/${row.route_id}/endpoint?u=`;

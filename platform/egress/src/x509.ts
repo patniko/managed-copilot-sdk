@@ -82,8 +82,38 @@ function spki(publicKey: KeyObject): Buffer {
   return publicKey.export({ type: "spki", format: "der" });
 }
 
+interface DerNode {
+  readonly tag: number;
+  readonly start: number;
+  readonly contentStart: number;
+  readonly end: number;
+}
+
+function readNode(der: Buffer, offset: number): DerNode {
+  const tag = der[offset]!;
+  const first = der[offset + 1]!;
+  if (first < 0x80) return { tag, start: offset, contentStart: offset + 2, end: offset + 2 + first };
+  const count = first & 0x7f;
+  let length = 0;
+  for (let i = 0; i < count; i++) length = length * 256 + der[offset + 2 + i]!;
+  return { tag, start: offset, contentStart: offset + 2 + count, end: offset + 2 + count + length };
+}
+
+function children(der: Buffer, node: DerNode): DerNode[] {
+  const out: DerNode[] = [];
+  for (let offset = node.contentStart; offset < node.end; ) {
+    const child = readNode(der, offset);
+    out.push(child);
+    offset = child.end;
+  }
+  return out;
+}
+
+/** RFC 5280 section 4.2.1.2 method (1): SHA-1 of the subjectPublicKey bits, without the BIT STRING's tag, length, or unused-bits count. */
 function keyIdentifier(publicKey: KeyObject): Buffer {
-  return createHash("sha1").update(spki(publicKey)).digest();
+  const der = spki(publicKey);
+  const bits = children(der, readNode(der, 0))[1]!;
+  return createHash("sha1").update(der.subarray(bits.contentStart + 1, bits.end)).digest();
 }
 
 function serialNumber(): Buffer {
@@ -131,12 +161,15 @@ export interface CaMaterial {
 
 const ORGANIZATION = "Managed Copilot";
 
-/** Creates a new self-signed CA (ECDSA P-256) allowed to issue server certificates only (pathLen 0). */
-export function createCaMaterial(options: { commonName: string; validDays?: number; now?: Date }): CaMaterial {
+/**
+ * Creates a new self-signed CA (ECDSA P-256) allowed to issue server certificates only (pathLen 0). `keyIdentifier`
+ * overrides the subject key identifier, as CAs from other tooling may use a different method.
+ */
+export function createCaMaterial(options: { commonName: string; validDays?: number; now?: Date; keyIdentifier?: Buffer }): CaMaterial {
   const now = options.now ?? new Date();
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const subject = name(options.commonName, ORGANIZATION);
-  const keyId = keyIdentifier(publicKey);
+  const keyId = options.keyIdentifier ?? keyIdentifier(publicKey);
   const der = buildCertificate({
     subject,
     issuer: subject,
@@ -183,7 +216,8 @@ export class CertificateAuthority {
     if (!this.certificate.ca) throw new Error("The egress CA certificate is not a CA certificate");
     if (!this.certificate.checkPrivateKey(this.#caKey)) throw new Error("The egress CA private key does not match its certificate");
     this.certPem = this.certificate.toString();
-    this.#caKeyId = keyIdentifier(this.certificate.publicKey);
+    // Leaf authority key identifiers must equal the CA's own subject key identifier, whichever method produced it.
+    this.#caKeyId = subjectKeyIdentifierOf(this.certificate) ?? keyIdentifier(this.certificate.publicKey);
     this.#issuer = Buffer.from(subjectDer(this.certificate));
     // One leaf key pair per process; each host gets its own certificate for that key.
     const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
@@ -236,33 +270,32 @@ export class CertificateAuthority {
   }
 }
 
+/** The fields of a certificate's TBSCertificate: [0] version, serial, signature, issuer, validity, subject, spki, ..., [3] extensions. */
+function tbsFields(der: Buffer): DerNode[] {
+  return children(der, children(der, readNode(der, 0))[0]!);
+}
+
 /** Extracts the DER-encoded subject Name from a certificate (the issuer of certificates it signs). */
 function subjectDer(certificate: X509Certificate): Buffer {
   const der = certificate.raw;
-  // Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { [0] version, serial, sigAlg, issuer, validity, subject, ... } }
-  const readHeader = (offset: number): { tag: number; length: number; header: number } => {
-    const tag = der[offset]!;
-    const first = der[offset + 1]!;
-    if (first < 0x80) return { tag, length: first, header: 2 };
-    const count = first & 0x7f;
-    let length = 0;
-    for (let i = 0; i < count; i++) length = length * 256 + der[offset + 2 + i]!;
-    return { tag, length, header: 2 + count };
-  };
-  const certificateHeader = readHeader(0);
-  let offset = certificateHeader.header;
-  const tbsHeader = readHeader(offset);
-  offset += tbsHeader.header;
-  const skip = () => {
-    const header = readHeader(offset);
-    const start = offset;
-    offset += header.header + header.length;
-    return der.subarray(start, offset);
-  };
-  if (der[offset] === 0xa0) skip(); // version
-  skip(); // serial
-  skip(); // signature algorithm
-  skip(); // issuer
-  skip(); // validity
-  return Buffer.from(skip()); // subject
+  const fields = tbsFields(der);
+  const subject = fields[(fields[0]!.tag === 0xa0 ? 1 : 0) + 4]!;
+  return Buffer.from(der.subarray(subject.start, subject.end));
+}
+
+/** The certificate's subject key identifier extension value, if it has one. */
+function subjectKeyIdentifierOf(certificate: X509Certificate): Buffer | undefined {
+  const der = certificate.raw;
+  const extensions = tbsFields(der).find((field) => field.tag === 0xa3);
+  const list = extensions ? children(der, extensions)[0] : undefined;
+  if (!list) return undefined;
+  const oid = objectId(OID.subjectKeyIdentifier);
+  for (const entry of children(der, list)) {
+    const parts = children(der, entry);
+    if (!der.subarray(parts[0]!.start, parts[0]!.end).equals(oid)) continue;
+    const value = parts[parts.length - 1]!;
+    const keyId = readNode(der, value.contentStart);
+    return keyId.tag === 0x04 ? Buffer.from(der.subarray(keyId.contentStart, keyId.end)) : undefined;
+  }
+  return undefined;
 }

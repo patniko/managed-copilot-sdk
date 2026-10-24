@@ -47,15 +47,29 @@ export async function openUpstream(host: AhpHost, protocols: readonly string[]):
   });
 }
 
-function closeCode(code: number): number {
-  return code === 1000 || (code >= 3000 && code <= 4999) ? code : 1011;
+function isNormalClose(code: number): boolean {
+  return code === 1000 || (code >= 3000 && code <= 4999);
 }
+
+/**
+ * How long a client outlives an abnormal drop of its listener connection. A runtime that stops or a session that moves
+ * drops the listener connection moments before its lifecycle event, whose release then closes the client with 4410 or
+ * 4307 and a reason; only a drop with no such event ends the client with 1011.
+ */
+export const LISTENER_LOSS_GRACE_MS = 500;
 
 /** Relays one attached client to its session's AHP listener until either side closes or the lifetime ends. */
 export function bridge(client: WebSocket, upstream: WebSocket, options: { readonly log: Logger; readonly sessionId: string; readonly maxLifetimeMs: number }): void {
   const { log, sessionId } = options;
   const lifetime = setTimeout(() => client.close(4408, "Attachment expired. Attach again to continue."), options.maxLifetimeMs);
   lifetime.unref();
+  let lossTimer: NodeJS.Timeout | undefined;
+  const listenerLost = (reason: string) => {
+    lossTimer ??= setTimeout(() => {
+      if (client.readyState === WebSocket.OPEN) client.close(1011, reason.slice(0, 120));
+    }, LISTENER_LOSS_GRACE_MS);
+    lossTimer.unref();
+  };
 
   client.on("message", (data: RawData, isBinary: boolean) => {
     if (isBinary) {
@@ -77,15 +91,18 @@ export function bridge(client: WebSocket, upstream: WebSocket, options: { readon
 
   client.on("close", () => {
     clearTimeout(lifetime);
+    clearTimeout(lossTimer);
     if (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING) upstream.close(1000);
   });
   upstream.on("close", (code: number, reason: Buffer) => {
     clearTimeout(lifetime);
-    if (client.readyState === WebSocket.OPEN) client.close(closeCode(code), reason.toString().slice(0, 120));
+    const text = reason.toString();
+    if (!isNormalClose(code)) return listenerLost(text || "The session's runtime connection failed.");
+    if (client.readyState === WebSocket.OPEN) client.close(code, text.slice(0, 120));
   });
   client.on("error", (error: Error) => log.debug("Attached client socket error", { sessionId, error: error.message }));
   upstream.on("error", (error: Error) => {
     log.warn("Session AHP listener connection failed", { sessionId, error: error.message });
-    if (client.readyState === WebSocket.OPEN) client.close(1011, "The session's runtime connection failed.");
+    listenerLost("The session's runtime connection failed.");
   });
 }

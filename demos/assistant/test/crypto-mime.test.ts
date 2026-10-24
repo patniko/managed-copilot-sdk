@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Sealer } from "../src/server/seal.js";
-import { addressOf, buildMime, encodeWord, htmlToText, normalizeAddress } from "../src/server/tools/google/mime.js";
+import { addressOf, buildMime, encodeHeaderText, encodeWord, htmlToText, normalizeAddress } from "../src/server/tools/google/mime.js";
 import { extractBody } from "../src/server/tools/google/workspace.js";
 import { ToolError } from "../src/server/tools/types.js";
 
@@ -49,6 +49,18 @@ describe("MIME", () => {
     expect(encodeWord("Rivera, Sam")).toBe('"Rivera, Sam"');
     expect(normalizeAddress('"Rivera, Sam" <sam@contoso.example>')).toBe('"Rivera, Sam" <sam@contoso.example>');
     expect(addressOf("Sam <SAM@Contoso.example>")).toBe("sam@contoso.example");
+  });
+
+  it("sends subjects as plain header text, splitting long non-ASCII ones into whole characters", () => {
+    const plain = buildMime({ to: ["sam@contoso.example"], subject: "Q3 launch: timeline, pricing (draft)", body: "x" });
+    expect(plain).toContain("Subject: Q3 launch: timeline, pricing (draft)\r\n");
+    const long = "Résumé review — ".repeat(5).trim();
+    const encoded = encodeHeaderText(long);
+    const words = encoded.split("\r\n ");
+    expect(words.length).toBeGreaterThan(1);
+    for (const word of words) expect(word.length).toBeLessThanOrEqual(75);
+    const decoded = words.map((word) => Buffer.from(/^=\?UTF-8\?B\?(.*)\?=$/.exec(word)![1]!, "base64").toString("utf8")).join("");
+    expect(decoded).toBe(long);
   });
 
   it("turns HTML mail into readable text", () => {

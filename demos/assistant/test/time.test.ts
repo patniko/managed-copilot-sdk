@@ -17,6 +17,10 @@ describe("time zones", () => {
   it("rejects malformed input with a helpful message", () => {
     expect(() => parseDateTime("tomorrow at 4", LA)).toThrow(TimeInputError);
     expect(() => parseDateTime("2026-13-01T10:00", LA)).toThrow(/ISO 8601/);
+    // Days that don't exist are errors, not a silent roll into the next month.
+    expect(() => parseDateTime("2026-02-31T10:00", LA)).toThrow(TimeInputError);
+    expect(() => parseDateTime("2026-04-31", LA)).toThrow(TimeInputError);
+    expect(parseDateTime("2028-02-29T10:00", LA).toISOString()).toBe("2028-02-29T18:00:00.000Z");
   });
 
   it("handles daylight saving transitions", () => {
@@ -35,6 +39,47 @@ describe("time zones", () => {
     const next = addDays(start, 2, LA); // Nov 2 local midnight, now PST
     expect(isoInZone(next, LA)).toBe("2026-11-02T00:00:00-08:00");
     expect(dayKey(next, LA)).toBe("2026-11-02");
+  });
+
+  it("moves wall times skipped by a DST jump forward, keeping the day", () => {
+    // Santiago skips local midnight on 2027-09-05 (00:00 -04:00 jumps to 01:00 -03:00).
+    const santiago = "America/Santiago";
+    const midnight = zonedToUtc(2027, 9, 5, 0, 0, 0, santiago);
+    expect(isoInZone(midnight, santiago)).toBe("2027-09-05T01:00:00-03:00");
+    const days = [addDays(new Date("2027-09-04T15:00:00Z"), 0, santiago)];
+    for (let i = 0; i < 3; i++) days.push(addDays(days[days.length - 1]!, 1, santiago));
+    expect(days.map((day) => dayKey(day, santiago))).toEqual(["2027-09-04", "2027-09-05", "2027-09-06", "2027-09-07"]);
+    // Berlin skips 02:30 on 2026-03-29; repeated 02:30 on 2026-10-25 resolves to the first (summer time) occurrence.
+    const berlin = "Europe/Berlin";
+    expect(isoInZone(zonedToUtc(2026, 3, 29, 2, 30, 0, berlin), berlin)).toBe("2026-03-29T03:30:00+02:00");
+    expect(isoInZone(zonedToUtc(2026, 10, 25, 2, 30, 0, berlin), berlin)).toBe("2026-10-25T02:30:00+02:00");
+  });
+
+  it("finds free time across a skipped midnight without looping", () => {
+    const santiago = "America/Santiago";
+    const result = findFreeTime({
+      busy: [],
+      rangeStart: new Date("2027-09-03T12:00:00Z"),
+      rangeEnd: new Date("2027-09-08T12:00:00Z"),
+      durationMinutes: 30,
+      timeZone: santiago,
+      notBefore: new Date("2027-09-01T00:00:00Z"),
+      includeWeekends: true,
+    });
+    expect(result.windows.map((window) => dayKey(window.start, santiago))).toEqual(["2027-09-03", "2027-09-04", "2027-09-05", "2027-09-06", "2027-09-07"]);
+  });
+
+  it("aligns suggestions to the local clock in zones with 45-minute offsets", () => {
+    const kathmandu = "Asia/Kathmandu";
+    const result = findFreeTime({
+      busy: [{ start: zonedToUtc(2026, 10, 26, 9, 0, 0, kathmandu), end: zonedToUtc(2026, 10, 26, 10, 10, 0, kathmandu) }],
+      rangeStart: zonedToUtc(2026, 10, 26, 0, 0, 0, kathmandu),
+      rangeEnd: zonedToUtc(2026, 10, 27, 0, 0, 0, kathmandu),
+      durationMinutes: 30,
+      timeZone: kathmandu,
+      notBefore: new Date("2026-10-01T00:00:00Z"),
+    });
+    expect(isoInZone(result.suggestions[0]!.start, kathmandu)).toBe("2026-10-26T10:30:00+05:45");
   });
 
   it("formats with the zone's offset", () => {

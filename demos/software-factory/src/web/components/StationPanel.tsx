@@ -1,5 +1,5 @@
 import { ArrowDown, ChevronDown, CircleCheck, Inbox, SquareTerminal, X } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { AttachResponse, ReviewFinding, ReviewRecord, Station, WorkOrder } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
@@ -32,7 +32,7 @@ function useStickToBottom(
   scrollRef: RefObject<HTMLDivElement | null>,
   contentRef: RefObject<HTMLDivElement | null>,
   startAtBottom: boolean,
-): { readonly showJump: boolean; readonly hasNew: boolean; readonly jump: () => void } {
+): { readonly showJump: boolean; readonly hasNew: boolean; readonly jump: () => void; readonly pin: () => void } {
   const pinned = useRef(startAtBottom);
   const [away, setAway] = useState(false);
   const [hasNew, setHasNew] = useState(false);
@@ -86,7 +86,17 @@ function useStickToBottom(
     scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
   }, [scrollRef]);
 
-  return { showJump: away || (hasNew && !pinned.current), hasNew, jump };
+  /** Follows new output again, for example when a finished station is retried. */
+  const pin = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    pinned.current = true;
+    setHasNew(false);
+    setAway(false);
+    scroller.scrollTop = scroller.scrollHeight;
+  }, [scrollRef]);
+
+  return { showJump: away || (hasNew && !pinned.current), hasNew, jump, pin };
 }
 
 const PANEL_CLASS =
@@ -95,10 +105,16 @@ const SCROLL_CLASS = "min-h-0 flex-1 overflow-y-auto overscroll-contain max-xl:m
 
 export function StationPanel({ workOrder, station }: { readonly workOrder: WorkOrder; readonly station: Station }) {
   // Follow live output for stations that are running (or about to); start the others at the top (details, reviews).
-  const [follow] = useState(() => isStationActive(station.status) || station.status === "waiting");
+  const live = isStationActive(station.status) || station.status === "waiting";
+  const [startAtBottom] = useState(live);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const { showJump, hasNew, jump } = useStickToBottom(scroller, content, follow);
+  const { showJump, hasNew, jump, pin } = useStickToBottom(scroller, content, startAtBottom);
+  const wasLive = useRef(live);
+  useEffect(() => {
+    if (live && !wasLive.current) pin();
+    wasLive.current = live;
+  }, [live, pin]);
 
   return (
     <section aria-label={`${station.title} station`} className={PANEL_CLASS}>
@@ -142,8 +158,8 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
 }
 
 type AttachState =
-  | { readonly status: "pending" }
-  | { readonly status: "done"; readonly result: AttachResponse; readonly failed: boolean };
+  | { readonly sessionId: string; readonly status: "pending" }
+  | { readonly sessionId: string; readonly status: "done"; readonly result: AttachResponse; readonly failed: boolean };
 
 function PanelHeader({ station }: { readonly station: Station }) {
   const meta = stationStatusMeta(station);
@@ -153,19 +169,22 @@ function PanelHeader({ station }: { readonly station: Station }) {
   const KindIcon = KIND_ICONS[station.kind];
   const attachAllowed = useStore((state) => state.platform?.features.attach ?? false);
   const attachTemplate = useStore((state) => state.attachCommand);
-  const [attach, setAttach] = useState<AttachState>();
+  const [attachState, setAttach] = useState<AttachState>();
   const sessionId = station.sessionId;
   const sessionDeleted = station.sessionState === "deleted";
+  // A retried or replaced station has a new session: an earlier attach result no longer applies.
+  const attach = attachState?.sessionId === sessionId ? attachState : undefined;
 
   const onAttach = async (): Promise<void> => {
     if (!sessionId) return;
-    setAttach({ status: "pending" });
+    setAttach({ sessionId, status: "pending" });
     try {
       const result = await api.attach(sessionId);
-      setAttach({ status: "done", result, failed: false });
+      setAttach({ sessionId, status: "done", result, failed: false });
     } catch (error) {
       const command = attachTemplate ? attachTemplate.replace("{sessionId}", sessionId) : "";
       setAttach({
+        sessionId,
         status: "done",
         failed: true,
         result: { command, launched: false, message: `${errorMessage(error)} You can still attach from your own terminal.` },

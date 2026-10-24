@@ -43,6 +43,8 @@ export interface GatewayLinkOptions {
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const MIN_BACKOFF_MS = 500;
+const MAX_BACKOFF_MS = 10_000;
 
 export class GatewayLink implements SecretResolver, Reporter {
   readonly #options: GatewayLinkOptions;
@@ -50,6 +52,7 @@ export class GatewayLink implements SecretResolver, Reporter {
   #stopped = false;
   #abort: AbortController | undefined;
   #heartbeatMs = 15_000;
+  #backoffMs = MIN_BACKOFF_MS;
   #queue: EgressReport[] = [];
   #flushTimer: NodeJS.Timeout | undefined;
   readonly #recent = new Map<string, number>();
@@ -77,20 +80,18 @@ export class GatewayLink implements SecretResolver, Reporter {
   }
 
   async #run(): Promise<void> {
-    let backoff = 500;
     while (!this.#stopped) {
       try {
         await this.#hello();
         await this.#stream();
-        backoff = 500;
       } catch (error) {
         if (this.#stopped) break;
-        this.#options.log.warn("Gateway link interrupted; retrying", { error: (error as Error).message, retryInMs: backoff });
+        this.#options.log.warn("Gateway link interrupted; retrying", { error: (error as Error).message, retryInMs: this.#backoffMs });
       }
       this.#options.registry.markDisconnected();
       if (this.#stopped) break;
-      await sleep(backoff);
-      backoff = Math.min(backoff * 2, 10_000);
+      await sleep(this.#backoffMs);
+      this.#backoffMs = Math.min(this.#backoffMs * 2, MAX_BACKOFF_MS);
     }
   }
 
@@ -158,6 +159,8 @@ export class GatewayLink implements SecretResolver, Reporter {
         case "snapshot": {
           const snapshot = JSON.parse(data) as EgressSnapshot;
           registry.replaceAll(snapshot.registrations);
+          // A synchronized stream is a successful connection: the next interruption retries quickly again.
+          this.#backoffMs = MIN_BACKOFF_MS;
           this.#options.log.info("Synchronized sandbox registrations", { sandboxes: snapshot.registrations.length });
           break;
         }
