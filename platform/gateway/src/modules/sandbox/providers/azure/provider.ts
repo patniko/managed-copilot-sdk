@@ -216,10 +216,11 @@ export class AzureSandboxProvider implements SandboxProvider {
   }
 
   /**
-   * Submits a create at most once while its outcome is unknown. After a failure without a definite answer, the
-   * resource is looked up by its labels until it appears or the reconciliation window ends; the attempt is remembered
-   * (across restarts), so later calls look for it instead of submitting another create until it appears or the horizon
-   * passes.
+   * Submits a create at most once while its outcome is unknown. The attempt is recorded (durably) before the request
+   * goes out and forgotten once Azure's answer is definite, so neither a lost answer nor a crash mid-request leads to
+   * a second create: later calls, also from a restarted gateway, look the resource up by its labels instead until it
+   * appears or the horizon passes. After a failure without a definite answer, this call also keeps looking for the
+   * resource until the reconciliation window ends.
    */
   async #createOnce<T>(key: string, what: string, create: () => Promise<T>, lookup: () => Promise<T | undefined>): Promise<T> {
     const since = this.#unconfirmed.outstanding(key);
@@ -232,17 +233,23 @@ export class AzureSandboxProvider implements SandboxProvider {
       const waitS = Math.max(1, Math.ceil((since + this.#timeouts.unconfirmedMs - Date.now()) / 1000));
       throw unavailable(`An earlier attempt to create ${what} has not been confirmed by Azure yet. Try again in ${waitS} s.`);
     }
+    this.#unconfirmed.record(key);
+    let created: T;
     try {
-      return await create();
+      created = await create();
     } catch (error) {
-      if (!isAmbiguous(error)) throw error;
-      this.#unconfirmed.record(key);
+      if (!isAmbiguous(error)) {
+        this.#unconfirmed.clear(key); // Azure refused it: nothing will appear
+        throw error;
+      }
       const adopted = await this.#reconcile(lookup);
-      if (!adopted) throw unconfirmed(what, error);
+      if (!adopted) throw unconfirmed(what, error); // the record stays until the resource appears or the horizon passes
       this.#unconfirmed.clear(key);
       this.#log.warn("Adopted a resource Azure created without answering", { resource: what });
       return adopted;
     }
+    this.#unconfirmed.clear(key);
+    return created;
   }
 
   /**

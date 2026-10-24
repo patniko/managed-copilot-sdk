@@ -39,6 +39,11 @@ class FakeDataPlane {
   dropImageCreates = 0;
   /** When a dropped sandbox create takes effect: at once, after this many sandbox listings, or never. */
   dropCommitAfterLists: number | "never" = 0;
+  /** Sandbox creates that get no answer until releaseHung() (the gateway "crashes" mid-request). */
+  hangSandboxCreates = 0;
+  /** Sandbox creates Azure refuses outright (a definite outcome). */
+  rejectSandboxCreates = 0;
+  readonly #hung: IncomingMessage[] = [];
   readonly #pending: { sandbox: FakeSandbox; lists: number }[] = [];
   #next = 0;
   #server: Server | undefined;
@@ -51,7 +56,13 @@ class FakeDataPlane {
   }
 
   async stop(): Promise<void> {
+    this.releaseHung();
+    this.#server?.closeAllConnections();
     await new Promise<void>((resolve) => this.#server?.close(() => resolve()));
+  }
+
+  releaseHung(): void {
+    for (const req of this.#hung.splice(0)) req.socket.destroy();
   }
 
   #attach(sandbox: FakeSandbox, attached: boolean): void {
@@ -91,6 +102,15 @@ class FakeDataPlane {
       }
       if (path.length === 1 && req.method === "PUT") {
         const body = JSON.parse(raw.toString()) as Record<string, unknown>;
+        if (this.hangSandboxCreates > 0) {
+          this.hangSandboxCreates--;
+          this.#hung.push(req);
+          return;
+        }
+        if (this.rejectSandboxCreates > 0) {
+          this.rejectSandboxCreates--;
+          return send(400, { error: { code: "InvalidRequest", message: "The sandbox request is invalid" } });
+        }
         // A data disk attaches to one sandbox at a time.
         if (((body.volumes as { volumeName: string }[] | undefined) ?? []).some((mount) => this.volumes.get(mount.volumeName)?.isAttached)) {
           return send(409, { error: { code: "VolumeAttached", message: "A volume is attached to another sandbox" } });
@@ -467,6 +487,45 @@ describe("Azure sandbox provider", () => {
     await subject.create(spec());
     expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(2);
     expect(plane.sandboxes.size).toBe(1);
+  });
+
+  it("records a create before submitting it, so a gateway that crashed mid-request does not submit it again", async () => {
+    plane.hangSandboxCreates = 1;
+    const crashed = provider(env(), { timeouts: { reconcileMs: 20 } });
+    const inFlight = crashed.create(spec()).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(plane.requests).toContain("PUT /sandboxes"));
+    const journal = join(dataDir, "sandbox-azure", "unconfirmed-creates.json");
+    expect(Object.keys(JSON.parse(readFileSync(journal, "utf8")))).toEqual(["sandbox:sbx_0123456789abcdef01234567"]);
+
+    const replacement = provider();
+    await expect(replacement.create(spec())).rejects.toThrow(/earlier attempt to create the sandbox has not been confirmed/);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+    plane.releaseHung();
+    expect(isManagedCopilotError(await inFlight, "capability_unavailable")).toBe(true);
+  });
+
+  it("refuses to create anything while the record of unconfirmed creates cannot be read", async () => {
+    const journal = join(dataDir, "sandbox-azure", "unconfirmed-creates.json");
+    mkdirSync(join(dataDir, "sandbox-azure"), { recursive: true });
+    writeFileSync(journal, "{not json");
+    const subject = provider();
+    const error = await subject.create(spec()).catch((caught: unknown) => caught);
+    expect(isManagedCopilotError(error, "capability_unavailable")).toBe(true);
+    expect((error as Error).message).toMatch(/cannot be read/);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(0);
+
+    writeFileSync(journal, "{}"); // readable again: nothing from the failed read is kept
+    await subject.create(spec());
+    expect(plane.sandboxes.size).toBe(1);
+  });
+
+  it("forgets a create Azure refused outright, so the next attempt submits it", async () => {
+    plane.rejectSandboxCreates = 1;
+    const subject = provider();
+    await expect(subject.create(spec())).rejects.toThrow(/The sandbox request is invalid/);
+    expect(JSON.parse(readFileSync(join(dataDir, "sandbox-azure", "unconfirmed-creates.json"), "utf8"))).toEqual({});
+    await subject.create(spec());
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(2);
   });
 
   it("refuses an environment with system packages but no image of its own instead of using the base image", async () => {
