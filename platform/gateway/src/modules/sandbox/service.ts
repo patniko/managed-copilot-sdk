@@ -110,6 +110,8 @@ async function collectRuntimeState(directory: string): Promise<{ relative: strin
   let total = 0;
   const walk = async (absolute: string, relative: string): Promise<void> => {
     for (const entry of await fs.readdir(absolute, { withFileTypes: true })) {
+      // Lock files are never imported, whatever they are.
+      if (entry.name.endsWith(".lock")) continue;
       const childAbsolute = join(absolute, entry.name);
       const childRelative = relative ? `${relative}/${entry.name}` : entry.name;
       const stat = await fs.lstat(childAbsolute);
@@ -118,7 +120,6 @@ async function collectRuntimeState(directory: string): Promise<{ relative: strin
         continue;
       }
       if (!stat.isFile()) throw new ManagedCopilotError("invalid_request", `"${childRelative}" in the runtime state is a symbolic link or special file; only regular files can be imported.`);
-      if (entry.name.endsWith(".lock")) continue;
       total += stat.size;
       if (files.length >= IMPORT_LIMITS.files) throw new ManagedCopilotError("invalid_request", `The runtime state has more than ${IMPORT_LIMITS.files} files.`);
       if (total > IMPORT_LIMITS.bytes) throw new ManagedCopilotError("invalid_request", "The runtime state is larger than 1 GiB.");
@@ -566,6 +567,8 @@ export class SandboxService implements SandboxesService {
       throw new ManagedCopilotError("capability_unavailable", `The session's sandbox is ${row.state}; runtime state can only be imported into a running sandbox.`, { sandboxId: row.id });
     }
     const files = await collectRuntimeState(options.sessionStateDir);
+    // An empty directory cannot be resumed; refuse it before anything changes in the sandbox.
+    if (files.length === 0) throw new ManagedCopilotError("invalid_request", `The runtime state directory ${options.sessionStateDir} has no files to import.`);
     const agent = this.#agent(row);
     const status = await agent.health();
     if (status.state !== "ready" || status.runtime.state !== "running") {
@@ -573,19 +576,20 @@ export class SandboxService implements SandboxesService {
     }
     const staging = randomBytes(8).toString("hex");
     let bytes = 0;
-    const done = this.track(sessionId, Promise.resolve());
-    try {
-      for (const file of files) {
-        await agent.writeRuntimeImport(staging, file.relative, createReadStream(file.absolute), file.size);
-        bytes += file.size;
+    const upload = async (): Promise<void> => {
+      try {
+        for (const file of files) {
+          await agent.writeRuntimeImport(staging, file.relative, createReadStream(file.absolute), file.size);
+          bytes += file.size;
+        }
+        await agent.commitRuntimeImport(staging, sessionId);
+      } catch (error) {
+        await agent.abortRuntimeImport(staging).catch(() => undefined);
+        throw toManaged(error);
       }
-      await agent.commitRuntimeImport(staging, sessionId);
-    } catch (error) {
-      await agent.abortRuntimeImport(staging).catch(() => undefined);
-      throw toManaged(error);
-    } finally {
-      await done;
-    }
+    };
+    // Busy for the whole transfer, so idle stop waits for it.
+    await this.track(sessionId, upload());
     if (options.activeTurnId) {
       this.#artifacts?.turnStarted(sessionId, options.activeTurnId);
       const live = this.#liveFor(sessionId);
@@ -798,7 +802,14 @@ export class SandboxService implements SandboxesService {
           await this.delete(row.sessionId);
         } else if (row.state === "running" || row.state === "stopping") {
           if (!(await provider.isRunning(row.id))) store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
-          else {
+          else if (row.state === "stopping") {
+            // A stop interrupted by the restart: finish it rather than leave the sandbox unmanaged.
+            await this.#withLock(row.sessionId, async () => {
+              await provider.stop(row.id);
+              await this.#unregisterEgress(row);
+              store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
+            });
+          } else {
             await provider.reattach?.(row.id);
             this.#liveFor(row.sessionId).recoveredAt = Date.now();
           }
