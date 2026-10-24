@@ -5,7 +5,7 @@ import type { PlatformEvent, PlatformEventType } from "@managed-copilot/protocol
 import type { Logger } from "../../log.js";
 import type { RequestContext } from "../../http.js";
 import type { EventsService, PlatformEventMeta } from "./contracts.js";
-import type { SessionLedger } from "./ledger.js";
+import { EVENTS_START, type SessionLedger } from "./ledger.js";
 
 type Listener = (event: PlatformEvent, meta: PlatformEventMeta) => void;
 
@@ -94,13 +94,18 @@ export class PlatformEvents implements EventsService {
       else send(event);
     });
     const lastEventId = (req.headers["last-event-id"] as string | undefined) ?? ctx.query.get("lastEventId") ?? undefined;
-    if (lastEventId) {
-      let cursor = lastEventId;
+    const position = lastEventId ? this.#ledger.eventPosition(principal.accountId, lastEventId) : undefined;
+    if (position === undefined) {
+      // No usable cursor (a new subscription, or an ID the ledger no longer has): the stream starts with one, so a
+      // client whose stream ends before its first event still resumes from here instead of losing what it missed.
+      res.write(`id: ${this.#ledger.latestEventId(principal.accountId) ?? EVENTS_START}\n\n`);
+    } else {
+      let cursor = position;
       for (;;) {
-        const page = this.#ledger.eventsAfter(principal.accountId, cursor, 500);
+        const page = this.#ledger.eventsAfterPosition(principal.accountId, cursor, 500);
         for (const { event } of page) send(event);
         if (page.length < 500) break;
-        cursor = page[page.length - 1]!.event.id;
+        cursor = page[page.length - 1]!.seq;
       }
     }
     for (const event of buffered) send(event);

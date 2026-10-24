@@ -1,5 +1,6 @@
 // Owner: sandbox workstream. Turn-scoped immutable artifacts from /workspace/outputs (spec section 6).
 import { isManagedCopilotError, ManagedCopilotError, ROUTES, type ArtifactInfo, type PublicationResult } from "@managed-copilot/protocol";
+import { timings } from "../http.js";
 import type { ManagedArtifacts, ManagedContext } from "../types.js";
 import { saveResponse } from "./files.js";
 
@@ -42,9 +43,12 @@ export function createArtifactsApi(ctx: ManagedContext, sessionId: string): Mana
       let turnId = options.turnId;
       for (;;) {
         const remaining = Math.max(0, deadline - Date.now());
+        const wait = Math.min(remaining, SERVER_WAIT_MS);
         try {
           return await http().get<PublicationResult>(ROUTES.artifactPublication(sessionId), {
-            query: { ...(turnId ? { turnId } : {}), timeoutMs: Math.min(remaining, SERVER_WAIT_MS) },
+            query: { ...(turnId ? { turnId } : {}), timeoutMs: wait },
+            // A long poll the gateway holds for `wait`: bounded by that, not by the default for ordinary calls.
+            timeoutMs: wait + timings.requestMs,
           });
         } catch (error) {
           if (isManagedCopilotError(error, "timeout")) {

@@ -113,6 +113,29 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
    provider registrations (`sessionFs.setProvider`, `llmInference.setProvider`, `plugins.builtin.set`) are answered or
    rejected by the gateway, scoped to the caller.
 
+**SDK call deadlines.** The SDK's REST calls never wait indefinitely; an ingress can hold a request for minutes while
+the gateway behind it is replaced. The bounds are internal defaults (`timings` in `packages/sdk/src/http.ts`), not
+public API:
+- `ManagedCopilot.connect()` and the event stream's connection get 45 s, and other calls 60 s for their answer. Both
+  exceed the gateway's 35 s GitHub verification, so its explicit errors win.
+- `managed.promote` gets 10 minutes, since its answer includes sandbox preparation.
+- The publication long poll gets its own wait plus 60 s.
+- Streamed uploads and downloads fail after 60 s without progress, however large they are.
+- The event stream reconnects with `Last-Event-ID` after 45 s without a byte, which is three of the gateway's 15 s
+  heartbeats. A stream that has no usable cursor (a new subscription, or an ID the ledger pruned) starts with an
+  id-only SSE block holding the owner's newest event ID, or `start` when the owner has none. The SDK records it
+  without dispatching it, so a stream that ends before its first event still replays everything published after it
+  began.
+
+An expired bound fails with `timeout`, naming the call. A caller's `AbortSignal` rejects with its own reason. Durable
+result submissions are idempotent and retried after a `timeout`.
+
+**Bridge keepalive.** Proxies close WebSockets that carry nothing for a while (Azure Container Apps ingress closes
+them after 240 s with code 1006), and a half-open connection never reports itself closed. The bridge therefore pings
+the gateway every 30 s. A gateway that answers nothing (no pong, no message) for 90 s ends the bridge with "The
+connection to Managed Copilot at … stopped responding", which the stock client reports. The gateway's `/v1/connect`
+server answers pings itself (`ws` `autoPong`). The event stream stays busy with the gateway's 15 s `: ping` comments.
+
 ### Client mode and safe defaults
 
 The stock `mode: "empty"` validates on the client before transmission (it requires `baseDirectory`/`sessionFs` and an
@@ -558,13 +581,11 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   again for re-approval, and a removed one is deleted. Declarations without `runAs` are logged as unrunnable.
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
-- **Known limitations, pending core (fail closed).** Durable passes the expected incarnation to `sessions.send` and
-  `sessions.request` and reads `SessionRecord.incarnation`, `create(...).incarnation`, `authenticate(token, {
-  background })`, and `auth.forgetCredential`, all additive and optional. Until core's builds with them are on
-  `main`: durable rechecks the incarnation synchronously right before each send or answer, but a session deleted and
-  recreated under the same ID while core itself awaits (for example restoring its placement) before writing could
-  still receive the prompt or answer; incarnations are the session's creation time; a background verification may be
-  recorded as the account's live credential, and logout cannot make core drop a token it holds.
+- **Incarnations and credentials with core.** Durable passes the expected incarnation to `sessions.send` and
+  `sessions.request`, and core checks it again in the step that writes upstream, so a prompt or answer meant for a
+  deleted session never reaches a later session that reuses its ID. Background verifications use `authenticate(token,
+  { background: true })` and are never recorded as the account's live credential; logout, invalidation, and a new
+  sign-in call `auth.forgetCredential`, so core drops the removed token.
 
 ### Promotion (as built)
 
@@ -694,12 +715,12 @@ structurally (they may add members).
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
 | `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials, never a live credential); `liveCredential(accountId)` (tokens attached connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` (GitHub rejected it, e.g. a 401 from the Copilot API) |
-| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
-| `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
+| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
+| `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay (a stream without a usable cursor first gets one: an id-only block with the owner's newest event ID, or `start`) |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
-| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
+| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`; when `llmInference.setProvider` is refused because a lost connection still holds the registration, `initialize` restarts the runtime and throws `capability_unavailable` with `details.reopen: true`, and core opens it again, at most twice; a refusal while another handle of this gateway is open is a `conflict`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for an isolated session's sandbox MCP servers, `undefined` when none apply, throws `capability_unavailable` for servers the proxy cannot substitute for; shared placement uses the adapter) |
@@ -774,12 +795,61 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   resumes pass `continuePendingWork: true` while durable still owns something the runtime may await
   (`actions.hasOpenActions(id, { incarnation })`, else open `actions.list`), because a resume without it drops the
   runtime's pending tool calls; a caller's own `continuePendingWork` stands.
+- **Turns a lost runtime connection cut.** On stock 1.0.103 a running turn does not survive the runtime connection it
+  needs: the shared runtime is restarted whenever its connection closes, and a sandbox runtime keeps the
+  `llmInference` provider registration of a closed connection, so a turn that was mid-inference (or running a
+  built-in tool) never finishes, and a restarted runtime neither continues nor ends it on resume. Core ends such a turn
+  itself when the connection closes (not for deletes, cutovers, or gateway shutdown) and, at startup, for turns a
+  stopped gateway left running. Attached clients and `sessions.subscribe`/`subscribeSession` listeners get an
+  ephemeral root `session.error` (`errorType: "interrupted"`, "This turn was interrupted because the platform lost the
+  connection to the session's runtime … Send your message again to continue.") and a root `session.idle`. The ledger
+  records `lastTurn` `failed` (state `idle`) and emits `session.failed` and `session.idle` (`status: "failed"`), so
+  `SessionInfo` shows it. A `sendAndWait` the lost connection cut rejects with a plain message
+  (`capability_unavailable`): "The platform lost the connection to the session's runtime before this message's answer
+  arrived … The turn may not have finished: check the session before sending the message again." Which turn was the
+  call's own cannot be told from stock events (its turn may have completed with only the reply lost, or a steered or
+  queued message may have started another), so it never claims the turn was interrupted. The session stays
+  resumable; the next turn restores it. A turn waiting on work durable
+  owns (`hasOpenActions`) is kept, because `continuePendingWork` keeps the runtime's pending tool call or permission
+  and answering it continues the turn. On every restore, a turn the ledger still has running is checked against the
+  runtime that now owns the session. It ends only on answers: `session.metadata.isProcessing` is `false`, and, while
+  durable has open actions, the runtime lists no pending tool or permission requests. A check the runtime answers
+  with an error leaves the turn running. A connection that is gone or silent fails the restore, and the next request
+  retries it. The end applies only while that runtime still owns the session, so a cutover that commits meanwhile
+  wins, and a client resume overtaken that way is admitted again where the session moved. An external shared runtime
+  (`MANAGED_COPILOT_RUNTIME_URL`) keeps running its turns, so nothing ends while its connection is down. A turn it
+  no longer processes ends as its history records. Its own root `session.error` fails it, and an abort cancels it. It
+  is `completed` only on evidence: a root `session.idle`, a final reply that requested no tools whose model call ended
+  (`assistant.turn_end`) with no later model call started, or a later run. Steering messages, autopilot continuations, and
+  skill prompts are user messages inside the turn, not new runs. A turn with no recorded ending, or missing from the
+  history, was lost to a runtime restart and is interrupted.
+- **Reopening a sandbox runtime.** Because the stock runtime refuses `llmInference.setProvider` while a lost
+  connection holds the registration, the sandbox module restarts the runtime (session state stays on disk) and its
+  handle's `initialize` throws `capability_unavailable` with `details.reopen: true`. Core then opens the runtime again,
+  at most twice, for restores and for a promotion's destination alike. A refusal while another handle of this gateway
+  is open is a `conflict` and is never reopened.
+- **Registration path deadlines.** A session's registration changes run one at a time, so a runtime answer that never
+  comes would hold every later resume of the session (seen on Azure: a resume on a dead gateway→sandbox stream, with
+  the client's retry queued behind it). The bounded steps are `session.create`, `session.resume` (client resumes,
+  restores, and a cutover's destination), the sandbox handle's `initialize` and `sessionOpened`,
+  `session.options.update`, `session.tools.set`, and a restore's turn checks. Every 60 s without the answer
+  (`upstreamTimings` in `sessions.ts`), the connection is probed with `ping` (10 s). A connection that answers is still
+  working on the step, which may yet apply, so core keeps waiting and sends it nothing else for the session. Giving up
+  then would let the step land after whatever comes next, such as a resume withdrawing hooks after the reconcile that
+  restored them. A connection that does not answer is closed, so nothing it carried can apply later: a sandbox runtime
+  is restarted before it serves the session again (the reopen above), and the shared runtime's supervisor restarts it.
+  The caller fails with `timeout` (`details: { sessionId, step }`), which it can retry. Deleting a session, or
+  stopping the gateway, ends a wait on the session's sandbox runtime at once by closing that connection, which only
+  this session uses. A cutover that closes while its destination is still opening never installs it.
+  `RuntimeUpstream.open` already bounds the runtime handshake (30 s); starting a sandbox (`ensureRunning`,
+  `openRuntime`) is bounded by the sandbox module.
 - **Interrupted creates and deletions.** At startup (in the background) and on the next request for the session,
   rows a stopped gateway left `deleting` finish their deletion (sandbox, runtime state, policy, `session.deleted`,
   ledger), and rows left `creating` are discarded (sandbox and policy released), so a schedule retrying its
   deterministic session ID creates the session instead of finding a ghost. Until then such a create is not a session
   for its owner: `get`, `list`, and resumes do not find it, and a client or service create of the same ID cleans it up
-  first.
+  first. Events that still arrive for a session being deleted (such as those a cutover the deletion aborted flushes)
+  update its last turn but never replace its `deleting` state.
 - **Incarnations.** Session IDs are client-chosen and reusable after deletion, so every ledger row gets an immutable
   `incarnation` (`inc_…`). `sessions.get` returns it, and `create` returns the one it created (or found); durable's
   hooks (`onSessionEvent`, `onAttached`, `onClientAnswer`, `hasOpenActions`, `list`) and the
@@ -881,14 +951,23 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   Credential and routing model headers and shell agent mode are rejected.
 - **Known gaps** (stock behavior, reported rather than patched): the stock runtime does not re-emit pending tool or
   permission requests on resume (durable's `onAttached` replay covers it); `models.list` requires the shared runtime
-  even for isolated environments. Verified on runtime 1.0.103: custom agents' and `task` subagents' tool lists cannot
+  even for isolated environments. Runtime 1.0.103 never releases the `llmInference` provider registration of a closed
+  connection (every later `setProvider` is refused until the runtime restarts; there is no release RPC), and a resume
+  neither continues nor ends a turn its runtime lost, so core ends it and the sandbox restarts the runtime (see "Turns
+  a lost runtime connection cut"); the turn's work since its last answered request is lost, and the user sends it
+  again. Verified on runtime 1.0.103: custom agents' and `task` subagents' tool lists cannot
   escape the session's `availableTools` ceiling.
 - **Known limitations** (each fails closed): a registration's owner is the client that registered it last, so when the
   clients that registered the same tool or handler include one that is away, a withdrawal by the newest registrant also
   removes it for the away client until that client resumes (the session then lacks the tool rather than calling an
   unanswered one). Hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` have no closing answer on
   the stock wire; turns that would need them are refused while no handler is connected, but a turn already running
-  when the handler leaves runs them without it.
+  when the handler leaves runs them without it. A shared session's registration step on a shared runtime that keeps
+  answering `ping` but never answers the step is waited for, and so is the session's deletion, because the shared
+  runtime serves every shared session and is not closed for one of them (a sandbox session's wait ends at deletion).
+  An external shared runtime (`MANAGED_COPILOT_RUNTIME_URL`, for development and tests) cannot be fenced: the gateway
+  does not own its process, so a step its connection carried when that connection closed may still apply after the
+  gateway reconnects.
 
 ## Devloop: AppHost, CLI, and Copilot CLI attach
 
@@ -1016,6 +1095,14 @@ sequenceDiagram
   relay refuses a reconnect whose material names a different
   conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
   attach again with new material.
+- **Keepalive.** Ingresses close idle WebSockets (Azure Container Apps after 240 s, with 1006). The relay pings the
+  deployment every 30 s, and when nothing at all has arrived from it for 90 s (bytes of a large frame still arriving
+  count, since a pong waits behind them), a half-open link after sleep or a network change, it reconnects the CLI the
+  same way ("Managed Copilot stopped responding. Reconnecting.", counted against the same reconnect limit, then
+  `upstream_unavailable`). The gateway pings each attached client every 30 s and ends one it has received nothing from
+  for 90 s, which detaches its `cli` responder and releases prompts it claimed instead of waiting on the operating
+  system to notice. The gateway's link to a sandbox's listener is a sandbox runtime stream, which the sandbox module
+  keeps alive; on shared placement it is loopback.
 - **Verified live** (stock Copilot CLI 1.0.92, runtime 1.0.103, real model, captured between the relay and the
   gateway): with an SDK app holding a permission prompt, the CLI's "Approve once" was refused ("Another responder owns
   this action"), the tool did not run, and the app's later answer completed the turn; with no app attached, the CLI's
@@ -1033,7 +1120,9 @@ sequenceDiagram
   Reconnecting...", reconnected through the relay by itself, and approved the shell command in the sandbox
   (`cli-ok`, `Linux`, `/workspace`); Esc on a running turn sent `chat/turnCancelled` through `write({ kind: "abort" })`
   and the runtime ended the turn; `managed-copilot attach` exited 0 with "Detached from ...". 132 more CLI-bound frames
-  had no host path.
+  had no host path. Through a proxy that cuts connections idle for 45 s (standing in for the ingress), the real CLI
+  stayed attached for 3 minutes, 2.5 of them idle (pings and pongs every 30 s both ways; an idle raw connection
+  through the same proxy was cut at 45 s), and its next turn answered without a reconnect.
 - Hosts are disposed after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one
   alive), on `deleted` and `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on
   `promoted` or a new runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the

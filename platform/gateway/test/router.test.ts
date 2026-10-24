@@ -258,6 +258,43 @@ describe("core router with a stock-protocol runtime", () => {
     expect(text).toContain('"n":600');
   });
 
+  it("starts a stream without a usable cursor with one, so a reconnect replays what it missed", async () => {
+    const events = gateway.gateway.app.service("events");
+    const read = async (headers: Record<string, string>, ids: number): Promise<{ ids: string[]; text: string }> => {
+      const controller = new AbortController();
+      const response = await fetch(`${gateway.url}/v1/events`, { headers: { authorization: `Bearer ${MALLORY}`, ...headers }, signal: controller.signal });
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      while ((text.match(/^id: /gm)?.length ?? 0) < ids) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        text += decoder.decode(value);
+      }
+      controller.abort();
+      return { ids: [...text.matchAll(/^id: (.*)$/gm)].map((match) => match[1]!), text };
+    };
+    const anchor = events.emit("session.idle", { ownerId: 2002, data: { cursor: true } });
+    // A new subscription begins at its owner's newest event, as a cursor rather than an event.
+    const fresh = await read({}, 1);
+    expect(fresh.ids).toEqual([anchor.id]);
+    expect(fresh.text).not.toContain("data:");
+    // So does a stream whose cursor the ledger no longer has (pruned), or never had for this owner.
+    expect((await read({ "last-event-id": "evt_pruned_long_ago" }, 1)).ids).toEqual([anchor.id]);
+    // The stream ended before its first event; a reconnect from its cursor replays what was published meanwhile.
+    const missed = [events.emit("session.idle", { ownerId: 2002, data: { n: 1 } }), events.emit("session.idle", { ownerId: 2002, data: { n: 2 } })];
+    expect((await read({ "last-event-id": anchor.id }, 2)).ids).toEqual(missed.map((event) => event.id));
+  });
+
+  it("answers WebSocket pings on /v1/connect, so a bridge's keepalive keeps its connection busy", async () => {
+    const client = await connect(ALICE);
+    const pong = new Promise<string>((resolve) => client.ws.once("pong", (data) => resolve(data.toString())));
+    client.ws.ping("keepalive");
+    expect(await pong).toBe("keepalive");
+    // The connection carries JSON-RPC as before.
+    await expect(client.request("ping", { message: "hi" })).resolves.toBeDefined();
+  });
+
   it("scopes sessions to their owner", async () => {
     const alice = await connect(ALICE);
     const sessionId = crypto.randomUUID();

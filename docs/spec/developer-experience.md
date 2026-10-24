@@ -1,10 +1,14 @@
 # Managed Copilot SDK: developer experience
 
-> **Status: reviewed design, revised 2026-10-23 after independent Astra and Argon reviews.** No managed service,
-> wrapper, images, or Aspire integration is implemented. Snippets describe the intended customer experience, not
-> runnable packages. The six OpenAI gaps are in scope, not proven closed. The [decision tracker](#decision-tracker)
-> separates user decisions from implementation proposals, and the [delivery gates](#delivery-gates) define the
-> evidence required before making compatibility, isolation, or recovery claims.
+> **Status: built, and qualified within the limits recorded below (2026-10-24).** The SDK, Aspire integration, CLI,
+> gateway, sandbox image, and egress proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime
+> 1.0.103, unmodified. They run locally with `aspire run` and on Azure with `aspire deploy`. The 13 customer snippets
+> run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
+> [software factory](../../demos/software-factory) and [assistant](../../demos/assistant) demos use the platform end
+> to end with real models. The six OpenAI gaps are implemented and exercised; that is not a claim of full parity. The
+> [delivery gates](#delivery-gates) record what each gate proved and what it did not, and the
+> [decision tracker](#decision-tracker) separates user decisions from their delivery state.
+> [architecture.md](../architecture.md) and [deployment.md](../deployment.md) describe the system as built.
 
 ## The idea in one snippet
 
@@ -949,17 +953,18 @@ flowchart LR
   Identity --> Models
 ```
 
-## Planned deliverables
+## Deliverables
 
-All deliverables below are **Not implemented**. Names are proposals; listing a capability is not evidence of parity.
+Status as of 2026-10-24. **Built** means implemented, covered by tests, and exercised with real models; what that
+proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a capability is not evidence of parity.
 
-| Piece | What it is |
-| --- | --- |
-| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` |
-| `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost |
-| `managed-copilot` CLI | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, and `schedules` |
-| Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image |
-| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment |
+| Piece | What it is | Status |
+| --- | --- | --- |
+| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
+| `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `packages/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
+| `managed-copilot` CLI | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, and `schedules` | Built: `packages/cli`, plus `status` |
+| Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `platform/gateway`, `platform/sandbox`, `platform/egress` |
+| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment | Built: `demos/quickstart` (13 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` |
 
 ## Comparison with OpenAI's Agents API
 
@@ -967,7 +972,8 @@ Reviewed on 2026-10-23 against OpenAI's documentation. Their API is in beta and 
 
 The intended concepts match: an agent configuration, an environment, and a durable session that you continue and
 steer. `isolated` targets the per-session workspace experience of an OpenAI-hosted sandbox. The first comparison
-found six gaps; each is now **in scope and specified, not implemented or qualified**: setup
+found six gaps; each is now **implemented and exercised with real models**, within the limits in the
+[delivery gates](#delivery-gates): setup
 ([section 5](#5-set-up-the-sandbox)), artifacts
 ([section 6](#6-get-results-out)), network control ([section 7](#7-control-network-access)), vaults
 ([section 8](#8-keep-secrets-out-of-the-sandbox)), work while your app is offline
@@ -1030,47 +1036,48 @@ Sources: OpenAI's Agents API
 
 ## Decision tracker
 
-Statuses: **Decided** means a user-approved product choice, not working code. **Proposed** means a reviewed design
-to calibrate. **Needs decision** marks an unresolved customer/operational tradeoff. **To validate** means a technical
-prerequisite. **Later** remains out of the first delivery.
+Statuses: **Decided** means a user-approved product choice. **Proposed** means a reviewed design to calibrate.
+**Needs decision** marks an unresolved customer/operational tradeoff. **To validate** means a technical prerequisite;
+**Validated** and **Partly validated** record what live checks showed. **Later** remains out of the first delivery.
+The Delivery column records what is built as of 2026-10-24; the [delivery gates](#delivery-gates) hold the evidence.
 
-| # | Decision | Choice | Status |
-| --- | --- | --- | --- |
-| 1 | Client shape | Native `CopilotClient` / `CopilotSession` through `managed.client(env)`, plus one-call `managed.createSession` sugar. Transport and defaults compatibility are gated, not an excuse to replace the API | Decided |
-| 2 | Isolated granularity | A fresh sandbox per session, as in OpenAI's hosted environments | Decided |
-| 3 | Where environments come from | Declared in the AppHost and picked by name; inline `{ type, size }` only within the AppHost's `inline` list | Decided |
-| 4 | Reusable agent configurations | Copilot custom agents (`.agent.md`) deployed with an environment, selected with the SDK's `agent` option | Decided |
-| 5 | Identity and billing | GitHub identity end to end; sessions use the caller's Copilot entitlement; Azure AI Foundry optional per environment | Decided |
-| 6 | Background sign-in | Work that continues while you're away runs as you, after a one-time `npx managed-copilot login` | Decided |
-| 7 | Network default | On, as in OpenAI's API; `network: false` turns it off for one environment, a whole deployment, or one client's sessions | Decided |
-| 8 | Names | `@managed-copilot/sdk`, `@managed-copilot/aspire`, `ManagedCopilot`, "sandbox" | Proposed |
-| 9 | Languages | TypeScript first; .NET and Python later | Proposed |
-| 10 | Skills and instructions | Ship in the environment's `customizations` folder beside its agents | Proposed |
-| 11 | Environment settings | Separate operator defaults from enforced ceilings; validate nested configuration and later updates; caller restrictions survive resume/promotion | Proposed |
-| 12 | Session ownership | Stable GitHub account IDs, owner/delegation checks on every SDK, file, action, and AHP operation, and single runtime execution ownership | Proposed |
-| 13 | Promotion | One-way checkpointed handoff with atomic generation fencing, explicit failure behavior, and same-object/event compatibility gate | Proposed |
-| 14 | Sizes and warm pools | `small`, `medium`, `large`; optional backend-qualified `warm: n`, default 0; no instant-start promise | Proposed |
-| 15 | Idle and retention | Safe idle stop, restoration of declared state, explicit delete reconciliation; timeout/retention/cost limits still need values | Proposed |
-| 16 | Sandbox setup | Per-session descriptors plus reusable client defaults; no session-time network exception; system packages in image preparation; no blind setup replay | Proposed |
-| 17 | Files and artifacts | Stream live transfers; bounded immutable turn-scoped artifacts with pending/publication failure outcomes | Proposed |
-| 18 | Network rules | Boolean/host-list/object forms with unambiguous inheritance and wildcard semantics; session-time setup included, internal/metadata traffic blocked | Proposed |
-| 19 | Vaults | Scoped placeholders, exact HTTPS destinations and supported header forms; isolated and shared credential kinds differ | Proposed |
-| 20 | Work without a connection | Claim-before-execution, durable results, pending replay, explicit uncertainty and callback compatibility; proposed 24-hour answer deadline | Proposed |
-| 21 | Schedules | Store tool schemas and routes; deduplicate session creation and input; queue collisions, bounded backlog, explicit time-zone/missed-run policy | Proposed |
-| 22 | GitHub Copilot app | Real same-session interoperability and per-owner discovery; no shared multi-user relay publication without authorization proof | To validate |
-| 23 | Egress enforcement | Prove network isolation, per-session shared attribution, and supported vault TLS behavior on local and Azure backends | To validate |
-| 24 | Credential boundary | Trusted admission and inference broker; prove native per-session auth/model attribution without sandbox GitHub or Azure credentials | To validate |
-| 25 | Background credential | Supported refreshable GitHub user authorization, current entitlement, revocation, and pause/error behavior | To validate |
-| 26 | Suspended waits | Qualify root-agent checkpoints independently; no promise for subagent or OS-process survival | To validate |
-| 27 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later |
-| 28 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later |
-| 29 | GitHub App registration | Operator-owned registration versus a supported shared registration, including callback setup and tenant separation | Needs decision |
-| 30 | Active-wait cost policy | Proposed resident waits until a qualified checkpoint; exact limits and cancel/recovery behavior need agreement | Needs decision |
-| 31 | Background callback scope | Reject unsupported required hooks rather than bypass them; decide release scope after G2 without claiming full SDK callback parity | Needs decision |
-| 32 | Six-gap scope | Setup, artifacts, network controls, vaults, offline actions, and schedules all remain required workstreams; no parity claim from documentation alone | Decided |
-| 33 | Native transport/defaults | Public adapter and supported SDK APIs only; required upstream extensions block the affected capability | To validate |
-| 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | To validate |
-| 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate |
+| # | Decision | Choice | Status | Delivery |
+| --- | --- | --- | --- | --- |
+| 1 | Client shape | Native `CopilotClient` / `CopilotSession` through `managed.client(env)`, plus one-call `managed.createSession` sugar. Transport and defaults compatibility are gated, not an excuse to replace the API | Decided | Built: genuine SDK objects (G1) |
+| 2 | Isolated granularity | A fresh sandbox per session, as in OpenAI's hosted environments | Decided | Built: Docker locally, Container Apps Sandboxes on Azure |
+| 3 | Where environments come from | Declared in the AppHost and picked by name; inline `{ type, size }` only within the AppHost's `inline` list | Decided | Built |
+| 4 | Reusable agent configurations | Copilot custom agents (`.agent.md`) deployed with an environment, selected with the SDK's `agent` option | Decided | Built: the software factory ships four |
+| 5 | Identity and billing | GitHub identity end to end; sessions use the caller's Copilot entitlement; Azure AI Foundry optional per environment | Decided | Partly built: GitHub identity and entitlement end to end; a Foundry environment fails with `capability_unavailable` |
+| 6 | Background sign-in | Work that continues while you're away runs as you, after a one-time `npx managed-copilot login` | Decided | Built; no token refresh (row 25) |
+| 7 | Network default | On, as in OpenAI's API; `network: false` turns it off for one environment, a whole deployment, or one client's sessions | Decided | Built |
+| 8 | Names | `@managed-copilot/sdk`, `@managed-copilot/aspire`, `ManagedCopilot`, "sandbox" | Proposed | Built with these names |
+| 9 | Languages | TypeScript first; .NET and Python later | Proposed | Built for TypeScript; .NET and Python not started |
+| 10 | Skills and instructions | Ship in the environment's `customizations` folder beside its agents | Proposed | Built |
+| 11 | Environment settings | Separate operator defaults from enforced ceilings; validate nested configuration and later updates; caller restrictions survive resume/promotion | Proposed | Built |
+| 12 | Session ownership | Stable GitHub account IDs, owner/delegation checks on every SDK, file, action, and AHP operation, and single runtime execution ownership | Proposed | Built; a live check with two real GitHub accounts is not run (G4) |
+| 13 | Promotion | One-way checkpointed handoff with atomic generation fencing, explicit failure behavior, and same-object/event compatibility gate | Proposed | Built (G5) |
+| 14 | Sizes and warm pools | `small`, `medium`, `large`; optional backend-qualified `warm: n`, default 0; no instant-start promise | Proposed | Partly built: sizes; `warm > 0` fails gateway start on both backends |
+| 15 | Idle and retention | Safe idle stop, restoration of declared state, explicit delete reconciliation; timeout/retention/cost limits still need values | Proposed | Partly built: idle stop (default 900 s), restore, and delete reconciliation; retention and cost limits have no values |
+| 16 | Sandbox setup | Per-session descriptors plus reusable client defaults; no session-time network exception; system packages in image preparation; no blind setup replay | Proposed | Built |
+| 17 | Files and artifacts | Stream live transfers; bounded immutable turn-scoped artifacts with pending/publication failure outcomes | Proposed | Built |
+| 18 | Network rules | Boolean/host-list/object forms with unambiguous inheritance and wildcard semantics; session-time setup included, internal/metadata traffic blocked | Proposed | Built |
+| 19 | Vaults | Scoped placeholders, exact HTTPS destinations and supported header forms; isolated and shared credential kinds differ | Proposed | Built for static credentials (row 35) |
+| 20 | Work without a connection | Claim-before-execution, durable results, pending replay, explicit uncertainty and callback compatibility; proposed 24-hour answer deadline | Proposed | Built, with the 24-hour answer deadline |
+| 21 | Schedules | Store tool schemas and routes; deduplicate session creation and input; queue collisions, bounded backlog, explicit time-zone/missed-run policy | Proposed | Built |
+| 22 | GitHub Copilot app | Real same-session interoperability and per-owner discovery; no shared multi-user relay publication without authorization proof | Partly validated | Copilot CLI attaches to the same session (live, stock CLI); GitHub Copilot app publication is refused with `transport_unsupported` |
+| 23 | Egress enforcement | Prove network isolation, per-session shared attribution, and supported vault TLS behavior on local and Azure backends | Validated | Local and Azure (G4) |
+| 24 | Credential boundary | Trusted admission and inference broker; prove native per-session auth/model attribution without sandbox GitHub or Azure credentials | Validated | Sandboxes hold a placeholder; the gateway brokers inference (G4) |
+| 25 | Background credential | Supported refreshable GitHub user authorization, current entitlement, revocation, and pause/error behavior | Partly validated | Sealed sign-in, re-verification, revocation, and visible pauses work; no refresh, so an expired token needs `login` again |
+| 26 | Suspended waits | Qualify root-agent checkpoints independently; no promise for subagent or OS-process survival | Validated | Root-agent waits on durable actions outlast the app and gateway restarts; other interrupted turns end visibly as failed (G2) |
+| 27 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later | Not built |
+| 28 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later | Not built |
+| 29 | GitHub App registration | Operator-owned registration versus a supported shared registration, including callback setup and tenant separation | Needs decision | Not built: callers use their own GitHub sign-in (`gh` or `GH_TOKEN`) |
+| 30 | Active-wait cost policy | Proposed resident waits until a qualified checkpoint; exact limits and cancel/recovery behavior need agreement | Needs decision | Interim: waits stay resident until the 24-hour answer deadline |
+| 31 | Background callback scope | Reject unsupported required hooks rather than bypass them; decide release scope after G2 without claiming full SDK callback parity | Needs decision | Interim: while a session's hook handler is away, new turns on it, unattended ones included, are refused (`background_callback_unsupported`). A turn already running when the handler leaves runs hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` without it |
+| 32 | Six-gap scope | Setup, artifacts, network controls, vaults, offline actions, and schedules all remain required workstreams; no parity claim from documentation alone | Decided | Built: all six exercised with real models |
+| 33 | Native transport/defaults | Public adapter and supported SDK APIs only; required upstream extensions block the affected capability | Validated | Stock SDK and runtime only; [upstream gaps](#upstream-gaps) have platform mitigations or fail explicitly |
+| 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | Validated | Container Apps Sandboxes with retained data disks; gateway state on Azure Files NFS; one gateway replica (G3) |
+| 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate | Not built |
 
 ## Platform contracts
 
@@ -1134,8 +1141,8 @@ not prevent overlap during deployment; leases/generations must fence old and rep
 
 ### Errors and recovery
 
-Errors below are proposed stable codes surfaced through the SDK error path and platform status, not silent
-fallbacks. Diagnostic output must be redacted and scoped to the owner.
+Errors below are stable codes (`@managed-copilot/protocol`) surfaced through the SDK error path and platform status,
+not silent fallbacks. Diagnostic output must be redacted and scoped to the owner.
 
 | Condition | Required outcome |
 | --- | --- |
@@ -1151,8 +1158,9 @@ fallbacks. Diagnostic output must be redacted and scoped to the owner.
 
 ## Review disposition
 
-Both reviews were of the earlier draft. The changes below incorporate their findings; **specified** does not mean
-fixed in running code, and this revision has not been independently re-reviewed.
+Both reviews were of the earlier draft. The changes below incorporate their findings, and the Qualification column
+names the gates whose [results](#gate-results) cover each. Argon and Astra also reviewed every implementation
+milestone and the final integration; their findings were fixed before merge.
 
 | Finding | Reviewer | Plan response | Qualification |
 | --- | --- | --- | --- |
@@ -1174,8 +1182,9 @@ were also removed or bounded. The approved network-on default and one-line off s
 
 ## Delivery gates
 
-Every gate is **Not run** for the new managed platform. Earlier component probes below do not satisfy these gates.
-Gate failures must be visible in supported-capability reporting; a local result alone does not qualify Azure.
+Each gate below was run against the platform with real models: locally on Windows ARM64 with Docker sandboxes, and
+on Azure Container Apps in westus2. The [results](#gate-results) follow the table. Gate failures must be visible in
+supported-capability reporting; a local result alone does not qualify Azure.
 
 | Gate | Bounded objective and acceptance evidence | Prerequisites |
 | --- | --- | --- |
@@ -1185,33 +1194,51 @@ Gate failures must be visible in supported-capability reporting; a local result 
 | G4: Identity, isolation, and egress | Two GitHub users cannot cross-read/list/attach/answer. Real user-attributed inference, refresh, expiry, and revocation work through the broker without exposing provider/platform tokens in the sandbox. Network-on works; false blocks session-time packages and shell/MCP/web egress while scoped inference still works. Shared attribution, direct-IP/DNS/redirect bypasses, and supported TLS vault clients are exercised locally and on the chosen Azure backend | G1, G3 for Azure qualification |
 | G5: Promotion and attached-session continuity | Preserve the same client/session identity, native caller-visible operation, history, and ordered outcomes through promotion. Inject pre/post-commit failures and stale responses; only one owner executes. Caller network restrictions remain. A real interactive CLI reconnects to that same session. App/relay support is a separate acceptance result, not inferred from CLI success | G2, G3, G4 |
 
-G2 and G3 can proceed independently after G1. First obtain a small local compatibility result, then prove identity
-and the concrete Azure substrate before committing to unattended/promotion guarantees. Build the complete six-gap
-workflows incrementally behind their gates; do not replace failed gates with mock-only demonstrations or call the
-planned feature implemented.
+### Gate results
+
+Results as of 2026-10-24. **Passed** means the gate's acceptance evidence was shown. **Passed with limits** means it
+was shown except for the items in the last column, which fail explicitly or are not claimed. Azure details are in
+[deployment.md](../deployment.md#live-qualification).
+
+| Gate | Result | Local evidence | Azure evidence | Not established |
+| --- | --- | --- | --- | --- |
+| G1 | Passed | The 13 quickstart snippets pass through the AppHost: genuine SDK objects, caller-process tools, streaming, and stop/detach, and one client's next isolated session gets a different sandbox. Gated SDK e2e tests; admission tests keep nested configuration and post-create updates denied | Snippets 01–09, 11, and 13 pass (11); 10 and 12 need the local webhook receiver, which the deployment does not publish | — |
+| G2 | Passed with limits | The durable live suite passes 6/6 (webhook, poll, resume, reconcile, schedule, agent). The assistant held an approval while its app was stopped and resolved it exactly once on restart. Crash tests around external effects keep the result or report `needs_reconciliation` | Polling without duplicate execution; a schedule created before a redeploy ran exactly once on the new gateway; the assistant's tab-closed webhook and reminder | SDK hooks need a connected handler: while it is away, new turns on the session are refused (`background_callback_unsupported`), and in a turn already running when it leaves, hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` have no closing answer and run without it. A turn whose runtime process died ends as failed; the user retries from retained state |
+| G3 | Passed with limits | Docker sandbox e2e (idle stop and resume with workspace and tools intact); gateway rollover e2e 3/3 | Container Apps Sandboxes: idle/recreate probe 8/8; a compute replacement kept data disks, workspace, HOME, the declared Python package, and native history. NFS storage 10/10 with cross-host lease exclusion; revision canaries. Interrupted factory work recovered by explicit Retry (9 files, 44/44 tests) | Warm assignment (`warm > 0` is refused); more than one gateway replica; partition-tolerant recovery |
+| G4 | Passed with limits | Egress Docker suite 11/11, 7 cases in sandbox-like client containers and 4 in real sandboxes: `network: false` blocks curl, pip, npm, git, and raw sockets; host lists; metadata, private, direct-IP, port, and peer destinations blocked; vault substitution scoped to session, host, and header. Sandboxes hold no GitHub token. Gated SDK e2e keeps another account's sessions invisible | Network-denied CONNECT returns 403 while inference works; allowed hosts return 200; vault substitution and response redaction pass | A live check with two real GitHub accounts (tests use distinct identities); refresh of expiring user tokens |
+| G5 | Passed for Copilot CLI | Promotion e2e and snippet 08: same session object and ID, ordered outcomes, published artifact. The stock Copilot CLI attached live: one responder per prompt, `ask_user`, no host paths, and promotion of an attached session with the CLI reconnecting by itself | Explicit promotion and continuation; non-interactive AHP probe for shared and isolated sessions | GitHub Copilot app publication (refused with `transport_unsupported`); an interactive terminal check on Azure |
+
+The demos run end to end on both targets. The software factory completed work orders locally (19/19 tests) and on
+Azure (9 files, 37/37 tests), and recovered interrupted Azure work through explicit checkpoint Retry. The assistant's
+triage, approvals, reminders, and background work passed locally and on Azure with its labelled demo Google data.
+Its real Gmail and Google Calendar provider is implemented, but it needs the operator's own Google OAuth client and
+was not run against real accounts.
 
 Still requiring a user decision before the affected behavior is finalized: GitHub App ownership/setup; active-wait
 cost limits and cancellation policy; the initial background callback subset; and concrete retention/schedule
-collision and missed-run defaults. Updating this plan does not imply those choices were approved.
+collision and missed-run defaults. Until then the platform uses the interim behavior in the decision tracker and
+[architecture.md](../architecture.md). Updating this plan does not imply those choices were approved.
 
 ## Evidence and limits
 
-Evidence collected earlier on 2026-10-23 on Windows ARM64, plus the reviewers' targeted source inspection. Source
-API presence is not an end-to-end managed-platform result. Published SDK evidence takes precedence over newer
-default-branch docs when describing version 1.0.26.
+### Pre-implementation probes
+
+Evidence collected on 2026-10-23 on Windows ARM64, before implementation, plus the reviewers' targeted source
+inspection. Implementation results are in [gate results](#gate-results). Published SDK evidence takes precedence over
+newer default-branch docs when describing version 1.0.26.
 
 | Evidence | Result and limitation |
 | --- | --- |
 | `@github/copilot-sdk` 1.0.26 (runtime 1.0.103): `startAhpHost({ localServer })` and `publishSession` | Works: a token-protected `ws://127.0.0.1` listener, with an existing session published as `ahp-session:/<id>` |
 | `copilot --headless --port 0` (CLI 1.0.92) | Serves the SDK protocol; warns that it accepts any client when `COPILOT_CONNECTION_TOKEN` is unset |
-| `copilot --ahp <url>` (CLI 1.0.92) | Accepted, but refuses non-interactive use; interactive attach is not yet tested. `--host-ahp` is not in this release |
+| `copilot --ahp <url>` (CLI 1.0.92) | Accepted, but refuses non-interactive use. `--host-ahp` is not in this release. Interactive attach was later verified through `managed-copilot attach` (G5) |
 | `BuiltInTools.Isolated` | `ask_user`, `task_complete`, `exit_plan_mode`, `task`, `read_agent`, `write_agent`, `list_agents`, `send_inbox`, `context_board`, and `skill`: no file, shell, or network tools |
 | Native connection source in SDK 1.0.26 | `forUri` connects by raw TCP, not HTTPS/WSS; a secure bridge or supported extension is still required |
 | Empty-mode defaults in SDK 1.0.26 | Requires explicit persistence and tools; additional defaults can disable skills/instructions. Supplying directories alone is not qualification |
 | Waiting requests in SDK 1.0.26 | Pending tools/permission APIs exist. Root-agent calls require continued pending work on resume; subagent requests depend on a running subagent. The ordinary high-level resume path does not automatically drain them |
 | Callback dispatch source in SDK 1.0.26 | Local tool handlers execute before result submission; first-result acceptance alone cannot prevent duplicate external effects. Hooks have a separate RPC path |
 | Session authentication source in SDK 1.0.26 | Per-session GitHub tokens are normally sent to the runtime. Credential isolation requires more than changing the inference endpoint |
-| Previous Azure storage experiment | The prior project reported SQLite/locking failures on Azure Files SMB. Neither failure resolution nor a suitable new storage backend has been demonstrated here |
+| Previous Azure storage experiment | The prior project reported SQLite/locking failures on Azure Files SMB. The deployment here uses Azure Files NFS 4.1 instead, which passed its locking and recovery checks (G3) |
 
 Source references used in the reviews: the locally installed published `@github/copilot-sdk` 1.0.26
 (`dist/client.js`, `dist/session.js`, `dist/types.d.ts`, `dist/host.d.ts`, and `dist/generated/rpc.d.ts`);
@@ -1220,3 +1247,17 @@ Source references used in the reviews: the locally installed published `@github/
 [GitHub OAuth guidance](https://github.com/github/copilot-sdk/blob/main/docs/setup/github-oauth.md) as explanatory,
 potentially newer sources; and the
 [prior deployment record](https://github.com/patniko/copilot-sdk-aspire/blob/main/docs/DEPLOYMENT.md).
+
+### Upstream gaps
+
+Behaviors of the stock SDK 1.0.26, runtime 1.0.103, and Copilot CLI 1.0.92 that the platform works around or fails on
+explicitly. Each would need an upstream change to remove its limit; none is patched locally.
+
+| Gap | Platform behavior |
+| --- | --- |
+| The runtime never releases an `llmInference` provider registration when its connection closes, and in-flight exchanges are not failed; every later `setProvider` is refused | The gateway restarts the sandbox runtime and reopens the session; keepalive pings close dead links |
+| A turn cut off mid-inference is neither continued nor ended when its session resumes in a new runtime process, even with `continuePendingWork` | The gateway ends the turn visibly as failed, unless it waits on durable actions, and the user retries from retained state |
+| A JSON-RPC error answering `hooks.invoke` fails open, and the wire reports only `hooks: true`, not which hooks a client registered | While no hook handler is connected, the gateway refuses new turns on any session with hooks (`background_callback_unsupported`) and answers `preToolUse`, `userPromptSubmitted`, and `postToolUse` with an explicit deny, block, or withheld result. Other hooks have no closing answer, so a turn already running when the handler leaves runs them without it |
+| Pending tool calls rebuilt after a restart get a new `requestId` (same `toolCallId`) and are not emitted again on resume | Durable rebinds actions by `toolCallId` and replays pending work when a handler attaches |
+| `session.send` has no idempotency key or caller-chosen message ID | Durable records each send's phase and reconciles against history; an unknown outcome becomes `needs_reconciliation`, never a resend |
+| Copilot CLI 1.0.92 refuses non-interactive `--ahp`, does not show a `rejectionReason`, and has an empty model picker in attached sessions | Attach is interactive only. A refused approval closes the CLI's dialog, and the tool shows as waiting until the real outcome arrives |

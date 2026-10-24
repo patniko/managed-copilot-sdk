@@ -134,8 +134,9 @@ async function submit(http: HttpClient, sessionId: string, actionId: string, bod
     try {
       return await http.post<HandleActionResult>(ROUTES.actionResult(sessionId, actionId), body);
     } catch (error) {
-      // The handler already ran; only transport failures are retried (the gateway deduplicates the same result).
-      const transient = error instanceof ManagedCopilotError && (error.code === "capability_unavailable" || error.code === "internal");
+      // The handler already ran; only transport failures and timeouts are retried (the gateway deduplicates the same
+      // result, so a submission that arrived before its answer was lost is not applied twice).
+      const transient = error instanceof ManagedCopilotError && (error.code === "capability_unavailable" || error.code === "internal" || error.code === "timeout");
       if (attempt >= 4 || !transient) throw error;
       await sleep(250 * 2 ** attempt);
     }

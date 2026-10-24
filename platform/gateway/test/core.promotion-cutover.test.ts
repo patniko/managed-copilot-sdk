@@ -234,6 +234,79 @@ describe("placement cutover", () => {
     expect(stored.params).not.toHaveProperty("systemMessage");
   });
 
+  it("re-admits a restoring client resume when the session moves while the restore checks its turn", async () => {
+    const first = await connect();
+    const sessionId = crypto.randomUUID();
+    await first.request("session.create", { sessionId });
+    await first.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => sessions().get(sessionId)?.lastTurn?.status === "running");
+    // A promotion opens its cutover while the session is resident.
+    const cut = await sessions().cutover!(sessionId, { generation: sessions().get(sessionId)!.generation });
+    // A registration fails, and so does the resume that would reconcile it: the session is not resident any more.
+    runtime.failNext("session.tools.set", sessionId);
+    runtime.failNext("session.resume", sessionId);
+    await expect(first.request("session.tools.set", { sessionId, tools: [{ name: "extra_tool" }] })).rejects.toBeDefined();
+    // The next client resume restores it and checks its running turn; the check is answered only after the move.
+    const check = runtime.holdNext("session.metadata.isProcessing", sessionId);
+    const second = await connect();
+    const resuming = second.request("session.resume", { sessionId, tools: [{ name: "late_tool" }] });
+    await check.held;
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    check.release();
+    await resuming;
+    // The resume was repeated on the sandbox, and the stored restore configuration is the sandbox's, not the source's.
+    expect(sessions().get(sessionId)).toMatchObject({ placement: "sandbox" });
+    const lastResume = lastCall("session.resume", sessionId)!;
+    expect(lastResume.connection).not.toBe(sourceConnection(sessionId));
+    expect((lastResume.params["tools"] as { name: string }[]).map((tool) => tool.name)).toContain("late_tool");
+    const row = gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string };
+    expect((JSON.parse(row.admitted) as { params: Record<string, unknown> }).params["workingDirectory"]).toBe("/workspace");
+  });
+
+  it("never installs a destination that was still opening when its cutover closed", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: sessions().get(sessionId)!.generation });
+    cut.fence();
+    const open = sandboxes.holdNextOpen();
+    const opening = cut.open({ continuePendingWork: true }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await open.held;
+    // The cutover closes while its destination is still being opened (nothing to close yet).
+    await cut.abort();
+    const resumes = runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).length;
+    open.release();
+    expect(await opening).toMatchObject({ code: "conflict", message: expect.stringContaining("is already closed") });
+    // Nothing was sent to the abandoned destination, and the session still works where it was.
+    expect(runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId)).toHaveLength(resumes);
+    await expect(client.request("session.sendAndWait", { sessionId, prompt: "still here" })).resolves.toMatchObject({ response: { data: { content: "echo: still here" } } });
+  });
+
+  it("keeps a session it is deleting marked deleting while an aborted cutover flushes its events", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: sessions().get(sessionId)!.generation });
+    cut.fence();
+    // The source says something while the session is fenced: it waits in the cutover's buffer.
+    runtime.emitEvent(sessionId, "session.idle", {});
+    await sleep(50);
+    // Deleting aborts the cutover, which flushes that event; the runtime's delete is still pending.
+    const removal = runtime.holdNext("session.delete", sessionId);
+    const deleting = fetch(`${gateway.url}/v1/sessions/${sessionId}`, { method: "DELETE", headers: { authorization: `Bearer ${ALICE}` } });
+    await removal.held;
+    // Startup recovery finishes deletions by this state: the flushed event must not have replaced it.
+    expect(sessions().get(sessionId)?.state).toBe("deleting");
+    removal.release();
+    expect((await deleting).status).toBe(204);
+  });
+
   it("moves remote MCP servers with their original endpoints and carries the caller's option changes", async (ctx) => {
     if (!(gateway.gateway.app.services as Record<string, unknown>)["policy"]) return ctx.skip();
     const client = await connect();
