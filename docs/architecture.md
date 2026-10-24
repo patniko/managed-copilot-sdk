@@ -167,12 +167,64 @@ applies the session's policy and attaches vault credentials. Anything else is re
 
 ### Durable actions and schedules
 
-- `PendingAction.requestId` is the runtime request ID the answer RPC is keyed on; `payload` carries the permission
-  request or elicitation data a handler needs. One invocation identity (`idempotencyKey`) survives live callbacks,
-  webhooks, polling, resume, and placement changes.
-- Stock `session.send` has no idempotency key. Schedules persist dispatch phases per occurrence; when a crash leaves
-  acceptance unknown, reconcile against the session's runtime state instead of resending, or surface
-  `needs_reconciliation`. `runNow` accepts a retry-stable `invocationId`.
+As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; live acceptance:
+`npx tsx packages/sdk/test/acceptance/durable.live.ts` after `pnpm build`).
+
+- **One ledger for every responder.** Execution-bearing events are recorded in `durable_actions` (keyed by session,
+  kind, runtime `requestId`; carrying tool call, provider, placement generation, deadline) and claimed before
+  emission: core's router asks `actions.onSessionEvent` who may receive the event. Live SDK clients are claimed at
+  emission or on resume replay (`onAttached`); webhook workers (`mcc_` capability) and owners (polling) claim over
+  REST; gateway platform tools (`schedule_task`, ...) are claimed and executed by the ledger itself. Every claim is a
+  compare-and-set on `(claim_seq, state)`, so exactly one responder wins and older claim tokens can never commit.
+- `PendingAction.requestId` is the runtime request ID the answer RPC is keyed on; `payload` carries the stock
+  `PermissionRequest` or the elicitation's message and schema. `idempotencyKey` is `${sessionId}:${toolCallId}` for
+  tools, the same identity a live handler sees in its `ToolInvocation`, across webhooks, polling, resume, restarts,
+  and placement changes.
+- **Results before acknowledgment.** Answers (live, REST, platform) are persisted, then delivered to the runtime by
+  the ledger through `sessions.request`, retried with backoff if the runtime is unavailable. Duplicates (same claim,
+  same canonical result) return the recorded state; different results are `conflict`.
+- **Uncertainty is explicit.** A tool whose live client disconnects, whose REST lease expires, or that was in flight
+  across a gateway restart becomes `needs_reconciliation` and is never re-offered; the original claimant's late result
+  is still accepted, anyone else must claim with `reconcile: true`. Prompts have no external effect and return to
+  `pending`. At the 24-hour answer deadline actions `expire`: the runtime receives an error (tool),
+  `user-not-available` (permission), or `cancel` (elicitation), never an approval. Completion events and the runtime's
+  pending lists (`session.tools.listPendingRequests`, `session.permissions.pendingRequests`) reconcile the ledger.
+- **Webhooks.** AppHost subscriptions (environment + event types, operator-authorized for every owner in those
+  environments) get signed at-least-once deliveries from an outbox: `x-managed-copilot-signature: t=<s>,v1=<hex
+  HMAC-SHA256("<t>.<raw body>")>`, a stable `x-managed-copilot-event-id`, bounded jittered backoff (10 attempts, up to
+  5 min apart), no redirects, and a visible `failed` state (`GET /v1/webhooks/deliveries` for the owner,
+  `/v1/webhooks/deliveries/all` with the platform key). `session.action_required` deliveries carry a capability minted
+  per attempt for the session's actions that are still pending (15 min, audience = this deployment's public URL).
+- **Schedules.** Cron (IANA zones; nonexistent DST slots skipped, repeated slots run once at the earliest instant)
+  and one-shot `runAt`. Each occurrence is persisted with a stable occurrence ID before anything happens upstream; a
+  new-session run uses a session ID derived from the occurrence (so a retried create finds the same session), and the
+  prompt is sent with `source: "system"` only after `input_state = submitting` is persisted. After a crash the
+  session's history (`session.getMessages`) decides whether the prompt was accepted; if it cannot be read after
+  bounded retries the run ends `needs_reconciliation` and is never resent. Runs of one schedule never overlap (one
+  occurrence may wait; more are skipped), owners have a concurrency cap, occurrences later than the grace window (5 min
+  cron, 60 min one-shot) are `skipped` with a recorded reason, and delegation, environment policy, webhook routes, and
+  the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`).
+  `schedule.run_started` / `schedule.run_completed` carry `{ scheduleId, scheduleName, runId, occurrenceId, status,
+  sessionId, scheduledFor, messageId?, reason? }`.
+- **Agent scheduling.** With operator-approved `scheduling: true`, sessions get `schedule_task` (`prompt` plus exactly
+  one of `delaySeconds`, `runAt` with offset, or `cron` + `timeZone`), `list_schedules`, and `cancel_schedule`. They
+  act only on schedules that target the calling session, as its owner, with at most 10 active per session and cron at
+  most every 5 minutes; retries are idempotent by the tool call's key.
+- **Background sign-in.** `POST /v1/credentials/background` seals the caller's own GitHub token (AES-256-GCM, AAD
+  bound to the account) under `MANAGED_COPILOT_DURABLE_KEY` or `<dataDir>/durable.key`. `principalFor` re-verifies it
+  with GitHub (cached 2 minutes); a rejected token or a different account invalidates it and pauses the owner's
+  schedules with a visible reason. No refresh: a revoked or expired token requires `managed-copilot login` again.
+- Durable REST: `GET /v1/sessions/:id/actions[?state=]`, `POST .../actions/:actionId/claim` (`{ claimToken? }` renews,
+  `{ reconcile: true }` takes over uncertain actions), `POST .../actions/:actionId/result` (`{ claimToken, result |
+  error | release }`), `/v1/schedules` CRUD with runs, pause, resume, and `run` (`{ invocationId }`), and
+  `/v1/credentials/background` (`POST`/`GET`/`DELETE`).
+- **AppHost schedules.** A declaration with `runAs` materializes for that account (when it signs in for background
+  work or lists its schedules) as **paused, awaiting approval**: naming an account is not a grant. That account
+  resuming it is the explicit grant for this deployment, environment, and schedule; a changed declaration pauses it
+  again for re-approval, and a removed one is deleted. Declarations without `runAs` are logged as unrunnable.
+- Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
+  closed), and credential refresh.
+
 ## Gateway extension points
 
 Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
@@ -192,10 +244,10 @@ structurally (they may add members).
 | `artifacts` | sandbox | Turn-scoped publication and immutable storage |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id)` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server |
 | `vaults` | network | AppHost and per-user vault storage (sealed at rest) |
-| `actions` | durable | Core calls `onSessionEvent` (claim before emit), `onClientAnswer`, `onAttached` (replay), `onDetached`, `releaseLiveClaim`, and `list(id, { open: true })` for `SessionInfo.pendingActions` |
-| `webhooks` | durable | Signed delivery with retries and replay protection |
-| `schedules` | durable | Cron/one-shot schedules, occurrences, runs, agent scheduling tools |
-| `credentials` | durable | Core calls `principalFor(accountId)` when a session owner has no live verified token (background work) |
+| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation |
+| `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
+| `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
+| `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`),
 `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background` (`credentials`) when those services are
@@ -252,6 +304,7 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 | `MANAGED_COPILOT_APPHOST_DIR` | config file dir or cwd | Base for relative `customizations` paths |
 | `MANAGED_COPILOT_DATA_DIR` | `./.managed-copilot/data` | SQLite ledger, artifacts, runtime homes, pinned customizations |
 | `MANAGED_COPILOT_PLATFORM_KEY` | random per run | Internal service credential (relay, egress, sandboxd provisioning) |
+| `MANAGED_COPILOT_DURABLE_KEY` | `<dataDir>/durable.key` | Base64 32-byte key sealing background credentials and signing action capabilities |
 | `MANAGED_COPILOT_PUBLIC_URL` | the listening address | URL clients use (`app.config.publicUrl` is always the real URL) |
 | `MANAGED_COPILOT_GITHUB_API_URL` | `https://api.github.com` | Loopback `http://` allowed for test stubs only |
 | `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
