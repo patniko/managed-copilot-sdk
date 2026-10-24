@@ -127,7 +127,10 @@ export interface SessionEventInput {
   /** Placement generation of the runtime that emitted the event (fencing; 0 until promotion exists). */
   readonly generation: number;
   readonly event: RuntimeSessionEvent;
-  /** Connections attached to the session right now, in preference order (the creating connection first). */
+  /**
+   * Connections attached to the session right now, in attach order (the creating connection first, then the others by
+   * attach time). The ledger gives an action to the most recently attached eligible connection.
+   */
   readonly attached: readonly AttachedResponder[];
 }
 

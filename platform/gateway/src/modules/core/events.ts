@@ -56,8 +56,8 @@ export class PlatformEvents implements EventsService {
     };
   }
 
-  /** Serves `GET /v1/events` as server-sent events for the authenticated owner. */
-  stream(ctx: RequestContext): void {
+  /** Serves `GET /v1/events` as server-sent events for the authenticated owner. `verify` re-checks the credential. */
+  stream(ctx: RequestContext, verify?: () => Promise<void>): void {
     const principal = ctx.principal!;
     const types = ctx.query.get("types")?.split(",").filter(Boolean);
     const { res, req } = ctx;
@@ -68,18 +68,39 @@ export class PlatformEvents implements EventsService {
       "x-accel-buffering": "no",
     });
     res.write(": connected\n\n");
+    const sent = new Set<string>();
     const send = (event: PlatformEvent) => {
+      if (sent.has(event.id)) return;
+      sent.add(event.id);
+      if (sent.size > 10_000) sent.clear();
       if (types && !types.includes(event.type)) return;
       res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     };
+    // Subscribe before replaying so nothing published during the replay is lost; deliver it after the replay.
+    let buffered: PlatformEvent[] | undefined = [];
+    const unsubscribe = this.subscribe((event, meta) => {
+      if (meta.ownerId !== principal.accountId) return;
+      if (buffered) buffered.push(event);
+      else send(event);
+    });
     const lastEventId = (req.headers["last-event-id"] as string | undefined) ?? ctx.query.get("lastEventId") ?? undefined;
     if (lastEventId) {
-      for (const { event } of this.#ledger.eventsAfter(principal.accountId, lastEventId)) send(event);
+      let cursor = lastEventId;
+      for (;;) {
+        const page = this.#ledger.eventsAfter(principal.accountId, cursor, 500);
+        for (const { event } of page) send(event);
+        if (page.length < 500) break;
+        cursor = page[page.length - 1]!.event.id;
+      }
     }
-    const unsubscribe = this.subscribe((event, meta) => {
-      if (meta.ownerId === principal.accountId) send(event);
-    });
-    const heartbeat = setInterval(() => res.write(": ping\n\n"), 15_000);
+    for (const event of buffered) send(event);
+    buffered = undefined;
+    let beats = 0;
+    const heartbeat = setInterval(() => {
+      res.write(": ping\n\n");
+      // Revoked or expired credentials end the subscription (checked about once a minute).
+      if (verify && ++beats % 4 === 0) void verify().catch(() => res.end());
+    }, 15_000);
     heartbeat.unref();
     const close = () => {
       clearInterval(heartbeat);

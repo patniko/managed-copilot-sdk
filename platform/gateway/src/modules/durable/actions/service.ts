@@ -164,9 +164,14 @@ function isEligible(responder: AttachedResponder, action: { readonly kind: Actio
   }
 }
 
-/** Application handlers first; an attached person answers prompts only when no application handler is attached. */
+/**
+ * The most recently attached eligible application client owns the action (it is the one most likely alive and
+ * driving the session, e.g. after a resume); an attached person answers prompts only when no application handler is.
+ * `eligible` is in attach order, oldest first.
+ */
 function chooseOwner(eligible: readonly AttachedResponder[], kind: ActionKind): AttachedResponder | undefined {
-  return eligible.find((responder) => responder.kind === "sdk") ?? (kind === "tool" ? undefined : eligible.find((responder) => responder.kind === "cli"));
+  const latest = (predicate: (responder: AttachedResponder) => boolean) => [...eligible].reverse().find(predicate);
+  return latest((responder) => responder.kind === "sdk") ?? (kind === "tool" ? undefined : latest((responder) => responder.kind === "cli"));
 }
 
 /** Mirrors the stock SDK: nullish → "", strings and `ToolResultObject`s unchanged, anything else JSON-encoded. */

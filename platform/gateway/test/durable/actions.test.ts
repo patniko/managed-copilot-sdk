@@ -139,13 +139,13 @@ describe("durable actions ledger", () => {
   });
 
   describe("claim before emission", () => {
-    it("gives the actionable event to exactly one eligible live client and withholds it from the others", async () => {
+    it("gives the actionable event to exactly one eligible live client (the most recently attached) and withholds it from the others", async () => {
       const decision = await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"]), sdk("c2", ["lookup_order"]), sdk("c3", [])]));
-      expect(decision.owner).toBe("c1");
-      expect(decision.withhold).toEqual(["c2"]);
+      expect(decision.owner).toBe("c2");
+      expect(decision.withhold).toEqual(["c1"]);
       expect(decision.claimToken).toMatch(/^mct_/);
       const [action] = actions.list(SESSION);
-      expect(action).toMatchObject({ kind: "tool", tool: "lookup_order", state: "executing", claimedBy: "live:c1", idempotencyKey: `${SESSION}:call-r1` });
+      expect(action).toMatchObject({ kind: "tool", tool: "lookup_order", state: "executing", claimedBy: "live:c2", idempotencyKey: `${SESSION}:call-r1` });
       expect(published).toHaveLength(0);
     });
 
@@ -203,7 +203,7 @@ describe("durable actions ledger", () => {
     it("rejects an answer from a client that does not own the action", async () => {
       await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"]), sdk("c2", ["lookup_order"])]));
       await expectCode(
-        actions.onClientAnswer({ sessionId: SESSION, connectionId: "c2", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "r1", result: "x" } }),
+        actions.onClientAnswer({ sessionId: SESSION, connectionId: "c1", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "r1", result: "x" } }),
         "conflict",
       );
       expect(sessions.answers()).toHaveLength(0);
