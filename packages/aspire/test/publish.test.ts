@@ -34,7 +34,16 @@ describe("prepareAzureConfig", () => {
     expect(prepared.config.environments.coder?.customizations).toBe(`${APPHOST_DIR_IN_IMAGE}/demos/software-factory/customizations/workshop`);
     expect(prepared.config.environments.coder?.image).toBeUndefined();
     expect(prepared.customizations).toEqual(["copilot/chat", "demos/software-factory/customizations/workshop"]);
-    expect(prepared.sandboxImages).toEqual({ coder: "sandboxes/coder", "*": "" });
+    expect(prepared.sandboxImages).toEqual({ coder: { folder: "sandboxes/coder" }, "*": {} });
+  });
+
+  it("builds system packages into the environment's image", () => {
+    const withPackages = config({
+      environments: { tools: { type: "isolated", packages: { system: ["jq", "ffmpeg", "jq"], npm: ["typescript"] } }, chat: { type: "shared" } },
+    });
+    const prepared = prepareAzureConfig(withPackages, appHost);
+    expect(prepared.sandboxImages).toEqual({ tools: { system: ["ffmpeg", "jq"] }, "*": {} });
+    expect(prepared.config.environments.tools?.packages).toEqual({ system: ["jq", "ffmpeg", "jq"], npm: ["typescript"] });
   });
 
   it("needs no sandbox images for a shared-only deployment", () => {
@@ -65,9 +74,9 @@ describe("applyAccessRules", () => {
 });
 
 describe("rewriteWebhooks", () => {
-  it("points loopback webhooks at the deployed app on that port and leaves others alone", () => {
+  it("points loopback webhooks at the deployed app's HTTPS address and leaves others alone", () => {
     const rewritten = rewriteWebhooks(config(), new Map([[7490, "assistant"]]));
-    expect(rewritten.webhooks?.assistant?.url).toBe("http://assistant/api/copilot-events?v=1");
+    expect(rewritten.webhooks?.assistant?.url).toBe("https://assistant.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/api/copilot-events?v=1");
     expect(rewritten.webhooks?.partner?.url).toBe("https://hooks.example.com/copilot");
   });
 

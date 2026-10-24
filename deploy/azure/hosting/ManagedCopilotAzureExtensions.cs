@@ -227,7 +227,13 @@ public static class ManagedCopilotAzureExtensions
         container.Probes.Add(new ContainerAppProbe
         {
             ProbeType = ContainerAppProbeType.Readiness,
-            HttpGet = new ContainerAppHttpRequestInfo { Path = healthPath, Port = targetPort },
+            HttpGet = new ContainerAppHttpRequestInfo
+            {
+                Path = healthPath,
+                Port = targetPort,
+                // Probes otherwise send the replica's IP as Host, which apps that guard against DNS rebinding refuse.
+                HttpHeaders = { new ContainerAppHttpHeaderInfo { Name = "Host", Value = $"localhost:{targetPort}" } },
+            },
             PeriodSeconds = 5,
             FailureThreshold = 3,
             TimeoutSeconds = 3,

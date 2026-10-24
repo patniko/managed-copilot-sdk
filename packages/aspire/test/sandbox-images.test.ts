@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,7 +15,7 @@ function write(path: string, content: string): void {
   writeFileSync(path, content);
 }
 
-function inputs(environments: Record<string, string> = { "*": "", coder: "sandboxes/coder" }): SandboxImageInputs {
+function inputs(environments: SandboxImageInputs["environments"] = { "*": {}, coder: { folder: "sandboxes/coder" } }): SandboxImageInputs {
   const root = mkdtempSync(join(tmpdir(), "mc-sandbox-images-"));
   roots.push(root);
   write(join(root, "sandbox", "image", "Dockerfile"), "FROM node:24\n");
@@ -33,18 +33,21 @@ function inputs(environments: Record<string, string> = { "*": "", coder: "sandbo
   };
 }
 
-/** Records commands; `present` refs exist in the registry, and the base label is set unless `unlabeled`. */
+/** Records commands (and generated Dockerfiles); `present` refs exist in the registry; the base label is set unless `unlabeled`. */
 function fakeRunner(options: { present?: string[]; failLogin?: boolean; unlabeled?: boolean } = {}) {
   const commands: string[] = [];
+  const dockerfiles: string[] = [];
   const run: CommandRunner = async (command, args) => {
     const line = `${command} ${args.join(" ")}`;
     commands.push(line);
+    const context = args.at(-1) ?? "";
+    if (args[0] === "build" && context.includes("mc-azure-system-")) dockerfiles.push(readFileSync(join(context, "Dockerfile"), "utf8"));
     if (command === "az") return { code: options.failLogin ? 1 : 0, output: options.failLogin ? "Please run 'az login' to setup account." : "Login Succeeded" };
     if (args[0] === "buildx" && args[1] === "imagetools") return { code: options.present?.includes(args[3]!) ? 0 : 1, output: "" };
     if (args[0] === "image" && args[1] === "inspect") return { code: 0, output: options.unlabeled ? "<no value>" : "1.0.26" };
     return { code: 0, output: "" };
   };
-  return { run, commands };
+  return { run, commands, dockerfiles };
 }
 
 describe("planSandboxImages", () => {
@@ -64,9 +67,18 @@ describe("planSandboxImages", () => {
     expect(JSON.parse(imageMap(plan))).toEqual({ "*": `copilot-sandbox:${plan.builds[0]!.tag}`, coder: `copilot-sandbox-coder:${plan.builds[1]!.tag}` });
   });
 
+  it("tags system packages into the environment's image and rejects names apt would misread", () => {
+    const base = inputs({ "*": {}, tools: { system: ["ffmpeg"] } });
+    const first = planSandboxImages(base).builds.find((build) => build.environment === "tools")!;
+    expect(first.system).toEqual(["ffmpeg"]);
+    const other = planSandboxImages({ ...base, environments: { "*": {}, tools: { system: ["imagemagick"] } } }).builds.find((build) => build.environment === "tools")!;
+    expect(other.tag).not.toBe(first.tag);
+    expect(() => planSandboxImages({ ...base, environments: { "*": {}, tools: { system: ["ffmpeg; rm -rf /"] } } })).toThrow(/invalid system package "ffmpeg; rm -rf \/"/);
+  });
+
   it("names registry repositories safely and explains missing inputs", () => {
     expect(repositoryName("copilot", "Factory_Builder")).toBe("copilot-sandbox-factory-builder");
-    const missing = inputs({ "*": "", coder: "sandboxes/missing" });
+    const missing = inputs({ "*": {}, coder: { folder: "sandboxes/missing" } });
     expect(() => planSandboxImages(missing)).toThrow(/names image "sandboxes\/missing", but .* does not exist/);
     const unbuilt = inputs();
     rmSync(join(unbuilt.sandboxContext, "dist"), { recursive: true });
@@ -101,6 +113,22 @@ describe("pushSandboxImages", () => {
     expect(builds[3]).toMatch(/BASE_IMAGE=managed-copilot-azure-env-copilot-sandbox-coder:/);
     expect(fake.commands.filter((command) => command.startsWith("docker push"))).toHaveLength(2);
     expect(fake.commands[0]).toBe("az acr login --name myacr");
+  });
+
+  it("installs system packages in their own layer, on the environment image and under the Azure layer", async () => {
+    const plan = planSandboxImages(inputs({ "*": {}, coder: { folder: "sandboxes/coder", system: ["ffmpeg", "jq"] } }));
+    const fake = fakeRunner();
+    await pushSandboxImages(plan, context(fake.run));
+    const builds = fake.commands.filter((command) => command.startsWith("docker build "));
+    const coder = plan.builds.find((build) => build.environment === "coder")!;
+    const environmentTag = `managed-copilot-azure-env-copilot-sandbox-coder:${coder.tag}`;
+    const systemTag = `managed-copilot-azure-system-copilot-sandbox-coder:${coder.tag}`;
+    expect(fake.dockerfiles).toEqual([
+      `FROM ${environmentTag}\nUSER root\nRUN apt-get update && apt-get install -y --no-install-recommends ffmpeg jq && rm -rf /var/lib/apt/lists/*\nUSER 10001:10001\n`,
+    ]);
+    expect(builds.some((command) => command.includes(`-t ${systemTag}`))).toBe(true);
+    expect(builds.at(-1)).toContain(`BASE_IMAGE=${systemTag}`);
+    expect(fake.commands.some((command) => existsSync(command.split(" ").at(-1)!) && command.includes("mc-azure-system-"))).toBe(false); // cleaned up
   });
 
   it("refuses an environment image that is not built FROM the platform base", async () => {

@@ -1,7 +1,8 @@
 /**
  * Sandbox images for Azure Container Apps Sandboxes. `aspire deploy` builds them on the deploying machine for
- * linux/amd64 (the base image from platform/sandbox, each isolated environment's own `image` folder FROM it, and the
- * Azure layer from deploy/azure/sandbox on top) and pushes them to the Container Apps environment's registry.
+ * linux/amd64 (the base image from platform/sandbox, each isolated environment's own `image` folder FROM it, a layer
+ * with its `packages.system` as `aspire run` builds it, and the Azure layer from deploy/azure/sandbox on top) and pushes
+ * them to the Container Apps environment's registry.
  *
  * Tags are content hashes computed at publish time, so the gateway's image map is known before anything is built, and
  * redeploys skip images the registry already has. The base image is never tagged with its canonical name locally (that
@@ -9,15 +10,18 @@
  */
 import { spawn } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
-import { AzurePublishError } from "./config.js";
+import { AzurePublishError, type SandboxImageSource } from "./config.js";
 
 /** The image every environment image must be built FROM (the platform's contract). */
 export const CANONICAL_BASE_IMAGE = "ghcr.io/patniko/managed-copilot-sandbox:0.1.0";
 /** Set by the base image (and inherited by images built FROM it). */
 const BASE_LABEL = "managed-copilot.copilot-sdk";
 const PLATFORM = "linux/amd64";
+/** Debian package names (optionally `=version`), as the local Docker provider accepts them. */
+const SYSTEM_PACKAGE = /^[a-z0-9][a-z0-9+.-]*(=[A-Za-z0-9.+:~-]+)?$/;
 
 export interface SandboxImageInputs {
   /** The platform's resource name; prefixes the registry repositories. */
@@ -27,8 +31,8 @@ export interface SandboxImageInputs {
   /** deploy/azure/sandbox. */
   readonly azureLayerContext: string;
   readonly appHostDirectory: string;
-  /** Isolated environment → AppHost-relative image folder; `*` is the base image (see prepareAzureConfig). */
-  readonly environments: Readonly<Record<string, string>>;
+  /** Environment → what its image is built from; `*` is the base image (see prepareAzureConfig). */
+  readonly environments: Readonly<Record<string, SandboxImageSource>>;
   readonly npmRegistry: string;
   readonly pipIndexUrl?: string | undefined;
   /** The stock runtime version installed in the image (the gateway's @github/copilot-sdk version). */
@@ -40,8 +44,10 @@ export interface SandboxImageBuild {
   readonly environment: string;
   readonly repository: string;
   readonly tag: string;
-  /** The environment's own image folder (absolute); absent for the base image. */
+  /** The environment's own image folder (absolute), if it has one. */
   readonly imageDirectory?: string;
+  /** System packages installed in a layer of their own (sorted). */
+  readonly system?: readonly string[];
 }
 
 export interface SandboxImagePlan {
@@ -95,18 +101,28 @@ export function planSandboxImages(inputs: SandboxImageInputs): SandboxImagePlan 
   );
   const layerHash = short(hashTree(inputs.azureLayerContext, () => true));
   const builds: SandboxImageBuild[] = [];
-  for (const [environment, folder] of Object.entries(inputs.environments).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [environment, source] of Object.entries(inputs.environments).sort(([a], [b]) => a.localeCompare(b))) {
     let imageDirectory: string | undefined;
     let environmentHash = "";
-    if (environment !== "*") {
-      imageDirectory = join(inputs.appHostDirectory, ...folder.split("/"));
+    if (environment !== "*" && source.folder) {
+      imageDirectory = join(inputs.appHostDirectory, ...source.folder.split("/"));
       if (!existsSync(join(imageDirectory, "Dockerfile")) || !statSync(imageDirectory).isDirectory()) {
-        throw new AzurePublishError(`Environment "${environment}" names image "${folder}", but ${join(imageDirectory, "Dockerfile")} does not exist.`);
+        throw new AzurePublishError(`Environment "${environment}" names image "${source.folder}", but ${join(imageDirectory, "Dockerfile")} does not exist.`);
       }
       environmentHash = short(hashTree(imageDirectory, () => true));
     }
-    const tag = createHash("sha256").update(`${baseHash}\0${environmentHash}\0${layerHash}`).digest("hex").slice(0, 16);
-    builds.push({ environment, repository: repositoryName(inputs.name, environment), tag, ...(imageDirectory ? { imageDirectory } : {}) });
+    const system = environment === "*" ? [] : [...new Set(source.system ?? [])].sort();
+    for (const pkg of system) {
+      if (!SYSTEM_PACKAGE.test(pkg)) throw new AzurePublishError(`Environment "${environment}" declares an invalid system package "${pkg}".`);
+    }
+    const tag = createHash("sha256").update(`${baseHash}\0${environmentHash}\0system=${system.join(",")}\0${layerHash}`).digest("hex").slice(0, 16);
+    builds.push({
+      environment,
+      repository: repositoryName(inputs.name, environment),
+      tag,
+      ...(imageDirectory ? { imageDirectory } : {}),
+      ...(system.length > 0 ? { system } : {}),
+    });
   }
   return { inputs, baseHash, builds };
 }
@@ -214,6 +230,29 @@ export async function pushSandboxImages(plan: SandboxImagePlan, context: PushCon
         throw new AzurePublishError(`Environment "${build.environment}" image must be built FROM ${CANONICAL_BASE_IMAGE}, so it keeps the platform's non-root execution, transport, and certificate-trust contract.`);
       }
       from = environmentTag;
+    }
+    if (build.system) {
+      await context.report(`Installing the "${build.environment}" environment's system packages`);
+      const systemTag = `managed-copilot-azure-system-${build.repository}:${build.tag}`;
+      const directory = mkdtempSync(join(tmpdir(), "mc-azure-system-"));
+      try {
+        // The same layer the local Docker provider builds for packages.system.
+        writeFileSync(
+          join(directory, "Dockerfile"),
+          [
+            `FROM ${from}`,
+            "USER root",
+            `RUN apt-get update && apt-get install -y --no-install-recommends ${build.system.join(" ")} && rm -rf /var/lib/apt/lists/*`,
+            "USER 10001:10001",
+            "",
+          ].join("\n"),
+        );
+        const layer = await run("docker", ["build", "--progress=plain", "--platform", PLATFORM, "-t", systemTag, directory], context.debug);
+        if (layer.code !== 0) throw failure(`Installing the "${build.environment}" environment's system packages (${build.system.join(", ")})`, layer);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+      from = systemTag;
     }
     const ref = `${context.loginServer}/${build.repository}:${build.tag}`;
     await context.report(`Building and pushing ${build.repository}:${build.tag}`);

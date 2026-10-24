@@ -2,9 +2,10 @@
  * Turns the normalized AppHost configuration into what the gateway enforces in Azure. Pure functions (unit tested):
  *
  * - `customizations` folders are copied into the gateway image, so their host paths become image paths.
- * - Isolated environments' `image` folders are built and pushed by `aspire deploy`; the gateway gets registry images.
- * - Webhooks that point at a local app (`http://localhost:<port>/...`) point at that app inside the Container Apps
- *   environment instead (`http://<app>/...`).
+ * - Isolated environments' `image` folders and `packages.system` are built into images and pushed by `aspire deploy`;
+ *   the gateway gets registry images.
+ * - Webhooks that point at a local app (`http://localhost:<port>/...`) point at that app's HTTPS address in the
+ *   Container Apps environment instead (`https://<app>.<environment domain>/...`), which stays inside the environment.
  * - A public deployment must say which GitHub accounts may use it.
  */
 import { isAbsolute, relative, sep } from "node:path";
@@ -13,9 +14,23 @@ import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
 /** Where the gateway image keeps the AppHost files it needs (customizations). */
 export const APPHOST_DIR_IN_IMAGE = "/opt/managed-copilot/apphost";
 
+/**
+ * The environment's domain, known only at runtime: the gateway's entrypoint (deploy/azure/src/lease/environment.ts)
+ * replaces it in MANAGED_COPILOT_CONFIG with CONTAINER_APP_ENV_DNS_SUFFIX.
+ */
+export const DNS_SUFFIX_PLACEHOLDER = "{{CONTAINER_APP_ENV_DNS_SUFFIX}}";
+
 /** A deployment problem the operator fixes in the AppHost; reported before anything is built or provisioned. */
 export class AzurePublishError extends Error {
   override readonly name = "AzurePublishError";
+}
+
+/** What one environment's sandbox image is built from, on top of the base image. */
+export interface SandboxImageSource {
+  /** AppHost-relative folder (POSIX separators) with a Dockerfile FROM the base image. */
+  readonly folder?: string;
+  /** Operator-declared system packages (`packages.system`), installed in a layer of their own. */
+  readonly system?: readonly string[];
 }
 
 export interface AzureGatewayConfig {
@@ -23,8 +38,8 @@ export interface AzureGatewayConfig {
   readonly config: ManagedCopilotConfig;
   /** AppHost-relative folders (POSIX separators) copied into the gateway image. */
   readonly customizations: readonly string[];
-  /** Isolated environment → AppHost-relative image folder; `*` is the base sandbox image for the others. */
-  readonly sandboxImages: Readonly<Record<string, string>>;
+  /** Environment → what its image is built from; `*` is the base sandbox image for every other environment. */
+  readonly sandboxImages: Readonly<Record<string, SandboxImageSource>>;
 }
 
 function appHostRelative(appHostDirectory: string, path: string, setting: string): string {
@@ -37,7 +52,7 @@ function appHostRelative(appHostDirectory: string, path: string, setting: string
 
 export function prepareAzureConfig(config: ManagedCopilotConfig, appHostDirectory: string): AzureGatewayConfig {
   const customizations = new Set<string>();
-  const sandboxImages: Record<string, string> = {};
+  const sandboxImages: Record<string, SandboxImageSource> = {};
   const environments: Record<string, ManagedCopilotConfig["environments"][string]> = {};
   for (const [name, environment] of Object.entries(config.environments)) {
     const next = { ...environment };
@@ -46,14 +61,14 @@ export function prepareAzureConfig(config: ManagedCopilotConfig, appHostDirector
       customizations.add(rel);
       next.customizations = `${APPHOST_DIR_IN_IMAGE}/${rel}`;
     }
-    if (environment.image) {
-      sandboxImages[name] = appHostRelative(appHostDirectory, environment.image, `environments.${name}.image`);
-      delete next.image;
-    }
+    const folder = environment.image ? appHostRelative(appHostDirectory, environment.image, `environments.${name}.image`) : undefined;
+    const system = [...new Set(environment.packages?.system ?? [])].sort();
+    if (folder || system.length > 0) sandboxImages[name] = { ...(folder ? { folder } : {}), ...(system.length > 0 ? { system } : {}) };
+    delete next.image;
     environments[name] = next;
   }
   const isolated = Object.values(config.environments).some((environment) => environment.type !== "shared") || (config.inline?.types ?? []).some((type) => type !== "shared");
-  if (isolated) sandboxImages["*"] = "";
+  if (isolated) sandboxImages["*"] = {};
   return { config: { ...config, environments }, customizations: [...customizations].sort(), sandboxImages };
 }
 
@@ -97,7 +112,10 @@ function isLoopback(url: URL): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1" || host.endsWith(".localhost");
 }
 
-/** Points loopback webhooks at the deployed app that serves that port. */
+/**
+ * Points loopback webhooks at the deployed app that serves that port, by its HTTPS address: plain HTTP between apps is
+ * redirected to HTTPS by the environment's ingress, and the app's public host name is the one it accepts.
+ */
 export function rewriteWebhooks(config: ManagedCopilotConfig, appsByPort: ReadonlyMap<number, string>): ManagedCopilotConfig {
   if (!config.webhooks) return config;
   const webhooks: NonNullable<ManagedCopilotConfig["webhooks"]> = {};
@@ -115,7 +133,7 @@ export function rewriteWebhooks(config: ManagedCopilotConfig, appsByPort: Readon
           "Deploy that app with publishApp(...) in the AppHost, or leave the webhook out when publishing.",
       );
     }
-    webhooks[name] = { ...hook, url: `http://${app}${url.pathname}${url.search}` };
+    webhooks[name] = { ...hook, url: `https://${app}.${DNS_SUFFIX_PLACEHOLDER}${url.pathname}${url.search}` };
   }
   return { ...config, webhooks };
 }

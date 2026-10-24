@@ -7,8 +7,9 @@ reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public U
 
 > **Status.** Everything below is implemented and validated offline (unit tests, container tests of the lease and the
 > images, `aspire publish` output compiled with `az bicep build`). It has **not yet been qualified on a live Azure
-> deployment**; the capability matrix marks what is pending. Until a capability passes, the gateway does not advertise
-> it in `/v1/info` and fails requests for it with `capability_unavailable`.
+> deployment**; the capability matrix marks what is pending. Capabilities whose backend is not ready (for example
+> isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
+> requests for them fail with `capability_unavailable` naming what is missing.
 
 ## What gets deployed
 
@@ -28,7 +29,7 @@ flowchart LR
   Client["SDK / CLI / browser"] -- "HTTPS + WSS" --> GW
   Client -- "HTTPS (IP allowlist)" --> Apps
   Apps -- "MANAGED_COPILOT_URL" --> GW
-  GW -- "webhooks http://<app>" --> Apps
+  GW -- "webhooks https://<app>.<domain>" --> Apps
   GW -- "data plane (managed identity)" --> SG
   GW -- "sandboxd (per-sandbox key)" --> SG
   GW --- NFS
@@ -107,8 +108,8 @@ const copilot = await ManagedCopilot.connect({ url: "https://copilot.<environmen
 ```
 
 Redeploying (`aspire deploy` again) builds a new revision of each app; the gateway's lease hands its data volume to the
-new revision (see "Durable state"). `aspire deploy --clear-cache` forgets cached deployment choices for the
-environment.
+new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again without the cached deployment choices
+(it asks for them again).
 
 ### Configuration and secrets
 
@@ -125,7 +126,8 @@ environment.
 
 Every AppHost secret parameter reaches the gateway as a Container Apps secret, and its `MANAGED_COPILOT_CONFIG` holds
 only `{ secretEnv }` references. Webhooks that point at a local app (`http://localhost:<port>/...`) are rewritten to that
-app inside the environment (`http://<app>/...`); a loopback webhook with no published app on that port fails the deploy
+app's HTTPS address (`https://<app>.<environment-domain>/...`; calls between apps stay inside the environment, and the
+gateway fills in the domain when it starts); a loopback webhook with no published app on that port fails the deploy
 with the fix.
 
 ### Publishing your own apps
@@ -171,11 +173,13 @@ customizations on an **Azure Files NFS 4.1** share mounted at `/data`.
   replica that loses the lease kills its gateway immediately. A waiting replica answers `503` (readiness fails, so it
   gets no traffic). A newer deployment (higher `MANAGED_COPILOT_LEASE_STAMP`, set per publish) asks the holder to hand
   over; an older one never takes the lease while a newer one waits; and if the newer replica never takes it, the old
-  holder reclaims it and refuses that deployment for 10 minutes instead of flapping. The demos' images use the same
-  supervisor for their own directories.
-- **Qualification.** `node /opt/managed-copilot/azure/dist/probe/main.js /data/.probe` (in the gateway container)
-  checks POSIX metadata, atomic rename, fsync, cross-process lock exclusion, SQLite WAL and rollback journals under
-  concurrent writers, and crash recovery, and prints a JSON report. *Pending: a run on the deployed share.*
+  holder reclaims it and refuses that deployment for 10 minutes instead of flapping. The gateway runs in its own
+  process group, and the lease is released only after every process in it (including the shared runtime) has exited.
+  The demos' images use the same supervisor for their own directories.
+- **Qualification.** `node /opt/managed-copilot/azure/dist/probe/main.js` (in the gateway container; `--dir <path>`
+  picks another directory than a fresh one under `/data/.probe`) checks POSIX metadata, atomic rename, fsync,
+  cross-process lock exclusion, SQLite WAL and rollback journals under concurrent writers, and crash recovery, and
+  prints a JSON report. *Pending: a run on the deployed share.*
 
 **Limits.** One gateway replica: no horizontal scale-out, and a handover (deploy, restart, or maintenance) makes the API
 unavailable for seconds to tens of seconds while the new replica takes the lease and starts. Durable actions, webhooks,
@@ -187,9 +191,11 @@ account; the default is LRS. Back up the share with Azure Files snapshots if you
 Isolated sessions run in **Azure Container Apps Sandboxes**: one microVM per session in the deployment's sandbox
 group (`platform/gateway/src/modules/sandbox/providers/azure`, selected with `MANAGED_COPILOT_SANDBOX_PROVIDER=azure`).
 
-- **Images.** `aspire deploy` builds the base sandbox image, each isolated environment's own `image` folder FROM it, and
-  an Azure layer (`deploy/azure/sandbox`) on top, for `linux/amd64`, tagged by content and pushed to the registry. The
-  gateway imports each into a disk image on first use (`prepare`), pinned per sandbox.
+- **Images.** `aspire deploy` builds the base sandbox image, each isolated environment's own `image` folder FROM it, its
+  `packages.system` in a layer of their own (as `aspire run` does), and an Azure layer (`deploy/azure/sandbox`) on top,
+  for `linux/amd64`, tagged by content and pushed to the registry. The gateway imports each into a disk image when it
+  starts (`prepare`), pinned per sandbox. An environment that declares system packages never falls back to the base
+  image.
 - **Per-session isolation.** Each sandbox is its own microVM. sandboxd starts as root and runs every workload process as
   uid 10001 through `setpriv` with `no_new_privs` and empty capability sets; the image has no setuid files.
 - **Persistent state.** Three data disks per sandbox (`/workspace`, `/home/agent`, `/var/lib/managed-copilot`). The
@@ -211,7 +217,7 @@ group (`platform/gateway/src/modules/sandbox/providers/azure`, selected with `MA
 | Gateway API, HTTPS/WSS ingress, GitHub sign-in, access rules | Yes (HTTP on localhost) | Implemented; pending live qualification |
 | Shared sessions (stock shared runtime) | Yes | Implemented (container verified locally); pending live qualification |
 | Durable state across restarts and redeploys, single writer | Yes (local disk) | Implemented (NFS + lease; lease verified in containers); pending NFS probe run |
-| Durable actions, webhooks, schedules | Yes | Implemented; webhooks to published apps over the environment network; pending live qualification |
+| Durable actions, webhooks, schedules | Yes | Implemented; webhooks to published apps over HTTPS inside the environment; pending live qualification |
 | Isolated sessions (`network: false`) | Yes (Docker) | Implemented (ACA Sandboxes); pending live qualification |
 | Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Not yet: `capability_unavailable` (no egress proxy on Azure) |
 | Files and artifacts in sandboxes | Yes | Implemented with isolated sessions; pending live qualification |
@@ -238,7 +244,6 @@ Everything lives in the resource group you deployed to:
 
 ```powershell
 az group delete --name managed-copilot-dev --yes
-aspire deploy --clear-cache   # optional: forget the cached deployment choices
 ```
 
 Deleting the group deletes the sandbox group (with its sandboxes and disks), the NFS share (all platform state), the

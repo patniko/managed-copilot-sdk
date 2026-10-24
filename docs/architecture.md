@@ -560,17 +560,21 @@ capability matrix in [deployment.md](deployment.md). Not yet qualified on a live
   are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist). The C# integration in
   `deploy/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
   revision mode, IP rules). Publishing refuses an open gateway: access rules come from the AppHost or from
-  `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port.
+  `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port, by
+  its HTTPS address in the environment (`https://<app>.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/...`, filled in by the
+  gateway's entrypoint at start).
 - **Durable state.** The gateway's data directory is `/data` on the NFS share (SQLite needs POSIX locks; SMB failed in
   the earlier Copilot SDK Aspire deployment). One replica, Single revision mode, and a lease supervisor as the
   entrypoint (`deploy/azure/src/lease`): an exclusive SQLite lock on `/data/.lease/gateway.lease` held for the
   process's life, a fencing generation with a 5 s heartbeat (losing it kills the gateway), 503 while waiting, and
-  handover to strictly newer deployments (`MANAGED_COPILOT_LEASE_STAMP`). The demo images use the same supervisor.
+  handover to strictly newer deployments (`MANAGED_COPILOT_LEASE_STAMP`). The gateway runs in its own process group;
+  the lease is released only after every process in it (the shared runtime included) has exited. The demo images use
+  the same supervisor.
 - **Isolated placement.** Azure Container Apps Sandboxes (`Microsoft.App/sandboxGroups`): one microVM per sandbox,
   three data disks per sandbox that outlive compute (stop deletes the microVM; resume recreates it over the disks),
   sandboxd reached through the sandbox's port URL with its per-sandbox key, and a deny-all platform egress policy.
-  `aspire deploy` builds and pushes content-tagged sandbox images (base, environment images, and the
-  `deploy/azure/sandbox` layer that runs the entrypoint as root and seeds empty disks) and creates the group, its VNet
+  `aspire deploy` builds and pushes content-tagged sandbox images (base, environment images, a `packages.system` layer,
+  and the `deploy/azure/sandbox` layer that runs the entrypoint as root and seeds empty disks) and creates the group, its VNet
   connection, a registry pull identity, and the gateway's identity with only SandboxGroup Data Owner on the group.
   The egress proxy is not deployed to Azure yet, so environments that need network access or vault credentials fail
   with `capability_unavailable` there.
