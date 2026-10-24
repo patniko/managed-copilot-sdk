@@ -214,6 +214,8 @@ export class CertificateAuthority {
     this.certificate = new X509Certificate(material.certPem);
     this.#caKey = createPrivateKey(material.keyPem);
     if (!this.certificate.ca) throw new Error("The egress CA certificate is not a CA certificate");
+    // Leaf certificates are signed as ecdsa-with-SHA256, so an RSA CA would mint certificates no client accepts.
+    if (this.#caKey.asymmetricKeyType !== "ec") throw new Error(`The egress CA must use an ECDSA key (P-256 recommended), not ${this.#caKey.asymmetricKeyType ?? "an unknown key type"}`);
     if (!this.certificate.checkPrivateKey(this.#caKey)) throw new Error("The egress CA private key does not match its certificate");
     this.certPem = this.certificate.toString();
     // Leaf authority key identifiers must equal the CA's own subject key identifier, whichever method produced it.

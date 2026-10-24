@@ -7,6 +7,7 @@
 # Build from platform/sandbox after `pnpm build` (the gateway does this automatically):
 #   docker build -f image/Dockerfile --build-arg NPM_REGISTRY=<npm config get registry> \
 #     -t ghcr.io/patniko/managed-copilot-sandbox:0.1.0 .
+# NPM_REGISTRY and PIP_INDEX_URL must not contain credentials (the build refuses them).
 #
 # Customer images extend it and must keep its non-root execution, transport, and certificate-trust contract:
 #   FROM ghcr.io/patniko/managed-copilot-sandbox:0.1.0
@@ -32,9 +33,15 @@ RUN apt-get update \
 
 # Session-time npm installs use the operator's registry by default (npm's builtin config is read regardless of the
 # per-session prefix), and pip uses the operator's index when one is given. Network policy still applies: the
-# registry and index hosts must be allowed for the session.
+# registry and index hosts must be allowed for the session. Neither URL may carry credentials: this configuration is
+# readable by every workload, and build arguments are recorded in the image history.
+COPY image/check-registry-url.sh /tmp/check-registry-url.sh
 RUN test -n "${NPM_REGISTRY}" || { echo "Pass --build-arg NPM_REGISTRY=<registry URL> (npm config get registry)." >&2; exit 1; } \
- && echo "registry=${NPM_REGISTRY}" >> /usr/local/lib/node_modules/npm/npmrc \
+ && sed -i 's/\r$//' /tmp/check-registry-url.sh \
+ && sh /tmp/check-registry-url.sh NPM_REGISTRY "${NPM_REGISTRY}" \
+ && sh /tmp/check-registry-url.sh PIP_INDEX_URL "${PIP_INDEX_URL}" \
+ && rm /tmp/check-registry-url.sh \
+ && printf 'registry=%s\n' "${NPM_REGISTRY}" >> /usr/local/lib/node_modules/npm/npmrc \
  && if [ -n "${PIP_INDEX_URL}" ]; then printf '[global]\nindex-url = %s\n' "${PIP_INDEX_URL}" > /etc/pip.conf; fi
 
 # The stock headless runtime the Copilot SDK spawns by default (@github/copilot-sdk-<platform>/prebuilds/.../copilot-runtime).
