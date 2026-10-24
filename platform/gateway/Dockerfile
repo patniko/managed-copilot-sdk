@@ -27,10 +27,14 @@ RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; e
  && pnpm fetch
 COPY packages/protocol/ packages/protocol/
 COPY platform/gateway/ platform/gateway/
+COPY deploy/azure/ deploy/azure/
 # The gateway's tests use the SDK (a dev dependency); pnpm only needs its manifest to resolve the workspace.
 COPY packages/sdk/package.json packages/sdk/
-RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/gateway \
- && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/gateway run build
+RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure \
+ && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure run build \
+ && mkdir -p /out-azure \
+ && cp deploy/azure/package.json /out-azure/ && cp -r deploy/azure/dist /out-azure/ \
+ && find /out-azure -name '*.map' -delete
 # A production-only install of the built gateway in its own workspace root (/out), with only the target platform's
 # native packages. It reuses the fetched store and the lockfile, so nothing is resolved again. Install scripts are
 # skipped because they would probe the build platform; native packages ship as per-platform prebuilt packages, and
@@ -63,4 +67,15 @@ ENV NODE_ENV=production \
     MANAGED_COPILOT_DATA_DIR=/data
 EXPOSE 8080
 ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/main.js"]
+
+# Azure Container Apps: the gateway's data directory is an NFS share that two replicas can briefly share (revision
+# swaps, platform maintenance), so the lease supervisor runs the gateway only while this replica holds the share's
+# single-writer lease. The storage probe qualifies the mount (`node /opt/managed-copilot/azure/dist/probe/main.js`).
+FROM gateway AS azure
+COPY --from=build /out-azure /opt/managed-copilot/azure
+# /data is the deployment's persistent volume; the lease supervisor and the gateway both use it.
+ENV MANAGED_COPILOT_MODE=azure \
+    MANAGED_COPILOT_DATA_DIR=/data
+ENTRYPOINT ["/usr/bin/tini", "--", "node", "/opt/managed-copilot/azure/dist/lease/main.js", "--"]
 CMD ["node", "dist/main.js"]

@@ -1,4 +1,5 @@
-// Runs the gateway only while holding the single-writer lease on its data directory.
+// Runs the gateway (or an app with state on the shared volume) only while holding the single-writer lease on its data
+// directory.
 //
 // Standby: the supervisor answers the gateway's port with 503 (so readiness fails and no traffic arrives) and keeps
 // trying to take the lease. Holding: it starts the gateway as a child process and renews the lease. A heartbeat that
@@ -44,13 +45,15 @@ export const DEFAULT_TIMINGS: SupervisorTimings = {
 };
 
 export interface SupervisorOptions {
-  /** The gateway's data directory; the lease lives in `<dataDir>/.lease/`. */
+  /** The supervised process's data directory; the lease lives in `<dataDir>/.lease/`. */
   readonly dataDir: string;
   readonly identity: LeaseIdentity;
-  /** Gateway command line, e.g. ["node", "dist/main.js"]. */
+  /** Command line of the supervised process, e.g. ["node", "dist/main.js"]. */
   readonly command: readonly string[];
-  /** The gateway's port. The standby server answers on it while this instance does not hold the lease. */
+  /** Its port. The standby server answers on it while this instance does not hold the lease. */
   readonly port: number;
+  /** What the supervised process is called in logs and standby answers (default "gateway"). */
+  readonly subject?: string;
   readonly host?: string;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
@@ -90,6 +93,7 @@ const consoleLogger: Logger = (level, message, fields) => {
 
 export class Supervisor {
   readonly #options: SupervisorOptions;
+  readonly #subject: string;
   readonly #timings: SupervisorTimings;
   readonly #log: Logger;
   readonly #leaseFile: string;
@@ -100,7 +104,7 @@ export class Supervisor {
   #child: ChildProcess | undefined;
   #childExit: Promise<number> | undefined;
   #standby: Server | undefined;
-  #standbyReason = "waiting for the previous gateway instance to stop";
+  #standbyReason: string;
   #timer: NodeJS.Timeout | undefined;
   #refused = new Map<string, number>();
   #handedOverAt = 0;
@@ -110,6 +114,8 @@ export class Supervisor {
 
   constructor(options: SupervisorOptions) {
     this.#options = options;
+    this.#subject = options.subject ?? "gateway";
+    this.#standbyReason = `waiting for the previous ${this.#subject} instance to stop`;
     this.#timings = { ...DEFAULT_TIMINGS, ...options.timings };
     this.#log = options.log ?? consoleLogger;
     const leaseDir = join(options.dataDir, ".lease");
@@ -130,7 +136,7 @@ export class Supervisor {
   /** Starts supervision; resolves with the process exit code once the supervisor has stopped. */
   async run(): Promise<number> {
     mkdirSync(this.#requestsDir, { recursive: true });
-    await this.#enterStandby("waiting for the previous gateway instance to stop");
+    await this.#enterStandby(`waiting for the previous ${this.#subject} instance to stop`);
     return this.#finished;
   }
 
@@ -205,7 +211,7 @@ export class Supervisor {
     } catch (error) {
       if (error instanceof LeaseStorageError) {
         this.#log("error", error.message);
-        this.#standbyReason = "the data volume does not support the locks the gateway needs";
+        this.#standbyReason = `the data volume does not support the locks the ${this.#subject} needs`;
         await this.#closeStandby();
         this.#removeRequest();
         this.#finish(EXIT.storage);
@@ -220,7 +226,7 @@ export class Supervisor {
     if (handingOverSince) {
       // Nobody newer kept the lease after we handed it over: serve again, and do not hand over to them for a while.
       if (this.#handedOverTo !== undefined) this.#refused.set(this.#handedOverTo, Date.now() + this.#timings.refuseAfterReclaimMs);
-      this.#log("warn", "No newer gateway kept the lease after the handover; reclaiming it", { generation: lease.generation, refused: this.#handedOverTo });
+      this.#log("warn", `No newer ${this.#subject} kept the lease after the handover; reclaiming it`, { generation: lease.generation, refused: this.#handedOverTo });
       this.#handedOverAt = 0;
       this.#handedOverTo = undefined;
     }
@@ -275,7 +281,7 @@ export class Supervisor {
     if (this.#standby) return;
     const server = createServer((req: IncomingMessage, res: ServerResponse) => {
       const body = JSON.stringify({
-        error: { code: "capability_unavailable", message: `The gateway is not serving on this instance yet: ${this.#standbyReason}. Retry shortly.` },
+        error: { code: "capability_unavailable", message: `The ${this.#subject} is not serving on this instance yet: ${this.#standbyReason}. Retry shortly.` },
         status: "standby",
       });
       res.writeHead(503, { "content-type": "application/json", "retry-after": "5", "cache-control": "no-store", connection: "close" });
@@ -309,8 +315,8 @@ export class Supervisor {
     this.#state = "starting";
     await this.#closeStandby();
     const [command, ...args] = this.#options.command;
-    if (!command) throw new Error("No gateway command was given.");
-    this.#log("info", "Took the single-writer lease; starting the gateway", { generation: lease.generation, holder: this.#options.identity.holder });
+    if (!command) throw new Error(`No ${this.#subject} command was given.`);
+    this.#log("info", `Took the single-writer lease; starting the ${this.#subject}`, { generation: lease.generation, holder: this.#options.identity.holder });
     const child = spawn(command, args, {
       cwd: this.#options.cwd,
       env: { ...(this.#options.env ?? process.env), MANAGED_COPILOT_LEASE_GENERATION: String(lease.generation) },
@@ -320,7 +326,7 @@ export class Supervisor {
     this.#childExit = new Promise<number>((resolve) => {
       child.once("exit", (code, signal) => resolve(code ?? (signal ? 128 + (signalNumbers[signal] ?? 15) : 1)));
       child.once("error", (error) => {
-        this.#log("error", "The gateway process could not start", { error: error.message });
+        this.#log("error", `The ${this.#subject} process could not start`, { error: error.message });
         resolve(1);
       });
     });
@@ -333,7 +339,7 @@ export class Supervisor {
     if (this.#child !== child) return;
     this.#child = undefined;
     if (this.#state !== "serving" && this.#state !== "starting") return; // stop, handover, and fencing handle their own exits
-    this.#log(code === 0 ? "info" : "error", "The gateway exited; releasing the lease", { code });
+    this.#log(code === 0 ? "info" : "error", `The ${this.#subject} exited; releasing the lease`, { code });
     this.#clearTimer();
     this.#releaseLease();
     this.#finish(code);
@@ -344,7 +350,7 @@ export class Supervisor {
     try {
       this.#lease!.heartbeat();
     } catch (error) {
-      this.#log("error", "Lost the single-writer lease; stopping the gateway immediately", { error: (error as Error).message });
+      this.#log("error", `Lost the single-writer lease; stopping the ${this.#subject} immediately`, { error: (error as Error).message });
       await this.#fence("the lease could not be renewed");
       return;
     }
@@ -358,7 +364,7 @@ export class Supervisor {
 
   async #handOver(request: TakeoverRequest): Promise<void> {
     this.#state = "handing-over";
-    this.#log("info", "A newer deployment is waiting; handing the gateway over", { to: request.holder, stamp: request.stamp, generation: this.#lease?.generation });
+    this.#log("info", `A newer deployment is waiting; handing the ${this.#subject} over`, { to: request.holder, stamp: request.stamp, generation: this.#lease?.generation });
     await this.#stopChild();
     this.#releaseLease();
     this.#handedOverAt = Date.now();
@@ -380,7 +386,7 @@ export class Supervisor {
     this.#releaseLease();
     this.#removeRequest();
     await this.#closeStandby();
-    this.#log("error", "Fenced: the gateway was stopped", { reason });
+    this.#log("error", `Fenced: the ${this.#subject} was stopped`, { reason });
     this.#finish(EXIT.fenced);
   }
 
@@ -392,7 +398,7 @@ export class Supervisor {
     const exited = this.#childExit!;
     const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), this.#timings.stopGraceMs).unref());
     if ((await Promise.race([exited, timeout])) === "timeout") {
-      this.#log("warn", "The gateway did not stop in time; killing it", { graceMs: this.#timings.stopGraceMs });
+      this.#log("warn", `The ${this.#subject} did not stop in time; killing it`, { graceMs: this.#timings.stopGraceMs });
       child.kill("SIGKILL");
       await exited;
     }

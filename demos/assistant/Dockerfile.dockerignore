@@ -7,9 +7,12 @@
 !packages/protocol/**
 !packages/sdk/**
 !demos/assistant/**
+!deploy/azure/**
 **/node_modules
 **/dist
 **/*.tsbuildinfo
 **/.data
 **/test
 demos/assistant/docs
+deploy/azure/hosting
+deploy/azure/sandbox

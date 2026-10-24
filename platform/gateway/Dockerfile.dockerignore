@@ -7,7 +7,11 @@
 !packages/protocol/**
 !packages/sdk/package.json
 !platform/gateway/**
+!deploy/azure/**
 **/node_modules
 **/dist
 **/*.tsbuildinfo
 platform/gateway/test
+deploy/azure/test
+deploy/azure/hosting
+deploy/azure/sandbox

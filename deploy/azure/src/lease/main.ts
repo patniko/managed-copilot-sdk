@@ -32,6 +32,7 @@ const supervisor = new Supervisor({
   identity: { holder, stamp: env.MANAGED_COPILOT_LEASE_STAMP ?? "0" },
   command,
   port,
+  subject: env.MANAGED_COPILOT_MODE === "azure" ? "gateway" : "app",
   ...(env.HOST ? { host: env.HOST } : {}),
 });
 

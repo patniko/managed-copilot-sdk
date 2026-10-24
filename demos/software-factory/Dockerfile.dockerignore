@@ -7,9 +7,12 @@
 !packages/protocol/**
 !packages/sdk/**
 !demos/software-factory/**
+!deploy/azure/**
 **/node_modules
 **/dist
 **/*.tsbuildinfo
 **/.data
 **/test
 demos/software-factory/customizations
+deploy/azure/hosting
+deploy/azure/sandbox
