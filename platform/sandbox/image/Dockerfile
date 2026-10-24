@@ -49,12 +49,14 @@ RUN mkdir -p /opt/managed-copilot/runtime \
  && chmod 0755 /usr/local/bin/copilot-runtime \
  && npm cache clean --force
 
-# Workload identity and the layout each session's volumes are pre-populated from.
+# Workload identity and the layout each session's volumes are pre-populated from. No file keeps a setuid/setgid bit:
+# workload processes also run with no_new_privs, but the image should not offer an escalation path either way.
 RUN groupadd --gid 10001 agent \
  && useradd --uid 10001 --gid 10001 --home-dir /home/agent --create-home --shell /bin/bash agent \
  && mkdir -p /workspace/outputs /opt/managed-copilot/customizations /var/lib/managed-copilot/runtime /var/lib/managed-copilot/sandboxd \
  && chown -R 10001:10001 /workspace /var/lib/managed-copilot/runtime \
- && chmod 0700 /var/lib/managed-copilot/runtime /var/lib/managed-copilot/sandboxd
+ && chmod 0700 /var/lib/managed-copilot/runtime /var/lib/managed-copilot/sandboxd \
+ && find / -xdev -type f -perm /6000 -exec chmod a-s {} +
 USER 10001:10001
 RUN python3 -m venv /home/agent/.venv \
  && mkdir -p /home/agent/.npm-global/bin /home/agent/.local/bin

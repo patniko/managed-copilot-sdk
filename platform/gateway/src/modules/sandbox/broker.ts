@@ -354,6 +354,18 @@ export class InferenceBroker {
         resolve();
       }),
     );
+    // Listen from the start: frames that arrive before the response start is acknowledged are buffered, then
+    // forwarded in order.
+    const early: { data: Buffer; binary: boolean }[] = [];
+    let forwarding = false;
+    const forward = (data: Buffer, binary: boolean) => {
+      void this.#respond(requestId, exchange, "llmInference.httpResponseChunk", binary ? { data: data.toString("base64"), binary: true } : { data: data.toString("utf8") });
+    };
+    socket.on("message", (data, isBinary) => {
+      const buffer = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
+      if (forwarding) forward(buffer, isBinary);
+      else early.push({ data: buffer, binary: isBinary });
+    });
     await new Promise<void>((resolve, reject) => {
       socket.once("open", () => resolve());
       socket.once("error", reject);
@@ -365,10 +377,8 @@ export class InferenceBroker {
       socket.once("close", () => reject(failure ?? new Error("WebSocket closed during the upgrade")));
     });
     await this.#respond(requestId, exchange, "llmInference.httpResponseStart", { status: 101, headers: {} });
-    socket.on("message", (data, isBinary) => {
-      const buffer = Array.isArray(data) ? Buffer.concat(data) : Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-      void this.#respond(requestId, exchange, "llmInference.httpResponseChunk", isBinary ? { data: buffer.toString("base64"), binary: true } : { data: buffer.toString("utf8") });
-    });
+    forwarding = true;
+    for (const frame of early.splice(0)) forward(frame.data, frame.binary);
     // Each request chunk is one runtime message, sent with its original frame type.
     void (async () => {
       while (!exchange.cancelled && socket.readyState === WebSocket.OPEN) {

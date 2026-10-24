@@ -33,6 +33,20 @@ function sendError(res: ServerResponse, error: unknown, log: Log): void {
   sendJson(res, STATUS[code] ?? 500, { error: { code, message } });
 }
 
+function uploadLength(req: IncomingMessage): number | undefined {
+  const length = req.headers["content-length"] === undefined ? undefined : Number(req.headers["content-length"]);
+  if (length !== undefined && (!Number.isFinite(length) || length < 0)) throw new AgentError("invalid_request", "Invalid Content-Length.");
+  if (length !== undefined && length > LIMITS.uploadBytes) throw new AgentError("invalid_request", `Uploads are limited to ${LIMITS.uploadBytes} bytes.`);
+  return length;
+}
+
+/** Runtime-state imports stage under a gateway-chosen random name. */
+function stagingName(url: URL): string {
+  const staging = url.searchParams.get("staging") ?? "";
+  if (!/^[0-9a-f]{16}$/.test(staging)) throw new AgentError("invalid_request", "staging must be 16 lowercase hex characters.");
+  return staging;
+}
+
 async function readJson<T>(req: IncomingMessage, limit = 64 * 1024 * 1024): Promise<T> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -103,15 +117,30 @@ export function createSandboxdServer(options: ServerOptions): Server {
         return;
       case `PUT ${ROUTES.fileContent}`: {
         const relative = normalizeWorkspacePath(url.searchParams.get("path"));
-        const length = req.headers["content-length"] === undefined ? undefined : Number(req.headers["content-length"]);
-        if (length !== undefined && (!Number.isFinite(length) || length < 0)) throw new AgentError("invalid_request", "Invalid Content-Length.");
-        if (length !== undefined && length > LIMITS.uploadBytes) throw new AgentError("invalid_request", `Uploads are limited to ${LIMITS.uploadBytes} bytes.`);
+        const length = uploadLength(req);
         const controller = new AbortController();
         req.on("aborted", () => controller.abort());
         const entry = await agent.writeFile(relative, req, { overwrite: url.searchParams.get("overwrite") !== "false", ...(length !== undefined ? { expectedBytes: length } : {}), signal: controller.signal });
         sendJson(res, 201, entry);
         return;
       }
+      case `PUT ${ROUTES.runtimeImportContent}`: {
+        const staging = stagingName(url);
+        const relative = normalizeWorkspacePath(url.searchParams.get("path"));
+        const length = uploadLength(req);
+        const controller = new AbortController();
+        req.on("aborted", () => controller.abort());
+        sendJson(res, 201, await agent.writeImport(staging, relative, req, { ...(length !== undefined ? { expectedBytes: length } : {}), signal: controller.signal }));
+        return;
+      }
+      case `POST ${ROUTES.runtimeImportCommit}`:
+        await agent.commitImport(stagingName(url), url.searchParams.get("sessionId") ?? "");
+        sendJson(res, 200, {});
+        return;
+      case `POST ${ROUTES.runtimeImportAbort}`:
+        await agent.abortImport(stagingName(url));
+        sendJson(res, 200, {});
+        return;
       case `POST ${ROUTES.outputsManifest}`:
         sendJson(res, 200, await agent.outputsManifest());
         return;

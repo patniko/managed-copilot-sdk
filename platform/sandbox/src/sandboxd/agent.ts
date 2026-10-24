@@ -8,7 +8,7 @@ import type { FileEntry, SandboxdStatus, SandboxOutputsManifest, SandboxSetupRec
 import { LIMITS, PATHS, SANDBOX_GID, SANDBOX_RUNTIME_PORT, SANDBOX_UID } from "../shared/constants.js";
 import type { Log } from "../shared/log.js";
 import { PathError, type PathErrorCode } from "../shared/paths.js";
-import { redact, type Identity } from "./exec.js";
+import { asWorkload, redact, type Identity } from "./exec.js";
 import { runtimeEnvironment, secretValues, workloadEnvironment, type EnvironmentInput } from "./env.js";
 import { RuntimeSupervisor } from "./runtime.js";
 import { emptyRecord, runSetup } from "./setup.js";
@@ -183,6 +183,21 @@ export class SandboxAgent {
     return JSON.parse(await this.#worker(["list", "workspace", relative, recursive ? "1" : "0", String(LIMITS.listEntries)])) as FileEntry[];
   }
 
+  /** Writes one file of a runtime-state import into its staging directory under COPILOT_HOME (promotion). */
+  async writeImport(staging: string, relative: string, body: Readable, options: { expectedBytes?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
+    const args = ["write", "runtime-import", `${staging}/${relative}`, "1", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
+    return JSON.parse(await this.#worker(args, body, options.signal)) as FileEntry & { sha256: string };
+  }
+
+  /** Replaces `session-state/<sessionId>` with a staged import. */
+  async commitImport(staging: string, sessionId: string): Promise<void> {
+    await this.#worker(["import-commit", "runtime-import", staging, sessionId]);
+  }
+
+  async abortImport(staging: string): Promise<void> {
+    await this.#worker(["import-abort", "runtime-import", staging]);
+  }
+
   /** Hashes the publishable files under /workspace/outputs as the workload identity. */
   async outputsManifest(): Promise<SandboxOutputsManifest> {
     const { count, fileBytes, totalBytes } = LIMITS.artifacts;
@@ -236,11 +251,10 @@ export class SandboxAgent {
 
   #spawnWorker(args: readonly string[]) {
     // The worker enters /workspace itself, after dropping to the workload identity.
-    return spawn(process.execPath, [WORKER, ...args], {
-      cwd: "/",
+    const target = asWorkload(IDENTITY, "/", process.execPath, [WORKER, ...args]);
+    return spawn(target.command, target.args, {
+      cwd: target.cwd,
       env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: PATHS.home },
-      uid: IDENTITY.uid,
-      gid: IDENTITY.gid,
       stdio: ["pipe", "pipe", "pipe"],
     });
   }
