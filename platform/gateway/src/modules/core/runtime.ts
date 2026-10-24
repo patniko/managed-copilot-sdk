@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { Logger } from "../../log.js";
 import type { UpstreamInfo } from "./contracts.js";
-import { RpcEndpoint, RpcError, streamTransport, type IncomingRequestContext, type MessageTransport } from "./rpc.js";
+import { RpcEndpoint, RpcError, streamTransport, type IncomingRequestContext, type MessageTransport, type RequestOptions } from "./rpc.js";
 
 /** Minimum and maximum protocol versions this gateway relays (SDK 1.0.26 speaks version 3). */
 export const MIN_PROTOCOL_VERSION = 3;
@@ -78,7 +78,7 @@ export class RuntimeUpstream {
     }
   }
 
-  request<T = unknown>(method: string, params?: unknown, options?: { signal?: AbortSignal }): Promise<T> {
+  request<T = unknown>(method: string, params?: unknown, options?: RequestOptions): Promise<T> {
     return this.endpoint.request<T>(method, params, options);
   }
 

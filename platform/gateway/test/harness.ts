@@ -265,6 +265,8 @@ export class FakeRuntime {
         return { success: true };
       case "session.getMessages":
         return { events: session?.events ?? [] };
+      case "session.eventLog.read":
+        return { events: session?.events ?? [], cursor: `cursor-${session?.events.length ?? 0}` };
       case "session.detach":
         return { success: true };
       case "session.delete":
@@ -322,6 +324,8 @@ export class FakeSandboxes {
   /** The backend's readiness, as the real service reports it. */
   available = true;
   failCreate: Error | undefined;
+  /** Fails the next `prepareSessionParams` (test hook). */
+  failNextPrepare: Error | undefined;
 
   constructor(private readonly runtime: FakeRuntime) {}
 
@@ -361,6 +365,9 @@ export class FakeSandboxes {
       },
       prepareSessionParams: async (method: string, params: Record<string, unknown>) => {
         this.log.push({ op: `prepare ${method}`, sessionId, detail: params });
+        const failure = this.failNextPrepare;
+        this.failNextPrepare = undefined;
+        if (failure) throw failure;
         const { gitHubToken: _token, gitHubTokenProviderRegistrationId: _registration, agent, ...rest } = params;
         if (typeof agent === "string") deferred.set(sessionId, agent);
         return rest;

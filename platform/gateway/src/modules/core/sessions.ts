@@ -122,20 +122,34 @@ interface LiveSession {
   moves: number;
   /** Event IDs history reads must not return (loaded from the ledger on first use). */
   hidden: Set<string> | undefined;
-  /** After an aborted, sealed cutover: the source, whose output for this session is a handoff artifact until resumed. */
-  sealedSource: RuntimeUpstream | undefined;
+  /**
+   * After an aborted, sealed cutover: the source, whose output for this session is a handoff until it answers the
+   * session's next resume there (after its answers to the sealing calls).
+   */
+  sealedSource: { readonly upstream: RuntimeUpstream; readonly settled: Promise<void> } | undefined;
 }
 
 interface InflightWait {
   fenced: boolean;
-  sealed: boolean;
+  readonly signal: AbortSignal;
+  /** Set at the seal: the call completes from the owner's events unless the source's reply shows its turn ended. */
+  held: HeldCompletion | undefined;
 }
 
+/** A `sendAndWait` that a seal caught in flight, completed like the stock request-owned completion by the owner. */
 interface HeldCompletion {
-  readonly messageId: unknown;
-  response: unknown;
+  readonly promise: Promise<unknown>;
   readonly resolve: (value: unknown) => void;
   readonly reject: (error: unknown) => void;
+  /** From the source's handoff reply. */
+  messageId: unknown;
+  seed: unknown;
+  /** The owner's last root `assistant.message` after the seal. */
+  latest: unknown;
+  /** The owner's first root completion after the seal, kept until the source's reply has arrived. */
+  outcome: { readonly aborted: boolean; readonly completionEventId: unknown } | { readonly error: RpcError } | undefined;
+  /** The source's reply arrived and was a handoff (aborted, or failed): the outcome completes the call. */
+  replied: boolean;
 }
 
 interface BufferedNotification {
@@ -148,8 +162,15 @@ interface CutoverState {
   readonly source: RuntimeUpstream;
   readonly priorState: SessionState;
   fenced: boolean;
-  /** Set by the first `session.suspend` / `sessions.close` on the source: what it sends afterwards is a handoff artifact. */
+  /** Set by the first `session.suspend` / `sessions.close` on the source. */
   sealed: boolean;
+  /**
+   * A sealing call was answered. Until then the source's output is a handoff only if the suspend caused it (the rest
+   * was already on its way); from then on, all of it is.
+   */
+  settled: boolean;
+  /** The sealing calls (an aborted cutover resumes its source only after they settled). */
+  readonly sealing: Promise<unknown>[];
   /** Genuine source notifications between the fence and the seal, delivered on commit or abort. */
   readonly buffered: BufferedNotification[];
   /** Destination notifications before commit, delivered after the buffered source ones. */
@@ -170,10 +191,29 @@ interface CutoverState {
 interface NotificationOrigin {
   readonly generation: number;
   readonly placement: Placement;
+  /** Emitted by the source before the seal: it never completes a call the seal caught. */
+  readonly beforeSeal?: boolean;
 }
 
 /** Thrown inside dispatch when a placement cutover moved the session after the request was admitted. */
 const MOVED = Symbol("moved");
+
+/**
+ * What a runtime emits because `session.suspend` / `sessions.close` interrupted the session, seen on the wire of runtime
+ * 1.0.103 (several are internal types the SDK does not list); an aborted `session.idle` counts too.
+ */
+const HANDOFF_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "agent.interrupted",
+  "abort",
+  "external_tool.completed",
+  "model.call_finished",
+  "model.telemetry",
+  "model.turn_failed",
+  "model.turn_ended",
+  "assistant.turn_end",
+  "session.usage_checkpoint",
+  "session.shutdown",
+]);
 
 /** Session configuration calls: set again on the new owner when a cutover moved the session while they ran. */
 const CONFIG_METHODS: ReadonlySet<string> = new Set([
@@ -184,6 +224,9 @@ const CONFIG_METHODS: ReadonlySet<string> = new Set([
   "session.agent.select",
   "session.agent.deselect",
 ]);
+
+/** Reads of a session's event history (`{ events }`): hidden handoff events are filtered and history origin scrubbed. */
+const HISTORY_METHODS: ReadonlySet<string> = new Set(["session.getMessages", "session.eventLog.read"]);
 
 /** Runtime → client requests bound to a session and the attachment flag that answers them. */
 const CLIENT_REQUESTS: Record<string, keyof Attachment | undefined> = {
@@ -414,7 +457,7 @@ export class SessionManager implements SessionsService {
     for (;;) {
       try {
         const result = await this.#onOwner(live, live.placement, (upstream) => upstream.request<T>(method, { ...params, sessionId }));
-        return method === "session.getMessages" ? this.#withoutHidden(live, result) : result;
+        return HISTORY_METHODS.has(method) ? this.#withoutHidden(live, result) : result;
       } catch (error) {
         // Service calls carry no placement-specific admission: send them where the session lives now.
         if (error !== MOVED) throw error;
@@ -583,6 +626,8 @@ export class SessionManager implements SessionsService {
       priorState: current.state,
       fenced: false,
       sealed: false,
+      settled: false,
+      sealing: [],
       buffered: [],
       destinationBuffer: [],
       replies: [],
@@ -615,13 +660,17 @@ export class SessionManager implements SessionsService {
       sourceStateDir: this.#options.sharedRuntime?.sessionStateDirectory(sessionId),
       source: async <T,>(method: string, params: Record<string, unknown> = {}): Promise<T> => {
         if (state.done) throw cutoverClosed(sessionId);
-        if (method === "session.suspend" || method === "sessions.close") {
-          // The seal: from here on the source only produces handoff artifacts.
-          fence();
+        if (method !== "session.suspend" && method !== "sessions.close") return state.source.request<T>(method, { sessionId, ...params });
+        // The seal: the source's output becomes a handoff (what the suspend causes at once, everything once it is
+        // answered), and the calls waiting on it continue on the session's next owner.
+        fence();
+        if (!state.sealed) {
           state.sealed = true;
-          for (const wait of live.waits) wait.sealed = true;
+          for (const wait of live.waits) wait.held ??= this.#hold(live, wait.signal);
         }
-        return state.source.request<T>(method, { sessionId, ...params });
+        const sent = state.source.request<T>(method, { sessionId, ...params }, { onSettle: () => (state.settled = true) });
+        state.sealing.push(sent.catch(() => undefined));
+        return sent;
       },
       fence,
       open: (extra = {}) => this.#openDestination(live, state, extra),
@@ -727,7 +776,7 @@ export class SessionManager implements SessionsService {
     live.sandbox = destination.sandbox;
     // Genuine source events from the fence window first (their placement and generation), then what the destination
     // sent before the commit; the fence stays up until they have been delivered.
-    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: source });
+    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: source, beforeSeal: true });
     for (const item of state.destinationBuffer.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation, placement: "sandbox" });
     await this.#finishCutover(live, state, () => live.upstream === destination.upstream && !destination.upstream.closed);
     this.#log.info("Session moved to its sandbox", { sessionId: live.id, generation });
@@ -743,13 +792,13 @@ export class SessionManager implements SessionsService {
     state.outcome = "aborted";
     this.#closeDestination(state);
     if (state.sealed) {
-      // The session was suspended and closed on its source: resume it there on next use, and until then treat what
-      // the source still sends for it as handoff artifacts.
+      // The session was suspended (and maybe closed) on its source: it is resumed there with `resume`, and until the
+      // source answers that resume (after the sealing calls), what it sends for the session is still the handoff.
       live.resumeExtras = resume;
-      live.sealedSource = state.source;
+      live.sealedSource = { upstream: state.source, settled: Promise.all(state.sealing).then(() => undefined) };
     }
     if (!live.deleting && state.fenced) this.#ledger.update(live.id, { state: state.priorState === "promoting" ? "idle" : state.priorState });
-    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: live.placement });
+    for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: live.placement, beforeSeal: true });
     await this.#finishCutover(live, state, () => !state.sealed && live.upstream === state.source && !state.source.closed);
     this.#log.info("Session move aborted; it stays on its source", { sessionId: live.id });
   }
@@ -816,13 +865,16 @@ export class SessionManager implements SessionsService {
         // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
         const kept = stored.params["agent"];
         if (stable["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, stable)) stable["agent"] = kept;
+        // A resume configures the session again: what it sets replaces earlier option changes, and it is the caller's
+        // configuration from now on (restores and placement changes apply the same thing; model and agent come from
+        // the ledger).
+        const requestedOptions = withoutKeys(stored.requestedOptions, requested);
         return {
           params: stable,
           ...(stored.tools ? { tools: stored.tools } : {}),
-          optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
-          // Resume params override what the session was created with, as they do in the runtime.
-          requested: { ...stored.requested, ...requested },
-          ...(stored.requestedOptions ? { requestedOptions: stored.requestedOptions } : {}),
+          optionsPatch: { ...withoutKeys(stored.optionsPatch, requested), ...admitted.optionsPatch },
+          requested,
+          ...(requestedOptions && Object.keys(requestedOptions).length > 0 ? { requestedOptions } : {}),
         };
       });
       const current = this.get(sessionId) ?? record;
@@ -843,8 +895,10 @@ export class SessionManager implements SessionsService {
     const run = async (upstream: RuntimeUpstream): Promise<{ result: unknown } | typeof MOVED> => {
       const extras = live.resumeExtras;
       const prepared = await this.#prepare(live, "session.resume", { ...admitted.params, ...extras });
+      await this.#sealSettled(live, upstream);
       // Checked and sent in one synchronous step.
       if (live.moves !== moves || live.cutover?.fenced || upstream.closed) return MOVED;
+      const previous = live.attachments.get(peer.id);
       this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared);
       let result: unknown;
@@ -852,12 +906,16 @@ export class SessionManager implements SessionsService {
         result = await this.#resumeUpstream(live, upstream, forwarded);
         await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
+        this.#unattach(live, peer.id, previous);
         if (live.moves !== moves) return MOVED;
-        this.#detach(live, peer.id);
         throw error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
-      if (live.moves !== moves) return MOVED;
+      if (live.moves !== moves) {
+        // Fenced during the resume: the client attaches where the session lives after the cutover, with what it had.
+        this.#unattach(live, peer.id, previous);
+        return MOVED;
+      }
       live.ready = true;
       return { result };
     };
@@ -942,13 +1000,19 @@ export class SessionManager implements SessionsService {
       } catch (error) {
         // A cutover moved the session after this call was admitted: admit it again where the session lives now.
         if (error === MOVED) continue;
+        // Configuration a cutover interrupted (the source closed the session meanwhile) is set on its owner instead.
+        if (live.moves !== moves && CONFIG_METHODS.has(method) && error instanceof RpcError && !signal.aborted) {
+          await this.#fenceLifted(live);
+          continue;
+        }
         throw error;
       }
       if (method === "session.sendAndWait") return result;
-      // Configuration set on a runtime the session left during the call is set again on its new owner.
+      // A fence went up while configuration was being set: the session's owner after it (the destination, or a source
+      // resumed from stored configuration) may not have it, so it is set again there (an idempotent repeat otherwise).
       if (live.moves !== moves && CONFIG_METHODS.has(method)) {
-        if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
-        if (live.placement !== placement) continue;
+        await this.#fenceLifted(live);
+        continue;
       }
       if (patch && Object.keys(patch).length > 0) {
         const requested = withoutSessionId(params);
@@ -972,10 +1036,11 @@ export class SessionManager implements SessionsService {
           return { ...stored, params: rest };
         });
       }
-      // Scrubbed for the placement that answered, which a cutover may have changed since.
-      if (method === "session.getMessages" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
+      // Scrubbed for where the history comes from: a promoted session's earlier events are from shared placement.
+      if (HISTORY_METHODS.has(method) && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
+        const origin = placement === "shared" ? placement : this.#historyPlacement(live);
         const visible = this.#withoutHidden(live, result as { events: RuntimeSessionEvent[] });
-        return this.#scrub(live, { ...visible, events: visible.events.map((event) => this.#sanitizeEvent(live, event, placement)) }, placement);
+        return this.#scrub(live, { ...visible, events: visible.events.map((event) => this.#sanitizeEvent(live, event, origin)) }, origin);
       }
       return this.#scrub(live, result, placement);
     }
@@ -983,45 +1048,73 @@ export class SessionManager implements SessionsService {
 
   /**
    * A client's `sendAndWait`. During a placement cutover, a reply the source sends between the fence and the seal is
-   * genuine and is delivered when the fence lifts; a reply or failure after the seal is a handoff artifact of the
-   * suspend, so the call completes from the owning runtime's events instead. Replies are scrubbed for the placement
-   * that sent them.
+   * genuine and is delivered when the fence lifts. For a call the seal caught, an aborted reply or a failure is the
+   * suspend's handoff, so the call completes from the owning runtime's events instead; a completed reply means the turn
+   * ended on the source first, and is delivered as is. Replies are scrubbed for the placement that sent them.
    */
   async #sendAndWait(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>, signal: AbortSignal, placement: Placement): Promise<unknown> {
-    const wait: InflightWait = { fenced: false, sealed: false };
+    const wait: InflightWait = { fenced: false, signal, held: undefined };
     live.waits.add(wait);
     let reply: unknown;
+    let failure: { readonly error: unknown } | undefined;
     try {
       reply = await upstream.request("session.sendAndWait", params, { signal });
     } catch (error) {
-      if (!wait.sealed || signal.aborted) throw error;
-      reply = undefined;
+      failure = { error };
     } finally {
       live.waits.delete(wait);
     }
+    const held = wait.held;
+    if (held) {
+      if (!signal.aborted && (failure || (reply as { aborted?: unknown } | undefined)?.aborted === true)) {
+        const handoff = failure ? undefined : (this.#scrub(live, reply, placement) as Record<string, unknown> | undefined);
+        held.messageId = handoff?.["messageId"];
+        held.seed = handoff?.["response"];
+        held.replied = true;
+        this.#settleHeld(live, held);
+        this.#driveHeld(live);
+        return held.promise;
+      }
+      this.#unhold(live, held);
+    }
+    if (failure) throw failure.error;
     const clean = this.#scrub(live, reply, placement);
-    if (wait.sealed) return this.#holdCompletion(live, clean as Record<string, unknown> | undefined, signal);
     const cutover = live.cutover;
     if (wait.fenced && cutover && !cutover.flushed) return new Promise((resolve) => cutover.replies.push({ value: clean, resolve }));
     return clean;
   }
 
-  #holdCompletion(live: LiveSession, reply: Record<string, unknown> | undefined, signal: AbortSignal): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      const held: HeldCompletion = { messageId: reply?.["messageId"], response: reply?.["response"], resolve, reject };
-      live.held.push(held);
-      signal.addEventListener(
-        "abort",
-        () => {
-          const index = live.held.indexOf(held);
-          if (index < 0) return;
-          live.held.splice(index, 1);
-          reject(new RpcError(-32800, "Request cancelled"));
-        },
-        { once: true },
-      );
-      this.#driveHeld(live);
+  /** Starts holding a `sendAndWait` the seal caught: owner events after the seal record its outcome. */
+  #hold(live: LiveSession, signal: AbortSignal): HeldCompletion {
+    let resolve!: (value: unknown) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<unknown>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
     });
+    // Settled before its caller may have awaited it (a deletion while the source's reply is still on its way).
+    promise.catch(() => undefined);
+    const held: HeldCompletion = { promise, resolve, reject, messageId: undefined, seed: undefined, latest: undefined, outcome: undefined, replied: false };
+    live.held.push(held);
+    signal.addEventListener("abort", () => {
+      if (this.#unhold(live, held)) reject(new RpcError(-32800, "Request cancelled"));
+    }, { once: true });
+    return held;
+  }
+
+  #unhold(live: LiveSession, held: HeldCompletion): boolean {
+    const index = live.held.indexOf(held);
+    if (index < 0) return false;
+    live.held.splice(index, 1);
+    return true;
+  }
+
+  /** Completes a held call once both its outcome on the owner and the source's handoff reply are known. */
+  #settleHeld(live: LiveSession, held: HeldCompletion): void {
+    const outcome = held.outcome;
+    if (!held.replied || !outcome || !this.#unhold(live, held)) return;
+    if ("error" in outcome) held.reject(outcome.error);
+    else held.resolve({ ...(held.messageId !== undefined ? { messageId: held.messageId } : {}), response: held.latest ?? held.seed, aborted: outcome.aborted, completionEventId: outcome.completionEventId });
   }
 
   /**
@@ -1377,12 +1470,17 @@ export class SessionManager implements SessionsService {
 
   /**
    * Returns a connected upstream where the session is open, resuming it with its stored admitted configuration when
-   * the runtime restarted, the sandbox stopped, or the gateway restarted.
+   * the runtime restarted, the sandbox stopped, or the gateway restarted. A fence that went up meanwhile holds every
+   * caller (not only the one that started the restore) until the cutover commits or aborts.
    */
   #resident(live: LiveSession): Promise<RuntimeUpstream> {
     if (live.deleting) return Promise.reject(new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id }));
     if (live.upstream && !live.upstream.closed && live.ready) return Promise.resolve(live.upstream);
-    if (live.residency) return live.residency;
+    const residency = live.residency ?? this.#restore(live);
+    return residency.then((upstream) => (live.cutover?.fenced && live.residency && live.residency !== residency ? live.residency : upstream));
+  }
+
+  #restore(live: LiveSession): Promise<RuntimeUpstream> {
     return this.#serialize(live, async () => {
       const upstream = await this.#connect(live);
       const admitted = this.#ledger.admitted(live.id);
@@ -1396,6 +1494,7 @@ export class SessionManager implements SessionsService {
         ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
         ...extras,
       });
+      await this.#sealSettled(live, upstream);
       // A fence that went up during the restore wins: nothing is sent to a runtime after it.
       if (live.cutover?.fenced) return upstream;
       try {
@@ -1409,10 +1508,6 @@ export class SessionManager implements SessionsService {
       if (!live.cutover?.fenced) live.ready = true;
       this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
       return upstream;
-    }).then((upstream) => {
-      // A fence that went up during the restore holds this caller too, until the cutover commits or aborts.
-      const fenced = live.cutover?.fenced ? live.residency : undefined;
-      return fenced ?? upstream;
     });
   }
 
@@ -1442,10 +1537,14 @@ export class SessionManager implements SessionsService {
    * with the same ID and configuration. A session whose history the runtime lost still fails.
    */
   async #resumeUpstream(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>): Promise<unknown> {
-    // From this resume on, what the runtime sends for the session is genuine again.
-    if (live.sealedSource === upstream) live.sealedSource = undefined;
+    // On a source an aborted cutover sealed, what arrives before this resume is answered is still the suspend's
+    // handoff; the resumed session's own output follows the answer (verified on runtime 1.0.103).
+    const sealed = live.sealedSource?.upstream === upstream ? live.sealedSource : undefined;
+    const reopened = () => {
+      if (sealed && live.sealedSource === sealed) live.sealedSource = undefined;
+    };
     try {
-      return await upstream.request("session.resume", params);
+      return await upstream.request("session.resume", params, { onSettle: reopened });
     } catch (error) {
       if (!(error instanceof RpcError) || !UNKNOWN_SESSION.test(error.message) || this.get(live.id)?.lastTurn) throw error;
       this.#log.info("The runtime has no state for a session that never ran a turn; creating it again", { sessionId: live.id });
@@ -1455,6 +1554,22 @@ export class SessionManager implements SessionsService {
 
   async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, params) : params;
+  }
+
+  /** Before resuming on a source an aborted cutover sealed: its answers to the sealing calls come first. */
+  async #sealSettled(live: LiveSession, upstream: RuntimeUpstream): Promise<void> {
+    const sealed = live.sealedSource;
+    if (sealed?.upstream === upstream) await sealed.settled;
+  }
+
+  /** Waits for an open cutover's fence to lift (the session then has its next owner). */
+  async #fenceLifted(live: LiveSession): Promise<void> {
+    if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
+  }
+
+  /** Where a session's history comes from: a promotable session started on shared placement, wherever it runs now. */
+  #historyPlacement(live: LiveSession): Placement {
+    return live.environment.type === "promotable" ? "shared" : live.placement;
   }
 
   async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>): Promise<void> {
@@ -1554,7 +1669,18 @@ export class SessionManager implements SessionsService {
   #detach(live: LiveSession, peerId: string, notifyActions = true): void {
     live.attachments.delete(peerId);
     if (live.creator === peerId) live.creator = live.attachments.keys().next().value;
+    live.wire = this.#registrations(live);
     if (notifyActions) this.#actions?.onDetached(peerId, live.id);
+  }
+
+  /** Undoes an attach whose resume did not complete: the client keeps the attachment it had before, if any. */
+  #unattach(live: LiveSession, peerId: string, previous: Attachment | undefined): void {
+    if (!previous) {
+      this.#detach(live, peerId);
+      return;
+    }
+    live.attachments.set(peerId, previous);
+    live.wire = this.#registrations(live);
   }
 
   async #afterAttach(peer: ClientPeer, sessionId: string): Promise<void> {
@@ -1567,7 +1693,9 @@ export class SessionManager implements SessionsService {
     if (!responder) return;
     try {
       const replay = await actions.onAttached({ sessionId, ownerId: record.ownerId, environment: record.environment, generation: record.generation, responder });
-      for (const event of replay) peer.notify("session.event", { sessionId, event: this.#scrub(live, this.#sanitizeEvent(live, event)) });
+      // Pending actions can predate a placement change, like history.
+      const origin = this.#historyPlacement(live);
+      for (const event of replay) peer.notify("session.event", { sessionId, event: this.#scrub(live, this.#sanitizeEvent(live, event, origin), origin) });
     } catch (error) {
       this.#log.warn("Action replay after attach failed", { sessionId, error: (error as Error).message });
     }
@@ -1597,9 +1725,10 @@ export class SessionManager implements SessionsService {
     const live = this.#live.get(sessionId);
     if (!live) return;
     const cutover = live.cutover;
-    if (live.sealedSource === upstream && (method === "session.event" || method === "session.lifecycle")) {
-      // Late output of a suspend whose cutover was aborted: the session runs on this runtime again only once resumed.
-      if (method === "session.event") this.#hide(live, (params as { event?: { id?: unknown } } | undefined)?.event?.id);
+    const event = method === "session.event" ? (params as { event?: RuntimeSessionEvent } | undefined)?.event : undefined;
+    if (live.sealedSource?.upstream === upstream && (method === "session.event" || method === "session.lifecycle")) {
+      // Late output of a suspend whose cutover was aborted: the session runs here again once its resume is answered.
+      if (event) this.#hide(live, event.id);
       return;
     }
     if (cutover && !cutover.done && (method === "session.event" || method === "session.lifecycle")) {
@@ -1608,10 +1737,12 @@ export class SessionManager implements SessionsService {
         return;
       }
       if (cutover.fenced && upstream === cutover.source) {
-        // Before the seal the source's events are genuine and wait for commit/abort; after it they are handoff
-        // artifacts of the suspend (interruptions, aborted idles, shutdown) that nobody may see, now or in history.
-        if (!cutover.sealed) cutover.buffered.push({ method, params });
-        else if (method === "session.event") this.#hide(live, (params as { event?: { id?: unknown } } | undefined)?.event?.id);
+        // Before the seal the source's events are genuine and wait for commit/abort. Until a sealing call is answered,
+        // what the suspend causes (interruptions, ended or failed turns, the aborted idle, shutdown) is a handoff and
+        // the rest was already on its way; once it is answered, all of it is a handoff, which nobody may see, now or
+        // in history.
+        if (!cutover.sealed || (!cutover.settled && event && !isHandoffEvent(event))) cutover.buffered.push({ method, params });
+        else if (event) this.#hide(live, event.id);
         return;
       }
     }
@@ -1645,18 +1776,16 @@ export class SessionManager implements SessionsService {
   }
 
   /**
-   * Completes `sendAndWait` calls whose source reply was a handoff artifact, like the stock request-owned completion:
-   * at the owner's next root `session.idle`, with the last root `assistant.message`; a root `session.error` fails them.
+   * Completes `sendAndWait` calls the seal caught, like the stock request-owned completion: at the owner's next root
+   * `session.idle` after the seal, with the last root `assistant.message`; a root `session.error` fails them.
    */
   #advanceHeld(live: LiveSession, event: RuntimeSessionEvent): void {
-    if (event.type === "assistant.message") {
-      for (const held of live.held) held.response = event;
-    } else if (event.type === "session.idle") {
-      for (const held of live.held.splice(0)) {
-        held.resolve({ ...(held.messageId !== undefined ? { messageId: held.messageId } : {}), response: held.response, aborted: event.data?.["aborted"] === true, completionEventId: event.id });
-      }
-    } else if (event.type === "session.error") {
-      for (const held of live.held.splice(0)) held.reject(new RpcError(-32603, String(event.data?.["message"] ?? "The session failed"), { completionEventId: event.id }));
+    for (const held of [...live.held]) {
+      if (held.outcome) continue;
+      if (event.type === "assistant.message") held.latest = event;
+      else if (event.type === "session.idle") held.outcome = { aborted: event.data?.["aborted"] === true, completionEventId: event.id };
+      else if (event.type === "session.error") held.outcome = { error: new RpcError(-32603, String(event.data?.["message"] ?? "The session failed"), { completionEventId: event.id }) };
+      this.#settleHeld(live, held);
     }
   }
 
@@ -1664,7 +1793,8 @@ export class SessionManager implements SessionsService {
     this.#track(live, event);
     // Sanitized for the placement that emitted it, which a cutover may have changed since.
     const sanitized = this.#scrub(live, this.#sanitizeEvent(live, event, origin?.placement), origin?.placement);
-    if (!event.agentId && live.held.length > 0) this.#advanceHeld(live, sanitized);
+    // Only the owner's events after a seal complete the calls it caught; what the source said before it cannot.
+    if (!event.agentId && live.held.length > 0 && !origin?.beforeSeal) this.#advanceHeld(live, sanitized);
     for (const listener of this.#listeners) {
       try {
         listener(live.id, event);
@@ -1684,7 +1814,8 @@ export class SessionManager implements SessionsService {
       for (const attachment of live.attachments.values()) attachment.peer.notify("session.event", notification);
       return;
     }
-    const decision = await this.#routeAction(live, event, origin?.generation);
+    // The actions ledger stores and replays what clients see, never platform host paths.
+    const decision = await this.#routeAction(live, sanitized, origin?.generation);
     for (const attachment of live.attachments.values()) {
       const id = attachment.peer.id;
       if (decision.withhold.includes(id) && decision.owner !== id) continue;
@@ -1765,8 +1896,11 @@ export class SessionManager implements SessionsService {
       return registered({ method, upstream: upstream.info, ...(record ? { session: record } : {}), params, signal: context.signal });
     }
     if (method in CLIENT_REQUESTS && live) {
-      // A fenced source asks nobody: the session is moving, and after the seal its requests are handoff artifacts.
-      if (live.cutover?.fenced && upstream === live.cutover.source) throw new RpcError(-32000, "The session is moving to another runtime", { code: "promotion_busy" });
+      // A fenced source asks nobody: the session is moving, and after the seal its requests are handoff artifacts
+      // (as they are from a source an aborted cutover sealed, until the session's resume there is answered).
+      if ((live.cutover?.fenced && upstream === live.cutover.source) || live.sealedSource?.upstream === upstream) {
+        throw new RpcError(-32000, "The session is moving to another runtime", { code: "promotion_busy" });
+      }
       const flag = CLIENT_REQUESTS[method];
       const attachments = [...live.attachments.values()].sort((a, b) => b.attachedAt - a.attachedAt);
       const target = attachments.find((attachment) => !attachment.peer.closed && (flag === undefined || attachment[flag] === true));
@@ -1905,6 +2039,18 @@ export class SessionManager implements SessionsService {
 /** How the stock runtime reports a session it has no persisted state for. */
 const UNKNOWN_SESSION = /session not found|failed to load session events/i;
 
+/** Whether an event is something `session.suspend` / `sessions.close` caused, rather than output already under way. */
+function isHandoffEvent(event: RuntimeSessionEvent): boolean {
+  if (typeof event.type !== "string") return true;
+  return HANDOFF_EVENT_TYPES.has(event.type) || (event.type === "session.idle" && event.data?.["aborted"] === true);
+}
+
+/** `patch` without the keys `replacing` sets (a later resume's configuration replaces earlier option changes). */
+function withoutKeys(patch: Record<string, unknown> | undefined, replacing: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!patch) return undefined;
+  return Object.fromEntries(Object.entries(patch).filter(([key]) => !(key in replacing)));
+}
+
 function cutoverClosed(sessionId: string): ManagedCopilotError {
   return new ManagedCopilotError("conflict", `The cutover of session ${sessionId} is already closed`, { sessionId });
 }
@@ -1940,6 +2086,9 @@ export function pathScrubber(dataDir: string): (value: unknown) => unknown {
   const segment = String.raw`[A-Za-z0-9_-]+`;
   // The rest of the path (segments without spaces), rewritten with POSIX separators.
   const tail = String.raw`((?:[\\/]+[^\\/\s"'\`]+)*)`;
+  // The directory itself, not part of a longer name: `/data` is neither `/mnt/data` nor `/database` (`/data.` ends one).
+  const before = String.raw`(?<![A-Za-z0-9_.~-])`;
+  const after = String.raw`(?![A-Za-z0-9_~-]|\.[A-Za-z0-9_~-])`;
   const flags = process.platform === "win32" ? "gi" : "g";
   const variants = new Set([resolvePath(dataDir)]);
   try {
@@ -1949,12 +2098,12 @@ export function pathScrubber(dataDir: string): (value: unknown) => unknown {
   }
   const rules: [RegExp, string][] = [];
   for (const variant of variants) {
-    const root = variant.replace(/[\\/]+$/, "").split(/[\\/]+/).map(escapeRegExp).join(separators);
+    const root = before + variant.replace(/[\\/]+$/, "").split(/[\\/]+/).map(escapeRegExp).join(separators);
     rules.push(
       [new RegExp(`${root}${separators}runtime${separators}shared${separators}workspaces${separators}${segment}${tail}`, flags), "/workspace"],
       [new RegExp(`${root}${separators}customizations${separators}${segment}${separators}${segment}${tail}`, flags), SANDBOX_CUSTOMIZATIONS_DIR],
       [new RegExp(`${root}${separators}runtime${separators}shared${tail}`, flags), "/platform"],
-      [new RegExp(`${root}${tail}`, flags), "/platform"],
+      [new RegExp(`${root}${after}${tail}`, flags), "/platform"],
     );
   }
   const shortest = Math.min(...[...variants].map((variant) => variant.length));

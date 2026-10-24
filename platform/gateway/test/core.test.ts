@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isManagedCopilotError, NETWORK_ENABLED, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
@@ -451,6 +451,11 @@ describe("gateway primitives", () => {
       // The runtime may report the directory's resolved form (8.3 names on Windows, symlinks elsewhere).
       expect(scrub(join(realpathSync.native(dataDir), "runtime", "shared", "workspaces", "abc"))).toBe("/workspace");
       expect(scrub("unrelated /etc/hosts and C:\\Windows")).toBe("unrelated /etc/hosts and C:\\Windows");
+      // Only the directory itself: not a sibling that shares its name as a prefix, nor a path that merely ends with it.
+      expect(scrub(`${dataDir}base${sep}x`)).toBe(`${dataDir}base${sep}x`);
+      expect(scrub(`${dataDir}.bak${sep}x`)).toBe(`${dataDir}.bak${sep}x`);
+      expect(scrub(`mnt${dataDir}${sep}x`)).toBe(`mnt${dataDir}${sep}x`);
+      expect(scrub(`The data is in ${dataDir}.`)).toBe("The data is in /platform.");
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }
