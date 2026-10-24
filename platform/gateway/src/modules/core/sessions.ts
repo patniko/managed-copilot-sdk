@@ -123,8 +123,8 @@ interface LiveSession {
   /** Event IDs history reads must not return (loaded from the ledger on first use). */
   hidden: Set<string> | undefined;
   /**
-   * After an aborted, sealed cutover: the source, whose output for this session is a handoff until it answers the
-   * session's next resume there (after its answers to the sealing calls).
+   * A source a sealed cutover left (committed, or aborted until the session's next resume there is answered, after
+   * its answers to the sealing calls): its output for this session is handoff, hidden from clients and history.
    */
   sealedSource: { readonly upstream: RuntimeUpstream; readonly settled: Promise<void> } | undefined;
 }
@@ -774,6 +774,8 @@ export class SessionManager implements SessionsService {
     live.placement = "sandbox";
     live.upstream = destination.upstream;
     live.sandbox = destination.sandbox;
+    // What the sealed source still sends for the session is handoff: hidden from history as well.
+    if (state.sealed) live.sealedSource = { upstream: state.source, settled: Promise.resolve() };
     // Genuine source events from the fence window first (their placement and generation), then what the destination
     // sent before the commit; the fence stays up until they have been delivered.
     for (const item of state.buffered.splice(0)) this.#dispatchNotification(live, item.method, item.params, { generation: state.generation, placement: source, beforeSeal: true });
@@ -857,7 +859,9 @@ export class SessionManager implements SessionsService {
       const admitted = await this.#admit(live.environment, placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
       await this.#checkRemoteMcp(admitted, sessionId, placement, network);
       if (live.moves !== moves) continue;
-      const outcome = await this.#resumeClient(live, peer, admitted, moves);
+      // The session's option changes this resume does not set again stay in effect (as a restore applies them).
+      const optionsPatch = { ...withoutKeys(this.#ledger.admitted(sessionId)?.optionsPatch, requested), ...admitted.optionsPatch };
+      const outcome = await this.#resumeClient(live, peer, admitted, moves, optionsPatch);
       // A cutover fenced the session during this resume: admit it again and resume where the session lives after it.
       if (outcome === MOVED) continue;
       this.#persist(sessionId, (stored) => {
@@ -891,7 +895,7 @@ export class SessionManager implements SessionsService {
    * Resumes a client's attachment on the session's owner (restoring the session there if it is not running). Returns
    * MOVED when a placement cutover fenced the session meanwhile; nothing is sent to a runtime after a fence.
    */
-  async #resumeClient(live: LiveSession, peer: ClientPeer, admitted: AdmittedSession, moves: number): Promise<{ result: unknown } | typeof MOVED> {
+  async #resumeClient(live: LiveSession, peer: ClientPeer, admitted: AdmittedSession, moves: number, optionsPatch: Record<string, unknown>): Promise<{ result: unknown } | typeof MOVED> {
     const run = async (upstream: RuntimeUpstream): Promise<{ result: unknown } | typeof MOVED> => {
       const extras = live.resumeExtras;
       const prepared = await this.#prepare(live, "session.resume", { ...admitted.params, ...extras });
@@ -904,7 +908,7 @@ export class SessionManager implements SessionsService {
       let result: unknown;
       try {
         result = await this.#resumeUpstream(live, upstream, forwarded);
-        await this.#opened(live, upstream, admitted.optionsPatch);
+        await this.#opened(live, upstream, optionsPatch);
       } catch (error) {
         this.#unattach(live, peer.id, previous);
         if (live.moves !== moves) return MOVED;
@@ -926,7 +930,7 @@ export class SessionManager implements SessionsService {
     // Not resident: the client's own resume restores it, and concurrent callers wait for it.
     let outcome: { result: unknown } | typeof MOVED = MOVED;
     await this.#serialize(live, async () => {
-      const upstream = await this.#connect(live);
+      const upstream = await this.#connect(live, moves);
       outcome = await run(upstream);
       return upstream;
     });
@@ -1453,7 +1457,7 @@ export class SessionManager implements SessionsService {
   }
 
   /** Connects the session's upstream (shared runtime, or its sandbox) without opening the session on it. */
-  async #connect(live: LiveSession): Promise<RuntimeUpstream> {
+  async #connect(live: LiveSession, moves = live.moves): Promise<RuntimeUpstream> {
     live.ready = false;
     if (live.placement === "sandbox") {
       const sandboxes = this.#sandboxes;
@@ -1464,25 +1468,30 @@ export class SessionManager implements SessionsService {
     const shared = this.#options.sharedRuntime;
     if (!shared) throw new ManagedCopilotError("capability_unavailable", "Shared environments are disabled on this gateway");
     const upstream = await shared.ready();
-    live.upstream = upstream;
+    // A cutover that fenced (and maybe committed) while the runtime came back owns the session's routing now.
+    if (live.moves === moves) live.upstream = upstream;
     return upstream;
   }
 
   /**
    * Returns a connected upstream where the session is open, resuming it with its stored admitted configuration when
    * the runtime restarted, the sandbox stopped, or the gateway restarted. A fence that went up meanwhile holds every
-   * caller (not only the one that started the restore) until the cutover commits or aborts.
+   * caller (not only the one that started the restore) until the cutover commits or aborts, and then the session's
+   * owner after it is found afresh.
    */
   #resident(live: LiveSession): Promise<RuntimeUpstream> {
     if (live.deleting) return Promise.reject(new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id }));
     if (live.upstream && !live.upstream.closed && live.ready) return Promise.resolve(live.upstream);
+    const moves = live.moves;
     const residency = live.residency ?? this.#restore(live);
-    return residency.then((upstream) => (live.cutover?.fenced && live.residency && live.residency !== residency ? live.residency : upstream));
+    return residency.then((upstream) => (live.moves !== moves || live.cutover?.fenced ? this.#resident(live) : upstream));
   }
 
   #restore(live: LiveSession): Promise<RuntimeUpstream> {
+    const moves = live.moves;
     return this.#serialize(live, async () => {
-      const upstream = await this.#connect(live);
+      const upstream = await this.#connect(live, moves);
+      if (live.moves !== moves) return upstream;
       const admitted = this.#ledger.admitted(live.id);
       if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
       const extras = live.resumeExtras;
@@ -1495,8 +1504,9 @@ export class SessionManager implements SessionsService {
         ...extras,
       });
       await this.#sealSettled(live, upstream);
-      // A fence that went up during the restore wins: nothing is sent to a runtime after it.
-      if (live.cutover?.fenced) return upstream;
+      // A fence that went up during the restore wins (even one whose cutover has ended since): nothing is sent to a
+      // runtime after it, and callers find the session's owner afresh.
+      if (live.moves !== moves || live.cutover?.fenced) return upstream;
       try {
         await this.#resumeUpstream(live, upstream, prepared);
         await this.#opened(live, upstream, admitted.optionsPatch);
@@ -1505,7 +1515,7 @@ export class SessionManager implements SessionsService {
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
       // A cutover fenced while this restore ran keeps the session fenced.
-      if (!live.cutover?.fenced) live.ready = true;
+      if (live.moves === moves && !live.cutover?.fenced) live.ready = true;
       this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
       return upstream;
     });
@@ -1669,17 +1679,13 @@ export class SessionManager implements SessionsService {
   #detach(live: LiveSession, peerId: string, notifyActions = true): void {
     live.attachments.delete(peerId);
     if (live.creator === peerId) live.creator = live.attachments.keys().next().value;
-    live.wire = this.#registrations(live);
     if (notifyActions) this.#actions?.onDetached(peerId, live.id);
   }
 
   /** Undoes an attach whose resume did not complete: the client keeps the attachment it had before, if any. */
   #unattach(live: LiveSession, peerId: string, previous: Attachment | undefined): void {
-    if (!previous) {
-      this.#detach(live, peerId);
-      return;
-    }
-    live.attachments.set(peerId, previous);
+    if (previous) live.attachments.set(peerId, previous);
+    else this.#detach(live, peerId);
     live.wire = this.#registrations(live);
   }
 

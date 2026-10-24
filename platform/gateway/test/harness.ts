@@ -71,6 +71,17 @@ export class FakeRuntime {
     return this.#emit(session.endpoint, session, type, data);
   }
 
+  /** Emits a session event on one runtime connection (1 = the first), whichever connection the session is open on (test hook). */
+  emitEventOn(connection: number, sessionId: string, type: string, data: Record<string, unknown> = {}): string {
+    const endpoint = this.#byConnection.get(connection);
+    const session = this.sessions.get(sessionId);
+    if (!endpoint || !session) throw new Error(`No connection ${connection} or session ${sessionId}`);
+    const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data };
+    session.events.push(event);
+    endpoint.notify("session.event", { sessionId, event });
+    return event.id;
+  }
+
   /** Answers a pending tool call inside the runtime, as if a responder had (test hook). */
   answerTool(requestId: string, result: unknown): void {
     const pending = this.#pendingTools.get(requestId);

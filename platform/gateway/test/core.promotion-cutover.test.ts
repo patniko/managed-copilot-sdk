@@ -523,6 +523,22 @@ describe("placement cutover", () => {
     expect(onDestination.some((call) => call.params["reasoningEffort"] === "high")).toBe(false);
   });
 
+  it("hides what a source still sends for a session that moved, from history too", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    const late = runtime.emitEventOn(sourceConnection(sessionId), sessionId, "session.usage_checkpoint", {});
+    await sleep(50);
+    const history = await client.request<{ events: { id: string }[] }>("session.getMessages", { sessionId });
+    expect(history.events.map((event) => event.id)).not.toContain(late);
+    expect(client.events("session.usage_checkpoint").map((event) => event["id"])).not.toContain(late);
+  });
+
   it("refuses stale generations and a second cutover, and ends an open cutover when the session is deleted", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();
@@ -565,5 +581,30 @@ describe("placement cutover", () => {
     const [restored, joined] = await Promise.all([first, second]);
     expect(joined.connectionId).toBe(restored.connectionId);
     expect(lastCall("session.resume", sessionId)).toBeDefined();
+  }, 20_000);
+
+  it("never lets a restore that waited out a runtime outage take back a session that moved meanwhile", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    let stopped = false;
+    const off = sessions().onLifecycle((event) => {
+      if (event.sessionId === sessionId && event.type === "stopped") stopped = true;
+    });
+    runtime.dropConnections();
+    await waitUntil(() => stopped);
+    off();
+    // A restore waits for the shared runtime to come back while the session moves to its sandbox.
+    const restoring = sessions().runtime(sessionId);
+    cut.fence();
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    const owner = await restoring;
+    expect(owner.connectionId).toMatch(new RegExp(`^sandbox:${sessionId}`));
+    expect(runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId && call.params["continuePendingWork"] !== true)).toHaveLength(0);
+    await client.request("session.sendAndWait", { sessionId, prompt: "still in the sandbox" });
+    const destination = runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).at(-1)!.connection;
+    expect(lastCall("session.sendAndWait", sessionId)!.connection).toBe(destination);
   }, 20_000);
 });
