@@ -94,7 +94,9 @@ export interface PromotionParticipantOutcome {
    * the source holds the session only once core resumes it there: right away when a caller's completion is waiting,
    * otherwise on next use (for example `sessions.runtime()`). The shared runtime's connection, and so its
    * `connectionId`, stays the same: anything bound to the session before the checkpoint (an AHP host's publication) is
-   * stale and must be disposed, not reused because the `connectionId` matches. Always true when `committed`.
+   * stale and must be disposed, not reused because the `connectionId` matches. Publish again only through a fresh
+   * `sessions.runtime()`, which waits for that resume; a `SessionRuntime` obtained before the fence bypasses it. Always
+   * true when `committed`.
    */
   readonly sealed: boolean;
 }
