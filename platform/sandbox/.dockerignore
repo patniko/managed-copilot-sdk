@@ -1,0 +1,8 @@
+*
+!dist/**
+!image/Dockerfile
+!image/sandboxd-package.json
+!image/trust-ca.sh
+dist/**/*.map
+dist/**/*.d.ts
+dist/**/*.d.ts.map
