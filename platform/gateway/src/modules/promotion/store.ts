@@ -2,7 +2,7 @@
 // time (a partial unique index makes admission atomic). Recovery after a restart reconciles open rows against core's
 // ledger, whose commit moves placement and generation in one transaction, and finishes the work each row still owes.
 import { ManagedCopilotError, type PromotionTrigger } from "@managed-copilot/protocol";
-import { migrate, type Database } from "../../db.js";
+import { migrate, transaction, type Database } from "../../db.js";
 import type { OperationState, PromotionOperation } from "./contract.js";
 
 const MIGRATIONS = [
@@ -32,6 +32,30 @@ const MIGRATIONS = [
    CREATE INDEX promotion_operations_session ON promotion_operations (session_id, created_at);
    CREATE UNIQUE INDEX promotion_operations_open ON promotion_operations (session_id) WHERE state NOT IN ('committed', 'failed');`,
 ];
+
+/** Bookkeeping columns that version 1 gained before it shipped, with their definitions. */
+const PRERELEASE_COLUMNS: readonly (readonly [name: string, definition: string])[] = [
+  ["source_state_dir", "TEXT"],
+  ["event_published", "INTEGER NOT NULL DEFAULT 0"],
+  ["finalized", "INTEGER NOT NULL DEFAULT 0"],
+  ["cleanup_pending", "INTEGER NOT NULL DEFAULT 0"],
+];
+
+/**
+ * Brings data directories from pre-release branch builds, whose version-1 table predates some bookkeeping columns,
+ * up to the shipped schema. Those builds published `session.promoted` while committing, so their committed rows owe
+ * at most the source cleanup.
+ */
+export function upgradePromotionSchema(db: Database): void {
+  const present = new Set((db.prepare("PRAGMA table_info(promotion_operations)").all() as { name: string }[]).map((column) => column.name));
+  const missing = PRERELEASE_COLUMNS.filter(([name]) => !present.has(name));
+  if (missing.length === 0) return;
+  transaction(db, () => {
+    for (const [name, definition] of missing) db.exec(`ALTER TABLE promotion_operations ADD COLUMN ${name} ${definition}`);
+    if (!present.has("event_published")) db.exec("UPDATE promotion_operations SET event_published = 1 WHERE state = 'committed'");
+    if (!present.has("finalized")) db.exec("UPDATE promotion_operations SET finalized = source_cleaned WHERE state = 'committed' AND event_published = 1");
+  });
+}
 
 interface Row {
   id: string;
@@ -129,6 +153,7 @@ export class PromotionStore {
   constructor(db: Database) {
     this.#db = db;
     migrate(db, "promotion", MIGRATIONS);
+    upgradePromotionSchema(db);
   }
 
   /** Admits an attempt; fails with `promotion_busy` when another attempt for the session is still open. */

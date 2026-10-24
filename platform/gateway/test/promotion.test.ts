@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isManagedCopilotError, ManagedCopilotError, type NetworkPolicy, type PendingAction, type PlatformEvent } from "@managed-copilot/protocol";
 import { GatewayApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
@@ -36,6 +36,8 @@ interface Behavior {
   openFails?: ManagedCopilotError;
   sourceFails?: (method: string) => Error | undefined;
   commitFails?: ManagedCopilotError;
+  /** The commit moves the ledger, then reports this error (as if a later commit step failed). */
+  commitFailsAfterMove?: ManagedCopilotError;
 }
 
 class FakeCutover implements PlacementCutover {
@@ -90,11 +92,12 @@ class FakeCutover implements PlacementCutover {
     };
   }
 
-  commit(): SessionRecord {
+  async commit(): Promise<SessionRecord> {
     this.steps.push("commit");
     if (this.#behavior.commitFails) throw this.#behavior.commitFails;
     const committed: SessionRecord = { ...this.record, placement: "sandbox", generation: this.record.generation + 1, state: "idle" };
     this.#sessions.records.set(committed.id, committed);
+    if (this.#behavior.commitFailsAfterMove) throw this.#behavior.commitFailsAfterMove;
     return committed;
   }
 
@@ -134,13 +137,18 @@ class FakeSandboxes {
   readonly created: Record<string, unknown>[] = [];
   readonly imports: { sessionId: string; sessionStateDir: string; activeTurnId?: string; files: string[] }[] = [];
   readonly deleted: string[] = [];
+  /** Starts and ends of creates and deletes, in order. */
+  readonly log: string[] = [];
   createFails: ManagedCopilotError | undefined;
   importFails: ManagedCopilotError | undefined;
   createDelayMs = 0;
+  deleteDelayMs = 0;
 
   async create(request: Record<string, unknown>) {
     this.created.push(request);
+    this.log.push("create:start");
     if (this.createDelayMs) await new Promise((resolve) => setTimeout(resolve, this.createDelayMs));
+    this.log.push("create:end");
     if (this.createFails) throw this.createFails;
     return { sandboxId: "sbx_test", info: { id: "sbx_test", size: "medium", state: "running", network: DISABLED } };
   }
@@ -153,6 +161,9 @@ class FakeSandboxes {
   }
 
   async delete(sessionId: string) {
+    this.log.push("delete:start");
+    if (this.deleteDelayMs) await new Promise((resolve) => setTimeout(resolve, this.deleteDelayMs));
+    this.log.push("delete:end");
     this.deleted.push(sessionId);
   }
 
@@ -199,6 +210,8 @@ let policy: FakePolicy;
 let actions: FakeActions;
 let published: PlatformEvent[];
 let publishFails: boolean;
+/** What the fake events service reports for each publish (`false`: not stored in the event ledger). */
+let publishStores: boolean | undefined;
 let manager: PromotionManager;
 let store: PromotionStore;
 let stateDir: string;
@@ -255,6 +268,7 @@ beforeEach(() => {
   actions = new FakeActions();
   published = [];
   publishFails = false;
+  publishStores = undefined;
   const services = app.services as Record<string, unknown>;
   services["sessions"] = sessions;
   services["sandboxes"] = sandboxes;
@@ -264,6 +278,7 @@ beforeEach(() => {
     publish: (event: PlatformEvent) => {
       if (publishFails) throw new Error("bus down");
       published.push(event);
+      return publishStores;
     },
   };
   services["environments"] = { forSession: () => ({ customizations: { root: join(temp, "pinned", "helper") } }) };
@@ -401,6 +416,16 @@ describe("API promotion (managed.promote)", () => {
     expect(sandboxes.deleted).toEqual([SESSION]);
     expect(existsSync(stateDir)).toBe(true);
     expect(actions.generations).toHaveLength(0);
+  });
+
+  it("finishes, and never rolls back, when the commit fails after the ledger moved", async () => {
+    sessions.behavior.commitFailsAfterMove = new ManagedCopilotError("internal", "a listener failed");
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox", generation: 1 });
+    expect(sessions.steps).not.toContain("abort:{}");
+    expect(sandboxes.deleted).toHaveLength(0);
+    expect(policy.calls).toEqual([`promote:${SESSION}:coder`, `commit:${SESSION}`]);
+    expect(manager.latest(SESSION)).toMatchObject({ state: "committed", toGeneration: 1, finalized: true });
+    expect(published).toHaveLength(1);
   });
 
   it("fails without allocating when the import capability or a local source is missing", async () => {
@@ -651,6 +676,70 @@ describe("recovery after a restart", () => {
     store.update("prm_f", { cleanupPending: true });
     await manager.recover();
     expect(sandboxes.deleted).toEqual([SESSION]);
+  });
+
+  it("finishes releasing an interrupted attempt's candidate before a new attempt allocates", async () => {
+    store.insert({ id: "prm_g", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_g", { state: "failed", cleanupPending: true });
+    sandboxes.deleteDelayMs = 50;
+    const recovering = manager.recover();
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox", generation: 1 });
+    await recovering;
+    expect(sandboxes.log).toEqual(["delete:start", "delete:end", "create:start", "create:end"]);
+    expect(store.get("prm_g")).toMatchObject({ cleanupPending: false });
+  });
+
+  it("never releases a newer attempt's candidate from a list read before that attempt allocated", async () => {
+    store.insert({ id: "prm_h", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_h", { state: "failed", cleanupPending: true });
+    const stale = store.owing();
+    sandboxes.createDelayMs = 50;
+    const promoting = manager.promote(OWNER, SESSION);
+    await vi.waitFor(() => expect(sandboxes.log).toContain("create:start"));
+    const owing = store.owing.bind(store);
+    store.owing = () => stale;
+    await manager.recover();
+    store.owing = owing;
+    expect(await promoting).toMatchObject({ placement: "sandbox", generation: 1 });
+    expect(sandboxes.log).toEqual(["delete:start", "delete:end", "create:start", "create:end"]);
+  });
+
+  it("publishes session.promoted again at the next start when the event ledger did not store it", async () => {
+    publishStores = false;
+    await manager.promote(OWNER, SESSION);
+    const operation = manager.latest(SESSION)!;
+    expect(operation).toMatchObject({ state: "committed", eventPublished: false, finalized: false });
+    publishStores = true;
+    await manager.recover();
+    expect(published.map((event) => event.id)).toEqual([`evt_promoted_${operation.id}`, `evt_promoted_${operation.id}`]);
+    expect(manager.latest(SESSION)).toMatchObject({ eventPublished: true, finalized: true });
+  });
+});
+
+describe("promotion store", () => {
+  it("upgrades a pre-release version-1 table, keeping what its rows already did", () => {
+    const db = openDatabase(":memory:");
+    db.exec(`CREATE TABLE promotion_operations (
+       id TEXT PRIMARY KEY, session_id TEXT NOT NULL, owner_id INTEGER NOT NULL, from_generation INTEGER NOT NULL,
+       to_generation INTEGER, trigger TEXT NOT NULL, tool_call_id TEXT, request_id TEXT, target TEXT NOT NULL,
+       state TEXT NOT NULL, sandbox_id TEXT, error_code TEXT, error TEXT, source_cleaned INTEGER NOT NULL DEFAULT 0,
+       created_at TEXT NOT NULL, updated_at TEXT NOT NULL, committed_at TEXT)`);
+    const now = new Date().toISOString();
+    db.prepare("INSERT INTO schema_migrations (module, version, applied_at) VALUES ('promotion', 1, ?)").run(now);
+    const insert = db.prepare(
+      "INSERT INTO promotion_operations (id, session_id, owner_id, from_generation, to_generation, trigger, target, state, source_cleaned, created_at, updated_at) VALUES (?, ?, 101, 0, ?, 'api', 'coder', ?, ?, ?, ?)",
+    );
+    insert.run("prm_done", SESSION, 1, "committed", 1, now, now);
+    insert.run("prm_dirty", "7a7a7a7a-1111-4222-8333-944444444444", 1, "committed", 0, now, now);
+    insert.run("prm_failed", "8b8b8b8b-1111-4222-8333-944444444444", null, "failed", 0, now, now);
+    const upgraded = new PromotionStore(db);
+    expect(upgraded.get("prm_done")).toMatchObject({ eventPublished: true, finalized: true, cleanupPending: false });
+    expect(upgraded.get("prm_dirty")).toMatchObject({ eventPublished: true, finalized: false });
+    expect(upgraded.get("prm_failed")).toMatchObject({ eventPublished: false, finalized: false, cleanupPending: false });
+    // Only the source cleanup is still owed; opening the store again changes nothing.
+    expect(upgraded.owing().map((operation) => operation.id)).toEqual(["prm_dirty"]);
+    expect(new PromotionStore(db).owing().map((operation) => operation.id)).toEqual(["prm_dirty"]);
+    db.close();
   });
 });
 

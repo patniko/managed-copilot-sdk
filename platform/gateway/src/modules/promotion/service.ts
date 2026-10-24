@@ -107,6 +107,8 @@ export class PromotionManager implements PromotionService {
   readonly #log: Logger;
   readonly #store: PromotionStore;
   readonly #inflight = new Map<string, InFlight>();
+  /** The tail of each session's candidate work (see `#candidateWork`). */
+  readonly #candidates = new Map<string, Promise<void>>();
   #running = 0;
 
   constructor(options: PromotionManagerOptions) {
@@ -280,27 +282,31 @@ export class PromotionManager implements PromotionService {
           const check = await this.#quiescent(progress);
           if (check.fatal) throw check.fatal;
         }
-        await this.#releaseLeftovers(record.id, operation.id);
-
-        // Allocation: the source keeps serving while the target's image and setup are prepared.
-        network = this.#narrow(progress, target);
-        this.#update(progress, { state: "allocating" });
-        progress.allocated = true;
-        const handle = await sandboxes.create({
-          sessionId: record.id,
-          ownerId: record.ownerId,
-          environment: target,
-          size: targetConfig.size ?? "small",
-          network,
-          ...(record.environmentRequest.vaults ? { vaults: record.environmentRequest.vaults } : {}),
-          additions: {
-            ...(record.environmentRequest.files ? { files: record.environmentRequest.files } : {}),
-            ...(record.environmentRequest.packages ? { packages: record.environmentRequest.packages } : {}),
-            ...(record.environmentRequest.env ? { env: record.environmentRequest.env } : {}),
-          },
-          resolved: this.#resolved(record, targetConfig),
+        // Allocation: the source keeps serving while the target's image and setup are prepared. It runs in order with
+        // releasing what earlier attempts left behind, so a release never undoes this attempt's candidate.
+        const allocated = await this.#candidateWork(record.id, async () => {
+          await this.#releaseLeftovers(record.id, operation.id);
+          const narrowed = this.#narrow(progress, target);
+          this.#update(progress, { state: "allocating" });
+          progress.allocated = true;
+          const handle = await sandboxes.create({
+            sessionId: record.id,
+            ownerId: record.ownerId,
+            environment: target,
+            size: targetConfig.size ?? "small",
+            network: narrowed,
+            ...(record.environmentRequest.vaults ? { vaults: record.environmentRequest.vaults } : {}),
+            additions: {
+              ...(record.environmentRequest.files ? { files: record.environmentRequest.files } : {}),
+              ...(record.environmentRequest.packages ? { packages: record.environmentRequest.packages } : {}),
+              ...(record.environmentRequest.env ? { env: record.environmentRequest.env } : {}),
+            },
+            resolved: this.#resolved(record, targetConfig),
+          });
+          return { network: narrowed, sandboxId: handle.sandboxId };
         });
-        sandboxId = handle.sandboxId;
+        network = allocated.network;
+        sandboxId = allocated.sandboxId;
         this.#update(progress, { state: "quiescing", sandboxId });
 
         // Quiesce at a supported checkpoint, then fence the source and re-check what may have started meanwhile.
@@ -347,7 +353,7 @@ export class PromotionManager implements PromotionService {
           // Recorded before commit, so recovery can carry the call even if the gateway stops right after commit.
           this.#update(progress, { requestId });
         }
-        committed = cutover.commit();
+        committed = await this.#commit(progress, cutover);
       } catch (error) {
         const managed = toManaged(error);
         await this.#rollback(progress, managed);
@@ -371,6 +377,37 @@ export class PromotionManager implements PromotionService {
 
   #update(progress: Progress, fields: Parameters<PromotionStore["update"]>[1]): void {
     progress.operation = this.#store.update(progress.operation.id, fields);
+  }
+
+  /**
+   * Runs work on a session's candidate sandboxes (releasing what earlier attempts left, allocating a new one) one at a
+   * time, so a release never overlaps an allocation it would undo.
+   */
+  async #candidateWork<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.#candidates.get(sessionId) ?? Promise.resolve()).then(work);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#candidates.set(sessionId, settled);
+    try {
+      return await run;
+    } finally {
+      if (this.#candidates.get(sessionId) === settled) this.#candidates.delete(sessionId);
+    }
+  }
+
+  /** Commits the cutover. A commit that fails after core's ledger moved the session still moved it: nothing may undo that. */
+  async #commit(progress: Progress, cutover: PlacementCutover): Promise<SessionRecord> {
+    const { record } = progress.attempt;
+    try {
+      return await cutover.commit();
+    } catch (error) {
+      const moved = this.#sessions().get(record.id);
+      if (!moved || moved.placement !== "sandbox" || moved.generation <= record.generation || moved.createdAt !== record.createdAt) throw error;
+      this.#log.error("The placement commit failed after the session moved; finishing the promotion", { sessionId: record.id, operation: progress.operation.id, error: (error as Error).message });
+      return moved;
+    }
   }
 
   /** The session's policy narrowed by the target's ceiling: through the network module when present, else locally. */
@@ -576,8 +613,11 @@ export class PromotionManager implements PromotionService {
         data: data as unknown as Record<string, unknown>,
       };
       try {
-        this.#app.service("events").publish(event, { ownerId: committed.ownerId });
-        current = this.#store.update(current.id, { eventPublished: true });
+        // Core reports `false` when the event reached live subscribers but not its ledger (so `Last-Event-ID` replay
+        // would miss it); it is then published again, with the same ID, at the next start.
+        const stored: unknown = this.#app.service("events").publish(event, { ownerId: committed.ownerId });
+        if (stored === false) this.#log.warn("session.promoted was not stored in the event ledger; it is published again at the next start", { sessionId: committed.id });
+        else current = this.#store.update(current.id, { eventPublished: true });
       } catch (error) {
         this.#log.warn("Could not publish session.promoted; it is retried at the next start", { sessionId: committed.id, error: (error as Error).message });
       }
@@ -606,14 +646,25 @@ export class PromotionManager implements PromotionService {
     }
   }
 
-  /** A new attempt first releases what an attempt interrupted by a restart left behind (its candidate sandbox). */
+  /** A new attempt first releases what earlier attempts of the session left behind (their candidate sandbox). */
   async #releaseLeftovers(sessionId: string, current: string): Promise<void> {
     for (const operation of this.#store.owing()) {
-      if (operation.sessionId !== sessionId || operation.id === current || operation.state !== "failed") continue;
-      await this.#sandboxes()?.delete(sessionId);
-      await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
-      this.#store.update(operation.id, { cleanupPending: false });
+      if (operation.sessionId === sessionId && operation.id !== current) await this.#releaseCandidate(operation.id);
     }
+  }
+
+  /**
+   * Releases the candidate sandbox of an attempt that failed or was interrupted, if that is still owed. Runs inside
+   * `#candidateWork`: an owed release means no later attempt of the session has allocated since.
+   */
+  async #releaseCandidate(operationId: string): Promise<void> {
+    const operation = this.#store.get(operationId);
+    if (!operation || operation.state !== "failed" || !operation.cleanupPending) return;
+    const current = optionalService<SessionsService>(this.#app.services, "sessions")?.get(operation.sessionId);
+    // A session in sandbox placement owns its sandbox (a new session that reused the ID): never touched.
+    if (!current || current.placement === "shared") await this.#sandboxes()?.delete(operation.sessionId);
+    await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
+    this.#store.update(operation.id, { cleanupPending: false });
   }
 
   // Recovery -------------------------------------------------------------------------------------------------------
@@ -673,14 +724,9 @@ export class PromotionManager implements PromotionService {
           }
           continue;
         }
-        // An interrupted attempt's candidate, unless a newer attempt already took over (it releases the leftover
-        // itself before allocating) or the session meanwhile became something else.
-        const newest = this.#store.latest(operation.sessionId);
-        if (newest?.id === operation.id && (!record || (record.placement === "shared" && record.createdAt <= operation.createdAt))) {
-          await this.#sandboxes()?.delete(operation.sessionId);
-        }
-        await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
-        this.#store.update(operation.id, { cleanupPending: false });
+        // An interrupted attempt's candidate, released in order with any newer attempt's allocation (which releases
+        // it itself first, so a snapshot taken before that never undoes the newer candidate).
+        await this.#candidateWork(operation.sessionId, () => this.#releaseCandidate(operation.id));
       } catch (error) {
         this.#log.warn("Promotion recovery step failed; it is retried at the next start", { sessionId: operation.sessionId, operation: operation.id, error: (error as Error).message });
       }
