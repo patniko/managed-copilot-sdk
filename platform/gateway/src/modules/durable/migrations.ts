@@ -163,4 +163,7 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
            AND earlier.message_id = durable_schedule_runs.message_id
            AND earlier.rowid < durable_schedule_runs.rowid);
   CREATE UNIQUE INDEX durable_schedule_runs_message ON durable_schedule_runs (session_id, message_id) WHERE message_id IS NOT NULL;`,
+
+  // 6: live connections that held each action, per placement generation (promotion fences earlier claimants).
+  `ALTER TABLE durable_actions ADD COLUMN live_claimants TEXT;`,
 ];

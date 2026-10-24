@@ -41,6 +41,8 @@ export interface ActionRow {
   readonly next_forward_at: number | null;
   /** When the action was first included in a `session.action_required` notification. */
   readonly notified_at: number | null;
+  /** JSON `{ connectionId: generation }`: live connections that held this action, and the placement they held it in. */
+  readonly live_claimants: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -76,6 +78,8 @@ export interface ClaimChange {
   readonly liveConnection: string | null;
   /** Null for live claims. */
   readonly leaseExpiresAt: number | null;
+  /** Live claims: the action's claimant history including this connection (see `ActionRow.live_claimants`). */
+  readonly liveClaimants?: string;
   readonly now: number;
 }
 
@@ -196,7 +200,7 @@ export class ActionStore {
       this.#db
         .prepare(
           `UPDATE durable_actions SET state = ?, claim_seq = claim_seq + 1, claim_token_hash = ?, claimed_by = ?, responder_type = ?,
-             live_connection = ?, lease_expires_at = ?, reason = NULL, updated_at = ?
+             live_connection = ?, lease_expires_at = ?, live_claimants = COALESCE(?, live_claimants), reason = NULL, updated_at = ?
            WHERE id = ? AND claim_seq = ? AND state IN (${placeholders(expected.states)})`,
         )
         .run(
@@ -206,6 +210,7 @@ export class ActionStore {
           change.responderType,
           change.liveConnection,
           change.leaseExpiresAt,
+          n(change.liveClaimants),
           change.now,
           id,
           expected.seq,
@@ -290,7 +295,15 @@ export class ActionStore {
   moveToGeneration(
     id: string,
     seq: number,
-    change: { readonly generation: number; readonly state: ActionState; readonly clearClaim: boolean; readonly reason: string | null; readonly now: number },
+    change: {
+      readonly generation: number;
+      readonly state: ActionState;
+      readonly clearClaim: boolean;
+      readonly reason: string | null;
+      /** Updated claimant history (a live claim carried into the new placement is held there). */
+      readonly liveClaimants?: string;
+      readonly now: number;
+    },
   ): boolean {
     const claim = change.clearClaim
       ? ", claim_seq = claim_seq + 1, claim_token_hash = NULL, claimed_by = NULL, responder_type = NULL, live_connection = NULL, lease_expires_at = NULL"
@@ -298,10 +311,10 @@ export class ActionStore {
     return changed(
       this.#db
         .prepare(
-          `UPDATE durable_actions SET generation = ?, state = ?, reason = ?, updated_at = ?${claim}
+          `UPDATE durable_actions SET generation = ?, state = ?, reason = ?, live_claimants = COALESCE(?, live_claimants), updated_at = ?${claim}
            WHERE id = ? AND claim_seq = ? AND generation < ? AND state IN (${placeholders(OPEN_STATES)})`,
         )
-        .run(change.generation, change.state, change.reason, change.now, id, seq, change.generation, ...OPEN_STATES),
+        .run(change.generation, change.state, change.reason, n(change.liveClaimants), change.now, id, seq, change.generation, ...OPEN_STATES),
     );
   }
 
@@ -321,7 +334,10 @@ export class ActionStore {
     );
   }
 
-  /** Marks an answer as delivered (or as never deliverable, with a reason); `generation` limits it to that placement. */
+  /**
+   * Marks an undelivered answer as delivered (or as never deliverable, with a reason). `generation` scopes it to the
+   * placement that was attempted, so a late acknowledgment from an older placement never covers a newer one.
+   */
   markForwarded(id: string, now: number, reason?: string, generation?: number): void {
     const sets = ["forwarded = 1", "next_forward_at = NULL", "updated_at = ?"];
     const params: Bindable[] = [now];
@@ -329,7 +345,7 @@ export class ActionStore {
       sets.push("reason = ?");
       params.push(reason);
     }
-    const conditions = ["id = ?"];
+    const conditions = ["id = ?", "forwarded = 0"];
     params.push(id);
     if (generation !== undefined) {
       conditions.push("generation = ?");
@@ -338,8 +354,11 @@ export class ActionStore {
     this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params);
   }
 
-  deferForward(id: string, nextAt: number, now: number): void {
-    this.#db.prepare("UPDATE durable_actions SET forward_attempts = forward_attempts + 1, next_forward_at = ?, updated_at = ? WHERE id = ?").run(nextAt, now, id);
+  deferForward(id: string, nextAt: number, now: number, generation?: number): void {
+    const scope = generation === undefined ? "" : " AND generation = ?";
+    this.#db
+      .prepare(`UPDATE durable_actions SET forward_attempts = forward_attempts + 1, next_forward_at = ?, updated_at = ? WHERE id = ? AND forwarded = 0${scope}`)
+      .run(nextAt, now, id, ...(generation === undefined ? [] : [generation]));
   }
 
   markNotified(ids: readonly string[], now: number): void {
