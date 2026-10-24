@@ -42,9 +42,11 @@ describe("promotion through the gateway", () => {
     await github?.close();
   });
 
-  it("advertises promotion and injects request_sandbox only into promotable sessions, behind the permission policy", async () => {
+  it("advertises promotion only with a working sandbox backend, and injects request_sandbox only into promotable sessions, behind the permission policy", async () => {
     const info = (await (await fetch(`${gateway.url}/v1/info`, { headers: { authorization: `Bearer ${ALICE}` } })).json()) as { capabilities: string[] };
-    expect(info.capabilities).toContain("promotion");
+    // This gateway's DOCKER_HOST is unreachable: like isolated sessions, promotion is not advertised.
+    expect(info.capabilities).not.toContain("isolated");
+    expect(info.capabilities).not.toContain("promotion");
 
     const helper = await RawClient.connect(gateway.url, ALICE, "helper");
     const chat = await RawClient.connect(gateway.url, ALICE, "chat");
