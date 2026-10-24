@@ -30,6 +30,37 @@ importers:
         specifier: 8.2.1
         version: 8.2.1
 
+  demos/quickstart:
+    dependencies:
+      '@github/copilot-sdk':
+        specifier: 1.0.26
+        version: 1.0.26
+      '@managed-copilot/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@managed-copilot/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
+      zod:
+        specifier: ^4.3.6
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.2
+      tsx:
+        specifier: ^4.21.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/aspire:
     dependencies:
       '@managed-copilot/gateway':
