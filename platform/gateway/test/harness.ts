@@ -30,7 +30,7 @@ export class FakeRuntime {
   readonly requests: RecordedRequest[] = [];
   readonly notifications: RecordedRequest[] = [];
   readonly sessions = new Map<string, FakeSession>();
-  readonly #pendingTools = new Map<string, (answer: Record<string, unknown>) => void>();
+  readonly #pendingTools = new Map<string, { sessionId: string; toolName: string; toolCallId: string; arguments: unknown; resolve: (answer: Record<string, unknown>) => void }>();
   readonly #endpoints = new Set<RpcEndpoint>();
   #server: Server | undefined;
   port = 0;
@@ -139,12 +139,20 @@ export class FakeRuntime {
         return { completionEventId: randomUUID() };
       }
       case "session.tools.handlePendingToolCall": {
-        const resolve = this.#pendingTools.get(String(params["requestId"]));
-        if (!resolve) return { success: false, error: "No pending tool call" };
+        const pending = this.#pendingTools.get(String(params["requestId"]));
+        if (!pending) return { success: false, error: "No pending tool call" };
         this.#pendingTools.delete(String(params["requestId"]));
-        resolve(params);
+        pending.resolve(params);
         return { success: true };
       }
+      case "session.tools.listPendingRequests":
+        return {
+          items: [...this.#pendingTools.entries()]
+            .filter(([, pending]) => pending.sessionId === sessionId)
+            .map(([requestId, pending]) => ({ requestId, toolName: pending.toolName, toolCallId: pending.toolCallId, arguments: pending.arguments })),
+        };
+      case "session.permissions.pendingRequests":
+        return { items: [] };
       case "session.permissions.handlePendingPermissionRequest":
         return { success: true };
       case "session.getMessages":
@@ -165,15 +173,20 @@ export class FakeRuntime {
 
   async #turn(endpoint: RpcEndpoint, session: FakeSession, prompt: string, messageId: string): Promise<string> {
     this.#emit(endpoint, session, "user.message", { content: prompt, messageId });
-    const tool = /tool:([a-z_]+)/.exec(prompt)?.[1];
+    // `tool:<name>` calls a tool, optionally with JSON arguments: `tool:web_fetch {"url":"https://example.com"}`.
+    const call = /tool:([a-z_]+)(?:\s+(\{[\s\S]*\}))?/.exec(prompt);
+    const tool = call?.[1];
     let content = `echo: ${prompt}`;
     if (tool) {
       const requestId = randomUUID();
-      const answered = new Promise<Record<string, unknown>>((resolve) => this.#pendingTools.set(requestId, resolve));
-      this.#emit(endpoint, session, "external_tool.requested", { requestId, sessionId: session.id, toolCallId: `call_${requestId}`, toolName: tool, arguments: { id: "1234" }, workingDirectory: "/platform/host/path" });
+      const toolCallId = `call_${requestId}`;
+      const args: unknown = call?.[2] ? JSON.parse(call[2]) : { id: "1234" };
+      const answered = new Promise<Record<string, unknown>>((resolve) => this.#pendingTools.set(requestId, { sessionId: session.id, toolName: tool, toolCallId, arguments: args, resolve }));
+      this.#emit(endpoint, session, "external_tool.requested", { requestId, sessionId: session.id, toolCallId, toolName: tool, arguments: args, workingDirectory: "/platform/host/path" });
       const answer = await answered;
       this.#emit(endpoint, session, "external_tool.completed", { requestId });
-      content = `tool said: ${typeof answer["result"] === "string" ? answer["result"] : JSON.stringify(answer["result"] ?? answer["error"])}`;
+      const result = answer["result"] as { textResultForLlm?: unknown } | string | undefined;
+      content = `tool said: ${typeof result === "string" ? result : typeof result?.textResultForLlm === "string" ? result.textResultForLlm : JSON.stringify(result ?? answer["error"])}`;
     }
     this.#emit(endpoint, session, "assistant.message_delta", { messageId: "m1", deltaContent: content.slice(0, 5) });
     this.#emit(endpoint, session, "assistant.message", { messageId: "m1", content, originatingMessageId: messageId });
@@ -253,6 +266,9 @@ export async function startTestGateway(options: { runtime: FakeRuntime; githubUr
       MANAGED_COPILOT_RUNTIME_URL: `tcp://127.0.0.1:${options.runtime.port}`,
       MANAGED_COPILOT_RUNTIME_TOKEN: options.runtime.token,
       MANAGED_COPILOT_CONFIG: JSON.stringify(options.deployment ?? TEST_DEPLOYMENT),
+      // Hermetic by default: isolated placement fails fast (no Docker builds) and no egress container starts.
+      DOCKER_HOST: "tcp://127.0.0.1:1",
+      MANAGED_COPILOT_EGRESS: "off",
       ...options.env,
     }),
   );

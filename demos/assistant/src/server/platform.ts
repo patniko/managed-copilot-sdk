@@ -10,6 +10,13 @@ import { errorMessage, type Logger } from "./log.js";
 const MIN_RETRY_MS = 2_000;
 const MAX_RETRY_MS = 30_000;
 
+/** Short, actionable copy for connection failures (the UI adds "Start it with `aspire run`"). */
+export function friendlyPlatformError(message: string): string {
+  const unreachable = /Cannot reach the Managed Copilot deployment at (\S+?):? (?:fetch failed|connect ECONNREFUSED.*)$/i.exec(message);
+  if (unreachable) return `Nothing is answering at ${unreachable[1]}.`;
+  return /[.!?]$/.test(message.trim()) ? message.trim() : `${message.trim()}.`;
+}
+
 export class Platform {
   readonly #config: AssistantConfig;
   readonly #log: Logger;
@@ -90,10 +97,10 @@ export class Platform {
     } catch (error) {
       await managed?.close().catch(() => undefined);
       if (isManagedCopilotError(error, "authentication_required")) {
-        this.#retry({ state: "unauthenticated", environment, message: errorMessage(error) }, MAX_RETRY_MS);
+        this.#retry({ state: "unauthenticated", environment, message: friendlyPlatformError(errorMessage(error)) }, MAX_RETRY_MS);
       } else {
         const delay = Math.min(MAX_RETRY_MS, MIN_RETRY_MS * 2 ** this.#attempt++);
-        this.#retry({ state: "unavailable", environment, message: errorMessage(error) }, delay);
+        this.#retry({ state: "unavailable", environment, message: friendlyPlatformError(errorMessage(error)) }, delay);
       }
     }
   }

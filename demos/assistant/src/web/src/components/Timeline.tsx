@@ -85,15 +85,13 @@ export function Timeline(props: TimelineProps) {
   const showTyping = busy && !(lastItem?.kind === "assistant" && lastItem.streaming) && !(lastItem?.kind === "approval" && lastItem.status === "pending");
   const isEmpty = items.length === 0 && pending.length === 0;
 
-  const onScroll = () => {
+  const measure = () => {
     const el = scroller.current;
     if (!el) return;
     const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
     stick.current = bottom;
-    if (bottom !== atBottom) {
-      setAtBottom(bottom);
-      props.onAtBottomChange(bottom);
-    }
+    setAtBottom(bottom);
+    props.onAtBottomChange(bottom);
   };
 
   useLayoutEffect(() => {
@@ -104,20 +102,26 @@ export function Timeline(props: TimelineProps) {
       if (unreadRef.current) {
         unreadRef.current.scrollIntoView({ block: "start" });
         el.scrollTop -= 16;
-        stick.current = false;
-        onScroll();
-        return;
+      } else {
+        el.scrollTop = el.scrollHeight;
       }
+    } else if (stick.current) {
       el.scrollTop = el.scrollHeight;
-      return;
     }
-    if (stick.current) el.scrollTop = el.scrollHeight;
+    // Short content never fires a scroll event, so always report the position after layout.
+    measure();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items.length, pending.length, streamingText, showTyping]);
 
   useEffect(() => {
     if (items.length === 0) initialScrollDone.current = false;
   }, [items.length]);
+
+  // Report the position on mount too: the timeline remounts after loading states.
+  useEffect(() => {
+    measure();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const jump = () => {
     const el = scroller.current;
@@ -128,7 +132,7 @@ export function Timeline(props: TimelineProps) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div ref={scroller} onScroll={onScroll} className="h-full overflow-y-auto scrollbar-thin" role="log" aria-live="polite" aria-relevant="additions">
+      <div ref={scroller} onScroll={measure} className="h-full overflow-y-auto scrollbar-thin" role="log" aria-live="polite" aria-relevant="additions">
         {isEmpty ? (
           props.empty
         ) : (

@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isManagedCopilotError, NETWORK_ENABLED, parseConfig } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
 import { redact } from "../src/log.js";
-import { admitOptionsUpdate, admitSession, lockSystemMessage, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
+import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
 import { createLogger } from "../src/log.js";
@@ -119,6 +119,11 @@ describe("shared admission", () => {
     });
     expect(admitted.params["availableTools"]).not.toContain("builtin:web_fetch");
     expect(admitted.params["availableTools"]).not.toContain("builtin:bash");
+    // Plain chat does not offer subagent orchestration it cannot use; sessions with agents do.
+    expect(admitted.params["availableTools"]).not.toContain("builtin:task");
+    const withAgents = admitSession({ sessionId: "s1", customAgents: [{ name: "helper", prompt: "Help." }] }, context(), "create");
+    expect(withAgents.params["availableTools"]).toContain("builtin:task");
+    expect(admitSession({ sessionId: "s1", availableTools: ["builtin:task"] }, context(), "create").params["availableTools"]).toEqual(["builtin:task"]);
     expect(admitted.client).toEqual({ tools: ["lookup_order"], requestPermission: true, requestUserInput: false, requestElicitation: false });
     expect(admitted.optionsPatch).toMatchObject({ skipCustomInstructions: true, installedPlugins: [], includedBuiltinSkills: [] });
   });
@@ -132,9 +137,12 @@ describe("shared admission", () => {
     expect(filters.excludedTools).toEqual(["builtin:task"]);
   });
 
-  it("removes the host environment section from system prompts", () => {
-    expect(lockSystemMessage({ content: "Be brief." })).toEqual({ mode: "customize", content: "Be brief.", sections: { environment_context: { action: "remove" } } });
-    expect(lockSystemMessage({ mode: "customize", sections: { environment_context: { action: "transform" } } })).toMatchObject({ sections: { environment_context: { action: "remove" } } });
+  it("replaces the host environment section in system prompts", () => {
+    const environment = { action: "replace", content: SHARED_ENVIRONMENT_CONTEXT };
+    expect(lockSystemMessage({ content: "Be brief." })).toEqual({ mode: "customize", content: "Be brief.", sections: { environment_context: environment, code_change_rules: { action: "remove" } } });
+    expect(lockSystemMessage({ mode: "customize", sections: { environment_context: { action: "transform" }, code_change_rules: { action: "preserve" } } })).toMatchObject({
+      sections: { environment_context: environment, code_change_rules: { action: "preserve" } },
+    });
     expect(lockSystemMessage({ mode: "replace", content: "Only this." })).toEqual({ mode: "replace", content: "Only this." });
   });
 

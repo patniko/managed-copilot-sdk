@@ -174,7 +174,13 @@ export function AutomationsCard(props: {
       {schedules.length === 0 ? (
         <div className="text-sm text-zinc-500 dark:text-zinc-400">
           <p>Ask me to remind you about something, or to do a task on a schedule. They run on Managed Copilot even when this tab is closed.</p>
-          <button type="button" className="btn-secondary mt-3 w-full" disabled={!props.ready || busy === "briefing"} onClick={() => void act("briefing", () => actions.addBriefing())}>
+          <button
+            type="button"
+            className="btn-secondary mt-3 w-full"
+            disabled={!props.ready || props.error !== undefined || busy === "briefing"}
+            title={props.error ?? (props.ready ? undefined : "Managed Copilot isn't connected")}
+            onClick={() => void act("briefing", () => actions.addBriefing())}
+          >
             {busy === "briefing" ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <Plus className="size-4" aria-hidden />}
             Weekday morning briefing
           </button>

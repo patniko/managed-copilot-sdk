@@ -67,8 +67,17 @@ export function scheduleIdFrom(content: string | undefined): string | undefined 
   return match?.[1];
 }
 
+/** "stretch-water-reminder" → "Stretch water reminder"; names with spaces are kept as written. */
+export function humanizeName(name: string): string {
+  if (/\s/.test(name) || !/[-_]/.test(name)) return name;
+  // The platform suffixes duplicate agent schedule names with 4 random characters ("…-2QQq"); drop that for display.
+  const base = name.replace(/-(?=[A-Za-z0-9_-]{4}$)(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]{4}$/, "");
+  const words = base.replace(/[-_]+/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 export function scheduleSummary(args: Args, timeZone: string, at: Date): string {
-  const name = text(args.name) ?? text(args.prompt) ?? "a task";
+  const name = (text(args.name) && humanizeName(text(args.name)!)) ?? text(args.prompt) ?? "a task";
   const cron = text(args.cron);
   if (cron) return `${quote(name)} · ${describeCron(cron)}`;
   const runAt = text(args.runAt);

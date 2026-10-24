@@ -1,0 +1,31 @@
+{
+  "name": "@managed-copilot/sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated placement for Managed Copilot: the base sandbox image, the in-sandbox agent (sandboxd), and the gateway relay.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/shared/index.d.ts",
+      "default": "./dist/shared/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@github/copilot": "1.0.103",
+    "@github/copilot-sdk": "1.0.26",
+    "@managed-copilot/protocol": "workspace:*",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}

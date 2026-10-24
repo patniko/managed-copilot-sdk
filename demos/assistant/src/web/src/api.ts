@@ -49,4 +49,5 @@ export const api = {
   connectGoogle: () => request<{ url: string }>("POST", "/api/google/connect", {}),
   disconnectGoogle: () => request("POST", "/api/google/disconnect", {}),
   resetDemo: () => request("POST", "/api/demo/reset", {}),
+  startOver: () => request("POST", "/api/conversation/reset", {}),
 };

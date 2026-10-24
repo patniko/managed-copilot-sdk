@@ -12,6 +12,13 @@ import type { RegisteredPlatformTool, ResolvedEnvironment } from "./contracts.js
 /** `BuiltInTools.Isolated` from @github/copilot-sdk 1.0.26: built-ins that stay inside one session. */
 export const SESSION_SAFE_BUILTINS = ["ask_user", "task_complete", "exit_plan_mode", "task", "read_agent", "write_agent", "list_agents", "send_inbox", "context_board"] as const;
 
+/**
+ * Multi-agent built-ins. In shared sessions without agents they only spawn subagents that have nothing to work with
+ * (no web, shell, or files), which turns a quick chat answer into minutes of fruitless delegation, so they are on by
+ * default only when the session has agents; callers can still opt in with `availableTools`.
+ */
+export const SUBAGENT_BUILTINS = ["task", "read_agent", "write_agent", "list_agents", "send_inbox", "context_board"] as const;
+
 /** Runtime built-in MCP servers, disabled in shared placement (no direct egress from the shared runtime). */
 export const BUILTIN_MCP_SERVERS = ["github-mcp-server"] as const;
 
@@ -116,20 +123,34 @@ export function checkModel(environment: ResolvedEnvironment, model: unknown): vo
   if (!allowed.includes(model)) throw violation(`Model "${model}" is not allowed in environment "${environment.name}" (allowed: ${allowed.join(", ")})`, { allowedModels: allowed });
 }
 
-/** Removes the runtime's host environment section from shared sessions' system prompts. */
+/**
+ * Shared sessions get an accurate environment section instead of the runtime's host details (cwd, OS, directory
+ * listing), so models do not attempt shell commands or file access the session does not have.
+ */
+export const SHARED_ENVIRONMENT_CONTEXT = [
+  "<environment_context>",
+  "This session runs in a Managed Copilot shared environment. It has no shell, no file system, and no direct network access.",
+  "Use only the tools available in this session. Never write tool calls, shell commands, or code meant to be executed as plain text.",
+  "If a request needs a capability this session does not have, say so briefly and answer as well as you can from what you know.",
+  "</environment_context>",
+].join("\n");
+
+/** Replaces the runtime's host environment section in shared sessions' system prompts. */
 export function lockSystemMessage(supplied: unknown): unknown {
-  if (supplied === undefined || supplied === null) return { mode: "customize", sections: { environment_context: { action: "remove" } } };
+  const environment = { action: "replace", content: SHARED_ENVIRONMENT_CONTEXT };
+  const defaults = { environment_context: environment, code_change_rules: { action: "remove" } };
+  if (supplied === undefined || supplied === null) return { mode: "customize", sections: defaults };
   if (!isRecord(supplied)) throw new ManagedCopilotError("invalid_request", "systemMessage must be an object");
   switch (supplied["mode"]) {
     case "replace":
       return supplied;
     case "customize": {
       const sections = isRecord(supplied["sections"]) ? supplied["sections"] : {};
-      return { ...supplied, sections: { ...sections, environment_context: { action: "remove" } } };
+      return { ...supplied, sections: { ...defaults, ...sections, environment_context: environment } };
     }
     case "append":
     case undefined:
-      return { mode: "customize", ...(supplied["content"] !== undefined ? { content: supplied["content"] } : {}), sections: { environment_context: { action: "remove" } } };
+      return { mode: "customize", ...(supplied["content"] !== undefined ? { content: supplied["content"] } : {}), sections: defaults };
     default:
       throw new ManagedCopilotError("invalid_request", `Unknown systemMessage mode "${String(supplied["mode"])}"`);
   }
@@ -148,9 +169,16 @@ export function sharedBuiltins(environment: ResolvedEnvironment, _network: Netwo
 }
 
 /** Intersects the caller's tool filters with the shared environment's allowlist (source-qualified names). */
-export function sharedToolFilters(input: ToolFilterInput, environment: ResolvedEnvironment, network: NetworkPolicy, allowMcp: boolean): { availableTools: string[]; excludedTools?: string[] } {
+export function sharedToolFilters(
+  input: ToolFilterInput,
+  environment: ResolvedEnvironment,
+  network: NetworkPolicy,
+  allowMcp: boolean,
+  options: { hasAgents?: boolean } = {},
+): { availableTools: string[]; excludedTools?: string[] } {
   const builtins = sharedBuiltins(environment, network);
-  const base = [...builtins.map((name) => `builtin:${name}`), "custom:*", ...(allowMcp ? ["mcp:*"] : [])];
+  const defaults = options.hasAgents ? builtins : builtins.filter((name) => !(SUBAGENT_BUILTINS as readonly string[]).includes(name));
+  const base = [...defaults.map((name) => `builtin:${name}`), "custom:*", ...(allowMcp ? ["mcp:*"] : [])];
   const requested = stringList(input.availableTools, "availableTools");
   const excluded = stringList(input.excludedTools, "excludedTools");
   let availableTools = base;
@@ -476,7 +504,8 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     if (directories.skills) params["skillDirectories"] = [directories.skills];
     if (directories.agents) params["agentDirectories"] = [directories.agents];
     if (directories.instructions) params["instructionDirectories"] = [directories.instructions];
-    const filters = sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0);
+    const hasAgents = (environment.customizations?.agents.length ?? 0) > 0 || (Array.isArray(raw["customAgents"]) && raw["customAgents"].length > 0) || typeof raw["agent"] === "string";
+    const filters = sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0, { hasAgents });
     params["availableTools"] = filters.availableTools;
     if (filters.excludedTools) params["excludedTools"] = filters.excludedTools;
     // The runtime's built-in GitHub MCP server would egress directly from the shared runtime host.
