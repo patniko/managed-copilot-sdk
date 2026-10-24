@@ -256,4 +256,7 @@ registry, and the identities. Your AppHost's user secrets stay on your machine.
 - **`/v1/info` lists no `isolated` capability**: the gateway's log names what the sandbox backend is missing (for
   example the role assignment, which can take a few minutes to propagate; the gateway re-checks every 30 s).
 - **The image step fails at `az acr login`**: install the Azure CLI and sign in with the account you deploy with.
+- **"Azure did not confirm whether … was created" / "An earlier attempt … has not been confirmed"**: Azure's answer to a
+  create was lost. The gateway never submits a second create while the first may still take effect (for up to 5
+  minutes); retry when the message says, and it adopts the resource if Azure created it.
 - **A gateway replica stays "not ready"**: it is waiting for the lease; its log says which replica holds it.
