@@ -282,7 +282,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   `failed`, and the sandbox service fails the turn's publication ("the sandbox runtime was restarted while this turn
   was running…") and stops holding idle stop for it. Each `openRuntime` reads sandboxd's `runtime.instance`, so a
   process change between connections is noticed. Gateway↔sandboxd runtime and tunnel WebSockets are pinged every 30 s
-  and closed after two unanswered pings, so a dead path ends the session's upstream instead of hanging it.
+  and closed after two unanswered pings, so a dead path ends the session's upstream instead of hanging it. Verified
+  live (`test/rollover.e2e.test.ts`, real Docker sandboxes and models): a turn cut mid-stream by a killed gateway, by a
+  graceful gateway shutdown, and on a shared session each ends as `failed` on the next gateway, and a new turn
+  completes; after the kill the same sandbox's runtime was restarted rather than the sandbox recreated.
 - **Promotion import.** `sandboxes.importRuntimeState(sessionId, { sessionStateDir, activeTurnId? })` copies the
   regular files of a gateway-host `session-state/<sessionId>` export (no `*.lock` files; links and special files are
   refused; ≤10,000 files, ≤1 GiB) into the running sandbox runtime's COPILOT_HOME as uid 10001. Files are staged under
