@@ -239,6 +239,11 @@ export class DurableActions implements ActionsService {
   readonly #detachGenerations = new Map<string, number>();
   /** Deleted sessions: nothing may be recorded or claimed for them, even by work that was already in flight. */
   readonly #deletedSessions = new Set<string>();
+  /**
+   * Latest placement generation the ledger applied per session (bounded). Updated synchronously by
+   * `onGenerationChanged`, so work that awaited across a move can tell before it changes anything.
+   */
+  readonly #placements = new Map<string, number>();
   #sweeper: NodeJS.Timeout | undefined;
   #sweeping = false;
 
@@ -516,6 +521,11 @@ export class DurableActions implements ActionsService {
   onGenerationChanged(sessionId: string, generation: number, options: GenerationChangeOptions = {}): void {
     const now = this.#now();
     const carried = new Set(options.carried ?? []);
+    if ((this.#placements.get(sessionId) ?? -1) < generation) {
+      this.#placements.delete(sessionId);
+      this.#placements.set(sessionId, generation);
+      if (this.#placements.size > MAX_REMEMBERED) this.#placements.delete(this.#placements.keys().next().value!);
+    }
     for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
       if (row.generation >= generation) continue;
       const owned = OWNED_STATES.includes(row.state);
@@ -696,10 +706,11 @@ export class DurableActions implements ActionsService {
       withTimeout(sessions.request<{ items?: unknown[] }>(sessionId, PENDING_LIST_METHODS.permission, { sessionId }), timeout, "The runtime").catch(() => undefined),
     ]);
     // The lists describe the placement asked. If the session was deleted or moved meanwhile, they are obsolete:
-    // never record, offer, or close anything from them.
-    if (this.#deletedSessions.has(sessionId)) return;
+    // never record, offer, or close anything from them. The ledger's own placement epoch is checked last and
+    // synchronously, so a move applied while the re-read was pending is seen before anything changes.
     const current = await sessions.get(sessionId);
     if (!current || current.generation !== view.generation || this.#deletedSessions.has(sessionId)) return;
+    if ((this.#placements.get(sessionId) ?? view.generation) > view.generation) return;
     const now = this.#now();
     if (tools && Array.isArray(tools.items)) {
       const waiting = new Set<string>();
@@ -744,7 +755,7 @@ export class DurableActions implements ActionsService {
           this.#adoptAnswered(row, view.generation, now);
         }
       }
-      this.#closeNotAwaited(sessionId, "tool", waiting, listedAt, now);
+      this.#closeNotAwaited(sessionId, "tool", waiting, listedAt, now, view.generation);
     }
     if (permissions && Array.isArray(permissions.items)) {
       const waiting = new Set((permissions.items as Record<string, unknown>[]).map((item) => str(item.requestId)).filter((id): id is string => !!id));
@@ -752,7 +763,7 @@ export class DurableActions implements ActionsService {
         const row = this.#store.findByRequest(sessionId, "permission", requestId);
         if (row) this.#adoptAnswered(row, view.generation, now);
       }
-      this.#closeNotAwaited(sessionId, "permission", waiting, listedAt, now);
+      this.#closeNotAwaited(sessionId, "permission", waiting, listedAt, now, view.generation);
     }
   }
 
@@ -825,13 +836,14 @@ export class DurableActions implements ActionsService {
     }
   }
 
-  #closeNotAwaited(sessionId: string, kind: ActionKind, waiting: ReadonlySet<string>, listedAt: number, now: number): void {
+  /** Closes actions of one placement that its runtime no longer lists; a move since the lists were read voids it. */
+  #closeNotAwaited(sessionId: string, kind: ActionKind, waiting: ReadonlySet<string>, listedAt: number, now: number, generation: number): void {
     for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
-      if (row.kind !== kind || waiting.has(row.request_id) || row.created_at >= listedAt - RECONCILE_GRACE_MS) continue;
+      if (row.kind !== kind || row.generation !== generation || waiting.has(row.request_id) || row.created_at >= listedAt - RECONCILE_GRACE_MS) continue;
       if (
         this.#store.transition(
           row.id,
-          { states: OPEN_STATES, seq: row.claim_seq },
+          { states: OPEN_STATES, seq: row.claim_seq, generation },
           { state: "cancelled", reason: "The runtime no longer waits for this request (for example, its turn was cancelled)", forwarded: true, now },
         )
       ) {

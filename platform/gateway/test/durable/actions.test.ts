@@ -863,6 +863,25 @@ describe("durable actions ledger", () => {
       expect(sessions.answers().map((answer) => [answer.params.requestId, answer.generation])).toEqual([["r1", 1]]);
     });
 
+    it("applies nothing from reconciliation when the session moves while it re-reads the session", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
+      now += 5_000;
+      // Placement 0's lists no longer include r1 and name a call the destination does not have.
+      sessions.pendingTools.set(SESSION, [{ requestId: "ghost", toolCallId: "call-ghost", toolName: "lookup_order", arguments: {} }]);
+      const get = sessions.get.bind(sessions);
+      let reads = 0;
+      sessions.get = (sessionId: string) => {
+        const view = get(sessionId);
+        // The move lands after the re-read returned placement 0, before reconciliation continues.
+        if (++reads === 2) queueMicrotask(() => promote(1, ["r1"]));
+        return view;
+      };
+      await actions.reconcile(SESSION);
+      await sleep(10);
+      expect(states()).toEqual({ r1: "executing" });
+      expect(published).toHaveLength(0);
+    });
+
     it("recovers orphaned live claims after a gateway restart", async () => {
       await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
       actions.stop();
