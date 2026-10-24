@@ -344,6 +344,8 @@ export class Platform implements FactoryPlatform {
       // Only a broken transport warrants a new client: a healthy client serves other sessions, and a session-level
       // rejection (admission, setup) must surface as is. A ping tells them apart.
       if (await this.#alive(client)) throw error;
+      // Abandoned during the probe: the client may serve a newer resume by now, so this attempt doesn't replace it.
+      if (attempt?.abandoned) throw error;
       log.warn("The environment's connection dropped; retrying on a fresh client", { role, error: errorText(error) });
       if (this.#clients.get(role) === client) {
         this.#clients.delete(role);
