@@ -124,6 +124,8 @@ export interface PolicyServiceOptions {
   readonly log: Logger;
   /** How long `registerSandbox` waits for the egress proxy (first start may build its image). */
   readonly egressWaitMs?: number;
+  /** Wait for the egress proxy even for sandboxes without network access (true when the platform runs the proxy). */
+  readonly alwaysWaitForEgress?: boolean;
   /** Publishes `network.blocked` platform events (rate-limited by the caller). */
   readonly onBlocked?: (session: SessionNetwork, report: EgressReport) => void;
 }
@@ -355,7 +357,9 @@ export class PolicyService {
     if (session.type === "shared") throw new ManagedCopilotError("policy_violation", `Session ${input.sessionId} is a shared session; promote it before it gets a sandbox`);
     const credentials = this.#credentials(session).filter(({ meta }) => meta.kind === "env");
     const needsEgress = session.policy.access !== "disabled" || credentials.length > 0;
-    if (needsEgress && !this.#options.egress.ready) {
+    // When the platform runs the egress proxy, every sandbox waits for it, so the proxy exists before the sandbox
+    // provider attaches it to the sandbox's network (it then denies everything for network: false).
+    if ((needsEgress || this.#options.alwaysWaitForEgress) && !this.#options.egress.ready) {
       this.#options.egress.ensureStarted?.();
       try {
         await this.#options.egress.waitReady(this.#options.egressWaitMs ?? 120_000);
