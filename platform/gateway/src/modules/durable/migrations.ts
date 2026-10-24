@@ -87,11 +87,13 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
     next_run_at INTEGER,
     definition_hash TEXT NOT NULL,
     apphost_key TEXT,
+    origin_key TEXT,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     deleted_at INTEGER
   );
   CREATE UNIQUE INDEX durable_schedules_owner_name ON durable_schedules (owner_id, name) WHERE deleted_at IS NULL;
+  CREATE UNIQUE INDEX durable_schedules_origin ON durable_schedules (owner_id, origin_key) WHERE origin_key IS NOT NULL;
   CREATE INDEX durable_schedules_due ON durable_schedules (state, next_run_at);
   CREATE TABLE durable_schedule_runs (
     id TEXT PRIMARY KEY,
@@ -108,7 +110,9 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
     input_state TEXT NOT NULL DEFAULT 'none',
     input_started_at INTEGER,
     message_id TEXT,
-    turn_id TEXT,
+    consumed INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER,
     started_at INTEGER,
     completed_at INTEGER,
     created_at INTEGER NOT NULL,
