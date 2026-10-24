@@ -447,6 +447,116 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
 
+### Promotion (as built)
+
+A promotable session moves once, from the shared runtime into its own sandbox, with the same session ID, history,
+and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, contract in `contract.ts`; core's
+`PlacementCutover` in `modules/core/contracts.ts`; acceptance in `platform/gateway/test/promotion.e2e.test.ts`).
+
+- **Stock mechanism (verified on runtime 1.0.103).** A session's whole runtime state is the
+  `session-state/<sessionId>/` directory of its runtime's `COPILOT_HOME` (`events.jsonl`, `workspace.yaml`,
+  `checkpoints/`). After `sessions.close` on the source (flushes, releases the in-use lock), a copy of that directory
+  in another runtime's `COPILOT_HOME` resumes with `session.resume` and full history, even when that runtime was
+  already running. `session.suspend` while an external tool call is pending checkpoints it: resuming with
+  `continuePendingWork: true` lists the same `requestId` and `toolCallId` in `session.tools.listPendingRequests`
+  (`external_tool.requested` is not re-emitted), and `session.tools.handlePendingToolCall` on the new runtime
+  continues the very same turn there. Nothing else under `COPILOT_HOME` is needed; consent and settings files are not
+  carried, so nothing is broadened.
+- **Triggers.** `POST /v1/sessions/:id/promote` (`managed.promote(session)`, `managed-copilot promote <id>`) promotes an
+  idle session as its owner. The agent asks with the `request_sandbox` platform tool, injected only into promotable
+  sessions on shared placement with `skipPermission: false`, so the session's permission policy approves it before
+  anything is allocated. Both return or report the same `PromoteResult { sessionId, placement, sandboxId, generation }`.
+- **Admission** (`promotion_operations`, one open attempt per session by a partial unique index; concurrent and
+  repeated API calls join it, a second `request_sandbox` call gets `promotion_busy` at once so the first can drain,
+  and an already promoted session returns its result): owned and promotable, the `promoteTo` target is an isolated
+  environment that does not route inference to Foundry (a different billing route is incompatible), the router
+  supports cutovers, sandboxes import state, at most 4 attempts in flight, and (API) no running turn
+  (`session_busy`); a tool call must come from the main agent's still-running turn. All of this is checked before
+  anything is allocated.
+- **Policy never broadens.** Before allocation, `policy.promoteSession(id, target)` narrows the session's current
+  effective network policy by the target's ceiling (`network: false` stays false), and the sandbox is created from the
+  target's image, size, setup, and idle policy with the *source's* pinned customizations (no new persona), the
+  session's vault bindings, and the caller's recorded additions (`files`, `packages`, `env`). The target supplies
+  compute only: model and approval ceilings stay the promotable environment's (core re-admits the caller's requested
+  configuration for the sandbox), so the target's `models` list does not apply to promoted sessions.
+- **Quiesce.** The source keeps serving while setup runs. API promotions then require an idle session
+  (`session.metadata.isProcessing`, no open actions, no running or idle background tasks); otherwise `session_busy`
+  and nothing was interrupted. Tool promotions wait up to 20 s until their own `request_sandbox` call (a root-agent
+  call) is the only open work: no other pending tool calls, permission prompts, durable actions, background tasks,
+  or queued messages; otherwise `promotion_busy` reaches the agent as a failed tool result. The checks run again right
+  after `fence()`, against the same session incarnation. Probes fail closed: only the runtime's "session not found"
+  (a session it does not hold, therefore idle) is accepted as an answer other than a valid result.
+- **Fence and transfer.** `fence()` makes new requests for the session wait and keeps everything the source emits
+  from clients, durable, observers, and the ledger. A tool promotion calls `session.suspend`, then `sessions.close`.
+  The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
+  data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
+  `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
+  each path is read once, in the style its separators show, so nested `\n` escapes survive: plain or JSON-escaped,
+  a forward-slash root continued with backslashes that cannot be JSON escapes is one plain path, a UNC root keeps its
+  `\\` prefix, and punctuation after a path stays outside it); JSONL split on `\n` only, with only lines that mention
+  a path re-serialized; JSON and text files up to 32 MiB rewritten, other files copied byte for byte; refused with
+  `policy_violation` if any file holds a GitHub token (`gh[pousr]_…`, `github_pat_…`, also inside Markdown emphasis,
+  or the owner's live token); at most 10,000 files and 1 GiB; any read or write failure fails the export.
+  `sandboxes.importRuntimeState` writes it into the sandbox runtime's `COPILOT_HOME` as uid 10001; a tool promotion
+  passes `activeTurnId` so the carried turn's `outputs/` publish when it completes.
+- **Open and commit.** `cutover.open({ continuePendingWork })` resumes the session on the sandbox runtime with the
+  sandbox admission and the union of attached clients' registrations; a tool promotion verifies the carried call is
+  pending there and records its request ID. The destination does not keep the shared prompt's `request_sandbox`
+  section: `systemMessage` is per-resume configuration (see the stock facts above), so it gets only what `open()`
+  sends. `await commit()` moves placement and generation in one ledger update, switches routing, delivers what the
+  cutover held back, and lifts the fence; the old owner never runs again, and nothing after the ledger update can roll
+  the move back (a commit that reports an error after it is finished, not undone). Then:
+  `policy.commitPromotion`, `actions.onGenerationChanged(id, generation, { carried: [requestId] })` (the carried call
+  keeps its platform claim and its answer is delivered into the new generation), the `session.promoted` platform
+  event (id `evt_promoted_<operation>`, top-level `sessionId` and `sandboxId`; `data: SessionPromotedData` with
+  `generation`, `target`, `trigger`, `toolCallId`, `network`, `durationMs`; published again with the same ID at the
+  next start if the event ledger reports it did not store it), and removal of the source's copy of the state, so the
+  fenced owner can never be reactivated. Only then does `request_sandbox` return; durable delivers its result to the
+  sandbox runtime and the turn continues there with the shell.
+- **One `sendAndWait` across the move.** The caller's in-flight `session.sendAndWait` is answered by the source with
+  `aborted: true` when it is suspended; core holds that reply and completes the request from the owning runtime's
+  events exactly as the stock runtime does (next root `session.idle`; `response` is that message's last root
+  `assistant.message`; `aborted` and `completionEventId` from that idle; a root `session.error` becomes the error), so
+  the call returns after the continued work in the sandbox, with ordered events and genuine cancellation. The
+  source's suspend artifacts (`agent.interrupted`, `model.turn_failed`, `session.idle {aborted}`, `session.shutdown`)
+  never reach clients; they remain in the persisted history, followed by the sandbox's `session.resume`.
+- **Failures.** Before commit, any failure reverts the network narrowing (`policy.revertPromotion`), aborts the
+  cutover (once suspend or close was attempted the source resumes on next use, with `continuePendingWork` for a tool
+  promotion so its call can still be answered there with the failure), deletes the candidate sandbox and staging,
+  and records the attempt `failed`; the source is the only owner. After commit, nothing undoes the move: later steps
+  only log, and core recovers the destination.
+- **Session IDs can be reused.** A deleted session's ID can name a new session, even another owner's, so every step
+  that touches a session by ID first confirms it is the incarnation the attempt was made for (same creation time).
+  The check right before allocation runs in the same synchronous step as the narrowing, and reverts apply only to
+  that incarnation. Candidates are released only when provably theirs: the recorded candidate by its ID (unique per
+  creation); after a failed creation only a `failed` row (the sandbox module released the rest); after a restart
+  during creation whatever is registered. A sandbox already being deleted counts as released. Nothing is deleted
+  while the ID names a session in sandbox placement: the promoted session's home, or a new session's sandbox, whose
+  creation may already be queued in the sandbox service. A candidate still registered then is retried at the next
+  start. Otherwise the check and the queued delete happen in one synchronous step, and core records a session before
+  allocating its sandbox, so no other session's creation can be queued ahead of it. The sandbox service also confirms
+  the expected sandbox ID under its session lock and skips a delete whose sandbox was replaced.
+- **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
+  core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
+  generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried
+  `request_sandbox` call re-applies that before answering); any other is marked failed and its network narrowing
+  reverted (core returns `promoting` rows to `idle`). Candidate sandboxes left behind are released at start (in the
+  background, so the gateway is ready without waiting) or by the session's next attempt before it allocates: releases
+  and allocations run one at a time per session, and a release happens only while it is still owed, so it never
+  undoes a newer attempt's candidate. Committed attempts then finish what they owe (the event, staging, the source's
+  copy of the state) for the incarnation that was promoted, or after that session was deleted; a session ID reused by
+  a new session is never touched. A restart still interrupts the turn that was moving, as it interrupts any running
+  turn.
+- **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
+  attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
+  publishes the same session on the sandbox runtime's AHP host.
+- **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
+  sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
+  so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
+  Promotion is one-way. The stock SDK's `sendAndWait` times out after 60 s by default (the work continues); a turn that
+  may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
+  (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
+
 ## Gateway extension points
 
 Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
@@ -466,10 +576,11 @@ structurally (they may add members).
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |
-| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation |
+| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits |
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
+| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`; registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`
@@ -692,5 +803,6 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
+| **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 
-Later workstreams: promotion (G5, SDK `features/promote.ts`), Azure deployment (G3), and end-to-end polish.
+Later workstreams: Azure deployment (G3) and end-to-end polish.
