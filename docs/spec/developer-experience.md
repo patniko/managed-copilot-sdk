@@ -1146,6 +1146,7 @@ fallbacks. Diagnostic output must be redacted and scoped to the owner.
 | Setup or state restore is incomplete | `setup_failed` / `state_restore_failed`; retain diagnostics and do not mark ready |
 | Artifact publication is incomplete | Explicit pending or `publication_failed`, not successful empty output |
 | Identity or entitlement is missing/revoked | `authentication_required` / `inference_unavailable`; no silent alternate account or billing route |
+| A platform dependency (GitHub) is briefly unreachable or rate-limited | `upstream_unavailable` (HTTP 503, `Retry-After`); a recent successful verification may stand in briefly, a rejected credential never does |
 | App/relay attachment lacks safe owner scoping | `transport_unsupported`; keep the explicitly supported direct path |
 
 ## Review disposition

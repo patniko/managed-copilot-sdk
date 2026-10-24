@@ -139,7 +139,13 @@ function parseExecutionEvent(event: RuntimeSessionEvent): ParsedAction | undefin
       // A permissionRequest hook already decided; nothing waits for a responder.
       if (data.resolvedByHook === true) return undefined;
       const request = data.permissionRequest as Record<string, unknown> | undefined;
-      return { kind: "permission", requestId, ...(str(request?.toolCallId) ? { toolCallId: str(request?.toolCallId)! } : {}) };
+      return {
+        kind: "permission",
+        requestId,
+        // Custom and MCP tool prompts name their tool, which makes pending prompts readable.
+        ...(str(request?.toolName) ? { tool: str(request?.toolName)! } : {}),
+        ...(str(request?.toolCallId) ? { toolCallId: str(request?.toolCallId)! } : {}),
+      };
     }
     case "elicitation.requested": {
       const { message, requestedSchema, mode, elicitationSource, url } = data;
@@ -204,8 +210,8 @@ export class DurableActions implements ActionsService {
   readonly #notifyTimers = new Map<string, NodeJS.Timeout>();
   readonly #forwarding = new Map<string, Promise<unknown>>();
   readonly #listeners = new Set<(change: ActionChange) => void>();
-  /** Connections that detached (bounded); attach work still in flight for them must not claim anything. */
-  readonly #detached = new Set<string>();
+  /** Detach counters per connection and per connection+session (bounded); fence attaches that raced a detach. */
+  readonly #detachGenerations = new Map<string, number>();
   #sweeper: NodeJS.Timeout | undefined;
   #sweeping = false;
 
@@ -380,13 +386,17 @@ export class DurableActions implements ActionsService {
   }
 
   async onAttached(input: AttachInput): Promise<readonly RuntimeSessionEvent[]> {
+    const connectionKey = input.responder.connectionId;
+    const attachmentKey = `${input.responder.connectionId}\u0000${input.sessionId}`;
+    const before = [this.#detachGenerations.get(connectionKey) ?? 0, this.#detachGenerations.get(attachmentKey) ?? 0];
     try {
       await this.reconcile(input.sessionId);
     } catch (error) {
       this.#log.debug("Reconciliation on attach skipped", { sessionId: input.sessionId, error: (error as Error).message });
     }
-    // The connection may have closed while reconciling; never claim for a connection that can no longer answer.
-    if (this.#detached.has(input.responder.connectionId)) return [];
+    // The connection (or just this attachment) may have gone away while reconciling: never claim for it then.
+    // A later attach of the same connection captures the new generation and replays normally.
+    if ((this.#detachGenerations.get(connectionKey) ?? 0) !== before[0] || (this.#detachGenerations.get(attachmentKey) ?? 0) !== before[1]) return [];
     const replay: RuntimeSessionEvent[] = [];
     for (const row of this.#store.listBySession(input.sessionId, ["pending"])) {
       if (!isEligible(input.responder, { kind: row.kind, tool: row.tool })) continue;
@@ -400,12 +410,56 @@ export class DurableActions implements ActionsService {
     return replay;
   }
 
-  onDetached(connectionId: string): void {
-    this.#detached.add(connectionId);
-    if (this.#detached.size > 10_000) this.#detached.delete(this.#detached.values().next().value!);
+  onDetached(connectionId: string, sessionId?: string): void {
+    this.#bumpDetachGeneration(sessionId === undefined ? connectionId : `${connectionId}\u0000${sessionId}`);
     const now = this.#now();
     for (const row of this.#store.listByLiveConnection(connectionId)) {
+      if (sessionId !== undefined && row.session_id !== sessionId) continue;
       this.#orphan(row, "The client handling this action disconnected before it answered", now);
+    }
+  }
+
+  #bumpDetachGeneration(key: string): void {
+    this.#detachGenerations.delete(key);
+    this.#detachGenerations.set(key, (this.#detachGenerations.get(key) ?? 0) + 1);
+    if (this.#detachGenerations.size > 10_000) this.#detachGenerations.delete(this.#detachGenerations.keys().next().value!);
+  }
+
+  /**
+   * The session was deleted: its open actions can never be answered. They are cancelled (later claims and results
+   * are refused) and recorded answers that were never delivered stop being retried.
+   */
+  onSessionDeleted(sessionId: string): void {
+    const now = this.#now();
+    for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
+      if (this.#store.transition(row.id, { states: OPEN_STATES, seq: row.claim_seq }, { state: "cancelled", reason: "The session was deleted", clearClaim: true, forwarded: true, now })) {
+        this.#emit({ type: "resolved", sessionId, actionId: row.id });
+      }
+    }
+    for (const row of this.#store.listBySession(sessionId, ["completed", "failed", "expired"])) {
+      if (!row.forwarded) this.#store.markForwarded(row.id, now, "Not delivered: the session was deleted");
+    }
+    const timer = this.#notifyTimers.get(sessionId);
+    if (timer) clearTimeout(timer);
+    this.#notifyTimers.delete(sessionId);
+  }
+
+  /**
+   * The session moved to a new placement generation (promotion). Waiting actions move with it; actions owned under
+   * the old generation are fenced: their claims are void (stale results are refused), tools in flight become
+   * uncertain, and prompts are offered again in the new generation.
+   */
+  onGenerationChanged(sessionId: string, generation: number): void {
+    const now = this.#now();
+    for (const row of this.#store.listBySession(sessionId, OPEN_STATES)) {
+      if (row.generation >= generation) continue;
+      const owned = OWNED_STATES.includes(row.state);
+      const state: ActionState = owned ? (row.kind === "tool" ? "needs_reconciliation" : "pending") : row.state;
+      const reason = owned && row.kind === "tool" ? "The session moved to a new placement while this tool was running; it may have run. Check its effect with the idempotency key, then answer it with a reconcile claim." : row.reason;
+      if (this.#store.moveToGeneration(row.id, row.claim_seq, { generation, state, clearClaim: owned, reason, now })) {
+        if (state === "pending" && owned) this.#scheduleNotify(row);
+        else if (state === "needs_reconciliation") this.#emit({ type: "pending", sessionId, actionId: row.id });
+      }
     }
   }
 
@@ -803,7 +857,12 @@ export class DurableActions implements ActionsService {
     };
     if (!sessions) throw retryLater(new ManagedCopilotError("capability_unavailable", "The session router is not available yet; the answer is recorded and will be delivered"));
     const view = await sessions.get(row.session_id);
-    if (view && view.generation !== row.generation) {
+    if (!view) {
+      // Nothing can receive it any more (deleted session); stop retrying.
+      this.#store.markForwarded(row.id, now, "Not delivered: the session no longer exists");
+      return { success: false };
+    }
+    if (view.generation !== row.generation) {
       // Fencing: an answer belongs to the placement generation whose runtime asked for it.
       this.#store.markForwarded(row.id, now, `Not delivered: the session moved to placement generation ${view.generation}`);
       return { success: false };
@@ -880,15 +939,18 @@ export class DurableActions implements ActionsService {
       },
     };
     this.#log.info("Actions waiting for a responder", { sessionId, count: pending.length });
+    try {
+      this.#deps.publish(event, { ownerId });
+    } catch (error) {
+      // Left unmarked, so the sweeper announces it again.
+      this.#log.error("Publishing session.action_required failed; it will be retried", { sessionId, error: (error as Error).message });
+      return;
+    }
+    // Marked only once published (the webhook outbox row exists), so a failure stays repairable.
     this.#store.markNotified(
       pending.map((row) => row.id),
       this.#now(),
     );
-    try {
-      this.#deps.publish(event, { ownerId });
-    } catch (error) {
-      this.#log.error("Publishing session.action_required failed", { sessionId, error: (error as Error).message });
-    }
   }
 
   #emit(change: ActionChange): void {

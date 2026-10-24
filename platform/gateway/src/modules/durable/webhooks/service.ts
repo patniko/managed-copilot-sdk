@@ -147,6 +147,16 @@ export class DurableWebhooks implements WebhooksService {
       .map((subscription) => subscription.name);
   }
 
+  dropSession(sessionId: string): number {
+    const now = this.#now();
+    const result = this.#deps.db
+      .prepare(
+        "UPDATE durable_webhook_deliveries SET state = 'failed', last_error = 'The session was deleted', updated_at = ? WHERE session_id = ? AND event_type = 'session.action_required' AND state = 'pending'",
+      )
+      .run(now, sessionId);
+    return Number(result.changes);
+  }
+
   enqueue(event: PlatformEvent, meta: PlatformEventMeta): number {
     if (!event.environment) return 0;
     const now = this.#now();

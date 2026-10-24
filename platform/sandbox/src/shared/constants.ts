@@ -18,6 +18,9 @@ export const ROUTES = {
   fileContent: "/v1/files/content",
   outputsManifest: "/v1/outputs/manifest",
   outputsContent: "/v1/outputs/content",
+  runtimeImportContent: "/v1/runtime-import/content",
+  runtimeImportCommit: "/v1/runtime-import/commit",
+  runtimeImportAbort: "/v1/runtime-import/abort",
 } as const;
 
 export const PATHS = {

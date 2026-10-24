@@ -2,9 +2,9 @@
 // session the gateway hosts. Client connections attach to sessions; the gateway owns the upstream runtime
 // connections, so detaching or disconnecting a client never stops a session or cancels accepted work.
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { connect as connectTcp } from "node:net";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { Duplex } from "node:stream";
 import {
   isManagedCopilotError,
@@ -25,7 +25,7 @@ import {
   type AttachedResponder,
   type RuntimeSessionEvent,
 } from "../durable/contract.js";
-import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, type AdmissionContext, type AdmittedSession } from "./admission.js";
+import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, SANDBOX_CUSTOMIZATIONS_DIR, type AdmissionContext, type AdmittedSession } from "./admission.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -206,7 +206,7 @@ export class SessionManager implements SessionsService {
     this.#options = options;
     this.#log = options.log;
     this.#ledger = options.ledger;
-    this.#scrubber = options.sharedRuntime ? pathScrubber(join(options.app.config.dataDir, "runtime", "shared")) : undefined;
+    this.#scrubber = options.sharedRuntime ? pathScrubber(options.app.config.dataDir) : undefined;
     this.#upstreamHandlers = {
       onNotification: (upstream, method, params) => this.#onUpstreamNotification(upstream, method, params),
       onRequest: (upstream, method, params, context) => this.#onUpstreamRequest(upstream, method, params, context),
@@ -381,7 +381,7 @@ export class SessionManager implements SessionsService {
     if (live) {
       for (const attachment of live.attachments.values()) {
         attachment.peer.notify("session.lifecycle", { type: "session.deleted", sessionId });
-        this.#actions?.onDetached(attachment.peer.id);
+        this.#actions?.onDetached(attachment.peer.id, sessionId);
       }
       live.attachments.clear();
       this.#live.delete(sessionId);
@@ -484,7 +484,7 @@ export class SessionManager implements SessionsService {
       this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared);
       try {
-        result = await upstream.request("session.resume", forwarded);
+        result = await this.#resumeUpstream(live, upstream, forwarded);
         await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
         this.#detach(live, peer.id);
@@ -504,12 +504,22 @@ export class SessionManager implements SessionsService {
         return upstream;
       });
     }
-    this.#persist(sessionId, (stored) => ({
-      params: storedParams(admitted.params),
-      ...(stored.tools ? { tools: stored.tools } : {}),
-      optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
-    }));
-    this.#ledger.update(sessionId, { state: record.state === "failed" || record.state === "stopped" ? "ready" : record.state, ...(admitted.model ? { model: admitted.model } : {}) });
+    this.#persist(sessionId, (stored) => {
+      const params = storedParams(admitted.params);
+      // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
+      const kept = stored.params["agent"];
+      if (params["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, params)) params["agent"] = kept;
+      return {
+        params,
+        ...(stored.tools ? { tools: stored.tools } : {}),
+        optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
+      };
+    });
+    this.#ledger.update(sessionId, {
+      state: record.state === "failed" || record.state === "stopped" ? "ready" : record.state,
+      ...(admitted.model ? { model: admitted.model } : {}),
+      ...(admitted.agent ? { agent: admitted.agent } : {}),
+    });
     return { result: this.#scrub(live, this.#sanitizeResponse(live, result)), after: () => this.#afterAttach(peer, sessionId) };
   }
 
@@ -577,6 +587,18 @@ export class SessionManager implements SessionsService {
       const model = params["modelId"];
       this.#ledger.update(sessionId, { model });
       this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, model } }));
+    }
+    // Restores re-select the agent the session last had, not the one it was created with.
+    if (method === "session.agent.select" && typeof params["name"] === "string" && params["name"]) {
+      const agent = params["name"];
+      this.#ledger.update(sessionId, { agent });
+      this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, agent } }));
+    } else if (method === "session.agent.deselect") {
+      this.#ledger.update(sessionId, { agent: "" });
+      this.#persist(sessionId, (stored) => {
+        const { agent: _agent, ...rest } = stored.params;
+        return { ...stored, params: rest };
+      });
     }
     if (method === "session.getMessages" && live.placement === "shared" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
       const events = (result as { events: RuntimeSessionEvent[] }).events;
@@ -741,7 +763,7 @@ export class SessionManager implements SessionsService {
     } catch (error) {
       if (live) {
         this.#live.delete(sessionId);
-        for (const attachment of live.attachments.values()) this.#actions?.onDetached(attachment.peer.id);
+        for (const attachment of live.attachments.values()) this.#actions?.onDetached(attachment.peer.id, sessionId);
         live.attachments.clear();
       }
       this.#ledger.remove(sessionId);
@@ -910,7 +932,7 @@ export class SessionManager implements SessionsService {
       const upstream = await this.#connect(live);
       const admitted = this.#ledger.admitted(live.id);
       if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
-      const params = await this.#prepare(live, "session.resume", {
+      const prepared = await this.#prepare(live, "session.resume", {
         ...admitted.params,
         sessionId: live.id,
         tools: [...live.wire.tools, ...this.#platformToolDeclarations(live)],
@@ -918,7 +940,7 @@ export class SessionManager implements SessionsService {
         ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
       });
       try {
-        await upstream.request("session.resume", params);
+        await this.#resumeUpstream(live, upstream, prepared);
         await this.#opened(live, upstream, admitted.optionsPatch);
       } catch (error) {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
@@ -949,11 +971,28 @@ export class SessionManager implements SessionsService {
     return upstream;
   }
 
+  /**
+   * Resumes the session on `upstream`. The stock runtime persists a session with its first turn, so a session that
+   * never ran one is unknown to a restarted runtime (shared runtime restart, sandbox idle stop): it is created again
+   * with the same ID and configuration. A session whose history the runtime lost still fails.
+   */
+  async #resumeUpstream(live: LiveSession, upstream: RuntimeUpstream, params: Record<string, unknown>): Promise<unknown> {
+    try {
+      return await upstream.request("session.resume", params);
+    } catch (error) {
+      if (!(error instanceof RpcError) || !UNKNOWN_SESSION.test(error.message) || this.get(live.id)?.lastTurn) throw error;
+      this.#log.info("The runtime has no state for a session that never ran a turn; creating it again", { sessionId: live.id });
+      return upstream.request("session.create", params);
+    }
+  }
+
   async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, params) : params;
   }
 
   async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>): Promise<void> {
+    // Sandboxes install the owner's credential here, then select a requested agent (the runtime resolves agents only
+    // for authenticated sessions, so the sandbox module defers `agent` out of create/resume params).
     if (live.sandbox?.sessionOpened) await live.sandbox.sessionOpened(live.id);
     if (Object.keys(optionsPatch).length > 0) {
       const result = await upstream.request<{ success?: boolean; error?: string }>("session.options.update", { ...optionsPatch, sessionId: live.id });
@@ -1034,10 +1073,11 @@ export class SessionManager implements SessionsService {
     return { ...params, ...registrations.flags, tools: [...registrations.tools, ...this.#platformToolDeclarations(live)] };
   }
 
+  /** Detaches one connection from one session; durable releases only that session's live claims of the connection. */
   #detach(live: LiveSession, peerId: string, notifyActions = true): void {
     live.attachments.delete(peerId);
     if (live.creator === peerId) live.creator = live.attachments.keys().next().value;
-    if (notifyActions) this.#actions?.onDetached(peerId);
+    if (notifyActions) this.#actions?.onDetached(peerId, live.id);
   }
 
   async #afterAttach(peer: ClientPeer, sessionId: string): Promise<void> {
@@ -1050,7 +1090,7 @@ export class SessionManager implements SessionsService {
     if (!responder) return;
     try {
       const replay = await actions.onAttached({ sessionId, ownerId: record.ownerId, environment: record.environment, generation: record.generation, responder });
-      for (const event of replay) peer.notify("session.event", { sessionId, event: this.#sanitizeEvent(live, event) });
+      for (const event of replay) peer.notify("session.event", { sessionId, event: this.#scrub(live, this.#sanitizeEvent(live, event)) });
     } catch (error) {
       this.#log.warn("Action replay after attach failed", { sessionId, error: (error as Error).message });
     }
@@ -1325,6 +1365,16 @@ export class SessionManager implements SessionsService {
   }
 }
 
+/** How the stock runtime reports a session it has no persisted state for. */
+const UNKNOWN_SESSION = /session not found|failed to load session events/i;
+
+/** Whether an agent name resolves in a session's configuration: deployed with its environment, or declared inline. */
+function agentResolves(environment: ResolvedEnvironment, name: string, params: Record<string, unknown>): boolean {
+  if (environment.customizations?.agents.some((agent) => agent.name === name)) return true;
+  const inline = params["customAgents"];
+  return Array.isArray(inline) && inline.some((agent) => agent && typeof agent === "object" && (agent as { name?: unknown }).name === name);
+}
+
 /** Whether stored admitted params include remote MCP servers (top-level or in custom agents). */
 function hasRemoteMcp(params: Record<string, unknown> | undefined): boolean {
   if (!params) return false;
@@ -1338,15 +1388,37 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Builds a deep string replacer for a platform directory, tolerant of slash direction (and case on Windows). */
-export function pathScrubber(root: string): (value: unknown) => unknown {
-  const normalized = root.replace(/[\\/]+$/, "");
+/**
+ * Builds a deep string replacer for platform host paths under the gateway's data directory, tolerant of slash
+ * direction, case on Windows, and the directory's resolved form (8.3 names, symlinks): a shared session's directory
+ * becomes `/workspace`, a pinned customizations bundle the path sandboxes mount it at, anything else `/platform`.
+ */
+export function pathScrubber(dataDir: string): (value: unknown) => unknown {
   const separators = String.raw`[\\/]+`;
-  const rootPattern = normalized.split(/[\\/]+/).map(escapeRegExp).join(separators);
+  // Session IDs, environment names, and bundle digests: identifier characters only, so punctuation after a path stays.
+  const segment = String.raw`[A-Za-z0-9_-]+`;
+  // The rest of the path (segments without spaces), rewritten with POSIX separators.
+  const tail = String.raw`((?:[\\/]+[^\\/\s"'\`]+)*)`;
   const flags = process.platform === "win32" ? "gi" : "g";
-  const workspace = new RegExp(`${rootPattern}${separators}workspaces${separators}[^\\\\/\\s"'\`]+`, flags);
-  const anyPath = new RegExp(rootPattern, flags);
-  const replaceString = (text: string) => (text.length < normalized.length ? text : text.replace(workspace, "/workspace").replace(anyPath, "/platform"));
+  const variants = new Set([resolvePath(dataDir)]);
+  try {
+    variants.add(realpathSync.native(dataDir));
+  } catch {
+    // Not created yet: the configured form is the one the runtime sees.
+  }
+  const rules: [RegExp, string][] = [];
+  for (const variant of variants) {
+    const root = variant.replace(/[\\/]+$/, "").split(/[\\/]+/).map(escapeRegExp).join(separators);
+    rules.push(
+      [new RegExp(`${root}${separators}runtime${separators}shared${separators}workspaces${separators}${segment}${tail}`, flags), "/workspace"],
+      [new RegExp(`${root}${separators}customizations${separators}${segment}${separators}${segment}${tail}`, flags), SANDBOX_CUSTOMIZATIONS_DIR],
+      [new RegExp(`${root}${separators}runtime${separators}shared${tail}`, flags), "/platform"],
+      [new RegExp(`${root}${tail}`, flags), "/platform"],
+    );
+  }
+  const shortest = Math.min(...[...variants].map((variant) => variant.length));
+  const replaceString = (text: string) =>
+    text.length < shortest ? text : rules.reduce((out, [pattern, base]) => out.replace(pattern, (_match, rest: string) => `${base}${rest.replace(/[\\/]+/g, "/")}`), text);
   const walk = (value: unknown, depth: number): unknown => {
     if (typeof value === "string") return replaceString(value);
     if (depth > 12 || value === null || typeof value !== "object") return value;

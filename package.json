@@ -9,14 +9,18 @@
   },
   "scripts": {
     "build": "pnpm -r --if-present run build",
-    "typecheck": "pnpm -r run typecheck",
+    "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.apphost.json",
     "test": "pnpm -r --if-present run test",
-    "clean": "pnpm -r --if-present run clean"
+    "clean": "pnpm -r --if-present run clean",
+    "dev": "aspire run"
   },
   "devDependencies": {
+    "@managed-copilot/aspire": "workspace:*",
+    "@managed-copilot/cli": "workspace:*",
     "@types/node": "^24.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.0"
+    "vitest": "^4.0.0",
+    "vscode-jsonrpc": "8.2.1"
   }
 }

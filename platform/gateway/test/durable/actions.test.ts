@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isManagedCopilotError, type PlatformEvent } from "@managed-copilot/protocol";
 import { migrate, openDatabase, type Database } from "../../src/db.js";
-import { createLogger } from "../../src/log.js";
+import { createLogger, type Logger } from "../../src/log.js";
 import type { Principal } from "../../src/http.js";
 import type {
   AttachedResponder,
@@ -481,6 +481,114 @@ describe("durable actions ledger", () => {
       await sleep(20);
       expect(published.map((event) => event.type)).toEqual(["session.action_required"]);
       restarted.stop();
+    });
+
+    it("keeps an announcement repairable when publishing it fails", async () => {
+      let fail = true;
+      actions.stop();
+      const quiet: Logger = { debug() {}, info() {}, warn() {}, error() {}, child: () => quiet };
+      actions = new DurableActions({
+        db,
+        log: quiet,
+        capabilityKey: KEY,
+        publicUrl: URL,
+        sessions: () => sessions,
+        platformTools: () => undefined,
+        publish: (event) => {
+          if (fail) throw new Error("outbox unavailable");
+          published.push(event);
+        },
+        now: () => now,
+        options: { sweepIntervalMs: 0, notifyDebounceMs: 1 },
+      });
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      await sleep(20);
+      expect(published).toHaveLength(0);
+      fail = false;
+      now += 10_000;
+      await actions.sweep();
+      await sleep(20);
+      expect(published.map((event) => event.type)).toEqual(["session.action_required"]);
+    });
+
+    it("names the tool a permission prompt is for", async () => {
+      const event = permissionEvent("p1");
+      await actions.onSessionEvent(input({ ...event, data: { ...event.data, permissionRequest: { kind: "custom-tool", toolName: "lookup_order", toolDescription: "", toolCallId: "call-1" } } }));
+      expect(actions.list(SESSION)[0]).toMatchObject({ kind: "permission", tool: "lookup_order", toolCallId: "call-1" });
+    });
+
+    it("releases only one session's live claims when a client detaches from that session", async () => {
+      const OTHER_SESSION = "22222222-2222-4222-8222-222222222222";
+      sessions.views.set(OTHER_SESSION, { id: OTHER_SESSION, ownerId: OWNER.accountId, environment: "chat", state: "running", generation: 0 });
+      await actions.onSessionEvent(input(toolEvent("r1"), [sdk("c1", ["lookup_order"])]));
+      await actions.onSessionEvent({ ...input(toolEvent("r2"), [sdk("c1", ["lookup_order"])]), sessionId: OTHER_SESSION });
+      actions.onDetached("c1", SESSION);
+      expect(actions.list(SESSION)[0]!.state).toBe("needs_reconciliation");
+      expect(actions.list(OTHER_SESSION)[0]!.state).toBe("executing");
+    });
+
+    it("replays to the same client when it resumes a session it detached from", async () => {
+      await actions.onSessionEvent(input(permissionEvent("p1"), [sdk("c1", [])]));
+      actions.onDetached("c1", SESSION);
+      expect(actions.list(SESSION)[0]!.state).toBe("pending");
+      const replay = await actions.onAttached({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "chat", generation: 0, responder: sdk("c1", []) });
+      expect(replay.map((event) => event.data.requestId)).toEqual(["p1"]);
+    });
+
+    it("cancels a deleted session's actions, refuses their claims, and stops undeliverable answers", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      await actions.onSessionEvent(input(toolEvent("r2")));
+      const [first, second] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, second!.id);
+      sessions.failRequests = 1;
+      await actions.submit(user(), SESSION, second!.id, { claimToken: claim.claimToken, result: "ok" });
+      sessions.views.delete(SESSION);
+      actions.onSessionDeleted(SESSION);
+      expect(actions.list(SESSION).map((action) => [action.state, action.reason])).toEqual([
+        ["cancelled", "The session was deleted"],
+        ["completed", "Not delivered: the session was deleted"],
+      ]);
+      await expectCode(actions.claim(user(), SESSION, first!.id), "conflict");
+      now += 60_000;
+      await actions.sweep();
+      await sleep(10);
+      expect(sessions.answers()).toHaveLength(1);
+    });
+
+    it("stops retrying an answer whose session no longer exists", async () => {
+      await actions.onSessionEvent(input(toolEvent("r1")));
+      const [action] = actions.list(SESSION);
+      const claim = await actions.claim(user(), SESSION, action!.id);
+      sessions.views.delete(SESSION);
+      await actions.submit(user(), SESSION, action!.id, { claimToken: claim.claimToken, result: "ok" });
+      expect(actions.list(SESSION)[0]!.reason).toBe("Not delivered: the session no longer exists");
+      now += 60_000;
+      await actions.sweep();
+      await sleep(10);
+      expect(sessions.answers()).toHaveLength(0);
+    });
+
+    it("moves waiting actions to a new placement generation and fences the old owners", async () => {
+      await actions.onSessionEvent(input(toolEvent("waiting")));
+      await actions.onSessionEvent(input(toolEvent("running"), [sdk("c1", ["lookup_order"])]));
+      await actions.onSessionEvent(input(permissionEvent("prompt"), [sdk("c1", [])]));
+      const [waiting, running] = actions.list(SESSION);
+      const stale = await actions.claim(user(), SESSION, waiting!.id);
+      await actions.submit(user(), SESSION, waiting!.id, { claimToken: stale.claimToken, release: true });
+
+      sessions.views.set(SESSION, { ...sessions.views.get(SESSION)!, generation: 1 });
+      actions.onGenerationChanged(SESSION, 1);
+      const states = Object.fromEntries(actions.list(SESSION).map((action) => [action.requestId, action.state]));
+      expect(states).toEqual({ waiting: "pending", running: "needs_reconciliation", prompt: "pending" });
+      // The old live owner's late answer is refused; answers in the new generation are delivered.
+      await expectCode(
+        actions.onClientAnswer({ sessionId: SESSION, connectionId: "c1", responderKind: "sdk", method: "session.tools.handlePendingToolCall", params: { requestId: "running", result: "late" } }),
+        "conflict",
+      );
+      const fresh = await actions.claim(user(), SESSION, waiting!.id);
+      await actions.submit(user(), SESSION, waiting!.id, { claimToken: fresh.claimToken, result: "ok" });
+      expect(sessions.answers().map((answer) => answer.params.requestId)).toEqual(["waiting"]);
+      void running;
     });
 
     it("recovers orphaned live claims after a gateway restart", async () => {

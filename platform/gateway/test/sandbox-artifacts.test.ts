@@ -18,7 +18,9 @@ class FakeAgent {
   files = new Map<string, string>();
   rejected: { path: string; reason: string }[] = [];
   mutate: string | undefined;
+  gate: Promise<void> | undefined;
   async outputsManifest(): Promise<SandboxOutputsManifest> {
+    if (this.gate) await this.gate;
     return {
       files: [...this.files].map(([path, content]) => ({ path, size: Buffer.byteLength(content), sha256: sha(content), modifiedAt: new Date().toISOString() })),
       rejected: this.rejected,
@@ -32,13 +34,14 @@ class FakeAgent {
 
 describe("ArtifactService", () => {
   let dir: string;
+  let db: ReturnType<typeof openDatabase>;
   let agent: FakeAgent;
   let events: { type: string; data: Record<string, unknown> }[];
   let service: ArtifactService;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "mc-artifacts-"));
-    const db = openDatabase(":memory:");
+    db = openDatabase(":memory:");
     new SandboxStore(db);
     agent = new FakeAgent();
     events = [];
@@ -120,11 +123,64 @@ describe("ArtifactService", () => {
     await expect(service.waitForPublication(SESSION, { turnId: "nope" })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "not_found"));
   });
 
+  it("never attributes outputs to a turn once a later turn may have changed them", async () => {
+    agent.files.set("report.md", "turn 1");
+    let release!: () => void;
+    agent.gate = new Promise((resolve) => (release = resolve));
+    service.turnStarted(SESSION, "turn-1");
+    const publishing = service.publish(SESSION, service.turnsCompleted(SESSION, "completed"), "completed");
+    service.turnStarted(SESSION, "turn-2");
+    agent.files.set("report.md", "turn 2 (unfinished)");
+    release();
+    await publishing;
+    await expect(service.waitForPublication(SESSION, { turnId: "turn-1" })).rejects.toSatisfy(
+      (error: unknown) => isManagedCopilotError(error, "publication_failed") && /Another turn started/.test((error as Error).message),
+    );
+    expect(service.list(SESSION)).toEqual([]);
+  });
+
+  it("fails publications a gateway restart interrupted instead of leaving them pending", async () => {
+    service.turnStarted(SESSION, "turn-1");
+    service.turnsCompleted(SESSION, "completed");
+    expect(service.failInterruptedTurns()).toBe(1);
+    await expect(service.waitForPublication(SESSION, { turnId: "turn-1", timeoutMs: 100 })).rejects.toSatisfy(
+      (error: unknown) => isManagedCopilotError(error, "publication_failed") && /restarted/.test((error as Error).message),
+    );
+  });
+
   it("deletes a session's artifacts", async () => {
     agent.files.set("a.txt", "a");
     await turn("turn-1");
     await service.deleteSession(SESSION);
     expect(service.list(SESSION)).toEqual([]);
+  });
+
+  it("announces only new versions and records a deleted session's publication with a clear reason", async () => {
+    agent.files.set("a.txt", "a");
+    await turn("turn-1");
+    await turn("turn-2");
+    expect((await service.waitForPublication(SESSION, { turnId: "turn-2" })).artifacts.map((artifact) => `${artifact.path}@${artifact.version}`)).toEqual(["a.txt@1"]);
+    expect(events).toHaveLength(1);
+
+    let gone = false;
+    const deleting = new ArtifactService({
+      db,
+      dataDir: dir,
+      log: createLogger("test", "error"),
+      agentFor: async () => {
+        gone = true;
+        throw new Error("The sandbox connection failed.");
+      },
+      track: (_sessionId, work) => work,
+      ownerOf: () => 42,
+      sessionGone: () => gone,
+      events: () => undefined,
+    });
+    deleting.turnStarted(SESSION, "turn-3");
+    await deleting.publish(SESSION, deleting.turnsCompleted(SESSION, "completed"), "completed");
+    await expect(deleting.waitForPublication(SESSION, { turnId: "turn-3" })).rejects.toSatisfy(
+      (error: unknown) => isManagedCopilotError(error, "publication_failed") && /deleted before its outputs were published/.test((error as Error).message),
+    );
   });
 
   it("maps common content types", () => {

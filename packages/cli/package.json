@@ -1,0 +1,37 @@
+{
+  "name": "@managed-copilot/cli",
+  "version": "0.1.0",
+  "description": "managed-copilot: sign in for background work, list sessions, attach Copilot CLI, and manage artifacts and schedules.",
+  "type": "module",
+  "bin": {
+    "managed-copilot": "./bin/managed-copilot.mjs"
+  },
+  "main": "./dist/cli.js",
+  "types": "./dist/cli.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    }
+  },
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.26",
+    "@managed-copilot/protocol": "workspace:*",
+    "@managed-copilot/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}
