@@ -2,7 +2,7 @@
 // (spec section 9, gate G5): `POST /v1/sessions/:id/promote`, the `request_sandbox` platform tool, the
 // `session.promoted` platform event, and crash recovery of interrupted attempts.
 import { join } from "node:path";
-import { PLATFORM_TOOLS, ROUTES } from "@managed-copilot/protocol";
+import { PLATFORM_TOOLS } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
 import { PromotionManager } from "./service.js";
 import { PromotionStore } from "./store.js";
@@ -36,7 +36,8 @@ export const promotionModule: GatewayModule = {
     });
     app.provide("promotion", manager);
 
-    app.routes.post(ROUTES.promote(":id"), async (ctx) => manager.promote(ctx.principal!, ctx.params["id"]!));
+    // `ROUTES.promote(id)` encodes its argument, so the pattern is spelled out.
+    app.routes.post("/v1/sessions/:id/promote", async (ctx) => manager.promote(ctx.principal!, ctx.params["id"]!));
 
     // Injected only into promotable sessions on shared placement, and approved through the session's permission
     // policy like any tool: the call is then carried into the sandbox and answered there.
