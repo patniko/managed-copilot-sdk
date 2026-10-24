@@ -15,6 +15,9 @@ import {
 import WebSocket, { createWebSocketStream } from "ws";
 import type { SandboxEndpoint } from "./providers/types.js";
 
+/** How often runtime and tunnel streams are pinged (see `SandboxAgentClient.openStream`). */
+const KEEPALIVE_MS = 30_000;
+
 const CODE_MAP: Record<string, ErrorCode> = {
   invalid_request: "invalid_request",
   forbidden: "forbidden",
@@ -105,6 +108,11 @@ export class SandboxAgentClient {
     return this.#json("GET", SANDBOXD_ROUTES.health, { timeoutMs });
   }
 
+  /** Replaces the sandbox's runtime process with a fresh one (`SANDBOXD_ROUTES.runtimeRestart`); resolves once it listens. */
+  restartRuntime(): Promise<SandboxdStatus> {
+    return this.#json("POST", SANDBOXD_ROUTES.runtimeRestart, { timeoutMs: 120_000 });
+  }
+
   /** Waits until sandboxd answers (the container just started). */
   async waitHealthy(timeoutMs = 60_000): Promise<SandboxdStatus> {
     const deadline = Date.now() + timeoutMs;
@@ -186,8 +194,12 @@ export class SandboxAgentClient {
     await this.#json("POST", SANDBOXD_ROUTES.runtimeImportAbort, { query: { staging } });
   }
 
-  /** Opens a WebSocket to `route` and returns a byte stream (binary frames). */
-  async openStream(route: string, query?: Record<string, string>): Promise<Duplex> {
+  /**
+   * Opens a WebSocket to `route` and returns a byte stream (binary frames). The link is pinged every `keepaliveMs`
+   * (default 30 s) and closed when two pings go unanswered, so a dead path (a vanished sandbox, a dropped proxy) ends
+   * the stream instead of holding the session's runtime connection open, and idle intermediaries keep the link.
+   */
+  async openStream(route: string, query?: Record<string, string>, options: { readonly keepaliveMs?: number } = {}): Promise<Duplex> {
     const { base, headers } = await this.#headers();
     const search = new URLSearchParams(query ?? {}).toString();
     const url = `${base.protocol === "https:" ? "wss:" : "ws:"}//${base.host}${base.pathname === "/" ? "" : base.pathname}${route}${search ? `?${search}` : ""}`;
@@ -204,6 +216,26 @@ export class SandboxAgentClient {
     });
     const stream = createWebSocketStream(ws, { allowHalfOpen: false });
     stream.on("error", () => stream.destroy());
+    // Destroying the stream (not just terminating the socket) is what ends it for readers: after a local terminate,
+    // createWebSocketStream's duplex ends but never closes.
+    let answered = true;
+    ws.on("pong", () => {
+      answered = true;
+    });
+    const keepalive = setInterval(() => {
+      if (!answered) {
+        stream.destroy(new Error("The sandbox stopped answering keepalive pings"));
+        return;
+      }
+      answered = false;
+      try {
+        ws.ping();
+      } catch {
+        stream.destroy();
+      }
+    }, options.keepaliveMs ?? KEEPALIVE_MS);
+    keepalive.unref();
+    ws.once("close", () => clearInterval(keepalive));
     return stream;
   }
 }

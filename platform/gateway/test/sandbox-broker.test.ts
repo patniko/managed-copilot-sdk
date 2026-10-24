@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { isManagedCopilotError } from "@managed-copilot/protocol";
 import { createLogger } from "../src/log.js";
-import { InferenceBroker } from "../src/modules/sandbox/broker.js";
+import { InferenceBroker, isProviderTaken } from "../src/modules/sandbox/broker.js";
 
 const log = createLogger("test", "error");
 const PLACEHOLDER = "mcrt_placeholder_value_for_tests";
@@ -127,6 +127,22 @@ describe("InferenceBroker", () => {
     expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"]).toBe(401);
     expect((sent.find((entry) => entry.method === "llmInference.httpResponseChunk")!.params["error"] as Record<string, unknown>)["code"]).toBe("authentication_required");
     await expect(broker.sessionOpened(SESSION)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "authentication_required"));
+  });
+
+  it("reports a runtime whose inference provider is already taken, and passes other failures through", async () => {
+    const held = new Error("Request llmInference.setProvider failed with message: Another client is already the LLM inference provider.");
+    await expect(
+      setup().broker.initialize(async () => {
+        throw held;
+      }),
+    ).rejects.toSatisfy((error: unknown) => isProviderTaken(error) && isManagedCopilotError(error, "conflict"));
+    const other = new Error("Connection closed");
+    await expect(
+      setup().broker.initialize(async () => {
+        throw other;
+      }),
+    ).rejects.toBe(other);
+    await expect(setup().broker.initialize(async () => ({ success: false }))).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "inference_unavailable") && !isProviderTaken(error));
   });
 
   it("never answers gitHubToken.getToken for sandbox runtimes", async () => {

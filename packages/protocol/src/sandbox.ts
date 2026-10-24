@@ -41,6 +41,12 @@ export const SANDBOXD_ROUTES = {
   runtimeImportCommit: "/v1/runtime-import/commit",
   /** `POST ?staging=` discards a staging directory. */
   runtimeImportAbort: "/v1/runtime-import/abort",
+  /**
+   * `POST` replaces the stock runtime process with a fresh one on the same `COPILOT_HOME` (session state stays on disk;
+   * bridged runtime connections close). Stock runtimes keep their inference-provider registration with their first
+   * provider connection even after it closed, so a new gateway connection can only become the provider of a new process.
+   */
+  runtimeRestart: "/v1/runtime/restart",
 } as const;
 
 /** Fixed paths inside every sandbox. */
@@ -174,7 +180,8 @@ export interface SandboxdStatus {
   readonly sandboxId: string;
   readonly version: string;
   readonly state: "booting" | "starting" | "ready" | "failed";
-  readonly runtime: { readonly state: SandboxdRuntimeState; readonly restarts: number; readonly exitCode?: number };
+  /** `instance` identifies the runtime process: it changes whenever a new process starts (restart, crash recovery, or a new sandbox). */
+  readonly runtime: { readonly state: SandboxdRuntimeState; readonly restarts: number; readonly exitCode?: number; readonly instance?: string };
   readonly setup?: SandboxSetupRecord;
   readonly error?: string;
 }

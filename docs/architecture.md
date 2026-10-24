@@ -163,6 +163,16 @@ denies configuration RPCs it does not understand.
   5. When GitHub rejects that token (HTTP 401 from the Copilot API, including a refused WebSocket upgrade, or from
      `copilot_internal/user`), the gateway calls core's `auth.invalidate(token)` and drops the token's cached Copilot
      identity, so the next `resolveToken` verifies the token with GitHub again rather than reusing it.
+  6. A stock runtime keeps its inference-provider registration with the first connection that registered, even after
+     that connection closed, and has no way to release it (verified on 1.0.103 for idle and mid-stream closes, RST and
+     FIN): every later `llmInference.setProvider` fails with "Another client is already the LLM inference provider".
+     So after a gateway restart or a dropped gateway↔sandbox link, a runtime that kept running cannot be used again.
+     When `setProvider` is refused and no other connection of this gateway is open to the runtime, the gateway asks
+     sandboxd to replace the runtime process (`POST /v1/runtime/restart`; session state stays on disk) and fails
+     `initialize` with `capability_unavailable` and `details.reopen: true`. Core then reopens the connection (at most
+     twice) and resumes the session in the new process. Sandboxes whose sandboxd predates the route (pinned older
+     images) are stopped instead, and the reopen starts them with a fresh runtime. A refusal while another connection
+     of this gateway is open is a real second provider and fails with `conflict`.
 
   Evidence (2026-10-23, Windows ARM64, both the SDK's `copilot-runtime` and the `@github/copilot` CLI binary, 1.0.103,
   with all direct network egress blocked): session creation without a token succeeded, `GET <endpoints.api>/models` and
@@ -213,7 +223,8 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
 - **sandboxd** (`platform/sandbox/src/sandboxd`) runs as root, never as uid 10001. It serves, behind a per-sandbox
   bearer key: health/status, `POST /v1/start` (NDJSON progress: egress CA trust, one-time setup, runtime start),
   `/v1/runtime` (WebSocket ⇄ the runtime's loopback TCP port 7790), `/v1/tunnel?port=` (loopback TCP for CLI
-  attach), streamed workspace list/read/write, and output manifests. It starts the SDK's stock headless
+  attach), `POST /v1/runtime/restart` (replaces the runtime process; health reports a new `runtime.instance` for
+  every process), streamed workspace list/read/write, and output manifests. It starts the SDK's stock headless
   `copilot-runtime` as uid 10001 with cwd `/workspace`, `COPILOT_CONNECTION_TOKEN`, its own `COPILOT_HOME`, the egress
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
   unexpected exits. Every workload process (the runtime, setup commands, file workers) starts through `setpriv`:
@@ -262,6 +273,16 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
   `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources
   labelled with the instance that no current record owns are swept on start.
+- **Replaced runtimes and interrupted turns.** A turn cut off mid-inference or mid built-in tool does not survive its
+  runtime process: when the session is resumed in a new process (a recreated or restarted sandbox, sandboxd's crash
+  recovery, or a restart for a held inference provider), stock runtimes neither continue nor end it, with or without
+  `continuePendingWork`, and `session.abort` emits nothing (verified on 1.0.103). Only a turn waiting on actions
+  durable still owns continues, because `continuePendingWork` carries those over. Otherwise the gateway ends the turn:
+  core emits a root `session.error` (`errorType: "interrupted"`) and `session.idle` and records `lastTurn` as
+  `failed`, and the sandbox service fails the turn's publication ("the sandbox runtime was restarted while this turn
+  was running…") and stops holding idle stop for it. Each `openRuntime` reads sandboxd's `runtime.instance`, so a
+  process change between connections is noticed. Gateway↔sandboxd runtime and tunnel WebSockets are pinged every 30 s
+  and closed after two unanswered pings, so a dead path ends the session's upstream instead of hanging it.
 - **Promotion import.** `sandboxes.importRuntimeState(sessionId, { sessionStateDir, activeTurnId? })` copies the
   regular files of a gateway-host `session-state/<sessionId>` export (no `*.lock` files; links and special files are
   refused; ≤10,000 files, ≤1 GiB) into the running sandbox runtime's COPILOT_HOME as uid 10001. Files are staged under
@@ -302,7 +323,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the
   placeholder); turn attribution relies on the runtime's `user.message` reaching the gateway before the next turn's
-  tools change `outputs/`.
+  tools change `outputs/`. A gateway replacement ends the turns its sandboxes were running (gateway shutdown stops
+  sandboxes, and the inference stream of a running model call lives in the gateway), so callers resend them. A turn that
+  waited on durable actions across a gateway restart can still finish, but its outputs are not published: turns
+  running at gateway start are recorded as interrupted.
 - **REST** (owner-scoped, shared sessions answer `invalid_request`): `GET /v1/sessions/:id/files?path=&recursive=`,
   `GET|PUT /v1/sessions/:id/files/content?path=&overwrite=` (streamed, 512 MiB limit, atomic replace by default),
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
