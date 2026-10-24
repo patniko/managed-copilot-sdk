@@ -103,13 +103,13 @@ export function retryPrompt(reason: string, release: boolean): string {
   const command = release ? "npm run check:release" : "npm run check";
   return `The factory is retrying this station. The previous attempt stopped: ${reason}
 
-Continue where you left off. Make sure the work is complete, run \`${command}\` until it passes, then reply with a short summary.`;
+Commands from that attempt may have been stopped partway, so check the workspace's current state before relying on earlier results. Then continue where you left off: make sure the work is complete, run \`${command}\` until it passes, and reply with a short summary.`;
 }
 
-/** After a restart, when the platform reports that the in-flight turn didn't finish. */
+/** When an interrupted turn didn't finish: it failed, was stopped, or the runtime running it restarted. */
 export function continuePrompt(release: boolean): string {
   const command = release ? "npm run check:release" : "npm run check";
-  return `Your previous turn was interrupted before it finished. Continue the task, run \`${command}\` until it passes, then reply with a short summary.`;
+  return `Your previous turn was interrupted before it finished, and the commands it was running may have been stopped partway. Check the workspace's current state before relying on earlier results, then continue the task, run \`${command}\` until it passes, and reply with a short summary.`;
 }
 
 function testSection(report: TestReport | undefined): string {
