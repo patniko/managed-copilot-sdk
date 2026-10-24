@@ -194,20 +194,35 @@ export class GitHubAuthenticator implements Authenticator {
     for (const [key, entry] of this.#cache) if (entry.expiresAt <= now) this.#cache.delete(key);
   }
 
-  #get(path: string, token: string): Promise<Response> {
+  async #get(path: string, token: string): Promise<Response> {
     const doFetch = this.#options.fetch ?? fetch;
-    return doFetch(`${this.#options.apiUrl.replace(/\/+$/, "")}${path}`, {
+    const url = `${this.#options.apiUrl.replace(/\/+$/, "")}${path}`;
+    const init = {
       headers: {
         authorization: `Bearer ${token}`,
         accept: "application/vnd.github+json",
         "x-github-api-version": "2022-11-28",
         "user-agent": this.#options.userAgent ?? "managed-copilot-gateway",
       },
-      redirect: "manual",
-      signal: AbortSignal.timeout(15_000),
-    });
+      redirect: "manual" as const,
+    };
+    // These GETs are idempotent: ride out GitHub's occasional 5xx answers and dropped connections, but not timeouts.
+    for (let attempt = 0; ; attempt++) {
+      const delay = GITHUB_RETRY_DELAYS_MS[attempt];
+      try {
+        const response = await doFetch(url, { ...init, signal: AbortSignal.timeout(15_000) });
+        if (delay === undefined || !TRANSIENT_STATUSES.has(response.status)) return response;
+        await response.body?.cancel().catch(() => undefined);
+      } catch (error) {
+        if (delay === undefined || (error as Error).name === "TimeoutError") throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
   }
 }
+
+const GITHUB_RETRY_DELAYS_MS: readonly number[] = [250, 1000];
+const TRANSIENT_STATUSES: ReadonlySet<number> = new Set([500, 502, 503, 504]);
 
 /** Parses GitHub's `2026-11-01 08:00:00 UTC` (or `-0700` offset) token expiration header. */
 export function parseExpiration(value: string | null): number | undefined {
