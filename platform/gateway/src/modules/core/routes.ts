@@ -20,13 +20,21 @@ const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
   credentials: ["background"],
 };
 
+/** Module capabilities (`app.capabilities`) that need a working sandbox backend. */
+const SANDBOX_BACKED_CAPABILITIES: ReadonlySet<string> = new Set(["promotion"]);
+
 export function deploymentInfo(app: GatewayApp, environments: Environments, runtime: SharedRuntime | undefined): DeploymentInfo {
   const capabilities = new Set<string>(["events"]);
   if (runtime) capabilities.add("shared");
+  const services = app.services as Record<string, unknown>;
+  // Only what works now: the sandbox backend reports readiness (Docker down, Azure not configured or qualified).
+  const sandboxes = services["sandboxes"] as { available?: boolean } | undefined;
+  const sandboxesWork = sandboxes !== undefined && sandboxes.available !== false;
   for (const [service, provided] of Object.entries(SERVICE_CAPABILITIES)) {
-    if ((app.services as Record<string, unknown>)[service] !== undefined) for (const capability of provided) capabilities.add(capability);
+    if (services[service] === undefined || (service === "sandboxes" && !sandboxesWork)) continue;
+    for (const capability of provided) capabilities.add(capability);
   }
-  for (const capability of app.capabilities) capabilities.add(capability);
+  for (const capability of app.capabilities) if (sandboxesWork || !SANDBOX_BACKED_CAPABILITIES.has(capability)) capabilities.add(capability);
   const deployment = app.config.deployment;
   return {
     name: deployment.name,

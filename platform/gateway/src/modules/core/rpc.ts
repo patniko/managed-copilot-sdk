@@ -243,6 +243,24 @@ interface Pending {
   readonly method: string;
   resolve(value: unknown): void;
   reject(error: unknown): void;
+  readonly onSettle: (() => void) | undefined;
+}
+
+export interface RequestOptions {
+  readonly signal?: AbortSignal;
+  /**
+   * Called synchronously when the answer (or the connection's close) is handled, before any later message from the
+   * peer is: a caller can tell what the peer sent before its answer from what it sent after.
+   */
+  readonly onSettle?: () => void;
+}
+
+function settle(pending: Pending): void {
+  try {
+    pending.onSettle?.();
+  } catch {
+    // A settle hook only records state; it must never stop the connection's dispatch.
+  }
 }
 
 /**
@@ -264,7 +282,10 @@ export class RpcEndpoint {
     transport.onMessage((message) => this.#handle(message));
     transport.onClose((error) => {
       const reason = new RpcError(RPC_ERROR.internal, `${this.name} connection closed${error ? `: ${error.message}` : ""}`, { code: "capability_unavailable" });
-      for (const pending of this.#pending.values()) pending.reject(reason);
+      for (const pending of this.#pending.values()) {
+        settle(pending);
+        pending.reject(reason);
+      }
       this.#pending.clear();
       for (const controller of this.#incoming.values()) controller.abort();
       this.#incoming.clear();
@@ -280,13 +301,14 @@ export class RpcEndpoint {
     return this.#pending.size;
   }
 
-  request<T = unknown>(method: string, params?: unknown, options: { signal?: AbortSignal } = {}): Promise<T> {
+  request<T = unknown>(method: string, params?: unknown, options: RequestOptions = {}): Promise<T> {
     if (this.transport.closed) {
+      options.onSettle?.();
       return Promise.reject(new RpcError(RPC_ERROR.internal, `${this.name} is not connected`, { code: "capability_unavailable" }));
     }
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
-      this.#pending.set(id, { method, resolve: resolve as (value: unknown) => void, reject });
+      this.#pending.set(id, { method, resolve: resolve as (value: unknown) => void, reject, onSettle: options.onSettle });
       const signal = options.signal;
       if (signal) {
         const cancel = () => this.notify(CANCEL_METHOD, { id });
@@ -311,6 +333,7 @@ export class RpcEndpoint {
       const pending = this.#pending.get(message.id);
       if (!pending) return;
       this.#pending.delete(message.id);
+      settle(pending);
       if (message.error) pending.reject(new RpcError(message.error.code, message.error.message, message.error.data));
       else pending.resolve(message.result);
       return;

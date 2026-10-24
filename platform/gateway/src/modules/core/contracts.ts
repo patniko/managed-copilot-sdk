@@ -143,6 +143,8 @@ export interface SandboxRuntimeHandle {
 }
 
 export interface SandboxPlacement {
+  /** The backend's latest readiness check; `false` while it cannot place sandboxes (`/v1/info` then omits `isolated`/`files`). */
+  readonly available?: boolean;
   /** Allocates a fresh sandbox for the session; resolves when setup finished. */
   create(request: SandboxCreateRequest): Promise<unknown>;
   /** Starts (or restores) the session's sandbox if it stopped. */
@@ -261,8 +263,11 @@ export interface PlacementCutover {
    * (e.g. `continuePendingWork: true`). Opening again replaces the previous destination.
    */
   open(extra?: Record<string, unknown>): Promise<{ request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> }>;
-  /** After `open`: placement `sandbox`, generation + 1, the sandbox-admitted configuration; routing moves and the fence lifts. */
-  commit(): SessionRecord;
+  /**
+   * After `open`: placement `sandbox`, generation + 1, the sandbox-admitted configuration; routing moves. Resolves once
+   * everything the cutover held back has been delivered, the fence has lifted, and `onLifecycle("promoted")` fired.
+   */
+  commit(): Promise<SessionRecord>;
   /** Before `commit`: closes the destination and lifts the fence; the source stays the owner and is resumed on next use with `resume` extras. */
   abort(options?: { readonly resume?: Record<string, unknown> }): Promise<void>;
 }
@@ -283,8 +288,12 @@ export interface PlatformEventMeta {
 }
 
 export interface EventsService {
-  /** Publishes to SSE subscribers (owner-scoped) and `subscribe` listeners (webhooks). */
-  publish(event: PlatformEvent, meta: PlatformEventMeta): void;
+  /**
+   * Publishes to SSE subscribers (owner-scoped) and `subscribe` listeners (webhooks). Returns whether the event is
+   * stored for `Last-Event-ID` replay, which includes an ID this owner already stored. Listeners are notified either
+   * way, so a publisher that retries with a stable event ID gets at-least-once delivery (consumers dedupe by `id`).
+   */
+  publish(event: PlatformEvent, meta: PlatformEventMeta): boolean;
   /** Builds, publishes, and returns a platform event. */
   emit(type: PlatformEventType, input: { readonly ownerId: number; readonly sessionId?: string; readonly environment?: string; readonly data?: Record<string, unknown> }): PlatformEvent;
   subscribe(listener: (event: PlatformEvent, meta: PlatformEventMeta) => void): () => void;

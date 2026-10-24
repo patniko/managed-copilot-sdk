@@ -1,14 +1,16 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isManagedCopilotError, NETWORK_ENABLED, parseConfig } from "@managed-copilot/protocol";
+import { isManagedCopilotError, NETWORK_ENABLED, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
 import { redact } from "../src/log.js";
-import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
+import { admitOptionsUpdate, admitSession, lockSystemMessage, PROMOTABLE_ENVIRONMENT_CONTEXT, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
+import { PlatformEvents } from "../src/modules/core/events.js";
+import { SessionLedger } from "../src/modules/core/ledger.js";
 import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
 import { pathScrubber } from "../src/modules/core/sessions.js";
 import { createLogger } from "../src/log.js";
@@ -199,6 +201,9 @@ describe("shared admission", () => {
       sections: { environment_context: environment, code_change_rules: { action: "preserve" } },
     });
     expect(lockSystemMessage({ mode: "replace", content: "Only this." })).toEqual({ mode: "replace", content: "Only this." });
+    // Promotable sessions are pointed at request_sandbox for work that needs a shell or files.
+    expect(lockSystemMessage(undefined, { promotable: true })).toMatchObject({ sections: { environment_context: { action: "replace", content: PROMOTABLE_ENVIRONMENT_CONTEXT } } });
+    expect(PROMOTABLE_ENVIRONMENT_CONTEXT).toContain("call request_sandbox first");
   });
 
   it("allows workload capabilities in sandbox placement but keeps credentials and billing platform-owned", () => {
@@ -446,6 +451,11 @@ describe("gateway primitives", () => {
       // The runtime may report the directory's resolved form (8.3 names on Windows, symlinks elsewhere).
       expect(scrub(join(realpathSync.native(dataDir), "runtime", "shared", "workspaces", "abc"))).toBe("/workspace");
       expect(scrub("unrelated /etc/hosts and C:\\Windows")).toBe("unrelated /etc/hosts and C:\\Windows");
+      // Only the directory itself: not a sibling that shares its name as a prefix, nor a path that merely ends with it.
+      expect(scrub(`${dataDir}base${sep}x`)).toBe(`${dataDir}base${sep}x`);
+      expect(scrub(`${dataDir}.bak${sep}x`)).toBe(`${dataDir}.bak${sep}x`);
+      expect(scrub(`mnt${dataDir}${sep}x`)).toBe(`mnt${dataDir}${sep}x`);
+      expect(scrub(`The data is in ${dataDir}.`)).toBe("The data is in /platform.");
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }
@@ -473,5 +483,32 @@ describe("gateway primitives", () => {
     expect(() => transaction(db, () => Promise.resolve(1))).toThrowError(/synchronous/);
     expect(db.prepare("SELECT COUNT(*) AS n FROM t").get()).toEqual({ n: 1 });
     db.close();
+  });
+});
+
+describe("platform events", () => {
+  const event = (id: string, type: PlatformEvent["type"] = "session.promoted"): PlatformEvent => ({ id, type, createdAt: new Date().toISOString(), sessionId: "s1", data: {} });
+
+  it("reports whether an event is stored, idempotently for a stable ID, while notifying listeners every time", () => {
+    const db = openDatabase(":memory:");
+    const ledger = new SessionLedger(db);
+    const events = new PlatformEvents(ledger, log);
+    const heard: string[] = [];
+    events.subscribe((published, meta) => heard.push(`${published.id}@${meta.ownerId}`));
+
+    expect(events.publish(event("evt_anchor"), { ownerId: 7 })).toBe(true);
+    expect(events.publish(event("evt_promoted_op1"), { ownerId: 7 })).toBe(true);
+    // A publisher retrying with the same ID (after a crash or an unknown outcome) is told it is stored, without a duplicate.
+    expect(events.publish(event("evt_promoted_op1"), { ownerId: 7 })).toBe(true);
+    expect(ledger.eventsAfter(7, "evt_anchor").map(({ event: stored }) => stored.id)).toEqual(["evt_promoted_op1"]);
+    // Another owner can't claim (or replay) an existing ID.
+    expect(events.publish(event("evt_promoted_op1"), { ownerId: 8 })).toBe(false);
+    expect(ledger.eventsAfter(8, "evt_promoted_op1")).toEqual([]);
+    expect(heard).toEqual(["evt_anchor@7", "evt_promoted_op1@7", "evt_promoted_op1@7", "evt_promoted_op1@8"]);
+
+    // When the ledger can't store it, live listeners still hear it and the publisher learns it isn't replayable.
+    db.close();
+    expect(events.publish(event("evt_promoted_op2"), { ownerId: 7 })).toBe(false);
+    expect(heard.at(-1)).toBe("evt_promoted_op2@7");
   });
 });
