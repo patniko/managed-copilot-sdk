@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { ATTACH_TICKET_PREFIX } from "@managed-copilot/protocol";
 import { migrate, transaction, type Database } from "../../db.js";
+import type { Principal } from "../../http.js";
 
 /** Recognizable prefix so attach tickets are easy to spot and redact. */
 export const TICKET_PREFIX = ATTACH_TICKET_PREFIX;
@@ -22,6 +23,13 @@ export interface AttachTicket {
   readonly sessionId: string;
   readonly accountId: number;
   readonly expiresAt: string;
+  /**
+   * The verified principal that requested the ticket, kept in memory only until the ticket is redeemed (absent after
+   * a gateway restart). The attached CLI serves as the session's connected credential with it.
+   */
+  readonly principal?: Principal;
+  /** The session incarnation the ticket was minted for (a reused session ID names another incarnation). */
+  readonly incarnation?: string;
 }
 
 interface TicketRow {
@@ -32,17 +40,24 @@ interface TicketRow {
   used_at: string | null;
 }
 
+interface Grant {
+  readonly principal?: Principal;
+  readonly incarnation?: string;
+  readonly expiresAt: number;
+}
+
 function hash(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
 /**
  * Short-lived, single-use, owner- and session-bound attach tickets. Only a SHA-256 hash is stored; the token
- * exists in plaintext only in the `POST /attach` response.
+ * exists in plaintext only in the `POST /attach` response, and the requester's credential only in memory.
  */
 export class AttachTickets {
   readonly #db: Database;
   readonly #now: () => number;
+  readonly #grants = new Map<string, Grant>();
 
   constructor(db: Database, now: () => number = Date.now) {
     this.#db = db;
@@ -50,15 +65,19 @@ export class AttachTickets {
     migrate(db, "attach", MIGRATIONS);
   }
 
-  mint(accountId: number, sessionId: string, ttlMs: number): { token: string; expiresAt: string } {
+  mint(owner: number | Principal, sessionId: string, ttlMs: number, options: { readonly incarnation?: string } = {}): { token: string; expiresAt: string } {
     const now = this.#now();
+    const accountId = typeof owner === "number" ? owner : owner.accountId;
     // Tickets are useless once expired; keep a short tail for diagnostics only.
     this.#db.prepare("DELETE FROM attach_tickets WHERE expires_at < ?").run(new Date(now - 60 * 60_000).toISOString());
+    for (const [id, grant] of this.#grants) if (grant.expiresAt <= now) this.#grants.delete(id);
+    const id = randomUUID();
     const token = `${TICKET_PREFIX}${randomBytes(32).toString("base64url")}`;
     const expiresAt = new Date(now + ttlMs).toISOString();
     this.#db
       .prepare("INSERT INTO attach_tickets (id, token_hash, session_id, account_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(randomUUID(), hash(token), sessionId, accountId, new Date(now).toISOString(), expiresAt);
+      .run(id, hash(token), sessionId, accountId, new Date(now).toISOString(), expiresAt);
+    this.#grants.set(id, { ...(typeof owner === "number" ? {} : { principal: owner }), ...(options.incarnation ? { incarnation: options.incarnation } : {}), expiresAt: now + ttlMs });
     return { token, expiresAt };
   }
 
@@ -66,7 +85,7 @@ export class AttachTickets {
   redeem(token: string, sessionId: string): AttachTicket | undefined {
     if (!token.startsWith(TICKET_PREFIX)) return undefined;
     const now = new Date(this.#now()).toISOString();
-    return transaction(this.#db, () => {
+    const ticket = transaction(this.#db, () => {
       const row = this.#db.prepare("SELECT id, session_id, account_id, expires_at, used_at FROM attach_tickets WHERE token_hash = ?").get(hash(token)) as
         | TicketRow
         | undefined;
@@ -74,5 +93,9 @@ export class AttachTickets {
       this.#db.prepare("UPDATE attach_tickets SET used_at = ? WHERE id = ? AND used_at IS NULL").run(now, row.id);
       return { id: row.id, sessionId: row.session_id, accountId: row.account_id, expiresAt: row.expires_at };
     });
+    if (!ticket) return undefined;
+    const grant = this.#grants.get(ticket.id);
+    this.#grants.delete(ticket.id);
+    return { ...ticket, ...(grant?.principal ? { principal: grant.principal } : {}), ...(grant?.incarnation ? { incarnation: grant.incarnation } : {}) };
   }
 }

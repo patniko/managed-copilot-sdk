@@ -35,6 +35,23 @@ const CLI_RECONNECT = 1012;
 /** At most this many platform-requested reconnects per window, so a fault can't loop forever. */
 const MAX_RECONNECTS = 5;
 const RECONNECT_WINDOW_MS = 60_000;
+/** How long a reconnect keeps trying while the session moves into a sandbox (`session_busy`); a move takes seconds. */
+const BUSY_RETRY_MS = 120_000;
+const BUSY_BACKOFF_MS = [250, 500, 1_000, 2_000] as const;
+
+function isSessionBusy(error: unknown): boolean {
+  return error instanceof ManagedCopilotError && error.code === "session_busy";
+}
+
+/** The stable error code in a refused upgrade's JSON body, if it has one. */
+function errorCodeOf(body: string): string | undefined {
+  try {
+    const code = (JSON.parse(body) as { error?: { code?: unknown } }).error?.code;
+    return typeof code === "string" ? code : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Why an attachment ended, when the platform or the launcher ended it rather than the user. */
 export interface AttachOutcome {
@@ -158,8 +175,11 @@ export class AttachRelay {
   readonly #upstreams = new Set<WebSocket>();
   #pending: AttachMaterial | undefined;
   #active: { client: WebSocket; upstream: WebSocket } | undefined;
-  /** A CLI connection is being verified or connected; reserved before the first await so only one can win. */
-  #connecting = false;
+  /**
+   * The CLI connection being verified or connected; reserved before the first await so only one can win. A connection
+   * whose socket is already gone (the CLI gave up waiting while the session moved) no longer holds the slot.
+   */
+  #connecting: Duplex | undefined;
   #closed = false;
   /** When the platform last asked the CLI to reconnect (session moved, attachment renewed). */
   #reconnects: number[] = [];
@@ -237,9 +257,41 @@ export class AttachRelay {
     return this.#options.http.post<AttachMaterial>(ROUTES.attach(this.#options.sessionId));
   }
 
-  async #connectUpstream(protocols: string[]): Promise<WebSocket> {
-    for (let attempt = 0; ; attempt++) {
-      const material = await this.#material();
+  /**
+   * Connects to the deployment's attach socket with fresh material. While the session is moving into a sandbox the
+   * deployment answers `session_busy` (for the ticket or the socket), so this keeps trying with backoff for as long as
+   * the CLI waits on `cliSocket`, bounded by `BUSY_RETRY_MS`.
+   */
+  async #connectUpstream(protocols: string[], cliSocket: Duplex): Promise<WebSocket> {
+    const deadline = Date.now() + BUSY_RETRY_MS;
+    let waits = 0;
+    let renewed = false;
+    const mayWait = () => !this.#closed && !cliSocket.destroyed && Date.now() < deadline;
+    // Ends early when the CLI hangs up, so a CLI that redials gets the launcher at once.
+    const pause = () =>
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(done, BUSY_BACKOFF_MS[Math.min(waits++, BUSY_BACKOFF_MS.length - 1)]);
+        timer.unref();
+        cliSocket.once("close", done);
+        function done() {
+          clearTimeout(timer);
+          cliSocket.off("close", done);
+          resolve();
+        }
+      });
+    for (;;) {
+      // The CLI hung up on this dial: its next one (if any) takes over.
+      if (cliSocket.destroyed) throw new ManagedCopilotError("conflict", "Copilot CLI stopped waiting for this connection.");
+      let material: AttachMaterial;
+      try {
+        material = await this.#material();
+      } catch (error) {
+        if (isSessionBusy(error) && mayWait()) {
+          await pause();
+          continue;
+        }
+        throw error;
+      }
       // Reconnects stay on the conversation the CLI attached to (spec section 9): never switch sessions silently.
       if (material.ahpSessionId !== this.#options.first.ahpSessionId) {
         throw new ManagedCopilotError("conflict", "The deployment offered a different conversation for this session; refusing to switch. Attach again.");
@@ -254,20 +306,38 @@ export class AttachRelay {
       });
       this.#upstreams.add(upstream);
       upstream.once("close", () => this.#upstreams.delete(upstream));
-      const status = await new Promise<number | undefined>((resolve) => {
+      const refusal = await new Promise<{ status: number; code?: string } | undefined>((resolve) => {
         upstream.once("open", () => resolve(undefined));
         upstream.once("unexpected-response", (_request, response) => {
-          resolve(response.statusCode ?? 502);
-          upstream.terminate();
+          const chunks: Buffer[] = [];
+          let size = 0;
+          response.on("data", (chunk: Buffer) => {
+            size += chunk.length;
+            if (size <= 64 * 1024) chunks.push(chunk);
+          });
+          const done = () => {
+            const code = errorCodeOf(Buffer.concat(chunks).toString());
+            resolve({ status: response.statusCode ?? 502, ...(code ? { code } : {}) });
+            upstream.terminate();
+          };
+          response.once("end", done);
+          response.once("error", done);
         });
-        upstream.once("error", () => resolve(502));
+        upstream.once("error", () => resolve({ status: 502 }));
       });
-      if (status === undefined) return upstream;
-      if (status === 401 && attempt === 0) continue;
-      throw new ManagedCopilotError("capability_unavailable", `The deployment refused the attachment (HTTP ${status}).`);
+      if (refusal === undefined) return upstream;
+      if (refusal.code === "session_busy" && mayWait()) {
+        await pause();
+        continue;
+      }
+      // An expired or already used ticket: one fresh one.
+      if (refusal.status === 401 && !renewed) {
+        renewed = true;
+        continue;
+      }
+      throw new ManagedCopilotError("capability_unavailable", `The deployment refused the attachment (HTTP ${refusal.status}${refusal.code ? `, ${refusal.code}` : ""}).`);
     }
   }
-
   async #upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
     let pathname: string;
     try {
@@ -277,10 +347,13 @@ export class AttachRelay {
     }
     if (pathname !== `/ahp/${this.#nonce}`) return reject(socket, 404, "not_found", "Unknown attach endpoint.");
     if (this.#closed) return reject(socket, 503, "capability_unavailable", "This launcher is shutting down.");
-    if (this.#active || this.#connecting) return reject(socket, 409, "conflict", "Another Copilot CLI is already attached through this launcher.");
+    if (this.#active || (this.#connecting && !this.#connecting.destroyed)) return reject(socket, 409, "conflict", "Another Copilot CLI is already attached through this launcher.");
     const protocols = parseWebSocketProtocols(req.headers["sec-websocket-protocol"]);
     if (!protocols) return reject(socket, 400, "invalid_request", "The Sec-WebSocket-Protocol header is malformed.");
-    this.#connecting = true;
+    this.#connecting = socket;
+    // Until ws takes the socket over, a CLI that hangs up mid-wait ends this dial (no half-open waiting).
+    const hangUp = () => socket.destroy();
+    socket.once("end", hangUp);
     try {
       const refusal = await this.#verify(req);
       if (refusal) {
@@ -289,21 +362,25 @@ export class AttachRelay {
       }
       let upstream: WebSocket;
       try {
-        upstream = await this.#connectUpstream(protocols);
+        upstream = await this.#connectUpstream(protocols, socket);
       } catch (error) {
+        // An abandoned dial (the CLI hung up while the session moved) says nothing about the attachment.
+        if (socket.destroyed) return;
         const code: ErrorCode = error instanceof ManagedCopilotError ? error.code : "capability_unavailable";
         this.outcome = { code, message: (error as Error).message };
         return reject(socket, code === "capability_unavailable" ? 502 : ERROR_HTTP_STATUS[code], code, (error as Error).message);
       }
-      if (socket.destroyed || this.#closed) {
+      if (socket.destroyed || this.#closed || this.#active) {
         upstream.terminate();
         return;
       }
+      socket.off("end", hangUp);
       this.#wss.handleUpgrade(req, socket, head, (client) => this.#bridge(client, upstream));
       // ws completes or refuses the handshake synchronously; a refused one leaves nothing to own the upstream.
       if (!this.#bridged(upstream)) upstream.terminate();
     } finally {
-      this.#connecting = false;
+      socket.off("end", hangUp);
+      if (this.#connecting === socket) this.#connecting = undefined;
     }
   }
 

@@ -20,6 +20,9 @@ const upgradeHeaders: Record<string, unknown>[] = [];
 const revoked = new Set<string>();
 /** The conversation the fake deployment offers in attach material. */
 let offeredConversation = "ahp-session:/s1";
+/** How many more ticket requests and socket upgrades the fake deployment answers with `session_busy` (a move in progress). */
+const busy = { tickets: 0, upgrades: 0 };
+const BUSY_BODY = JSON.stringify({ error: { code: "session_busy", message: "This session is moving into a sandbox. Attach again when the move finishes." } });
 
 async function listen(server: Server): Promise<string> {
   server.listen(0, "127.0.0.1");
@@ -38,6 +41,11 @@ beforeAll(async () => {
   const wss = new WebSocketServer({ noServer: true });
   gateway = createServer((req, res) => {
     if (req.method === "POST" && req.url === "/v1/sessions/s1/attach") {
+      if (busy.tickets > 0) {
+        busy.tickets--;
+        res.writeHead(409, { "content-type": "application/json" }).end(BUSY_BODY);
+        return;
+      }
       const token = `mcat_ticket${minted.length}`;
       minted.push(token);
       const material: AttachMaterial = { transport: "ahp", url: "ws://elsewhere.example:1/v1/sessions/s1/ahp", token, expiresAt: new Date(Date.now() + 60_000).toISOString(), ahpSessionId: offeredConversation };
@@ -54,6 +62,11 @@ beforeAll(async () => {
       return;
     }
     used.add(ticket);
+    if (busy.upgrades > 0) {
+      busy.upgrades--;
+      socket.end(`HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(BUSY_BODY)}\r\nconnection: close\r\n\r\n${BUSY_BODY}`);
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       gatewaySockets.add(ws);
       ws.on("message", (data) => {
@@ -289,5 +302,44 @@ describe("Copilot CLI attach relay", () => {
     } finally {
       offeredConversation = "ahp-session:/s1";
     }
+  });
+
+  it("keeps the CLI's reconnect waiting while the session moves into a sandbox", async () => {
+    const { relay, url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    expect(await platformCloses(cli, 4307, "The session is moving into a sandbox. Reconnecting.")).toBe(1012);
+    // The move is under way: the deployment refuses tickets, then a socket, with session_busy.
+    busy.tickets = 2;
+    busy.upgrades = 1;
+    const before = minted.length;
+    const again = await connect(url, "gho_owner");
+    again.send(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "initialize", params: {} }));
+    expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
+    expect(busy).toEqual({ tickets: 0, upgrades: 0 });
+    // The refused socket spent its ticket; the reconnect used a fresh one.
+    expect(minted.length).toBe(before + 2);
+    expect(relay.outcome).toBeUndefined();
+    again.close();
+  });
+
+  it("stops waiting for a move when the CLI hangs up, so its next dial gets the launcher", async () => {
+    const { relay, url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    expect(await platformCloses(cli, 4307, "The session is moving into a sandbox. Reconnecting.")).toBe(1012);
+    busy.tickets = 1_000;
+    // The CLI redials while the move is under way, then gives up on that handshake (its own timeout).
+    const abandoned = new WebSocket(url, { headers: { authorization: ["Bearer", "gho_owner"].join(" ") } });
+    abandoned.on("error", () => undefined);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    abandoned.terminate();
+    busy.tickets = 0;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const again = await connect(url, "gho_owner");
+    again.send(JSON.stringify({ jsonrpc: "2.0", id: 6, method: "initialize", params: {} }));
+    expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The abandoned dial ended quietly: it neither took over nor recorded an outcome for the attachment.
+    expect(relay.outcome).toBeUndefined();
+    again.close();
   });
 });
