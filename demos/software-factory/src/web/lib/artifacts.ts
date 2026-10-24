@@ -153,7 +153,7 @@ export function useArtifactContent(
   version: ArtifactVersionView | undefined,
 ): { readonly content: ContentState; readonly retry: () => void } {
   const key =
-    file && version && file.viewable
+    file && version && version.viewable
       ? `${workOrderId}\n${file.stationId}\n${file.path}\n${version.version}\n${version.digest}`
       : undefined;
   const [result, setResult] = useState<{ readonly key: string; readonly error?: string; readonly text?: string }>();

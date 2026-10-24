@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventHub } from "../src/server/hub.js";
 import { Factory } from "../src/server/pipeline/factory.js";
 import { FactoryStore } from "../src/server/store.js";
@@ -448,7 +448,52 @@ describe("Factory pipeline", () => {
     for (const station of wo.stations.filter((candidate) => candidate.kind === "build")) {
       expect(station.previousSessionIds).toHaveLength(1);
       expect(station.sessionState, station.id).toBe("idle");
+      expect(station.sessionGone, station.id).toBeUndefined();
     }
+  });
+
+  it("rechecks deletion markers it didn't confirm, and stops looking up confirmed ones", async () => {
+    const { platform, factory } = setup({ planner, builder: builder(), reviewer, release });
+    const created = factory.create(CREATE);
+    await settle(factory, created.id);
+    await factory.reconcileSessions();
+    // As an earlier reconciler persisted it for a session that was merely missing from a capped list.
+    const stored = store.getWorkOrder(created.id)!;
+    const releaseSession = stored.stations.find((station) => station.id === "release")!.sessionId!;
+    Object.assign(stored.stations.find((station) => station.id === "release")!, { sessionState: "deleted" });
+    store.saveWorkOrder(stored);
+    platform.listLimit = 0;
+    const lookups = vi.spyOn(platform, "sessionInfo");
+
+    await factory.reconcileSessions();
+    expect(factory.get(created.id)!.stations.find((station) => station.id === "release")!.sessionState).toBe("idle");
+
+    platform.lost.add(releaseSession);
+    await factory.reconcileSessions();
+    expect(factory.get(created.id)!.stations.find((station) => station.id === "release")).toMatchObject({ sessionState: "deleted", sessionGone: true });
+
+    lookups.mockClear();
+    await factory.reconcileSessions();
+    expect(lookups.mock.calls.map(([sessionId]) => sessionId)).not.toContain(releaseSession);
+    expect(factory.get(created.id)!.stations.find((station) => station.id === "release")!.sessionState).toBe("deleted");
+  });
+
+  it("tells each artifact version apart: kept text or not stored", async () => {
+    const growing: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      const fix = prompt.includes("requested changes");
+      platform.publish(session.sessionId, { "data.txt": fix ? "x".repeat(1024 * 1024 + 1) : "small" });
+    };
+    const { factory } = setup({ planner, builder: growing, reviewer, release });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("completed");
+    const file = factory.artifactIndex(created.id).files.find((candidate) => candidate.stationId === "build:csv2json" && candidate.path === "data.txt")!;
+    expect(file.versions.map((version) => [version.version, version.viewable])).toEqual([
+      [2, false],
+      [1, true],
+    ]);
+    expect(file.viewable).toBe(false);
+    expect(factory.artifact(created.id, "build:csv2json", "data.txt", 1)?.content).toBe("small");
   });
 
   it("leaves files a builder deleted in a later round out of the release", async () => {

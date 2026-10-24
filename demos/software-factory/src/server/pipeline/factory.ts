@@ -198,7 +198,14 @@ export class Factory {
         file = { stationId: meta.stationId, path: meta.path, contentType: meta.contentType, versions: [], viewable: meta.hasContent };
         files.set(key, file);
       }
-      file.versions.push({ version: meta.version, size: meta.size, digest: meta.digest, publishedAt: meta.publishedAt, round: meta.round });
+      file.versions.push({
+        version: meta.version,
+        size: meta.size,
+        digest: meta.digest,
+        publishedAt: meta.publishedAt,
+        round: meta.round,
+        viewable: meta.hasContent,
+      });
     }
     const sorted = [...files.values()].sort(
       (a, b) => (order.get(a.stationId) ?? 99) - (order.get(b.stationId) ?? 99) || a.path.localeCompare(b.path),
@@ -348,14 +355,14 @@ export class Factory {
       return;
     }
     // The list is capped, so a missing session isn't necessarily gone: look each one up, and only a definitive
-    // not_found marks it deleted. Sessions already known to be deleted stay that way.
+    // not_found marks it deleted. Confirmed deletions aren't looked up again; older `deleted` markers are rechecked.
     const missing = new Set<string>();
     for (const wo of candidates()) {
       for (const station of wo.stations) {
-        if (station.sessionId && !sessions.has(station.sessionId) && station.sessionState !== "deleted") missing.add(station.sessionId);
+        if (station.sessionId && !sessions.has(station.sessionId) && !station.sessionGone) missing.add(station.sessionId);
       }
     }
-    const gone = new Set<string>();
+    const goneIds = new Set<string>();
     const pending = [...missing];
     for (let index = 0; index < pending.length; index += 8) {
       await Promise.all(
@@ -363,7 +370,7 @@ export class Factory {
           try {
             sessions.set(sessionId, await this.#platform.sessionInfo(sessionId));
           } catch (error) {
-            if (isManagedCopilotError(error, "not_found")) gone.add(sessionId);
+            if (isManagedCopilotError(error, "not_found")) goneIds.add(sessionId);
             else log.debug("Couldn't look up a session", { sessionId, error: (error as Error).message });
           }
         }),
@@ -375,10 +382,18 @@ export class Factory {
       for (const station of wo.stations) {
         if (!station.sessionId) continue;
         const info = sessions.get(station.sessionId);
-        const state = info?.state ?? (gone.has(station.sessionId) ? "deleted" : station.sessionState);
+        const gone = goneIds.has(station.sessionId);
+        const state = info?.state ?? (gone ? "deleted" : station.sessionState);
         if (station.sessionState !== state) {
           if (state === undefined) delete station.sessionState;
           else station.sessionState = state;
+          changed = true;
+        }
+        if (gone && !station.sessionGone) {
+          station.sessionGone = true;
+          changed = true;
+        } else if (info && station.sessionGone) {
+          delete station.sessionGone;
           changed = true;
         }
         if (info?.sandbox && station.sandbox && station.sandbox.state !== info.sandbox.state) {
@@ -916,7 +931,7 @@ export class Factory {
     try {
       const info = await this.#platform.sessionInfo(station.sessionId);
       if (info.id !== station.sessionId) return;
-      const patch: Partial<MStation> = { sessionState: info.state };
+      const patch: Partial<MStation> = { sessionState: info.state, sessionGone: undefined };
       if (info.sandbox) {
         patch.sandbox = {
           id: info.sandbox.id,
@@ -1124,7 +1139,10 @@ export class Factory {
   #updateStation(run: Run, station: MStation, patch: Partial<MStation>): void {
     if (run.closed) return;
     // Session-derived state describes the old session once the station moves to another one.
-    if ("sessionId" in patch && patch.sessionId !== station.sessionId && !("sessionState" in patch)) delete station.sessionState;
+    if ("sessionId" in patch && patch.sessionId !== station.sessionId) {
+      if (!("sessionState" in patch)) delete station.sessionState;
+      if (!("sessionGone" in patch)) delete station.sessionGone;
+    }
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) delete (station as Record<string, unknown>)[key];
       else (station as Record<string, unknown>)[key] = value;

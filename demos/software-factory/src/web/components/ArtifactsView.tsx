@@ -328,7 +328,7 @@ function Viewer({
   const Icon = fileIcon(file);
 
   let body: ReactNode;
-  if (!file.viewable) {
+  if (!version.viewable) {
     // The factory keeps text files up to 1 MB; it has no bytes to serve for anything else.
     body = (
       <EmptyState icon={FileArchive} title="This file can't be previewed">
@@ -399,7 +399,7 @@ function Viewer({
               {versionLabel(version, now)}
             </span>
           )}
-          {file.viewable ? (
+          {version.viewable ? (
             <>
               <a href={url} target="_blank" rel="noreferrer" className={buttonClass("ghost", "sm")}>
                 <ExternalLink className="size-3.5" aria-hidden />

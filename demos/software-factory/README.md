@@ -41,7 +41,9 @@ Managed Copilot features in play (see the [developer experience spec](../../docs
 - **Network control** (section 7). Office stations run with `network: false`; workshop sandboxes reach only the allowed hosts.
 - **Agents, skills, and instructions shipped with the environment** (section 10). See [`customizations/office`](customizations/office) and [`customizations/workshop`](customizations/workshop).
 - **Coming back later** (section 11). Work orders survive restarts; in-flight sandbox turns are resumed with `managed.resumeSession`.
-- **Open in Copilot CLI** (section 14). Any station's live session can be attached from a terminal.
+- **Open in Copilot CLI** (section 14). Any station's session can be attached from a terminal: on Windows the station
+  panel opens a console running `npx managed-copilot attach <session>`; elsewhere it shows the command to copy. The
+  CLI and the factory see the same turns.
 
 ### A tour
 
@@ -71,7 +73,8 @@ aspire run          # the platform, sandboxes, and the factory; open the "softwa
 
 The factory floor opens at <http://localhost:7480>. Pick the **CSV ⇄ JSON toolkit** template and press
 **Start work order**: two builders work side by side, the reviewer usually sends work back once, and the release
-lands in four to nine minutes. Measured live runs: 8m 32s (38 tests), 4m 27s (44 tests), and 3m 55s (51 tests).
+lands in three to nine minutes. Measured live runs: 2m 52s (51 tests) and 4m 25s (36 tests) from `main`, and
+3m 55s to 8m 32s while the platform was coming together.
 
 ### Scripted happy path
 
