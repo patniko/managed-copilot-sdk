@@ -398,6 +398,8 @@ export interface DurableSessionView {
    */
   readonly incarnation?: string;
   readonly createdAt?: string;
+  /** The schedule that created the session (core sets it only for its server-side create, never for a client's). */
+  readonly scheduleId?: string;
   readonly lastTurn?: { readonly turnId?: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
 }
 

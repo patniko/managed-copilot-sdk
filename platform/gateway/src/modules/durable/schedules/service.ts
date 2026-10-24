@@ -134,6 +134,8 @@ const QUEUE_READ_TIMEOUT_MS = 15_000;
 const TARGET_GONE = "The session this schedule continues was deleted, so it cannot run again. Delete the schedule, or create a new one for another session.";
 const TARGET_DELETED = "Paused: the session this schedule continues was deleted";
 const RUN_SESSION_DELETED = "The run's session was deleted while the run was in progress";
+const NOT_THIS_RUNS_SESSION =
+  "Could not start the run: a session this schedule did not create now uses the run's session ID (the run's own session may have been deleted), so nothing was sent to it";
 /** Binding of a schedule recorded before incarnations whose session could not be proven to be the same one. */
 const RETIRED = "retired";
 
@@ -506,8 +508,9 @@ export class DurableSchedules implements SchedulesService {
       // A dispatch in progress rechecks the session itself before it sends anything.
       if (this.#inFlight.has(run.id)) continue;
       if (run.session_incarnation === null) {
-        // Unbound: a new session's run that has not created it yet has nothing to lose.
-        if (current !== undefined || (run.session_mode === "new" && run.session_created === 0)) continue;
+        // Unbound: whatever was deleted may be the run's own session (a create whose reply was lost), so the run ends
+        // unless the ID names a live session again (a dispatch then adopts it only if this schedule created it).
+        if (current !== undefined) continue;
       } else if (sameIncarnation(run.session_incarnation, current)) {
         continue;
       }
@@ -563,9 +566,11 @@ export class DurableSchedules implements SchedulesService {
         const schedule = this.#store.schedule(run.schedule_id) ?? this.#deletedSchedule(run.schedule_id);
         bound = schedule?.target_incarnation ?? (schedule && provenSession(view, schedule.owner_id, Number.NEGATIVE_INFINITY, schedule.created_at) ? incarnationOf(view) : undefined);
       } else {
-        // The run's own session (its ID derives from the occurrence): created after the run and before its prompt.
+        // The run's own session (its ID derives from the occurrence, and this schedule created it): created after the
+        // run and before its prompt.
         const notAfter = (run.input_started_at ?? now) + INPUT_CLOCK_SKEW_MS;
-        bound = provenSession(view, run.owner_id, run.created_at - INPUT_CLOCK_SKEW_MS, notAfter) ? incarnationOf(view) : undefined;
+        bound =
+          provenSession(view, run.owner_id, run.created_at - INPUT_CLOCK_SKEW_MS, notAfter) && view.scheduleId === run.schedule_id ? incarnationOf(view) : undefined;
       }
       if (bound && sameIncarnation(bound, view)) {
         this.#store.updateRun(run.id, ["queued", "running", "waiting"], { session_incarnation: incarnationOf(view!) }, now);
@@ -839,6 +844,11 @@ export class DurableSchedules implements SchedulesService {
         });
         // The run continues the session it created (or found, when retried), never a later one that reuses its ID.
         const view = sessions.get(run.session_id!);
+        // An existing session is this run's only if this schedule created it (an earlier attempt whose reply was
+        // lost). Otherwise the run's own session may have been deleted and its ID reused: never adopt that one.
+        if (!created.created && !isGone(view) && view!.scheduleId !== schedule.id) {
+          return this.#finishRun(run, "failed", NOT_THIS_RUNS_SESSION, schedule);
+        }
         const incarnation = created.incarnation ?? (isGone(view) ? null : incarnationOf(view!));
         this.#store.updateRun(run.id, ["queued"], { session_created: 1, session_incarnation: incarnation }, this.#now());
       } else if (run.session_mode === "target" && this.#targetGone(schedule)) {

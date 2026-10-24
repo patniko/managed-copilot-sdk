@@ -80,6 +80,8 @@ class FakeSessions implements DurableSessionsPort {
         state: "idle",
         generation: 0,
         createdAt: new Date(this.now()).toISOString(),
+        // Like core: only its server-side create records the schedule.
+        ...(request.scheduleId ? { scheduleId: request.scheduleId } : {}),
       });
       this.history.set(request.sessionId, []);
     }
@@ -395,6 +397,38 @@ describe("durable schedules", () => {
       expect(sessions.views.size).toBe(1);
       expect(sessions.sends).toHaveLength(1);
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]!.status).toBe("running");
+    });
+
+    it("never adopts a session that reused the ID of the one a lost create made", async () => {
+      // The create reached core (session A) but its reply was lost: the run does not know it has a session.
+      const first = await dueOccurrence();
+      sessions.createFailures.push("after");
+      await tick();
+      const sessionId = sessions.creates[0]!.sessionId;
+      expect(schedules.runs(OWNER.accountId, first.id)[0]).toMatchObject({ status: "queued" });
+      // A is deleted: the run's own session may be what was deleted, so the run ends.
+      sessions.views.delete(sessionId);
+      schedules.onSessionDeleted(sessionId, "inc-a");
+      expect(schedules.runs(OWNER.accountId, first.id)[0]).toMatchObject({ status: "skipped", reason: "The session was deleted before this run started" });
+      now += 5_000;
+      await tick();
+      expect(sessions.creates).toHaveLength(1);
+
+      // Again, but the owner reuses the ID before the deletion is seen: the run never adopts that session.
+      db.exec("DELETE FROM durable_schedule_runs; DELETE FROM durable_schedules");
+      sessions.creates.length = 0;
+      sessions.views.clear();
+      const second = await dueOccurrence();
+      sessions.createFailures.push("after");
+      await tick();
+      const reusedId = sessions.creates[0]!.sessionId;
+      sessions.views.set(reusedId, { id: reusedId, ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, incarnation: "inc-b" });
+      sessions.history.set(reusedId, []);
+      schedules.onSessionDeleted(reusedId, "inc-a"); // announced late: the ID names B now
+      now += 5_000;
+      await tick();
+      expect(sessions.sends).toEqual([]);
+      expect(schedules.runs(OWNER.accountId, second.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/did not create now uses the run's session ID/) });
     });
 
     it("does not resend a prompt the runtime accepted before the crash", async () => {
@@ -1125,6 +1159,25 @@ describe("durable schedules", () => {
       expect(runOf(own.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
       sessions.finishTurn("s-chat", runOf(target.id).messageId!);
       expect(runOf(target.id)).toMatchObject({ status: "completed" });
+    });
+
+    it("binds a new session's run from before incarnations only to the session its schedule created", async () => {
+      const own = await schedules.create(OWNER, { name: "own", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "q" });
+      const other = await schedules.create(OWNER, { name: "other", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "r" });
+      now += 60_000;
+      await tick();
+      expect([runOf(own.id).status, runOf(other.id).status]).toEqual(["running", "running"]);
+      db.exec("UPDATE durable_schedule_runs SET session_incarnation = NULL");
+      // While the gateway was down, the second run's session was deleted and the owner reused its ID at once: the
+      // replacement falls in the run's time window, but its schedule did not create it.
+      const reusedId = runOf(other.id).sessionId!;
+      const { scheduleId: _created, ...replacement } = sessions.views.get(reusedId)!;
+      sessions.views.set(reusedId, { ...replacement, incarnation: "inc-owner" });
+      await schedules.stop();
+      schedules = build();
+      expect(runOf(own.id)).toMatchObject({ status: "running" });
+      expect(db.prepare("SELECT session_incarnation FROM durable_schedule_runs WHERE schedule_id = ?").get(own.id)).not.toEqual({ session_incarnation: null });
+      expect(runOf(other.id)).toMatchObject({ status: "failed", reason: "The run's session was deleted while the run was in progress" });
     });
   });
 

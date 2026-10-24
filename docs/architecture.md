@@ -477,7 +477,9 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   per attempt for the session's actions that are still pending (15 min, audience = this deployment's public URL).
 - **Schedules.** Cron (IANA zones; nonexistent DST slots skipped, repeated slots run once at the earliest instant)
   and one-shot `runAt`. Each occurrence is persisted with a stable occurrence ID before anything happens upstream; a
-  new-session run uses a session ID derived from the occurrence (so a retried create finds the same session), and the
+  new-session run uses a session ID derived from the occurrence (so a retried create finds the same session, which it
+  adopts only if this schedule created it: core records `scheduleId` only for its server-side create, so a session the
+  owner made under that ID after the run's own was deleted is never used, and the run fails without sending), and the
   prompt is sent with `source: "system"` only after `input_state = submitting` is persisted. After a crash the
   session's history (`session.getMessages`) decides whether the prompt was accepted; while the runtime may still hold
   it unrecorded (queued work per `session.queue.hasPending`/`pendingItems`, or a running turn) the run waits rather
