@@ -35,6 +35,12 @@ export const SANDBOXD_ROUTES = {
   outputsManifest: "/v1/outputs/manifest",
   /** `GET ?path=` streams a file under `/workspace/outputs`. */
   outputsContent: "/v1/outputs/content",
+  /** `PUT ?staging=&path=` writes one file of a runtime-state import into its staging directory (promotion). */
+  runtimeImportContent: "/v1/runtime-import/content",
+  /** `POST ?staging=&sessionId=` replaces `session-state/<sessionId>/` in the runtime's COPILOT_HOME with the staging directory. */
+  runtimeImportCommit: "/v1/runtime-import/commit",
+  /** `POST ?staging=` discards a staging directory. */
+  runtimeImportAbort: "/v1/runtime-import/abort",
 } as const;
 
 /** Fixed paths inside every sandbox. */

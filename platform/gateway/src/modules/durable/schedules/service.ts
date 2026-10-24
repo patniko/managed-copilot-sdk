@@ -150,6 +150,7 @@ export class DurableSchedules implements SchedulesService {
   readonly #now: () => number;
   readonly #inFlight = new Set<string>();
   readonly #inFlightSchedules = new Set<string>();
+  readonly #inFlightSessions = new Set<string>();
   readonly #inFlightOwners = new Map<number, number>();
   /** Recent `user.message` IDs per session: a prompt's event can arrive before `send` returns its ID. */
   readonly #recentMessages = new Map<string, string[]>();
@@ -407,6 +408,9 @@ export class DurableSchedules implements SchedulesService {
   async runNow(ownerId: number, scheduleId: string, invocationId?: string): Promise<ScheduleRun> {
     const row = this.#owned(ownerId, scheduleId);
     if (!this.#deps.credentials().has(ownerId)) throw new ManagedCopilotError("authentication_required", `Schedules run as you while you're away. ${LOGIN_HINT}`);
+    if (row.state !== "active" && row.paused_reason) {
+      throw new ManagedCopilotError("conflict", `This schedule was paused by the platform: ${row.paused_reason.replace(/^Paused: /, "")} Resume it first.`);
+    }
     const key = invocationId?.trim() || newId("inv");
     if (key.length > 200) throw new ManagedCopilotError("invalid_request", "invocationId must be at most 200 characters");
     const occurrenceId = occurrenceIdFor(row.id, "manual", key);
@@ -428,6 +432,16 @@ export class DurableSchedules implements SchedulesService {
       .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND state = 'active' AND deleted_at IS NULL")
       .run(reason, this.#now(), ownerId);
     return Number(result.changes);
+  }
+
+  /** A deleted session can no longer be continued: schedules targeting it pause and its queued runs are skipped. */
+  onSessionDeleted(sessionId: string): void {
+    for (const schedule of this.#store.listByTarget(sessionId)) {
+      this.#pauseFor(schedule, "Paused: the session this schedule continues was deleted");
+    }
+    for (const run of this.#deps.db.prepare("SELECT * FROM durable_schedule_runs WHERE session_id = ? AND status = 'queued'").all(sessionId) as unknown as RunRow[]) {
+      if (!this.#inFlight.has(run.id)) this.#finishRun(run, "skipped", "The session was deleted before this run started");
+    }
   }
 
   // ---------------------------------------------------------------------------------------------------------
@@ -599,6 +613,8 @@ export class DurableSchedules implements SchedulesService {
   #dispatchQueued(now: number): void {
     for (const run of this.#store.runsByStatus(["queued"])) {
       if (this.#inFlight.has(run.id) || this.#inFlightSchedules.has(run.schedule_id)) continue;
+      // One dispatch per session at a time, so input reconciliation for a shared session is never concurrent.
+      if (run.session_id && this.#inFlightSessions.has(run.session_id)) continue;
       if (run.next_attempt_at !== null && run.next_attempt_at > now) continue;
       if (this.#store.countRuns(run.schedule_id, ACTIVE_RUN_STATUSES) > 0) continue;
       // Dispatches still creating sessions or sending count against the owner's capacity too.
@@ -606,12 +622,14 @@ export class DurableSchedules implements SchedulesService {
       if (active >= this.#options.maxActiveRunsPerOwner) continue;
       this.#inFlight.add(run.id);
       this.#inFlightSchedules.add(run.schedule_id);
+      if (run.session_id) this.#inFlightSessions.add(run.session_id);
       this.#inFlightOwners.set(run.owner_id, (this.#inFlightOwners.get(run.owner_id) ?? 0) + 1);
       void this.#dispatch(run.id)
         .catch((error: unknown) => this.#log.error("Schedule dispatch failed unexpectedly", { runId: run.id, error: (error as Error)?.stack ?? String(error) }))
         .finally(() => {
           this.#inFlight.delete(run.id);
           this.#inFlightSchedules.delete(run.schedule_id);
+          if (run.session_id) this.#inFlightSessions.delete(run.session_id);
           const remaining = (this.#inFlightOwners.get(run.owner_id) ?? 1) - 1;
           if (remaining > 0) this.#inFlightOwners.set(run.owner_id, remaining);
           else this.#inFlightOwners.delete(run.owner_id);
@@ -624,7 +642,9 @@ export class DurableSchedules implements SchedulesService {
     if (!run || run.status !== "queued") return;
     const schedule = this.#store.schedule(run.schedule_id);
     if (!schedule) return this.#finishRun(run, "skipped", "The schedule was deleted before this run started");
-    if (schedule.state !== "active" && run.trigger !== "manual") {
+    // A person's pause still lets them run it now; a platform pause (safety, revoked sign-in, awaiting approval) blocks
+    // every run, including ones queued before it.
+    if (schedule.state !== "active" && (run.trigger !== "manual" || schedule.paused_reason)) {
       return this.#finishRun(run, "skipped", `The schedule was paused before this run started${schedule.paused_reason ? ` (${schedule.paused_reason})` : ""}`, schedule);
     }
 
@@ -742,12 +762,21 @@ export class DurableSchedules implements SchedulesService {
     const now = this.#now();
     // The runtime may emit the prompt's user.message before `send` returns, or (after a crash) long before.
     const consumed = alreadyInSession || (messageId !== "" && (this.#recentMessages.get(run.session_id!) ?? []).includes(messageId));
-    const updated = this.#store.updateRun(
-      run.id,
-      ["queued"],
-      { status: "running", input_state: "submitted", message_id: messageId || null, consumed: consumed ? 1 : 0, started_at: now, attempts: 0, next_attempt_at: null, reason: null },
-      now,
-    );
+    let updated: boolean;
+    try {
+      updated = this.#store.updateRun(
+        run.id,
+        ["queued"],
+        { status: "running", input_state: "submitted", message_id: messageId || null, consumed: consumed ? 1 : 0, started_at: now, attempts: 0, next_attempt_at: null, reason: null },
+        now,
+      );
+    } catch (error) {
+      // Another run already owns that message (unique per session): never let two occurrences share one prompt.
+      if (/UNIQUE/i.test((error as Error).message)) {
+        return this.#finishRun(run, "needs_reconciliation", "The session's history cannot show which message is this run's prompt, so it was not sent again. Check the session before running it again.", schedule);
+      }
+      throw error;
+    }
     if (!updated) return;
     const started = this.#store.run(run.id)!;
     this.#log.info("Schedule run started", { scheduleId: schedule.id, runId: run.id, sessionId: run.session_id });
@@ -779,8 +808,9 @@ export class DurableSchedules implements SchedulesService {
   }
 
   /**
-   * Bounds run lifetime without breaking no-overlap: the overdue turn is stopped first, and if that cannot be
-   * confirmed the schedule pauses (with a visible reason) instead of admitting another run beside it.
+   * Bounds run lifetime without breaking no-overlap or touching other work: only a turn proven to be this run's
+   * (its prompt was consumed and it is the session's current turn) is stopped. Otherwise (the prompt may still be
+   * queued behind someone else's turn, or the stop fails) the schedule pauses with a visible reason instead.
    */
   async #expireLongRuns(now: number): Promise<void> {
     const hours = Math.round(this.#options.maxRunLifetimeMs / 3_600_000);
@@ -788,10 +818,13 @@ export class DurableSchedules implements SchedulesService {
       if (run.started_at === null || now - run.started_at <= this.#options.maxRunLifetimeMs) continue;
       const sessions = this.#deps.sessions();
       let stopped = false;
-      if (sessions && run.session_id) {
+      if (sessions && run.session_id && run.consumed && run.message_id) {
         try {
-          await sessions.request(run.session_id, "session.abort", { sessionId: run.session_id });
-          stopped = true;
+          const turn = (await sessions.get(run.session_id))?.lastTurn;
+          if (turn?.turnId === run.message_id && turn.status === "running") {
+            await sessions.request(run.session_id, "session.abort", { sessionId: run.session_id });
+            stopped = true;
+          }
         } catch (error) {
           this.#log.warn("Could not stop an overdue scheduled run", { runId: run.id, sessionId: run.session_id, error: (error as Error).message });
         }
@@ -801,8 +834,9 @@ export class DurableSchedules implements SchedulesService {
         continue;
       }
       const schedule = this.#store.schedule(run.schedule_id);
-      if (schedule) this.#pauseFor(schedule, `Paused: a run exceeded ${hours} hours and could not be stopped; check session ${run.session_id} before resuming`);
-      this.#finishRun(run, "failed", `The run did not finish within ${hours} hours and could not be stopped`, schedule);
+      const why = run.consumed ? "could not be stopped" : "never started (its prompt may still be queued in the session)";
+      if (schedule) this.#pauseFor(schedule, `Paused: a run ${why} after ${hours} hours; check session ${run.session_id} before resuming`);
+      this.#finishRun(run, "failed", `The run did not finish within ${hours} hours and ${why}`, schedule);
     }
   }
 
@@ -857,16 +891,8 @@ export class DurableSchedules implements SchedulesService {
     if (!run || !ACTIVE_RUN_STATUSES.includes(run.status) || !run.session_id) return;
     const view = await sessions.get(run.session_id);
     const turn = view?.lastTurn;
-    if (!turn || turn.status === "running") return;
-    if (turn.turnId !== undefined && run.message_id && turn.turnId !== run.message_id) {
-      // A continued session's ledger may still show an earlier turn. Only a turn that finished after this run's
-      // prompt was sent proves this run's turn (which runs first) already ended.
-      const finishedAt = turn.completedAt ? Date.parse(turn.completedAt) : Number.NaN;
-      if (Number.isFinite(finishedAt) && finishedAt > (run.input_started_at ?? run.created_at)) {
-        this.#finishRun(run, "completed", "The run's turn finished while the platform was restarting");
-      }
-      return;
-    }
+    // Only the run's own turn proves its outcome: another turn's result (or timing) says nothing about it.
+    if (!turn || turn.status === "running" || turn.turnId === undefined || turn.turnId !== run.message_id) return;
     if (turn.status === "completed") this.#finishRun(run, "completed", "The agent finished the run's turn");
     else if (turn.status === "cancelled") this.#finishRun(run, "failed", "The run's turn was cancelled");
     else this.#finishRun(run, "failed", "The run's turn failed");

@@ -251,4 +251,15 @@ describe("durable webhooks", () => {
     expect(webhooks.deliveries({ ownerId: 3 })).toHaveLength(0);
     expect(webhooks.deliveries()).toHaveLength(4);
   });
+
+  it("stops action deliveries for a deleted session but still reports its other events", () => {
+    webhooks.enqueue(event("session.action_required"), { ownerId: 1 });
+    webhooks.enqueue(event("session.idle"), { ownerId: 1 });
+    expect(webhooks.dropSession("s1")).toBe(2);
+    expect(webhooks.deliveries({ state: "failed" }).map((delivery) => [delivery.eventType, delivery.lastError])).toEqual([
+      ["session.action_required", "The session was deleted"],
+      ["session.action_required", "The session was deleted"],
+    ]);
+    expect(webhooks.deliveries({ state: "pending" }).map((delivery) => delivery.eventType)).toEqual(["session.idle", "session.idle"]);
+  });
 });

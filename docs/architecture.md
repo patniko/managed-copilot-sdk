@@ -121,6 +121,13 @@ denies configuration RPCs it does not understand.
   client's session lifecycle events. Owner checks are never weakened to make a helper work.
 - The SDK validates the deployment URL before sending a credential: HTTPS for remote deployments, HTTP only for
   verified loopback, no embedded credentials, and a validated discovery record.
+- **GitHub verification** (`auth`). Tokens are verified against GitHub `/user` (cached 5 minutes) plus the AppHost
+  access rules. Transport errors, timeouts, and 5xx answers are retried with jittered backoff inside a 35 s deadline;
+  rate limits are not retried. While GitHub is unreachable, a token's last successful verification stands in for up
+  to 15 minutes (re-checked in the background every 30 s); a rejection (401, a non-rate-limit 403, or `forbidden`)
+  replaces it, so it never revives a rejected token. Otherwise callers get `upstream_unavailable` (HTTP 503 with
+  `Retry-After` and `details.retryAfterSeconds`), never `authentication_required` for an outage. Long-lived
+  connections re-verify at most once a minute and are closed only for `authentication_required`/`forbidden`.
 
 ### Credentials and inference
 
@@ -158,9 +165,20 @@ denies configuration RPCs it does not understand.
 
 ### Isolated placement
 
-As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platform/sandbox`; contract in
-`platform/gateway/src/modules/sandbox/contract.ts` and `packages/protocol/src/sandbox.ts`):
+As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts in
+`platform/gateway/src/modules/sandbox/contract.ts`, `.../sandbox/providers/types.ts`, and
+`packages/protocol/src/sandbox.ts`):
 
+- **Backends.** The service owns policy and lifecycle (setup, egress registration, the runtime, idle stop,
+  reconciliation, artifacts); a `SandboxProvider` (`providers/types.ts`) owns compute, persistent storage,
+  networking, images, and reachability of each sandbox's sandboxd: `ready`/`prepare`, `ensureImage`/`hasImage`,
+  `create`/`start` (with cancellation and progress), `stop`/`remove`/`isRunning`, `address` (egress pinning, when
+  `capabilities.addressPinning`), `endpoint` (http or https base URL plus headers, also used for WebSocket upgrades),
+  optional `egressProxy` (passed to `policy.registerSandbox`), `reportUnreachable`/`reattach`, and `inventory`.
+  `MANAGED_COPILOT_SANDBOX_PROVIDER` selects `docker` (local, `providers/docker/`, described below) or `azure`
+  (`providers/azure/`, owned by the azure workstream). Providers must keep: sandboxd as root with only CHOWN, KILL,
+  SETGID, and SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, `/var/lib/managed-copilot`; no
+  route between sandboxes and no Internet except through the egress proxy; sandboxd reachable only through `endpoint`.
 - **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
@@ -180,10 +198,13 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   attach), streamed workspace list/read/write, and output manifests. It starts the SDK's stock headless
   `copilot-runtime` as uid 10001 with cwd `/workspace`, `COPILOT_CONNECTION_TOKEN`, its own `COPILOT_HOME`, the egress
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
-  unexpected exits. Every workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a
-  short-lived worker as uid 10001 that walks the path one segment at a time with `chdir`, refuses symbolic links,
-  verifies the real directory after every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root
-  never touches workspace paths, and children enter `/workspace` only after dropping privileges.
+  unexpected exits. Every workload process (the runtime, setup commands, file workers) starts through `setpriv`:
+  uid/gid 10001, cleared groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so the
+  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. Every
+  workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a short-lived worker as uid 10001
+  that walks the path one segment at a time with `chdir`, refuses symbolic links, verifies the real directory after
+  every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root never touches workspace paths, and
+  children enter `/workspace` only after dropping privileges.
 - **Custom agents.** The stock runtime resolves a named `agent` from `agentDirectories` only when it holds a GitHub
   credential at construction (verified on 1.0.103: without one, `session.create` fails with "Custom agent … not
   found"). A sandbox runtime gets its brokered credential after construction, so the sandbox module removes `agent`
@@ -201,12 +222,20 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   FROM it, must carry the base label, and are pinned by image ID per sandbox, so a resume never changes the toolchain.
   `warm > 0` fails gateway start: this backend cannot keep warm sandboxes safely.
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
-  tool/permission/elicitation action is pending, and no file transfer or publication is in flight; it closes runtime
-  streams so core resumes on next use. `ensureRunning` restarts (or recreates from the pinned image and existing
-  volumes) and re-registers egress. Stops close runtime streams, stop the container, then unregister egress and detach
-  the relay and proxy from the sandbox network. `delete` marks `deleting`, removes container, volumes, network, and
-  artifacts, and reconciliation finishes after a crash; orphaned resources labelled with the instance are swept on
-  start.
+  tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
+  no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
+  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until its
+  events flow again), and idle sweeps begin only after that reconciliation. `ensureRunning` restarts (or recreates
+  from the pinned image and existing volumes) and re-registers egress. Stops close runtime streams, stop the
+  container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
+  `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources
+  labelled with the instance that no current record owns are swept on start.
+- **Promotion import.** `sandboxes.importRuntimeState(sessionId, { sessionStateDir, activeTurnId? })` copies the
+  regular files of a gateway-host `session-state/<sessionId>` export (no `*.lock` files; links and special files are
+  refused; ≤10,000 files, ≤1 GiB) into the running sandbox runtime's COPILOT_HOME as uid 10001. Files are staged under
+  `COPILOT_HOME/.mc-import/<random>` and swapped in for `session-state/<sessionId>` with two renames, so a retried
+  import replaces rather than merges. `activeTurnId` tracks a turn that started in shared placement so its root
+  `session.idle` in the sandbox publishes outputs and idle stop waits for it.
 - **The sandbox relay** (`<instance>-relay`, same image, uid 65534, read-only rootfs) is on `<instance>-edge`
   (published on 127.0.0.1) and every sandbox network; it forwards `/relay/<sandboxId>/...` HTTP and upgrades to
   `sbx-<id>:7781` after checking the platform key.
@@ -224,12 +253,15 @@ As built (local Docker backend, `platform/gateway/src/modules/sandbox`, `platfor
   total are rejected with reasons), the gateway downloads and re-verifies each changed file into content-addressed
   storage under `<dataDir>/artifacts/<sessionId>/`, and records versions, digests, and a per-turn manifest. Rejections,
   cancelled turns, and turns that ended in errors are recorded as `failed` publications, never empty successes.
-  Publications run one at a time per session, and `artifact.published` (through core's events) lists only new
-  versions; a turn that changed nothing under `outputs/` emits no event.
+  Publications run one at a time per session. If a later root turn started before a turn's outputs manifest was
+  captured, that publication fails ("cannot be attributed to this turn") rather than label the later turn's bytes;
+  the current outputs publish when the later turn completes. Publications still pending at gateway start are failed
+  with an explicit reason. `artifact.published` (through core's events) lists only new versions; a turn that changed
+  nothing under `outputs/` emits no event.
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the
-  placeholder); a publication can race a following turn that rewrites a file within its download window, which the
-  digest re-check turns into a `failed` publication rather than a wrong artifact.
+  placeholder); turn attribution relies on the runtime's `user.message` reaching the gateway before the next turn's
+  tools change `outputs/`.
 - **REST** (owner-scoped, shared sessions answer `invalid_request`): `GET /v1/sessions/:id/files?path=&recursive=`,
   `GET|PUT /v1/sessions/:id/files/content?path=&overwrite=` (streamed, 512 MiB limit, atomic replace by default),
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
@@ -372,6 +404,12 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   bound to the account) under `MANAGED_COPILOT_DURABLE_KEY` or `<dataDir>/durable.key`. `principalFor` re-verifies it
   with GitHub (cached 2 minutes); a rejected token or a different account invalidates it and pauses the owner's
   schedules with a visible reason. No refresh: a revoked or expired token requires `managed-copilot login` again.
+- **Session lifecycle.** Deleting a session cancels its open actions (claims and late results are refused), stops
+  undeliverable answers, fails its pending `session.action_required` deliveries, and pauses schedules that continue
+  it. On `session.promoted` (or `actions.onGenerationChanged`), waiting actions move to the new placement generation;
+  actions owned under the old generation are fenced (their claims are void, tools in flight become
+  `needs_reconciliation`, prompts are offered again). `onDetached(connectionId, sessionId?)` releases only that
+  session's live claims when `sessionId` is given.
 - Durable REST: `GET /v1/sessions/:id/actions[?state=]`, `POST .../actions/:actionId/claim` (`{ claimToken? }` renews,
   `{ reconcile: true }` takes over uncertain actions), `POST .../actions/:actionId/result` (`{ claimToken, result |
   error | release }`), `/v1/schedules` CRUD with runs, pause, resume, and `run` (`{ invocationId }`), and
@@ -392,13 +430,13 @@ structurally (they may add members).
 
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
-| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected); `liveCredential(accountId)` |
+| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity); `liveCredential(accountId)` |
 | `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
 | `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
-| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `stop` and workspace `listFiles`/`readFile`/`writeFile` |
+| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |
@@ -436,10 +474,18 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 - **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
   delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the first attached
   client able to answer, in durable's preference order (the creating connection, then by attach time), gets them and
-  other eligible clients are withheld. `session.lifecycle` goes only to
+  other eligible clients are withheld. Replayed actions (`onAttached`) take the same sanitizing path. `session.detach`,
+  deletion, and failed creates call `onDetached(connectionId, sessionId)`; only a closed connection calls
+  `onDetached(connectionId)`. `session.lifecycle` goes only to
   the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Everything a shared session
   sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
-  rewritten (`/workspace` for the session directory, `/platform` otherwise).
+  rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
+  (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
+  else under the data directory (including its resolved form) `/platform`.
+- **Agents.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a restore
+  (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
+  Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
+  create/resume params and selects it in `sessionOpened`.
 - **Registrations.** The runtime scopes tool and handler registrations to a connection, and all clients share the
   gateway's upstream connection, so the gateway sends the union of attached clients' tools and handler flags (plus
   stored server-side declarations) on create, resume, and `tools.set`. Transform, canvas, hook, and user-input
@@ -453,11 +499,79 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   `models.list` requires the shared runtime even for isolated environments. Verified on runtime 1.0.103: custom
   agents' and `task` subagents' tool lists cannot escape the session's `availableTools` ceiling.
 
+## Devloop: AppHost, CLI, and Copilot CLI attach
+
+### AppHost (`@managed-copilot/aspire`, root `apphost.mts`)
+
+- `addManagedCopilot(builder, name, options)` validates the declaration with `ManagedCopilotConfigSchema` (all
+  problems reported at once, before anything starts) and runs the gateway as an Aspire Node app on a **fixed,
+  unproxied** port (default 7400) with `/healthz`. Relative `image` and `customizations` paths resolve against the
+  AppHost directory. It refuses publish mode (`aspire deploy`) until gate G3.
+- Secrets must be Aspire secret parameters. Each becomes a `{ secretEnv }` reference in `MANAGED_COPILOT_CONFIG` and
+  an environment variable on the gateway: `MANAGED_COPILOT_SECRET_VAULT_<VAULT>_<HASH>_<INDEX>` and
+  `MANAGED_COPILOT_SECRET_WEBHOOK_<NAME>_<HASH>`, where `<HASH>` is the first 8 hex digits of the SHA-256 of the exact
+  vault or webhook name, so distinct names never share a variable. Literal strings are rejected. Schedule `session.tools` accept stock
+  `defineTool` objects; only the declaration (zod schemas via the same `toJSONSchema()` the SDK sends, flags, and a
+  stable `sha256:` revision) is stored.
+- The gateway gets a generated persistent `<name>-platform-key`, `MANAGED_COPILOT_DATA_DIR`
+  (`<apphost>/.managed-copilot/data`), `MANAGED_COPILOT_APPHOST_DIR`, `MANAGED_COPILOT_NPM_REGISTRY` (from
+  `npm config get registry`), and `MANAGED_COPILOT_INSTANCE` (`mc-<hash of the AppHost path>`, so checkouts sharing one
+  Docker engine never collide). The gateway builds sandbox images and supervises the relay and egress containers
+  itself, so the AppHost declares no containers. When an isolated or promotable environment exists, the AppHost also
+  sets `MANAGED_COPILOT_SANDBOX_PREPARE=1` (opt out with `prepareSandboxes: false`), so the base image builds while
+  the platform starts rather than on the first sandboxed session.
+- The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
+  `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
+  them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
+- `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
+  `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
+
+### Copilot CLI attach (spec section 14)
+
+```mermaid
+sequenceDiagram
+  participant CLI as Copilot CLI (stock)
+  participant Relay as managed-copilot / openCli<br/>loopback relay
+  participant GW as gateway attach module
+  participant RT as session runtime<br/>(AHP host, one-session catalog)
+  Relay->>GW: POST /v1/sessions/:id/attach (owner's GitHub token)
+  GW->>RT: host.start(computeId mc-session-<id>, creation denied) + host.publishSession
+  GW-->>Relay: AttachMaterial (single-use ticket, 60 s)
+  Relay->>CLI: copilot --ahp ws://127.0.0.1:<port>/ahp/<nonce> (no credential in argv)
+  CLI->>Relay: WebSocket (CLI's own GitHub token)
+  Relay->>Relay: CLI's GitHub account must be the session owner
+  Relay->>GW: WebSocket /v1/sessions/:id/ahp, Authorization: Bearer <ticket>
+  GW->>RT: WebSocket via runtime.connect(port), ?tkn=<listener token>
+  CLI-->>RT: AHP 0.9 (authenticate answered locally, never forwarded)
+```
+
+- Verified on Copilot CLI 1.0.92 with runtime 1.0.103 (shared placement): the CLI attaches, shows history, and its
+  turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
+  after 5 idle minutes, on `deleted`/`promoted`/`stopped` lifecycle events (close code 4410), and when the runtime
+  connection closes. Attachments are capped at 8 hours (4408).
+- Tickets are 60-second, single-use, owner- and session-bound, stored as SHA-256 hashes (`attach_tickets`). Upgrades
+  re-check ownership and session state. Generic AHP clients may pass the ticket as `?tkn=`.
+- The stock CLI sends its GitHub OAuth token as `Authorization` and in an AHP `authenticate` request. The relay and
+  the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
+  headers, so no CLI token reaches a runtime or sandbox.
+- Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
+  empty because the host cannot list models without an AHP credential; sandbox sessions need the sandbox module's
+  `connect(sessionId, port)`; GitHub Copilot app publication is not implemented (`github.publish`).
+
+### CLI and quickstart
+
+- `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
+  `attach`, `promote`, `artifacts`, `schedules`. It uses the SDK and `@managed-copilot/sdk/internal` (first-party only:
+  `HttpClient`, URL/token resolution, `launchAttachedCli`). Tokens never come from argv. Errors print the stable code
+  and a hint; usage errors exit 2.
+- `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
+  `/v1/info`, or `capability_unavailable`), or skipped (a local prerequisite such as background sign-in).
+
 ## Ports and environment
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Gateway `PORT` | 7400 | Aspire assigns it in `aspire run`; `0` picks a free port |
+| Gateway `PORT` | 7400 | Fixed and unproxied under `aspire run` (`addManagedCopilot`'s `port` option); `0` picks a free port |
 | `MANAGED_COPILOT_CONFIG` / `_CONFIG_FILE` | dev defaults | Normalized AppHost JSON (`ManagedCopilotConfig`) |
 | `MANAGED_COPILOT_APPHOST_DIR` | config file dir or cwd | Base for relative `customizations` paths |
 | `MANAGED_COPILOT_DATA_DIR` | `./.managed-copilot/data` | SQLite ledger, artifacts, runtime homes, pinned customizations |
@@ -467,6 +581,8 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 | `MANAGED_COPILOT_GITHUB_API_URL` | `https://api.github.com` | Loopback `http://` allowed for test stubs only |
 | `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
+| `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
+| Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` disables it (sandboxes with network access then fail) |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
@@ -480,6 +596,7 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 | `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs |
 | `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images |
 | `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `platform/sandbox` | Use a prebuilt base image instead (must carry the base label) |
+| `MANAGED_COPILOT_SANDBOX_PROVIDER` | `docker` | Sandbox backend: `docker` (local) or `azure` |
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
 | `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
 | `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |
@@ -495,7 +612,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **sandbox** | `platform/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
 | **network** | `platform/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
-| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `demos/quickstart/**`, SDK `features/cli.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
+| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
 

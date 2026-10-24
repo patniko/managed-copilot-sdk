@@ -230,6 +230,41 @@ export interface SessionsService {
   /** Where the session is resident now (resuming it upstream if needed); used by Copilot CLI attach. */
   runtime(sessionId: string): Promise<SessionRuntime>;
   onLifecycle(listener: (event: { readonly sessionId: string; readonly type: "deleted" | "promoted" | "stopped" }) => void): () => void;
+  /**
+   * Opens a placement cutover (promotion): fails with `conflict` when `generation` is not the session's current one,
+   * `promotion_busy` while another cutover is open, and `not_found` for unknown or deleting sessions.
+   */
+  cutover?(sessionId: string, options: { readonly generation: number }): Promise<PlacementCutover>;
+}
+
+/**
+ * One placement change of a session from its current (source) runtime to its sandbox (destination). The promotion
+ * module drives it: `source` RPCs to quiesce/suspend, `fence`, export/import state, `open`, then `commit` or `abort`.
+ */
+export interface PlacementCutover {
+  /** The session's ledger record when the cutover opened. */
+  readonly record: SessionRecord;
+  /** The source runtime's state for the session (`<COPILOT_HOME>/session-state/<id>`); undefined when not local. */
+  readonly sourceStateDir: string | undefined;
+  /** A session-scoped request straight to the source upstream (`sessionId` filled in). Works after `fence()`. */
+  source<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T>;
+  /**
+   * Idempotent. From now on nothing the source sends for this session reaches clients, durable, observers, or the
+   * ledger (its runtime requests get an error); new requests for the session wait for `commit`/`abort`; a client's
+   * `sendAndWait` whose reply arrives fenced is completed later from the owning runtime's events. Ledger state
+   * becomes `promoting`.
+   */
+  fence(): void;
+  /**
+   * Opens the session on its sandbox (which must exist, with state imported): the session's requested configuration
+   * re-admitted for `sandbox` placement, attached clients' registrations, the sandbox platform tools, and `extra`
+   * (e.g. `continuePendingWork: true`). Opening again replaces the previous destination.
+   */
+  open(extra?: Record<string, unknown>): Promise<{ request<T = unknown>(method: string, params?: Record<string, unknown>): Promise<T> }>;
+  /** After `open`: placement `sandbox`, generation + 1, the sandbox-admitted configuration; routing moves and the fence lifts. */
+  commit(): SessionRecord;
+  /** Before `commit`: closes the destination and lifts the fence; the source stays the owner and is resumed on next use with `resume` extras. */
+  abort(options?: { readonly resume?: Record<string, unknown> }): Promise<void>;
 }
 
 export interface SessionRuntime {

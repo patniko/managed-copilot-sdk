@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -8,10 +9,64 @@ import { redact } from "../src/log.js";
 import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
+import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
+import { pathScrubber } from "../src/modules/core/sessions.js";
 import { createLogger } from "../src/log.js";
-import { startGitHubStub } from "./harness.js";
+import { sleep, startGitHubStub } from "./harness.js";
 
 const log = createLogger("test", "error");
+
+type GitHubStep = "reset" | "timeout" | number | { readonly status: number; readonly headers?: Record<string, string>; readonly delayMs?: number; readonly truncated?: boolean };
+
+/** A scripted GitHub API: each call consumes one step (an HTTP status, a dropped connection, or a timeout). */
+function scriptedGitHub(steps: GitHubStep[], user = { id: 7, login: "octo" }) {
+  const state = { calls: 0 };
+  const script = [...steps];
+  const fetchImpl = async (_url: string, init?: { signal?: AbortSignal }) => {
+    state.calls++;
+    const step = script.shift() ?? 200;
+    if (step === "reset") throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+    if (step === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const { status, headers = {}, delayMs = 0, truncated = false } = typeof step === "number" ? { status: step } : step;
+    if (delayMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, delayMs);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(init.signal!.reason);
+        });
+      });
+    }
+    const text = status === 200 ? JSON.stringify(user) : JSON.stringify({ message: `HTTP ${status}` });
+    // A connection lost after the headers: the body stream fails partway.
+    const body = truncated
+      ? new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(text.slice(0, 5)));
+            controller.error(new TypeError("terminated"));
+          },
+        })
+      : status === 204
+        ? null
+        : text;
+    return new Response(body, { status, headers: { "content-type": "application/json", ...headers } });
+  };
+  return {
+    fetch: fetchImpl as unknown as typeof fetch,
+    script,
+    get calls() {
+      return state.calls;
+    },
+  };
+}
+
+async function waitUntil(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("Condition not met in time");
+    await sleep(2);
+  }
+}
 
 function environments(deployment: unknown, baseDir = tmpdir()): Environments {
   return new Environments({ deployment: parseConfig(deployment), baseDir, pinDir: mkdtempSync(join(tmpdir(), "mc-pin-")), log });
@@ -202,9 +257,137 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("outsider")).rejects.toMatchObject({ code: "forbidden" });
   });
 
-  it("reports GitHub outages as capability_unavailable, not as a bad token", async () => {
-    const auth = new GitHubAuthenticator({ apiUrl: "http://127.0.0.1:9", log });
-    await expect(auth.authenticate("member")).rejects.toMatchObject({ code: "capability_unavailable" });
+  it("reports persistent GitHub outages as retryable upstream_unavailable, not as a bad token", async () => {
+    const auth = new GitHubAuthenticator({ apiUrl: "http://127.0.0.1:9", log, retryDelaysMs: [1, 1] });
+    const error = await auth.authenticate("member").catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "upstream_unavailable", details: { upstream: "github", retryAfterSeconds: 5 } });
+    expect((error as { status: number }).status).toBe(503);
+    expect((error as Error).message).toMatch(/GitHub is unreachable/);
+  });
+
+  it("retries transport errors and 5xx answers before giving up", async () => {
+    const github = scriptedGitHub(["reset", 502, 200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1, 1, 1] });
+    await expect(auth.authenticate("token-a")).resolves.toMatchObject({ accountId: 7, login: "octo" });
+    expect(github.calls).toBe(3);
+
+    const failing = scriptedGitHub(["reset", "timeout", 503, "reset"]);
+    const strict = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: failing.fetch, retryDelaysMs: [1, 1, 1] });
+    await expect(strict.authenticate("token-b")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    expect(failing.calls).toBe(4);
+  });
+
+  it("accepts a recent verification while GitHub is unreachable, and never after GitHub rejected the token", async () => {
+    const github = scriptedGitHub([200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, negativeTtlMs: 200, outageRecheckMs: 1, staleGraceMs: 60_000 });
+    const principal = await auth.authenticate("token-c");
+    await sleep(5);
+    // GitHub drops connections: the verification from moments ago stands in.
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-c")).resolves.toEqual(principal);
+    expect(github.calls).toBe(3);
+    await sleep(5);
+    // Still in the outage: callers get the standing principal at once while the re-check runs, which now gets a 401.
+    github.script.push(401);
+    await expect(auth.authenticate("token-c")).resolves.toEqual(principal);
+    await waitUntil(() => github.calls === 4);
+    await sleep(5);
+    await expect(auth.authenticate("token-c")).rejects.toMatchObject({ code: "authentication_required" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+    // The rejection replaced the earlier verification: a later outage cannot revive it.
+    await sleep(250);
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-c")).rejects.toMatchObject({ code: "upstream_unavailable" });
+  });
+
+  it("stops accepting a stale verification once its grace period ends", async () => {
+    const github = scriptedGitHub([200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 20 });
+    await auth.authenticate("token-d");
+    await sleep(40);
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-d")).rejects.toMatchObject({ code: "upstream_unavailable" });
+  });
+
+  it("treats rate limits as an outage without retrying, and other 403s as a token problem", async () => {
+    const reset = Math.ceil(Date.now() / 1000) + 120;
+    const limited = scriptedGitHub([{ status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: limited.fetch, retryDelaysMs: [1, 1] });
+    const error = (await auth.authenticate("token-e").catch((caught: unknown) => caught)) as { code: string; details: { retryAfterSeconds: number } };
+    expect(error.code).toBe("upstream_unavailable");
+    expect(error.details.retryAfterSeconds).toBeGreaterThan(100);
+    expect(limited.calls).toBe(1);
+
+    const secondary = scriptedGitHub([{ status: 429, headers: { "retry-after": "7" } }]);
+    const other = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: secondary.fetch, retryDelaysMs: [1] });
+    await expect(other.authenticate("token-f")).rejects.toMatchObject({ code: "upstream_unavailable", details: { retryAfterSeconds: 7 } });
+
+    const refused = scriptedGitHub([403]);
+    const integration = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: refused.fetch, retryDelaysMs: [1] });
+    await expect(integration.authenticate("token-g")).rejects.toMatchObject({ code: "authentication_required" });
+  });
+
+  it("never reads an organization-membership outage as 'not a member'", async () => {
+    const github = scriptedGitHub([200, "reset", "reset"]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], access: { githubOrgs: ["contoso"] } });
+    await expect(auth.authenticate("token-h")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    github.script.push(200, 404);
+    await expect(auth.authenticate("token-h")).rejects.toMatchObject({ code: "forbidden" });
+  });
+
+  it("stops serving an account's credential to runtimes once the account loses access", async () => {
+    const github = scriptedGitHub([200, 204]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, access: { githubOrgs: ["contoso"] } });
+    await auth.authenticate("token-i");
+    expect(auth.liveCredential(7)?.token).toBe("token-i");
+    await sleep(5);
+    github.script.push(200, 404);
+    await expect(auth.authenticate("token-i")).rejects.toMatchObject({ code: "forbidden" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+  });
+
+  it("treats a membership 401 as a rejected token, even when another organization's check then fails", async () => {
+    const github = scriptedGitHub([200, 204]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 60_000, access: { githubOrgs: ["first", "second"] } });
+    await auth.authenticate("token-j");
+    await sleep(5);
+    github.script.push(200, 401, "reset", "reset");
+    await expect(auth.authenticate("token-j")).rejects.toMatchObject({ code: "authentication_required" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+  });
+
+  it("treats a connection lost while reading the answer as an outage", async () => {
+    const github = scriptedGitHub([{ status: 200, truncated: true }, { status: 200, truncated: true }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 60_000 });
+    await expect(auth.authenticate("token-k")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    github.script.push({ status: 200, truncated: true }, 200);
+    await expect(auth.authenticate("token-k")).resolves.toMatchObject({ login: "octo" });
+    expect(github.calls).toBe(4);
+    // A recent verification stands in when the body keeps failing.
+    await sleep(5);
+    github.script.push({ status: 200, truncated: true }, { status: 200, truncated: true });
+    await expect(auth.authenticate("token-k")).resolves.toMatchObject({ login: "octo" });
+  });
+
+  it("lets an invalidation during a verification win", async () => {
+    const github = scriptedGitHub([{ status: 200, delayMs: 50 }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1] });
+    const verifying = auth.authenticate("token-l");
+    await sleep(10);
+    auth.invalidate("token-l");
+    await expect(verifying).rejects.toMatchObject({ code: "authentication_required" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+    // Nothing was cached: the next call asks GitHub again.
+    await expect(auth.authenticate("token-l")).resolves.toMatchObject({ login: "octo" });
+    expect(github.calls).toBe(2);
+  });
+
+  it("bounds a whole verification, membership checks included, by one deadline", async () => {
+    const github = scriptedGitHub([{ status: 200, delayMs: 150 }, { status: 204, delayMs: 400 }, { status: 204, delayMs: 400 }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1, 1, 1], deadlineMs: 300, access: { githubOrgs: ["contoso"] } });
+    const started = Date.now();
+    await expect(auth.authenticate("token-m")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("parses GitHub token expiration headers", () => {
@@ -214,7 +397,60 @@ describe("GitHub authentication", () => {
   });
 });
 
+describe("shared runtime lifetime", () => {
+  it("reaps the runtime a dead gateway left behind, never a reused pid or a live gateway's runtime", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mc-reap-"));
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+    try {
+      await new Promise((resolve) => orphan.once("spawn", resolve));
+      const startTime = await processStartTime(orphan.pid!);
+      expect(startTime).toBeTruthy();
+      const deadGateway = spawnSync(process.execPath, ["-e", "0"]).pid;
+      const record = join(root, "runtime.json");
+      const write = (value: object) => writeFileSync(record, JSON.stringify(value));
+      // The pid now belongs to a different process (another start time): left alone.
+      write({ pid: orphan.pid, startTime: "1999-01-01T00:00:00.0000000Z", gatewayPid: deadGateway });
+      await reapStaleRuntime(root, log);
+      expect(orphan.exitCode).toBeNull();
+      // The gateway that recorded it is still running: left alone, record kept.
+      write({ pid: orphan.pid, startTime, gatewayPid: process.ppid });
+      await reapStaleRuntime(root, log);
+      expect(orphan.exitCode).toBeNull();
+      expect(existsSync(record)).toBe(true);
+      // The recorded runtime of a gateway that is gone: stopped.
+      write({ pid: orphan.pid, startTime, gatewayPid: deadGateway });
+      const exited = new Promise((resolve) => orphan.once("exit", resolve));
+      await reapStaleRuntime(root, log);
+      await exited;
+      expect(existsSync(record)).toBe(false);
+    } finally {
+      if (orphan.exitCode === null && orphan.signalCode === null) orphan.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+});
+
 describe("gateway primitives", () => {
+  it("scrubs host paths under the data directory without eating the punctuation around them", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "mc-scrub-"));
+    try {
+      const scrub = pathScrubber(dataDir) as (value: unknown) => unknown;
+      const workspace = join(dataDir, "runtime", "shared", "workspaces", "0b1c2d3e-aaaa-bbbb-cccc-000000000001");
+      const bundle = join(dataDir, "customizations", "chat", "3303eed202f7e4a6");
+      expect(scrub(`(${workspace})`)).toBe("(/workspace)");
+      expect(scrub(`Working in ${workspace}.`)).toBe("Working in /workspace.");
+      expect(scrub(join(workspace, "src", "app.ts"))).toBe("/workspace/src/app.ts");
+      expect(scrub({ agent: { path: join(bundle, "agents", "builder.agent.md") } })).toEqual({ agent: { path: "/opt/managed-copilot/customizations/agents/builder.agent.md" } });
+      expect(scrub([join(dataDir, "runtime", "shared", "copilot-home", "logs")])).toEqual(["/platform/copilot-home/logs"]);
+      expect(scrub(`key at ${join(dataDir, "network", "vault.key")}, see logs`)).toBe("key at /platform/network/vault.key, see logs");
+      // The runtime may report the directory's resolved form (8.3 names on Windows, symlinks elsewhere).
+      expect(scrub(join(realpathSync.native(dataDir), "runtime", "shared", "workspaces", "abc"))).toBe("/workspace");
+      expect(scrub("unrelated /etc/hosts and C:\\Windows")).toBe("unrelated /etc/hosts and C:\\Windows");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("redacts credentials without masking identifiers", () => {
     const circular: Record<string, unknown> = { idempotencyKey: "k1", value: "secret", headers: { authorization: "x" }, nested: { placeholder: "mcrt_1", token: "t" }, big: 10n };
     circular["self"] = circular;
