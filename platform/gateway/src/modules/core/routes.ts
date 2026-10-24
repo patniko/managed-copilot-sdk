@@ -1,5 +1,5 @@
 // Core REST routes: deployment info, the caller's account, owner-scoped sessions, and platform events (SSE).
-import { ManagedCopilotError, ROUTES, type DeploymentInfo, type SessionState } from "@managed-copilot/protocol";
+import { isManagedCopilotError, ManagedCopilotError, ROUTES, type DeploymentInfo, type SessionState } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
 import { accountInfo } from "./auth.js";
 import type { Environments } from "./environments.js";
@@ -68,7 +68,9 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
       ...(state ? { state: state as SessionState } : {}),
       ...(limit !== undefined ? { limit } : {}),
     });
-    return Promise.all(records.map((record) => manager.toInfo(record)));
+    // A session deleted while its details were read is left out.
+    const infos = await Promise.all(records.map((record) => manager.toInfo(record).catch((error: unknown) => (isManagedCopilotError(error, "not_found") ? undefined : Promise.reject(error)))));
+    return infos.filter((info) => info !== undefined);
   });
 
   app.routes.get("/v1/sessions/:id", (ctx) => manager.info(ctx.principal!.accountId, ctx.params["id"]!));

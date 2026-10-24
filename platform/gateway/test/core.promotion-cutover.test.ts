@@ -559,7 +559,54 @@ describe("placement cutover", () => {
     // A session the gateway does not run at all.
     const unknown = (await runtime.requestOn(source, "hooks.invoke", { sessionId: crypto.randomUUID(), hookType: "preToolUse", input: {} })) as { output?: Record<string, unknown> };
     expect(unknown.output).toMatchObject({ permissionDecision: "deny" });
+    // A result the source still produced is withheld, and it gets no GitHub token for a session it no longer hosts.
+    const post = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "postToolUse", input: { toolName: "bash", toolArgs: {}, toolResult: { textResultForLlm: "secret", resultType: "success" } } })) as { output?: Record<string, unknown> };
+    expect(post.output).toMatchObject({ modifiedResult: { resultType: "denied" } });
+    const registrationId = runtime.calls("session.create").find((call) => call.params["sessionId"] === sessionId)!.params["gitHubTokenProviderRegistrationId"];
+    expect(typeof registrationId).toBe("string");
+    const asked = await runtime.requestOn(source, "gitHubToken.getToken", { registrationId, sessionId, host: "https://github.com", reason: "refresh" }).catch((error: unknown) => ({ error }));
+    expect(asked).not.toHaveProperty("accessToken");
+    // Even where the request is not stale (a restore of the sandbox in progress), the registration no longer answers.
+    const manager = sessions() as unknown as { answerTokenRequest(params: unknown): Promise<unknown> };
+    await expect(manager.answerTokenRequest({ registrationId, sessionId, host: "https://github.com" })).resolves.toEqual({ kind: "cancelled" });
     expect(client.requests.filter((request) => request.method === "hooks.invoke")).toHaveLength(0);
+  });
+
+  it("resumes a session again with its hooks when their withdrawal fails while a move is open but not fenced", async () => {
+    const guard = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(guard);
+    guard.answer = (method) => (method === "hooks.invoke" ? { output: { permissionDecision: "deny", permissionDecisionReason: "guarded" } } : {});
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    // The withdrawal reaches the runtime, then fails (its option update is refused).
+    runtime.failNext("session.options.update", sessionId);
+    await expect(guard.request("session.resume", { sessionId, requestPermission: true })).rejects.toBeDefined();
+    await cut.abort();
+    // The runtime was given the session's hooks back before anything else ran, and the guard still answers them.
+    expect(lastCall("session.resume", sessionId)!.params).toMatchObject({ hooks: true });
+    const source = sourceConnection(sessionId);
+    const answer = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "preToolUse", input: { toolName: "bash", toolArgs: {} } })) as { output?: Record<string, unknown> };
+    expect(answer.output).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: "guarded" });
+  });
+
+  it("opens a destination with the registrations in effect, not a tools update still waiting for the move", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "committed_tool" }] });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    const updating = client.request("session.tools.set", { sessionId, tools: [{ name: "pending_tool" }] });
+    await sleep(50);
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    const opened = (lastCall("session.resume", sessionId)!.params["tools"] as { name: string }[]).map((tool) => tool.name);
+    expect(opened).toContain("committed_tool");
+    expect(opened).not.toContain("pending_tool");
+    await cut.commit();
+    // The update then applies where the session lives.
+    await updating;
+    expect((lastCall("session.tools.set", sessionId)!.params["tools"] as { name: string }[]).map((tool) => tool.name)).toContain("pending_tool");
   });
 
   it("refuses an attached CLI's writes while the session is fenced and after it moved", async () => {
