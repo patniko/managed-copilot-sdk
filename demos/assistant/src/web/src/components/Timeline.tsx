@@ -23,6 +23,8 @@ export interface TimelineProps {
   onRetry(message: PendingMessage): void;
   onDiscard(localId: string): void;
   onOpenSchedule(id: string): void;
+  /** Set while background work is off: tool rows blocked by it offer to turn it on. */
+  onOpenBackground?: () => void;
   onAtBottomChange(atBottom: boolean): void;
 }
 
@@ -163,7 +165,7 @@ export function Timeline(props: TimelineProps) {
                   return (
                     <ul key={block.key} className="ml-11 rounded-xl border border-dashed border-zinc-200 bg-white/60 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-900/40">
                       {block.items.map((tool) => (
-                        <ToolRow key={tool.id} item={tool} onOpenSchedule={props.onOpenSchedule} />
+                        <ToolRow key={tool.id} item={tool} onOpenSchedule={props.onOpenSchedule} onOpenBackground={props.onOpenBackground} />
                       ))}
                     </ul>
                   );

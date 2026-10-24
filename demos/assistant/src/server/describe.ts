@@ -67,6 +67,33 @@ export function scheduleIdFrom(content: string | undefined): string | undefined 
   return match?.[1];
 }
 
+/** Whether a platform message says the person's background work (background sign-in) is missing or no longer valid. */
+export function isBackgroundWorkError(message: string | undefined): boolean {
+  return message !== undefined && /background work|background sign-in|managed-copilot login/i.test(message);
+}
+
+/**
+ * The platform's reason for stopping background work, or for pausing a schedule because of it, in plain words for
+ * this app (its copy mentions CLI commands; here the person uses the side panel). Unrelated reasons return undefined.
+ */
+export function backgroundReason(reason: string | undefined): string | undefined {
+  if (!reason) return undefined;
+  if (/logout|signed out/i.test(reason)) return "Background work was turned off.";
+  if (/different GitHub account/i.test(reason)) return "The saved GitHub sign-in now belongs to a different account.";
+  if (/no longer allowed to use this deployment/i.test(reason)) return "Your account is no longer allowed to use this deployment.";
+  if (/no longer accepts|no longer valid|revoked|expired/i.test(reason)) return "GitHub no longer accepts the saved sign-in (it was revoked or expired).";
+  if (/changed while it was being verified/i.test(reason)) return "Background work changed while it was being checked.";
+  if (isBackgroundWorkError(reason)) return "Background work is off.";
+  return undefined;
+}
+
+/** A schedule's pause reason for the side panel: "Paused: Signed out with …" → "Background work was turned off". */
+export function pausedReasonText(reason: string | undefined): string | undefined {
+  const clean = reason?.replace(/^Paused:\s*/i, "").trim();
+  if (!clean) return undefined;
+  return (backgroundReason(clean) ?? clean).replace(/\.$/, "");
+}
+
 /** "stretch-water-reminder" → "Stretch water reminder"; names with spaces are kept as written. */
 export function humanizeName(name: string): string {
   // The platform suffixes duplicate agent schedule names with 4 random characters ("…-2QQq"); drop that for display.

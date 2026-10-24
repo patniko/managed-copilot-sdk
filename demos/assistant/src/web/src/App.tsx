@@ -75,6 +75,15 @@ export function App() {
     setTimeout(() => setHighlight(undefined), 2600);
   }, []);
 
+  const backgroundOff = snapshot?.background?.state === "off";
+  /** Shows the background-work card (with its consent copy), the one place it can be turned on. */
+  const openBackground = useCallback(() => {
+    setHighlight("background");
+    if (!window.matchMedia("(min-width: 1280px)").matches) setPanelOpen(true);
+    setTimeout(() => document.getElementById("background-work")?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+    setTimeout(() => setHighlight(undefined), 2600);
+  }, []);
+
   const platform = snapshot?.platform;
   const conversation = snapshot?.conversation;
   const status = statusOf(stream, platform, conversation);
@@ -90,6 +99,8 @@ export function App() {
       schedules={snapshot?.schedules ?? []}
       schedulesError={snapshot?.schedulesError}
       offline={snapshot?.offline}
+      background={snapshot?.background}
+      account={snapshot?.account}
       platform={platform}
       connections={snapshot?.connections}
       timeZone={timeZone}
@@ -101,7 +112,14 @@ export function App() {
   return (
     <div className="flex h-full">
       <main className="flex min-w-0 flex-1 flex-col">
-        <Header status={status} account={snapshot?.account} unread={unread} onOpenPanel={() => setPanelOpen(true)} onOpenSettings={() => setSettingsOpen(true)} />
+        <Header
+          status={status}
+          account={snapshot?.account}
+          unread={unread}
+          panelAttention={backgroundOff ? "Background work is off" : undefined}
+          onOpenPanel={() => (backgroundOff ? openBackground() : setPanelOpen(true))}
+          onOpenSettings={() => setSettingsOpen(true)}
+        />
         <Banner
           stream={stream}
           platform={platform}
@@ -126,11 +144,25 @@ export function App() {
             timeZone={timeZone}
             busy={conversation?.busy ?? false}
             unreadAnchor={state.unreadAnchor}
-            empty={<EmptyState name={snapshot?.account?.name} login={snapshot?.account?.login} timeZone={timeZone} demo={demo} onPick={(text) => void actions.send(text)} />}
+            empty={
+              <EmptyState
+                name={snapshot?.account?.name}
+                login={snapshot?.account?.login}
+                timeZone={timeZone}
+                demo={demo}
+                backgroundOff={backgroundOff}
+                onPick={(text) => void actions.send(text)}
+                onNeedBackground={() => {
+                  openBackground();
+                  actions.toast("info", "Turn on background work first, so reminders can run while you're away.");
+                }}
+              />
+            }
             onDecide={(id, decision, feedback) => actions.decide(id, decision, feedback)}
             onRetry={(message) => void actions.retrySend(message)}
             onDiscard={actions.discard}
             onOpenSchedule={openSchedule}
+            onOpenBackground={backgroundOff ? openBackground : undefined}
             onAtBottomChange={setAtBottom}
           />
         )}
@@ -158,7 +190,17 @@ export function App() {
         </div>
       )}
 
-      {settingsOpen && <SettingsDialog snapshot={snapshot} onClose={() => setSettingsOpen(false)} actions={actions} />}
+      {settingsOpen && (
+        <SettingsDialog
+          snapshot={snapshot}
+          onClose={() => setSettingsOpen(false)}
+          onOpenBackground={() => {
+            setSettingsOpen(false);
+            openBackground();
+          }}
+          actions={actions}
+        />
+      )}
       <Toasts toasts={state.toasts} />
     </div>
   );

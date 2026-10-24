@@ -14,6 +14,7 @@ only from the stock `@github/copilot-sdk` and `@managed-copilot/sdk`.
 | "Remind me at 4pm to call Sam" | The agent uses the platform's `schedule_task`, `list_schedules`, and `cancel_schedule` tools (`scheduling: true`); the side panel pauses, runs, and deletes them with `managed.schedules` | [§13](../../docs/spec/developer-experience.md#13-run-on-a-schedule) |
 | Proactive messages, unread badges, notifications | Scheduled runs deliver their prompt with `source: "system"`; the reply arrives in the chat as a proactive message | [§13](../../docs/spec/developer-experience.md#13-run-on-a-schedule) |
 | "Handled while you were away" | With no tab open the server detaches; a scheduled run's tool calls reach it through the signed webhook (`verifyWebhook` + `event.handleActions`), with polling as a safety net | [§12](../../docs/spec/developer-experience.md#12-keep-working-while-your-app-is-offline) |
+| "Background work is off · Turn on background work" | The side panel shows whether the platform may run your scheduled work as you, and turns it on with one click after explaining what that means (the platform's background sign-in) | [§2](../../docs/spec/developer-experience.md#work-that-continues-without-you) |
 
 <table>
   <tr>
@@ -36,12 +37,12 @@ From the repository root:
 pnpm install
 pnpm build
 aspire run                     # the platform plus this assistant (and the other demos)
-npx managed-copilot login      # once: lets reminders and briefings run as you while you're away
 ```
 
 Open **http://localhost:7490**. The assistant signs in to Managed Copilot as your GitHub account (`gh auth login` or
 `GH_TOKEN`) and starts with the **demo workspace**: a realistic, fictional inbox and calendar, so everything works
-without Google credentials.
+without Google credentials. On a new deployment the side panel first asks you to **Turn on background work**, so
+reminders and briefings can run as you while the tab is closed (or run `npx managed-copilot login` once instead).
 
 The AppHost wiring comes from [`apphost.mts`](apphost.mts): a `shared` environment named `assistant` with
 `scheduling: true` and `network: false` (its tools run here, so the agent needs no Internet access), the `assistant`
@@ -64,8 +65,8 @@ node platform/gateway/dist/main.js                        # prints its URL, e.g.
 pnpm --filter @managed-copilot/demo-assistant start       # http://localhost:7490
 ```
 
-Then enable background sign-in once (`npx managed-copilot login`, or `POST /v1/credentials/background` with your
-GitHub token) so scheduled runs can act as you.
+Then turn on background work once, from the side panel or with `npx managed-copilot login`, so scheduled runs can act
+as you.
 
 For UI work, `pnpm --filter @managed-copilot/demo-assistant dev` restarts the server on changes and
 `pnpm --filter @managed-copilot/demo-assistant dev:web` serves the UI with hot reload on http://localhost:7491.
@@ -120,29 +121,34 @@ while Google is connected.
 
 ## Scripted happy path
 
-1. Open http://localhost:7490 and click **Triage my inbox**. Watch the tool activity, then the triage grouped into
-   *needs a reply*, *FYI*, and *can wait*.
-2. Ask: *"Sam asked for 30 minutes to go over the Q3 launch plan. Find a time in the next few days and send the
+1. Open http://localhost:7490. If the side panel says **Background work is off**, read what it explains and click
+   **Turn on background work**: reminders and briefings run as you on the platform, so they need it. Until then the
+   scheduling suggestions and buttons wait for it, and the assistant tells you the same if you ask for a reminder.
+2. Click **Triage my inbox**. Watch the tool activity, then the triage grouped into *needs a reply*, *FYI*, and
+   *can wait*.
+3. Ask: *"Sam asked for 30 minutes to go over the Q3 launch plan. Find a time in the next few days and send the
    invite."* The assistant checks your calendar and shows an approval card. Click **Add to calendar**; the meeting
    appears under **Up next**.
-3. Ask: *"Remind me in 1 minute to stretch and grab some water."* The reminder shows under **Reminders &
+4. Ask: *"Remind me in 1 minute to stretch and grab some water."* The reminder shows under **Reminders &
    automations**. A minute later the assistant messages you on its own (with a browser notification if you allowed
    them in Settings and the tab is in the background).
-4. Ask: *"In 2 minutes, check my calendar for the next business day and tell me when my first meeting starts."*
+5. Ask: *"In 2 minutes, check my calendar for the next business day and tell me when my first meeting starts."*
    Close the tab. About three minutes later, reopen it: the reply is waiting under **New since you were away**, and
    its calendar lookup is marked **Handled while you were away**: the platform ran the turn and called this server's
    webhook to answer the tool call.
-5. Optional: add the **Weekday morning briefing** from the side panel, or ask *"Every weekday at 8am, brief me on my
+6. Optional: add the **Weekday morning briefing** from the side panel, or ask *"Every weekday at 8am, brief me on my
    calendar and important unread mail."*
 
 The same journey runs automatically against the live platform, in your installed Microsoft Edge:
 
 ```powershell
-pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline
-pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --screenshots docs/screenshots
+pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --enable-background
+pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --enable-background --screenshots docs/screenshots
 ```
 
 `--fresh` starts a new conversation and resets the demo workspace (also available as **Settings → Start over**).
+`--enable-background` clicks **Turn on background work** if it's off: passing it is your consent, as the button's
+explanation describes. Without it, the reminder and offline steps stop with a message when background work is off.
 
 ## How it works
 
@@ -189,6 +195,20 @@ this conversation. When one fires, the platform delivers its prompt with `source
 trigger followed by a proactive reply. The side panel lists them with `managed.schedules.list()` and pauses, resumes,
 runs, or deletes them. Runs act as you through your background sign-in.
 
+**Background work.** Scheduled runs act as you on the platform, so they need the person's background sign-in on the
+deployment (spec section 2). The side panel shows it before it matters: on (with the account it runs as), or off with
+a one-click **Turn on background work** whose explanation is the consent (a sealed copy of your GitHub sign-in stays on
+the deployment for all your scheduled work, and **Settings** turns it off), plus the `npx managed-copilot login`
+alternative and **check again**. The SDK doesn't wrap background sign-in yet, so the server calls the platform's
+documented route, `POST`/`GET`/`DELETE /v1/credentials/background` (the same one the CLI uses), with the token it
+connected with: it resolves that token once (`MANAGED_COPILOT_GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
+`GITHUB_TOKEN`, then `gh auth token`, like the SDK) and passes it to `ManagedCopilot.connect({ gitHubToken })`, so the
+route always acts as the connected account. While it's off, adding the briefing, resuming, and **Run now** are disabled
+(and refused by the server), the scheduling suggestions point to the card, and if the agent's `schedule_task` fails for
+that reason the chat offers the same button. The status is re-checked when a tab opens, after scheduled runs, and
+every 30 seconds while it's off (every 5 minutes while it's on), so a terminal login or a revoked sign-in shows up on
+its own.
+
 **Work while you're away.** Thirty seconds after the last tab closes, the server detaches (`session.disconnect()`);
 the session keeps running on the platform. When a scheduled run needs your mail or calendar, the tool call becomes a
 durable action and the platform POSTs `session.action_required` to the webhook. The server verifies the signature,
@@ -215,6 +235,7 @@ logs. Google tokens are sealed with AES-256-GCM and bound to their purpose.
 | [`src/server/timeline.ts`](src/server/timeline.ts) | SDK session events → chat timeline |
 | [`src/server/offline.ts`](src/server/offline.ts) | Webhook handler and polling reconciliation |
 | [`src/server/schedules.ts`](src/server/schedules.ts) | `managed.schedules` for the side panel |
+| [`src/server/background.ts`](src/server/background.ts) | Background work status, one-click turn on and off (`/v1/credentials/background`) |
 | [`src/server/tools/`](src/server/tools) | Tools, Google OAuth and REST clients, the demo workspace, free-time search |
 | [`src/web/`](src/web) | The web UI |
 | [`scripts/happy-path.ts`](scripts/happy-path.ts) | The automated journey and screenshot capture |

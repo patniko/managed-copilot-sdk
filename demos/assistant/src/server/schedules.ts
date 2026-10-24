@@ -7,7 +7,7 @@ import type { ScheduleView } from "../shared/protocol.js";
 import type { AssistantConfig } from "./config.js";
 import { describeCron } from "./cron.js";
 import { UserFacingError } from "./conversation.js";
-import { scheduleDisplayName } from "./describe.js";
+import { isBackgroundWorkError, pausedReasonText, scheduleDisplayName } from "./describe.js";
 import { errorMessage, type Logger } from "./log.js";
 import type { Platform } from "./platform.js";
 import { formatWhen } from "./time.js";
@@ -44,10 +44,16 @@ function toView(schedule: ScheduleInfo, timeZone: string): ScheduleView {
     timeZone: schedule.timeZone,
     prompt: schedule.prompt,
     state: schedule.state,
+    pausedReason: schedule.state === "paused" ? pausedReasonText(schedule.pausedReason) : undefined,
     createdBy: schedule.createdBy,
     nextRunAt: schedule.nextRunAt,
     lastRun: schedule.lastRun
-      ? { status: schedule.lastRun.status, startedAt: schedule.lastRun.startedAt, completedAt: schedule.lastRun.completedAt, reason: schedule.lastRun.reason }
+      ? {
+          status: schedule.lastRun.status,
+          startedAt: schedule.lastRun.startedAt,
+          completedAt: schedule.lastRun.completedAt,
+          reason: schedule.lastRun.reason ? (pausedReasonText(schedule.lastRun.reason) ?? schedule.lastRun.reason) : undefined,
+        }
       : undefined,
     oneShot,
   };
@@ -57,8 +63,8 @@ function friendly(error: unknown): string {
   if (isManagedCopilotError(error, "capability_unavailable") && /not available in this build/i.test(errorMessage(error))) {
     return "Schedules aren't available on this platform yet.";
   }
-  if (isManagedCopilotError(error, "authentication_required")) {
-    return "Scheduled work needs your background sign-in. Run `npx managed-copilot login` once, then try again.";
+  if (isManagedCopilotError(error, "authentication_required") || isBackgroundWorkError(errorMessage(error))) {
+    return "Scheduled work needs background work. Turn it on in the side panel, then try again.";
   }
   return errorMessage(error);
 }

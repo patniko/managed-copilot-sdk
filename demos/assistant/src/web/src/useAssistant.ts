@@ -107,6 +107,8 @@ function applyServerEvent(state: AssistantState, event: ServerEvent): AssistantS
       return { ...state, snapshot: { ...snapshot, platform: event.platform, conversation: event.conversation, account: event.account ?? snapshot.account } };
     case "schedules":
       return { ...state, snapshot: { ...snapshot, schedules: event.schedules, schedulesError: event.error } };
+    case "background":
+      return { ...state, snapshot: { ...snapshot, background: event.background } };
     case "connections":
       return { ...state, snapshot: { ...snapshot, connections: event.connections } };
     case "offline":
@@ -224,6 +226,14 @@ export function useAssistant() {
       disconnectGoogle: () => run(() => api.disconnectGoogle(), "Google disconnected. Using the demo workspace."),
       resetDemo: () => run(() => api.resetDemo(), "Demo inbox and calendar reset"),
       startOver: () => run(() => api.startOver(), "Started a new conversation"),
+      enableBackground: () => run(() => api.enableBackground(), "Background work is on. Reminders and automations run even when this tab is closed."),
+      disableBackground: () => run(() => api.disableBackground(), "Background work is off. Your reminders and automations are paused."),
+      checkBackground: async () => {
+        const view = await run(() => api.checkBackground());
+        if (view?.state === "on") toast("success", "Background work is on.");
+        else if (view?.state === "off") toast("info", "Background work is still off.");
+        return view;
+      },
       toast,
     }),
     [run, toast],
