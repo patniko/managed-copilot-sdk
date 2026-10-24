@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -8,6 +9,7 @@ import { redact } from "../src/log.js";
 import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
+import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
 import { pathScrubber } from "../src/modules/core/sessions.js";
 import { createLogger } from "../src/log.js";
 import { sleep, startGitHubStub } from "./harness.js";
@@ -393,6 +395,39 @@ describe("GitHub authentication", () => {
     expect(parseExpiration("2026-11-01 08:00:00 -0700")).toBe(Date.parse("2026-11-01T15:00:00Z"));
     expect(parseExpiration("garbage")).toBeUndefined();
   });
+});
+
+describe("shared runtime lifetime", () => {
+  it("reaps the runtime a dead gateway left behind, never a reused pid or a live gateway's runtime", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mc-reap-"));
+    const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
+    try {
+      await new Promise((resolve) => orphan.once("spawn", resolve));
+      const startTime = await processStartTime(orphan.pid!);
+      expect(startTime).toBeTruthy();
+      const deadGateway = spawnSync(process.execPath, ["-e", "0"]).pid;
+      const record = join(root, "runtime.json");
+      const write = (value: object) => writeFileSync(record, JSON.stringify(value));
+      // The pid now belongs to a different process (another start time): left alone.
+      write({ pid: orphan.pid, startTime: "1999-01-01T00:00:00.0000000Z", gatewayPid: deadGateway });
+      await reapStaleRuntime(root, log);
+      expect(orphan.exitCode).toBeNull();
+      // The gateway that recorded it is still running: left alone, record kept.
+      write({ pid: orphan.pid, startTime, gatewayPid: process.ppid });
+      await reapStaleRuntime(root, log);
+      expect(orphan.exitCode).toBeNull();
+      expect(existsSync(record)).toBe(true);
+      // The recorded runtime of a gateway that is gone: stopped.
+      write({ pid: orphan.pid, startTime, gatewayPid: deadGateway });
+      const exited = new Promise((resolve) => orphan.once("exit", resolve));
+      await reapStaleRuntime(root, log);
+      await exited;
+      expect(existsSync(record)).toBe(false);
+    } finally {
+      if (orphan.exitCode === null && orphan.signalCode === null) orphan.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 });
 
 describe("gateway primitives", () => {
