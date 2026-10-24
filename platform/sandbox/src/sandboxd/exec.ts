@@ -39,13 +39,15 @@ export function asWorkload(identity: Identity, cwd: string, command: string, arg
   };
 }
 
-/** Replaces secret values and URL userinfo in diagnostic text. */
+/** Replaces secret values, URL userinfo, and signed-URL credentials (SAS `sig`, S3/GCS signatures, tokens) in diagnostic text. */
 export function redact(text: string, secrets: readonly string[]): string {
   let out = text;
   for (const secret of secrets) {
     if (secret.length >= 6) out = out.split(secret).join("[redacted]");
   }
-  return out.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@");
+  return out
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/([?&](?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|token|access_token|api[-_]?key|code)=)[^&\s'")]+/gi, "$1[redacted]");
 }
 
 /** Keeps the last `limit` bytes of combined output. */

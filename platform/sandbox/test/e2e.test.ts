@@ -25,7 +25,11 @@ const container = (sandboxId: string) => `${instance}-${sandboxId.replace("_", "
 // A tiny npm CLI installed offline during setup proves the persisted tool environment survives idle stop and resume.
 const INSTALL_DEMO_CLI = String.raw`mkdir -p /tmp/npmdemo && cd /tmp/npmdemo && printf '{"name":"demo-cli","version":"1.2.3","bin":{"demo-cli":"cli.js"}}' > package.json && printf '#!/usr/bin/env node\nconsole.log("demo-cli 1.2.3")\n' > cli.js && npm pack --silent && npm install -g --offline --no-audit --no-fund ./demo-cli-1.2.3.tgz`;
 
-/** Hosts pip needs for setup installs: the configured index (the gateway bakes the same one into the image), else PyPI. */
+/**
+ * Hosts pip needs for setup installs: the configured index (the gateway bakes the same one into the image), else PyPI.
+ * Azure Artifacts feeds behind packagefeedproxy redirect wheel downloads to *.pkgs.visualstudio.com and then to blob
+ * storage (*.vsblob.vsassets.io).
+ */
 function pipHosts(): string[] {
   let index = process.env.MANAGED_COPILOT_PIP_INDEX_URL;
   if (!index && enabled) {
@@ -35,7 +39,9 @@ function pipHosts(): string[] {
       index = undefined;
     }
   }
-  return index ? [new URL(index).hostname] : ["pypi.org", "files.pythonhosted.org"];
+  if (!index) return ["pypi.org", "files.pythonhosted.org"];
+  const host = new URL(index).hostname;
+  return host.endsWith("packagefeedproxy.microsoft.io") ? [host, "*.pkgs.visualstudio.com", "*.vsblob.vsassets.io"] : [host];
 }
 const PIP_HOSTS = pipHosts();
 
@@ -152,7 +158,7 @@ describe.runIf(enabled)("isolated placement end to end", () => {
     const info = (await managed.sessions.get(restricted.sessionId)).sandbox;
     expect(info.network.access).toBe("restricted");
     // The workload has no direct route: only the proxy env sandboxd gives the runtime reaches the index.
-    expect(tryDocker("exec", "--user", "10001:10001", container(info.id), "sh", "-c", `curl -sS -m 4 https://${PIP_HOSTS[0]}; echo exit=$?`)).toMatch(/exit=(6|7|28)/);
+    expect(tryDocker("exec", "--user", "10001:10001", container(info.id), "sh", "-c", `curl -sS -m 4 https://${PIP_HOSTS[0]!.replace(/^\*\./, "")}; echo exit=$?`)).toMatch(/exit=(6|7|28)/);
     await egress.deleteSession(restricted.sessionId);
   }, 600_000);
 
