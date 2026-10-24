@@ -29,6 +29,8 @@ export function Header(props: {
   status: { tone: Tone; text: string };
   account?: AccountView;
   unread: number;
+  /** Something in the side panel needs the person (shown as a dot on the panel button on narrow screens). */
+  panelAttention?: string;
   onOpenPanel(): void;
   onOpenSettings(): void;
 }) {
@@ -47,8 +49,15 @@ export function Header(props: {
         </div>
       </div>
       <div className="ml-auto flex items-center gap-1">
-        <button type="button" className="btn-ghost px-2 xl:hidden" onClick={props.onOpenPanel} aria-label="Today, automations, and connections">
+        <button
+          type="button"
+          className="btn-ghost relative px-2 xl:hidden"
+          onClick={props.onOpenPanel}
+          aria-label={props.panelAttention ? `Today, automations, and connections (${props.panelAttention})` : "Today, automations, and connections"}
+          title={props.panelAttention}
+        >
           <PanelRight className="size-4.5" aria-hidden />
+          {props.panelAttention && <span className="absolute top-1 right-1 size-2 rounded-full bg-amber-500 ring-2 ring-white dark:ring-zinc-950" aria-hidden />}
         </button>
         <button type="button" className="btn-ghost px-2" onClick={props.onOpenSettings} aria-label="Settings">
           <Settings className="size-4.5" aria-hidden />

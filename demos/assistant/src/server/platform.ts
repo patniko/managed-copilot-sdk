@@ -2,13 +2,43 @@
  * The connection to the Managed Copilot deployment: `ManagedCopilot.connect()` with retry, status for the UI, and
  * explicit failure states (no silent fallback to a local agent or another account).
  */
-import { isManagedCopilotError, ManagedCopilot } from "@managed-copilot/sdk";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { isManagedCopilotError, ManagedCopilot, ManagedCopilotError } from "@managed-copilot/sdk";
 import type { PlatformStatus } from "../shared/protocol.js";
 import type { AssistantConfig } from "./config.js";
 import { errorMessage, type Logger } from "./log.js";
 
 const MIN_RETRY_MS = 2_000;
 const MAX_RETRY_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const execFileAsync = promisify(execFile);
+
+/** The SDK's documented token lookup for `ManagedCopilot.connect()`: these variables in order, then `gh auth token`. */
+export const TOKEN_ENVS = ["MANAGED_COPILOT_GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] as const;
+
+async function ghAuthToken(): Promise<string | undefined> {
+  const { stdout } = await execFileAsync("gh", ["auth", "token"], { windowsHide: true, timeout: 10_000 });
+  return stdout.trim() || undefined;
+}
+
+/**
+ * This server's GitHub token, found the same way `ManagedCopilot.connect()` finds one. The server passes it to
+ * `connect` explicitly, so platform routes the SDK doesn't wrap yet (background sign-in) act as exactly the account
+ * the connection does.
+ */
+export async function resolveGitHubToken(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  gh: () => Promise<string | undefined> = ghAuthToken,
+): Promise<string> {
+  for (const name of TOKEN_ENVS) {
+    const value = env[name]?.trim();
+    if (value) return value;
+  }
+  const fromGh = await gh().catch(() => undefined);
+  if (fromGh) return fromGh;
+  throw new ManagedCopilotError("authentication_required", `Sign in with GitHub first: set ${TOKEN_ENVS[0]}, or run \`gh auth login\`.`);
+}
 
 /** Short, actionable copy for connection failures (the UI adds "Start it with `aspire run`"). */
 export function friendlyPlatformError(message: string): string {
@@ -20,17 +50,21 @@ export function friendlyPlatformError(message: string): string {
 export class Platform {
   readonly #config: AssistantConfig;
   readonly #log: Logger;
+  readonly #fetch: typeof fetch;
   readonly #listeners = new Set<(status: PlatformStatus) => void>();
   #managed: ManagedCopilot | undefined;
+  /** The GitHub token `#managed` connected with; it never leaves this process except to the deployment. */
+  #token: string | undefined;
   #status: PlatformStatus;
   #attempt = 0;
   #timer: NodeJS.Timeout | undefined;
   #connecting: Promise<void> | undefined;
   #stopped = false;
 
-  constructor(config: AssistantConfig, log: Logger) {
+  constructor(config: AssistantConfig, log: Logger, options: { fetch?: typeof fetch } = {}) {
     this.#config = config;
     this.#log = log;
+    this.#fetch = options.fetch ?? fetch;
     this.#status = { state: "connecting", environment: config.environment };
   }
 
@@ -69,7 +103,8 @@ export class Platform {
     if (this.#status.state !== "connecting") this.#set({ ...this.#status, state: "connecting", message: undefined, retryAt: undefined });
     let managed: ManagedCopilot | undefined;
     try {
-      managed = await ManagedCopilot.connect({ clientName: "assistant-demo" });
+      const token = await resolveGitHubToken();
+      managed = await ManagedCopilot.connect({ clientName: "assistant-demo", gitHubToken: token });
       const env = managed.info.environments.find((candidate) => candidate.name === environment);
       if (!env) {
         await managed.close();
@@ -85,6 +120,7 @@ export class Platform {
         return;
       }
       this.#managed = managed;
+      this.#token = token;
       this.#attempt = 0;
       this.#set({
         state: "ready",
@@ -118,6 +154,7 @@ export class Platform {
   async reconnect(reason: string): Promise<void> {
     const old = this.#managed;
     this.#managed = undefined;
+    this.#token = undefined;
     if (old) {
       this.#log.warn("Reconnecting to Managed Copilot", { reason });
       await old.close().catch(() => undefined);
@@ -126,10 +163,42 @@ export class Platform {
     await this.connect();
   }
 
+  /**
+   * Calls a platform REST route as this server's GitHub account, for features the SDK doesn't wrap yet (background
+   * sign-in, `/v1/credentials/background`). Errors become `ManagedCopilotError`, as they do in the SDK.
+   */
+  async request<T>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+    const managed = this.#managed;
+    const token = this.#token;
+    if (!managed || !token) throw new ManagedCopilotError("capability_unavailable", "Managed Copilot isn't connected.", { reason: "not_connected" });
+    let response: Response;
+    try {
+      response = await this.#fetch(`${managed.url}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(body !== undefined ? { "content-type": "application/json" } : {}) },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        // The token goes to the deployment `connect` validated, and nowhere else.
+        redirect: "error",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw new ManagedCopilotError("capability_unavailable", `Cannot reach the Managed Copilot deployment at ${managed.url}: ${errorMessage(error)}`, { reason: "unreachable" });
+    }
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = undefined;
+    }
+    if (!response.ok) throw ManagedCopilotError.fromBody(payload, response.status);
+    return payload as T;
+  }
+
   async stop(): Promise<void> {
     this.#stopped = true;
     clearTimeout(this.#timer);
     await this.#managed?.close().catch(() => undefined);
     this.#managed = undefined;
+    this.#token = undefined;
   }
 }

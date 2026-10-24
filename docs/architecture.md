@@ -501,7 +501,11 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   after `fence()`, against the same session incarnation. Probes fail closed: only the runtime's "session not found"
   (a session it does not hold, therefore idle) is accepted as an answer other than a valid result.
 - **Fence and transfer.** `fence()` makes new requests for the session wait and keeps everything the source emits
-  from clients, durable, observers, and the ledger. A tool promotion calls `session.suspend`, then `sessions.close`.
+  from clients, durable, observers, and the ledger. Paths into the source runtime that core does not see, such as an
+  attached Copilot CLI's AHP relay, are *participants* (`promotion.participate`). They are fenced right after `fence()`
+  (the ledger already says `promoting`, so new attachments are refused), bounded at 15 s (`promotion_busy`
+  otherwise), and before the quiescence re-check, so the re-check sees work they started. They are released once the
+  cutover ends. A tool promotion calls `session.suspend`, then `sessions.close`.
   The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
   data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
   `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
@@ -563,7 +567,11 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   turn.
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
   attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
-  publishes the same session on the sandbox runtime's AHP host.
+  publishes the same session on the sandbox runtime's AHP host. As a participant, attach is told when the cutover ends:
+  `committed`, or aborted `sealed` or unsealed (the source never stopped). Sealed means the source was checkpointed
+  and core resumes it there, right away when a caller's completion is waiting and otherwise on next use. The shared
+  connection and its `connectionId` stay the same, so an AHP host published before the fence is stale and must be
+  disposed, not reused. Attachments already past the `promoting` check when the fence started are attach's to stop.
 - **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
   sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
   so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
@@ -594,7 +602,7 @@ structurally (they may add members).
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
-| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`; registers the `request_sandbox` platform tool and publishes `session.promoted` |
+| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`

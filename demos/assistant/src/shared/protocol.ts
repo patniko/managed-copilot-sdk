@@ -47,6 +47,8 @@ export interface ToolItem extends BaseItem {
   readonly handledOffline?: boolean;
   /** Set for scheduling tools so the UI can offer pause/cancel inline. */
   readonly scheduleId?: string;
+  /** A scheduling tool failed because background work is off; the UI offers to turn it on. */
+  readonly needsBackgroundWork?: boolean;
   readonly endedAt?: string;
 }
 
@@ -154,6 +156,8 @@ export interface ScheduleView {
   readonly timeZone: string;
   readonly prompt: string;
   readonly state: "active" | "paused";
+  /** Why the platform paused it (for example, background work was turned off), in plain words. */
+  readonly pausedReason?: string;
   readonly createdBy: "user" | "agent" | "apphost";
   readonly nextRunAt?: string;
   readonly lastRun?: { readonly status: string; readonly startedAt?: string; readonly completedAt?: string; readonly reason?: string };
@@ -176,6 +180,26 @@ export interface AgendaView {
   readonly error?: string;
 }
 
+/**
+ * Background work (spec section 2): whether the platform may run this person's scheduled work as them while no tab
+ * is open. It needs a one-time background sign-in on the deployment.
+ */
+export interface BackgroundView {
+  /**
+   * `on`: scheduled work runs as you while you're away. `off`: it isn't turned on, or the platform turned it off.
+   * `unknown`: not checked yet. `unavailable`: this deployment can't run background work. `error`: couldn't check.
+   */
+  readonly state: "unknown" | "on" | "off" | "unavailable" | "error";
+  /** The GitHub account background work runs as. */
+  readonly login?: string;
+  /** When it was turned on. */
+  readonly since?: string;
+  /** Why it stopped, when the platform turned it off (a revoked sign-in, or turned off elsewhere). */
+  readonly reason?: string;
+  readonly error?: string;
+  readonly checkedAt?: string;
+}
+
 export interface Snapshot {
   readonly account?: AccountView;
   readonly platform: PlatformStatus;
@@ -185,6 +209,7 @@ export interface Snapshot {
   readonly connections: ConnectionsView;
   readonly schedules: readonly ScheduleView[];
   readonly schedulesError?: string;
+  readonly background: BackgroundView;
   readonly settings: { readonly timeZone: string };
   readonly offline: OfflineView;
   readonly agenda?: AgendaView;
@@ -196,6 +221,7 @@ export type ServerEvent =
   | { readonly type: "delta"; readonly id: string; readonly text: string }
   | { readonly type: "status"; readonly platform: PlatformStatus; readonly conversation: ConversationStatus; readonly account?: AccountView }
   | { readonly type: "schedules"; readonly schedules: readonly ScheduleView[]; readonly error?: string }
+  | { readonly type: "background"; readonly background: BackgroundView }
   | { readonly type: "connections"; readonly connections: ConnectionsView }
   | { readonly type: "offline"; readonly offline: OfflineView }
   | { readonly type: "agenda"; readonly agenda: AgendaView }
