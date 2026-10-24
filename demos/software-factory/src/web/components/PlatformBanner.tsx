@@ -5,6 +5,7 @@ import { InlineCode } from "./ui/Feedback.js";
 
 const DEFAULTS = {
   connecting: "Connecting to Managed Copilot…",
+  reconnecting: "Reconnecting to Managed Copilot…",
   unavailable: "Managed Copilot is unavailable right now.",
   misconfigured: "The platform is reachable but isn't set up for the factory.",
 } as const;
@@ -14,13 +15,14 @@ export function PlatformBanner() {
   const platform = useStore((state) => state.platform);
   if (!platform || platform.state === "connected") return null;
   const state = platform.state;
-  const Icon = state === "connecting" ? LoaderCircle : state === "misconfigured" ? TriangleAlert : CircleAlert;
+  const pending = state === "connecting" || state === "reconnecting";
+  const Icon = pending ? LoaderCircle : state === "misconfigured" ? TriangleAlert : CircleAlert;
   return (
     <div
       role="status"
       className={cx(
         "shrink-0 border-b px-4 py-2.5 sm:px-6",
-        state === "connecting" && "border-sky-400/15 bg-sky-400/[0.05]",
+        pending && "border-sky-400/15 bg-sky-400/[0.05]",
         state === "misconfigured" && "border-amber-400/20 bg-amber-400/[0.06]",
         state === "unavailable" && "border-rose-400/20 bg-rose-400/[0.07]",
       )}
@@ -29,7 +31,7 @@ export function PlatformBanner() {
         <Icon
           className={cx(
             "mt-0.5 size-4 shrink-0",
-            state === "connecting" && "animate-spin text-sky-300",
+            pending && "animate-spin text-sky-300",
             state === "misconfigured" && "text-amber-300",
             state === "unavailable" && "text-rose-300",
           )}

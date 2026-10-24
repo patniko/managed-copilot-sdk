@@ -22,6 +22,7 @@ const factory = new Factory({
     return account ? { login: account.login, ...(account.avatarUrl ? { avatarUrl: account.avatarUrl } : {}) } : undefined;
   },
   config,
+  checkPlatform: () => platform.verify(),
   ...(process.env.FACTORY_SKILLS_ROOT ? { skillsRoot: process.env.FACTORY_SKILLS_ROOT } : {}),
 });
 

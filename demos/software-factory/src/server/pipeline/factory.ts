@@ -32,7 +32,7 @@ import { log } from "../log.js";
 import type { FactoryPlatform, StationSession } from "../platform.js";
 import type { StoredArtifact, FactoryStore } from "../store.js";
 import { StationActivityMapper } from "./activity.js";
-import { CancelledError, StationError, toFactoryError } from "./errors.js";
+import { CancelledError, isPlatformInterruption, StationError, toFactoryError } from "./errors.js";
 import { factoryPermissions } from "./permissions.js";
 import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, validateReview, type ValidReview } from "./plan.js";
 import {
@@ -125,6 +125,12 @@ interface Run {
   /** Set once the run has finished; late asynchronous results must not touch the work order anymore. */
   closed: boolean;
   done: Promise<void>;
+  /** A station lost its platform connection (see `#interrupts`); no failure was recorded for it. */
+  interrupted: boolean;
+  /** A station recorded a real failure, so the work order fails rather than pausing. */
+  failed: boolean;
+  /** The run ended paused at its checkpoint; the work order resumes when the platform is ready. */
+  paused: boolean;
 }
 
 interface CheckOutcome {
@@ -146,7 +152,19 @@ export interface FactoryOptions {
   readonly skillsRoot?: string;
   /** Poll interval while waiting for a resumed turn (tests shorten it). */
   readonly pollMs?: number;
+  /**
+   * Confirms the platform answers before a paused work order resumes on its own; resolves false (and starts
+   * reconnecting) when it doesn't. Without it, readiness alone decides.
+   */
+  readonly checkPlatform?: () => Promise<boolean>;
+  /** First delay before a paused work order resumes on its own; doubles per pause (tests shorten it). */
+  readonly resumeBackoffMs?: number;
 }
+
+/** Pauses a work order may take for lost platform connections before the next one fails it instead. */
+const MAX_AUTO_RESUMES = 5;
+/** Detaching a session whose transport dropped can go unanswered; the run moves on after this long. */
+const DETACH_TIMEOUT_MS = 5_000;
 
 /** Runs work orders through the factory: plan → parallel builds with review loops → release. */
 export class Factory {
@@ -154,6 +172,9 @@ export class Factory {
   readonly #runs = new Map<string, Run>();
   readonly #sandboxes: Semaphore;
   readonly #usageTimers = new Map<string, NodeJS.Timeout>();
+  /** Work orders paused by a lost platform connection, and how many times. */
+  readonly #pauses = new Map<string, number>();
+  readonly #resumeTimers = new Map<string, NodeJS.Timeout>();
   #stopping = false;
 
   constructor(options: FactoryOptions) {
@@ -270,8 +291,9 @@ export class Factory {
       const stored = this.#store.getWorkOrder(id);
       if (!stored) throw new StationError("not_found", "That work order doesn't exist.");
       if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status)) throw new StationError("conflict", "Only an active work order can be cancelled.");
-      // Interrupted by a restart and never resumed: cancel the record directly.
+      // Interrupted by a restart (or paused by a lost connection) and never resumed: cancel the record directly.
       const wo = stored as MWorkOrder;
+      this.#forgetPause(id);
       this.#cancelStations(wo);
       Object.assign(wo, { status: "cancelled", completedAt: now() });
       this.#persist(wo);
@@ -320,6 +342,7 @@ export class Factory {
     if (this.#runs.has(id)) throw new StationError("conflict", "Cancel the work order before deleting it.");
     const wo = this.#store.getWorkOrder(id);
     if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
+    this.#forgetPause(id);
     this.#store.deleteWorkOrder(id);
     this.#options.hub.publish({ type: "workOrderDeleted", workOrderId: id });
     const sessionIds = wo.stations.flatMap((station) => [...(station.sessionId ? [station.sessionId] : []), ...(station.previousSessionIds ?? [])]);
@@ -329,14 +352,26 @@ export class Factory {
     });
   }
 
-  /** Resumes work orders interrupted by a factory restart. Call when the platform becomes ready. */
+  /**
+   * Resumes work orders interrupted by a factory restart or paused by a lost platform connection. Call when the
+   * platform becomes ready.
+   */
   resumeInterrupted(): void {
     for (const stored of this.#store.listWorkOrders()) {
       if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.#runs.has(stored.id)) continue;
-      log.info("Resuming work order after restart", { id: stored.id });
-      this.#activity(stored, "plan", "The factory restarted; resuming from the last checkpoint", "warning");
-      this.#start(stored as MWorkOrder);
+      this.#resume(stored as MWorkOrder);
     }
+  }
+
+  #resume(wo: MWorkOrder): void {
+    const paused = this.#pauses.has(wo.id);
+    const timer = this.#resumeTimers.get(wo.id);
+    if (timer) clearTimeout(timer);
+    this.#resumeTimers.delete(wo.id);
+    log.info(paused ? "Resuming work order: the platform is back" : "Resuming work order after restart", { id: wo.id });
+    const note = paused ? "Managed Copilot is back; resuming from the last checkpoint" : "The factory restarted; resuming from the last checkpoint";
+    this.#activity(wo, "plan", note, "warning");
+    this.#start(wo);
   }
 
   /**
@@ -418,6 +453,7 @@ export class Factory {
     }
     await Promise.race([Promise.allSettled(runs.map((run) => run.done)), new Promise((resolve) => setTimeout(resolve, 5_000).unref())]);
     for (const timer of this.#usageTimers.values()) clearTimeout(timer);
+    for (const timer of this.#resumeTimers.values()) clearTimeout(timer);
   }
 
   // ─── Run loop ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -428,7 +464,16 @@ export class Factory {
   }
 
   #start(wo: MWorkOrder): void {
-    const run: Run = { wo, abort: new AbortController(), sessions: new Map(), closed: false, done: Promise.resolve() };
+    const run: Run = {
+      wo,
+      abort: new AbortController(),
+      sessions: new Map(),
+      closed: false,
+      done: Promise.resolve(),
+      interrupted: false,
+      failed: false,
+      paused: false,
+    };
     this.#runs.set(wo.id, run);
     run.done = this.#execute(run).finally(() => this.#finish(run));
   }
@@ -449,6 +494,8 @@ export class Factory {
         this.#cancelStations(wo);
         this.#setWorkOrder(run, { status: "cancelled", completedAt: now() });
         log.info("Work order cancelled", { id: wo.id });
+      } else if (!run.failed && (run.interrupted || this.#interrupts(run, error))) {
+        this.#pauseRun(run, error);
       } else {
         const failure = toFactoryError(error);
         for (const station of wo.stations) {
@@ -470,6 +517,11 @@ export class Factory {
     this.#persist(run.wo);
     run.closed = true;
     await Promise.allSettled([...run.sessions.keys()].map((stationId) => this.#closeSession(run, stationId)));
+    if (run.paused) {
+      this.#resumeSoon(run.wo.id);
+      return;
+    }
+    this.#pauses.delete(run.wo.id);
     // Record where each station's session ended up (sessions replaced or deleted during the run included).
     if (!this.#stopping) {
       await this.reconcileSessions([run.wo.id]).catch((error: unknown) => log.debug("Session reconciliation failed", { error: (error as Error).message }));
@@ -545,7 +597,10 @@ export class Factory {
           }
         }
         const settled = await Promise.allSettled(task.dependsOn.map((dep) => runTask(byId.get(dep)!)));
-        if (settled.some((result) => result.status === "rejected")) {
+        const rejected = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (rejected) {
+          // A dependency that lost its platform connection didn't fail: this task waits for the work order to resume.
+          if (run.interrupted && !run.failed) throw rejected.reason;
           for (const id of [`build:${task.id}`, `review:${task.id}`]) {
             const station = this.#station(run, id);
             if (!TERMINAL_STATION_STATUSES.includes(station.status)) this.#updateStation(run, station, { status: "skipped", detail: "Skipped: a dependency failed" });
@@ -870,6 +925,8 @@ export class Factory {
         return active;
       } catch (error) {
         if (run.abort.signal.aborted) throw new CancelledError();
+        // A dropped connection isn't a lost sandbox: keep the workspace and reattach once the platform is back.
+        if (this.#interrupts(run, error)) throw error;
         mapper.status(`Couldn't reattach to session ${station.sessionId} (${toFactoryError(error).message}); starting a fresh sandbox`, "warning");
         // The new sandbox starts over: its artifact versions restart at 1 and its rounds need fresh reviews.
         this.#store.deleteStationArtifacts(run.wo.id, station.id);
@@ -953,7 +1010,11 @@ export class Factory {
     if (!active) return;
     run.sessions.delete(stationId);
     active.mapper.close();
-    await active.session.disconnect().catch(() => undefined);
+    // A dropped transport can leave the detach unanswered; the session stays on the platform either way.
+    await Promise.race([
+      active.session.disconnect().catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, DETACH_TIMEOUT_MS).unref()),
+    ]);
   }
 
   async #turn(run: Run, station: MStation, active: ActiveSession, prompt: string, kind: NonNullable<Station["turn"]>["kind"], round: number): Promise<void> {
@@ -1095,6 +1156,8 @@ export class Factory {
         await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
       }
     }
+    // A lost connection pauses the work order instead of failing the collection.
+    if (isPlatformInterruption(lastError)) throw lastError;
     throw new StationError("artifact_unavailable", `Couldn't download ${path} from the platform: ${toFactoryError(lastError).message}`);
   }
 
@@ -1131,9 +1194,80 @@ export class Factory {
   }
 
   #failStation(run: Run, station: MStation, error: unknown): void {
+    if (this.#interrupts(run, error)) {
+      // Not a failure: the work order pauses at its checkpoint and resumes when the platform is back (#pauseRun).
+      run.interrupted = true;
+      return;
+    }
+    run.failed = true;
     const failure: FactoryError = toFactoryError(error);
     this.#updateStation(run, station, { status: "failed", error: failure, detail: failure.message, finishedAt: now() });
     this.#emitItem(run.wo, { stationId: station.id, kind: "error", text: failure.message, level: "error" });
+  }
+
+  /**
+   * Whether an error means the run lost its platform connection (or the platform is down), so the work order should
+   * pause and resume rather than fail. After MAX_AUTO_RESUMES pauses, the next one fails it.
+   */
+  #interrupts(run: Run, error: unknown): boolean {
+    if (this.#stopping || run.abort.signal.aborted || error instanceof CancelledError) return false;
+    if ((this.#pauses.get(run.wo.id) ?? 0) >= MAX_AUTO_RESUMES) return false;
+    return isPlatformInterruption(error) || !this.#options.readiness().ready;
+  }
+
+  /** Leaves an interrupted work order at its checkpoint: running stations wait, and nothing is marked failed. */
+  #pauseRun(run: Run, error: unknown): void {
+    const { wo } = run;
+    run.paused = true;
+    this.#pauses.set(wo.id, (this.#pauses.get(wo.id) ?? 0) + 1);
+    const text = error instanceof Error ? error.message : String(error);
+    const reason = (/\[managed-copilot\]\s*([^\n]+)/.exec(text)?.[1] ?? text.split("\n")[0] ?? "").replace(/[.\s]+$/, "") || "the connection dropped";
+    const note = `Paused: lost the connection to Managed Copilot (${reason}). Continues from its last checkpoint once the platform is back.`;
+    const active = wo.stations.filter((station) => station.status === "starting" || station.status === "working" || station.status === "collecting");
+    for (const station of active) {
+      Object.assign(station, { status: "waiting", detail: "Paused until Managed Copilot is back" });
+      this.#activity(wo, station.id, note, "warning");
+    }
+    if (active.length === 0) this.#activity(wo, "plan", note, "warning");
+    this.#setWorkOrder(run, {});
+    log.warn("Work order paused: lost the platform connection", { id: wo.id, pauses: this.#pauses.get(wo.id), reason });
+  }
+
+  /**
+   * Resumes a paused work order by itself once the platform answers. While the platform is down, its return to ready
+   * resumes the work order instead (main.ts calls `resumeInterrupted`).
+   */
+  #resumeSoon(id: string): void {
+    if (this.#stopping) return;
+    const pauses = this.#pauses.get(id) ?? 1;
+    const delay = Math.min((this.#options.resumeBackoffMs ?? 1_000) * 2 ** (pauses - 1), 30_000);
+    const existing = this.#resumeTimers.get(id);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => void this.#resumePaused(id), delay);
+    timer.unref();
+    this.#resumeTimers.set(id, timer);
+  }
+
+  async #resumePaused(id: string): Promise<void> {
+    this.#resumeTimers.delete(id);
+    if (!this.#resumable(id) || !this.#options.readiness().ready) return;
+    if (this.#options.checkPlatform && !(await this.#options.checkPlatform())) return;
+    const wo = this.#resumable(id);
+    if (wo && this.#options.readiness().ready) this.#resume(wo);
+  }
+
+  /** The stored work order when it's still active and nothing runs it (it may have been cancelled or deleted meanwhile). */
+  #resumable(id: string): MWorkOrder | undefined {
+    if (this.#stopping || this.#runs.has(id)) return undefined;
+    const stored = this.#store.getWorkOrder(id);
+    return stored && ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) ? (stored as MWorkOrder) : undefined;
+  }
+
+  #forgetPause(id: string): void {
+    this.#pauses.delete(id);
+    const timer = this.#resumeTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.#resumeTimers.delete(id);
   }
 
   #updateStation(run: Run, station: MStation, patch: Partial<MStation>): void {

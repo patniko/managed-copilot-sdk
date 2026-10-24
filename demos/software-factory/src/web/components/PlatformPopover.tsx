@@ -12,6 +12,7 @@ import { Tooltip } from "./ui/Tooltip.js";
 const STATE_TITLES: Readonly<Record<PlatformStatus["state"], string>> = {
   connected: "Connected",
   connecting: "Connecting to the platform",
+  reconnecting: "Reconnecting to the platform",
   unavailable: "Platform unavailable",
   misconfigured: "Platform misconfigured",
 };

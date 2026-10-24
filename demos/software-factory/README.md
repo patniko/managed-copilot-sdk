@@ -119,6 +119,10 @@ environments.
 - **Restarts resume work.** A work order that was running when the factory stopped resumes from its last checkpoint.
   Plans and reviews are re-run, because they're cheap. Builders and the release reattach to their sandboxes and wait
   for the in-flight turn.
+- **Platform outages pause work instead of failing it.** If the factory loses Managed Copilot, for example during a
+  gateway handover, it reports `reconnecting` (on the floor and in `/api/health`) and retries with jittered backoff
+  from 1 to 30 seconds. Every step has a deadline, so a request that a proxy holds open can't stall it. Running work
+  orders pause at their last checkpoint and resume the same way as after a restart once the platform is back.
 
 ## Configuration
 

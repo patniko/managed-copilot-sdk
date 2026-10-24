@@ -27,7 +27,8 @@ export interface EnvironmentView {
   readonly model: string;
 }
 
-export type PlatformState = "connecting" | "connected" | "unavailable" | "misconfigured";
+/** `reconnecting`: the factory was connected, lost the connection, and is retrying; paused work orders resume when it's back. */
+export type PlatformState = "connecting" | "connected" | "reconnecting" | "unavailable" | "misconfigured";
 
 export interface PlatformStatus {
   readonly state: PlatformState;

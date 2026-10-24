@@ -21,6 +21,7 @@ import type { EnvironmentView, PlatformStatus, StationRole } from "../shared/typ
 import type { FactoryConfig } from "./config.js";
 import { log } from "./log.js";
 import { chooseModels } from "./models.js";
+import { PlatformUnavailableError } from "./pipeline/errors.js";
 
 /** The parts of a stock `CopilotSession` the pipeline uses. */
 export interface StationSession {
@@ -59,9 +60,108 @@ export interface FactoryPlatform {
 /** Platform capabilities the factory needs before it accepts work orders. */
 export const REQUIRED_CAPABILITIES = ["shared", "isolated", "files", "artifacts"] as const;
 
+/** Timings of the connection loop. Every step has a deadline, so a request held open in front of the gateway can't stall it. */
+export interface PlatformTimings {
+  /** First retry delay after a failure; doubles per attempt up to `retryMaxMs`, with jitter. */
+  readonly retryBaseMs: number;
+  readonly retryMaxMs: number;
+  /** One connect attempt: the deployment's info and the signed-in account. */
+  readonly connectTimeoutMs: number;
+  /** One health probe. */
+  readonly healthTimeoutMs: number;
+  /** Model discovery (starting a client and listing models); the preferred defaults apply when it runs out. */
+  readonly discoveryTimeoutMs: number;
+  /** A graceful client stop, before the client is forced. */
+  readonly stopTimeoutMs: number;
+}
+
+/**
+ * The gateway gives GitHub token verification up to 35 s, but it caches results and shares verifications in flight, so
+ * a connect attempt abandoned at 15 s still lets the next one through quickly.
+ */
+export const PLATFORM_TIMINGS: PlatformTimings = {
+  retryBaseMs: 1_000,
+  retryMaxMs: 30_000,
+  connectTimeoutMs: 15_000,
+  healthTimeoutMs: 10_000,
+  discoveryTimeoutMs: 20_000,
+  stopTimeoutMs: 5_000,
+};
+
+export interface PlatformOptions {
+  readonly timings?: Partial<PlatformTimings>;
+  /** Deployment URL; defaults to the SDK's resolution (`MANAGED_COPILOT_URL`, then the local AppHost). */
+  readonly url?: string;
+  /** GitHub token; defaults to the SDK's resolution (environment variables, then `gh auth token`). */
+  readonly gitHubToken?: string;
+}
+
+/** Retry delay after the `attempt`-th consecutive failure: exponential up to the cap, then 50–100 % of that (jitter). */
+export function reconnectDelay(
+  attempt: number,
+  timings: Pick<PlatformTimings, "retryBaseMs" | "retryMaxMs"> = PLATFORM_TIMINGS,
+  random: () => number = Math.random,
+): number {
+  const ceiling = Math.min(timings.retryMaxMs, timings.retryBaseMs * 2 ** Math.max(0, attempt - 1));
+  return Math.round(ceiling * (0.5 + random() * 0.5));
+}
+
+/** Failures that retrying fixes by itself; sign-in and access problems need someone to act. */
+export function isRetryable(error: unknown): boolean {
+  return !isManagedCopilotError(error) || !["authentication_required", "forbidden", "invalid_request"].includes(error.code);
+}
+
+class DeadlineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DeadlineError";
+  }
+}
+
+function formatSeconds(ms: number): string {
+  const seconds = ms / 1000;
+  return `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} s`;
+}
+
+/**
+ * Waits for an SDK call at most `ms`. The SDK's requests can't be aborted, so a call that misses its deadline is
+ * abandoned, and `onLate` disposes of whatever it resolves to afterwards.
+ */
+function withDeadline<T>(promise: Promise<T>, ms: number, what: string, onLate?: (value: T) => void): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      if (onLate) promise.then(onLate, () => undefined);
+      reject(new DeadlineError(`${what} took longer than ${formatSeconds(ms)}.`));
+    }, ms);
+    timer.unref();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
+/** Stops a client, forcing it when a dropped transport leaves the graceful stop waiting for answers that never come. */
+async function stopClient(client: CopilotClient, ms: number): Promise<void> {
+  try {
+    await withDeadline(client.stop(), ms, "Stopping a client");
+  } catch {
+    await client.forceStop().catch(() => undefined);
+  }
+}
+
+async function closeQuietly(managed: ManagedCopilot, ms: number): Promise<void> {
+  await withDeadline(managed.close(), ms, "Closing the connection").catch(() => undefined);
+}
+
+function errorText(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).split("\n")[0]!;
+}
+
 type StatusListener = (status: PlatformStatus) => void;
 
 function describeFailure(error: unknown, url: string | undefined): Pick<PlatformStatus, "message" | "hint" | "state"> {
+  if (error instanceof DeadlineError) {
+    return { state: "unavailable", message: error.message, hint: "The factory retries automatically. Check the platform logs in the Aspire dashboard." };
+  }
   if (isManagedCopilotError(error)) {
     switch (error.code) {
       case "authentication_required":
@@ -97,6 +197,8 @@ function describeFailure(error: unknown, url: string | undefined): Pick<Platform
 /** Connects to the deployment, keeps the connection healthy, and hands out stock clients per environment. */
 export class Platform implements FactoryPlatform {
   readonly #config: FactoryConfig;
+  readonly #options: PlatformOptions;
+  readonly #timings: PlatformTimings;
   readonly #listeners = new Set<StatusListener>();
   readonly #clients = new Map<StationRole, Promise<CopilotClient>>();
   #managed: ManagedCopilot | undefined;
@@ -104,10 +206,21 @@ export class Platform implements FactoryPlatform {
   #status: PlatformStatus;
   #timer: NodeJS.Timeout | undefined;
   #stopped = false;
+  /** Consecutive failed connect attempts. */
   #attempt = 0;
+  /** Consecutive failed health probes. */
+  #healthFailures = 0;
+  /** Once connected, a lost connection is reported as `reconnecting`. */
+  #connectedOnce = false;
+  /** When the current outage began. */
+  #lostAt: number | undefined;
+  /** The last connected status: a reconnecting one keeps showing its deployment and account. */
+  #lastConnected: PlatformStatus | undefined;
 
-  constructor(config: FactoryConfig) {
+  constructor(config: FactoryConfig, options: PlatformOptions = {}) {
     this.#config = config;
+    this.#options = options;
+    this.#timings = { ...PLATFORM_TIMINGS, ...options.timings };
     this.#models = chooseModels(undefined, config.modelOverrides);
     this.#status = this.#baseStatus("connecting", { message: "Connecting to the Managed Copilot platform…" });
   }
@@ -139,8 +252,30 @@ export class Platform implements FactoryPlatform {
     await this.#dispose();
   }
 
+  /**
+   * Checks the connection right away, for example after a station's transport dropped. Resolves true when the platform
+   * answers; otherwise the factory starts reconnecting and resolves false.
+   */
+  async verify(): Promise<boolean> {
+    const managed = this.#managed;
+    if (this.#stopped || !managed || !this.#status.features.runs) return false;
+    try {
+      await withDeadline(managed.sessions.list({ limit: 1 }), this.#timings.healthTimeoutMs, "The health check");
+      return true;
+    } catch (error) {
+      if (!this.#stopped && this.#managed === managed) this.#connectionLost(error);
+      return false;
+    }
+  }
+
   #managedOrThrow(): ManagedCopilot {
-    if (!this.#managed) throw new Error(this.#status.message ?? "The Managed Copilot platform is not connected.");
+    if (!this.#managed) {
+      throw new PlatformUnavailableError(
+        this.#status.state === "reconnecting"
+          ? "The factory is reconnecting to Managed Copilot."
+          : (this.#status.message ?? "The factory isn't connected to Managed Copilot."),
+      );
+    }
     return this.#managed;
   }
 
@@ -240,50 +375,108 @@ export class Platform implements FactoryPlatform {
 
   async #connect(): Promise<void> {
     if (this.#stopped) return;
-    const url = process.env.MANAGED_COPILOT_URL;
+    const url = this.#options.url ?? process.env.MANAGED_COPILOT_URL;
+    this.#attempt++;
+    let managed: ManagedCopilot;
     try {
-      const managed = await ManagedCopilot.connect({ clientName: "software-factory" });
-      this.#managed = managed;
-      this.#attempt = 0;
-      await this.#refreshModels();
-      this.#setStatus(this.#connectedStatus());
-      log.info("Connected to Managed Copilot", { url: managed.url, account: managed.account.login, models: this.#models });
-      this.#schedule(this.#config.healthIntervalMs, () => this.#healthCheck());
+      managed = await withDeadline(
+        ManagedCopilot.connect({
+          clientName: "software-factory",
+          ...(this.#options.url ? { url: this.#options.url } : {}),
+          ...(this.#options.gitHubToken ? { gitHubToken: this.#options.gitHubToken } : {}),
+        }),
+        this.#timings.connectTimeoutMs,
+        "Connecting to Managed Copilot",
+        (late) => void closeQuietly(late, this.#timings.stopTimeoutMs),
+      );
     } catch (error) {
-      await this.#dispose();
-      const failure = describeFailure(error, url);
-      if (this.#status.message !== failure.message) log.warn("Platform unavailable", { reason: failure.message });
-      this.#setStatus(this.#baseStatus(failure.state, { ...failure, ...(url ? { url } : {}) }));
-      this.#attempt++;
-      this.#schedule(Math.min(2_000 * this.#attempt, 10_000), () => this.#connect());
+      this.#connectFailed(error, url);
+      return;
     }
+    if (this.#stopped) {
+      void closeQuietly(managed, this.#timings.stopTimeoutMs);
+      return;
+    }
+    this.#managed = managed;
+    await this.#refreshModels();
+    if (this.#stopped || this.#managed !== managed) return;
+    const reconnected = this.#connectedOnce;
+    const attempts = this.#attempt;
+    const outageMs = this.#lostAt === undefined ? undefined : Date.now() - this.#lostAt;
+    this.#attempt = 0;
+    this.#healthFailures = 0;
+    this.#lostAt = undefined;
+    this.#connectedOnce = true;
+    this.#lastConnected = this.#connectedStatus();
+    this.#setStatus(this.#lastConnected);
+    if (reconnected) log.info("Reconnected to Managed Copilot", { url: managed.url, attempts, ...(outageMs !== undefined ? { outageMs } : {}) });
+    else log.info("Connected to Managed Copilot", { url: managed.url, account: managed.account.login, models: this.#models });
+    this.#schedule(this.#config.healthIntervalMs, () => this.#healthCheck());
+  }
+
+  #connectFailed(error: unknown, url: string | undefined): void {
+    const retryable = isRetryable(error);
+    const delay = retryable ? reconnectDelay(this.#attempt, this.#timings) : this.#timings.retryMaxMs;
+    const failure = describeFailure(error, url);
+    const status =
+      retryable && this.#connectedOnce ? this.#reconnectingStatus(error, delay) : this.#baseStatus(failure.state, { ...failure, ...(url ? { url } : {}) });
+    // Every reconnect attempt is logged: repeats of the same message, once suppressed, hid a stalled reconnect.
+    if (this.#connectedOnce || status.message !== this.#status.message) {
+      log.warn(this.#connectedOnce ? "Couldn't reconnect to Managed Copilot yet" : "Platform unavailable", {
+        reason: failure.message,
+        attempt: this.#attempt,
+        retryInMs: delay,
+      });
+    }
+    this.#setStatus(status);
+    this.#schedule(delay, () => this.#connect());
   }
 
   async #healthCheck(): Promise<void> {
-    if (this.#stopped || !this.#managed) return;
+    const managed = this.#managed;
+    if (this.#stopped || !managed) return;
     try {
-      await this.#managed.sessions.list({ limit: 1 });
+      await withDeadline(managed.sessions.list({ limit: 1 }), this.#timings.healthTimeoutMs, "The health check");
+      if (this.#stopped || this.#managed !== managed) return;
+      this.#healthFailures = 0;
       this.#schedule(this.#config.healthIntervalMs, () => this.#healthCheck());
     } catch (error) {
-      log.warn("Lost the platform connection; reconnecting", { error: (error as Error).message });
-      await this.#dispose();
-      this.#setStatus(this.#baseStatus("connecting", { message: "Reconnecting to the Managed Copilot platform…" }));
-      this.#schedule(1_000, () => this.#connect());
+      if (this.#stopped || this.#managed !== managed) return;
+      // One failed probe can be a blip in front of the gateway: confirm before dropping the connection and pausing work.
+      if (++this.#healthFailures < 2) {
+        log.debug("Health check failed; checking again", { error: errorText(error) });
+        this.#schedule(this.#timings.retryBaseMs, () => this.#healthCheck());
+        return;
+      }
+      this.#connectionLost(error);
     }
   }
 
+  /** Lets go of the connection without waiting for it and starts reconnecting. */
+  #connectionLost(error: unknown): void {
+    log.warn("Lost the platform connection; reconnecting", { error: errorText(error) });
+    this.#lostAt = Date.now();
+    this.#healthFailures = 0;
+    this.#attempt = 0;
+    void this.#dispose();
+    const delay = reconnectDelay(1, this.#timings);
+    this.#setStatus(this.#reconnectingStatus(error, delay));
+    this.#schedule(delay, () => this.#connect());
+  }
+
   async #refreshModels(): Promise<void> {
+    const pending = this.#client("planner");
     try {
-      const client = await this.#client("planner");
-      this.#models = chooseModels(await client.listModels(), this.#config.modelOverrides);
+      const client = await withDeadline(pending, this.#timings.discoveryTimeoutMs, "Starting a client for model discovery");
+      const models = await withDeadline(client.listModels(), this.#timings.discoveryTimeoutMs, "Listing models");
+      this.#models = chooseModels(models, this.#config.modelOverrides);
     } catch (error) {
       // Model discovery is best effort; preferences still apply and sessions fail explicitly if a model is missing.
       if (!isManagedCopilotError(error) || error.code !== "environment_not_found") {
-        log.warn("Model discovery failed; using preferred defaults", { error: (error as Error).message });
+        log.warn("Model discovery failed; using preferred defaults", { error: errorText(error) });
       }
-      const failed = this.#clients.get("planner");
-      this.#clients.delete("planner");
-      void failed?.then((client) => client.stop()).catch(() => undefined);
+      if (this.#clients.get("planner") === pending) this.#clients.delete("planner");
+      void pending.then((client) => stopClient(client, this.#timings.stopTimeoutMs), () => undefined);
       this.#models = chooseModels(undefined, this.#config.modelOverrides);
     }
   }
@@ -295,13 +488,19 @@ export class Platform implements FactoryPlatform {
     this.#timer.unref();
   }
 
+  /**
+   * Drops the clients and the connection. Bounded: a dropped transport can leave a graceful stop waiting forever, so
+   * clients are forced after a grace period, and a client still starting is stopped when it does.
+   */
   async #dispose(): Promise<void> {
     const clients = [...this.#clients.values()];
     this.#clients.clear();
     const managed = this.#managed;
     this.#managed = undefined;
-    await Promise.allSettled(clients.map(async (client) => (await client).stop()));
-    await managed?.close().catch(() => undefined);
+    const ms = this.#timings.stopTimeoutMs;
+    const stops = Promise.allSettled(clients.map((pending) => pending.then((client) => stopClient(client, ms))));
+    await withDeadline(stops, 2 * ms, "Stopping clients").catch(() => undefined);
+    if (managed) await closeQuietly(managed, ms);
   }
 
   #environmentViews(): EnvironmentView[] {
@@ -382,6 +581,21 @@ export class Platform implements FactoryPlatform {
       checkedAt: new Date().toISOString(),
       ...extra,
     };
+  }
+
+  /** While reconnecting, the floor keeps showing the deployment it was connected to, with runs paused. */
+  #reconnectingStatus(error: unknown, retryInMs: number): PlatformStatus {
+    const last = this.#lastConnected;
+    const url = this.#options.url ?? process.env.MANAGED_COPILOT_URL ?? last?.url;
+    const seconds = Math.max(1, Math.round(retryInMs / 1000));
+    return this.#baseStatus("reconnecting", {
+      message: "Reconnecting to Managed Copilot…",
+      hint: `${describeFailure(error, url).message} Next attempt in ${seconds} s; running work orders pause and continue from their last checkpoint once it's back.`,
+      ...(url ? { url } : {}),
+      ...(last?.deployment ? { deployment: last.deployment } : {}),
+      ...(last?.account ? { account: last.account } : {}),
+      environments: last?.environments ?? [],
+    });
   }
 
   #setStatus(status: PlatformStatus): void {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventHub } from "../src/server/hub.js";
-import { Factory } from "../src/server/pipeline/factory.js";
+import { Factory, type FactoryOptions } from "../src/server/pipeline/factory.js";
 import { FactoryStore } from "../src/server/store.js";
 import type { ServerEvent, WorkOrder } from "../src/shared/types.js";
 import { FakePlatform, manifest, testReport, type FakeSession, type Script } from "./fakes.js";
@@ -96,7 +96,7 @@ const release: Script = async (session, _prompt, platform) => {
 let store: FactoryStore;
 let hub: EventHub;
 
-function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingStore?: FactoryStore) {
+function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingStore?: FactoryStore, overrides: Partial<FactoryOptions> = {}) {
   store = existingStore ?? new FactoryStore(":memory:");
   hub = new EventHub(60_000);
   const platform = new FakePlatform(scripts);
@@ -108,6 +108,7 @@ function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingS
     account: () => ({ login: "octocat" }),
     config: { maxSandboxes: 4, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000 }, publicationTimeoutMs: 1_000 },
     pollMs: 10,
+    ...overrides,
   });
   return { platform, factory };
 }
@@ -120,6 +121,14 @@ async function settle(factory: Factory, id: string, timeoutMs = 5_000): Promise<
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`Work order ${id} did not settle: ${factory.get(id)?.status}`);
+}
+
+async function until(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting for the condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 afterEach(() => {
@@ -494,6 +503,73 @@ describe("Factory pipeline", () => {
     ]);
     expect(file.viewable).toBe(false);
     expect(factory.artifact(created.id, "build:csv2json", "data.txt", 1)?.content).toBe("small");
+  });
+
+  it("pauses a work order whose platform connection drops, then resumes it from its checkpoint", async () => {
+    let ready = true;
+    let dropped = false;
+    // The turn runs to completion on the platform, but the factory loses the connection before it hears back.
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        ready = false;
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { readiness: () => ({ ready }), resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    await until(() => dropped && !factory.isActive(created.id));
+
+    const paused = factory.get(created.id)!;
+    expect(paused.status).toBe("building");
+    const build = paused.stations.find((station) => station.id === "build:csv2json")!;
+    expect(build).toMatchObject({ status: "waiting", detail: "Paused until Managed Copilot is back" });
+    expect(paused.stations.filter((station) => station.status === "failed")).toEqual([]);
+
+    // The platform is back: main.ts resumes interrupted work orders when it reports ready again.
+    ready = true;
+    factory.resumeInterrupted();
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    const resumed = wo.stations.find((station) => station.id === "build:csv2json")!;
+    expect(resumed.sessionId).toBe(build.sessionId);
+    expect(resumed.previousSessionIds).toBeUndefined();
+    const texts = factory.activity(created.id).map((item) => item.text ?? "");
+    expect(texts.some((text) => text.startsWith("Paused: lost the connection to Managed Copilot (Session disconnected"))).toBe(true);
+    expect(texts).toContain("Managed Copilot is back; resuming from the last checkpoint");
+  });
+
+  it("resumes a paused work order by itself when only its transport dropped", async () => {
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "json2csv") {
+        dropped = true;
+        throw new Error("CLI server exited with code 1\n[managed-copilot] Managed Copilot closed the connection: gateway shutting down (close code 1001)");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    expect(dropped).toBe(true);
+    expect(wo.stations.find((station) => station.id === "build:json2csv")!.previousSessionIds).toBeUndefined();
+    expect(factory.activity(created.id).some((item) => item.text?.includes("(Managed Copilot closed the connection: gateway shutting down (close code 1001))"))).toBe(true);
+  });
+
+  it("fails a work order that keeps losing its connection instead of pausing forever", async () => {
+    const dropping: Script = async (session, prompt, platform) => {
+      if (taskOf(platform, session).id === "csv2json") throw new Error("Session disconnected while waiting for a response");
+      await builder()(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 1 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id, 10_000);
+    expect(wo.status).toBe("failed");
+    expect(wo.error?.code).toBe("interrupted");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.status).toBe("failed");
+    expect(factory.activity(created.id).filter((item) => item.text?.startsWith("Paused:")).length).toBe(5);
   });
 
   it("leaves files a builder deleted in a later round out of the release", async () => {

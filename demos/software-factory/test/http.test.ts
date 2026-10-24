@@ -24,9 +24,10 @@ let base: string;
 let hub: EventHub;
 let factory: Factory;
 let ready = true;
+let reconnecting = false;
 
 const status = (): PlatformStatus => ({
-  state: ready ? "connected" : "unavailable",
+  state: ready ? "connected" : reconnecting ? "reconnecting" : "unavailable",
   ...(ready ? {} : { message: "The Managed Copilot platform isn't running.", hint: "Start it with `aspire run`." }),
   environments: [],
   missingEnvironments: [],
@@ -107,6 +108,17 @@ describe("factory HTTP API", () => {
     ready = true;
     expect(response.status).toBe(503);
     expect(response.body).toEqual({ error: { code: "platform_unavailable", message: "The Managed Copilot platform isn't running." } });
+  });
+
+  it("reports a platform that is reconnecting in /api/health", async () => {
+    ready = false;
+    reconnecting = true;
+    try {
+      expect((await json<{ status: string; platform: string }>("/api/health")).body).toEqual({ status: "ok", platform: "reconnecting" });
+    } finally {
+      ready = true;
+      reconnecting = false;
+    }
   });
 
   it("runs a work order and serves its activity, artifacts, and release", async () => {
