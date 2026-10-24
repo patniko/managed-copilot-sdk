@@ -57,9 +57,9 @@ const session = await managed.createSession({ environment: "chat", model: "claud
    CLI, and pay for model calls, including work that continues while you're away.
 6. **Every session is attachable.** Open any running session in Copilot CLI, and in the GitHub Copilot app where
    supported, and work alongside your app.
-7. **Secure by default.** Only the platform's gateway is reachable, over HTTPS and WSS. Every request is
-   authenticated, sessions belong to the GitHub user who created them, nothing leaves a sandbox unless its network
-   setting allows it, and secrets stay in vaults outside the sandbox.
+7. **Secure by default, easy to lock down.** Only the platform's gateway is reachable, over HTTPS and WSS. Every
+   request is authenticated, sessions belong to the GitHub user who created them, and secrets stay in vaults outside
+   the sandbox. Outbound network access is on, as in OpenAI's API, and `network: false` turns it off.
 
 ## Environment types
 
@@ -89,13 +89,12 @@ await addManagedCopilot(builder, "copilot", {
       type: "shared",
       customizations: "./copilot/chat", // agents, skills, and instructions (section 10)
       models: ["claude-sonnet-5", "claude-haiku-5.5"],
-      network: { access: "restricted", allowedDomains: ["learn.microsoft.com"] },
+      network: ["learn.microsoft.com"], // only this host
     },
     coder: {
       type: "isolated",
       image: "./sandboxes/coder",
       size: "medium",
-      network: { access: "enabled" },
       warm: 2,
     },
     helper: { type: "promotable", promoteTo: "coder" },
@@ -116,8 +115,8 @@ aspire deploy   # the same model in Azure Container Apps
 - The platform enforces every setting in an environment. Code can add setup and narrow settings, but never broaden
   them.
 - **`models`** lists the models its sessions may use.
-- **`network`** controls outbound access, and is `disabled` unless you say otherwise
-  ([section 7](#7-control-network-access)).
+- **`network`** controls outbound access. It's on unless you turn it off with `network: false`, here or for every
+  environment at once ([section 7](#7-control-network-access)).
 - **`size`** is `small` (1 vCPU, 2 GiB), `medium` (2 vCPU, 4 GiB), or `large` (4 vCPU, 8 GiB).
 - **`warm`** keeps that many sandboxes started and waiting, so new sessions skip the cold start. Warm sandboxes cost
   money while they wait.
@@ -264,8 +263,8 @@ const session = await client.createSession({ model: "claude-sonnet-5", onPermiss
 
 - Setup runs in order before the agent starts: packages, then files, then setup commands. File paths are relative to
   `/workspace`. If a command fails, `createSession` throws with its output.
-- Packages install from their public registries even when the network setting is `disabled`. Setup commands follow
-  the network setting.
+- Packages install from their public registries even when network access is off. Setup commands follow the network
+  setting.
 - Warm sandboxes have already run the environment's own setup. A client's additions run when its session claims one,
   so keep them small and bake anything slow into the image.
 - `env` values are visible to everything in the sandbox. Put secrets in a vault
@@ -292,23 +291,43 @@ await artifacts.download("revenue.png", "./revenue.png");
 
 ## 7. Control network access
 
+Network access is on by default, as in OpenAI's API. Turning it off, or limiting it to a few hosts, takes one line:
+
 ```ts
-coder: {
-  type: "isolated",
-  network: { access: "restricted", allowedDomains: ["github.com", "*.githubusercontent.com", "pypi.org"] },
-},
+coder: { type: "isolated", network: false },                                    // nothing leaves the sandbox
+docs:  { type: "isolated", network: ["github.com", "*.githubusercontent.com"] }, // only these hosts
 ```
 
-| `access` | Behavior |
+Set it once at the top level to change the default for every environment. An environment that needs access says so:
+
+```ts
+await addManagedCopilot(builder, "copilot", {
+  network: false, // off for every environment below, unless it says otherwise
+  environments: {
+    chat: { type: "shared" },                          // off
+    coder: { type: "isolated", network: ["pypi.org"] }, // only PyPI
+  },
+});
+```
+
+Code can turn it off for the sessions one client creates:
+
+```ts
+const client = await managed.client({ name: "coder", network: false });
+```
+
+| Setting | Behavior |
 | --- | --- |
-| `disabled` (default) | No outbound access |
-| `restricted` | Only the hosts in `allowedDomains`; `*.example.com` matches any subdomain |
-| `enabled` | Any host |
+| Omitted, or `true` | Any host (the default) |
+| A list of hosts | Only those hosts; `*.example.com` matches any subdomain |
+| `false` | No outbound access |
+
+OpenAI's longer form works too: `{ access: "enabled" | "restricted" | "disabled", allowedDomains }`.
 
 - The setting covers everything the agent runs: shell commands, web fetches, and the MCP servers it starts. Model
   calls and platform traffic aren't affected.
-- A client can narrow its sessions' access, for example with
-  `managed.client({ name: "coder", network: { access: "disabled" } })`, but never broaden it.
+- Even with access on, the agent can't reach the platform's internal network or cloud metadata endpoints.
+- Code can narrow access but never broaden it.
 - A blocked request fails immediately with an error the agent can read, and the platform records it with the
   session.
 
@@ -333,7 +352,7 @@ await addManagedCopilot(builder, "copilot", {
     docs: [{ mcpServer: "https://mcp.contoso.example/docs", value: docsToken }],
   },
   environments: {
-    coder: { type: "isolated", vaults: ["payments"], network: { access: "restricted", allowedDomains: ["api.stripe.com"] } },
+    coder: { type: "isolated", vaults: ["payments"], network: ["api.stripe.com"] },
     chat: { type: "shared", vaults: ["docs"] },
   },
 });
@@ -651,7 +670,7 @@ Reviewed on 2026-10-23 against OpenAI's documentation. Their API is in beta and 
 The concepts match: an agent configuration, an environment, and a durable session that you continue and steer. An
 `isolated` environment behaves like an OpenAI-hosted sandbox, with a fresh workspace for each session. The first
 comparison found six gaps; each now has a design: sandbox setup ([section 5](#5-set-up-the-sandbox)), artifacts
-([section 6](#6-get-results-out)), network modes ([section 7](#7-control-network-access)), vaults
+([section 6](#6-get-results-out)), network control ([section 7](#7-control-network-access)), vaults
 ([section 8](#8-keep-secrets-out-of-the-sandbox)), work while your app is offline
 ([section 12](#12-keep-working-while-your-app-is-offline)), and schedules ([section 13](#13-run-on-a-schedule)). The
 differences that remain are deliberate: the agent loop runs in your deployment instead of at OpenAI, you program it
@@ -669,7 +688,7 @@ through the Copilot SDK instead of REST calls, and identity and billing go throu
 | Reusable environment settings | Environment templates | Named environments in the AppHost |
 | Sandbox setup | `packages`, `files`, `setup_commands`, and `env` | The same fields, on environments and clients |
 | Fast starts | Pre-warm a sandbox before creating its session | `warm: n` ready sandboxes per environment |
-| Network control | `enabled`, `disabled`, or `restricted` to at most 100 exact host names | The same three modes; `restricted` also accepts wildcard subdomains |
+| Network control | `enabled` (the default), `disabled`, or `restricted` to at most 100 exact host names | The same modes and default, plus one-line forms (`network: false`, or a list of hosts) and wildcard subdomains |
 | Output files | Files under `/workspace/outputs` published as artifacts that outlive the sandbox | The same convention, through `managed.artifacts(session)` |
 | Secrets | Vaults: placeholders that a proxy swaps for sandbox requests, plus MCP server credentials | Vaults with the same two kinds of credential, declared in the AppHost or created in code |
 | Your functions while you're away | `required_actions` wait for a `tool_result`, and webhooks notify you | Waiting requests, answered by resuming, a signed webhook, or polling |
@@ -688,7 +707,6 @@ through the Copilot SDK instead of REST calls, and identity and billing go throu
 | Attaching a person | Streaming and webhooks; no CLI attach documented | Copilot CLI, and the GitHub Copilot app where supported |
 | Identity and billing | API keys with scopes; model usage at API rates plus container rates | GitHub identity; Copilot entitlement or Foundry, with compute on your Azure bill |
 | Models | OpenAI models | Any model your Copilot entitlement offers, or your Foundry deployments |
-| Default network access | `enabled` | `disabled` |
 | Idle sandboxes | Deleted after an hour without activity, which isn't configurable; published artifacts remain | Stopped with their files kept, and woken when the session resumes; published artifacts remain |
 
 Sources: OpenAI's Agents API
@@ -717,27 +735,29 @@ prototype), **Later** (outside the first delivery).
 | 3 | Where environments come from | Declared in the AppHost and picked by name; inline `{ type, size }` only within the AppHost's `inline` list | Decided |
 | 4 | Reusable agent configurations | Copilot custom agents (`.agent.md`) deployed with an environment, selected with the SDK's `agent` option | Decided |
 | 5 | Identity and billing | GitHub identity end to end; sessions use the caller's Copilot entitlement; Azure AI Foundry optional per environment | Decided |
-| 6 | Names | `@managed-copilot/sdk`, `@managed-copilot/aspire`, `ManagedCopilot`, "sandbox" | Proposed |
-| 7 | Languages | TypeScript first; .NET and Python later | Proposed |
-| 8 | Skills and instructions | Ship in the environment's `customizations` folder beside its agents | Proposed |
-| 9 | Environment settings | Enforced by the platform; code can add setup and narrow settings, never broaden them | Proposed |
-| 10 | Session ownership | Only the creating GitHub user can list, resume, attach to, or delete a session | Proposed |
-| 11 | Promotion | The agent's `promote_to_sandbox` tool, approved through `onPermissionRequest`, plus `managed.promote()`; one way | Proposed |
-| 12 | Sizes and warm pools | `small`, `medium`, and `large`; `warm: n` per environment, default 0 | Proposed |
-| 13 | Idle and retention | Idle sandboxes stop and keep their files; deleting a session deletes its sandbox and artifacts; retention period not yet set | Proposed |
-| 14 | Sandbox setup | `packages`, `files`, `setupCommands`, and `env` on environments and clients; packages install even when the network is `disabled` | Proposed |
-| 15 | Files and artifacts | Live files through `managed.files(session)`; `/workspace/outputs` published as versioned artifacts at the end of each turn | Proposed |
-| 16 | Network modes | `disabled` by default, `restricted` with wildcard subdomains, or `enabled`; covers everything the agent runs | Proposed |
-| 17 | Vaults | AppHost and per-user vaults; sandbox placeholders swapped by the egress proxy; MCP server credentials | Proposed |
-| 18 | Work without a connection | Waiting requests answered by resuming, signed webhooks with session-scoped tokens, or polling; `actionTimeout` defaults to 24 hours | Proposed |
-| 19 | Schedules | Created in code or the AppHost; cron and time zone; a new or continued session per run; agent scheduling tools | Proposed |
-| 20 | GitHub Copilot app | Environments register with GitHub so the owner's sessions appear in the app | To validate |
-| 21 | Egress proxy | One proxy enforces network modes and swaps vault placeholders for all outbound traffic, including HTTPS | To validate |
-| 22 | GitHub tokens in sandboxes | Route model calls through the gateway so the caller's token never enters a sandbox | To validate |
-| 23 | Background identity | A refreshable GitHub credential per user, from a GitHub App authorization, for schedules and long-running work | To validate |
-| 24 | Suspended waits | A sandbox stops while its session waits for an answer, and wakes and continues the turn when answered | To validate |
-| 25 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later |
-| 26 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later |
+| 6 | Background sign-in | Work that continues while you're away runs as you, after a one-time `npx managed-copilot login` | Decided |
+| 7 | Network default | On, as in OpenAI's API; `network: false` turns it off for one environment, a whole deployment, or one client's sessions | Decided |
+| 8 | Names | `@managed-copilot/sdk`, `@managed-copilot/aspire`, `ManagedCopilot`, "sandbox" | Proposed |
+| 9 | Languages | TypeScript first; .NET and Python later | Proposed |
+| 10 | Skills and instructions | Ship in the environment's `customizations` folder beside its agents | Proposed |
+| 11 | Environment settings | Enforced by the platform; code can add setup and narrow settings, never broaden them | Proposed |
+| 12 | Session ownership | Only the creating GitHub user can list, resume, attach to, or delete a session | Proposed |
+| 13 | Promotion | The agent's `promote_to_sandbox` tool, approved through `onPermissionRequest`, plus `managed.promote()`; one way | Proposed |
+| 14 | Sizes and warm pools | `small`, `medium`, and `large`; `warm: n` per environment, default 0 | Proposed |
+| 15 | Idle and retention | Idle sandboxes stop and keep their files; deleting a session deletes its sandbox and artifacts; retention period not yet set | Proposed |
+| 16 | Sandbox setup | `packages`, `files`, `setupCommands`, and `env` on environments and clients; packages install even when network access is off | Proposed |
+| 17 | Files and artifacts | Live files through `managed.files(session)`; `/workspace/outputs` published as versioned artifacts at the end of each turn | Proposed |
+| 18 | Network rules | A list of hosts with wildcard subdomains, or OpenAI's `{ access, allowedDomains }` form; covers everything the agent runs; internal and cloud metadata addresses are always blocked | Proposed |
+| 19 | Vaults | AppHost and per-user vaults; sandbox placeholders swapped by the egress proxy; MCP server credentials | Proposed |
+| 20 | Work without a connection | Waiting requests answered by resuming, signed webhooks with session-scoped tokens, or polling; `actionTimeout` defaults to 24 hours | Proposed |
+| 21 | Schedules | Created in code or the AppHost; cron and time zone; a new or continued session per run; agent scheduling tools | Proposed |
+| 22 | GitHub Copilot app | Environments register with GitHub so the owner's sessions appear in the app | To validate |
+| 23 | Egress proxy | One proxy enforces network rules and swaps vault placeholders for all outbound traffic, including HTTPS | To validate |
+| 24 | GitHub tokens in sandboxes | Route model calls through the gateway so the caller's token never enters a sandbox | To validate |
+| 25 | Background credential | Behind `npx managed-copilot login`: a refreshable GitHub credential per user, from a GitHub App authorization, stored encrypted | To validate |
+| 26 | Suspended waits | A sandbox stops while its session waits for an answer, and wakes and continues the turn when answered | To validate |
+| 27 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later |
+| 28 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later |
 
 ## What these choices ask of the platform
 
@@ -756,7 +776,7 @@ These notes feed the next spec, the architecture. They don't change the API abov
 - **Empty-mode defaults.** In `mode: "empty"`, the SDK requires a `baseDirectory` or `sessionFs`, and an
   `availableTools` list on every session. The platform supplies both from the environment's settings.
 - **An egress proxy.** All outbound traffic from sandboxes and the shared runtime goes through it. It enforces the
-  network mode and swaps vault placeholders. Swapping a header inside HTTPS means terminating TLS with a platform
+  network setting, always blocks internal and cloud metadata addresses, and swaps vault placeholders. Swapping a header inside HTTPS means terminating TLS with a platform
   certificate authority that the sandbox base image trusts; traffic to hosts without a credential can pass through
   untouched.
 - **Waiting requests and webhooks.** The gateway watches each session's `external_tool.requested` and
@@ -767,7 +787,8 @@ These notes feed the next spec, the architecture. They don't change the API abov
   when deployed, and a local volume under `aspire run`.
 - **Schedules.** Durable timers in the platform's database, with an idempotent ID per run so a retry never starts two
   sessions.
-- **Background identity.** A GitHub App authorization with refresh tokens, stored in Key Vault.
+- **Background credential.** Behind `npx managed-copilot login`: a GitHub App authorization with refresh tokens,
+  stored in Key Vault.
 
 Evidence so far, collected on 2026-10-23 on Windows ARM64:
 
