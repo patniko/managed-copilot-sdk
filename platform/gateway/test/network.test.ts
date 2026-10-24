@@ -204,7 +204,7 @@ describe("network module", () => {
         expect(policy().session("s-coder")?.vaults).toEqual(["payments", jira.id]);
       });
 
-      it("only lets callers narrow, and keeps network: false through promotion", () => {
+      it("only lets callers narrow, and keeps network: false through promotion", async () => {
         expect(policy().bindSession({ sessionId: "s-narrow", owner: ALICE.id, environment: "coder", type: "isolated", requested: ["github.com", "evil.com"], vaults: undefined })).toEqual({
           access: "restricted",
           allowedDomains: ["github.com"],
@@ -213,7 +213,8 @@ describe("network module", () => {
         expect(policy().bindSession({ sessionId: "s-inline", owner: ALICE.id, environment: "inline-isolated", type: "isolated", requested: undefined, vaults: undefined }).access).toBe("enabled");
         expect(policy().bindSession({ sessionId: "s-helper", owner: ALICE.id, environment: "helper", type: "promotable", requested: undefined, vaults: undefined }).access).toBe("enabled");
         expect(policy().promoteSession("s-helper", "offline").access).toBe("disabled");
-        expect(policy().session("s-helper")).toMatchObject({ environment: "offline", type: "isolated", policy: { access: "disabled" } });
+        expect(policy().session("s-helper")).toMatchObject({ environment: "helper", promotedTo: "offline", type: "isolated", policy: { access: "disabled" } });
+        expect((await call("GET", "/v1/sessions/s-helper/network", ALICE)).body).toMatchObject({ sessionId: "s-helper", environment: "helper", promotedTo: "offline", policy: { access: "disabled" } });
       });
 
       it("rejects vaults the caller cannot use", () => {
@@ -397,7 +398,42 @@ describe("policy service across deployment changes", () => {
     const tightened = start(db, { environments: { helper: { type: "promotable", promoteTo: "worker", network: false }, worker } });
     expect(tightened.session("s-promote")?.policy.access).toBe("disabled");
     expect(tightened.promoteSession("s-promote", "worker").access).toBe("disabled");
-    expect(tightened.session("s-promote")).toMatchObject({ environment: "worker", type: "isolated", policy: { access: "disabled" } });
+    expect(tightened.session("s-promote")).toMatchObject({ environment: "helper", promotedTo: "worker", type: "isolated", policy: { access: "disabled" } });
+  });
+
+  it("keeps the source environment's vault grants and ceiling through promotion, narrowed by the target's", async () => {
+    const db = database();
+    const config = (helper: Record<string, unknown>, worker: Record<string, unknown> | undefined) => ({
+      environments: {
+        helper: { type: "promotable", promoteTo: worker ? "worker" : "elsewhere", vaults: ["payments"], network: ["api.stripe.com", "pypi.org", "files.pythonhosted.org"], ...helper },
+        ...(worker ? { worker: { type: "isolated", network: ["api.stripe.com", "pypi.org", "github.com"], ...worker } } : {}),
+        elsewhere: { type: "isolated" },
+      },
+    });
+    const policy = start(db, config({}, {}));
+    policy.bindSession({ sessionId: "s-carry", owner: 1, environment: "helper", type: "promotable", requested: undefined, vaults: undefined });
+    // The target does not repeat the source's vault, and its ceiling is different: neither may broaden the session.
+    expect(policy.promoteSession("s-carry", "worker")).toEqual({ access: "restricted", allowedDomains: ["api.stripe.com", "pypi.org"] });
+    expect(policy.session("s-carry")).toMatchObject({ environment: "helper", promotedTo: "worker", type: "isolated", vaults: ["payments"] });
+    const sandbox = await policy.registerSandbox({ sandboxId: "sbx_carry", sessionId: "s-carry" });
+    expect(sandbox.env.STRIPE_API_KEY).toMatch(/^mcv_placeholder_[0-9a-f]{40}$/);
+    const binding = policy.registrations()[0]!.credentials[0]!;
+    const use = { sandboxId: "sbx_carry", credentialId: binding.id, placeholder: binding.placeholder, host: "api.stripe.com", port: 443, header: "authorization" };
+    expect(policy.resolveSecret(use)).toBe("sk_test_stripe_123");
+    policy.commitPromotion("s-carry");
+
+    // Tightening the source after promotion still applies, and so does tightening the target.
+    expect(start(db, config({ network: ["api.stripe.com"] }, {})).session("s-carry")?.policy).toEqual({ access: "restricted", allowedDomains: ["api.stripe.com"] });
+    expect(start(db, config({}, { network: false })).session("s-carry")?.policy.access).toBe("disabled");
+    expect(start(db, config({}, undefined)).session("s-carry")?.policy.access).toBe("disabled");
+    // The source keeps owning the vault grant: removing it there revokes the credential.
+    const revoked = start(db, config({ vaults: [] }, {}));
+    expect(revoked.registrations()[0]!.credentials).toEqual([]);
+    expect(() => revoked.resolveSecret(use)).toThrow(/revoked/);
+    // Granting a vault only on the target gives the promoted session nothing new.
+    const targetOnly = start(db, config({ vaults: [] }, { vaults: ["payments"] }));
+    expect(targetOnly.session("s-carry")?.vaults).toEqual([]);
+    expect(start(db, config({}, {})).resolveSecret(use)).toBe("sk_test_stripe_123");
   });
 
   it("reverts an uncommitted promotion exactly, across restarts, and keeps a committed one", async () => {
@@ -417,6 +453,7 @@ describe("policy service across deployment changes", () => {
     const restarted = start(db, config, pushed);
     expect(restarted.revertPromotion("s-roll")).toEqual(source);
     expect(restarted.session("s-roll")).toMatchObject({ environment: "helper", type: "promotable", policy: source });
+    expect(restarted.session("s-roll")?.promotedTo).toBeUndefined();
     // The candidate sandbox left behind by the rollback gets no egress, and no new sandbox can register.
     expect(pushed.at(-1)).toMatchObject({ sandboxId: "sbx_candidate", policy: { access: "disabled" }, credentials: [] });
     await expect(restarted.registerSandbox({ sandboxId: "sbx_other", sessionId: "s-roll" })).rejects.toThrow(/shared session/);
@@ -425,7 +462,7 @@ describe("policy service across deployment changes", () => {
     restarted.promoteSession("s-roll", "worker");
     restarted.commitPromotion("s-roll");
     expect(restarted.revertPromotion("s-roll")).toBeUndefined();
-    expect(restarted.session("s-roll")).toMatchObject({ environment: "worker", type: "isolated", policy: { allowedDomains: ["pypi.org"] } });
+    expect(restarted.session("s-roll")).toMatchObject({ environment: "helper", promotedTo: "worker", type: "isolated", policy: { allowedDomains: ["pypi.org"] } });
   });
 
   it("refuses vault secrets to a reverted promotion's candidate sandbox", async () => {

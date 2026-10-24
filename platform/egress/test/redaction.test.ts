@@ -46,4 +46,57 @@ describe("response redaction", () => {
   it("releases a held tail when the body ends", async () => {
     expect((await run([SECRET, "another-secret"], ["trailing sk_test"])).final).toBe("trailing sk_test");
   });
+
+  it("never exposes the rest of a secret that begins with another secret", async () => {
+    const short = "tok_12345";
+    const long = "tok_12345_extended";
+    const body = `x ${long} y ${short} z ${long}`;
+    for (const secrets of [
+      [short, long],
+      [long, short],
+    ]) {
+      for (let split = 1; split < body.length; split++) {
+        const { afterEach, final } = await run(secrets, [body.slice(0, split), body.slice(split)]);
+        expect(final, `split at ${split}`).toBe("x [redacted] y [redacted] z [redacted]");
+        expect(afterEach[0], `split at ${split}`).not.toMatch(/_ext|_12345/);
+      }
+    }
+  });
+
+  it("redacts overlapping and self-similar secrets whole, and never rescans its own marker", async () => {
+    const cases: Array<readonly [readonly string[], string, string]> = [
+      [["aaaa_secret", "secret_bbbb"], "<aaaa_secret_bbbb>", "<[redacted]>"],
+      [["aba_aba"], "<aba_aba_aba>", "<[redacted]>"],
+      [["ted]1234"], "ted]12341234", "[redacted]1234"],
+      [["secret_one", "ted]_two"], "secret_one_two", "[redacted]_two"],
+    ];
+    for (const [secrets, body, expected] of cases) {
+      for (let split = 0; split <= body.length; split++) {
+        expect((await run(secrets, [body.slice(0, split), body.slice(split)])).final, `${body} split at ${split}`).toBe(expected);
+      }
+    }
+  });
+
+  it("gives the same result however a body is chunked, and never lets a secret through", async () => {
+    let seed = 20261024;
+    const random = (n: number) => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed % n;
+    };
+    const pick = () => "ab_"[random(3)]!;
+    for (let round = 0; round < 400; round++) {
+      const secrets = Array.from({ length: 1 + random(3) }, () => Array.from({ length: 4 + random(5) }, pick).join(""));
+      const body = Array.from({ length: 10 + random(30) }, () => (random(3) === 0 ? secrets[random(secrets.length)]! : pick())).join("");
+      const chunks: string[] = [];
+      for (let start = 0; start < body.length; ) {
+        const size = 1 + random(6);
+        chunks.push(body.slice(start, start + size));
+        start += size;
+      }
+      const whole = (await run(secrets, [body])).final;
+      const { afterEach, final } = await run(secrets, chunks);
+      expect(final, JSON.stringify({ secrets, chunks })).toBe(whole);
+      for (const secret of secrets) for (const seen of [...afterEach, final]) expect(seen.includes(secret), JSON.stringify({ secrets, chunks })).toBe(false);
+    }
+  });
 });
