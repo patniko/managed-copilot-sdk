@@ -581,13 +581,11 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   again for re-approval, and a removed one is deleted. Declarations without `runAs` are logged as unrunnable.
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
-- **Known limitations, pending core (fail closed).** Durable passes the expected incarnation to `sessions.send` and
-  `sessions.request` and reads `SessionRecord.incarnation`, `create(...).incarnation`, `authenticate(token, {
-  background })`, and `auth.forgetCredential`, all additive and optional. Until core's builds with them are on
-  `main`: durable rechecks the incarnation synchronously right before each send or answer, but a session deleted and
-  recreated under the same ID while core itself awaits (for example restoring its placement) before writing could
-  still receive the prompt or answer; incarnations are the session's creation time; a background verification may be
-  recorded as the account's live credential, and logout cannot make core drop a token it holds.
+- **Incarnations and credentials with core.** Durable passes the expected incarnation to `sessions.send` and
+  `sessions.request`, and core checks it again in the step that writes upstream, so a prompt or answer meant for a
+  deleted session never reaches a later session that reuses its ID. Background verifications use `authenticate(token,
+  { background: true })` and are never recorded as the account's live credential; logout, invalidation, and a new
+  sign-in call `auth.forgetCredential`, so core drops the removed token.
 
 ### Promotion (as built)
 
