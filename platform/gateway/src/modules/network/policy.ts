@@ -364,15 +364,29 @@ export class PolicyService {
     return out;
   }
 
-  /** Vault-backed headers for a remote MCP server. Shared placement goes through the MCP adapter instead. */
+  /**
+   * Vault-backed headers for a remote MCP server, merged by admission into the server's configuration. Shared
+   * placement returns nothing: the MCP adapter attaches the credential at request time. Sandbox placement returns
+   * only the session's placeholder (`Bearer <placeholder>` in `authorization`, or the bare placeholder in the header
+   * the vault names). The egress proxy substitutes it on that session's HTTPS requests to the server's exact host on
+   * port 443. Returns undefined without a live credential for exactly this URL, and throws when one exists but the
+   * proxy could never substitute it, so the session fails visibly instead of sending a dead placeholder.
+   */
   mcpHeaders(sessionId: string, url: string, placement: Placement): Record<string, string> | undefined {
     const session = this.session(sessionId);
     if (!session) return undefined;
     const target = mcpKey(url);
     for (const { row, meta } of this.#credentials(session)) {
       if (meta.kind !== "mcp" || mcpKey(meta.mcpServer) !== target) continue;
-      if (placement === "shared") return undefined;
-      return { [meta.header]: meta.bearer ? `Bearer ${row.placeholder}` : row.placeholder };
+      // Only isolated sessions' sandboxes are registered with credentials (see #registration).
+      if (placement === "shared" || session.type !== "isolated") return undefined;
+      if (!mcpDestination(meta.mcpServer)) {
+        throw new ManagedCopilotError(
+          "capability_unavailable",
+          `The vault credential for MCP server ${meta.mcpServer} cannot be used from a sandbox: the egress proxy substitutes vault credentials only for host names on port 443`,
+        );
+      }
+      return { [meta.header]: meta.bearer ? ["Bearer", row.placeholder].join(" ") : row.placeholder };
     }
     return undefined;
   }
@@ -495,9 +509,8 @@ export class PolicyService {
       if (meta.kind === "env") {
         credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: meta.destinations, headers: meta.headers });
       } else {
-        const url = new URL(meta.mcpServer);
-        const host = normalizeDestinationHost(url.hostname)?.host;
-        if (host && (url.port === "" || url.port === "443")) credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: [{ host, port: 443 }], headers: [meta.header] });
+        const destination = mcpDestination(meta.mcpServer);
+        if (destination) credentials.push({ id: credential.id, placeholder: credential.placeholder, destinations: [destination], headers: [meta.header] });
       }
     }
     return {
@@ -549,10 +562,11 @@ export class PolicyService {
     if (!credential) throw deny("This vault credential was revoked or never belonged to this session.");
     const { vault, meta } = credential;
     const host = normalizeDestinationHost(request.host)?.host;
+    const mcp = meta.kind === "mcp" ? mcpDestination(meta.mcpServer) : undefined;
     const destinationOk =
       meta.kind === "env"
         ? meta.destinations.some((destination) => destination.host === host && destination.port === request.port) && meta.headers.includes(request.header)
-        : normalizeDestinationHost(new URL(meta.mcpServer).hostname)?.host === host && request.port === 443 && meta.header === request.header;
+        : mcp !== undefined && mcp.host === host && mcp.port === request.port && meta.header === request.header;
     if (!host || !destinationOk) throw deny(`This vault credential is not valid for ${request.header} on ${request.host}:${request.port}.`);
     if (!isHostAllowed(session.policy, host)) throw deny(`${host} is not allowed by this session's network policy.`);
     const value = this.#options.vaults.secret(vault.id, meta.key, session.ownerId);
@@ -654,4 +668,20 @@ export function mcpKey(url: string): string {
   } catch {
     return url;
   }
+}
+
+/**
+ * Where the egress proxy substitutes a sandbox's MCP vault credential: the server's exact host name on port 443. IP
+ * addresses and other ports have none (the proxy never terminates TLS for them).
+ */
+export function mcpDestination(mcpServer: string): { readonly host: string; readonly port: number } | undefined {
+  let url: URL;
+  try {
+    url = new URL(mcpServer);
+  } catch {
+    return undefined;
+  }
+  const destination = normalizeDestinationHost(url.hostname);
+  if (url.protocol !== "https:" || !destination || destination.ip || (url.port !== "" && url.port !== "443")) return undefined;
+  return { host: destination.host, port: 443 };
 }

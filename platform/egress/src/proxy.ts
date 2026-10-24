@@ -129,10 +129,13 @@ function isCertificateError(error: NodeJS.ErrnoException): boolean {
   return /CERT|SIGNATURE|ALTNAME|ISSUER|SELF_SIGNED/i.test(error.code ?? "");
 }
 
-/** Streams a body while replacing any secret value with `[redacted]`, including values split across chunks. */
-function redactingStream(secrets: readonly string[]): Transform {
+/**
+ * Streams a body while replacing any secret value with `[redacted]`, including values split across chunks. It holds
+ * back only a tail that could still grow into a secret, so streamed responses (server-sent events, MCP) are not
+ * delayed.
+ */
+export function redactingStream(secrets: readonly string[]): Transform {
   const needles = secrets.filter((secret) => secret.length >= 4).map((secret) => Buffer.from(secret, "utf8"));
-  const keep = Math.max(1, ...needles.map((needle) => needle.length)) - 1;
   const marker = Buffer.from("[redacted]");
   const replace = (data: Buffer): Buffer => {
     let out: Buffer = data;
@@ -150,17 +153,26 @@ function redactingStream(secrets: readonly string[]): Transform {
     }
     return out;
   };
+  /** Length of the longest suffix of `data` that is the beginning of a secret. */
+  const pending = (data: Buffer): number => {
+    let longest = 0;
+    for (const needle of needles) {
+      for (let length = Math.min(needle.length - 1, data.length); length > longest; length--) {
+        if (data.subarray(data.length - length).equals(needle.subarray(0, length))) {
+          longest = length;
+          break;
+        }
+      }
+    }
+    return longest;
+  };
   let carry: Buffer = Buffer.alloc(0);
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      const data = replace(Buffer.concat([carry, chunk]));
-      if (data.length > keep) {
-        carry = Buffer.from(data.subarray(data.length - keep));
-        callback(null, data.subarray(0, data.length - keep));
-      } else {
-        carry = data;
-        callback();
-      }
+      const data = replace(carry.length === 0 ? chunk : Buffer.concat([carry, chunk]));
+      const hold = pending(data);
+      carry = Buffer.from(data.subarray(data.length - hold));
+      callback(null, data.subarray(0, data.length - hold));
     },
     flush(callback) {
       callback(null, replace(carry));
