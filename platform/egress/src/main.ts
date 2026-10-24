@@ -4,7 +4,9 @@
  * EGRESS_GATEWAY_URL      Gateway base URL reachable from the container (required)
  * EGRESS_GATEWAY_KEY      Egress-scoped key for the gateway's internal API (required)
  * EGRESS_LISTEN           host:port to listen on (default 0.0.0.0:3128)
- * EGRESS_DATA_DIR         Where a generated CA is persisted (default /var/lib/managed-copilot-egress)
+ * EGRESS_DATA_DIR         Where a generated CA is persisted, as ca/cert.pem and ca/key.pem; first creation is atomic
+ *                         and exclusive, so proxies sharing the directory (NFS) agree on one CA
+ *                         (default /var/lib/managed-copilot-egress)
  * EGRESS_CA_CERT_FILE / EGRESS_CA_KEY_FILE   Operator-provided CA instead of a generated one
  * EGRESS_ALLOWED_PORTS    Destination ports workloads may use (default 80,443)
  * EGRESS_PRIVATE_HOSTS    Exact host names allowed to resolve to private addresses (default none)

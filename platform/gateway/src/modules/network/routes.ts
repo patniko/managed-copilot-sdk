@@ -32,6 +32,7 @@ export function registerNetworkRoutes(app: GatewayApp, options: { readonly polic
     const info: SessionNetworkInfo = {
       sessionId,
       ...(session.environment ? { environment: session.environment } : {}),
+      ...(session.promotedTo ? { promotedTo: session.promotedTo } : {}),
       policy: session.policy,
       vaults: session.vaults.flatMap((id) => {
         const vault = vaults.find(id);
