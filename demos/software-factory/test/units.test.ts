@@ -1,5 +1,7 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
+import { attachCommand, parseAttachUrl } from "../src/server/attach.js";
+import { loadConfig } from "../src/server/config.js";
 import { describeSessionError, parseTestSummary, StationActivityMapper, summarizeToolCall } from "../src/server/pipeline/activity.js";
 import { chooseModels } from "../src/server/models.js";
 import { FactoryStore } from "../src/server/store.js";
@@ -148,5 +150,18 @@ describe("zip writer", () => {
     }
     expect(names).toEqual(["csvjson/README.md", "csvjson/bin/cli.js"]);
     expect(crc32(Buffer.from("123456789"))).toBe(0xcbf43926);
+  });
+});
+
+describe("attach commands", () => {
+  it("adds --url only for a plain deployment URL", () => {
+    expect(attachCommand("sess_1")).toBe("npx managed-copilot attach sess_1");
+    expect(parseAttachUrl(" https://copilot.example.azurecontainerapps.io/ ")).toBe("https://copilot.example.azurecontainerapps.io");
+    expect(attachCommand("sess_1", parseAttachUrl("http://localhost:7410"))).toBe("npx managed-copilot attach sess_1 --url http://localhost:7410");
+    expect(loadConfig({ FACTORY_ATTACH_URL: "https://gw.example.com:8443/copilot" }).attachUrl).toBe("https://gw.example.com:8443/copilot");
+    for (const unsafe of ["", "ftp://gw.example.com", "https://gw.example.com & calc", "https://gw.example.com/?a=1", "https://user@gw.example.com", 'https://gw"x']) {
+      expect(parseAttachUrl(unsafe), unsafe).toBeUndefined();
+    }
+    expect(loadConfig({ FACTORY_ATTACH_URL: "https://gw.example.com|calc" }).attachUrl).toBeUndefined();
   });
 });

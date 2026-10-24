@@ -121,12 +121,14 @@ environments.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `7480` | HTTP port for the floor and API |
+| `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `FACTORY_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
 | `FACTORY_MODEL_PLANNER` / `_BUILDER` / `_REVIEWER` / `_RELEASE` | first available preference | Override a station's model |
 | `FACTORY_MAX_SANDBOXES` | `4` | Sandboxes the factory runs at once |
 | `FACTORY_BUILD_TIMEOUT_MINUTES` and similar | 5 to 20 | Turn timeouts per station |
 | `FACTORY_DATA_DIR` | `.data` | The factory's SQLite store |
 | `FACTORY_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
+| `FACTORY_ATTACH_URL` | none | Gateway URL added to "Open in Copilot CLI" commands (`--url`) when users reach the platform at another address, as in a cloud deployment |
 
 The default models are Claude Haiku for planning, Claude Sonnet for building and release, and a GPT model for review,
 chosen from what your Copilot entitlement offers (`client.listModels()`).
