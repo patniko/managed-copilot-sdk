@@ -87,6 +87,11 @@ describe("core router with a stock-protocol runtime", () => {
     // Host paths never reach the client.
     const start = await client.waitForEvent("session.start");
     expect(start["data"]).not.toHaveProperty("context");
+    const info = await client.waitForEvent("session.info");
+    expect(info["data"]).toMatchObject({ message: "Working in /workspace" });
+    const history = await client.request<{ events: Record<string, unknown>[] }>("session.getMessages", { sessionId });
+    expect(JSON.stringify(history)).not.toContain(gateway.dataDir.replace(/\\/g, "\\\\"));
+    expect(JSON.stringify(history)).toContain("Working in /workspace");
   });
 
   it("rejects shell, file, local MCP, hooks, and nested custom-agent capabilities in shared placement", async () => {
@@ -184,6 +189,68 @@ describe("core router with a stock-protocol runtime", () => {
     controller.abort();
     // The runtime observed the relayed $/cancelRequest and answered the original request as cancelled.
     await expect(waiting).rejects.toMatchObject({ code: -32800, message: "Request cancelled" });
+  });
+
+  it("rejects host-path attachments and platform model headers in shared sends", async () => {
+    const client = await connect(ALICE);
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    for (const attachment of [{ type: "file", path: "C:\\Windows\\win.ini" }, { type: "directory", path: "/etc" }, { type: "selection", filePath: "/etc/passwd", displayName: "x" }]) {
+      await expect(client.request("session.send", { sessionId, prompt: "read it", attachments: [attachment] }), attachment.type).rejects.toMatchObject({ data: { code: "policy_violation" } });
+    }
+    await expect(client.request("session.send", { sessionId, prompt: "x", requestHeaders: { Authorization: "Bearer other" } })).rejects.toMatchObject({ data: { code: "policy_violation" } });
+    await expect(client.request("session.send", { sessionId, prompt: "x", agentMode: "shell" })).rejects.toMatchObject({ data: { code: "policy_violation" } });
+    const inline = await client.request<{ messageId: string }>("session.send", { sessionId, prompt: "inline", attachments: [{ type: "blob", data: "aGk=", mimeType: "text/plain" }] });
+    expect(inline.messageId).toBeDefined();
+    expect(runtime.calls("session.send").some((call) => JSON.stringify(call.params).includes("win.ini"))).toBe(false);
+  });
+
+  it("keeps every attached client's tools registered when another client resumes", async () => {
+    const owner = await connect(ALICE);
+    const sessionId = crypto.randomUUID();
+    await owner.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true, hooks: true });
+    const observer = await connect(ALICE);
+    await observer.request("session.resume", { sessionId, tools: [{ name: "list_orders" }] });
+    const resumed = runtime.calls("session.resume").filter((call) => call.params["sessionId"] === sessionId).at(-1)!;
+    expect((resumed.params["tools"] as { name: string }[]).map((tool) => tool.name).sort()).toEqual(["list_orders", "lookup_order"]);
+    expect(resumed.params).toMatchObject({ requestPermission: true, hooks: true });
+    // The owner's tool still reaches the owner.
+    owner.answer = () => ({});
+    await owner.request("session.send", { sessionId, prompt: "tool:lookup_order" });
+    const requested = await owner.waitForEvent("external_tool.requested");
+    await owner.request("session.tools.handlePendingToolCall", { sessionId, requestId: (requested["data"] as Record<string, unknown>)["requestId"], result: "still mine" });
+    expect((await owner.waitForEvent("assistant.message"))["data"]).toMatchObject({ content: "tool said: still mine" });
+    expect(observer.events("external_tool.requested")).toHaveLength(1);
+  });
+
+  it("serializes concurrent creates of the same session ID", async () => {
+    const sessionId = crypto.randomUUID();
+    const sessions = gateway.gateway.app.service("sessions");
+    const principal = await gateway.gateway.app.service("auth").authenticate(ALICE);
+    const results = await Promise.all([sessions.create(principal, { sessionId, environment: "chat" }), sessions.create(principal, { sessionId, environment: "chat" })]);
+    expect(results.map((result) => result.created).sort()).toEqual([false, true]);
+    expect(runtime.calls("session.create").filter((call) => call.params["sessionId"] === sessionId)).toHaveLength(1);
+    const intruder = await gateway.gateway.app.service("auth").authenticate(MALLORY);
+    await expect(sessions.create(intruder, { sessionId, environment: "chat" })).rejects.toMatchObject({ code: "conflict" });
+  });
+
+  it("replays more than one page of missed platform events", async () => {
+    const events = gateway.gateway.app.service("events");
+    const first = events.emit("session.idle", { ownerId: 2002, data: { n: 0 } });
+    for (let n = 1; n <= 600; n++) events.emit("session.idle", { ownerId: 2002, data: { n } });
+    const controller = new AbortController();
+    const response = await fetch(`${gateway.url}/v1/events?types=session.idle`, { headers: { authorization: `Bearer ${MALLORY}`, "last-event-id": first.id }, signal: controller.signal });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    while ((text.match(/^id: /gm)?.length ?? 0) < 600) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+    controller.abort();
+    expect(text.match(/^id: /gm)?.length).toBe(600);
+    expect(text).toContain('"n":600');
   });
 
   it("scopes sessions to their owner", async () => {

@@ -14,6 +14,7 @@ import {
   type SessionInfo,
 } from "@managed-copilot/protocol";
 import type { ManagedState } from "../connection.js";
+import { HttpClient } from "../http.js";
 import type { EnvironmentSelector, ManagedClientOptions, ManagedResumeConfig, ManagedSessionConfig } from "../types.js";
 
 const BRIDGE_PATH = fileURLToPath(new URL("../bridge.js", import.meta.url));
@@ -121,13 +122,23 @@ function cacheKey(request: EnvironmentRequest, token: string): string {
   return `${createHash("sha256").update(token).digest("base64url").slice(0, 16)}:${JSON.stringify(request)}`;
 }
 
+/** The REST client acting as a given GitHub identity. */
+function httpForToken(ctx: ManagedState, token: string): HttpClient {
+  let client = ctx.httpClients.get(token);
+  if (!client) {
+    client = new HttpClient(ctx.url, token);
+    ctx.httpClients.set(token, client);
+  }
+  return client;
+}
+
 /** One client per environment selector and identity, reused by `managed.createSession` / `resumeSession`. */
 async function cachedClient(ctx: ManagedState, environment: EnvironmentSelector, gitHubToken: string | undefined): Promise<CopilotClient> {
-  const request = toEnvironmentRequest(environment);
-  const key = cacheKey(request, gitHubToken ?? ctx.token);
+  const key = cacheKey(toEnvironmentRequest(environment), gitHubToken ?? ctx.token);
   let pending = ctx.cachedClients.get(key);
   if (!pending) {
-    pending = createClient(ctx, request, gitHubToken ? { gitHubToken } : {});
+    // Pass the original selector: createClient encodes files exactly once.
+    pending = createClient(ctx, environment, gitHubToken ? { gitHubToken } : {});
     ctx.cachedClients.set(key, pending);
     pending.catch(() => ctx.cachedClients.delete(key));
   }
@@ -147,7 +158,7 @@ export async function resumeManagedSession(ctx: ManagedState, sessionId: string,
   const { environment, ...resumeConfig } = config;
   let selector: EnvironmentSelector | undefined = environment;
   if (selector === undefined) {
-    const http = resumeConfig.gitHubToken ? ctx.httpClients.get(resumeConfig.gitHubToken) ?? ctx.httpFor(sessionId) : ctx.httpFor(sessionId);
+    const http = resumeConfig.gitHubToken ? httpForToken(ctx, resumeConfig.gitHubToken) : ctx.httpFor(sessionId);
     const info = await http.get<SessionInfo>(ROUTES.session(sessionId));
     const declared = ctx.info.environments.some((candidate) => candidate.name === info.environment);
     selector = declared ? info.environment : { type: info.type, ...(info.sandbox?.size && info.type !== "shared" ? { size: info.sandbox.size } : {}) };

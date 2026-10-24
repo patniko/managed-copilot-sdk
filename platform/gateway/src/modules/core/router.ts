@@ -80,7 +80,8 @@ export class ClientConnection implements ClientPeer {
 
   async #dispatch(method: string, params: unknown, context: IncomingRequestContext): Promise<unknown> {
     const body = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
-    if (method === "session.create" || method === "session.resume" || method === "session.send" || method === "session.sendAndWait") await this.#reverify();
+    // Every call re-checks the credential (cached, bounded): revocation stops reads, writes, and answers alike.
+    await this.#reverify();
     switch (method) {
       case "connect":
         return { ok: true, protocolVersion: this.#protocolVersion(), version: this.#runtimeVersion(), taskKinds: ["agent", "shell", "client"] };
@@ -94,12 +95,13 @@ export class ClientConnection implements ClientPeer {
         return this.#manager.listModels(this);
       case "session.create": {
         const created = await this.#manager.createForClient(this, params);
-        queueMicrotask(() => void created.after());
+        // After the response is written: replayed actions must reach a session object that already exists.
+        setImmediate(() => void created.after());
         return created.result;
       }
       case "session.resume": {
         const resumed = await this.#manager.resumeForClient(this, params);
-        queueMicrotask(() => void resumed.after());
+        setImmediate(() => void resumed.after());
         return resumed.result;
       }
       case "session.detach":

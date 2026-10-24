@@ -157,7 +157,9 @@ describe("shared admission", () => {
     expect(() => admitOptionsUpdate({ customAgentsLocalOnly: false }, context())).toThrowError(/cannot be changed/);
     expect(() => admitOptionsUpdate({ eventsLogDirectory: "/tmp" }, context())).toThrowError(/cannot be changed/);
     expect(() => admitOptionsUpdate({ model: "gpt-5" }, context())).toThrowError(/not allowed/);
-    expect(admitOptionsUpdate({ availableTools: ["bash", "builtin:ask_user"] }, context())).toEqual({ availableTools: ["custom:bash", "mcp:bash", "builtin:ask_user"] });
+    expect(admitOptionsUpdate({ availableTools: ["bash", "builtin:ask_user"] }, context())).toEqual({ availableTools: ["custom:bash", "builtin:ask_user"] });
+    // MCP tool names are admitted only for sessions that admitted remote MCP servers.
+    expect(admitOptionsUpdate({ availableTools: ["bash"] }, { ...context(), allowMcp: true })).toEqual({ availableTools: ["custom:bash", "mcp:bash"] });
   });
 });
 

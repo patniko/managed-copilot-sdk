@@ -50,7 +50,7 @@ async function startGitHubProxy(): Promise<{ url: string; close(): Promise<void>
   return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, close: () => new Promise((resolve) => server.close(() => resolve())) };
 }
 
-describe.skipIf(!token || !built)("G1: stock SDK and runtime with a real model", () => {
+describe.skipIf(!token || !built)("G1: stock SDK and runtime with a real model", { retry: 1 }, () => {
   let gateway: RunningGateway;
   let github: Awaited<ReturnType<typeof startGitHubProxy>>;
   let temp: string;
@@ -76,13 +76,19 @@ describe.skipIf(!token || !built)("G1: stock SDK and runtime with a real model",
       }),
     );
     const probe = await ManagedCopilot.connect({ url: gateway.url, gitHubToken: token });
-    const client = await probe.client("chat");
-    const models = (await client.listModels()).map((entry) => entry.id);
-    if (!models.includes(SNIPPET_MODEL)) {
-      model = models.find((id) => id.startsWith("claude-haiku")) ?? models[0] ?? SNIPPET_MODEL;
-      console.warn(`${SNIPPET_MODEL} is not available to this account; using ${model}`);
+    try {
+      const client = await probe.client("chat");
+      const models = (await client.listModels()).map((entry) => entry.id);
+      if (!models.includes(SNIPPET_MODEL)) {
+        model = models.find((id) => id.startsWith("claude-haiku")) ?? models[0] ?? SNIPPET_MODEL;
+        console.warn(`${SNIPPET_MODEL} is not available to this account; using ${model}`);
+      }
+    } catch (error) {
+      // The model catalog is a remote call; when it is slow, run the snippet with its own model.
+      console.warn(`Could not list models (${(error as Error).message}); using ${SNIPPET_MODEL}`);
+    } finally {
+      await probe.close();
     }
-    await probe.close();
   }, TIMEOUT);
 
   afterAll(async () => {

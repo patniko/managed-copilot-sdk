@@ -102,6 +102,7 @@ export class FakeRuntime {
           created.token = answer.accessToken;
         }
         this.#emit(endpoint, created, "session.start", { sessionId: id, context: { cwd: "/platform/host/path" } });
+        if (typeof params["workingDirectory"] === "string") this.#emit(endpoint, created, "session.info", { infoType: "cwd", message: `Working in ${params["workingDirectory"]}` });
         endpoint.notify("session.lifecycle", { type: "session.created", sessionId: id, metadata: { startTime: new Date().toISOString(), modifiedTime: new Date().toISOString() } });
         return { sessionId: id, workspacePath: "/platform/host/session-state", capabilities: { ui: { elicitation: false } } };
       }
