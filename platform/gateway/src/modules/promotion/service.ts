@@ -578,7 +578,11 @@ export class PromotionManager implements PromotionService {
       }
     }
     let released = !progress.allocated;
-    if (progress.allocated) {
+    // Sandboxes are keyed by session ID: once a new session reusing the ID runs in sandbox placement, that sandbox is
+    // its own and is never deleted here.
+    const current = this.#sessions().get(record.id);
+    if (progress.allocated && current && current.placement !== "shared") released = true;
+    else if (progress.allocated) {
       try {
         await this.#sandboxes()?.delete(record.id);
         released = true;

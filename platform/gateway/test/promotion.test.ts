@@ -409,6 +409,19 @@ describe("API promotion (managed.promote)", () => {
     expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox", generation: 1 });
   });
 
+  it("never deletes the sandbox of a new session that reused the ID while the move failed", async () => {
+    const create = sandboxes.create.bind(sandboxes);
+    sandboxes.create = async (request) => {
+      // The session is deleted and a new isolated session with the same ID gets its own sandbox meanwhile.
+      sessions.records.set(SESSION, record({ environment: "coder", type: "isolated", placement: "sandbox", createdAt: new Date(Date.now() + 60_000).toISOString() }));
+      sandboxes.createFails = new ManagedCopilotError("conflict", "a sandbox already exists for this session");
+      return create(request);
+    };
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "conflict");
+    expect(sandboxes.deleted).toEqual([]);
+    expect(manager.latest(SESSION)).toMatchObject({ state: "failed", cleanupPending: false });
+  });
+
   it("aborts after the source closed when the destination cannot open, keeping the source state", async () => {
     sessions.behavior.openFails = new ManagedCopilotError("state_restore_failed", "resume failed");
     expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "state_restore_failed");
