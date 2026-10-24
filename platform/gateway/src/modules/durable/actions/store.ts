@@ -265,7 +265,7 @@ export class ActionStore {
   /** Moves an action between states without an answer (release, reconciliation, expiry, cancellation). */
   transition(
     id: string,
-    expected: { readonly states: readonly ActionState[]; readonly seq?: number },
+    expected: { readonly states: readonly ActionState[]; readonly seq?: number; readonly generation?: number },
     to: { readonly state: ActionState; readonly reason?: string | null; readonly clearClaim?: boolean; readonly forwarded?: boolean; readonly now: number },
   ): boolean {
     const sets = ["state = ?", "reason = ?", "updated_at = ?", "lease_expires_at = NULL"];
@@ -284,6 +284,10 @@ export class ActionStore {
     if (expected.seq !== undefined) {
       conditions.push("claim_seq = ?");
       params.push(expected.seq);
+    }
+    if (expected.generation !== undefined) {
+      conditions.push("generation = ?");
+      params.push(expected.generation);
     }
     return changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params));
   }
