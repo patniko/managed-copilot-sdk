@@ -1,11 +1,11 @@
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect } from "node:tls";
 import { afterAll, describe, expect, it } from "vitest";
-import { loadOrCreateCa } from "../src/ca.js";
+import { CA_DIRECTORY, loadOrCreateCa } from "../src/ca.js";
 import { CertificateAuthority, createCaMaterial } from "../src/x509.js";
 
 describe("certificate authority", () => {
@@ -98,20 +98,71 @@ describe("certificate authority", () => {
 });
 
 describe("CA persistence", () => {
-  const dir = mkdtempSync(join(tmpdir(), "mc-egress-ca-"));
-  afterAll(() => rmSync(dir, { recursive: true, force: true }));
+  const root = mkdtempSync(join(tmpdir(), "mc-egress-ca-"));
+  let count = 0;
+  const fresh = () => join(root, `data-${++count}`);
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
 
   it("creates once and reloads the same CA", () => {
+    const dir = fresh();
     const first = loadOrCreateCa({ dataDir: dir });
     expect(first.created).toBe(true);
     const second = loadOrCreateCa({ dataDir: dir });
     expect(second.created).toBe(false);
     expect(second.ca.fingerprint).toBe(first.ca.fingerprint);
-    expect(readFileSync(join(dir, "ca-cert.pem"), "utf8")).toBe(first.ca.certPem);
-    if (process.platform !== "win32") expect(statSync(join(dir, "ca-key.pem")).mode & 0o777).toBe(0o600);
+    expect(readFileSync(join(dir, CA_DIRECTORY, "cert.pem"), "utf8")).toBe(first.ca.certPem);
+    if (process.platform !== "win32") expect(statSync(join(dir, CA_DIRECTORY, "key.pem")).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual([CA_DIRECTORY]);
+  });
+
+  it("keeps using a pair persisted as two files by earlier versions", () => {
+    const dir = fresh();
+    const legacy = createCaMaterial({ commonName: "Earlier Egress CA" });
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "ca-cert.pem"), legacy.certPem);
+    writeFileSync(join(dir, "ca-key.pem"), legacy.keyPem);
+    const loaded = loadOrCreateCa({ dataDir: dir });
+    expect(loaded).toMatchObject({ created: false });
+    expect(loaded.ca.certPem).toBe(new X509Certificate(legacy.certPem).toString());
+    expect(existsSync(join(dir, CA_DIRECTORY))).toBe(false);
+  });
+
+  it("uses the CA of a proxy that created one at the same time, and discards its own", () => {
+    const dir = fresh();
+    let winner: string | undefined;
+    const lost = loadOrCreateCa(
+      { dataDir: dir },
+      {
+        // Another replica on the same storage finishes first, while this one is about to move its pair into place.
+        rename: (from, to) => {
+          winner = loadOrCreateCa({ dataDir: dir }).ca.fingerprint;
+          renameSync(from, to);
+        },
+      },
+    );
+    expect(lost.created).toBe(false);
+    expect(lost.ca.fingerprint).toBe(winner);
+    expect(loadOrCreateCa({ dataDir: dir }).ca.fingerprint).toBe(winner);
+    expect(readdirSync(dir)).toEqual([CA_DIRECTORY]);
+  });
+
+  it("fails loudly on a persisted pair it cannot use, instead of replacing it", () => {
+    const dir = fresh();
+    mkdirSync(join(dir, CA_DIRECTORY), { recursive: true });
+    writeFileSync(join(dir, CA_DIRECTORY, "cert.pem"), createCaMaterial({ commonName: "Half" }).certPem);
+    expect(() => loadOrCreateCa({ dataDir: dir })).toThrow(/cannot be used/);
+    expect(readdirSync(join(dir, CA_DIRECTORY))).toEqual(["cert.pem"]);
+  });
+
+  it("ignores staging left behind by a crash during creation", () => {
+    const dir = fresh();
+    mkdirSync(join(dir, ".ca-staging-1-abc"), { recursive: true });
+    writeFileSync(join(dir, ".ca-staging-1-abc", "key.pem"), "partial");
+    expect(loadOrCreateCa({ dataDir: dir }).created).toBe(true);
+    expect(loadOrCreateCa({ dataDir: dir }).created).toBe(false);
   });
 
   it("requires both operator CA files", () => {
-    expect(() => loadOrCreateCa({ dataDir: dir, certFile: join(dir, "ca-cert.pem") })).toThrow(/both/);
+    expect(() => loadOrCreateCa({ dataDir: fresh(), certFile: join(root, "ca-cert.pem") })).toThrow(/both/);
   });
 });

@@ -353,7 +353,10 @@ applies the session's policy and attaches vault credentials. Anything else is re
   session's environment (the source environment, also after promotion) still grants the vault (inline sessions get
   none), and user vaults only while the owner still owns them. Placeholders (`mcv_placeholder_` + 40 hex) are
   stable per session and credential; deleting a vault revokes it from running sandboxes at once.
-- **Substitution.** The proxy terminates TLS (ECDSA P-256 platform CA, key kept in the proxy's volume) only for a
+- **Substitution.** The proxy terminates TLS (ECDSA P-256 platform CA, key kept in the proxy's volume as
+  `ca/cert.pem` and `ca/key.pem`; first creation is atomic and exclusive, so proxies sharing storage agree on one CA,
+  and an unusable persisted pair fails startup rather than being replaced; operators can supply their own CA with
+  `EGRESS_CA_CERT_FILE`/`EGRESS_CA_KEY_FILE`) only for a
   session's vault hosts on port 443. Per request it re-checks the registration, policy, and `Host`; substitutes a
   placeholder only as literal text in that credential's named headers (default `authorization`); rejects
   placeholders in URLs, Basic credentials, other headers, other sessions, other hosts, plain HTTP, and WebSocket
