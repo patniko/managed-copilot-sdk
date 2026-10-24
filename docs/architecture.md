@@ -224,8 +224,9 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   `sessionFs.setProvider`, `llmInference.setProvider`, shell, workspace, plugin, auth, and permission-mode RPCs, fails
   with JSON-RPC MethodNotFound carrying `capability_unavailable`.
 - **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
-  delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the most recently
-  attached client able to answer gets them and other eligible clients are withheld. `session.lifecycle` goes only to
+  delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the first attached
+  client able to answer, in durable's preference order (the creating connection, then by attach time), gets them and
+  other eligible clients are withheld. `session.lifecycle` goes only to
   the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Everything a shared session
   sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
   rewritten (`/workspace` for the session directory, `/platform` otherwise).

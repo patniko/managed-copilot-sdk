@@ -1056,10 +1056,13 @@ export class SessionManager implements SessionsService {
     }
   }
 
-  /** Creating connection first, then the others by attach time. */
+  /** Responder preference: the creating connection first, then the others by attach time. */
+  #preferred(live: LiveSession): Attachment[] {
+    return [...live.attachments.values()].sort((a, b) => (a.peer.id === live.creator ? -1 : b.peer.id === live.creator ? 1 : a.attachedAt - b.attachedAt));
+  }
+
   #responders(live: LiveSession): AttachedResponder[] {
-    const ordered = [...live.attachments.values()].sort((a, b) => (a.peer.id === live.creator ? -1 : b.peer.id === live.creator ? 1 : a.attachedAt - b.attachedAt));
-    return ordered.map((attachment) => ({
+    return this.#preferred(live).map((attachment) => ({
       connectionId: attachment.peer.id,
       kind: attachment.peer.kind,
       tools: [...attachment.tools],
@@ -1139,8 +1142,9 @@ export class SessionManager implements SessionsService {
       void this.#runPlatformTool(live, record, event, platformTool.name);
       return { withhold: [...live.attachments.keys()] };
     }
-    // Default claim-before-emit: the most recent client able to answer executes; other eligible clients are withheld.
-    const attachments = [...live.attachments.values()].sort((a, b) => b.attachedAt - a.attachedAt);
+    // Default claim-before-emit (no durable module): the first eligible client in the same preference order durable
+    // uses executes; other eligible clients are withheld.
+    const attachments = this.#preferred(live);
     let eligible: Attachment[] = [];
     if (event.type === "external_tool.requested") eligible = attachments.filter((attachment) => toolName !== undefined && attachment.tools.has(toolName));
     else if (event.type === "permission.requested") eligible = attachments.filter((attachment) => attachment.requestPermission);
