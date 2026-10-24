@@ -44,6 +44,12 @@ const MIGRATIONS = [
      created_at TEXT NOT NULL
    );
    CREATE INDEX core_events_owner ON core_events (owner_id, seq);`,
+  // Runtime events a placement cutover hid (the source's handoff after the seal): never shown in history reads.
+  `CREATE TABLE core_hidden_events (
+     session_id TEXT NOT NULL,
+     event_id TEXT NOT NULL,
+     PRIMARY KEY (session_id, event_id)
+   );`,
 ];
 
 interface SessionRow {
@@ -83,6 +89,8 @@ export interface AdmittedConfig {
    * change can admit it again for the new placement.
    */
   readonly requested?: Record<string, unknown>;
+  /** The caller's `session.options.update` patches as requested (merged), re-admitted after a placement change. */
+  readonly requestedOptions?: Record<string, unknown>;
 }
 
 export interface NewSession {
@@ -206,6 +214,19 @@ export class SessionLedger {
 
   remove(id: string): void {
     this.#db.prepare("DELETE FROM core_sessions WHERE id = ?").run(id);
+    this.#db.prepare("DELETE FROM core_hidden_events WHERE session_id = ?").run(id);
+  }
+
+  /** Records runtime events of a session that history reads must not return. */
+  hideEvents(sessionId: string, eventIds: readonly string[]): void {
+    if (eventIds.length === 0) return;
+    const insert = this.#db.prepare("INSERT OR IGNORE INTO core_hidden_events (session_id, event_id) VALUES (?, ?)");
+    for (const eventId of eventIds) insert.run(sessionId, eventId);
+  }
+
+  hiddenEvents(sessionId: string): Set<string> {
+    const rows = this.#db.prepare("SELECT event_id FROM core_hidden_events WHERE session_id = ?").all(sessionId) as { event_id: string }[];
+    return new Set(rows.map((row) => row.event_id));
   }
 
   /** Sessions that were active when the gateway stopped; they are resumed lazily. */

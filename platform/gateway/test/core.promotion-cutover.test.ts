@@ -1,5 +1,6 @@
 // Core's placement cutover (used by the promotion module): fencing, sealing, buffering, held completions, commit,
 // and abort, with the fake runtime as both the shared source and the sandbox destination.
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { FakeRuntime, FakeSandboxes, RawClient, sleep, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
 
@@ -68,7 +69,7 @@ describe("placement cutover", () => {
         await cut.source("session.suspend");
         await cut.source("sessions.close");
         await cut.open({ continuePendingWork: true });
-        cut.commit();
+          await cut.commit();
         return "moved";
       },
     });
@@ -116,26 +117,136 @@ describe("placement cutover", () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();
     await client.request("session.create", { sessionId });
+    const delivered: string[] = [];
+    const unsubscribe = sessions().subscribe((id, event) => {
+      if (id === sessionId && event.type === "assistant.message") delivered.push(String(event.data["content"]));
+    });
+    let atPromoted: string[] | undefined;
+    const off = sessions().onLifecycle((event) => {
+      if (event.sessionId === sessionId && event.type === "promoted") atPromoted = [...delivered];
+    });
+    try {
+      const cut = await sessions().cutover!(sessionId, { generation: 0 });
+      cut.fence();
+      expect(sessions().get(sessionId)!.state).toBe("promoting");
+      const hostPath = join(gateway.dataDir, "runtime", "shared", "workspaces", sessionId, "private.txt");
+      runtime.emitEvent(sessionId, "assistant.message", { content: `said during the fence, see ${hostPath}` });
+      const send = client.request("session.send", { sessionId, prompt: "queued during the move" });
+      await sleep(50);
+      expect(messages(client, sessionId).some((text) => text.startsWith("said during the fence"))).toBe(false);
+      expect(lastCall("session.send", sessionId)).toBeUndefined();
+
+      await cut.source("session.suspend");
+      runtime.emitEvent(sessionId, "assistant.message", { content: "artifact after the seal" });
+      await cut.open({ continuePendingWork: true });
+      await cut.commit();
+      // Listeners of `promoted` (promotion's action carry-over) run after every held-back event was processed.
+      expect(atPromoted?.some((text) => text.startsWith("said during the fence"))).toBe(true);
+      await send;
+      await waitUntil(() => messages(client, sessionId).includes("echo: queued during the move"));
+      const said = messages(client, sessionId);
+      expect(said).not.toContain("artifact after the seal");
+      // Buffered shared events keep their shared-placement scrubbing after the session moved.
+      const buffered = said.findIndex((text) => text.startsWith("said during the fence"));
+      expect(said[buffered]).toBe("said during the fence, see /workspace/private.txt");
+      expect(buffered).toBeLessThan(said.indexOf("echo: queued during the move"));
+      expect(lastCall("session.send", sessionId)!.connection).not.toBe(sourceConnection(sessionId));
+      // The source's handoff never shows up in history either.
+      const history = await client.request<{ events: { type: string; data: Record<string, unknown> }[] }>("session.getMessages", { sessionId });
+      expect(history.events.map((event) => event.type)).not.toContain("session.shutdown");
+      expect(history.events.map((event) => event.type)).not.toContain("agent.interrupted");
+      expect(history.events.some((event) => event.data["content"] === "artifact after the seal")).toBe(false);
+      expect(history.events.some((event) => String(event.data["content"]).startsWith("said during the fence"))).toBe(true);
+    } finally {
+      unsubscribe();
+      off();
+    }
+  });
+
+  it("routes a destination's session-less runtime requests (inference chunks) to its sandbox before commit", async () => {
+    sandboxes.handlers.set("llmInference.httpRequestChunk", async (params) => ({ received: (params as Record<string, unknown>)["requestId"] }));
+    try {
+      const client = await connect();
+      const sessionId = crypto.randomUUID();
+      await client.request("session.create", { sessionId });
+      const cut = await sessions().cutover!(sessionId, { generation: 0 });
+      cut.fence();
+      await cut.source("session.suspend");
+      await cut.open({ continuePendingWork: true });
+      const destination = lastCall("session.resume", sessionId)!.connection!;
+      expect(destination).not.toBe(sourceConnection(sessionId));
+      await expect(runtime.requestOn(destination, "llmInference.httpRequestChunk", { requestId: "r-1", chunk: "e30=" })).resolves.toEqual({ received: "r-1" });
+      await cut.commit();
+    } finally {
+      sandboxes.handlers.delete("llmInference.httpRequestChunk");
+    }
+  });
+
+  it("never sends to the source after the seal, even a request that already found it", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    // A service send that has found the ready source but not written its request yet.
+    const sending = sessions().request(sessionId, "session.send", { prompt: "raced the seal", mode: "enqueue" });
+    cut.fence();
+    await cut.source("session.suspend");
+    await sleep(50);
+    const onSource = runtime.requests.filter((request) => request.params["sessionId"] === sessionId && request.connection === sourceConnection(sessionId)).map((request) => request.method);
+    expect(onSource.slice(onSource.indexOf("session.suspend"))).not.toContain("session.send");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    await sending;
+    expect(lastCall("session.send", sessionId)!.connection).not.toBe(sourceConnection(sessionId));
+    await waitUntil(() => messages(client, sessionId).includes("echo: raced the seal"));
+  });
+
+  it("re-admits a client resume that was in flight on the source when the session moved", async () => {
+    const first = await connect();
+    const sessionId = crypto.randomUUID();
+    await first.request("session.create", { sessionId });
+    const second = await connect();
+    // The source answers the second client's resume only after the move.
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const resuming = second.request("session.resume", { sessionId, tools: [{ name: "late_tool" }] });
+    await hold.held;
     const cut = await sessions().cutover!(sessionId, { generation: 0 });
     cut.fence();
-    expect(sessions().get(sessionId)!.state).toBe("promoting");
-    runtime.emitEvent(sessionId, "assistant.message", { content: "said during the fence" });
-    const send = client.request("session.send", { sessionId, prompt: "queued during the move" });
-    await sleep(50);
-    expect(messages(client, sessionId)).not.toContain("said during the fence");
-    expect(lastCall("session.send", sessionId)).toBeUndefined();
-
     await cut.source("session.suspend");
-    runtime.emitEvent(sessionId, "assistant.message", { content: "artifact after the seal" });
     await cut.open({ continuePendingWork: true });
-    cut.commit();
-    await send;
-    await waitUntil(() => messages(client, sessionId).includes("echo: queued during the move"));
-    const said = messages(client, sessionId);
-    expect(said).not.toContain("artifact after the seal");
-    expect(said.indexOf("said during the fence")).toBeGreaterThanOrEqual(0);
-    expect(said.indexOf("said during the fence")).toBeLessThan(said.indexOf("echo: queued during the move"));
-    expect(lastCall("session.send", sessionId)!.connection).not.toBe(sourceConnection(sessionId));
+    await cut.commit();
+    hold.release();
+    await resuming;
+    expect(sessions().get(sessionId)).toMatchObject({ placement: "sandbox", generation: 1 });
+    // The resume was repeated on the sandbox, and the stored restore configuration is the sandbox's.
+    const lastResume = lastCall("session.resume", sessionId)!;
+    expect(lastResume.connection).not.toBe(sourceConnection(sessionId));
+    expect((lastResume.params["tools"] as { name: string }[]).map((tool) => tool.name)).toContain("late_tool");
+    const row = gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string };
+    const stored = JSON.parse(row.admitted) as { params: Record<string, unknown> };
+    expect(stored.params["workingDirectory"]).toBe("/workspace");
+    expect(stored.params).not.toHaveProperty("availableTools");
+    expect(stored.params).not.toHaveProperty("systemMessage");
+  });
+
+  it("moves remote MCP servers with their original endpoints and carries the caller's option changes", async (ctx) => {
+    if (!(gateway.gateway.app.services as Record<string, unknown>)["policy"]) return ctx.skip();
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, mcpServers: { docs: { type: "http", url: "https://140.82.112.21/mcp", headers: { "x-team": "docs" }, tools: ["*"] } } });
+    const shared = runtime.sessions.get(sessionId)!.createParams["mcpServers"] as Record<string, Record<string, unknown>>;
+    expect(String(shared["docs"]!["url"])).toMatch(/\/internal\/mcp\//);
+    await client.request("session.options.update", { sessionId, reasoningEffort: "high" });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    const moved = sandboxes.detail(sessionId, "prepare session.resume")["mcpServers"] as Record<string, Record<string, unknown>>;
+    expect(moved["docs"]).toMatchObject({ url: "https://140.82.112.21/mcp", headers: { "x-team": "docs" } });
+    expect(JSON.stringify(moved)).not.toContain("x-managed-copilot-mcp");
+    const update = runtime.calls("session.options.update").filter((call) => call.params["sessionId"] === sessionId && call.connection !== sourceConnection(sessionId)).at(-1);
+    expect(update?.params["reasoningEffort"]).toBe("high");
   });
 
   it("delivers a reply the source gave before the seal as is", async () => {
@@ -159,7 +270,7 @@ describe("placement cutover", () => {
     expect(sessions().get(sessionId)!.state).not.toBe("promoting");
   });
 
-  it("keeps an aborted session on its source and resumes it there with the requested extras after a seal", async () => {
+  it("resumes an aborted session on its source with the requested extras right after a seal, hiding the handoff", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();
     await client.request("session.create", { sessionId });
@@ -168,12 +279,18 @@ describe("placement cutover", () => {
     cut.fence();
     await cut.source("session.suspend");
     await cut.abort({ resume: { continuePendingWork: true } });
+    // The session was closed on its source, so it is resumed there at once (its pending work continues).
+    await waitUntil(() => lastCall("session.resume", sessionId)?.params["continuePendingWork"] === true);
+    expect(lastCall("session.resume", sessionId)!.connection).toBe(sourceConnection(sessionId));
     await client.request("session.sendAndWait", { sessionId, prompt: "back on the source" });
-    const resumed = lastCall("session.resume", sessionId)!;
-    expect(resumed.params["continuePendingWork"]).toBe(true);
-    expect(resumed.connection).toBe(sourceConnection(sessionId));
+    expect(lastCall("session.sendAndWait", sessionId)!.connection).toBe(sourceConnection(sessionId));
     expect(messages(client, sessionId)).toContain("echo: back on the source");
     expect(sessions().get(sessionId)).toMatchObject({ placement: "shared", generation: 0 });
+    const history = await client.request<{ events: { type: string; data: Record<string, unknown> }[] }>("session.getMessages", { sessionId });
+    expect(history.events.map((event) => event.type)).not.toContain("session.shutdown");
+    expect(history.events.map((event) => event.type)).not.toContain("agent.interrupted");
+    expect(history.events.some((event) => event.type === "session.idle" && event.data["aborted"] === true)).toBe(false);
+    expect(history.events.some((event) => event.data["content"] === "echo: back on the source")).toBe(true);
   });
 
   it("fails held completions when the session is deleted or cannot return to its source", async () => {
@@ -210,7 +327,7 @@ describe("placement cutover", () => {
     await expect(sessions().cutover!(sessionId, { generation: 0 })).rejects.toMatchObject({ code: "promotion_busy" });
     cut.fence();
     await sessions().delete(1001, sessionId);
-    expect(() => cut.commit()).toThrow(/already closed/);
+    await expect(cut.commit()).rejects.toThrow(/already closed/);
     expect(sessions().get(sessionId)).toBeUndefined();
   });
 });

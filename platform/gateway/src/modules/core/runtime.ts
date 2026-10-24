@@ -548,14 +548,15 @@ export async function reapStaleRuntime(root: string, log: Logger): Promise<void>
     // Already gone.
   }
   for (let waited = 0; waited < 5000 && isRunning(pid); waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
-  if (isRunning(pid)) {
+  // Escalate only against the same process: the pid may have been reused while waiting.
+  if (isRunning(pid) && (await processStartTime(pid)) === startTime) {
     try {
       process.kill(pid, "SIGKILL");
     } catch {
       // Already gone.
     }
   }
-  if (!isRunning(pid)) rmSync(file, { force: true });
+  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) rmSync(file, { force: true });
 }
 
 function openTcp(host: string, port: number): Promise<MessageTransport> {
