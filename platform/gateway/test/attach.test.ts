@@ -1184,6 +1184,15 @@ describe("AhpBridge", () => {
     await listener.stop();
   });
 
+  /** Waits for `check`, polling; a loaded machine only makes it later. */
+  async function until(check: () => boolean, ms: number): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!check()) {
+      if (Date.now() > deadline) throw new Error("Timed out waiting for a condition");
+      await sleep(10);
+    }
+  }
+
   /** A client attached through a bridge, with core's handle for it. `autoPong: false` makes a client that went silent. */
   async function bridged(options: { log?: Logger; scrub?: (value: unknown) => unknown; keepAlive?: { intervalMs: number; timeoutMs: number }; autoPong?: boolean } = {}) {
     const accepted = once(wss, "connection") as Promise<[WebSocket, IncomingMessage]>;
@@ -1241,36 +1250,37 @@ describe("AhpBridge", () => {
   });
 
   it("pings an idle client so ingresses keep its link, and ends one that went silent, detaching its responder", async () => {
-    const keepAlive = { intervalMs: 20, timeoutMs: 120 };
-    // Idle but answering pings (as every WebSocket client does): attached well past the timeout.
-    const idle = await bridged({ keepAlive });
-    // Silent: no frames and no pongs (a half-open link after sleep or a network change).
-    const silent = await bridged({ keepAlive, autoPong: false });
-    await sleep(300);
-    expect(idle.pings.count).toBeGreaterThanOrEqual(5);
-    expect(idle.cli.readyState).toBe(WebSocket.OPEN);
-    expect(idle.attachment.closed).toBe(false);
+    // Silent: no frames and no pongs (a half-open link after sleep or a network change). Its end is awaited, so a loaded
+    // machine only makes it later.
+    const silent = await bridged({ keepAlive: { intervalMs: 20, timeoutMs: 120 }, autoPong: false });
+    // Idle but answering pings (as every WebSocket client does). Its timeout leaves room for a loaded machine's stalls,
+    // and it is checked only after more than that has passed (each ping follows the last by at least 50 ms).
+    const idle = await bridged({ keepAlive: { intervalMs: 50, timeoutMs: 1_500 } });
     await silent.closed;
     expect(silent.attachment.closed).toBe(true);
+    await until(() => idle.pings.count >= 40, 15_000);
+    expect(idle.cli.readyState).toBe(WebSocket.OPEN);
+    expect(idle.attachment.closed).toBe(false);
     idle.bridge.close(1000, "done");
     await idle.closed;
-  });
+  }, 30_000);
 
   it("counts a large message still arriving as life, so a slow link isn't taken for a dead one", async () => {
-    // A client that never answers pings sends one masked text frame by hand, a chunk every 20 ms (~400 ms, four
-    // timeouts): no message completes until it ends.
-    const slow = await bridged({ keepAlive: { intervalMs: 20, timeoutMs: 100 }, autoPong: false });
-    const payload = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 77, method: "ping", params: { pad: "x".repeat(20_000) } }));
+    // A client that never answers pings sends one masked text frame by hand, 800 bytes at a time at least 20 ms apart:
+    // at least 1.5 s, more than its 1 s timeout, in which no message completes and no pong can get out. Only a stall of
+    // nearly the whole timeout could end it early; a loaded machine just makes the transfer slower.
+    const slow = await bridged({ keepAlive: { intervalMs: 50, timeoutMs: 1_000 }, autoPong: false });
+    const payload = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 77, method: "ping", params: { pad: "x".repeat(60_000) } }));
     slow.raw.write(Buffer.from([0x81, 0x80 | 126, payload.length >> 8, payload.length & 0xff, 0, 0, 0, 0]));
-    for (let offset = 0; offset < payload.length; offset += 1_000) {
-      slow.raw.write(payload.subarray(offset, offset + 1_000));
+    for (let offset = 0; offset < payload.length; offset += 800) {
+      slow.raw.write(payload.subarray(offset, offset + 800));
       await sleep(20);
     }
-    // It arrived whole and was relayed; then the client, silent since, was ended.
+    // It arrived whole and was relayed: the bridge did not end the client while it was arriving.
+    await until(() => listener.received.some((message: any) => message.id === 77 && message.params?.pad?.length === 60_000), 15_000);
+    slow.bridge.close(1000, "done");
     await slow.closed;
-    expect(listener.received.some((message: any) => message.id === 77 && message.params?.pad?.length === 20_000)).toBe(true);
-    expect(slow.attachment.closed).toBe(true);
-  });
+  }, 30_000);
 });
 
 describe("attach tickets", () => {

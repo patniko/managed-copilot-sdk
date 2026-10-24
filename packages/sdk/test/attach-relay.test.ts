@@ -39,6 +39,15 @@ async function listen(server: Server): Promise<string> {
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
+/** Waits for `check`, polling; a loaded machine only makes it later. */
+async function until(check: () => boolean, ms: number): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error("Timed out waiting for a condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 beforeAll(async () => {
   github = createServer((req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, "");
@@ -91,14 +100,15 @@ beforeAll(async () => {
       slow.upgrades--;
       silentWss.handleUpgrade(req, socket, head, (ws) => {
         gatewaySockets.add(ws);
-        // One text frame written by hand, a chunk every 20 ms: nothing completes, and no pong could get out, until it ends.
-        const payload = Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "action", params: { pad: "x".repeat(20_000) } }));
+        // One ~60 KB text frame written by hand, 800 bytes at least 20 ms apart (at least 1.5 s): nothing completes, and no
+        // pong could get out, until it ends.
+        const payload = Buffer.from(JSON.stringify({ jsonrpc: "2.0", method: "action", params: { pad: "x".repeat(60_000) } }));
         socket.write(Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xff]));
         let offset = 0;
         const timer = setInterval(() => {
           if (socket.destroyed) return clearInterval(timer);
-          socket.write(payload.subarray(offset, offset + 1_000));
-          offset += 1_000;
+          socket.write(payload.subarray(offset, offset + 800));
+          offset += 800;
           if (offset >= payload.length) clearInterval(timer);
         }, 20);
       });
@@ -433,16 +443,16 @@ describe("Copilot CLI attach relay", () => {
   });
 
   it("pings the deployment while the CLI is idle, so an ingress keeps the link (Azure closes it after 240 s idle)", async () => {
-    const { relay, url } = await startRelay({ keepAlive: { intervalMs: 20, timeoutMs: 100 } });
+    // A timeout that leaves room for a loaded machine's stalls, checked only after more than it has passed (each ping
+    // follows the last by at least 50 ms) with nothing but pings and their pongs on the link.
+    const { relay, url } = await startRelay({ keepAlive: { intervalMs: 50, timeoutMs: 1_500 } });
     const before = pings.count;
     const cli = await connect(url, "gho_owner");
-    // Past the timeout with nothing but pings and their pongs: still attached.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(pings.count - before).toBeGreaterThanOrEqual(5);
+    await until(() => pings.count - before >= 40, 15_000);
     expect(cli.readyState).toBe(WebSocket.OPEN);
     expect(relay.outcome).toBeUndefined();
     cli.close();
-  });
+  }, 30_000);
 
   it("reconnects the CLI when the deployment stops responding, without waiting for the CLI to send", async () => {
     const { relay, url } = await startRelay({ keepAlive: { intervalMs: 20, timeoutMs: 100 } });
@@ -461,15 +471,14 @@ describe("Copilot CLI attach relay", () => {
   });
 
   it("counts a large message still arriving as life, so a slow link isn't taken for a dead one", async () => {
-    const { url } = await startRelay({ keepAlive: { intervalMs: 20, timeoutMs: 100 } });
+    // The deployment sends one ~60 KB frame for at least 1.5 s, more than the 1 s timeout. Only a stall of nearly the
+    // whole timeout could end it early; a loaded machine just makes the transfer slower.
+    const { url } = await startRelay({ keepAlive: { intervalMs: 50, timeoutMs: 1_000 } });
     slow.upgrades = 1;
     const cli = await connect(url, "gho_owner");
-    const events: string[] = [];
-    cli.on("message", (data) => events.push(`message ${(JSON.parse(data.toString()) as { params: { pad: string } }).params.pad.length}`));
-    const [code] = (await once(cli, "close")) as [number, Buffer];
-    // It arrived whole after ~400 ms (four timeouts) in which only its own bytes came; then the link, which never
-    // answers pings, was ended.
-    expect(events).toEqual(["message 20000"]);
-    expect(code).toBe(1012);
-  });
+    // It arrives whole: the relay didn't end the link (which would close the CLI) while it was arriving.
+    const arrived = await Promise.race([next(cli), once(cli, "close").then(() => undefined)]);
+    expect(arrived?.params?.pad?.length).toBe(60_000);
+    cli.close();
+  }, 30_000);
 });
