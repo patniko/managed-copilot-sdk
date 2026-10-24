@@ -1,5 +1,5 @@
 // GitHub authentication for the gateway: verifies bearer tokens against the GitHub API (cached), applies the
-// AppHost access rules, and keeps the freshest verified token per account for per-session runtime credentials.
+// AppHost access rules, and remembers the tokens it verified for connected callers (for secret scanning).
 import { createHash } from "node:crypto";
 import { ManagedCopilotError, type AccountInfo } from "@managed-copilot/protocol";
 import type { Authenticator, Principal } from "../../http.js";
@@ -45,6 +45,16 @@ interface CacheEntry {
   readonly staleUntil?: number;
   /** The principal is standing in on a past verification because GitHub was unreachable at the last check. */
   readonly outage?: boolean;
+  /** From GitHub's `github-authentication-token-expiration` header: when the token itself expires. */
+  readonly tokenExpiresAt?: number;
+}
+
+export interface AuthenticateOptions {
+  /**
+   * A stored background credential is being re-verified (not a connected caller presenting it): it is never
+   * remembered as the account's live credential.
+   */
+  readonly background?: boolean;
 }
 
 export interface LiveCredential {
@@ -84,7 +94,7 @@ export class GitHubAuthenticator implements Authenticator {
     return this.#options.access;
   }
 
-  async authenticate(token: string): Promise<Principal> {
+  async authenticate(token: string, options: AuthenticateOptions = {}): Promise<Principal> {
     if (!token || token.length > 4096 || /\s/.test(token)) throw new ManagedCopilotError("authentication_required", "The GitHub token is malformed");
     // Action capabilities (`mcc_…`) authorize only their own action routes; they are never sent to GitHub.
     if (token.startsWith("mcc_")) throw new ManagedCopilotError("authentication_required", "Action capability tokens are only valid for their session's action routes");
@@ -94,7 +104,7 @@ export class GitHubAuthenticator implements Authenticator {
     if (cached && cached.expiresAt > now) {
       if (cached.error) throw cached.error;
       if (cached.principal) {
-        if (!cached.outage) this.#remember(cached.principal);
+        if (!options.background) this.#remember(key, cached.principal);
         return cached.principal;
       }
     }
@@ -107,23 +117,51 @@ export class GitHubAuthenticator implements Authenticator {
       this.#inflight.set(key, started);
     }
     // During a GitHub outage, a token already standing in on its recent verification keeps answering while the
-    // re-check runs in the background, so callers don't wait out the retry budget on every re-check.
+    // re-check runs in the background, so callers don't wait out the retry budget on every re-check. A connected
+    // caller's token becomes the account's live credential once that re-check succeeds.
     if (cached?.principal && cached.outage && cached.staleUntil !== undefined && cached.staleUntil > now) {
-      pending.catch(() => undefined);
+      pending.then(
+        (principal) => {
+          if (!options.background) this.#remember(key, principal);
+        },
+        () => undefined,
+      );
       return cached.principal;
     }
-    return pending;
+    const principal = await pending;
+    if (!options.background) this.#remember(key, principal);
+    return principal;
   }
 
-  /** The freshest verified token for an account, if one was seen recently and has not expired. */
+  /**
+   * The token a connected caller of the account presented and GitHub verified within the cache TTL, if any. Only
+   * connected callers count (never a background credential's re-verification), and an outage's stand-in does not.
+   */
   liveCredential(accountId: number): LiveCredential | undefined {
     const credential = this.#credentials.get(accountId);
     if (!credential) return undefined;
-    if (credential.expiresAt !== undefined && credential.expiresAt <= Date.now()) {
+    const now = Date.now();
+    const verified = this.#cache.get(tokenFingerprint(credential.token));
+    if ((credential.expiresAt !== undefined && credential.expiresAt <= now) || !verified?.principal || verified.outage || now - credential.verifiedAt > (this.#options.cacheTtlMs ?? 5 * 60_000)) {
       this.#credentials.delete(accountId);
       return undefined;
     }
     return credential;
+  }
+
+  /** When GitHub said a verified token expires (fine-grained and app tokens); undefined when it did not say. */
+  tokenExpiration(token: string): number | undefined {
+    return this.#cache.get(tokenFingerprint(token))?.tokenExpiresAt;
+  }
+
+  /**
+   * Drops the account references to a token (a background credential being removed at logout) without touching its
+   * verification: a connected caller presenting the same token is verified again as usual.
+   */
+  forgetCredential(token: string): void {
+    for (const [accountId, credential] of this.#credentials) {
+      if (credential.token === token) this.#credentials.delete(accountId);
+    }
   }
 
   /** Observes successful authentications (e.g. to refresh session credentials). */
@@ -219,8 +257,9 @@ export class GitHubAuthenticator implements Authenticator {
       verifiedAt: now,
       expiresAt: Math.min(now + (this.#options.cacheTtlMs ?? 5 * 60_000), limit),
       staleUntil: Math.min(now + (this.#options.staleGraceMs ?? 15 * 60_000), limit),
+      ...(expiresAt !== undefined ? { tokenExpiresAt: expiresAt } : {}),
     });
-    this.#remember(principal, expiresAt);
+    this.#notify(principal);
     this.#prune();
     return principal;
   }
@@ -255,14 +294,19 @@ export class GitHubAuthenticator implements Authenticator {
     throw error;
   }
 
-  #remember(principal: Principal, expiresAt?: number): void {
-    const previous = this.#credentials.get(principal.accountId);
-    const credential: LiveCredential = {
+  /** Remembers a connected caller's token while its verification is current (not an outage's stand-in). */
+  #remember(key: string, principal: Principal): void {
+    const entry = this.#cache.get(key);
+    if (entry?.principal !== principal || entry.outage || entry.verifiedAt === undefined) return;
+    this.#credentials.set(principal.accountId, {
       token: principal.token,
-      verifiedAt: Date.now(),
-      ...(expiresAt !== undefined ? { expiresAt } : previous?.token === principal.token && previous.expiresAt !== undefined ? { expiresAt: previous.expiresAt } : {}),
-    };
-    this.#credentials.set(principal.accountId, credential);
+      verifiedAt: entry.verifiedAt,
+      ...(entry.tokenExpiresAt !== undefined ? { expiresAt: entry.tokenExpiresAt } : {}),
+    });
+  }
+
+  /** Observers of successful verifications (`onAuthenticated`). */
+  #notify(principal: Principal): void {
     for (const listener of this.#listeners) {
       try {
         listener(principal);

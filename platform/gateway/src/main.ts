@@ -1,7 +1,16 @@
+import { isManagedCopilotError } from "@managed-copilot/protocol";
 import { loadConfig } from "./config.js";
-import { startGateway } from "./server.js";
+import { startGateway, type RunningGateway } from "./server.js";
 
-const gateway = await startGateway(loadConfig());
+let gateway: RunningGateway;
+try {
+  gateway = await startGateway(loadConfig());
+} catch (error) {
+  // A configuration the gateway refuses is explained, not dumped as a stack trace.
+  if (!isManagedCopilotError(error)) throw error;
+  console.error(`The Managed Copilot gateway could not start: ${error.message}`);
+  process.exit(1);
+}
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {

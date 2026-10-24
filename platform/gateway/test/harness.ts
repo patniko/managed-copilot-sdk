@@ -43,6 +43,8 @@ export class FakeRuntime {
   #connections = 0;
   #server: Server | undefined;
   port = 0;
+  /** Like stock runtime 1.0.103: lifecycle notifications follow the create/resume answer (default: before it). */
+  lifecycleAfterAnswer = false;
 
   async start(): Promise<void> {
     this.#server = createServer((socket) => this.#accept(socket));
@@ -104,6 +106,11 @@ export class FakeRuntime {
     return { held, release };
   }
 
+  /** Fails the next request of `method` (optionally for one session) with a runtime error (test hook). */
+  failNext(method: string, sessionId?: string, message = "The runtime failed the request"): void {
+    this.#failures.push({ method, sessionId, message });
+  }
+
   /** Sends a runtime → gateway request on one connection (1 = the first), as the runtime would (test hook). */
   requestOn(connection: number, method: string, params: Record<string, unknown>): Promise<unknown> {
     const endpoint = this.#byConnection.get(connection);
@@ -112,6 +119,7 @@ export class FakeRuntime {
   }
 
   readonly #holds: { method: string; sessionId: string | undefined; gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #failures: { method: string; sessionId: string | undefined; message: string }[] = [];
   readonly #byConnection = new Map<number, RpcEndpoint>();
 
   #accept(socket: Socket): void {
@@ -129,15 +137,23 @@ export class FakeRuntime {
           return { ok: true, protocolVersion: 3, version: "1.0.103", taskKinds: ["agent", "shell", "client"] };
         }
         if (!authenticated) throw new RpcError(-32001, "Not connected");
-        const hold = this.#holds.findIndex((candidate) => candidate.method === method && (candidate.sessionId === undefined || candidate.sessionId === body["sessionId"]));
+        const matches = (candidate: { method: string; sessionId: string | undefined }) => candidate.method === method && (candidate.sessionId === undefined || candidate.sessionId === body["sessionId"]);
+        const failAt = this.#failures.findIndex(matches);
+        const failure = failAt >= 0 ? this.#failures.splice(failAt, 1)[0] : undefined;
+        const run = () => (failure ? Promise.reject(new RpcError(-32603, failure.message)) : this.#handle(endpoint, method, body, context.signal));
+        const hold = this.#holds.findIndex(matches);
         if (hold >= 0) {
           const [entry] = this.#holds.splice(hold, 1);
-          const result = await this.#handle(endpoint, method, body, context.signal);
+          const settled = await run().then(
+            (value) => ({ ok: true as const, value }),
+            (error: unknown) => ({ ok: false as const, error }),
+          );
           entry!.arrived();
           await entry!.gate;
-          return result;
+          if (!settled.ok) throw settled.error;
+          return settled.value;
         }
-        return this.#handle(endpoint, method, body, context.signal);
+        return run();
       },
     });
     this.#byConnection.set(connection, endpoint);
@@ -181,7 +197,9 @@ export class FakeRuntime {
         }
         this.#emit(endpoint, created, "session.start", { sessionId: id, context: { cwd: "/platform/host/path" } });
         if (typeof params["workingDirectory"] === "string") this.#emit(endpoint, created, "session.info", { infoType: "cwd", message: `Working in ${params["workingDirectory"]}` });
-        endpoint.notify("session.lifecycle", { type: "session.created", sessionId: id, metadata: { startTime: new Date().toISOString(), modifiedTime: new Date().toISOString() } });
+        const lifecycle = () => endpoint.notify("session.lifecycle", { type: "session.created", sessionId: id, metadata: { startTime: new Date().toISOString(), modifiedTime: new Date().toISOString() } });
+        if (this.lifecycleAfterAnswer) setTimeout(lifecycle, 50);
+        else lifecycle();
         return { sessionId: id, workspacePath: "/platform/host/session-state", capabilities: { ui: { elicitation: false } } };
       }
       case "session.resume": {

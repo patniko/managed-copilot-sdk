@@ -65,13 +65,15 @@ export const coreModule: GatewayModule = {
     app.onStart(async () => {
       if (!runtime) {
         log.warn("The shared runtime is disabled (MANAGED_COPILOT_SHARED_RUNTIME=0); shared environments are unavailable");
-        return;
+      } else {
+        try {
+          await runtime.start();
+        } catch (error) {
+          log.error("The shared runtime could not start; shared sessions will fail with capability_unavailable", { error: (error as Error).message });
+        }
       }
-      try {
-        await runtime.start();
-      } catch (error) {
-        log.error("The shared runtime could not start; shared sessions will fail with capability_unavailable", { error: (error as Error).message });
-      }
+      // In the background: deletions and creates a stopped gateway left half done.
+      void sessions.recover().catch((error: unknown) => log.warn("Session recovery failed", { error: (error as Error).message }));
     });
     app.onStop(async () => {
       closeClients();

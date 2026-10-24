@@ -539,6 +539,148 @@ describe("placement cutover", () => {
     expect(client.events("session.usage_checkpoint").map((event) => event["id"])).not.toContain(late);
   });
 
+  it("answers hooks from a runtime that no longer owns the session with the closed answer, not an error", async () => {
+    const client = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(client);
+    client.answer = (method) => (method === "hooks.invoke" ? { output: {} } : {});
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const source = sourceConnection(sessionId);
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    // A straggler from the shared source after the move: an error would let that runtime run the tool.
+    const late = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "preToolUse", input: { toolName: "bash", toolArgs: {} } })) as { output?: Record<string, unknown> };
+    expect(late.output).toMatchObject({ permissionDecision: "deny" });
+    const prompt = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "userPromptSubmitted", input: {} })) as { output?: Record<string, unknown> };
+    expect(prompt.output).toMatchObject({ decision: "block" });
+    // A session the gateway does not run at all.
+    const unknown = (await runtime.requestOn(source, "hooks.invoke", { sessionId: crypto.randomUUID(), hookType: "preToolUse", input: {} })) as { output?: Record<string, unknown> };
+    expect(unknown.output).toMatchObject({ permissionDecision: "deny" });
+    // A result the source still produced is withheld, and it gets no GitHub token for a session it no longer hosts.
+    const post = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "postToolUse", input: { toolName: "bash", toolArgs: {}, toolResult: { textResultForLlm: "secret", resultType: "success" } } })) as { output?: Record<string, unknown> };
+    expect(post.output).toMatchObject({ modifiedResult: { resultType: "denied" } });
+    const registrationId = runtime.calls("session.create").find((call) => call.params["sessionId"] === sessionId)!.params["gitHubTokenProviderRegistrationId"];
+    expect(typeof registrationId).toBe("string");
+    const asked = await runtime.requestOn(source, "gitHubToken.getToken", { registrationId, sessionId, host: "https://github.com", reason: "refresh" }).catch((error: unknown) => ({ error }));
+    expect(asked).not.toHaveProperty("accessToken");
+    // Even where the request is not stale (a restore of the sandbox in progress), the registration no longer answers.
+    const manager = sessions() as unknown as { answerTokenRequest(params: unknown): Promise<unknown> };
+    await expect(manager.answerTokenRequest({ registrationId, sessionId, host: "https://github.com" })).resolves.toEqual({ kind: "cancelled" });
+    expect(client.requests.filter((request) => request.method === "hooks.invoke")).toHaveLength(0);
+  });
+
+  it("keeps a source unroutable after an unsealed move while a registration it got is unanswered", async () => {
+    const guard = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(guard);
+    guard.answer = (method) => (method === "hooks.invoke" ? { output: { permissionDecision: "deny", permissionDecisionReason: "guarded" } } : {});
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    // The guard's hooks withdrawal reached the runtime and is unanswered when a move is fenced and aborted.
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const withdrawing = guard.request("session.resume", { sessionId, requestPermission: true });
+    withdrawing.catch(() => undefined);
+    await hold.held;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.abort();
+    const mark = runtime.requests.length;
+    const reading = sessions().request(sessionId, "session.getMessages", {});
+    await sleep(30);
+    hold.release();
+    await reading;
+    await withdrawing;
+    // Nothing reached the source before it was resumed with the registrations in effect.
+    const after = runtime.requests.slice(mark).filter((request) => request.params["sessionId"] === sessionId).map((request) => request.method);
+    expect(after.indexOf("session.resume")).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf("session.resume")).toBeLessThan(after.indexOf("session.getMessages"));
+  });
+
+  it("opens a destination with committed registrations, not a resume still unanswered on the source", async () => {
+    const guard = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(guard);
+    guard.answer = (method) => (method === "hooks.invoke" ? { output: {} } : {});
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const hold = runtime.holdNext("session.resume", sessionId);
+    const withdrawing = guard.request("session.resume", { sessionId, requestPermission: true });
+    withdrawing.catch(() => undefined);
+    await hold.held;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    expect(lastCall("session.resume", sessionId)!.params).toMatchObject({ hooks: true });
+    await cut.commit();
+    hold.release();
+    // The withdrawal is then made where the session lives.
+    await withdrawing;
+    expect(lastCall("session.resume", sessionId)!.params).toMatchObject({ hooks: false });
+  });
+
+  it("resumes a session again with its hooks when their withdrawal fails while a move is open but not fenced", async () => {
+    const guard = await RawClient.connect(gateway.url, ALICE, "helper");
+    clients.push(guard);
+    guard.answer = (method) => (method === "hooks.invoke" ? { output: { permissionDecision: "deny", permissionDecisionReason: "guarded" } } : {});
+    const sessionId = crypto.randomUUID();
+    await guard.request("session.create", { sessionId, hooks: true, requestPermission: true });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    // The withdrawal reaches the runtime, then fails (its option update is refused).
+    runtime.failNext("session.options.update", sessionId);
+    await expect(guard.request("session.resume", { sessionId, requestPermission: true })).rejects.toBeDefined();
+    await cut.abort();
+    // The runtime was given the session's hooks back before anything else ran, and the guard still answers them.
+    expect(lastCall("session.resume", sessionId)!.params).toMatchObject({ hooks: true });
+    const source = sourceConnection(sessionId);
+    const answer = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "preToolUse", input: { toolName: "bash", toolArgs: {} } })) as { output?: Record<string, unknown> };
+    expect(answer.output).toMatchObject({ permissionDecision: "deny", permissionDecisionReason: "guarded" });
+  });
+
+  it("opens a destination with the registrations in effect, not a tools update still waiting for the move", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "committed_tool" }] });
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    const updating = client.request("session.tools.set", { sessionId, tools: [{ name: "pending_tool" }] });
+    await sleep(50);
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    const opened = (lastCall("session.resume", sessionId)!.params["tools"] as { name: string }[]).map((tool) => tool.name);
+    expect(opened).toContain("committed_tool");
+    expect(opened).not.toContain("pending_tool");
+    await cut.commit();
+    // The update then applies where the session lives.
+    await updating;
+    expect((lastCall("session.tools.set", sessionId)!.params["tools"] as { name: string }[]).map((tool) => tool.name)).toContain("pending_tool");
+  });
+
+  it("refuses an attached CLI's writes while the session is fenced and after it moved", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cli = await sessions().attachCli!(1001, sessionId, { connectionId: `cli_${sessionId}`, notify: () => undefined });
+    let sent = 0;
+    const cut = await sessions().cutover!(sessionId, { generation: 0 });
+    cut.fence();
+    // Not queued for later: the input would otherwise land in whatever runtime owns the session after the move.
+    expect(() => cli.write({ kind: "turn", text: "during the move" }, () => sent++)).toThrowError(expect.objectContaining({ code: "session_busy" }));
+    await expect(sessions().attachCli!(1001, sessionId, { connectionId: `cli2_${sessionId}`, notify: () => undefined })).rejects.toMatchObject({ code: "session_busy" });
+    await cut.source("session.suspend");
+    await cut.open({ continuePendingWork: true });
+    await cut.commit();
+    expect(() => cli.write({ kind: "turn", text: "after the move" }, () => sent++)).toThrowError(expect.objectContaining({ code: "conflict" }));
+    await expect(cli.answer("session.permissions.handlePendingPermissionRequest", { requestId: "p", result: { kind: "approved" } })).rejects.toMatchObject({ code: "conflict" });
+    expect(sent).toBe(0);
+    // Attaching again pins the sandbox runtime.
+    const again = await sessions().attachCli!(1001, sessionId, { connectionId: `cli3_${sessionId}`, notify: () => undefined });
+    again.write({ kind: "abort" }, () => sent++);
+    expect(sent).toBe(1);
+    expect(again.generation).toBe(1);
+  });
+
   it("refuses stale generations and a second cutover, and ends an open cutover when the session is deleted", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();

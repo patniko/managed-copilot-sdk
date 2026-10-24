@@ -151,7 +151,10 @@ export async function createManagedSession(ctx: ManagedState, config: ManagedSes
   const { environment, ...sessionConfig } = config;
   if (environment === undefined) throw new ManagedCopilotError("invalid_request", "managed.createSession needs an environment");
   const client = await cachedClient(ctx, environment, sessionConfig.gitHubToken);
-  return client.createSession(sessionConfig);
+  const session = await client.createSession(sessionConfig);
+  // REST helpers called right away act as the identity that created it (the lifecycle notification can come later).
+  ctx.identities.set(session.sessionId, sessionConfig.gitHubToken ?? ctx.token);
+  return session;
 }
 
 export async function resumeManagedSession(ctx: ManagedState, sessionId: string, config: ManagedResumeConfig = {}): Promise<CopilotSession> {
@@ -164,5 +167,7 @@ export async function resumeManagedSession(ctx: ManagedState, sessionId: string,
     selector = declared ? info.environment : { type: info.type, ...(info.sandbox?.size && info.type !== "shared" ? { size: info.sandbox.size } : {}) };
   }
   const client = await cachedClient(ctx, selector, resumeConfig.gitHubToken);
-  return client.resumeSession(sessionId, resumeConfig);
+  const session = await client.resumeSession(sessionId, resumeConfig);
+  ctx.identities.set(session.sessionId, resumeConfig.gitHubToken ?? ctx.token);
+  return session;
 }

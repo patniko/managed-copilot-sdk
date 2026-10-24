@@ -255,6 +255,24 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("mcc_capability")).rejects.toMatchObject({ code: "authentication_required" });
   });
 
+  it("keeps background verifications out of the live credentials, and lets live ones lapse with the cache", async () => {
+    const auth = new GitHubAuthenticator({ apiUrl: github.url, log, cacheTtlMs: 40 });
+    // A stored background sign-in being re-verified is not a connected caller.
+    await expect(auth.authenticate("listed", { background: true })).resolves.toMatchObject({ accountId: 3 });
+    expect(auth.liveCredential(3)).toBeUndefined();
+    await auth.authenticate("listed");
+    expect(auth.liveCredential(3)?.token).toBe("listed");
+    // Logout of the background sign-in forgets the account's references to the token without unverifying it.
+    auth.forgetCredential("listed");
+    expect(auth.liveCredential(3)).toBeUndefined();
+    await auth.authenticate("listed");
+    expect(auth.liveCredential(3)?.token).toBe("listed");
+    // Tokens without an expiration (OAuth app tokens, classic PATs) still lapse once their verification is stale.
+    await sleep(60);
+    expect(auth.liveCredential(3)).toBeUndefined();
+    expect(auth.tokenExpiration("listed")).toBeUndefined();
+  });
+
   it("applies AppHost access rules", async () => {
     const auth = new GitHubAuthenticator({ apiUrl: github.url, log, access: { githubOrgs: ["contoso"], githubUsers: ["LISTED-USER"] } });
     await expect(auth.authenticate("member")).resolves.toMatchObject({ login: "Member" });
@@ -303,6 +321,23 @@ describe("GitHub authentication", () => {
     await sleep(250);
     github.script.push("reset", "reset");
     await expect(auth.authenticate("token-c")).rejects.toMatchObject({ code: "upstream_unavailable" });
+  });
+
+  it("makes a connected caller's token the live credential again once an outage's re-check succeeds", async () => {
+    const github = scriptedGitHub([200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 30, outageRecheckMs: 1, staleGraceMs: 60_000 });
+    await auth.authenticate("token-m");
+    expect(auth.liveCredential(7)?.token).toBe("token-m");
+    await sleep(40);
+    // GitHub is unreachable: the recent verification stands in, but an outage's stand-in is not a live credential.
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-m")).resolves.toMatchObject({ accountId: 7 });
+    expect(auth.liveCredential(7)).toBeUndefined();
+    await sleep(5);
+    // Still standing in, the caller is answered at once; the re-check in the background succeeds.
+    github.script.push(200);
+    await expect(auth.authenticate("token-m")).resolves.toMatchObject({ accountId: 7 });
+    await waitUntil(() => auth.liveCredential(7)?.token === "token-m");
   });
 
   it("stops accepting a stale verification once its grace period ends", async () => {
