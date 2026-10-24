@@ -148,10 +148,56 @@ describe("turns a lost runtime connection cut", () => {
     await sleep(100);
     // An external runtime keeps its turns: nothing ends while the connection is down.
     expect(record(sessionId).lastTurn?.status).toBe("running");
-    // Restored, it reports the turn is no longer running: it finished unseen, so it is settled quietly.
+    // It finishes the turn unseen (its history records the final reply and the turn's end).
+    runtime.emitEvent(sessionId, "assistant.message", { messageId: "m-final", content: "Done while you were away." });
+    runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "0" });
+    // Restored, it reports the turn is no longer running and its history shows it completed: settled quietly.
     await sessions().request(sessionId, "session.getMessages", {});
     await waitUntil(() => record(sessionId).lastTurn?.status === "completed");
     expect(client.events("session.error")).toHaveLength(0);
+  });
+
+  it("ends a turn an external runtime lost without recording an ending (it restarted) as interrupted", async () => {
+    const client = await connect("chat");
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    await client.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+    const turnId = record(sessionId).lastTurn!.turnId;
+    // The runtime itself restarts: it no longer processes the turn, whose history stops at its start.
+    runtime.dropConnections();
+    await sleep(100);
+    await sessions().request(sessionId, "session.getMessages", {});
+    await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
+    expect(record(sessionId)).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
+    expect(client.events("session.error").map((event) => (event["data"] as Record<string, unknown>)["errorType"])).toEqual(["interrupted"]);
+  });
+
+  it("does not tell a call its completed turn was interrupted when a later turn was", async () => {
+    const first = await connect();
+    const sessionId = crypto.randomUUID();
+    await first.request("session.create", { sessionId, requestPermission: true });
+    const second = await connect();
+    await second.request("session.resume", { sessionId, requestPermission: true });
+    // The first client's turn completes, but its reply is still on its way when another client starts a turn.
+    const reply = runtime.holdNext("session.sendAndWait", sessionId);
+    const waiting = first.request("session.sendAndWait", { sessionId, prompt: "done" }).then(
+      () => undefined,
+      (error: unknown) => error as { message?: string },
+    );
+    await reply.held;
+    await waitUntil(() => record(sessionId).lastTurn?.status === "completed");
+    await second.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+    const later = record(sessionId).lastTurn!.turnId;
+    runtime.dropConnections();
+    // The later turn is the one interrupted; the first call gets the connection error, never "send it again".
+    const error = await waiting;
+    expect(error?.message).toBeDefined();
+    expect(error?.message).not.toContain("interrupted");
+    await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
+    expect(record(sessionId).lastTurn?.turnId).toBe(later);
+    reply.release();
   });
 
   it("keeps a turn when the restore cannot check it (its connection drops mid-check)", async () => {

@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { createServer, request, type Server } from "node:http";
+import { createServer, request, type IncomingMessage, type Server } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1167,54 +1168,108 @@ describe("AhpHosts", () => {
 });
 
 describe("AhpBridge", () => {
-  it("ends only its own attachment when it can't handle a message, in either direction (Astra)", async () => {
-    const listener = new FakeListener();
+  let listener: FakeListener;
+  let wss: WebSocketServer;
+  let port: number;
+  const quiet = () => undefined;
+  beforeAll(async () => {
+    listener = new FakeListener();
     await listener.start();
-    const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });
     await once(wss, "listening");
-    const port = (wss.address() as AddressInfo).port;
-    const quiet = () => undefined;
-    const bridged = async (options: { log?: Logger; scrub?: (value: unknown) => unknown }) => {
-      const accepted = once(wss, "connection") as Promise<[WebSocket]>;
-      const cli = new WebSocket(`ws://127.0.0.1:${port}/`);
-      await once(cli, "open");
-      const [client] = await accepted;
-      const upstream = new WebSocket(`ws://127.0.0.1:${listener.port}/?tkn=${LISTENER_TOKEN}`);
-      await once(upstream, "open");
-      const attachment = new FakeAttachment("cli_1", "inc-s1", 0);
-      const log = options.log ?? createLogger("test", "error");
-      new AhpBridge(client, upstream, { log, sessionId: "s1", maxLifetimeMs: 60_000, placement: "shared", attachment, actions: new FakeActions(), gate: quiet, scrub: options.scrub ?? ((value) => value) });
-      return { cli, attachment, closed: once(cli, "close") as Promise<[number, Buffer]> };
+    port = (wss.address() as AddressInfo).port;
+  });
+  afterAll(async () => {
+    wss.close();
+    await listener.stop();
+  });
+
+  /** A client attached through a bridge, with core's handle for it. `autoPong: false` makes a client that went silent. */
+  async function bridged(options: { log?: Logger; scrub?: (value: unknown) => unknown; keepAlive?: { intervalMs: number; timeoutMs: number }; autoPong?: boolean } = {}) {
+    const accepted = once(wss, "connection") as Promise<[WebSocket, IncomingMessage]>;
+    const cli = new WebSocket(`ws://127.0.0.1:${port}/`, { autoPong: options.autoPong ?? true });
+    let raw: Duplex | undefined;
+    cli.once("upgrade", (response) => (raw = response.socket));
+    await once(cli, "open");
+    const [client, req] = await accepted;
+    const upstream = new WebSocket(`ws://127.0.0.1:${listener.port}/?tkn=${LISTENER_TOKEN}`);
+    await once(upstream, "open");
+    const attachment = new FakeAttachment("cli_1", "inc-s1", 0);
+    const log = options.log ?? createLogger("test", "error");
+    const bridge = new AhpBridge(client, upstream, {
+      log,
+      sessionId: "s1",
+      maxLifetimeMs: 60_000,
+      placement: "shared",
+      attachment,
+      actions: new FakeActions(),
+      gate: quiet,
+      scrub: options.scrub ?? ((value) => value),
+      ...(options.keepAlive ? { keepAlive: options.keepAlive } : {}),
+      transport: req.socket,
+    });
+    const pings = { count: 0 };
+    cli.on("ping", () => pings.count++);
+    return { cli, raw: raw!, bridge, attachment, pings, closed: once(cli, "close") as Promise<[number, Buffer]> };
+  }
+
+  it("ends only its own attachment when it can't handle a message, in either direction (Astra)", async () => {
+    // Runtime → client: an update that can't be relayed.
+    const fromRuntime = await bridged({
+      scrub: (value) => {
+        if (JSON.stringify(value).includes("unrelayable")) throw new Error("scrub failed");
+        return value;
+      },
+    });
+    listener.push({ jsonrpc: "2.0", method: "action", params: { channel: CHAT, serverSeq: 1, action: { type: "chat/responsePart", text: "unrelayable" } } });
+    expect((await fromRuntime.closed)[0]).toBe(1011);
+    expect(fromRuntime.attachment.closed).toBe(true);
+    // Client → runtime: a message whose handling fails.
+    const failing: Logger = {
+      debug: quiet,
+      info: () => {
+        throw new Error("log failed");
+      },
+      warn: quiet,
+      error: quiet,
+      child: () => failing,
     };
-    try {
-      // Runtime → client: an update that can't be relayed.
-      const fromRuntime = await bridged({
-        scrub: (value) => {
-          if (JSON.stringify(value).includes("unrelayable")) throw new Error("scrub failed");
-          return value;
-        },
-      });
-      listener.push({ jsonrpc: "2.0", method: "action", params: { channel: CHAT, serverSeq: 1, action: { type: "chat/responsePart", text: "unrelayable" } } });
-      expect((await fromRuntime.closed)[0]).toBe(1011);
-      expect(fromRuntime.attachment.closed).toBe(true);
-      // Client → runtime: a message whose handling fails.
-      const failing: Logger = {
-        debug: quiet,
-        info: () => {
-          throw new Error("log failed");
-        },
-        warn: quiet,
-        error: quiet,
-        child: () => failing,
-      };
-      const fromClient = await bridged({ log: failing });
-      fromClient.cli.send(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "createTerminal", params: {} }));
-      expect((await fromClient.closed)[0]).toBe(1008);
-      expect(fromClient.attachment.closed).toBe(true);
-    } finally {
-      wss.close();
-      await listener.stop();
+    const fromClient = await bridged({ log: failing });
+    fromClient.cli.send(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "createTerminal", params: {} }));
+    expect((await fromClient.closed)[0]).toBe(1008);
+    expect(fromClient.attachment.closed).toBe(true);
+  });
+
+  it("pings an idle client so ingresses keep its link, and ends one that went silent, detaching its responder", async () => {
+    const keepAlive = { intervalMs: 20, timeoutMs: 120 };
+    // Idle but answering pings (as every WebSocket client does): attached well past the timeout.
+    const idle = await bridged({ keepAlive });
+    // Silent: no frames and no pongs (a half-open link after sleep or a network change).
+    const silent = await bridged({ keepAlive, autoPong: false });
+    await sleep(300);
+    expect(idle.pings.count).toBeGreaterThanOrEqual(5);
+    expect(idle.cli.readyState).toBe(WebSocket.OPEN);
+    expect(idle.attachment.closed).toBe(false);
+    await silent.closed;
+    expect(silent.attachment.closed).toBe(true);
+    idle.bridge.close(1000, "done");
+    await idle.closed;
+  });
+
+  it("counts a large message still arriving as life, so a slow link isn't taken for a dead one", async () => {
+    // A client that never answers pings sends one masked text frame by hand, a chunk every 20 ms (~400 ms, four
+    // timeouts): no message completes until it ends.
+    const slow = await bridged({ keepAlive: { intervalMs: 20, timeoutMs: 100 }, autoPong: false });
+    const payload = Buffer.from(JSON.stringify({ jsonrpc: "2.0", id: 77, method: "ping", params: { pad: "x".repeat(20_000) } }));
+    slow.raw.write(Buffer.from([0x81, 0x80 | 126, payload.length >> 8, payload.length & 0xff, 0, 0, 0, 0]));
+    for (let offset = 0; offset < payload.length; offset += 1_000) {
+      slow.raw.write(payload.subarray(offset, offset + 1_000));
+      await sleep(20);
     }
+    // It arrived whole and was relayed; then the client, silent since, was ended.
+    await slow.closed;
+    expect(listener.received.some((message: any) => message.id === 77 && message.params?.pad?.length === 20_000)).toBe(true);
+    expect(slow.attachment.closed).toBe(true);
   });
 });
 

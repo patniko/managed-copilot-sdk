@@ -225,7 +225,7 @@ export const attachModule: GatewayModule = {
           // `track`, which registers the relay for the next one.
           server.handleUpgrade(req, socket, head, (client) => {
             attached = true;
-            const relay = new AhpBridge(client, upstream, { log, sessionId, maxLifetimeMs, ledgerWaitMs, placement, attachment, actions: actionsOf(app), gate: gateFor(sessionId, attachment), scrub });
+            const relay = new AhpBridge(client, upstream, { log, sessionId, maxLifetimeMs, ledgerWaitMs, placement, attachment, actions: actionsOf(app), gate: gateFor(sessionId, attachment), scrub, transport: socket });
             if (!hosts.track(host, relay)) return;
             log.info("Copilot CLI attached", { sessionId, accountId: ticket.accountId, connectionId });
             const principals = attachedPrincipals.get(sessionId) ?? new Map<string, Principal>();

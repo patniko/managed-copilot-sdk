@@ -581,13 +581,11 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   again for re-approval, and a removed one is deleted. Declarations without `runAs` are logged as unrunnable.
 - Not covered yet: durable answers for `userInput.request`/hooks (they require a live client; unattended hooks fail
   closed), and credential refresh.
-- **Known limitations, pending core (fail closed).** Durable passes the expected incarnation to `sessions.send` and
-  `sessions.request` and reads `SessionRecord.incarnation`, `create(...).incarnation`, `authenticate(token, {
-  background })`, and `auth.forgetCredential`, all additive and optional. Until core's builds with them are on
-  `main`: durable rechecks the incarnation synchronously right before each send or answer, but a session deleted and
-  recreated under the same ID while core itself awaits (for example restoring its placement) before writing could
-  still receive the prompt or answer; incarnations are the session's creation time; a background verification may be
-  recorded as the account's live credential, and logout cannot make core drop a token it holds.
+- **Incarnations and credentials with core.** Durable passes the expected incarnation to `sessions.send` and
+  `sessions.request`, and core checks it again in the step that writes upstream, so a prompt or answer meant for a
+  deleted session never reaches a later session that reuses its ID. Background verifications use `authenticate(token,
+  { background: true })` and are never recorded as the account's live credential; logout, invalidation, and a new
+  sign-in call `auth.forgetCredential`, so core drops the removed token.
 
 ### Promotion (as built)
 
@@ -806,8 +804,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   ephemeral root `session.error` (`errorType: "interrupted"`, "This turn was interrupted because the platform lost the
   connection to the session's runtime … Send your message again to continue.") and a root `session.idle`. The ledger
   records `lastTurn` `failed` (state `idle`) and emits `session.failed` and `session.idle` (`status: "failed"`), so
-  `SessionInfo` shows it. A `sendAndWait` whose own turn core ended this way rejects with the same message
-  (`capability_unavailable`). One whose turn completed (only the reply was lost), or whose turn pending work carries,
+  `SessionInfo` shows it. A `sendAndWait` rejects with the same message (`capability_unavailable`) only when the turn
+  core ended is positively its own: the only root turn started since the call began. Otherwise, for example when its
+  turn completed and only the reply was lost, when another turn followed it, or when pending work carries its turn, it
   gets the connection error. The session stays resumable; the next turn restores it. A turn waiting on work durable
   owns (`hasOpenActions`) is kept, because `continuePendingWork` keeps the runtime's pending tool call or permission
   and answering it continues the turn. On every restore, a turn the ledger still has running is checked against the
@@ -817,8 +816,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   retries it. The end applies only while that runtime still owns the session, so a cutover that commits meanwhile
   wins, and a client resume overtaken that way is admitted again where the session moved. An external shared runtime
   (`MANAGED_COPILOT_RUNTIME_URL`) keeps running its turns, so nothing ends while its connection is down. A turn it
-  finished unseen ends as its history records: its own root `session.error`, an abort (`cancelled`), or neither
-  (`completed`).
+  no longer processes ends as its history records. Its own root `session.error` fails it, and an abort cancels it. It
+  is `completed` only on evidence: a root `session.idle`, a final reply that requested no tools followed by
+  `assistant.turn_end`, or a later turn. A turn with no recorded ending was lost to a runtime restart and is
+  interrupted.
 - **Reopening a sandbox runtime.** Because the stock runtime refuses `llmInference.setProvider` while a lost
   connection holds the registration, the sandbox module restarts the runtime (session state stays on disk) and its
   handle's `initialize` throws `capability_unavailable` with `details.reopen: true`. Core then opens the runtime again,
@@ -826,14 +827,17 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   is open is a `conflict` and is never reopened.
 - **Registration path deadlines.** A session's registration changes run one at a time, so a runtime answer that never
   comes would hold every later resume of the session (seen on Azure: a resume on a dead gateway→sandbox stream, with
-  the client's retry queued behind it). Each runtime answer on the path therefore gets 60 s (`upstreamTimings` in
-  `sessions.ts`). The bounded steps are `session.create`, `session.resume` (client resumes, restores, and a cutover's
-  destination), the sandbox handle's `initialize` and `sessionOpened`, `session.options.update`, `session.tools.set`,
-  and a restore's turn checks. When one expires, the connection is probed with `ping` (10 s). One that does not answer
-  is closed: a sandbox session opens a fresh stream on its next request, and the shared runtime's supervisor restarts
-  it. The caller fails with `timeout` (`details: { sessionId, step }`), which it can retry. `RuntimeUpstream.open`
-  already bounds the runtime handshake (30 s); starting a sandbox (`ensureRunning`, `openRuntime`) is bounded by the
-  sandbox module.
+  the client's retry queued behind it). The bounded steps are `session.create`, `session.resume` (client resumes,
+  restores, and a cutover's destination), the sandbox handle's `initialize` and `sessionOpened`,
+  `session.options.update`, `session.tools.set`, and a restore's turn checks. Every 60 s without the answer
+  (`upstreamTimings` in `sessions.ts`), the connection is probed with `ping` (10 s). A connection that answers is still
+  working on the step, which may yet apply, so core keeps waiting and sends it nothing else for the session. Giving up
+  then would let the step land after whatever comes next, such as a resume withdrawing hooks after the reconcile that
+  restored them. A connection that does not answer is closed, so nothing it carried can apply later: a sandbox runtime
+  is restarted before it serves the session again (the reopen above), and the shared runtime's supervisor restarts it.
+  The caller fails with `timeout` (`details: { sessionId, step }`), which it can retry. `RuntimeUpstream.open` already
+  bounds the runtime handshake (30 s); starting a sandbox (`ensureRunning`, `openRuntime`) is bounded by the sandbox
+  module.
 - **Interrupted creates and deletions.** At startup (in the background) and on the next request for the session,
   rows a stopped gateway left `deleting` finish their deletion (sandbox, runtime state, policy, `session.deleted`,
   ledger), and rows left `creating` are discarded (sandbox and policy released), so a schedule retrying its
@@ -1080,6 +1084,14 @@ sequenceDiagram
   relay refuses a reconnect whose material names a different
   conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
   attach again with new material.
+- **Keepalive.** Ingresses close idle WebSockets (Azure Container Apps after 240 s, with 1006). The relay pings the
+  deployment every 30 s, and when nothing at all has arrived from it for 90 s (bytes of a large frame still arriving
+  count, since a pong waits behind them), a half-open link after sleep or a network change, it reconnects the CLI the
+  same way ("Managed Copilot stopped responding. Reconnecting.", counted against the same reconnect limit, then
+  `upstream_unavailable`). The gateway pings each attached client every 30 s and ends one it has received nothing from
+  for 90 s, which detaches its `cli` responder and releases prompts it claimed instead of waiting on the operating
+  system to notice. The gateway's link to a sandbox's listener is a sandbox runtime stream, which the sandbox module
+  keeps alive; on shared placement it is loopback.
 - **Verified live** (stock Copilot CLI 1.0.92, runtime 1.0.103, real model, captured between the relay and the
   gateway): with an SDK app holding a permission prompt, the CLI's "Approve once" was refused ("Another responder owns
   this action"), the tool did not run, and the app's later answer completed the turn; with no app attached, the CLI's
@@ -1097,7 +1109,9 @@ sequenceDiagram
   Reconnecting...", reconnected through the relay by itself, and approved the shell command in the sandbox
   (`cli-ok`, `Linux`, `/workspace`); Esc on a running turn sent `chat/turnCancelled` through `write({ kind: "abort" })`
   and the runtime ended the turn; `managed-copilot attach` exited 0 with "Detached from ...". 132 more CLI-bound frames
-  had no host path.
+  had no host path. Through a proxy that cuts connections idle for 45 s (standing in for the ingress), the real CLI
+  stayed attached for 3 minutes, 2.5 of them idle (pings and pongs every 30 s both ways; an idle raw connection
+  through the same proxy was cut at 45 s), and its next turn answered without a reconnect.
 - Hosts are disposed after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one
   alive), on `deleted` and `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on
   `promoted` or a new runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the
