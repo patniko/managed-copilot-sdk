@@ -11,6 +11,7 @@ import { openDatabase } from "../src/db.js";
 import type { Principal } from "../src/http.js";
 import { createLogger } from "../src/log.js";
 import type { PlacementCutover, SessionRecord } from "../src/modules/core/contracts.js";
+import type { PromotionParticipant, PromotionParticipantOutcome } from "../src/modules/promotion/contract.js";
 import { PromotionManager, SANDBOX_READY_TEXT } from "../src/modules/promotion/service.js";
 import { PromotionStore } from "../src/modules/promotion/store.js";
 
@@ -701,6 +702,124 @@ describe("agent-initiated promotion (request_sandbox)", () => {
     expect(tool).toBe(SANDBOX_READY_TEXT);
     expect(api).toMatchObject({ placement: "sandbox", generation: 1 });
     expect(sandboxes.created).toHaveLength(1);
+  });
+});
+
+describe("participants: paths into the source that core's fence does not cover (attached Copilot CLI)", () => {
+  /** Records into the cutover's step log, so ordering against core's fence and the checkpoint is checked directly. */
+  class FakeParticipant implements PromotionParticipant {
+    readonly name = "Copilot CLI attach";
+    fenceFails: Error | undefined;
+    hang = false;
+    signal: AbortSignal | undefined;
+    readonly releases: PromotionParticipantOutcome[] = [];
+
+    async fence(sessionId: string, signal: AbortSignal): Promise<void> {
+      this.signal = signal;
+      sessions.steps.push(`participant:fence:${sessionId === SESSION}`);
+      if (this.hang) await new Promise<void>(() => undefined);
+      if (this.fenceFails) throw this.fenceFails;
+    }
+
+    release(sessionId: string, outcome: PromotionParticipantOutcome): void {
+      this.releases.push(outcome);
+      sessions.steps.push(`participant:release:${sessionId === SESSION}`);
+    }
+  }
+
+  let participant: FakeParticipant;
+  beforeEach(() => {
+    participant = new FakeParticipant();
+    manager.participate(participant);
+  });
+
+  const at = (step: string) => sessions.steps.indexOf(step);
+  const lastAt = (step: string) => sessions.steps.lastIndexOf(step);
+
+  it("fences after core's fence and before the re-check and checkpoint, and releases after commit", async () => {
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox", generation: 1 });
+    expect(at("participant:fence:true")).toBe(at("fence") + 1);
+    // The re-check that follows sees whatever the attached client started before its fence.
+    expect(sessions.steps[at("participant:fence:true") + 1]).toBe("source:session.metadata.isProcessing");
+    expect(at("source:sessions.close")).toBeGreaterThan(at("participant:fence:true"));
+    expect(at("participant:release:true")).toBeGreaterThan(at("commit"));
+    expect(participant.releases).toEqual([{ committed: true, sealed: true }]);
+    expect(participant.signal?.aborted).toBe(false);
+  });
+
+  it("fences before a tool promotion suspends the source", async () => {
+    sessions.records.set(SESSION, record({ state: "running", lastTurn: { turnId: "turn-7", status: "running" } }));
+    actions.open = [toolAction()];
+    const own = { requestId: "req-1", toolCallId: "call-1", toolName: "request_sandbox" };
+    sessions.behavior.sourcePending = () => [own];
+    sessions.behavior.destinationPending = () => [own];
+    expect(await manager.fromTool({ sessionId: SESSION, ownerId: OWNER.accountId, environment: "helper", toolCallId: "call-1", idempotencyKey: `${SESSION}:call-1` })).toBe(SANDBOX_READY_TEXT);
+    expect(at("participant:fence:true")).toBe(at("fence") + 1);
+    expect(at("source:session.suspend")).toBeGreaterThan(at("participant:fence:true"));
+    expect(participant.releases).toEqual([{ committed: true, sealed: true }]);
+  });
+
+  it("releases unsealed after the abort when work started before the fence stops the move", async () => {
+    sessions.behavior.processing = (fenced) => fenced;
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "session_busy");
+    expect(sessions.steps).not.toContain("source:sessions.close");
+    expect(lastAt("participant:release:true")).toBe(lastAt("abort:{}") + 1);
+    expect(participant.releases).toEqual([{ committed: false, sealed: false }]);
+  });
+
+  it("releases sealed after the abort when the move fails after the source was checkpointed", async () => {
+    sessions.behavior.openFails = new ManagedCopilotError("state_restore_failed", "resume failed");
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "state_restore_failed");
+    expect(lastAt("participant:release:true")).toBe(lastAt("abort:{}") + 1);
+    expect(participant.releases).toEqual([{ committed: false, sealed: true }]);
+  });
+
+  it("fails before the checkpoint with promotion_busy when a participant cannot pause, and still releases it", async () => {
+    participant.fenceFails = new Error("the relay is closing");
+    const error = await manager.promote(OWNER, SESSION).catch((caught: unknown) => caught);
+    expectError(error, "promotion_busy");
+    expect((error as Error).message).toContain("Copilot CLI attach");
+    expect(sessions.steps).not.toContain("source:sessions.close");
+    expect(participant.releases).toEqual([{ committed: false, sealed: false }]);
+    expect(sandboxes.deleted).toEqual([SESSION]);
+    expect(sessions.get(SESSION)).toMatchObject({ placement: "shared", generation: 0 });
+  });
+
+  it("bounds a participant's fence, aborting its signal, and releases it", async () => {
+    const bounded = new PromotionManager({ app, log: createLogger("promotion-test", "error"), store, platformRoots: [join(temp, "data")], stagingRoot: join(temp, "data", "promotion"), participantFenceTimeoutMs: 40 });
+    const slow = new FakeParticipant();
+    slow.hang = true;
+    bounded.participate(slow);
+    expectError(await bounded.promote(OWNER, SESSION).catch((error: unknown) => error), "promotion_busy");
+    expect(slow.signal?.aborted).toBe(true);
+    expect(slow.releases).toEqual([{ committed: false, sealed: false }]);
+    expect(sessions.steps).not.toContain("source:sessions.close");
+  });
+
+  it("does not fence anything for a session deleted during the last probe before the fence", async () => {
+    let tasksProbes = 0;
+    sessions.behavior.sourceFails = (method) => {
+      // The second idle check (after allocation, right before the fence): core's delete aborts the cutover meanwhile.
+      if (method === "session.tasks.list" && ++tasksProbes === 2) sessions.records.set(SESSION, record({ state: "deleting" }));
+      return undefined;
+    };
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "not_found");
+    expect(sessions.steps).not.toContain("fence");
+    expect(sessions.steps.filter((step) => step.startsWith("participant:"))).toEqual([]);
+  });
+
+  it("leaves participants alone when the move fails before the fence, and after unregistering", async () => {
+    sandboxes.createFails = new ManagedCopilotError("setup_failed", "pip install failed");
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "setup_failed");
+    expect(sessions.steps.filter((step) => step.startsWith("participant:"))).toEqual([]);
+
+    sandboxes.createFails = undefined;
+    const other = new FakeParticipant();
+    const unregister = manager.participate(other);
+    unregister();
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox" });
+    expect(other.releases).toEqual([]);
+    expect(participant.releases).toEqual([{ committed: true, sealed: true }]);
   });
 });
 

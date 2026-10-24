@@ -354,7 +354,8 @@ applies the session's policy and attaches vault credentials. Anything else is re
   placeholders in URLs, Basic credentials, other headers, other sessions, other hosts, plain HTTP, and WebSocket
   upgrades; asks the gateway to authorize each use; writes nothing upstream until the destination's certificate
   verifies (within the connect deadline) and the registration and binding are re-checked once more; forces
-  `Accept-Encoding: identity` and redacts reflected values (defense in depth only). Clients that
+  `Accept-Encoding: identity` and redacts reflected values (defense in depth only; streamed bodies such as
+  server-sent events pass through immediately, holding back only a tail that could still become a secret). Clients that
   reject the platform CA or pin certificates are reported as `tls_client_untrusted`.
 - **Shared placement.** `web_fetch` (`overridesBuiltInTool`) follows redirects itself, re-evaluating each hop, with
   size/time limits (30 s for the whole call, body included) and HTML-to-text; it explains failures instead of
@@ -363,8 +364,15 @@ applies the session's policy and attaches vault credentials. Anything else is re
   for `Accept-Encoding: identity` (a compressed event stream fails with 502), rewrites legacy SSE `endpoint` events
   (parsed as SSE clients parse them; an event that only becomes `endpoint` after its data passed is renamed so clients
   ignore it), and attaches the vault MCP credential (`Bearer` unless the vault names a header) at request
-  time. Gateway-side dials and TLS handshakes are bounded by the connect timeout and the caller's cancellation. For
-  sandbox placement, `vaults.mcpHeaders(id, url, "sandbox")` returns placeholder headers the proxy fills.
+  time. Gateway-side dials and TLS handshakes are bounded by the connect timeout and the caller's cancellation.
+- **Sandbox MCP credentials.** For remote MCP servers of isolated sessions, admission merges
+  `vaults.mcpHeaders(id, url, "sandbox")` into the server's headers (the vault header replaces a caller header of the
+  same name). It returns only the session's placeholder (`authorization: Bearer <placeholder>`, or the bare
+  placeholder in the header the vault names), stable per session and credential, for an exact URL match (fragment
+  ignored); `undefined` without a live credential, for shared placement, or for non-isolated sessions; and throws
+  `capability_unavailable` when the vault's server is an IP address or uses a port other than 443, which the proxy
+  never terminates. The proxy substitutes it only on that session's TLS-terminated requests to the server's exact host
+  on port 443; other sessions' placeholders, other hosts, and other headers are refused before anything is sent.
 - **Visibility.** Blocks are stored per session (`GET /v1/sessions/:id/network`: policy, vaults, newest blocks) and
   published as `network.blocked` platform events (rate-limited).
 - **Limits.** Vault destinations are exact host names on port 443; request bodies, query strings, Basic encodings,
@@ -487,7 +495,11 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   after `fence()`, against the same session incarnation. Probes fail closed: only the runtime's "session not found"
   (a session it does not hold, therefore idle) is accepted as an answer other than a valid result.
 - **Fence and transfer.** `fence()` makes new requests for the session wait and keeps everything the source emits
-  from clients, durable, observers, and the ledger. A tool promotion calls `session.suspend`, then `sessions.close`.
+  from clients, durable, observers, and the ledger. Paths into the source runtime that core does not see, such as an
+  attached Copilot CLI's AHP relay, are *participants* (`promotion.participate`). They are fenced right after `fence()`
+  (the ledger already says `promoting`, so new attachments are refused), bounded at 15 s (`promotion_busy`
+  otherwise), and before the quiescence re-check, so the re-check sees work they started. They are released once the
+  cutover ends. A tool promotion calls `session.suspend`, then `sessions.close`.
   The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
   data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
   `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
@@ -549,7 +561,11 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   turn.
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
   attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
-  publishes the same session on the sandbox runtime's AHP host.
+  publishes the same session on the sandbox runtime's AHP host. As a participant, attach is told when the cutover ends:
+  `committed`, or aborted `sealed` or unsealed (the source never stopped). Sealed means the source was checkpointed
+  and core resumes it there, right away when a caller's completion is waiting and otherwise on next use. The shared
+  connection and its `connectionId` stay the same, so an AHP host published before the fence is stale and must be
+  disposed, not reused. Attachments already past the `promoting` check when the fence started are attach's to stop.
 - **Limits.** A shared runtime reached through `MANAGED_COPILOT_RUNTIME_URL` has no local state directory, so its
   sessions cannot be promoted (`capability_unavailable`). Background agents and shells do not survive a runtime move,
   so they make a session busy rather than being abandoned. Only a root-agent `request_sandbox` call can be carried.
@@ -575,12 +591,12 @@ structurally (they may add members).
 | `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
-| `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |
+| `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for an isolated session's sandbox MCP servers, `undefined` when none apply, throws `capability_unavailable` for servers the proxy cannot substitute for; shared placement uses the adapter) |
 | `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits |
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified, never another account) |
-| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`; registers the `request_sandbox` platform tool and publishes `session.promoted` |
+| `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`

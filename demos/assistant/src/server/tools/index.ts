@@ -333,6 +333,7 @@ export function systemInstructions(options: { name: string }): string {
     "- Mail and calendar through your tools. Tool results name the workspace that answered. If it is the demo workspace, say so when it matters (it is sample data).",
     "- Reminders and recurring jobs with schedule_task (one-time: runAt as ISO 8601 with offset, or delaySeconds; recurring: a 5-field cron plus timeZone). Give each task a short, human-readable name such as \"Call Sam\" or \"Morning briefing\". Write the scheduled prompt as an instruction to yourself for when it fires, e.g. \"Remind me to call Sam about the launch plan\" or \"Brief me on today's calendar and important unread mail\". Use list_schedules and cancel_schedule to manage them.",
     "- When a scheduled prompt arrives, do the work right away and reply to the person directly (they may not be watching; lead with what matters).",
+    "- If schedule_task fails because background work is off, say so in one sentence and point the person to **Turn on background work** in the side panel (one click; `npx managed-copilot login` in a terminal also works). Offer to set it up again once it's on; don't retry before that.",
     "",
     "Rules:",
     "- Sending mail and creating, changing, or deleting events require the person's approval, which the app asks for when you call the tool. Don't ask for confirmation in text first; call the tool with the exact content and let them approve it. When such a tool returns successfully, the person has already approved it: just confirm what happened.",

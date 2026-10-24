@@ -107,6 +107,8 @@ function applyServerEvent(state: AssistantState, event: ServerEvent): AssistantS
       return { ...state, snapshot: { ...snapshot, platform: event.platform, conversation: event.conversation, account: event.account ?? snapshot.account } };
     case "schedules":
       return { ...state, snapshot: { ...snapshot, schedules: event.schedules, schedulesError: event.error } };
+    case "background":
+      return { ...state, snapshot: { ...snapshot, background: event.background } };
     case "connections":
       return { ...state, snapshot: { ...snapshot, connections: event.connections } };
     case "offline":
@@ -224,6 +226,24 @@ export function useAssistant() {
       disconnectGoogle: () => run(() => api.disconnectGoogle(), "Google disconnected. Using the demo workspace."),
       resetDemo: () => run(() => api.resetDemo(), "Demo inbox and calendar reset"),
       startOver: () => run(() => api.startOver(), "Started a new conversation"),
+      enableBackground: async () => {
+        const view = await run(() => api.enableBackground());
+        if (view?.state === "on") toast("success", "Background work is on. Reminders and automations run even when this tab is closed.");
+        else if (view) toast("info", "Background work isn't on yet. Check the side panel in a moment.");
+        return view;
+      },
+      disableBackground: async () => {
+        const view = await run(() => api.disableBackground());
+        if (view?.state === "off") toast("success", "Background work is off. Your reminders and automations are paused.");
+        else if (view) toast("info", "Background work may not be off yet. Check Settings in a moment.");
+        return view;
+      },
+      checkBackground: async () => {
+        const view = await run(() => api.checkBackground());
+        if (view?.state === "on") toast("success", "Background work is on.");
+        else if (view?.state === "off") toast("info", "Background work is still off.");
+        return view;
+      },
       toast,
     }),
     [run, toast],
