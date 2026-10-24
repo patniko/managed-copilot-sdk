@@ -529,6 +529,8 @@ export class PolicyService {
     if (!sandbox) throw deny("This sandbox is no longer registered.");
     const session = this.session(sandbox.session_id);
     if (!session) throw deny("This sandbox's session no longer exists.");
+    // Matches the registrations: only isolated sessions have sandbox egress (a reverted promotion's candidate has none).
+    if (session.type !== "isolated") throw deny("This session is not running in an isolated sandbox, so its sandboxes cannot use vault credentials.");
     const credential = this.#credentials(session).find(({ row }) => row.id === request.credentialId && row.placeholder === request.placeholder);
     if (!credential) throw deny("This vault credential was revoked or never belonged to this session.");
     const { vault, meta } = credential;
