@@ -12,6 +12,16 @@ import type { RegisteredPlatformTool, ResolvedEnvironment } from "./contracts.js
 /** `BuiltInTools.Isolated` from @github/copilot-sdk 1.0.26: built-ins that stay inside one session. */
 export const SESSION_SAFE_BUILTINS = ["ask_user", "task_complete", "exit_plan_mode", "task", "read_agent", "write_agent", "list_agents", "send_inbox", "context_board"] as const;
 
+/**
+ * Multi-agent built-ins. In shared sessions without agents they only spawn subagents that have nothing to work with
+ * (no web, shell, or files), which turns a quick chat answer into minutes of fruitless delegation, so they are on by
+ * default only when the session has agents; callers can still opt in with `availableTools`.
+ */
+export const SUBAGENT_BUILTINS = ["task", "read_agent", "write_agent", "list_agents", "send_inbox", "context_board"] as const;
+
+/** Runtime built-in MCP servers, disabled in shared placement (no direct egress from the shared runtime). */
+export const BUILTIN_MCP_SERVERS = ["github-mcp-server"] as const;
+
 export interface AdmissionContext {
   readonly environment: ResolvedEnvironment;
   readonly placement: Placement;
@@ -21,6 +31,32 @@ export interface AdmissionContext {
   readonly workingDirectory: string;
   /** Gateway-owned `gitHubToken` provider registration for this session. */
   readonly tokenRegistrationId: string;
+  /** Where the customization bundle is mounted read-only inside a sandbox (sandbox placement only). */
+  readonly sandboxCustomizations?: string;
+  /** Whether the session admitted remote MCP servers (option patches may then allow `mcp:*` tools). */
+  readonly allowMcp?: boolean;
+}
+
+/** The sandbox module mounts deployed customizations here (read-only). */
+export const SANDBOX_CUSTOMIZATIONS_DIR = "/opt/managed-copilot/customizations";
+
+/** Customization directories as the runtime sees them: host paths for shared, mount paths for sandboxes. */
+function bundleDirectories(context: AdmissionContext): { agents?: string; skills?: string; instructions?: string } {
+  const bundle = context.environment.customizations;
+  if (!bundle) return {};
+  if (context.placement === "shared") {
+    return {
+      ...(bundle.agentDirectory ? { agents: bundle.agentDirectory } : {}),
+      ...(bundle.skillDirectory ? { skills: bundle.skillDirectory } : {}),
+      ...(bundle.instructionDirectory ? { instructions: bundle.instructionDirectory } : {}),
+    };
+  }
+  const root = (context.sandboxCustomizations ?? SANDBOX_CUSTOMIZATIONS_DIR).replace(/\/+$/, "");
+  return {
+    ...(bundle.agentDirectory ? { agents: `${root}/agents` } : {}),
+    ...(bundle.skillDirectory ? { skills: `${root}/skills` } : {}),
+    ...(bundle.instructionDirectory ? { instructions: `${root}/instructions` } : {}),
+  };
 }
 
 export interface ClientCapabilities {
@@ -87,20 +123,34 @@ export function checkModel(environment: ResolvedEnvironment, model: unknown): vo
   if (!allowed.includes(model)) throw violation(`Model "${model}" is not allowed in environment "${environment.name}" (allowed: ${allowed.join(", ")})`, { allowedModels: allowed });
 }
 
-/** Removes the runtime's host environment section from shared sessions' system prompts. */
+/**
+ * Shared sessions get an accurate environment section instead of the runtime's host details (cwd, OS, directory
+ * listing), so models do not attempt shell commands or file access the session does not have.
+ */
+export const SHARED_ENVIRONMENT_CONTEXT = [
+  "<environment_context>",
+  "This session runs in a Managed Copilot shared environment. It has no shell, no file system, and no direct network access.",
+  "Use only the tools available in this session. Never write tool calls, shell commands, or code meant to be executed as plain text.",
+  "If a request needs a capability this session does not have, say so briefly and answer as well as you can from what you know.",
+  "</environment_context>",
+].join("\n");
+
+/** Replaces the runtime's host environment section in shared sessions' system prompts. */
 export function lockSystemMessage(supplied: unknown): unknown {
-  if (supplied === undefined || supplied === null) return { mode: "customize", sections: { environment_context: { action: "remove" } } };
+  const environment = { action: "replace", content: SHARED_ENVIRONMENT_CONTEXT };
+  const defaults = { environment_context: environment, code_change_rules: { action: "remove" } };
+  if (supplied === undefined || supplied === null) return { mode: "customize", sections: defaults };
   if (!isRecord(supplied)) throw new ManagedCopilotError("invalid_request", "systemMessage must be an object");
   switch (supplied["mode"]) {
     case "replace":
       return supplied;
     case "customize": {
       const sections = isRecord(supplied["sections"]) ? supplied["sections"] : {};
-      return { ...supplied, sections: { ...sections, environment_context: { action: "remove" } } };
+      return { ...supplied, sections: { ...defaults, ...sections, environment_context: environment } };
     }
     case "append":
     case undefined:
-      return { mode: "customize", ...(supplied["content"] !== undefined ? { content: supplied["content"] } : {}), sections: { environment_context: { action: "remove" } } };
+      return { mode: "customize", ...(supplied["content"] !== undefined ? { content: supplied["content"] } : {}), sections: defaults };
     default:
       throw new ManagedCopilotError("invalid_request", `Unknown systemMessage mode "${String(supplied["mode"])}"`);
   }
@@ -119,9 +169,16 @@ export function sharedBuiltins(environment: ResolvedEnvironment, _network: Netwo
 }
 
 /** Intersects the caller's tool filters with the shared environment's allowlist (source-qualified names). */
-export function sharedToolFilters(input: ToolFilterInput, environment: ResolvedEnvironment, network: NetworkPolicy, allowMcp: boolean): { availableTools: string[]; excludedTools?: string[] } {
+export function sharedToolFilters(
+  input: ToolFilterInput,
+  environment: ResolvedEnvironment,
+  network: NetworkPolicy,
+  allowMcp: boolean,
+  options: { hasAgents?: boolean } = {},
+): { availableTools: string[]; excludedTools?: string[] } {
   const builtins = sharedBuiltins(environment, network);
-  const base = [...builtins.map((name) => `builtin:${name}`), "custom:*", ...(allowMcp ? ["mcp:*"] : [])];
+  const defaults = options.hasAgents ? builtins : builtins.filter((name) => !(SUBAGENT_BUILTINS as readonly string[]).includes(name));
+  const base = [...defaults.map((name) => `builtin:${name}`), "custom:*", ...(allowMcp ? ["mcp:*"] : [])];
   const requested = stringList(input.availableTools, "availableTools");
   const excluded = stringList(input.excludedTools, "excludedTools");
   let availableTools = base;
@@ -189,6 +246,7 @@ function admitCustomAgents(value: unknown, context: AdmissionContext, remote: { 
     if (seen.has(name)) throw new ManagedCopilotError("invalid_request", `Custom agent "${name}" is declared twice`);
     seen.add(name);
     if (deployed.has(name)) throw new ManagedCopilotError("conflict", `Custom agent "${name}" would shadow the agent deployed with environment "${context.environment.name}"; choose another name`);
+    if (agent["model"] !== undefined) checkModel(context.environment, agent["model"]);
     if (context.placement === "shared" && agent["hooks"] !== undefined && agent["hooks"] !== null && Object.keys(agent["hooks"] as object).length > 0) {
       throw violation(`Custom agent "${name}" declares hooks; shared environments do not run hook actions`);
     }
@@ -206,6 +264,7 @@ function admitTools(value: unknown, context: AdmissionContext): { declarations: 
     for (const [index, tool] of value.entries()) {
       if (!isRecord(tool) || typeof tool["name"] !== "string" || !tool["name"]) throw new ManagedCopilotError("invalid_request", `tools[${index}] needs a name`);
       const name = tool["name"];
+      if (names.includes(name)) throw new ManagedCopilotError("invalid_request", `Tool "${name}" is declared more than once`);
       if (context.platformTools.some((platform) => platform.name === name) || PLATFORM_RESERVED.has(name)) {
         throw new ManagedCopilotError("conflict", `Tool name "${name}" is reserved by the platform in environment "${context.environment.name}"`);
       }
@@ -419,6 +478,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
 
   // Environment defaults the platform owns.
   const tools = admitTools(raw["tools"], context);
+  const directories = bundleDirectories(context);
   params["tools"] = tools.declarations;
   params["envValueMode"] = "direct";
   params["mcpOAuthTokenStorage"] = "in-memory";
@@ -440,23 +500,27 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     params["memory"] = { enabled: false };
     params["embeddingCacheStorage"] = "in-memory";
     if (params["systemMessage"] === undefined) params["systemMessage"] = lockSystemMessage(undefined);
-    params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(bundle?.skillDirectory);
-    if (bundle?.skillDirectory) params["skillDirectories"] = [bundle.skillDirectory];
-    if (bundle?.agentDirectory) params["agentDirectories"] = [bundle.agentDirectory];
-    if (bundle?.instructionDirectory) params["instructionDirectories"] = [bundle.instructionDirectory];
-    const filters = sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0);
+    params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(directories.skills);
+    if (directories.skills) params["skillDirectories"] = [directories.skills];
+    if (directories.agents) params["agentDirectories"] = [directories.agents];
+    if (directories.instructions) params["instructionDirectories"] = [directories.instructions];
+    const hasAgents = (environment.customizations?.agents.length ?? 0) > 0 || (Array.isArray(raw["customAgents"]) && raw["customAgents"].length > 0) || typeof raw["agent"] === "string";
+    const filters = sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0, { hasAgents });
     params["availableTools"] = filters.availableTools;
     if (filters.excludedTools) params["excludedTools"] = filters.excludedTools;
+    // The runtime's built-in GitHub MCP server would egress directly from the shared runtime host.
+    const disabled = stringList(params["disabledMcpServers"], "disabledMcpServers") ?? [];
+    params["disabledMcpServers"] = [...new Set([...disabled, ...BUILTIN_MCP_SERVERS])];
   } else {
     params["workingDirectory"] ??= context.workingDirectory;
     const available = stringList(raw["availableTools"], "availableTools");
     const excluded = stringList(raw["excludedTools"], "excludedTools");
     if (available) params["availableTools"] = available;
     if (excluded && excluded.length > 0) params["excludedTools"] = excluded;
-    if (bundle?.skillDirectory) params["skillDirectories"] = [...((params["skillDirectories"] as string[] | undefined) ?? []), bundle.skillDirectory];
-    if (bundle?.agentDirectory) params["agentDirectories"] = [...((params["agentDirectories"] as string[] | undefined) ?? []), bundle.agentDirectory];
-    if (bundle?.instructionDirectory) params["instructionDirectories"] = [...((params["instructionDirectories"] as string[] | undefined) ?? []), bundle.instructionDirectory];
-    if (bundle?.skillDirectory && params["enableSkills"] === undefined) params["enableSkills"] = true;
+    if (directories.skills) params["skillDirectories"] = [...((params["skillDirectories"] as string[] | undefined) ?? []), directories.skills];
+    if (directories.agents) params["agentDirectories"] = [...((params["agentDirectories"] as string[] | undefined) ?? []), directories.agents];
+    if (directories.instructions) params["instructionDirectories"] = [...((params["instructionDirectories"] as string[] | undefined) ?? []), directories.instructions];
+    if (directories.skills && params["enableSkills"] === undefined) params["enableSkills"] = true;
   }
 
   const optionsPatch: Record<string, unknown> = shared
@@ -552,7 +616,7 @@ export function admitOptionsUpdate(raw: unknown, context: AdmissionContext): Rec
       case "availableTools":
       case "excludedTools":
         if (shared) {
-          const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, true);
+          const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, context.allowMcp === true);
           if (key === "availableTools") patch[key] = filters.availableTools;
           else patch[key] = filters.excludedTools ?? [];
         } else patch[key] = stringList(value, key);
@@ -585,4 +649,43 @@ export function admitToolsSet(raw: unknown, context: AdmissionContext): { params
 /** Admits an agent selection against the environment's deployed and inline agents. */
 export function admitAgentSelect(raw: unknown): void {
   if (!isRecord(raw) || (raw["name"] !== undefined && typeof raw["name"] !== "string")) throw new ManagedCopilotError("invalid_request", "session.agent.select needs an agent name");
+}
+
+/** Model-request headers a caller may not set: credentials and routing that belong to the platform. */
+const RESERVED_REQUEST_HEADERS = /^(authorization|proxy-authorization|cookie|x-api-key|api-key|x-github-.*|copilot-.*|openai-.*|anthropic-.*|x-request-id|host)$/i;
+
+/**
+ * Admits `session.send` / `session.sendAndWait` params. Shared sessions accept only inline (`blob`) attachments:
+ * the runtime reads file, directory, and selection paths from its own filesystem, which is the platform host.
+ */
+export function admitSend(input: unknown, context: AdmissionContext): Record<string, unknown> {
+  if (!isRecord(input)) throw new ManagedCopilotError("invalid_request", "send params must be an object");
+  let raw: Record<string, unknown> = input;
+  const shared = context.placement === "shared";
+  const attachments = raw["attachments"];
+  if (attachments !== undefined && attachments !== null) {
+    if (!Array.isArray(attachments)) throw new ManagedCopilotError("invalid_request", "attachments must be a list");
+    raw = {
+      ...raw,
+      attachments: attachments.map((attachment, index) => {
+        if (!isRecord(attachment) || typeof attachment["type"] !== "string") throw new ManagedCopilotError("invalid_request", `attachments[${index}] needs a type`);
+        const type = attachment["type"];
+        if (type === "blob") return attachment;
+        if (shared) {
+          throw violation(`Attachment type "${type}" refers to a file path; shared sessions have no workload filesystem. Send the content inline as a blob attachment.`);
+        }
+        if (type === "file" || type === "directory") return { ...attachment, path: sandboxPath(attachment["path"], `attachments[${index}].path`, context.workingDirectory) };
+        if (type === "selection") return { ...attachment, filePath: sandboxPath(attachment["filePath"], `attachments[${index}].filePath`, context.workingDirectory) };
+        throw unavailable(`Attachment type "${type}" is not supported by Managed Copilot`);
+      }),
+    };
+  }
+  if (shared && raw["agentMode"] === "shell") throw violation("Shell mode is not available in shared environments");
+  const headers = raw["requestHeaders"];
+  if (headers !== undefined && headers !== null) {
+    if (!isRecord(headers)) throw new ManagedCopilotError("invalid_request", "requestHeaders must be an object");
+    const reserved = Object.keys(headers).filter((name) => RESERVED_REQUEST_HEADERS.test(name));
+    if (reserved.length > 0) throw violation(`Model request headers ${reserved.join(", ")} are controlled by the platform`);
+  }
+  return raw;
 }

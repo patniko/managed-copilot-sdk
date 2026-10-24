@@ -7,6 +7,7 @@ import { connect as connectTcp } from "node:net";
 import { join } from "node:path";
 import type { Duplex } from "node:stream";
 import {
+  isManagedCopilotError,
   ManagedCopilotError,
   type NetworkPolicy,
   type PendingAction,
@@ -24,7 +25,7 @@ import {
   type AttachedResponder,
   type RuntimeSessionEvent,
 } from "../durable/contract.js";
-import { admitOptionsUpdate, admitSession, admitToolsSet, checkModel, type AdmissionContext, type AdmittedSession } from "./admission.js";
+import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, type AdmissionContext, type AdmittedSession } from "./admission.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -69,7 +70,18 @@ interface Attachment {
   requestAutoModeSwitch: boolean;
   hooks: boolean;
   skillProvider: boolean;
+  /** Registered `systemMessage` section transform callbacks. */
+  transforms: boolean;
+  /** Registered canvases or a canvas renderer/provider. */
+  canvases: boolean;
+  /** This client's tool declarations (platform tools excluded), for the aggregate upstream registration. */
+  declarations: Record<string, unknown>[];
+  /** This client's handler flags (`requestPermission`, `hooks`, ...). */
+  flags: Record<string, unknown>;
 }
+
+/** Handler flags the runtime registers per connection; the gateway sends the union across attached clients. */
+const WIRE_FLAGS = ["requestPermission", "requestUserInput", "requestElicitation", "requestExitPlanMode", "requestAutoModeSwitch", "hooks", "hasSkillProvider"] as const;
 
 /** Per-connection wire settings resent when the gateway resumes a session upstream on its own. */
 interface WireSettings {
@@ -83,13 +95,17 @@ interface LiveSession {
   readonly placement: Placement;
   readonly environment: ResolvedEnvironment;
   readonly tokenRegistrationId: string;
+  /** The upstream events are accepted from (set before create/resume is sent). */
   upstream: RuntimeUpstream | undefined;
+  /** True once create/resume completed on `upstream`; only then may other requests use it. */
+  ready: boolean;
   sandbox: SandboxRuntimeHandle | undefined;
   readonly attachments: Map<string, Attachment>;
   creator: string | undefined;
   wire: WireSettings;
   /** Ensures events of one session are processed in order even when routing awaits the actions hook. */
   queue: Promise<void>;
+  /** In-flight create, resume, or restore; concurrent callers wait for it. */
   residency: Promise<RuntimeUpstream> | undefined;
   deleting: boolean;
 }
@@ -102,10 +118,10 @@ const CLIENT_REQUESTS: Record<string, keyof Attachment | undefined> = {
   "hooks.invoke": "hooks",
   "skillProvider.list": "skillProvider",
   "skillProvider.read": "skillProvider",
-  "systemMessage.transform": undefined,
-  "canvas.open": undefined,
-  "canvas.close": undefined,
-  "canvas.action.invoke": undefined,
+  "systemMessage.transform": "transforms",
+  "canvas.open": "canvases",
+  "canvas.close": "canvases",
+  "canvas.action.invoke": "canvases",
 };
 
 /** Session-scoped client methods forwarded upstream after the ownership check (supported-operation matrix). */
@@ -182,11 +198,15 @@ export class SessionManager implements SessionsService {
   readonly #sessionListeners = new Map<string, Set<SessionEventListener>>();
   readonly #lifecycle = new Set<(event: { sessionId: string; type: "deleted" | "promoted" | "stopped" }) => void>();
   readonly #upstreamHandlers: UpstreamHandlers;
+  /** Session IDs reserved by in-flight creates. */
+  readonly #creating = new Map<string, { ownerId: number; done: Promise<unknown> }>();
+  readonly #scrubber: ((value: unknown) => unknown) | undefined;
 
   constructor(options: SessionManagerOptions) {
     this.#options = options;
     this.#log = options.log;
     this.#ledger = options.ledger;
+    this.#scrubber = options.sharedRuntime ? pathScrubber(join(options.app.config.dataDir, "runtime", "shared")) : undefined;
     this.#upstreamHandlers = {
       onNotification: (upstream, method, params) => this.#onUpstreamNotification(upstream, method, params),
       onRequest: (upstream, method, params, context) => this.#onUpstreamRequest(upstream, method, params, context),
@@ -272,9 +292,14 @@ export class SessionManager implements SessionsService {
 
   async create(principal: Principal, request: CreateSessionRequest): Promise<{ sessionId: string; created: boolean }> {
     const sessionId = request.sessionId ?? randomUUID();
+    const inflight = this.#creating.get(sessionId);
+    if (inflight) {
+      if (inflight.ownerId !== principal.accountId) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+      await inflight.done.catch(() => undefined);
+    }
     const existing = this.#ledger.get(sessionId);
     if (existing) {
-      if (existing.ownerId === principal.accountId && existing.state !== "deleted") return { sessionId, created: false };
+      if (existing.ownerId === principal.accountId && existing.state !== "deleted" && existing.state !== "deleting") return { sessionId, created: false };
       throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
     }
     const environment = this.#options.environments.resolve(request.environment);
@@ -288,7 +313,14 @@ export class SessionManager implements SessionsService {
       requestPermission: true,
       ...(request.clientName ? { clientName: request.clientName } : {}),
     };
-    await this.#create({ principal, environment, raw, peer: undefined, scheduleId: request.scheduleId, webhook: request.webhook, clientName: request.clientName });
+    try {
+      await this.#create({ principal, environment, raw, peer: undefined, scheduleId: request.scheduleId, webhook: request.webhook, clientName: request.clientName });
+    } catch (error) {
+      // A concurrent create of the same deterministic ID by the same owner won the race.
+      const winner = isManagedCopilotError(error, "conflict") ? this.#ledger.get(sessionId) : undefined;
+      if (winner && winner.ownerId === principal.accountId) return { sessionId, created: false };
+      throw error;
+    }
     return { sessionId, created: true };
   }
 
@@ -314,14 +346,18 @@ export class SessionManager implements SessionsService {
 
   async delete(accountId: number, sessionId: string): Promise<void> {
     const record = this.getOwned(accountId, sessionId);
+    if (record.state === "deleting") throw new ManagedCopilotError("conflict", `Session ${sessionId} is already being deleted`);
     const live = this.#live.get(sessionId);
     if (live) live.deleting = true;
     this.#ledger.update(sessionId, { state: "deleting" });
+    // Let an in-flight create/resume settle so it cannot reopen the session after deletion.
+    await live?.residency?.catch(() => undefined);
     try {
       if (record.placement === "sandbox") {
         const sandboxes = this.#sandboxes;
         if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available, so the sandbox cannot be deleted yet");
         live?.upstream?.close();
+        live?.sandbox?.close?.();
         await sandboxes.delete(sessionId);
       } else {
         const upstream = await this.#options.sharedRuntime?.ready();
@@ -421,7 +457,7 @@ export class SessionManager implements SessionsService {
     if (params["sessionId"] === undefined) params["sessionId"] = randomUUID();
     const sessionId = params["sessionId"];
     if (typeof sessionId !== "string" || !ID_PATTERN.test(sessionId)) throw new ManagedCopilotError("invalid_request", "sessionId must be a UUID");
-    if (this.#ledger.get(sessionId)) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists; resume it instead`);
+    if (this.#ledger.get(sessionId) || this.#creating.has(sessionId)) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists; resume it instead`);
     const result = await this.#create({ principal: peer.principal, environment: peer.environment, raw: params, peer, clientName: peer.clientName });
     return { result, after: () => this.#afterAttach(peer, sessionId) };
   }
@@ -437,21 +473,44 @@ export class SessionManager implements SessionsService {
     }
     if (record.state === "deleting") throw new ManagedCopilotError("conflict", `Session ${sessionId} is being deleted`);
     const live = this.#liveFor(sessionId);
-    const admitted = await this.#admit(live.environment, live.placement, params, "resume", record.network, sessionId, live.tokenRegistrationId, peer.principal);
-    await this.#checkRemoteMcp(admitted, sessionId, live.placement, record.network);
-    const upstream = await this.#resident(live, { skipResume: true });
-    const forwarded = await this.#prepare(live, "session.resume", admitted.params);
-    this.#attach(live, peer, admitted, forwarded);
+    const binding = await this.#policy?.session?.(sessionId);
+    const network = binding?.policy ?? record.network;
+    const admitted = await this.#admit(live.environment, live.placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
+    await this.#checkRemoteMcp(admitted, sessionId, live.placement, network);
+
     let result: unknown;
-    try {
-      result = await upstream.request("session.resume", forwarded);
-      await this.#opened(live, upstream, admitted.optionsPatch);
-    } catch (error) {
-      this.#detach(live, peer.id);
-      throw error;
+    const resumeOn = async (upstream: RuntimeUpstream) => {
+      const prepared = await this.#prepare(live, "session.resume", admitted.params);
+      this.#attach(live, peer, admitted, prepared);
+      const forwarded = this.#withRegistrations(live, prepared);
+      try {
+        result = await upstream.request("session.resume", forwarded);
+        await this.#opened(live, upstream, admitted.optionsPatch);
+      } catch (error) {
+        this.#detach(live, peer.id);
+        throw error;
+      }
+      live.ready = true;
+    };
+    await live.residency?.catch(() => undefined);
+    if (live.upstream && !live.upstream.closed && live.ready) {
+      // Resident already: the runtime re-registers this client's tools and handler flags.
+      await resumeOn(live.upstream);
+    } else {
+      // Not resident: the client's own resume restores it, and concurrent callers wait for it.
+      await this.#serialize(live, async () => {
+        const upstream = await this.#connect(live);
+        await resumeOn(upstream);
+        return upstream;
+      });
     }
+    this.#persist(sessionId, (stored) => ({
+      params: storedParams(admitted.params),
+      ...(stored.tools ? { tools: stored.tools } : {}),
+      optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
+    }));
     this.#ledger.update(sessionId, { state: record.state === "failed" || record.state === "stopped" ? "ready" : record.state, ...(admitted.model ? { model: admitted.model } : {}) });
-    return { result: this.#sanitizeResponse(live, result), after: () => this.#afterAttach(peer, sessionId) };
+    return { result: this.#scrub(live, this.#sanitizeResponse(live, result)), after: () => this.#afterAttach(peer, sessionId) };
   }
 
   async forwardForClient(peer: ClientPeer, method: string, params: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
@@ -463,6 +522,7 @@ export class SessionManager implements SessionsService {
     }
     const record = this.getOwned(peer.principal.accountId, sessionId);
     let forwarded: Record<string, unknown> = params;
+    let patch: Record<string, unknown> | undefined;
     const context = (): AdmissionContext => ({
       environment: live.environment,
       placement: live.placement,
@@ -470,17 +530,26 @@ export class SessionManager implements SessionsService {
       platformTools: this.#platformToolsFor(live.environment, live.placement),
       workingDirectory: this.#workingDirectory(live.placement, sessionId),
       tokenRegistrationId: live.tokenRegistrationId,
+      allowMcp: hasRemoteMcp(this.#ledger.admitted(sessionId)?.params),
     });
     switch (method) {
+      case "session.send":
+      case "session.sendAndWait":
+        forwarded = { ...admitSend(params, context()), sessionId };
+        break;
       case "session.options.update":
-        forwarded = { ...admitOptionsUpdate(params, context()), sessionId };
+        patch = admitOptionsUpdate(params, context());
+        forwarded = { ...patch, sessionId };
         break;
       case "session.tools.set": {
         const admitted = admitToolsSet(params, context());
-        forwarded = { ...admitted.params, sessionId };
         const attachment = live.attachments.get(peer.id);
-        if (attachment) attachment.tools = new Set(admitted.names);
-        live.wire.tools = (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"])));
+        if (attachment) {
+          attachment.tools = new Set(admitted.names);
+          attachment.declarations = (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"])));
+        }
+        live.wire = this.#registrations(live);
+        forwarded = { ...admitted.params, tools: [...live.wire.tools, ...this.#platformToolDeclarations(live)], sessionId };
         break;
       }
       case "session.model.switchTo":
@@ -500,8 +569,20 @@ export class SessionManager implements SessionsService {
     }
     const upstream = await this.#resident(live);
     const result = await upstream.request(method, forwarded, { signal });
-    if (method === "session.model.switchTo" && typeof params["modelId"] === "string") this.#ledger.update(sessionId, { model: params["modelId"] });
-    return result;
+    if (patch && Object.keys(patch).length > 0) {
+      this.#persist(sessionId, (stored) => ({ ...stored, optionsPatch: { ...stored.optionsPatch, ...patch } }));
+      if (typeof patch["model"] === "string") this.#ledger.update(sessionId, { model: patch["model"] });
+    }
+    if (method === "session.model.switchTo" && typeof params["modelId"] === "string") {
+      const model = params["modelId"];
+      this.#ledger.update(sessionId, { model });
+      this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, model } }));
+    }
+    if (method === "session.getMessages" && live.placement === "shared" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
+      const events = (result as { events: RuntimeSessionEvent[] }).events;
+      return this.#scrub(live, { ...(result as Record<string, unknown>), events: events.map((event) => this.#sanitizeEvent(live, event)) });
+    }
+    return this.#scrub(live, result);
   }
 
   detach(peer: ClientPeer, sessionId: unknown): { success: boolean } {
@@ -551,14 +632,33 @@ export class SessionManager implements SessionsService {
     webhook?: string | undefined;
     clientName?: string | undefined;
   }): Promise<unknown> {
-    const { principal, environment } = input;
     const sessionId = input.raw["sessionId"] as string;
+    // Reserve the ID synchronously so concurrent creates of the same ID cannot both proceed.
+    if (this.#creating.has(sessionId) || this.#ledger.get(sessionId)) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+    const done = this.#createReserved(input, sessionId);
+    this.#creating.set(sessionId, { ownerId: input.principal.accountId, done });
+    try {
+      return await done;
+    } finally {
+      this.#creating.delete(sessionId);
+    }
+  }
+
+  async #createReserved(
+    input: { principal: Principal; environment: ResolvedEnvironment; raw: Record<string, unknown>; peer: ClientPeer | undefined; scheduleId?: string | undefined; webhook?: string | undefined; clientName?: string | undefined },
+    sessionId: string,
+  ): Promise<unknown> {
+    const { principal, environment } = input;
     const placement: Placement = environment.type === "isolated" ? "sandbox" : "shared";
     if (placement === "shared" && !this.#options.sharedRuntime) {
       throw new ManagedCopilotError("capability_unavailable", "Shared environments are disabled on this gateway (no shared runtime)");
     }
     if (placement === "sandbox" && !this.#sandboxes) {
       throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" needs isolated sandboxes, which this deployment does not provide yet`);
+    }
+    if (environment.config.inference?.foundry) {
+      // An explicitly selected billing route must never silently fall back to the owner's GitHub entitlement.
+      throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" routes inference to Azure AI Foundry ("${environment.config.inference.foundry}"), which this gateway does not support yet`);
     }
     const tokenRegistrationId = `mc-${randomUUID()}`;
     const admitted = await this.#admit(environment, placement, input.raw, "create", environment.network, sessionId, tokenRegistrationId, principal);
@@ -577,68 +677,77 @@ export class SessionManager implements SessionsService {
       });
       if (bound) network = bound;
     }
-    await this.#checkRemoteMcp(admitted, sessionId, placement, network);
-
-    const stored: AdmittedConfig = {
-      params: storedParams(admitted.params),
-      ...(input.peer ? {} : { tools: (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))) }),
-      optionsPatch: admitted.optionsPatch,
-    };
-    const record = this.#ledger.insert({
-      id: sessionId,
-      owner: accountInfo(principal),
-      environment: environment.name,
-      type: environment.type,
-      placement,
-      network,
-      environmentRequest: environment.request,
-      admitted: stored,
-      ...(admitted.model ? { model: admitted.model } : {}),
-      ...(admitted.agent ? { agent: admitted.agent } : {}),
-      ...(input.clientName ? { clientName: input.clientName } : {}),
-      ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
-      ...(input.webhook ? { webhook: input.webhook } : {}),
-    });
-    const live = this.#register(record, environment, tokenRegistrationId);
-    live.wire = { tools: stored.tools ? [...stored.tools] : [], flags: {} };
+    let live: LiveSession | undefined;
     try {
-      let upstream: RuntimeUpstream;
-      if (placement === "sandbox") {
-        await this.#sandboxes!.create({
-          sessionId,
-          ownerId: principal.accountId,
-          environment: environment.name,
-          size: environment.config.size ?? "small",
-          network,
-          ...(environment.request.vaults ? { vaults: environment.request.vaults } : {}),
-          additions: {
-            ...(environment.request.files ? { files: environment.request.files } : {}),
-            ...(environment.request.packages ? { packages: environment.request.packages } : {}),
-            ...(environment.request.env ? { env: environment.request.env } : {}),
-          },
-          resolved: environment,
-        });
-        upstream = await this.#openSandbox(live);
-      } else {
-        mkdirSync(this.#workingDirectory("shared", sessionId), { recursive: true });
-        upstream = await this.#options.sharedRuntime!.ready();
-        live.upstream = upstream;
-      }
-      const forwarded = await this.#prepare(live, "session.create", admitted.params);
-      if (input.peer) this.#attach(live, input.peer, admitted, forwarded);
-      const result = await upstream.request("session.create", forwarded);
-      await this.#opened(live, upstream, admitted.optionsPatch);
+      await this.#checkRemoteMcp(admitted, sessionId, placement, network);
+      const stored: AdmittedConfig = {
+        params: storedParams(admitted.params),
+        ...(input.peer ? {} : { tools: (admitted.params["tools"] as Record<string, unknown>[]).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))) }),
+        optionsPatch: admitted.optionsPatch,
+      };
+      const record = this.#ledger.insert({
+        id: sessionId,
+        owner: accountInfo(principal),
+        environment: environment.name,
+        type: environment.type,
+        placement,
+        network,
+        environmentRequest: environment.request,
+        admitted: stored,
+        ...(admitted.model ? { model: admitted.model } : {}),
+        ...(admitted.agent ? { agent: admitted.agent } : {}),
+        ...(input.clientName ? { clientName: input.clientName } : {}),
+        ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
+        ...(input.webhook ? { webhook: input.webhook } : {}),
+      });
+      const created = this.#register(record, environment, tokenRegistrationId);
+      live = created;
+      created.wire = { tools: stored.tools ? [...stored.tools] : [], flags: {} };
+      let result: unknown;
+      await this.#serialize(created, async () => {
+        let upstream: RuntimeUpstream;
+        if (placement === "sandbox") {
+          await this.#sandboxes!.create({
+            sessionId,
+            ownerId: principal.accountId,
+            environment: environment.name,
+            size: environment.config.size ?? "small",
+            network,
+            ...(environment.request.vaults ? { vaults: environment.request.vaults } : {}),
+            additions: {
+              ...(environment.request.files ? { files: environment.request.files } : {}),
+              ...(environment.request.packages ? { packages: environment.request.packages } : {}),
+              ...(environment.request.env ? { env: environment.request.env } : {}),
+            },
+            resolved: environment,
+          });
+          upstream = await this.#openSandbox(created);
+        } else {
+          mkdirSync(this.#workingDirectory("shared", sessionId), { recursive: true });
+          upstream = await this.#options.sharedRuntime!.ready();
+          created.upstream = upstream;
+        }
+        const forwarded = await this.#prepare(created, "session.create", admitted.params);
+        if (input.peer) this.#attach(created, input.peer, admitted, forwarded);
+        result = await upstream.request("session.create", forwarded);
+        await this.#opened(created, upstream, admitted.optionsPatch);
+        created.ready = true;
+        return upstream;
+      });
       this.#ledger.update(sessionId, { state: "ready" });
       this.#options.events.emit("session.created", { ownerId: principal.accountId, sessionId, environment: environment.name, data: { placement, type: environment.type } });
       this.#log.info("Session created", { sessionId, owner: principal.login, environment: environment.name, placement });
-      return this.#sanitizeResponse(live, result);
+      return this.#scrub(created, this.#sanitizeResponse(created, result));
     } catch (error) {
-      this.#live.delete(sessionId);
+      if (live) {
+        this.#live.delete(sessionId);
+        for (const attachment of live.attachments.values()) this.#actions?.onDetached(attachment.peer.id);
+        live.attachments.clear();
+      }
       this.#ledger.remove(sessionId);
-      for (const attachment of live.attachments.values()) this.#actions?.onDetached(attachment.peer.id);
-      live.attachments.clear();
-      if (placement === "sandbox") {
+      if (placement === "sandbox" && live) {
         live.upstream?.close();
+        live.sandbox?.close?.();
         await this.#sandboxes?.delete(sessionId).catch((cleanup: unknown) => this.#log.warn("Sandbox cleanup after failed create failed", { sessionId, error: (cleanup as Error).message }));
       }
       await Promise.resolve(this.#policy?.releaseSession?.(sessionId)).catch(() => undefined);
@@ -717,6 +826,7 @@ export class SessionManager implements SessionsService {
       environment,
       tokenRegistrationId,
       upstream: undefined,
+      ready: false,
       sandbox: undefined,
       attachments: new Map(),
       creator: undefined,
@@ -732,9 +842,12 @@ export class SessionManager implements SessionsService {
   /** The live state for a ledger session, created lazily (after a gateway restart, sessions start non-resident). */
   #liveFor(sessionId: string): LiveSession {
     const existing = this.#live.get(sessionId);
-    if (existing) return existing;
+    if (existing) {
+      if (existing.deleting) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+      return existing;
+    }
     const record = this.get(sessionId);
-    if (!record) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+    if (!record || record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
     const environment = this.#options.environments.forSession(record);
     const live = this.#register(record, environment, `mc-${randomUUID()}`);
     const admitted = this.#ledger.admitted(sessionId);
@@ -744,58 +857,82 @@ export class SessionManager implements SessionsService {
 
   #attachedLive(peer: ClientPeer, sessionId: string, method: string): LiveSession {
     const live = this.#live.get(sessionId);
-    if (live?.attachments.has(peer.id)) return live;
+    if (live?.attachments.has(peer.id) && !live.deleting) return live;
     const record = this.get(sessionId);
-    if (!record || record.ownerId !== peer.principal.accountId) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+    if (!record || record.ownerId !== peer.principal.accountId || record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
     throw new ManagedCopilotError("invalid_request", `Resume session ${sessionId} on this client before calling ${method}`);
   }
 
   /**
-   * Returns a connected upstream where the session is resident, resuming it with its admitted configuration when the
-   * runtime restarted, the sandbox stopped, or the gateway restarted.
+   * Runs one create/resume/restore for a session at a time. Concurrent callers wait for it instead of using an
+   * upstream on which the session is not open yet.
    */
-  #resident(live: LiveSession, options: { skipResume?: boolean } = {}): Promise<RuntimeUpstream> {
-    if (live.upstream && !live.upstream.closed) return Promise.resolve(live.upstream);
-    if (live.residency) return live.residency;
+  #serialize(live: LiveSession, work: () => Promise<RuntimeUpstream>): Promise<RuntimeUpstream> {
     const residency = (async () => {
-      let upstream: RuntimeUpstream;
-      if (live.placement === "sandbox") {
-        const sandboxes = this.#sandboxes;
-        if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available on this gateway");
-        await sandboxes.ensureRunning?.(live.id);
-        upstream = await this.#openSandbox(live);
-      } else {
-        const shared = this.#options.sharedRuntime;
-        if (!shared) throw new ManagedCopilotError("capability_unavailable", "Shared environments are disabled on this gateway");
-        upstream = await shared.ready();
-        live.upstream = upstream;
-      }
-      if (!options.skipResume) {
-        const admitted = this.#ledger.admitted(live.id);
-        if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
-        const params = await this.#prepare(live, "session.resume", {
-          ...admitted.params,
-          sessionId: live.id,
-          tools: [...live.wire.tools, ...this.#platformToolDeclarations(live)],
-          ...live.wire.flags,
-          ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
-        });
-        try {
-          await upstream.request("session.resume", params);
-          await this.#opened(live, upstream, admitted.optionsPatch);
-        } catch (error) {
-          live.upstream = undefined;
-          throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
-        }
-        this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
-      }
+      const upstream = await work();
+      if (live.deleting) throw new ManagedCopilotError("not_found", `Session ${live.id} was deleted`, { sessionId: live.id });
       return upstream;
     })();
     live.residency = residency;
-    void residency.finally(() => {
-      if (live.residency === residency) live.residency = undefined;
-    }).catch(() => undefined);
+    void residency
+      .finally(() => {
+        if (live.residency === residency) live.residency = undefined;
+      })
+      .catch(() => undefined);
     return residency;
+  }
+
+  /** Connects the session's upstream (shared runtime, or its sandbox) without opening the session on it. */
+  async #connect(live: LiveSession): Promise<RuntimeUpstream> {
+    live.ready = false;
+    if (live.placement === "sandbox") {
+      const sandboxes = this.#sandboxes;
+      if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available on this gateway");
+      await sandboxes.ensureRunning?.(live.id);
+      return this.#openSandbox(live);
+    }
+    const shared = this.#options.sharedRuntime;
+    if (!shared) throw new ManagedCopilotError("capability_unavailable", "Shared environments are disabled on this gateway");
+    const upstream = await shared.ready();
+    live.upstream = upstream;
+    return upstream;
+  }
+
+  /**
+   * Returns a connected upstream where the session is open, resuming it with its stored admitted configuration when
+   * the runtime restarted, the sandbox stopped, or the gateway restarted.
+   */
+  #resident(live: LiveSession): Promise<RuntimeUpstream> {
+    if (live.deleting) return Promise.reject(new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id }));
+    if (live.upstream && !live.upstream.closed && live.ready) return Promise.resolve(live.upstream);
+    if (live.residency) return live.residency;
+    return this.#serialize(live, async () => {
+      const upstream = await this.#connect(live);
+      const admitted = this.#ledger.admitted(live.id);
+      if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
+      const params = await this.#prepare(live, "session.resume", {
+        ...admitted.params,
+        sessionId: live.id,
+        tools: [...live.wire.tools, ...this.#platformToolDeclarations(live)],
+        ...live.wire.flags,
+        ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
+      });
+      try {
+        await upstream.request("session.resume", params);
+        await this.#opened(live, upstream, admitted.optionsPatch);
+      } catch (error) {
+        throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
+      }
+      live.ready = true;
+      this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
+      return upstream;
+    });
+  }
+
+  /** Updates the stored admitted configuration used to restore the session. */
+  #persist(sessionId: string, update: (stored: AdmittedConfig) => AdmittedConfig): void {
+    const stored = this.#ledger.admitted(sessionId);
+    if (stored) this.#ledger.update(sessionId, { admitted: update(stored) });
   }
 
   async #openSandbox(live: LiveSession): Promise<RuntimeUpstream> {
@@ -842,6 +979,7 @@ export class SessionManager implements SessionsService {
         live.sandbox?.close?.();
         live.sandbox = undefined;
       }
+      live.ready = false;
       this.#emitLifecycle(live.id, "stopped");
     }
   }
@@ -851,6 +989,7 @@ export class SessionManager implements SessionsService {
 
   #attach(live: LiveSession, peer: ClientPeer, admitted: AdmittedSession, forwarded: Record<string, unknown>): void {
     const flag = (key: string) => forwarded[key] === true;
+    const sections = (forwarded["systemMessage"] as { sections?: Record<string, { action?: unknown }> } | undefined)?.sections ?? {};
     live.attachments.delete(peer.id);
     live.attachments.set(peer.id, {
       peer,
@@ -863,16 +1002,36 @@ export class SessionManager implements SessionsService {
       requestAutoModeSwitch: flag("requestAutoModeSwitch"),
       hooks: flag("hooks"),
       skillProvider: flag("hasSkillProvider"),
+      transforms: Object.values(sections).some((section) => section?.action === "transform"),
+      canvases: (Array.isArray(forwarded["canvases"]) && forwarded["canvases"].length > 0) || forwarded["requestCanvasRenderer"] !== undefined || forwarded["canvasProvider"] !== undefined,
+      declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))),
+      flags: Object.fromEntries([...WIRE_FLAGS, "streaming"].filter((key) => forwarded[key] !== undefined).map((key) => [key, forwarded[key]])),
     });
     live.creator ??= peer.id;
-    live.wire = {
-      tools: (forwarded["tools"] as Record<string, unknown>[] | undefined ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))),
-      flags: Object.fromEntries(
-        ["requestPermission", "requestUserInput", "requestElicitation", "requestExitPlanMode", "requestAutoModeSwitch", "hooks", "streaming", "hasSkillProvider"]
-          .filter((key) => forwarded[key] !== undefined)
-          .map((key) => [key, forwarded[key]]),
-      ),
-    };
+    live.wire = this.#registrations(live);
+  }
+
+  /**
+   * The runtime scopes tool and handler registrations to the calling connection, and every attached client shares
+   * the gateway's one upstream connection. Upstream registrations are therefore the union across attached clients
+   * (plus stored server-side declarations), so one client's resume never removes another's tools or hooks.
+   */
+  #registrations(live: LiveSession): WireSettings {
+    const byName = new Map<string, Record<string, unknown>>();
+    for (const tool of this.#ledger.admitted(live.id)?.tools ?? []) byName.set(String(tool["name"]), tool);
+    const ordered = [...live.attachments.values()].sort((a, b) => a.attachedAt - b.attachedAt);
+    for (const attachment of ordered) for (const tool of attachment.declarations) byName.set(String(tool["name"]), tool);
+    const flags: Record<string, unknown> = {};
+    for (const key of WIRE_FLAGS) if (ordered.some((attachment) => attachment.flags[key] === true)) flags[key] = true;
+    const streaming = ordered.at(-1)?.flags["streaming"];
+    if (streaming !== undefined) flags["streaming"] = streaming;
+    return { tools: [...byName.values()], flags };
+  }
+
+  /** Upstream create/resume/tools params: the aggregate registrations plus the environment's platform tools. */
+  #withRegistrations(live: LiveSession, params: Record<string, unknown>): Record<string, unknown> {
+    const registrations = this.#registrations(live);
+    return { ...params, ...registrations.flags, tools: [...registrations.tools, ...this.#platformToolDeclarations(live)] };
   }
 
   #detach(live: LiveSession, peerId: string, notifyActions = true): void {
@@ -897,10 +1056,13 @@ export class SessionManager implements SessionsService {
     }
   }
 
-  /** Creating connection first, then the others by attach time. */
+  /** Responder preference: the creating connection first, then the others by attach time. */
+  #preferred(live: LiveSession): Attachment[] {
+    return [...live.attachments.values()].sort((a, b) => (a.peer.id === live.creator ? -1 : b.peer.id === live.creator ? 1 : a.attachedAt - b.attachedAt));
+  }
+
   #responders(live: LiveSession): AttachedResponder[] {
-    const ordered = [...live.attachments.values()].sort((a, b) => (a.peer.id === live.creator ? -1 : b.peer.id === live.creator ? 1 : a.attachedAt - b.attachedAt));
-    return ordered.map((attachment) => ({
+    return this.#preferred(live).map((attachment) => ({
       connectionId: attachment.peer.id,
       kind: attachment.peer.kind,
       tools: [...attachment.tools],
@@ -925,7 +1087,8 @@ export class SessionManager implements SessionsService {
       });
     } else if (method === "session.lifecycle") {
       live.queue = live.queue.then(() => {
-        for (const attachment of live.attachments.values()) attachment.peer.notify("session.lifecycle", params);
+        const scrubbed = this.#scrub(live, params);
+        for (const attachment of live.attachments.values()) attachment.peer.notify("session.lifecycle", scrubbed);
       });
     }
     // Other notifications (host.event, telemetry) carry runtime-wide or account details and are never relayed.
@@ -947,7 +1110,7 @@ export class SessionManager implements SessionsService {
         this.#log.warn("Session event listener failed", { error: (error as Error).message });
       }
     }
-    const sanitized = this.#sanitizeEvent(live, event);
+    const sanitized = this.#scrub(live, this.#sanitizeEvent(live, event));
     const notification = { sessionId: live.id, event: sanitized };
     if (!ACTION_EVENT_TYPES.has(event.type)) {
       for (const attachment of live.attachments.values()) attachment.peer.notify("session.event", notification);
@@ -979,8 +1142,9 @@ export class SessionManager implements SessionsService {
       void this.#runPlatformTool(live, record, event, platformTool.name);
       return { withhold: [...live.attachments.keys()] };
     }
-    // Default claim-before-emit: the most recent client able to answer executes; other eligible clients are withheld.
-    const attachments = [...live.attachments.values()].sort((a, b) => b.attachedAt - a.attachedAt);
+    // Default claim-before-emit (no durable module): the first eligible client in the same preference order durable
+    // uses executes; other eligible clients are withheld.
+    const attachments = this.#preferred(live);
     let eligible: Attachment[] = [];
     if (event.type === "external_tool.requested") eligible = attachments.filter((attachment) => toolName !== undefined && attachment.tools.has(toolName));
     else if (event.type === "permission.requested") eligible = attachments.filter((attachment) => attachment.requestPermission);
@@ -1034,7 +1198,7 @@ export class SessionManager implements SessionsService {
       const attachments = [...live.attachments.values()].sort((a, b) => b.attachedAt - a.attachedAt);
       const target = attachments.find((attachment) => !attachment.peer.closed && (flag === undefined || attachment[flag] === true));
       if (!target) throw new ManagedCopilotError("capability_unavailable", `No connected client can answer ${method} for session ${live.id}`);
-      return target.peer.request(method, params, context.signal);
+      return target.peer.request(method, this.#scrub(live, params), context.signal);
     }
     throw unsupportedMethod(method, `The gateway does not answer ${method}`);
   }
@@ -1140,6 +1304,16 @@ export class SessionManager implements SessionsService {
     return rest;
   }
 
+  /**
+   * Replaces platform host paths in anything a shared session sends to clients (events, responses, and runtime
+   * requests): the session's private directory becomes `/workspace`, any other runtime path `/platform`.
+   */
+  #scrub<T>(live: LiveSession, value: T): T {
+    if (live.placement !== "shared") return value;
+    const scrubber = this.#scrubber;
+    return scrubber ? (scrubber(value) as T) : value;
+  }
+
   #emitLifecycle(sessionId: string, type: "deleted" | "promoted" | "stopped"): void {
     for (const listener of this.#lifecycle) {
       try {
@@ -1149,6 +1323,39 @@ export class SessionManager implements SessionsService {
       }
     }
   }
+}
+
+/** Whether stored admitted params include remote MCP servers (top-level or in custom agents). */
+function hasRemoteMcp(params: Record<string, unknown> | undefined): boolean {
+  if (!params) return false;
+  const servers = params["mcpServers"];
+  if (servers && typeof servers === "object" && Object.keys(servers).length > 0) return true;
+  const agents = params["customAgents"];
+  return Array.isArray(agents) && agents.some((agent) => agent && typeof agent === "object" && (agent as { mcpServers?: object }).mcpServers && Object.keys((agent as { mcpServers: object }).mcpServers).length > 0);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Builds a deep string replacer for a platform directory, tolerant of slash direction (and case on Windows). */
+export function pathScrubber(root: string): (value: unknown) => unknown {
+  const normalized = root.replace(/[\\/]+$/, "");
+  const separators = String.raw`[\\/]+`;
+  const rootPattern = normalized.split(/[\\/]+/).map(escapeRegExp).join(separators);
+  const flags = process.platform === "win32" ? "gi" : "g";
+  const workspace = new RegExp(`${rootPattern}${separators}workspaces${separators}[^\\\\/\\s"'\`]+`, flags);
+  const anyPath = new RegExp(rootPattern, flags);
+  const replaceString = (text: string) => (text.length < normalized.length ? text : text.replace(workspace, "/workspace").replace(anyPath, "/platform"));
+  const walk = (value: unknown, depth: number): unknown => {
+    if (typeof value === "string") return replaceString(value);
+    if (depth > 12 || value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map((item) => walk(item, depth + 1));
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) out[key] = walk(item, depth + 1);
+    return out;
+  };
+  return (value) => walk(value, 0);
 }
 
 /** Per-connection fields are not stored with the session; they are resent by whichever client resumes it. */

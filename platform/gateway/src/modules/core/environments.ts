@@ -27,6 +27,7 @@ interface BundleState {
 export interface AgentFile {
   readonly name: string;
   readonly description?: string;
+  readonly model?: string;
   readonly tools?: readonly string[];
   /** Frontmatter keys that declare executable capabilities (local MCP servers, hooks). */
   readonly executableKeys: readonly string[];
@@ -67,11 +68,13 @@ export function parseAgentFile(fileName: string, content: string): AgentFile {
   }
   const name = fields.get("name");
   const description = fields.get("description");
+  const model = fields.get("model");
   const tools = fields.get("tools");
   const executableKeys = keys.filter((key) => /^(mcp-servers|mcpServers|mcp_servers|hooks)$/i.test(key));
   return {
     name: typeof name === "string" && name ? name : fallbackName,
     ...(typeof description === "string" ? { description } : {}),
+    ...(typeof model === "string" && model ? { model } : {}),
     ...(Array.isArray(tools) ? { tools } : typeof tools === "string" ? { tools: [tools] } : {}),
     executableKeys,
   };
@@ -122,7 +125,7 @@ export function pinCustomizations(source: string, target: string): Customization
       if (!/\.md$/i.test(file)) continue;
       const agent = parseAgentFile(file, readFileSync(join(agentDirectory, file), "utf8"));
       if (agent.executableKeys.length > 0) unsafe.push(`agents/${file} declares ${agent.executableKeys.join(", ")}`);
-      agents.push({ name: agent.name, ...(agent.description ? { description: agent.description } : {}), ...(agent.tools ? { tools: agent.tools } : {}) });
+      agents.push({ name: agent.name, ...(agent.description ? { description: agent.description } : {}), ...(agent.model ? { model: agent.model } : {}), ...(agent.tools ? { tools: agent.tools } : {}) });
     }
   }
   const hasSkills = existsSync(skillDirectory) && readdirSync(skillDirectory, { withFileTypes: true }).some((entry) => entry.isDirectory() && existsSync(join(skillDirectory, entry.name, "SKILL.md")));
@@ -164,7 +167,11 @@ export class Environments implements EnvironmentResolver {
       const source = isAbsolute(env.customizations) ? env.customizations : resolve(options.baseDir, env.customizations);
       try {
         const bundle = pinCustomizations(source, join(options.pinDir, name)) as CustomizationBundle & { unsafe?: readonly string[] };
-        const problem = bundle.unsafe && bundle.unsafe.length > 0 && env.type !== "isolated" ? `Customizations for "${name}" include executable configuration: ${bundle.unsafe.join("; ")}` : undefined;
+        const problems: string[] = [];
+        if (bundle.unsafe && bundle.unsafe.length > 0 && env.type !== "isolated") problems.push(`include executable configuration: ${bundle.unsafe.join("; ")}`);
+        const outside = env.models ? bundle.agents.filter((agent) => agent.model && !env.models!.includes(agent.model)) : [];
+        if (outside.length > 0) problems.push(`select models the environment does not allow: ${outside.map((agent) => `${agent.name} uses ${agent.model}`).join("; ")}`);
+        const problem = problems.length > 0 ? `Customizations for "${name}" ${problems.join(", and ")}` : undefined;
         if (problem) options.log.error("Environment customizations rejected", { environment: name, problem });
         else options.log.info("Pinned environment customizations", { environment: name, digest: bundle.digest, agents: bundle.agents.map((agent) => agent.name) });
         this.#bundles.set(name, problem ? { bundle, problem } : { bundle });
