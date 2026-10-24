@@ -174,9 +174,10 @@ interface LiveSession {
   queue: Promise<void>;
   /**
    * Aborted (with the reason) when the session is deleted or the gateway stops: a registration step waiting on the
-   * session's sandbox runtime then closes that connection, which only this session uses (`#bounded`).
+   * session's sandbox runtime then closes that connection, which only this session uses (`#bounded`). A deletion that
+   * fails leaves the session in place with a new one.
    */
-  readonly ending: AbortController;
+  ending: AbortController;
   /** In-flight create, resume, or restore; concurrent callers wait for it. */
   residency: Promise<RuntimeUpstream> | undefined;
   deleting: boolean;
@@ -706,7 +707,11 @@ export class SessionManager implements SessionsService {
       await Promise.resolve(this.#policy?.releaseSession?.(sessionId)).catch((error: unknown) => this.#log.warn("Policy release failed", { sessionId, error: (error as Error).message }));
     } catch (error) {
       this.#ledger.update(sessionId, { state: "failed" });
-      if (live) live.deleting = false;
+      if (live) {
+        live.deleting = false;
+        // The session stays (failed, and deletable again), so steps on its runtime are no longer ended.
+        if (!this.#stopped) live.ending = new AbortController();
+      }
       throw error instanceof ManagedCopilotError ? error : new ManagedCopilotError("internal", `Deleting session ${sessionId} failed; it is marked failed and can be deleted again`);
     }
     if (live) {

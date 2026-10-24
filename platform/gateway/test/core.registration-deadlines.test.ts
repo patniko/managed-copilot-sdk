@@ -3,6 +3,7 @@
 // the session, and the connection is closed, so the session's next request connects afresh. A runtime that still
 // answers pings is still working on the step, which may yet apply: it is waited for, with nothing else sent meanwhile.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { SessionManager } from "../src/modules/core/sessions.js";
 import { upstreamTimings } from "../src/modules/core/sessions.js";
 import { FakeRuntime, FakeSandboxes, RawClient, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
@@ -151,6 +152,19 @@ describe("registration path deadlines", () => {
     expect(await resuming).toMatchObject({ data: { code: "not_found" }, message: expect.stringContaining(`Session ${sessionId} was deleted`) });
     expect(sandboxes.ops(sessionId)).toContain("delete");
     resume.release();
+  });
+
+  it("keeps a sandbox session whose deletion failed usable", async () => {
+    const owner = await connect();
+    const sessionId = crypto.randomUUID();
+    await owner.request("session.create", { sessionId, requestPermission: true });
+    sandboxes.failNextDelete = new ManagedCopilotError("capability_unavailable", "The sandbox backend is unreachable right now");
+    const deleted = await fetch(`${gateway.url}/v1/sessions/${sessionId}`, { method: "DELETE", headers: { authorization: `Bearer ${ALICE}` } });
+    expect(deleted.ok).toBe(false);
+    // The session stays (failed, deletable again) and its owner can still resume it: its sandbox runtime opens again.
+    const client = await connect();
+    await expect(client.request("session.resume", { sessionId })).resolves.toBeDefined();
+    await expect(client.request("session.sendAndWait", { sessionId, prompt: "after" })).resolves.toMatchObject({ response: { data: { content: "echo: after" } } });
   });
 
   it("bounds a tools update on a connection that stopped responding, so the session's next registration goes through", async () => {

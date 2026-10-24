@@ -372,6 +372,8 @@ export class FakeSandboxes {
   failNextPrepare: Error | undefined;
   /** Errors the next `initialize` calls throw, in order (test hook; e.g. a runtime restart asking to reopen). */
   readonly initializeFailures: Error[] = [];
+  /** Fails the next `delete` (test hook). */
+  failNextDelete: Error | undefined;
   readonly #openHolds: { gate: Promise<void>; arrived: () => void }[] = [];
 
   constructor(private readonly runtime: FakeRuntime) {}
@@ -454,6 +456,9 @@ export class FakeSandboxes {
 
   async delete(sessionId: string): Promise<void> {
     this.log.push({ op: "delete", sessionId });
+    const failure = this.failNextDelete;
+    this.failNextDelete = undefined;
+    if (failure) throw failure;
   }
 
   get(): undefined {
