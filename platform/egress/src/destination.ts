@@ -5,7 +5,7 @@
  */
 import { lookup } from "node:dns/promises";
 import { connect, type Socket } from "node:net";
-import { evaluateDestination, type DestinationCheckOptions, type DestinationDecision, type DestinationResolver } from "@managed-copilot/protocol";
+import { evaluateDestination, isUnresolvableName, type DestinationCheckOptions, type DestinationDecision, type DestinationResolver } from "@managed-copilot/protocol";
 
 export { evaluateDestination };
 export type DestinationOptions = DestinationCheckOptions;
@@ -14,6 +14,7 @@ export type Resolver = DestinationResolver;
 export type Dialer = (address: string, port: number) => Socket;
 
 export const systemResolver: Resolver = async (host) => {
+  if (isUnresolvableName(host)) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
   const results = await lookup(host, { all: true, verbatim: true });
   return results.map((entry) => entry.address);
 };

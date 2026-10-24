@@ -7,6 +7,7 @@ import {
   formatIpAddress,
   isPublicAddress,
   isReservedEnvName,
+  isUnresolvableName,
   isVaultPlaceholder,
   normalizeDestinationHost,
   normalizeNetwork,
@@ -129,6 +130,11 @@ describe("vault helpers", () => {
     expect(isReservedEnvName("NODE_EXTRA_CA_CERTS")).toBe(true);
     expect(isReservedEnvName("GITHUB_TOKEN")).toBe(true);
     expect(isReservedEnvName("STRIPE_API_KEY")).toBe(false);
+  });
+
+  it("refuses special-use names without a lookup", () => {
+    for (const host of ["mcp.invalid", "printer.local", "x.onion", "invalid", "a.invalid."]) expect(isUnresolvableName(host), host).toBe(true);
+    for (const host of ["api.stripe.com", "invalid.example.com", "localhost.example", "vault.mc.test"]) expect(isUnresolvableName(host), host).toBe(false);
   });
 
   it("describes policies", () => {

@@ -9,7 +9,7 @@ import { request as httpRequest, type IncomingMessage, type OutgoingHttpHeaders 
 import { connect as netConnect, type Socket } from "node:net";
 import type { Readable } from "node:stream";
 import { checkServerIdentity, connect as tlsConnect, rootCertificates } from "node:tls";
-import { evaluateDestination, parseCidr, type Cidr, type DestinationCheckOptions, type DestinationDecision, type NetworkPolicy } from "@managed-copilot/protocol";
+import { evaluateDestination, isUnresolvableName, parseCidr, type Cidr, type DestinationCheckOptions, type DestinationDecision, type NetworkPolicy } from "@managed-copilot/protocol";
 
 export type Connector = (address: string, port: number) => Socket;
 
@@ -56,7 +56,10 @@ export function destinationOptions(env: Readonly<Record<string, string | undefin
     privateHosts: new Set(settings.privateHosts),
     protectedCidrs: () => protectedCidrs,
     blockedCidrs: settings.blockedCidrs.map(parseCidr),
-    resolve: async (host) => (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address),
+    resolve: async (host) => {
+      if (isUnresolvableName(host)) throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${host}`), { code: "ENOTFOUND" });
+      return (await lookup(host, { all: true, verbatim: true })).map((entry) => entry.address);
+    },
     dnsTimeoutMs: 5_000,
   };
 }

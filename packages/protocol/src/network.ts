@@ -654,6 +654,11 @@ export interface EgressReport {
   readonly message: string;
 }
 
+/** Special-use names (RFC 6761, 6762, 7686) that never resolve to a workload destination; refused without a lookup. */
+export function isUnresolvableName(host: string): boolean {
+  return /(^|\.)(invalid|local|onion)\.?$/i.test(host.trim());
+}
+
 /** Platform event type published when a session's egress is blocked. */
 export const NETWORK_BLOCKED_EVENT = "network.blocked";
 
