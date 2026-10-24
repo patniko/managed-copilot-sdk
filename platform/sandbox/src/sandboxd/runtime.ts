@@ -71,10 +71,10 @@ export class RuntimeSupervisor {
     const env = this.#env ?? {};
     this.#state = "starting";
     this.#exitCode = undefined;
-    const target = asWorkload(identity, cwd, binary, ["--headless", "--no-auto-update", "--no-auto-login", "--port", String(port)]);
+    const target = asWorkload(identity, cwd, binary, ["--headless", "--no-auto-update", "--no-auto-login", "--port", String(port)], env);
     const child = spawn(target.command, target.args, {
       cwd: target.cwd,
-      env,
+      env: target.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.#child = child;

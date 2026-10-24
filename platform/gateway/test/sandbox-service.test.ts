@@ -66,20 +66,26 @@ describe("SandboxService lifecycle", () => {
   let store: SandboxStore;
   let provider: FakeProvider;
   let services: Record<string, unknown>;
-  let service: SandboxService;
+  let service: SandboxService | undefined;
 
   beforeEach(() => {
     store = new SandboxStore(openDatabase(":memory:"));
     provider = new FakeProvider();
     services = {};
-    const app = { services, config: { deployment: { environments: {} }, githubApiUrl: "https://api.github.test" } } as unknown as GatewayApp;
-    service = new SandboxService({ app, store, provider, log: createLogger("test", "error"), defaultIdleSeconds: 1, prepareOnStart: false });
+    service = undefined;
   });
 
   afterEach(async () => {
-    await service.shutdown();
+    await service?.shutdown();
     vi.useRealTimers();
   });
+
+  /** Built after the test's rows exist, as at gateway start. */
+  function createService(): SandboxService {
+    const app = { services, config: { deployment: { environments: {} }, githubApiUrl: "https://api.github.test" } } as unknown as GatewayApp;
+    service = new SandboxService({ app, store, provider, log: createLogger("test", "error"), defaultIdleSeconds: 1, prepareOnStart: false });
+    return service;
+  }
 
   function sandbox(state: SandboxRow["state"], options: { running?: boolean } = {}): SandboxRow {
     counter++;
@@ -110,18 +116,19 @@ describe("SandboxService lifecycle", () => {
     provider.onInventory = () => {
       created = sandbox("running", { running: true });
     };
-    await service.reconcile();
+    const sandboxes = createService();
+    await sandboxes.reconcile();
     expect(created).toBeDefined();
     expect(provider.removed).not.toContain(created!.id);
     provider.existing.add("sbx_ffffffffffffffffffffffff");
     provider.onInventory = undefined;
-    await service.reconcile();
+    await sandboxes.reconcile();
     expect(provider.removed).toEqual(["sbx_ffffffffffffffffffffffff"]);
   });
 
   it("finishes a stop that a gateway restart interrupted", async () => {
     const row = sandbox("stopping", { running: true });
-    await service.reconcile();
+    await createService().reconcile();
     expect(provider.stopped).toContain(row.id);
     expect(store.bySession(row.sessionId)?.state).toBe("stopped");
   });
@@ -131,7 +138,7 @@ describe("SandboxService lifecycle", () => {
     const waiting = sandbox("running", { running: true });
     const idle = sandbox("running", { running: true });
     services["actions"] = { list: (sessionId: string) => (sessionId === waiting.sessionId ? [{ id: "act_1" }] : []) };
-    await service.start();
+    await createService().start();
     await vi.advanceTimersByTimeAsync(31_000);
     expect(provider.stopped).toEqual([idle.id]);
     expect(store.bySession(waiting.sessionId)?.state).toBe("running");
@@ -141,25 +148,47 @@ describe("SandboxService lifecycle", () => {
     vi.useFakeTimers();
     const row = sandbox("running", { running: true });
     services["sessions"] = { get: () => ({ id: row.sessionId, ownerId: 1, lastTurn: { turnId: "m1", status: "running" } }), subscribe: () => () => undefined };
-    await service.start();
+    await createService().start();
     await vi.advanceTimersByTimeAsync(31_000);
     expect(provider.stopped).toEqual([]);
     await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
     expect(provider.stopped).toEqual([row.id]);
   });
 
+  it("keeps that protection through the turn's other events until the turn ends", async () => {
+    vi.useFakeTimers();
+    const row = sandbox("running", { running: true });
+    let emit: ((sessionId: string, event: { id: string; type: string; agentId?: string; data?: unknown }) => void) | undefined;
+    services["sessions"] = {
+      get: () => ({ id: row.sessionId, ownerId: 1, lastTurn: { turnId: "m1", status: "running" } }),
+      subscribe: (listener: typeof emit) => {
+        emit = listener;
+        return () => undefined;
+      },
+    };
+    await createService().start();
+    emit!(row.sessionId, { id: "e1", type: "tool.execution_start", data: { toolCallId: "t1" } });
+    emit!(row.sessionId, { id: "e2", type: "assistant.message", agentId: "sub-1", data: {} });
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(provider.stopped).toEqual([]);
+    emit!(row.sessionId, { id: "e3", type: "session.idle", data: {} });
+    await vi.advanceTimersByTimeAsync(31_000);
+    expect(provider.stopped).toEqual([row.id]);
+  });
+
   it("refuses an empty runtime state import before touching the sandbox", async () => {
     const row = sandbox("running", { running: true });
+    const stopped = sandbox("stopped");
+    const sandboxes = createService();
     const empty = mkdtempSync(join(tmpdir(), "mc-import-empty-"));
     try {
-      await expect(service.importRuntimeState(row.sessionId, { sessionStateDir: empty })).rejects.toSatisfy(
+      await expect(sandboxes.importRuntimeState(row.sessionId, { sessionStateDir: empty })).rejects.toSatisfy(
         (error: unknown) => isManagedCopilotError(error, "invalid_request") && /no files to import/.test((error as Error).message),
       );
-      await expect(service.importRuntimeState(row.sessionId, { sessionStateDir: join(empty, "missing") })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "invalid_request"));
+      await expect(sandboxes.importRuntimeState(row.sessionId, { sessionStateDir: join(empty, "missing") })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "invalid_request"));
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
-    const stopped = sandbox("stopped");
-    await expect(service.importRuntimeState(stopped.sessionId, { sessionStateDir: tmpdir() })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "capability_unavailable"));
+    await expect(sandboxes.importRuntimeState(stopped.sessionId, { sessionStateDir: tmpdir() })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "capability_unavailable"));
   });
 });

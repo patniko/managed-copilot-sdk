@@ -7,16 +7,34 @@ export interface Identity {
 }
 
 const SETPRIV = "/usr/bin/setpriv";
+const ENV = "/usr/bin/env";
+/** The only environment a launch has while it still runs as root: nothing the workload controls. */
+const LAUNCH_ENV: Readonly<Record<string, string>> = Object.freeze({ PATH: "/usr/sbin:/usr/bin:/sbin:/bin" });
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export interface WorkloadLaunch {
+  readonly command: string;
+  readonly args: string[];
+  readonly cwd: string;
+  /** The environment to spawn with: the trusted launch environment, never the workload's. */
+  readonly env: Record<string, string>;
+}
 
 /**
  * Spawn arguments that run `command` as the workload identity with no way back to privilege, independent of what the
- * backend's container runtime enforces: `setpriv` switches uid/gid, clears supplementary groups, sets no_new_privs,
- * and empties the inheritable, ambient, and bounding capability sets (the bounding drop is a no-op where sandboxd
- * lacks CAP_SETPCAP, as under Docker's minimal set). The shell then enters `cwd`, which happens only after the
- * privilege drop because sandboxd's root holds no DAC capabilities, and `exec`s the command, so the pid and signals are
- * the command's own.
+ * backend's container runtime enforces. `setpriv` starts as root with only a fixed PATH (glibc honors variables such
+ * as LD_AUDIT or GLIBC_TUNABLES for a root process that is not setuid, so the workload's environment must never reach
+ * it). It switches uid/gid, clears supplementary groups, sets no_new_privs, and empties the inheritable, ambient, and
+ * bounding capability sets (the bounding drop is a no-op where sandboxd lacks CAP_SETPCAP, as under Docker's minimal
+ * set). Only then does `env -i -C <cwd>` install the workload's environment, enter `cwd` (after the drop, because
+ * sandboxd's root holds no DAC capabilities), and exec the command, so the pid and signals are the command's own.
  */
-export function asWorkload(identity: Identity, cwd: string, command: string, args: readonly string[]): { command: string; args: string[]; cwd: string } {
+export function asWorkload(identity: Identity, cwd: string, command: string, args: readonly string[], env: Readonly<Record<string, string>>): WorkloadLaunch {
+  const assignments = Object.entries(env).map(([name, value]) => {
+    if (!ENV_NAME.test(name)) throw new Error(`Invalid environment variable name "${name}".`);
+    if (value.includes("\u0000")) throw new Error(`The value of environment variable "${name}" contains a NUL character.`);
+    return `${name}=${value}`;
+  });
   return {
     command: SETPRIV,
     args: [
@@ -28,14 +46,17 @@ export function asWorkload(identity: Identity, cwd: string, command: string, arg
       "--ambient-caps=-all",
       "--bounding-set=-all",
       "--",
-      "/bin/sh",
-      "-c",
-      'cd -- "$0" || exit 126; exec "$@"',
+      ENV,
+      "-i",
+      "-C",
       cwd,
+      "--",
+      ...assignments,
       command,
       ...args,
     ],
     cwd: "/",
+    env: { ...LAUNCH_ENV },
   };
 }
 
@@ -107,10 +128,11 @@ function killGroup(child: ChildProcess, signal: NodeJS.Signals): void {
  */
 export function run(command: string, args: readonly string[], options: RunOptions): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const target = options.identity ? asWorkload(options.identity, options.cwd, command, args) : { command, args: [...args], cwd: options.cwd };
+    // Without an identity the command runs as root and must be given a trusted environment by the caller.
+    const target = options.identity ? asWorkload(options.identity, options.cwd, command, args, options.env) : { command, args: [...args], cwd: options.cwd, env: { ...options.env } };
     const child = spawn(target.command, target.args, {
       cwd: target.cwd,
-      env: options.env,
+      env: target.env,
       stdio: ["pipe", "pipe", "pipe"],
       detached: true,
     });

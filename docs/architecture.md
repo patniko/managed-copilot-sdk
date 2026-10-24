@@ -193,7 +193,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
   unexpected exits. Every workload process (the runtime, setup commands, file workers) starts through `setpriv`:
   uid/gid 10001, cleared groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so the
-  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. Every
+  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. The
+  launcher runs as root with only a fixed `PATH`; the workload's environment is installed by `env -i` after the drop,
+  so loader variables such as `LD_AUDIT` or `GLIBC_TUNABLES` never reach a root process (the gated e2e probes this
+  with `LD_DEBUG_OUTPUT`). Every
   workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a short-lived worker as uid 10001
   that walks the path one segment at a time with `chdir`, refuses symbolic links, verifies the real directory after
   every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root never touches workspace paths, and
@@ -217,8 +220,9 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
   tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
   no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
-  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until its
-  events flow again), and idle sweeps begin only after that reconciliation. `ensureRunning` restarts (or recreates
+  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until a root
+  `user.message` or `session.idle` re-establishes turn tracking), and idle sweeps begin only after that
+  reconciliation. A stop that a restart interrupted is finished. `ensureRunning` restarts (or recreates
   from the pinned image and existing volumes) and re-registers egress. Stops close runtime streams, stop the
   container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
   `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources

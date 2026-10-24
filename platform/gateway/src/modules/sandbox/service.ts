@@ -718,7 +718,6 @@ export class SandboxService implements SandboxesService {
     if (!this.#active.has(sessionId)) return;
     const live = this.#liveFor(sessionId);
     live.lastActivity = Date.now();
-    live.recoveredAt = undefined;
     const data = (event.data ?? {}) as Record<string, unknown>;
     const requestId = typeof data["requestId"] === "string" ? (data["requestId"] as string) : typeof data["toolCallId"] === "string" ? (data["toolCallId"] as string) : undefined;
     if (ACTION_REQUESTED.has(event.type)) {
@@ -736,6 +735,8 @@ export class SandboxService implements SandboxesService {
       artifacts?.turnStarted(sessionId, turnId);
       live.turnRunning = true;
       live.turnFailed = false;
+      // Root-turn tracking is re-established; the restart guard is no longer needed.
+      live.recoveredAt = undefined;
     } else if (event.type === "session.error") {
       if (live.turnRunning) live.turnFailed = true;
     } else if (event.type === "session.idle") {
@@ -743,6 +744,8 @@ export class SandboxService implements SandboxesService {
       live.turnRunning = false;
       live.turnFailed = false;
       live.pending.clear();
+      // The turn that was running across the restart (if any) has ended.
+      live.recoveredAt = undefined;
       const turnIds = artifacts?.turnsCompleted(sessionId, outcome) ?? [];
       if (artifacts && turnIds.length > 0) void artifacts.publish(sessionId, turnIds, outcome).catch((error: unknown) => this.#log.warn("Publication crashed", { sessionId, error: (error as Error).message }));
     }
