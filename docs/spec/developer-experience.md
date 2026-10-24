@@ -1,8 +1,10 @@
 # Managed Copilot SDK: developer experience
 
-> **Status: draft for calibration, revised 2026-10-23.** Nothing is built yet. This revision designs the six gaps
-> found in the [comparison with OpenAI's Agents API](#comparison-with-openais-agents-api). The
-> [decision tracker](#decision-tracker) records what is decided and what is still proposed.
+> **Status: reviewed design, revised 2026-10-23 after independent Astra and Argon reviews.** No managed service,
+> wrapper, images, or Aspire integration is implemented. Snippets describe the intended customer experience, not
+> runnable packages. The six OpenAI gaps are in scope, not proven closed. The [decision tracker](#decision-tracker)
+> separates user decisions from implementation proposals, and the [delivery gates](#delivery-gates) define the
+> evidence required before making compatibility, isolation, or recovery claims.
 
 ## The idea in one snippet
 
@@ -19,8 +21,8 @@ const reply = await session.sendAndWait({ prompt: "Summarize what changed in Asp
 console.log(reply?.data.content);
 ```
 
-With Managed Copilot, the same code runs the agent in an **environment** you deployed, either locally under Aspire
-or in your Azure subscription:
+The intended Managed Copilot experience runs the agent in an **environment** you deployed, either locally under
+Aspire or in your Azure subscription:
 
 ```ts
 import { approveAll } from "@github/copilot-sdk";
@@ -34,8 +36,11 @@ const reply = await session.sendAndWait({ prompt: "Summarize what changed in Asp
 console.log(reply?.data.content);
 ```
 
-Only the setup lines change. Everything after `managed.client(...)` is the Copilot SDK you already know: sessions,
-events, tools, hooks, permissions, and resume.
+Only the setup lines change in this example. The goal is to retain genuine `CopilotClient` and `CopilotSession`
+objects, standard session events, and SDK tool definitions. That is a compatibility target, not a promise that every
+raw RPC or callback already works remotely. The [connection contract](#native-sdk-connection-contract) and
+[callback contract](#callback-support-and-disconnection) bound the supported surface without inventing a new agent
+API. If a required behavior needs an upstream SDK extension, that is a prerequisite, not a private-method patch.
 
 For a one-off session, a single call picks the environment and creates the session:
 
@@ -45,29 +50,30 @@ const session = await managed.createSession({ environment: "chat", model: "claud
 
 ## Principles
 
-1. **It's still the Copilot SDK.** `managed.client()` returns a `CopilotClient`, and sessions are `CopilotSession`s.
-   There is no new message, event, or tool model to learn.
+1. **It's still the Copilot SDK.** Target genuine SDK client and session objects through a supported transport
+   adapter. Keep the message, event, and tool model; advertise only the remotely supported operations.
 2. **One new concept: the environment.** It decides where the agent loop and its built-in tools run, and how they
    are isolated.
-3. **Same code, local or Azure.** `aspire run` for the inner loop and `aspire deploy` for Azure. Only the URL changes.
-4. **Your tools stay in your app.** Tools you define with `defineTool` run in your process, so the environment never
-   sees your secrets. Your app doesn't have to stay connected: a call made while it's away waits for an answer.
-   Built-in tools such as shell and file editing run in the environment.
+3. **Same code, local or Azure.** Aspire is the local and deployment entry point. The customer code stays the same;
+   a mode is advertised in Azure only after its chosen backend passes the same behavioral gates.
+4. **Your tools stay in your app.** `defineTool` handlers run in your process or your authorized webhook worker;
+   their code and credentials are not uploaded as sandbox code. Returned data still reaches the agent. Supported
+   external calls can wait while your app is away; hooks and other callbacks have explicit disconnect rules.
 5. **One identity: GitHub.** The login you use for Copilot is how you sign in to the platform, attach from Copilot
    CLI, and pay for model calls, including work that continues while you're away.
-6. **Every session is attachable.** Open any running session in Copilot CLI, and in the GitHub Copilot app where
-   supported, and work alongside your app.
-7. **Secure by default, easy to lock down.** Only the platform's gateway is reachable, over HTTPS and WSS. Every
-   request is authenticated, sessions belong to the GitHub user who created them, and secrets stay in vaults outside
-   the sandbox. Outbound network access is on, as in OpenAI's API, and `network: false` turns it off.
+6. **Attach to the same session.** Copilot CLI attachment is a delivery requirement; GitHub Copilot app attachment
+   is conditional on actual interoperability and authorization support. Neither path may create a shadow session.
+7. **Enforced boundaries, easy controls.** The target is authenticated HTTPS/WSS ingress, owner-scoped sessions,
+   credential isolation, and enforced egress policy. Shared placement is application isolation, not a hostile-code
+   boundary; a container is not a VM boundary. Outbound network access is on, and `network: false` turns it off.
 
 ## Environment types
 
 | Type | Where the agent runs | Built-in tools | Start | Isolation boundary | Typical use |
 | --- | --- | --- | --- | --- | --- |
-| `shared` | One runtime shared by many sessions | A safe set with no shell or files; plus your tools, MCP servers, and web fetch when the network setting allows | Instant | Per-session state and identity in a shared process | Chat, support, Q&A, high volume |
-| `isolated` | A fresh Linux **sandbox** (container) for each session | Everything: shell, files, git, and your image's toolchain | Seconds, or instant from a warm pool | A container per session | Coding and data agents, untrusted work |
-| `promotable` | Starts `shared`, then moves once into its own fresh sandbox | The safe set, then everything | Instant, then a sandbox start at promotion | Shared, then a container | Assistants that occasionally need a shell |
+| `shared` | One runtime shared by many sessions | Session-safe tools, approved remote MCP, and filtered web access; no workload filesystem or subprocess tools | No per-session container allocation | Per-session state and identity in a shared process | Chat, support, Q&A, high volume |
+| `isolated` | A fresh Linux **sandbox** (container) for each session | Policy-approved shell, files, git, and image toolchain | Cold start or warm allocation; latency to measure | A container per session | Coding and data agents |
+| `promotable` | Starts `shared`, then moves once into its own fresh sandbox | Shared tools, then the admitted sandbox tools | Shared start plus an explicit cutover | Shared, then a container | Assistants that occasionally need a shell |
 | `orchestrator` *(later)* | A shared coordinator that starts workers in dynamic containers | Per worker | | A container per worker | Parallel and multi-agent work |
 
 ## 1. Declare your environments
@@ -97,7 +103,7 @@ await addManagedCopilot(builder, "copilot", {
       size: "medium",
       warm: 2,
     },
-    helper: { type: "promotable", promoteTo: "coder" },
+    helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -108,26 +114,35 @@ await builder.build().run();
 ```
 
 ```powershell
-aspire run      # local: gateway, shared runtime, and sandboxes in Docker, plus the Aspire dashboard
-aspire deploy   # the same model in Azure Container Apps
+aspire run      # target: local platform and Docker sandboxes, with the Aspire dashboard
+aspire deploy   # target: deploy modes supported by the qualified Azure backend
 ```
 
-- The platform enforces every setting in an environment. Code can add setup and narrow settings, but never broaden
-  them.
+- The platform enforces the environment's policy. Callers can add permitted setup and narrow permissions, never
+  broaden them. Defaults and policy ceilings are different; a top-level network default is not a hard deny that the
+  operator cannot override in a named environment.
 - **`models`** lists the models its sessions may use.
 - **`network`** controls outbound access. It's on unless you turn it off with `network: false`, here or for every
   environment at once ([section 7](#7-control-network-access)).
 - **`size`** is `small` (1 vCPU, 2 GiB), `medium` (2 vCPU, 4 GiB), or `large` (4 vCPU, 8 GiB).
-- **`warm`** keeps that many sandboxes started and waiting, so new sessions skip the cold start. Warm sandboxes cost
-  money while they wait.
+- **`warm`** requests that many prepared, unassigned sandboxes. This is an optional backend capability, not a
+  universal Azure primitive. Unsupported nonzero values fail deployment. Warm capacity costs money and must never
+  contain another session's files or credentials.
 
-A sandbox image is an ordinary Dockerfile on top of the base image:
+A sandbox image is a Dockerfile on top of the proposed base image. The image must retain the platform's non-root
+execution, transport, and certificate-trust contract; a custom image does not get an exemption from policy.
 
 ```dockerfile
 # sandboxes/coder/Dockerfile
-FROM ghcr.io/patniko/managed-copilot-sandbox:latest
+FROM ghcr.io/patniko/managed-copilot-sandbox:0.1.0
+USER root
 RUN apt-get update && apt-get install -y python3-pip
+USER 10001:10001
 ```
+
+The image name and version above are illustrative, not a published artifact. Deployments pin the resolved image
+digest and configuration revision so a resume does not accidentally change its runtime or toolchain. The proposed
+base image reserves UID/GID 10001 for execution; elevated package installation is an image-build step only.
 
 When the AppHost allows `inline` requests, a quick demo can skip the name:
 
@@ -135,7 +150,9 @@ When the AppHost allows `inline` requests, a quick demo can skip the name:
 const client = await managed.client({ type: "isolated", size: "small" });
 ```
 
-A request outside the `inline` list, or for an environment name that isn't declared, fails at `managed.client(...)`.
+A request outside the `inline` list, or for an unknown environment name, fails at `managed.client(...)`. A client
+selects a policy/template and does not allocate its own sandbox. Each isolated `createSession` allocates a distinct
+sandbox. In every mode, creation resolves only when that session's admitted setup and runtime are ready.
 
 ## 2. Connect
 
@@ -149,9 +166,14 @@ const managed = await ManagedCopilot.connect({ url: "https://copilot.contoso.exa
 
 With no arguments, `connect()` uses `MANAGED_COPILOT_URL` when it is set and the local AppHost otherwise.
 
-Either way, **you are your GitHub login**: the account signed in to Copilot CLI, or `GH_TOKEN` or `GITHUB_TOKEN`. The
-platform admits the accounts in the AppHost's `access` list, and your sessions use your Copilot entitlement. Locally,
-the platform listens on loopback only.
+Either way, **you are your GitHub login**. Reuse an explicitly supplied token or a supported signed-in credential
+flow; do not scrape CLI credential storage. Without a usable credential, request sign-in or return
+`authentication_required`, rather than silently using another account. Token lookup order and CLI sign-in reuse
+must be documented with the qualified auth integration. Locally, public-facing platform endpoints use loopback.
+
+The platform verifies the account and the AppHost's access rules, and binds ownership to a stable GitHub account ID,
+not a mutable login. Authentication to this platform is distinct from permission to use a model. A backend serving
+several users creates an identity-bound managed client for each user; a request body cannot reassign ownership.
 
 A backend that serves signed-in users acts as each user with that user's GitHub token, obtained as in the SDK's
 GitHub OAuth guide:
@@ -160,7 +182,10 @@ GitHub OAuth guide:
 const client = await managed.client("chat", { gitHubToken: user.githubToken });
 ```
 
-The SDK's per-session `gitHubToken` option also works, and the platform verifies it the same way.
+The SDK's per-session `gitHubToken` is a compatibility target: trusted admission must verify it and convert it into
+a scoped credential reference before any execution runtime sees the request. It cannot silently switch the owner
+of an existing managed client or session. The credential-broker gate must prove both this flow and entitlement
+attribution; until then, it is not an advertised supported shortcut.
 
 ### Work that continues without you
 
@@ -168,11 +193,21 @@ Some work outlives your connection: a long turn you left running, a tool call wa
 run. It still runs as you. Before using it the first time, sign in once:
 
 ```powershell
-npx managed-copilot login   # authorizes the platform's GitHub App to act for you while you're away
+npx managed-copilot login   # target UX: authorize this deployment for your background work
 ```
 
-The platform keeps a refreshable GitHub credential for you, encrypted (in Azure Key Vault when deployed), and uses it
-only for your own sessions and schedules. `npx managed-copilot logout` revokes it.
+**Background sign-in is approved; the implementation is still gated.** A candidate is a GitHub App user
+authorization with a refreshable credential stored by a trusted broker (Key Vault in Azure). The operator setup
+must declare who owns that GitHub App and its callback registration; a shared registration versus an
+operator-owned registration remains a product decision. A login name alone is not delegation.
+
+The broker must prove refresh, current Copilot entitlement/model access, and revocation without giving the
+sandbox a GitHub token, refresh token, or Azure provisioning credential. Inference and session-authentication
+requests both cross this boundary. Failure blocks background work with `authentication_required` or
+`inference_unavailable`; it does not substitute a service account or a different inference route.
+`logout` invalidates this deployment's credential references and pauses dependent schedules/new work. Requests
+already sent upstream cannot be retroactively unsent. Revocation and expiry must also stop new privileged calls
+from already-connected clients.
 
 ## 3. Shared: a chat agent with your own tools
 
@@ -191,6 +226,7 @@ const session = await client.createSession({
   model: "claude-sonnet-5",
   systemMessage: { content: "You are Contoso's order assistant. Be brief." },
   tools: [lookupOrder],
+  streaming: true,
   onPermissionRequest: approveAll,
 });
 
@@ -198,9 +234,16 @@ session.on("assistant.message_delta", (e) => process.stdout.write(e.data.deltaCo
 await session.sendAndWait({ prompt: "Where is order 1234?" });
 ```
 
-You don't need `availableTools`: the environment decides which built-in tools exist, and you can narrow them further
-with `availableTools` or `excludedTools`. A `shared` environment has no shell or file tools, so asking for them fails
-at `createSession` rather than halfway through a conversation.
+The intended snippet omits `availableTools`: the integration supplies environment defaults **before the native
+SDK's local validation**, and the service independently enforces them. A gateway cannot repair a call that the SDK
+rejected before transmission; this exact snippet is part of gate G1. You may narrow the effective tools further
+with `availableTools` or `excludedTools`.
+
+Shared admission rejects shell, workload file tools, local/stdio MCP commands, file hooks, arbitrary executable
+plugins, and equivalent capabilities nested in custom agents. Remote MCP endpoints and tools require admission
+and per-session egress attribution. Apply the same validation on create, resume, tool changes, agent selection, and
+option updates, not only to the first request. SDK callbacks still execute in the customer's app, outside this
+shared-runtime boundary.
 
 ## 4. Isolated: a coding agent in its own sandbox
 
@@ -213,21 +256,32 @@ await session.sendAndWait({
   prompt: "Clone https://github.com/microsoft/aspire, count the *.cs files per top-level folder, and save outputs/report.md",
 });
 
-// Files under /workspace/outputs are published when the turn ends (section 6).
-console.log(await managed.artifacts(session).read("report.md"));
+const artifacts = managed.artifacts(session);
+await artifacts.waitForPublication(); // the completed turn's outputs, not just runtime idleness
+console.log(await artifacts.read("report.md"));
 ```
 
-`approveAll` is reasonable here: the agent can affect only its own sandbox and the hosts its network setting allows,
-not your machine or other sessions.
+`approveAll` above is demo shorthand, not an isolation guarantee or a production recommendation. The agent can
+still cause external effects through permitted network access, vault-backed APIs, or your application tools.
+Managed deny rules remain authoritative; unattended actions require an explicitly permitted approval policy.
 
-The sandbox's working directory is `/workspace`. While the sandbox exists, `managed.files(session)` reads, writes, and
-lists any file in it.
+The sandbox's logical working directory is `/workspace`. `managed.files(session)` reads, writes, and lists its
+authorized workload files, not platform metadata or credentials. Paths are workspace-relative and checked against
+traversal and symlink escapes. Host filesystem paths in this document are illustrative Linux sandbox paths;
+local Windows file paths refer to the customer's machine, never to the remote runtime.
 
-A sandbox lives exactly as long as its session:
+A session owns one sandbox allocation at a time, but compute lifetime and durable session lifetime are distinct:
 
 - It is created with the session and never shared with another session.
-- When the session goes idle, the sandbox stops and keeps its files. Resuming the session wakes it.
-- Deleting the session deletes its sandbox: `await client.deleteSession(session.sessionId)`.
+- An idle session can stop compute only after pending work and snapshot writes have drained. The idle event alone
+  is not a safe shutdown signal. The exact timeout/retention policy remains proposed.
+- Resuming restores declared persistent state. It does not promise the same process or container instance, or
+  survival of background servers, child shells, or in-memory subagents.
+- A pending external action is not an idle session. Keep its runtime resident unless the exact suspension boundary
+  is qualified; [offline behavior](#12-keep-working-while-your-app-is-offline) defines the limits and cost.
+- `await client.deleteSession(session.sessionId)` prevents new work and requests deletion of the sandbox and
+  artifacts. Reconciliation must finish cleanup even after a crash; expose `deleting`/cleanup errors rather than
+  returning a false success. Schedules targeting a deleted session cannot recreate it implicitly.
 
 ```ts
 const info = await managed.sessions.get(session.sessionId);
@@ -236,7 +290,8 @@ console.log(info.sandbox); // { id: "sbx_7f3a…", size: "medium", state: "runni
 
 ## 5. Set up the sandbox
 
-An environment can install packages, run setup commands, and set environment variables before every session starts:
+An environment can declare packages, setup commands, and non-secret environment variables. Preparation must be
+reproducible without treating arbitrary setup commands as safe to replay:
 
 ```ts
 // apphost.mts: every "coder" session starts like this
@@ -249,26 +304,56 @@ coder: {
 },
 ```
 
-Code can add to it for the sessions one client creates, for example to provide input files:
+Settings passed to `managed.client(...)` are defaults for **every** session it creates. For inputs that differ per
+session, use the one-call form with the same environment descriptor:
 
 ```ts
-const client = await managed.client({
-  name: "coder",
-  files: { "data/sales.csv": await readFile("./sales.csv") },
-  packages: { python: ["matplotlib"] },
-  env: { REPORT_TITLE: "Q3 sales" },
+const session = await managed.createSession({
+  environment: {
+    name: "coder",
+    files: { "data/sales.csv": await readFile(".\\sales.csv") },
+    packages: { python: ["matplotlib"] },
+    env: { REPORT_TITLE: "Q3 sales" },
+  },
+  model: "claude-sonnet-5",
+  onPermissionRequest: approveAll,
 });
-const session = await client.createSession({ model: "claude-sonnet-5", onPermissionRequest: approveAll });
 ```
 
-- Setup runs in order before the agent starts: packages, then files, then setup commands. File paths are relative to
-  `/workspace`. If a command fails, `createSession` throws with its output.
-- Packages install from their public registries even when network access is off. Setup commands follow the network
-  setting.
-- Warm sandboxes have already run the environment's own setup. A client's additions run when its session claims one,
-  so keep them small and bake anything slow into the image.
-- `env` values are visible to everything in the sandbox. Put secrets in a vault
-  ([section 8](#8-keep-secrets-out-of-the-sandbox)).
+Or reuse one client and upload separately before sending work:
+
+```ts
+const session = await client.createSession({ model: "claude-sonnet-5", onPermissionRequest: approveAll });
+await managed.files(session).upload(".\\sales.csv", "data/sales.csv");
+await session.sendAndWait({ prompt: "Summarize data/sales.csv into outputs/summary.md" });
+```
+
+Small `files` entries are convenient; `upload`/`download` must stream large files with explicit size limits, rather
+than buffering them through a session JSON-RPC request. Concurrent uploads require explicit overwrite/version
+semantics. An upload never races the agent's initial prompt in the one-call form.
+
+- Initial session setup runs admitted packages, files, then setup commands before the agent starts. Record progress,
+  resolved versions, hashes, and redacted errors. A nonzero exit prevents readiness; do not report a created,
+  usable session while setup is failing.
+- **No package-download exception to `network: false`.** Session-time installers, their lifecycle scripts, and setup
+  commands follow the effective session network policy. Offline setup uses a prepared image or approved local
+  cache; a missing package fails with an actionable setup error. Operator image builds occur separately, before any
+  session credentials or input files exist, and have their own explicitly reviewed build-network policy.
+- System packages belong in operator-controlled image preparation; client/session requests for system-package
+  installation are rejected. Python/npm additions use a persisted per-session environment or an immutable prepared
+  layer. On resume, retain or reconstruct those dependencies from the recorded manifest; do not silently reinstall
+  different versions.
+- Persist workload files, the declared tool environment, required `HOME` settings, and runtime state under separate
+  appropriate storage boundaries. A `/workspace` mount alone does not preserve global package installs or catalogs.
+  The trusted action/policy ledger is never authoritative from sandbox-writable files.
+- `setupCommands` run on initial creation, not automatically on every wake. Non-idempotent or interrupted setup
+  cannot be replayed blindly. A backend that cannot restore its effects must reject that configuration or require
+  an explicit recovery action; do not silently start with missing setup.
+- Warm instances contain only immutable, operator-prepared defaults. Session input, writable state, setup effects,
+  and secrets are attached after assignment and never reused for a different session. Whether a backend can do
+  that with durable state is part of gate G3, not an assumed volume hot-attach capability.
+- `env` values are visible to sandbox code. Reserved identity, proxy, and trust settings cannot be overridden. Use
+  [vaults](#8-keep-secrets-out-of-the-sandbox) for secrets.
 
 ## 6. Get results out
 
@@ -278,14 +363,22 @@ Continuing that session:
 await session.sendAndWait({ prompt: "Chart monthly revenue from data/sales.csv and save outputs/revenue.png" });
 
 const artifacts = managed.artifacts(session);
+await artifacts.waitForPublication();
 for (const artifact of await artifacts.list()) {
   console.log(artifact.path, artifact.size, artifact.publishedAt); // revenue.png 48213 2026-10-23T21:04:11Z
 }
-await artifacts.download("revenue.png", "./revenue.png");
+await artifacts.download("revenue.png", ".\\revenue.png");
 ```
 
-- When a turn ends, the platform publishes every file under `/workspace/outputs` as an immutable artifact.
-- Artifacts outlive the sandbox. They're deleted with the session.
+- Publication runs at an explicit completed-turn checkpoint and is distinct from runtime `session.idle`.
+  `waitForPublication()` captures the most recent completed turn known to the handle and waits for its manifest.
+  Concurrent callers may pass a specific `turnId`. Failure or timeout returns an explicit error, not an empty
+  success-shaped list.
+- Copy bounded, authorized regular files under `/workspace/outputs` into immutable storage. Reject traversal,
+  symlink escapes, and changing files rather than exposing another path or a corrupt snapshot.
+- Record `turnId`, artifact ID, digest, size, and `pending`/`published`/`failed` state. Files from interrupted turns
+  are not labeled successful outputs. Published artifacts outlive compute replacement and are deleted with the
+  session under the retention policy.
 - A file changed in a later turn becomes a new version. `list()` shows the newest version of each file, and
   `list({ versions: "all" })` shows every version.
 
@@ -294,7 +387,7 @@ await artifacts.download("revenue.png", "./revenue.png");
 Network access is on by default, as in OpenAI's API. Turning it off, or limiting it to a few hosts, takes one line:
 
 ```ts
-coder: { type: "isolated", network: false },                                    // nothing leaves the sandbox
+coder: { type: "isolated", network: false },                                    // no workload Internet access
 docs:  { type: "isolated", network: ["github.com", "*.githubusercontent.com"] }, // only these hosts
 ```
 
@@ -304,8 +397,8 @@ Set it once at the top level to change the default for every environment. An env
 await addManagedCopilot(builder, "copilot", {
   network: false, // off for every environment below, unless it says otherwise
   environments: {
-    chat: { type: "shared" },                          // off
-    coder: { type: "isolated", network: ["pypi.org"] }, // only PyPI
+    chat: { type: "shared" }, // off
+    coder: { type: "isolated", network: ["pypi.org", "files.pythonhosted.org"] },
   },
 });
 ```
@@ -318,33 +411,49 @@ const client = await managed.client({ name: "coder", network: false });
 
 | Setting | Behavior |
 | --- | --- |
-| Omitted, or `true` | Any host (the default) |
-| A list of hosts | Only those hosts; `*.example.com` matches any subdomain |
-| `false` | No outbound access |
+| Omitted | Inherit the containing environment/deployment setting; enabled only if no setting was supplied |
+| `true` | Public outbound access, subject to non-overridable platform protections |
+| A list of hosts | Restricted access; `*.example.com` matches subdomains, not the apex `example.com` |
+| `false`, or an empty host list | No workload outbound access |
 
-OpenAI's longer form works too: `{ access: "enabled" | "restricted" | "disabled", allowedDomains }`.
+The proposed object form is `{ access: "enabled" | "restricted" | "disabled", allowedDomains }`, normalized to the
+same policy as the shorthands. This is conceptually similar to OpenAI's form, not identical casing or wildcard
+semantics.
 
-- The setting covers everything the agent runs: shell commands, web fetches, and the MCP servers it starts. Model
-  calls and platform traffic aren't affected.
-- Even with access on, the agent can't reach the platform's internal network or cloud metadata endpoints.
-- Code can narrow access but never broaden it.
-- A blocked request fails immediately with an error the agent can read, and the platform records it with the
-  session.
+- The top-level field supplies an **operator default**; a named environment can explicitly override it. After
+  admission, caller options can only narrow that environment's ceiling. A caller's `network: true` cannot re-enable
+  an environment set to false. Store the effective restriction across resume and promotion.
+- The setting covers all workload egress: setup/package scripts, shell commands, web tools, and admitted MCP calls.
+  Model calls, file transfer, and narrow platform control operations use authenticated service channels, not a
+  general-purpose proxy exemption. `network: false` does not mean inference or customer uploads stop working.
+- Application-side `defineTool` handlers run outside the sandbox and can still access the application's services.
+  This setting does not firewall the customer's process; tool authorization remains the application's duty.
+- Even when enabled, workload traffic cannot reach platform internals, loopback/link-local services, or cloud
+  metadata. A host string is not sufficient authorization: validate resolved addresses, redirects, ports, and the
+  actual connection destination. Custom proxy/DNS settings cannot bypass enforcement.
+- Shared-runtime requests carry trusted session identity through the outbound path; process-wide environment
+  variables or a caller-selected session header cannot establish that identity.
+- Gate G4 must prove the selected Azure and local backends enforce these rules for supported protocols, including
+  direct-IP and non-HTTP bypass attempts. If a requested restriction cannot be enforced, refuse the environment.
+  Report blocked traffic to the session without disclosing credentials.
 
 ## 8. Keep secrets out of the sandbox
 
-A **vault** holds credentials the agent can use but never see. There are two kinds:
+A **vault** keeps stored secret values out of session configuration and sandbox storage. It authorizes specific
+uses, not arbitrary access to every secret. An allowed service can still cause external effects or return sensitive
+data; a vault is not a substitute for choosing trusted destinations and least-privilege credentials.
 
-- **Sandbox credentials.** The sandbox gets an environment variable that holds a placeholder. The platform's egress
-  proxy replaces the placeholder with the real value on requests to the credential's hosts, and nowhere else.
-- **MCP server credentials.** The platform adds the credential when a session connects to that MCP server.
+- **Sandbox credentials.** An assigned isolated sandbox gets a per-session opaque placeholder. A trusted proxy
+  substitutes it only in supported HTTP request headers to the credential's exact HTTPS destinations.
+- **MCP server credentials.** The trusted connector attaches a credential to an admitted MCP endpoint, scoped to
+  the owning session, without publishing it as a process-wide environment variable.
 
 Declare vaults for a whole environment in the AppHost:
 
 ```ts
 // apphost.mts
-const stripeKey = builder.addParameter("stripe-key", { secret: true }); // a user secret locally, Key Vault in Azure
-const docsToken = builder.addParameter("docs-mcp-token", { secret: true });
+const stripeKey = await builder.addParameter("stripe-key", { secret: true });
+const docsToken = await builder.addParameter("docs-mcp-token", { secret: true });
 
 await addManagedCopilot(builder, "copilot", {
   vaults: {
@@ -387,7 +496,22 @@ const client = await managed.client("coder", { vaults: [vault.id] });
 
 - No API returns a vault's values. AppHost vaults serve the environments that list them; vaults created in code
   belong to the GitHub user who created them.
-- A credential's hosts must also be allowed by the environment's network setting.
+- Vault attachment and each use require current owner/delegation authorization. A short-lived placeholder is bound
+  to the session and credential; copying it to another session must not grant access. Revocation prevents new uses.
+- Sandbox `env` credentials are valid only after isolated placement. A promotable session can bind them for its
+  future sandbox, not expose them in the shared process. A purely shared environment rejects them; use scoped MCP
+  credentials there. Never set per-user secrets or placeholders in the shared runtime's global `process.env`.
+- Both network and credential-destination policy must allow the call. Vault destination matching uses exact
+  HTTPS hosts and ports, not wildcard network rules. Match verified TLS destination/SNI and HTTP authority, and
+  re-evaluate every redirected request; substitution never grants permission to follow a different destination.
+- Initially support literal placeholders in Bearer and explicitly named request headers. Basic-auth encodings,
+  URLs/query strings, request bodies, non-HTTP protocols, and pinned TLS clients need separate support; reject
+  unsupported uses instead of transmitting a secret through a fallback.
+- HTTPS header substitution requires explicit proxy TLS termination with the signing key outside the sandbox.
+  The base image configures supported trust stores for Node, Python, curl, and git. Never disable TLS verification
+  to make a custom image work. Pinning/trust failures must be visible.
+- Response/log redaction is defense in depth, not a guarantee against an authorized upstream reflecting or
+  transforming a secret. The platform must not claim a malicious allowed service can never disclose one.
 
 ## 9. Promotable: start cheap, move when needed
 
@@ -397,16 +521,44 @@ managed.on("session.promoted", (e) => console.log(`${e.sessionId} moved to sandb
 const client = await managed.client("helper");
 const session = await client.createSession({ model: "claude-sonnet-5", onPermissionRequest: approveAll });
 
-// Shared and instant.
+// Starts on shared placement.
 await session.sendAndWait({ prompt: "What does a CSV header row usually contain?" });
 
-// Needs a shell: the agent calls its built-in `promote_to_sandbox` tool, which you approve like any other tool.
-await session.sendAndWait({ prompt: "Download https://example.com/sales.csv and compute summary stats with pandas" });
+// Needs a shell: promotion goes through the session's permission policy before allocation.
+await session.sendAndWait({ prompt: "Use Python to calculate the sum of 10, 20, and 30 and save outputs/summary.json" });
 ```
 
-The session moves into its own fresh sandbox from the `promoteTo` environment. The same `session` object keeps
-working across the move, with its full history. Your app can also promote a session with
-`await managed.promote(session)`. Promotion is one way: a promoted session never returns to `shared`.
+The target is the **same native session object and application session ID**, with its history, after one-way
+promotion. This requires an execution handoff, not only a WebSocket route change. It remains gated by G5.
+`promoteTo` selects prepared compute; it does not select a new agent persona or discard the source's policy.
+
+### Promotion contract
+
+1. Admit one idempotent promotion operation for the current placement generation. Check approval, capacity, target
+   availability, current policy, and caller restrictions before allocating. Reject incompatible targets explicitly.
+2. Quiesce the source at a supported checkpoint. A promotion tool finishes its own request before source teardown;
+   unrelated tool calls, subagents, permission waits, and callbacks must not be abandoned. If they cannot drain,
+   return `promotion_busy`. A direct `managed.promote(session)` on an active turn returns `session_busy` in the
+   conservative proposal, rather than interrupting work invisibly.
+3. Persist runtime state and the callback/action ledger under a single-owner generation. Shared placement has
+   private conversation/consent state, but **no workload `/workspace` tree**; promotion does not invent files that
+   never existed. The target initializes its admitted workspace and retains the existing history and agent revision.
+4. Start and verify the destination, then atomically commit ownership and routing to its new generation. Fence the
+   old owner before the new owner can execute. Reconnects resolve the committed generation, not a cached host.
+5. Before commit, a failure releases the candidate and leaves or restores the source as the only owner. After commit,
+   recover only the destination; never reactivate the source or automatically replay an uncertain side effect.
+
+The target for an agent-initiated promotion is one caller-visible `sendAndWait` operation that returns after the
+continued work finishes, not at an intermediate source checkpoint. Preserve message correlation, ordered events,
+and genuine completion/cancellation outcomes. The gateway cannot merely suppress every `session.idle` notification.
+If the pinned SDK/runtime cannot represent this handoff faithfully, require a supported extension or an explicit
+customer-visible continuation decision before claiming transparent promotion.
+
+Promotion may enable the target's pre-admitted shell/file tools, but never broaden the source or caller's network,
+vault, model, or approval ceilings. In particular, `network: false` stays false even if the target defaults to on.
+If broader access is desired, that is a separate explicit policy decision, not an effect of naming `promoteTo`.
+Attached CLI clients may reconnect with new authenticated connection material; the launcher must not silently
+accept a changed host key or switch to a different conversation.
 
 ## 10. Ship agents with an environment
 
@@ -440,50 +592,88 @@ const client = await managed.client("chat");
 const session = await client.createSession({ agent: "triage", tools: [lookupOrder], onPermissionRequest: approveAll });
 ```
 
-The platform loads the folder through the SDK's `agentDirectories`, `skillDirectories`, and
-`instructionDirectories`, so these files behave exactly as they do in Copilot CLI. Agents you pass in `customAgents`
-are added alongside the deployed ones. The environment's settings apply whichever agent runs.
+These are native Copilot formats, not a new saved-agent resource. The platform pins and mounts the reviewed bundle
+read-only, supplies `agentDirectories`, `skillDirectories`, and `instructionDirectories`, and explicitly enables the
+needed discovery behavior. Directory settings alone are insufficient in `mode: "empty"`, whose defaults can disable
+skills and custom instructions. Gate G1 covers the SDK's initial configuration and subsequent option patches.
+
+Enable skills only for the approved bundle (`enableSkills` plus the allowed `skill` tool). Configure
+`skipCustomInstructions: false` where needed for its instruction files while keeping ambient user/repository
+discovery disabled (`enableConfigDiscovery: false`); prove the directory scope rather than relying on a switch
+alone. Explicit file hooks or executable customizations are still rejected in shared placement. A client-supplied
+working directory or discovery path must not resolve against the gateway's host filesystem.
+
+Inline `customAgents` remain subject to the same nested validation; reject ambiguous duplicate names rather than
+silently shadowing a deployed agent. Existing sessions retain their admitted configuration revision across resume
+and promotion, while current policy can narrow access or refuse further work. New deployment files are not an
+implicit reconfiguration of existing sessions.
+
+An `.agent.md` tool list is a filter, **not a tool implementation or JSON schema**. `lookup_order` still needs the
+standard SDK tool declaration. Interactive code supplies it above; scheduled sessions supply a stored declaration
+and an authorized handler route as described in [section 13](#13-run-on-a-schedule).
 
 ## 11. Come back later
 
 ```ts
-// The platform knows where every session lives, so its id is enough. Resuming wakes its sandbox if needed.
+// The platform resolves placement and restores the supported state for this owner.
 const session = await managed.resumeSession(sessionId, { tools: [lookupOrder], onPermissionRequest: approveAll });
 
 for (const s of await managed.sessions.list()) {
   console.log(s.id, s.environment, s.placement, s.updatedAt); // placement is "shared" or "sandbox"
 }
 
-await managed.close(); // disconnects this process; sessions and sandboxes keep running
+await managed.close(); // detaches this process; it does not delete sessions or cancel accepted work
 ```
 
-As with the SDK, pass your tools and handlers again when you resume; they still run in your process. Anything that
-was waiting for them is delivered as soon as you resume ([section 12](#12-keep-working-while-your-app-is-offline)).
-Sessions belong to the GitHub user who created them, so `list()` returns only yours.
+As with the SDK, pass your tools and handlers again; functions are not serialized into session storage.
+The managed integration must reconcile the runtime's pending requests with its ledger and route only claims owned
+by this responder. Native `resumeSession` does not automatically drain the pending-request APIs; that behavior is
+part of G2, not established by the existence of `listPendingRequests`.
+
+`list()` and resume are owner-scoped. Required callbacks missing on resume are reported, not silently removed.
+Keep the same admitted bundle, effective policy, tool declaration revisions, and persistence namespace.
+Restoring a transcript does not prove that pending execution continued successfully.
 
 ## 12. Keep working while your app is offline
 
-Sessions don't need your app to stay connected. Send work and leave:
+The intended experience for a session with qualified background capabilities and valid delegated identity is:
 
 ```ts
-await session.send({ prompt: "Reconcile last month's refunds against the ledger" }); // returns once the work is queued
-await managed.close(); // the agent keeps working
+await session.send({ prompt: "Reconcile last month's refunds against the ledger" }); // durable admission before acknowledgment
+await managed.close(); // detach; accepted work belongs to the service
 ```
 
-If the agent calls one of your tools, or needs a permission decision, while no app is connected, the request waits in
-the session, as OpenAI's required actions do. Answer it in one of three ways.
+The service, not the caller's connection, owns the upstream runtime participation and tool declarations.
+`close`, `client.stop`, and a dropped transport must not erase that registration or kill unrelated sessions.
+After an ambiguous send failure, inspect the persisted operation outcome before submitting it again.
 
-**Resume the session.** Waiting requests go to your handlers as soon as you resume, as in section 11.
+### Callback support and disconnection
+
+| SDK surface | Proposed hosted contract | While no qualified handler is available |
+| --- | --- | --- |
+| `defineTool` callbacks | Persist name, schema, provider/revision, arguments, and request identity; execute code in its registered app/worker | A durable required action waits; supported root-agent recovery is gated separately from subagent/process recovery |
+| `onPermissionRequest` | Route one attributable decision under current managed policy; distinguish app policy from a person's approval | Wait or fail closed; never interpret disconnect or timeout as approval |
+| SDK hooks, including `onPreToolUse` | Keep the native live callback semantics; required hooks need an explicit durable route before unattended support can be advertised | Block/fail the dependent operation. Reject unattended admission with `background_callback_unsupported` when its required hook cannot be held or restored |
+| Questions, elicitation, plan-exit, and mode/limit decisions | Preserve each request type and allowed responder; ordinary tool output is not a human decision | Report `needs_input`; no automatic approval or fabricated answer |
+| Token providers and session storage callbacks | Platform-owned services must remain available independent of the caller | Authentication/storage failure is explicit; never fall back to host identity or a different persistence namespace |
+
+Hooks use a different RPC path from tool events. A `handleActions({ tools, onPermissionRequest })` helper does not
+magically implement hook recovery. Required callback registrations must be inventoried on create, resume, and
+update. A required callback does not become optional merely because its handler disconnected; an observational
+callback needs an explicit non-blocking contract rather than an inferred exemption.
+
+**Resume the session.** Reconcile and route waiting requests after registering the handlers, as in section 11.
 
 **Handle a webhook.** Declare an endpoint in the AppHost:
 
 ```ts
-const webhookSecret = builder.addParameter("webhook-secret", { secret: true });
+const webhookSecret = await builder.addParameter("webhook-secret", { secret: true });
 
 await addManagedCopilot(builder, "copilot", {
   webhooks: {
     orders: {
       url: "https://contoso-orders.azurewebsites.net/api/copilot-events",
+      environments: ["chat"], // authorized subscriber scope, not a deployment-wide broadcast
       events: ["session.action_required", "session.idle", "session.failed", "artifact.published"],
       secret: webhookSecret,
     },
@@ -511,29 +701,85 @@ app.http("copilot-events", {
 });
 ```
 
-Each event carries a short-lived token that can only read that session and answer its waiting requests, so the
-function holds no GitHub credential. `handleActions` answers what is waiting and returns. If the agent asks for more
-later, another event follows.
+Delivery is at least once. Verify the signature against the raw request bytes and timestamp, enforce a replay
+window, and retain event IDs for deduplication. A webhook subscription is bound to authorized environments,
+owners/delegations, and event types; a filter alone does not grant access to another owner's sessions.
+
+An action event may carry a short-lived capability for **that session's listed actions**, not arbitrary session
+control or GitHub access. It cannot change policy, create sessions, execute unrelated pending calls, or grant human
+authority. Verify its audience, expiry, action IDs, and deployment endpoint; do not trust an arbitrary response URL
+in a payload. A redelivery refreshes capability material only while the same authorized action is still pending.
+
+`handleActions` claims and answers eligible actions and returns. A normal, short lookup can run in this handler.
+For longer work, verify and durably enqueue first, then acknowledge the webhook; a 200 response before durable
+acceptance can lose work. The platform retries notification with bounded backoff and an operator-visible failed
+delivery state, not repeated blind tool execution.
 
 **Poll.**
 
 ```ts
 const { pendingActions } = await managed.sessions.get(sessionId);
-// [{ kind: "tool", tool: "lookup_order", arguments: { id: "1234" } }]
+// [{ id: "...", kind: "tool", tool: "lookup_order", state: "pending", arguments: { id: "1234" } }]
+await managed.sessions.handleActions(sessionId, {
+  tools: [lookupOrder],
+  onPermissionRequest: approveAll,
+});
 ```
+
+The polling helper follows exactly the same claim/result contract as live delivery and webhook handling.
+Customers must not execute a pending tool merely because it appeared in a list.
+
+### One owner for each action
+
+Every execution path uses a durable action record keyed by session, originating turn/tool call, provider revision,
+and action ID, with a placement generation for fencing. Notifications are not execution ownership.
+
+| State | Required behavior |
+| --- | --- |
+| `pending` | No responder owns execution; an eligible live client or webhook worker may atomically claim it |
+| `claimed` / `executing` | One responder and lease generation own it; delivery retries return ownership state, not permission for a second execution |
+| `completed` / `failed` | Persist the result before acknowledging it; duplicate submissions with the same identity return the recorded result, conflicting results are rejected |
+| `needs_reconciliation` | Execution may have happened but its result is unknown; do not automatically run a non-idempotent handler again |
+| `expired` / `cancelled` | Fence response acceptance and report the actual outcome; neither state proves an external effect did not occur |
+
+The gateway claims **before emitting a callback-triggering SDK notification**. The native SDK invokes a handler on
+receipt, so a lease acquired only when the handler submits its result is too late. Other attached clients receive
+progress-only views, not duplicate execution-bearing requests. Slow but healthy handlers renew ownership; a grace
+period without a result does not trigger a second handler.
+
+Lease expiry does not provide generic exactly-once side effects. Preserve a stable idempotency identity across
+live callbacks, resume, webhook retries, and placement changes; expose it through the action record and stable SDK
+invocation identity. Side-effecting tools must use it at the downstream service or reconcile the effect before retry.
+An expired executing claim becomes uncertain unless the effect can be safely resolved. Stale responders cannot
+commit a result into a newer generation.
+
+Permission races between a person, a policy handler, and a webhook use the same authoritative record with
+responder-type checks. If an application callback is unavailable, the CLI may answer an authorized human prompt,
+but it cannot execute that application's missing function.
 
 | Event | Sent when |
 | --- | --- |
-| `session.action_required` | A tool call or permission request is waiting, and no connected app answered it within a few seconds |
-| `session.idle` | A turn finished |
+| `session.action_required` | An action is durably pending and needs an eligible responder, not simply a slow handler's result |
+| `session.idle` | The runtime became idle; inspect the recorded turn outcome rather than assuming success |
 | `session.failed` | A turn failed |
 | `artifact.published` | A turn published files under `/workspace/outputs` |
 | `schedule.run_started` | A schedule started a run ([section 13](#13-run-on-a-schedule)) |
 
-- A waiting session costs nothing extra: its sandbox stops while it waits, wakes when you answer, and the turn
-  continues.
-- A request still unanswered after the environment's `actionTimeout` (24 hours by default) fails, and the agent sees
-  the failure.
+### Waiting, suspension, and cost
+
+The conservative proposal keeps active waits resident. Shared compute, retained storage, and running sandbox time
+can still cost money. **There is no zero-cost-wait or arbitrary process-hibernation promise.**
+
+Qualify root-agent suspension separately with explicit `continuePendingWork` behavior, persistence, and an actual
+process replacement. Published SDK types limit answerability of subagent calls to the lifetime of the running
+subagent; background processes and MCP subprocesses also do not survive ordinary container replacement.
+Do not stop such a session automatically while its work is pending. An unexpected crash reports interrupted or
+uncertain work; resuming must not blindly restart commands or duplicate completed effects.
+
+If retained compute exceeds a configured limit, surface `needs_attention` and the explicit cancel/recovery policy
+rather than silently stopping it and promising a transparent wake. Residency limits and suspend eligibility remain
+user-facing policy decisions before implementation. The proposed 24-hour `actionTimeout` is an answer deadline,
+not an entitlement to 24 hours of free compute; expiry closes the pending action but cannot undo work already done.
 
 ## 13. Run on a schedule
 
@@ -543,7 +789,8 @@ const schedule = await managed.schedules.create({
   cron: "0 9 * * 1-5",
   timeZone: "America/Los_Angeles",
   environment: "chat",
-  session: { agent: "triage" }, // createSession options for each run
+  session: { agent: "triage", tools: [lookupOrder] },
+  webhook: "orders", // supplies an authorized handler while the creating process is offline
   prompt: "Triage the issues opened since the last run",
 });
 
@@ -552,14 +799,20 @@ for (const run of await managed.schedules.runs(schedule.id)) {
 }
 ```
 
-- Each run starts a new session. Set `target: { sessionId }` to continue one session instead.
+- Each run starts a new session. Alternatively specify `target: { sessionId }`, without conflicting environment
+  or new-session settings, to continue an owned session.
 - Runs execute as the schedule's creator, through the access from
   [Work that continues without you](#work-that-continues-without-you). Your app's tools are answered through
   webhooks ([section 12](#12-keep-working-while-your-app-is-offline)).
 - `managed.schedules` also has `list`, `pause`, `resume`, `delete`, and `runNow`.
 
-Declare schedules in the AppHost to deploy them with your app. `runAs` names the GitHub account they run as, which
-must have signed in with `npx managed-copilot login`:
+The schedule serializer extracts only the standard tool declaration (name, description, JSON schema, and revision)
+from `lookupOrder`; it does not upload the handler closure. Creation requires a matching authorized handler route
+for external tools. Reject missing schemas, incompatible handlers, or other nonserializable callback options
+without an approved durable registration. A model cannot request a tool that was never declared.
+
+Declare schedules in the AppHost to deploy them with your app. `runAs` must resolve to a stable account ID with an
+explicit grant for this deployment, environment, and schedule; naming an account that once logged in is insufficient:
 
 ```ts
 schedules: {
@@ -567,16 +820,34 @@ schedules: {
     cron: "0 9 * * 1-5",
     timeZone: "America/Los_Angeles",
     environment: "chat",
-    session: { agent: "triage" },
+    session: { agent: "triage", tools: [lookupOrder] },
+    webhook: "orders",
     prompt: "Triage the issues opened since the last run",
     runAs: "contoso-bot",
   },
 },
 ```
 
-Agents can schedule their own follow-ups. Setting `scheduling: true` on an environment gives its sessions
-`schedule_task`, `list_schedules`, and `cancel_schedule` tools. Their schedules continue the same session, run as its
-owner, and need approval through `onPermissionRequest` like any other tool.
+### Schedule execution contract
+
+- Persist each scheduled occurrence and its resolved agent/tool/environment revisions before creating a session or
+  admitting input. A stable occurrence ID deduplicates both session creation **and input submission**, including a
+  restart between those operations. `runNow` also has an idempotent invocation ID.
+- Recheck owner delegation, current policy, handler availability, and capacity at execution time. Revoked identity
+  pauses/fails the run with a visible reason; it never borrows another user's entitlement.
+- Proposed collision behavior: enqueue behind an existing turn without steering it, and do not overlap runs of the
+  same schedule. Backlog and maximum run lifetime are bounded, visible policy, not an unbounded queue.
+- Record cron expression, time zone, and resolved scheduled instant. The proposed missed-run policy is skip with a
+  recorded outcome, not automatic backfill. Repeated daylight-saving wall-clock slots run at most once; nonexistent
+  slots are skipped. These defaults remain proposed until confirmed.
+- Expose invocation states such as `queued`, `running`, `waiting`, `completed`, `failed`, and `skipped`. Input
+  admission or runtime idleness alone does not mean a scheduled task succeeded.
+
+With operator-approved `scheduling: true`, an agent may propose a follow-up using `schedule_task`, `list_schedules`,
+or `cancel_schedule`. Agent-created schedules target only their existing session and admitted capabilities.
+Creating cost-bearing or persistent work follows the configured approval policy and delegation limits; a
+model-authored prompt or webhook capability never creates new human authority. Budgets, count/concurrency limits,
+and maximum lifetime bound amplification. Exact ceilings remain operator-policy work, not an unlimited default.
 
 ## 14. Open a session in Copilot CLI or the GitHub Copilot app
 
@@ -593,23 +864,35 @@ npx managed-copilot sessions        # your sessions, locally or in Azure
 npx managed-copilot attach 7f3a2c1  # Copilot CLI attached to that session over a secure WebSocket (AHP)
 ```
 
-The attached CLI uses your GitHub login, and only the session's owner can attach. Your app and the CLI can be
-attached at the same time: both see every message and tool call, and either can steer. Attaching needs an
-interactive terminal.
+The intended direct attach path authenticates the session owner, returns short-lived session-scoped connection
+material, and publishes the same resident session. It must not expose an entire runtime's session catalog or allow
+creation outside normal admission. Your app and CLI can observe and steer the same conversation, while callback
+execution and permission arbitration follow the single-action-owner contract. The CLI cannot replace an offline
+application tool implementation.
 
-For the GitHub Copilot app, an environment can register with GitHub:
+Interactive terminal support, host-key verification, reconnect, and CLI feature eligibility must be qualified on a
+specific CLI/runtime pair. A successful SDK `publishSession` call alone does not establish interactive attachment.
+
+For the GitHub Copilot app, optional GitHub environment publication remains a design candidate:
 
 ```ts
 chat: { type: "shared", github: { publish: true } },
 ```
 
-Its sessions would then appear as a remote host in the GitHub Copilot app and in Copilot CLI
-(`/ahp cloud <environment-id>`). *To validate: app support for self-hosted environments, how per-session sandboxes
-appear, and that only the registering account sees them.*
+Registration is host/account-scoped, not automatically a per-session multi-tenant authorization boundary.
+Do not enable `github.publish` on a shared multi-user host until owner-filtered discovery, file access, creation,
+and attachment are proven. If unavailable, explicitly return `transport_unsupported`; do not publish every user's
+sessions under one operator account. Direct authenticated WSS remains the baseline.
+
+The app must actually discover, open, and continue the SDK-created session before support is advertised. No custom
+deep link or generic AHP compatibility claim substitutes for that result. CLI relay commands such as
+`/ahp cloud <environment-id>` are also version/eligibility-dependent.
 
 ## 15. Models and billing
 
-Sessions use the Copilot entitlement of the GitHub user who creates them, limited to the environment's `models`.
+The target is model use attributed to the creating GitHub user, limited by current entitlement and the environment's
+`models`. Gate G4 must prove this through the trusted broker rather than by injecting the caller's token into the
+sandbox. No automatic shared-service-token fallback is permitted.
 
 An environment can send model calls to Azure AI Foundry instead:
 
@@ -617,68 +900,85 @@ An environment can send model calls to Azure AI Foundry instead:
 support: { type: "shared", inference: { foundry: "contoso-foundry" } },
 ```
 
-Callers still sign in with GitHub, but model calls go to your Foundry resource with the platform's managed identity
-(your `az login` locally) and use no Copilot entitlement.
+In that explicitly selected route, callers still sign in with GitHub, but model calls use the trusted platform's
+Foundry identity (`az login` locally, managed identity in Azure). That Azure credential stays outside execution
+sandboxes too. A missing route or unsupported model fails explicitly; switching billing/provider is not recovery
+from an authentication failure.
 
 ## What runs where
+
+This is the intended trust topology, not a deployed system. The bridge is transport code on the customer's
+machine; it does not run a local agent. Credential brokerage and session ownership remain in the trusted platform.
 
 ```mermaid
 flowchart LR
   subgraph App["Your app, script, or function"]
-    SDK["@github/copilot-sdk<br/>+ @managed-copilot/sdk"]
+    SDK["Native Copilot SDK<br/>+ managed integration"]
+    Bridge["Supported transport bridge"]
     Tools["Your tools<br/>(defineTool handlers)"]
     Hook["Webhook handler"]
   end
   CLI["Copilot CLI /<br/>GitHub Copilot app"]
   subgraph Platform["Managed Copilot: aspire run or Azure"]
-    GW["Gateway<br/>sign-in, routing,<br/>webhooks, schedules"]
+    GW["Authenticated gateway<br/>routing and admission"]
+    Owner["Session owner<br/>action claims, webhooks, schedules"]
+    Identity["Credential / inference broker"]
     Shared["Shared runtime<br/>shared and promotable sessions"]
     Sbx["Sandboxes<br/>one per isolated or promoted session"]
     Egress["Egress proxy<br/>network rules and vault secrets"]
-    Store[("Sessions, artifacts,<br/>vaults, schedules")]
+    Store[("Durable session / action ledger<br/>state and artifact storage")]
   end
   Models["GitHub Copilot models<br/>or Azure AI Foundry"]
   Web["Allowed hosts"]
-  SDK -- "HTTPS + WSS" --> GW
+  SDK -- "Framed SDK protocol" --> Bridge
+  Bridge -- "Authenticated WSS" --> GW
+  SDK --> Tools
   CLI -- "WSS (AHP)" --> GW
-  GW -- "signed webhooks" --> Hook
-  GW --> Shared
-  GW --> Sbx
-  GW --> Store
+  GW --> Owner
+  Owner -- "Signed, scoped webhooks" --> Hook
+  Owner --> Shared
+  Owner --> Sbx
+  Owner --> Store
+  Owner --> Identity
   Shared -. "promote" .-> Sbx
   Shared --> Egress
   Sbx --> Egress
   Egress --> Web
-  Shared --> Models
-  Sbx --> Models
+  Shared -- "Scoped inference access" --> Identity
+  Sbx -- "Scoped inference access" --> Identity
+  Identity --> Models
 ```
 
-## What ships
+## Planned deliverables
+
+All deliverables below are **Not implemented**. Names are proposals; listing a capability is not evidence of parity.
 
 | Piece | What it is |
 | --- | --- |
-| `@managed-copilot/sdk` | The client: `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` |
+| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` |
 | `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost |
-| `managed-copilot` CLI | `login`, `sessions`, `attach`, `promote`, `artifacts`, and `schedules` |
-| Platform images | Gateway, shared runtime, egress proxy, and the sandbox base image you can extend |
-| Samples | Runnable locally or in Azure: `shared-chat.ts`, `isolated-coder.ts`, `promotable-helper.ts`, `deployed-agent.ts`, `vault-secrets.ts`, `webhook-function.ts`, `weekday-schedule.ts`, `attach-cli.ts` |
+| `managed-copilot` CLI | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, and `schedules` |
+| Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image |
+| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment |
 
 ## Comparison with OpenAI's Agents API
 
 Reviewed on 2026-10-23 against OpenAI's documentation. Their API is in beta and can change.
 
-The concepts match: an agent configuration, an environment, and a durable session that you continue and steer. An
-`isolated` environment behaves like an OpenAI-hosted sandbox, with a fresh workspace for each session. The first
-comparison found six gaps; each now has a design: sandbox setup ([section 5](#5-set-up-the-sandbox)), artifacts
+The intended concepts match: an agent configuration, an environment, and a durable session that you continue and
+steer. `isolated` targets the per-session workspace experience of an OpenAI-hosted sandbox. The first comparison
+found six gaps; each is now **in scope and specified, not implemented or qualified**: setup
+([section 5](#5-set-up-the-sandbox)), artifacts
 ([section 6](#6-get-results-out)), network control ([section 7](#7-control-network-access)), vaults
 ([section 8](#8-keep-secrets-out-of-the-sandbox)), work while your app is offline
 ([section 12](#12-keep-working-while-your-app-is-offline)), and schedules ([section 13](#13-run-on-a-schedule)). The
-differences that remain are deliberate: the agent loop runs in your deployment instead of at OpenAI, you program it
-through the Copilot SDK instead of REST calls, and identity and billing go through GitHub.
+intended differences are deliberate: the agent loop runs in your deployment instead of at OpenAI, the client uses
+the Copilot SDK, and identity/billing use GitHub or explicitly selected Foundry. Other differences below are
+limitations or unresolved gates, not reasons to claim feature parity.
 
-### Where they match
+### Target correspondence, not verified parity
 
-| Concept | OpenAI Agents API | Managed Copilot |
+| Concept | OpenAI Agents API, documented | Managed Copilot, planned |
 | --- | --- | --- |
 | Session | Create with `input`, stream events, continue later, and steer during a turn | `createSession`, `send`, session events, `resumeSession`, and the SDK's steering |
 | Agent configuration | Inline `agent`, or a saved agent's `agent_id` with per-session overrides | `createSession` options, or a deployed `.agent.md` selected with `agent`, with per-session overrides |
@@ -686,14 +986,14 @@ through the Copilot SDK instead of REST calls, and identity and billing go throu
 | Sandbox | `openai_hosted`: a Linux workspace for each session | `isolated`: a fresh sandbox for each session |
 | Sizes | `small` (1 vCPU, 1 GB), `medium` (2 vCPU, 4 GB, the default), `large` (4 vCPU, 16 GB) | Proposed: `small` (1 vCPU, 2 GiB), `medium` (2 vCPU, 4 GiB), `large` (4 vCPU, 8 GiB) |
 | Reusable environment settings | Environment templates | Named environments in the AppHost |
-| Sandbox setup | `packages`, `files`, `setup_commands`, and `env` | The same fields, on environments and clients |
-| Fast starts | Pre-warm a sandbox before creating its session | `warm: n` ready sandboxes per environment |
-| Network control | `enabled` (the default), `disabled`, or `restricted` to at most 100 exact host names | The same modes and default, plus one-line forms (`network: false`, or a list of hosts) and wildcard subdomains |
-| Output files | Files under `/workspace/outputs` published as artifacts that outlive the sandbox | The same convention, through `managed.artifacts(session)` |
-| Secrets | Vaults: placeholders that a proxy swaps for sandbox requests, plus MCP server credentials | Vaults with the same two kinds of credential, declared in the AppHost or created in code |
-| Your functions while you're away | `required_actions` wait for a `tool_result`, and webhooks notify you | Waiting requests, answered by resuming, a signed webhook, or polling |
-| Schedules | Automations: cron schedules that start or continue sessions, and an `automations` tool for agents | `managed.schedules` and AppHost schedules, and scheduling tools for agents |
-| Multi-agent | Subagents with their own context, coordinated by the main agent in the same environment | Copilot sub-agents within a session today; `orchestrator` workers in their own containers later |
+| Sandbox setup | `packages`, `files`, `setup_commands`, and `env` | Similar fields on environments and per-session descriptors; client fields are reusable defaults. Session-time setup obeys network policy; restore semantics are gated |
+| Fast starts | Pre-warm a sandbox before creating its session | `warm: n` only on a backend qualified for isolated assignment and persistent state |
+| Network control | `enabled` (the default), `disabled`, or `restricted` to at most 100 exact host names | Same default and concepts, plus `network: false` and host-list shorthand; wildcard semantics differ and enforcement is gated |
+| Output files | Files under `/workspace/outputs` published as artifacts that outlive the sandbox | Same convention; turn-scoped immutable publication and explicit pending/failure state |
+| Secrets | Vaults for sandbox requests and MCP, including documented credential types | Target placeholders and scoped MCP credentials; header/TLS support is bounded. MCP OAuth lifecycle parity is not established |
+| Your functions while you're away | `required_actions` wait for a `tool_result`, and webhooks notify you | Durable actions with claims, replay reconciliation, signed webhooks, and polling; no blanket hook or process-resumption guarantee |
+| Schedules | Automations start/continue sessions; agents can request schedules | Same intended journeys, with stored tool declarations, authorized handler routes, and idempotent occurrences |
+| Multi-agent | Subagents with their own context in the same environment | Native SDK subagents are a candidate within admitted policy; their crash/suspend recovery is not established. Container-worker orchestration remains later |
 
 ### Where they differ by design
 
@@ -702,12 +1002,17 @@ through the Copilot SDK instead of REST calls, and identity and billing go throu
 | Where the agent loop runs | Always at OpenAI, in its hosted Codex harness. A `self_hosted` environment moves only command execution | In your deployment: the shared runtime or the session's own sandbox |
 | Programming model | REST: create sessions, post input events, stream events, and receive webhooks | The Copilot SDK's live connection with in-process callbacks, plus webhooks for work that continues without you |
 | Choosing an environment | Per request: `environment: { type, container_size, network, packages, ... }` | By name, declared in the AppHost. Code can add setup and narrow settings; inline `{ type, size }` works only where allowed |
-| Custom images | Only with `self_hosted`, where you run the compute and manage its lifecycle | Any environment, built from a Dockerfile and run by the platform |
-| Changing a running session's environment | Not supported: session updates change only the model, reasoning effort, service tier, and metadata | `promotable` |
-| Attaching a person | Streaming and webhooks; no CLI attach documented | Copilot CLI, and the GitHub Copilot app where supported |
+| Custom images | `self_hosted` supplies custom compute and lifecycle | Operator-approved sandbox images for isolated placement; not arbitrary code in the shared host |
+| Changing a running session's environment | No equivalent promotion operation was found in the reviewed documentation | One-way `promotable` handoff, conditional on native event/lifecycle compatibility |
+| Attaching a person | No equivalent live CLI attachment found in the reviewed docs | Same-session Copilot CLI is a requirement; app/relay compatibility and ownership filtering remain gated |
 | Identity and billing | API keys with scopes; model usage at API rates plus container rates | GitHub identity; Copilot entitlement or Foundry, with compute on your Azure bill |
 | Models | OpenAI models | Any model your Copilot entitlement offers, or your Foundry deployments |
-| Idle sandboxes | Deleted after an hour without activity, which isn't configurable; published artifacts remain | Stopped with their files kept, and woken when the session resumes; published artifacts remain |
+| Idle sandboxes | Can expire after an hour without activity/keep-alives; published artifacts remain | Restore declared durable state after safe idle stop; active waits may incur compute cost. No general process hibernation |
+
+These six workstreams do not exhaust the entire OpenAI API. For example, refreshable MCP OAuth credentials and
+additional vault protocol forms need their own contracts; static MCP credentials are not equivalent to them.
+Do not silently declare such gaps intentional or closed. They remain in the parity backlog within the requested
+vault workstream, and have to be explicitly implemented or reported unsupported.
 
 Sources: OpenAI's Agents API
 [overview](https://developers.openai.com/api/docs/guides/agents-api/overview),
@@ -725,12 +1030,13 @@ Sources: OpenAI's Agents API
 
 ## Decision tracker
 
-Statuses: **Decided** (agreed in review), **Proposed** (recommended, needs your OK), **To validate** (needs a
-prototype), **Later** (outside the first delivery).
+Statuses: **Decided** means a user-approved product choice, not working code. **Proposed** means a reviewed design
+to calibrate. **Needs decision** marks an unresolved customer/operational tradeoff. **To validate** means a technical
+prerequisite. **Later** remains out of the first delivery.
 
 | # | Decision | Choice | Status |
 | --- | --- | --- | --- |
-| 1 | Client shape | `managed.client(env)` returns a `CopilotClient`; `managed.createSession({ environment })` is one-call sugar. A drop-in `connection` for a plain `CopilotClient` was rejected because it can't follow a promoted session | Decided |
+| 1 | Client shape | Native `CopilotClient` / `CopilotSession` through `managed.client(env)`, plus one-call `managed.createSession` sugar. Transport and defaults compatibility are gated, not an excuse to replace the API | Decided |
 | 2 | Isolated granularity | A fresh sandbox per session, as in OpenAI's hosted environments | Decided |
 | 3 | Where environments come from | Declared in the AppHost and picked by name; inline `{ type, size }` only within the AppHost's `inline` list | Decided |
 | 4 | Reusable agent configurations | Copilot custom agents (`.agent.md`) deployed with an environment, selected with the SDK's `agent` option | Decided |
@@ -740,62 +1046,176 @@ prototype), **Later** (outside the first delivery).
 | 8 | Names | `@managed-copilot/sdk`, `@managed-copilot/aspire`, `ManagedCopilot`, "sandbox" | Proposed |
 | 9 | Languages | TypeScript first; .NET and Python later | Proposed |
 | 10 | Skills and instructions | Ship in the environment's `customizations` folder beside its agents | Proposed |
-| 11 | Environment settings | Enforced by the platform; code can add setup and narrow settings, never broaden them | Proposed |
-| 12 | Session ownership | Only the creating GitHub user can list, resume, attach to, or delete a session | Proposed |
-| 13 | Promotion | The agent's `promote_to_sandbox` tool, approved through `onPermissionRequest`, plus `managed.promote()`; one way | Proposed |
-| 14 | Sizes and warm pools | `small`, `medium`, and `large`; `warm: n` per environment, default 0 | Proposed |
-| 15 | Idle and retention | Idle sandboxes stop and keep their files; deleting a session deletes its sandbox and artifacts; retention period not yet set | Proposed |
-| 16 | Sandbox setup | `packages`, `files`, `setupCommands`, and `env` on environments and clients; packages install even when network access is off | Proposed |
-| 17 | Files and artifacts | Live files through `managed.files(session)`; `/workspace/outputs` published as versioned artifacts at the end of each turn | Proposed |
-| 18 | Network rules | A list of hosts with wildcard subdomains, or OpenAI's `{ access, allowedDomains }` form; covers everything the agent runs; internal and cloud metadata addresses are always blocked | Proposed |
-| 19 | Vaults | AppHost and per-user vaults; sandbox placeholders swapped by the egress proxy; MCP server credentials | Proposed |
-| 20 | Work without a connection | Waiting requests answered by resuming, signed webhooks with session-scoped tokens, or polling; `actionTimeout` defaults to 24 hours | Proposed |
-| 21 | Schedules | Created in code or the AppHost; cron and time zone; a new or continued session per run; agent scheduling tools | Proposed |
-| 22 | GitHub Copilot app | Environments register with GitHub so the owner's sessions appear in the app | To validate |
-| 23 | Egress proxy | One proxy enforces network rules and swaps vault placeholders for all outbound traffic, including HTTPS | To validate |
-| 24 | GitHub tokens in sandboxes | Route model calls through the gateway so the caller's token never enters a sandbox | To validate |
-| 25 | Background credential | Behind `npx managed-copilot login`: a refreshable GitHub credential per user, from a GitHub App authorization, stored encrypted | To validate |
-| 26 | Suspended waits | A sandbox stops while its session waits for an answer, and wakes and continues the turn when answered | To validate |
+| 11 | Environment settings | Separate operator defaults from enforced ceilings; validate nested configuration and later updates; caller restrictions survive resume/promotion | Proposed |
+| 12 | Session ownership | Stable GitHub account IDs, owner/delegation checks on every SDK, file, action, and AHP operation, and single runtime execution ownership | Proposed |
+| 13 | Promotion | One-way checkpointed handoff with atomic generation fencing, explicit failure behavior, and same-object/event compatibility gate | Proposed |
+| 14 | Sizes and warm pools | `small`, `medium`, `large`; optional backend-qualified `warm: n`, default 0; no instant-start promise | Proposed |
+| 15 | Idle and retention | Safe idle stop, restoration of declared state, explicit delete reconciliation; timeout/retention/cost limits still need values | Proposed |
+| 16 | Sandbox setup | Per-session descriptors plus reusable client defaults; no session-time network exception; system packages in image preparation; no blind setup replay | Proposed |
+| 17 | Files and artifacts | Stream live transfers; bounded immutable turn-scoped artifacts with pending/publication failure outcomes | Proposed |
+| 18 | Network rules | Boolean/host-list/object forms with unambiguous inheritance and wildcard semantics; session-time setup included, internal/metadata traffic blocked | Proposed |
+| 19 | Vaults | Scoped placeholders, exact HTTPS destinations and supported header forms; isolated and shared credential kinds differ | Proposed |
+| 20 | Work without a connection | Claim-before-execution, durable results, pending replay, explicit uncertainty and callback compatibility; proposed 24-hour answer deadline | Proposed |
+| 21 | Schedules | Store tool schemas and routes; deduplicate session creation and input; queue collisions, bounded backlog, explicit time-zone/missed-run policy | Proposed |
+| 22 | GitHub Copilot app | Real same-session interoperability and per-owner discovery; no shared multi-user relay publication without authorization proof | To validate |
+| 23 | Egress enforcement | Prove network isolation, per-session shared attribution, and supported vault TLS behavior on local and Azure backends | To validate |
+| 24 | Credential boundary | Trusted admission and inference broker; prove native per-session auth/model attribution without sandbox GitHub or Azure credentials | To validate |
+| 25 | Background credential | Supported refreshable GitHub user authorization, current entitlement, revocation, and pause/error behavior | To validate |
+| 26 | Suspended waits | Qualify root-agent checkpoints independently; no promise for subagent or OS-process survival | To validate |
 | 27 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later |
 | 28 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later |
+| 29 | GitHub App registration | Operator-owned registration versus a supported shared registration, including callback setup and tenant separation | Needs decision |
+| 30 | Active-wait cost policy | Proposed resident waits until a qualified checkpoint; exact limits and cancel/recovery behavior need agreement | Needs decision |
+| 31 | Background callback scope | Reject unsupported required hooks rather than bypass them; decide release scope after G2 without claiming full SDK callback parity | Needs decision |
+| 32 | Six-gap scope | Setup, artifacts, network controls, vaults, offline actions, and schedules all remain required workstreams; no parity claim from documentation alone | Decided |
+| 33 | Native transport/defaults | Public adapter and supported SDK APIs only; required upstream extensions block the affected capability | To validate |
+| 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | To validate |
+| 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate |
 
-## What these choices ask of the platform
+## Platform contracts
 
-These notes feed the next spec, the architecture. They don't change the API above.
+These contracts replace the earlier assumption that a JSON-RPC proxy, a pending-request API, and a volume mount
+would by themselves establish the customer guarantees. They are design requirements, not implementation evidence.
 
-- **A session router.** One `CopilotClient` spans many runtimes, because each isolated session has its own sandbox.
-  The gateway speaks the SDK's JSON-RPC protocol and routes each session's traffic to its runtime, including the tool,
-  permission, and hook callbacks back to your process. The same routing lets a promoted session keep its connection.
-- **Per-session sandboxes in Azure.** Locally they are Docker containers. Azure candidates are Container Apps dynamic
-  sessions (prewarmed pools; persistent storage still to be checked) and Container Apps jobs (slower to start, with
-  Azure Files). Sandboxes that dial out to the gateway need no ingress.
-- **Attach routing.** Each runtime runs an AHP host through the SDK's `startAhpHost`, and the gateway routes attach
-  connections by session after checking the caller's GitHub identity.
-- **Customizations.** The platform mounts an environment's folder read-only and passes it as `agentDirectories`,
-  `skillDirectories`, and `instructionDirectories`.
-- **Empty-mode defaults.** In `mode: "empty"`, the SDK requires a `baseDirectory` or `sessionFs`, and an
-  `availableTools` list on every session. The platform supplies both from the environment's settings.
-- **An egress proxy.** All outbound traffic from sandboxes and the shared runtime goes through it. It enforces the
-  network setting, always blocks internal and cloud metadata addresses, and swaps vault placeholders. Swapping a header inside HTTPS means terminating TLS with a platform
-  certificate authority that the sandbox base image trusts; traffic to hosts without a credential can pass through
-  untouched.
-- **Waiting requests and webhooks.** The gateway watches each session's `external_tool.requested` and
-  `permission.requested` events. When no connected client answers within a grace period, it sends
-  `session.action_required`. A reconnecting client lists what is waiting with the runtime's
-  `session.tools.listPendingRequests` and `session.permissions.pendingRequests`.
-- **Artifacts.** At the end of each turn, the platform copies `/workspace/outputs` to blob storage: Azure Blob Storage
-  when deployed, and a local volume under `aspire run`.
-- **Schedules.** Durable timers in the platform's database, with an idempotent ID per run so a retry never starts two
-  sessions.
-- **Background credential.** Behind `npx managed-copilot login`: a GitHub App authorization with refresh tokens,
-  stored in Key Vault.
+### Native SDK connection contract
 
-Evidence so far, collected on 2026-10-23 on Windows ARM64:
+Published SDK 1.0.26's `RuntimeConnection.forUri` uses raw TCP; an `https://` spelling does not turn it into TLS or
+WebSocket transport. Do not expose it over the Internet or treat a connection token as encryption.
 
-| Check | Result |
+The first candidate is a bundled **stdio-to-authenticated-WSS bridge**, selected using the SDK's public
+`RuntimeConnection.forStdio` support. The bridge carries framed SDK JSON-RPC to the trusted gateway and starts no
+local Copilot agent. Credentials go through protected configuration/IPC, not command-line URLs, ordinary logs, or
+model-visible state. A supported upstream transport API is an alternative if the bridge cannot preserve behavior.
+Do not rely on `_internalConnection`, patch private handler maps, or silently return a different session type.
+
+That transport alone does not solve defaults or routing. G1 must demonstrate:
+
+- The exact short snippets pass client-side validation, including empty-mode persistence/tool requirements.
+  Environment-derived defaults must be supplied through a supported integration before `createSession`, not only
+  injected into a request that never left the caller. If public SDK APIs cannot express this, an upstream defaults
+  extension is a prerequisite.
+- The service separately owns the execution mode, workspace, persistence namespace, admitted customizations, and
+  effective capabilities. Do not forward the customer's `process.cwd()` or ambient configuration into a remote
+  runtime, and do not let the SDK's post-create/post-resume option patch reopen denied capabilities.
+- Maintain an explicit supported-operation matrix for the pinned SDK/protocol version. Scope connection-wide
+  model discovery, status, session lists, and auth to the caller; reject host-global configuration and unsupported
+  raw RPCs. A route must not become unrestricted access to one shared runtime.
+- One client reaches multiple session owners; request/response correlation, callback provider identity, event
+  ordering, cancellation, and disconnect remain correct. Register tool handlers before delivery; reconcile pending
+  tools/permissions and route only the current execution owner's notifications.
+- `client.stop` or local bridge exit detaches this caller. Upstream ownership remains in the service; cleanup may
+  not shut down another session's runtime or erase its tools/history.
+
+### Durable state and Azure substrate
+
+| State | Required lifetime and boundary |
+| --- | --- |
+| Workload files | A private session volume or complete verified snapshot, with stable path semantics and no cross-session reuse |
+| Packages and setup effects | Pinned immutable layer or persisted tool environment/HOME; reconstruction must preserve resolved versions and not replay arbitrary effects |
+| Runtime history and consent | Original namespace with qualified filesystem/SessionFS semantics, locking, and single-writer fencing; no ambient host consent fallback |
+| Action/configuration/schedule ledger | Durable trusted service storage, including generations, tool schemas, claims, results, delegation references, and occurrence IDs |
+| Published artifacts | Immutable blob objects plus turn-scoped manifests, independent of a runtime or sandbox replacement |
+| Running processes and subagents | Volatile unless separately demonstrated; not covered by retaining files or pending-request metadata |
+
+Local Docker behavior is not evidence for an Azure persistence guarantee. Select one Azure implementation after
+G3, and publish a capability matrix instead of silently falling back between modes.
+
+| Candidate | Why evaluate it | What must be proved before selection |
+| --- | --- | --- |
+| Container Apps dynamic sessions | Prepared pools and per-session allocation | Supported authenticated connectivity, state export/restore, toolchain persistence, enforced egress, and supported lifecycle; do not assume stop/resume of the same writable root filesystem |
+| Container Apps jobs | On-demand session-owned execution | Allocation/routing controller, durable ownership and files, reconnect latency, and a real warm-capacity design if `warm` is requested |
+| Managed session-worker containers | Explicit control of a longer-lived owner/pool | Per-session compute isolation, safe assignment and storage attachment, cost, eviction, and stale-owner fencing during rollout |
+
+An outbound-only sandbox tunnel is a proposed connection strategy, not an established capability of every backend.
+Unsupported combinations fail deployment with the missing prerequisite. The previous project's Azure Files SMB
+SQLite/locking failures are a warning to requalify native runtime storage on the selected backend. Do not fix them
+by disabling locks or quietly moving required durable state to ephemeral disk. A single-replica setting alone does
+not prevent overlap during deployment; leases/generations must fence old and replacement owners.
+
+### Errors and recovery
+
+Errors below are proposed stable codes surfaced through the SDK error path and platform status, not silent
+fallbacks. Diagnostic output must be redacted and scoped to the owner.
+
+| Condition | Required outcome |
+| --- | --- |
+| Unsupported transport, defaults integration, or backend feature | `capability_unavailable` with the concrete prerequisite; never substitute a local agent or a weaker hosting mode |
+| Required unattended callback cannot be restored | `background_callback_unsupported`; block/fail dependent work rather than skip its policy hook |
+| Concurrent execution/promotion cannot safely proceed | `session_busy` / `promotion_busy`; preserve the current owner |
+| Tool execution outcome is uncertain | `needs_reconciliation`; no automatic non-idempotent retry |
+| Setup or state restore is incomplete | `setup_failed` / `state_restore_failed`; retain diagnostics and do not mark ready |
+| Artifact publication is incomplete | Explicit pending or `publication_failed`, not successful empty output |
+| Identity or entitlement is missing/revoked | `authentication_required` / `inference_unavailable`; no silent alternate account or billing route |
+| App/relay attachment lacks safe owner scoping | `transport_unsupported`; keep the explicitly supported direct path |
+
+## Review disposition
+
+Both reviews were of the earlier draft. The changes below incorporate their findings; **specified** does not mean
+fixed in running code, and this revision has not been independently re-reviewed.
+
+| Finding | Reviewer | Plan response | Qualification |
+| --- | --- | --- | --- |
+| Native SDK transport and resume replay were assumed | Both | Public bridge/defaults contract and explicit pending reconciliation | G1, G2 |
+| Shared tool allowlists did not cover subprocess/nested configuration | Astra | Shared admission on every mutation, plus server-owned namespace and mode | G1, G4 |
+| Empty-mode defaults could disable deployed customizations | Argon | Explicit approved skills/instruction activation without ambient discovery | G1 |
+| Live/webhook/reconnect could execute the same tool twice | Both | Claim before callback delivery, durable results, idempotency and uncertainty states | G2 |
+| Offline hook support was missing | Astra | Callback matrix and fail-closed unsupported background admission | G2 |
+| Pending wait suspension was confused with process hibernation | Both | Resident-wait proposal and separately qualified root-agent checkpoints | G2, G3 |
+| Promotion was treated as routing rather than execution cutover | Both | Safe checkpoints, single owner, generation fencing, event correlation, and rollback rules | G5 |
+| Credential-free sandboxes did not follow from model proxying | Astra; Argon gate | Trusted admission/inference broker plus refresh/revocation and account attribution | G4 |
+| Azure package/HOME/runtime persistence and warm assignment were unresolved | Argon; Astra storage concern | Explicit state contract and substrate selection gate | G3 |
+| Scheduled tools lacked schemas and concurrency rules | Astra; Argon | Stored declarations/handler routes, input deduplication, and collision policies | G2 |
+| Per-session files were awkwardly expressed as client defaults | Argon | Equivalent per-session descriptor and streaming file transfer | G1, G3 |
+| Vault protocol and shared-process credential semantics were too broad | Argon | Typed credential use, exact destinations, explicit TLS/header limits and no global secrets | G4 |
+
+The network-off package exception, blanket sandbox safety of `approveAll`, and unqualified latency/parity claims
+were also removed or bounded. The approved network-on default and one-line off switch are unchanged.
+
+## Delivery gates
+
+Every gate is **Not run** for the new managed platform. Earlier component probes below do not satisfy these gates.
+Gate failures must be visible in supported-capability reporting; a local result alone does not qualify Azure.
+
+| Gate | Bounded objective and acceptance evidence | Prerequisites |
+| --- | --- | --- |
+| G1: Native SDK connection and configuration | Run the exact short snippets with pinned published SDK/runtime versions, genuine client/session types, and no local agent. One client creates two isolated sessions on different runtime owners. Tools, streaming, stop/detach, and safe empty-mode defaults work; denied nested configuration and post-create updates stay denied | None |
+| G2: Durable actions and background execution | Slow live handler, duplicate webhooks, reconnect, and an attached CLI race without a second execution claim. Crash around external effects produces a retained result or explicit reconciliation state. Resume restores supported pending actions; absent required hooks never run unguarded. Signed/scoped webhook failures are rejected. Scheduled declarations produce real tool calls and restart does not duplicate session/input | G1 |
+| G3: Azure substrate and persistence | On the chosen Azure backend, create two isolated sessions, verify private assignment, replace compute, and recover files, declared package environment, HOME, and native runtime state. Test actual native locking/recovery and old-owner overlap. Demonstrate warm assignment only if advertised. Unsupported subprocess/subagent suspension fails visibly; no blind replay of setup effects | G1 |
+| G4: Identity, isolation, and egress | Two GitHub users cannot cross-read/list/attach/answer. Real user-attributed inference, refresh, expiry, and revocation work through the broker without exposing provider/platform tokens in the sandbox. Network-on works; false blocks session-time packages and shell/MCP/web egress while scoped inference still works. Shared attribution, direct-IP/DNS/redirect bypasses, and supported TLS vault clients are exercised locally and on the chosen Azure backend | G1, G3 for Azure qualification |
+| G5: Promotion and attached-session continuity | Preserve the same client/session identity, native caller-visible operation, history, and ordered outcomes through promotion. Inject pre/post-commit failures and stale responses; only one owner executes. Caller network restrictions remain. A real interactive CLI reconnects to that same session. App/relay support is a separate acceptance result, not inferred from CLI success | G2, G3, G4 |
+
+G2 and G3 can proceed independently after G1. First obtain a small local compatibility result, then prove identity
+and the concrete Azure substrate before committing to unattended/promotion guarantees. Build the complete six-gap
+workflows incrementally behind their gates; do not replace failed gates with mock-only demonstrations or call the
+planned feature implemented.
+
+Still requiring a user decision before the affected behavior is finalized: GitHub App ownership/setup; active-wait
+cost limits and cancellation policy; the initial background callback subset; and concrete retention/schedule
+collision and missed-run defaults. Updating this plan does not imply those choices were approved.
+
+## Evidence and limits
+
+Evidence collected earlier on 2026-10-23 on Windows ARM64, plus the reviewers' targeted source inspection. Source
+API presence is not an end-to-end managed-platform result. Published SDK evidence takes precedence over newer
+default-branch docs when describing version 1.0.26.
+
+| Evidence | Result and limitation |
 | --- | --- |
 | `@github/copilot-sdk` 1.0.26 (runtime 1.0.103): `startAhpHost({ localServer })` and `publishSession` | Works: a token-protected `ws://127.0.0.1` listener, with an existing session published as `ahp-session:/<id>` |
 | `copilot --headless --port 0` (CLI 1.0.92) | Serves the SDK protocol; warns that it accepts any client when `COPILOT_CONNECTION_TOKEN` is unset |
 | `copilot --ahp <url>` (CLI 1.0.92) | Accepted, but refuses non-interactive use; interactive attach is not yet tested. `--host-ahp` is not in this release |
 | `BuiltInTools.Isolated` | `ask_user`, `task_complete`, `exit_plan_mode`, `task`, `read_agent`, `write_agent`, `list_agents`, `send_inbox`, `context_board`, and `skill`: no file, shell, or network tools |
-| Waiting requests in the SDK 1.0.26 protocol | `session.tools.listPendingRequests`, `session.tools.handlePendingToolCall`, and `session.permissions.pendingRequests` exist. The typings say waiting tool calls survive a session being suspended and resumed. Not yet exercised |
+| Native connection source in SDK 1.0.26 | `forUri` connects by raw TCP, not HTTPS/WSS; a secure bridge or supported extension is still required |
+| Empty-mode defaults in SDK 1.0.26 | Requires explicit persistence and tools; additional defaults can disable skills/instructions. Supplying directories alone is not qualification |
+| Waiting requests in SDK 1.0.26 | Pending tools/permission APIs exist. Root-agent calls require continued pending work on resume; subagent requests depend on a running subagent. The ordinary high-level resume path does not automatically drain them |
+| Callback dispatch source in SDK 1.0.26 | Local tool handlers execute before result submission; first-result acceptance alone cannot prevent duplicate external effects. Hooks have a separate RPC path |
+| Session authentication source in SDK 1.0.26 | Per-session GitHub tokens are normally sent to the runtime. Credential isolation requires more than changing the inference endpoint |
+| Previous Azure storage experiment | The prior project reported SQLite/locking failures on Azure Files SMB. Neither failure resolution nor a suitable new storage backend has been demonstrated here |
+
+Source references used in the reviews: the locally installed published `@github/copilot-sdk` 1.0.26
+(`dist/client.js`, `dist/session.js`, `dist/types.d.ts`, `dist/host.d.ts`, and `dist/generated/rpc.d.ts`);
+[Copilot SDK multi-tenancy guidance](https://github.com/github/copilot-sdk/blob/main/docs/setup/multi-tenancy.md),
+[runtime-supervised hosting](https://github.com/github/copilot-sdk/blob/main/docs/runtime-supervised-host.md), and
+[GitHub OAuth guidance](https://github.com/github/copilot-sdk/blob/main/docs/setup/github-oauth.md) as explanatory,
+potentially newer sources; and the
+[prior deployment record](https://github.com/patniko/copilot-sdk-aspire/blob/main/docs/DEPLOYMENT.md).
