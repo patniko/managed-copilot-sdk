@@ -92,6 +92,56 @@ describe("isolated placement through the sandboxes port", () => {
     expect(agentSelections(sessionId)).toEqual(["builder", "reviewer", "reviewer"]);
   });
 
+  it("gives sandbox MCP servers their vault placeholder headers on every open, never storing them", async () => {
+    const services = gateway.gateway.app.services as Record<string, unknown>;
+    const original = services["vaults"];
+    const placeholder = "Bearer mcvp_placeholder";
+    let granted = true;
+    const asked: string[] = [];
+    services["vaults"] = {
+      mcpHeaders: (_sessionId: string, url: string, placement: string) => {
+        asked.push(`${placement} ${url}`);
+        if (url === "https://mcp.example.com:8443/mcp") throw new ManagedCopilotError("capability_unavailable", "the egress proxy substitutes vault credentials only for host names on port 443");
+        return granted && placement === "sandbox" && url === "https://mcp.example.com/mcp" ? { Authorization: placeholder } : undefined;
+      },
+    };
+    try {
+      const client = await connect("coder");
+      const sessionId = crypto.randomUUID();
+      const docs = { type: "http", url: "https://mcp.example.com/mcp", headers: { authorization: "Bearer caller", "x-team": "docs" }, tools: ["*"] };
+      await client.request("session.create", {
+        sessionId,
+        mcpServers: { docs, other: { type: "http", url: "https://elsewhere.example.com/mcp", tools: ["*"] } },
+        customAgents: [{ name: "helper", prompt: "Help.", mcpServers: { inner: { type: "http", url: "https://mcp.example.com/mcp", tools: ["*"] } } }],
+      });
+      const created = sandboxes.detail(sessionId, "prepare session.create") as { mcpServers: Record<string, { headers?: Record<string, string> }>; customAgents: { mcpServers: Record<string, { headers?: Record<string, string> }> }[] };
+      // The vault header replaces the caller's header of the same name; other headers and servers are untouched.
+      expect(created.mcpServers["docs"]!.headers).toEqual({ "x-team": "docs", Authorization: placeholder });
+      expect(created.mcpServers["other"]!.headers).toBeUndefined();
+      expect(created.customAgents[0]!.mcpServers["inner"]!.headers).toEqual({ Authorization: placeholder });
+      const row = gateway.gateway.app.db.prepare("SELECT admitted FROM core_sessions WHERE id = ?").get(sessionId) as { admitted: string };
+      expect(row.admitted).not.toContain("mcvp_placeholder");
+
+      // Restores ask again: a revoked credential's header is gone (the caller's own header is what remains).
+      granted = false;
+      sandboxes.streams.get(sessionId)!.destroy();
+      await sleep(100);
+      await client.request("session.getMessages", { sessionId });
+      const restored = sandboxes.detail(sessionId, "prepare session.resume") as typeof created;
+      expect(restored.mcpServers["docs"]!.headers).toEqual({ authorization: "Bearer caller", "x-team": "docs" });
+      expect(restored.customAgents[0]!.mcpServers["inner"]!.headers).toBeUndefined();
+
+      // A vault credential the egress proxy cannot substitute fails admission explicitly.
+      const refused = await client
+        .request("session.create", { sessionId: crypto.randomUUID(), mcpServers: { odd: { type: "http", url: "https://mcp.example.com:8443/mcp", tools: ["*"] } } })
+        .catch((error: unknown) => error);
+      expect(refused).toMatchObject({ data: { code: "capability_unavailable" } });
+      expect(asked.every((entry) => entry.startsWith("sandbox "))).toBe(true);
+    } finally {
+      services["vaults"] = original;
+    }
+  });
+
   it("runs each isolated session of one client on its own runtime connection", async () => {
     const client = await connect("coder");
     const first = crypto.randomUUID();

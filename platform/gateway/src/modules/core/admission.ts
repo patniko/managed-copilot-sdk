@@ -104,7 +104,7 @@ const onlyFalse = (what: string): Rule => (value) => {
   return false;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -215,7 +215,7 @@ export function sharedToolFilters(
   return { availableTools, ...(excluded && excluded.length > 0 ? { excludedTools: excluded } : {}) };
 }
 
-function isRemoteMcp(config: Record<string, unknown>): boolean {
+export function isRemoteMcp(config: Record<string, unknown>): boolean {
   return (config["type"] === "http" || config["type"] === "sse") && typeof config["url"] === "string" && config["command"] === undefined;
 }
 

@@ -17,8 +17,11 @@ export interface Principal {
 
 /** Provided by the core module as `app.services.auth`. */
 export interface Authenticator {
-  /** Verifies a bearer token (GitHub user, service, or scoped capability) and applies the AppHost access rules. */
-  authenticate(token: string): Promise<Principal>;
+  /**
+   * Verifies a bearer token (GitHub user, service, or scoped capability) and applies the AppHost access rules. Pass
+   * `background` when re-verifying a stored credential rather than a connected caller's.
+   */
+  authenticate(token: string, options?: { readonly background?: boolean }): Promise<Principal>;
 }
 
 /**

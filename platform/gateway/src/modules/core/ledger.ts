@@ -1,5 +1,6 @@
 // The core session ledger (`core_*` tables): ownership, placement, environment, admitted configuration, and the
 // owner-scoped platform event log used for SSE replay.
+import { randomBytes } from "node:crypto";
 import type { AccountInfo, EnvironmentRequest, EnvironmentType, NetworkPolicy, Placement, PlatformEvent, SessionState } from "@managed-copilot/protocol";
 import { migrate, type Database } from "../../db.js";
 import type { SessionRecord } from "./contracts.js";
@@ -50,6 +51,9 @@ const MIGRATIONS = [
      event_id TEXT NOT NULL,
      PRIMARY KEY (session_id, event_id)
    );`,
+  // A session ID can be reused after deletion; the incarnation tells two sessions with the same ID apart.
+  `ALTER TABLE core_sessions ADD COLUMN incarnation TEXT;
+   UPDATE core_sessions SET incarnation = 'inc_' || lower(hex(randomblob(16))) WHERE incarnation IS NULL;`,
 ];
 
 interface SessionRow {
@@ -70,6 +74,7 @@ interface SessionRow {
   environment_request: string;
   admitted: string;
   last_turn: string | null;
+  incarnation: string | null;
   created_at: string;
   updated_at: string;
   login: string | null;
@@ -83,6 +88,11 @@ export interface AdmittedConfig {
   readonly params: Record<string, unknown>;
   /** Server-side tool declarations for sessions created without a client (schedules). */
   readonly tools?: readonly Record<string, unknown>[];
+  /**
+   * What clients registered for the session: tool declarations and handler flags (`requestPermission`, `hooks`, ...).
+   * A disconnect never removes them; only the connection that registered something can withdraw it.
+   */
+  readonly callbacks?: CallbackInventory;
   readonly optionsPatch: Record<string, unknown>;
   /**
    * The caller's requested configuration before admission (no credentials, no per-connection fields), so a placement
@@ -91,6 +101,11 @@ export interface AdmittedConfig {
   readonly requested?: Record<string, unknown>;
   /** The caller's `session.options.update` patches as requested (merged), re-admitted after a placement change. */
   readonly requestedOptions?: Record<string, unknown>;
+}
+
+export interface CallbackInventory {
+  readonly tools: readonly Record<string, unknown>[];
+  readonly flags: Readonly<Record<string, true>>;
 }
 
 export interface NewSession {
@@ -117,12 +132,18 @@ export class SessionLedger {
   constructor(db: Database) {
     this.#db = db;
     migrate(db, "core", MIGRATIONS);
-    // A create that was in flight when the gateway stopped never completed. A placement cutover that was open did not
-    // commit (a commit moves placement and generation in one transaction): the source placement stays the owner, and
-    // the promotion module reconciles its own operation rows against generation/placement.
+    // A placement cutover that was open when the gateway stopped did not commit (a commit moves placement and
+    // generation in one transaction): the source placement stays the owner, and the promotion module reconciles its
+    // own operation rows against generation/placement. Interrupted creates and deletions are finished by
+    // `SessionManager.recover()`.
     const now = new Date().toISOString();
-    db.prepare("UPDATE core_sessions SET state = 'failed', updated_at = ? WHERE state = 'creating'").run(now);
     db.prepare("UPDATE core_sessions SET state = 'idle', updated_at = ? WHERE state = 'promoting'").run(now);
+  }
+
+  /** Sessions in one state (startup recovery). */
+  byState(state: SessionState): SessionRecord[] {
+    const rows = this.#db.prepare(`${SELECT} WHERE s.state = ?`).all(state) as unknown as SessionRow[];
+    return rows.map(toRecord);
   }
 
   upsertAccount(account: AccountInfo): void {
@@ -139,8 +160,8 @@ export class SessionLedger {
     this.upsertAccount(session.owner);
     this.#db
       .prepare(
-        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -156,6 +177,7 @@ export class SessionLedger {
         JSON.stringify(session.network),
         JSON.stringify(session.environmentRequest),
         JSON.stringify(session.admitted),
+        `inc_${randomBytes(16).toString("hex")}`,
         now,
         now,
       );
@@ -287,6 +309,7 @@ function toRecord(row: SessionRow): SessionRecord {
     network: JSON.parse(row.network) as NetworkPolicy,
     environmentRequest: JSON.parse(row.environment_request) as EnvironmentRequest,
     ...(row.last_turn ? { lastTurn: JSON.parse(row.last_turn) as NonNullable<SessionRecord["lastTurn"]> } : {}),
+    incarnation: row.incarnation ?? `inc_legacy_${row.id}_${row.created_at}`,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

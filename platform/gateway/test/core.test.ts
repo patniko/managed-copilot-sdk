@@ -255,6 +255,24 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("mcc_capability")).rejects.toMatchObject({ code: "authentication_required" });
   });
 
+  it("keeps background verifications out of the live credentials, and lets live ones lapse with the cache", async () => {
+    const auth = new GitHubAuthenticator({ apiUrl: github.url, log, cacheTtlMs: 40 });
+    // A stored background sign-in being re-verified is not a connected caller.
+    await expect(auth.authenticate("listed", { background: true })).resolves.toMatchObject({ accountId: 3 });
+    expect(auth.liveCredential(3)).toBeUndefined();
+    await auth.authenticate("listed");
+    expect(auth.liveCredential(3)?.token).toBe("listed");
+    // Logout of the background sign-in forgets the account's references to the token without unverifying it.
+    auth.forgetCredential("listed");
+    expect(auth.liveCredential(3)).toBeUndefined();
+    await auth.authenticate("listed");
+    expect(auth.liveCredential(3)?.token).toBe("listed");
+    // Tokens without an expiration (OAuth app tokens, classic PATs) still lapse once their verification is stale.
+    await sleep(60);
+    expect(auth.liveCredential(3)).toBeUndefined();
+    expect(auth.tokenExpiration("listed")).toBeUndefined();
+  });
+
   it("applies AppHost access rules", async () => {
     const auth = new GitHubAuthenticator({ apiUrl: github.url, log, access: { githubOrgs: ["contoso"], githubUsers: ["LISTED-USER"] } });
     await expect(auth.authenticate("member")).resolves.toMatchObject({ login: "Member" });

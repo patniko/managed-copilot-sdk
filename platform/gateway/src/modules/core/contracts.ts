@@ -53,6 +53,11 @@ export interface CustomizationBundle {
 /** A session row in the core ledger (`core_sessions`). */
 export interface SessionRecord {
   readonly id: string;
+  /**
+   * Tells this session apart from any other that used (or will use) the same ID: minted at creation, never reused.
+   * Durable state about a session is scoped to it.
+   */
+  readonly incarnation: string;
   readonly ownerId: number;
   readonly owner: AccountInfo;
   readonly environment: string;
@@ -231,6 +236,12 @@ export interface SessionsService {
   attached(sessionId: string): readonly AttachedResponder[];
   /** Where the session is resident now (resuming it upstream if needed); used by Copilot CLI attach. */
   runtime(sessionId: string): Promise<SessionRuntime>;
+  /**
+   * Marks the owner as present on a session without a `/v1/connect` attachment (an attached Copilot CLI): while held,
+   * the principal's re-verified credential serves the session's runtime like an attached client's. Owner only.
+   * Returns the release function.
+   */
+  presence?(sessionId: string, principal: Principal): () => void;
   onLifecycle(listener: (event: { readonly sessionId: string; readonly type: "deleted" | "promoted" | "stopped" }) => void): () => void;
   /**
    * Opens a placement cutover (promotion): fails with `conflict` when `generation` is not the session's current one,
