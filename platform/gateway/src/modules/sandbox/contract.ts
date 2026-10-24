@@ -155,8 +155,13 @@ export interface SandboxesService {
   get(sessionId: string): Promise<SandboxInfo | undefined>;
   /** Stops compute after pending work drains (idle stop). State volumes are kept. */
   stop(sessionId: string, reason?: string): Promise<void>;
-  /** Marks `deleting`, removes compute, volumes, and artifacts; reconciliation finishes after a crash. */
-  delete(sessionId: string): Promise<void>;
+  /**
+   * Marks `deleting`, removes compute, volumes, and artifacts; reconciliation finishes after a crash. With `sandboxId`
+   * (from `get(sessionId).id`), the delete applies only if that is still the session's sandbox when it runs (checked
+   * under the session lock); otherwise it does nothing, so a stale delete never removes a newer sandbox or a newer
+   * session's artifacts that reuse the session ID.
+   */
+  delete(sessionId: string, options?: { readonly sandboxId?: string }): Promise<void>;
   /** Records activity that should postpone idle stop. */
   touch(sessionId: string): void;
   setupRecord(sessionId: string): SandboxSetupRecord | undefined;

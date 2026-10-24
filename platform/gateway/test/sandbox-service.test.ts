@@ -1,4 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +8,7 @@ import { isManagedCopilotError, ManagedCopilotError, NETWORK_DISABLED, type Sand
 import type { GatewayApp } from "../src/app.js";
 import { openDatabase } from "../src/db.js";
 import { createLogger } from "../src/log.js";
+import type { ArtifactService } from "../src/modules/sandbox/artifacts.js";
 import type { SandboxProvider, SandboxSpec, SandboxStartResult } from "../src/modules/sandbox/providers/types.js";
 import { SandboxService } from "../src/modules/sandbox/service.js";
 import { SandboxStore, type SandboxRow } from "../src/modules/sandbox/store.js";
@@ -20,6 +23,8 @@ class FakeProvider implements SandboxProvider {
   readonly removed: string[] = [];
   onInventory: (() => void) | undefined;
   reachable = true;
+  /** Where every sandbox's sandboxd answers (see `fakeSandboxd`); nothing listens on the default. */
+  sandboxdUrl = "http://127.0.0.1:9";
   async ready(): Promise<void> {
     if (!this.reachable) throw new ManagedCopilotError("capability_unavailable", "The fake backend is down.");
   }
@@ -54,7 +59,7 @@ class FakeProvider implements SandboxProvider {
     return undefined;
   }
   async endpoint() {
-    return { url: "http://127.0.0.1:9", headers: {} };
+    return { url: this.sandboxdUrl, headers: {} };
   }
   async inventory(): Promise<Set<string>> {
     this.onInventory?.();
@@ -64,6 +69,27 @@ class FakeProvider implements SandboxProvider {
 
 const SUCCEEDED: SandboxSetupRecord = { state: "succeeded", steps: [], resolved: {}, files: [] };
 let counter = 0;
+
+/** The two sandboxd routes `create` needs: health, and a start stream that reports ready at once. */
+async function fakeSandboxd(): Promise<{ server: Server; url: string }> {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.method === "GET" && req.url === "/v1/health") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ sandboxId: "fake", version: "test", state: "ready", runtime: { state: "running", restarts: 0 } }));
+      } else if (req.method === "POST" && req.url === "/v1/start") {
+        res.writeHead(200, { "content-type": "application/x-ndjson" });
+        res.end(`${JSON.stringify({ type: "ready", setup: SUCCEEDED, runtimePort: 7790 })}\n`);
+      } else {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "not_found", message: `No route for ${req.method} ${req.url}` } }));
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}` };
+}
 
 describe("SandboxService lifecycle", () => {
   let store: SandboxStore;
@@ -196,6 +222,52 @@ describe("SandboxService lifecycle", () => {
     provider.reachable = false;
     await expect(sandboxes.ensureRunning(row.sessionId)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "capability_unavailable"));
     expect(sandboxes.available).toBe(false);
+  });
+
+  it("never lets a stale delete remove a newer sandbox that reuses the session ID", async () => {
+    const { server, url } = await fakeSandboxd();
+    provider.sandboxdUrl = url;
+    try {
+      const candidate = sandbox("running", { running: true });
+      const sandboxes = createService();
+      // Queued in this order under the session lock: someone else's delete of the candidate, a new session reusing the
+      // ID, then promotion's release of the candidate it saw in get() before queuing.
+      const first = sandboxes.delete(candidate.sessionId);
+      const recreated = sandboxes.create({ sessionId: candidate.sessionId, ownerId: 1, environment: "inline-isolated-small", size: "small", network: NETWORK_DISABLED, vaults: [] });
+      const stale = sandboxes.delete(candidate.sessionId, { sandboxId: candidate.id });
+      await first;
+      const handle = await recreated;
+      await stale;
+      expect(handle.sandboxId).not.toBe(candidate.id);
+      expect(store.bySession(candidate.sessionId)).toMatchObject({ id: handle.sandboxId, state: "running" });
+      expect(provider.removed).not.toContain(handle.sandboxId);
+      expect(provider.existing.has(handle.sandboxId)).toBe(true);
+      // Naming the current sandbox deletes it.
+      await sandboxes.delete(candidate.sessionId, { sandboxId: handle.sandboxId });
+      expect(store.bySession(candidate.sessionId)?.state).toBe("deleted");
+      expect(provider.removed).toContain(handle.sandboxId);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("leaves artifacts alone for a delete that names a sandbox the session no longer has", async () => {
+    const sandboxes = createService();
+    const deletedArtifacts: string[] = [];
+    sandboxes.attachArtifacts({ deleteSession: async (sessionId: string) => void deletedArtifacts.push(sessionId) } as unknown as ArtifactService);
+    const sessionId = "aaaaaaaa-0000-0000-0000-000000000001";
+    await sandboxes.delete(sessionId, { sandboxId: "sbx_000000000000000000000abc" });
+    expect(deletedArtifacts).toEqual([]);
+    // Without an expected sandbox, a session without a sandbox still has its artifacts removed (unchanged behavior).
+    await sandboxes.delete(sessionId);
+    expect(deletedArtifacts).toEqual([sessionId]);
+  });
+
+  it("finishes an interrupted delete at startup", async () => {
+    const row = sandbox("deleting");
+    await createService().reconcile();
+    expect(provider.removed).toContain(row.id);
+    expect(store.bySession(row.sessionId)?.state).toBe("deleted");
   });
 
   it("refuses an empty runtime state import before touching the sandbox", async () => {
