@@ -1,5 +1,5 @@
 import { CloudOff, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Banner, Header, statusOf } from "./components/Header";
 import { EmptyState, LoadingState } from "./components/EmptyState";
 import { Composer } from "./components/Composer";
@@ -37,29 +37,30 @@ export function App() {
   }, [actions]);
 
   const lastReadAt = snapshot?.lastReadAt;
-  const unread = items.filter((item) => isUnread(item, lastReadAt)).length;
+  const [visible, setVisible] = useState(() => document.visibilityState === "visible");
+  useEffect(() => {
+    const onChange = () => setVisible(document.visibilityState === "visible");
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+
+  // Messages are read once the tab is visible and scrolled to the latest one. (Focus is unreliable in embedded
+  // browsers, and a visible tab is one the person can see; notifications still require focus.)
+  const seeing = visible && atBottom;
+  const pendingUnread = items.filter((item) => isUnread(item, lastReadAt)).length;
+  const unread = seeing ? 0 : pendingUnread;
+  const markedAt = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     document.title = unread > 0 ? `(${unread}) Assistant` : "Assistant";
   }, [unread]);
 
-  // Mark the conversation read while it's visible, focused, and scrolled to the latest message.
   useEffect(() => {
     const latest = items[items.length - 1];
-    const check = () => {
-      if (!latest || unread === 0 || !atBottom) return;
-      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
-      actions.markRead(latest.at);
-    };
-    const timer = setTimeout(check, 600);
-    window.addEventListener("focus", check);
-    document.addEventListener("visibilitychange", check);
-    return () => {
-      clearTimeout(timer);
-      window.removeEventListener("focus", check);
-      document.removeEventListener("visibilitychange", check);
-    };
-  }, [items, unread, atBottom, actions]);
+    if (!seeing || pendingUnread === 0 || !latest || markedAt.current === latest.at) return;
+    markedAt.current = latest.at;
+    actions.markRead(latest.at);
+  }, [seeing, pendingUnread, items, actions]);
 
   const openSchedule = useCallback((id: string) => {
     setHighlight(id);

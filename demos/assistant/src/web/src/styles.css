@@ -1,5 +1,17 @@
 @import "tailwindcss";
 
+/* Dark mode follows the system unless the person picks a theme (html.light / html.dark), with no flash on load. */
+@custom-variant dark {
+  &:where(.dark, .dark *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:not(.light, .light *)) {
+      @slot;
+    }
+  }
+}
+
 @theme {
   --font-sans: "Segoe UI Variable Text", "Segoe UI", Inter, ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", Inter, ui-sans-serif, system-ui, sans-serif;
@@ -175,8 +187,11 @@
   scrollbar-width: thin;
   scrollbar-color: rgb(212 212 216 / 0.8) transparent;
 }
+.dark .scrollbar-thin {
+  scrollbar-color: rgb(63 63 70 / 0.8) transparent;
+}
 @media (prefers-color-scheme: dark) {
-  .scrollbar-thin {
+  :root:not(.light) .scrollbar-thin {
     scrollbar-color: rgb(63 63 70 / 0.8) transparent;
   }
 }

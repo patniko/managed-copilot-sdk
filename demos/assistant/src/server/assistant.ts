@@ -406,6 +406,18 @@ export class Assistant {
       return { ok: true };
     });
 
+    router.add("POST", "/api/conversation/reset", async () =>
+      run(async () => {
+        const previous = this.conversation.sessionId;
+        // Schedules that target the old conversation would fail once it is deleted.
+        for (const schedule of this.schedules.list) await this.schedules.remove(schedule.id).catch(() => undefined);
+        await this.conversation.startOver();
+        if (this.#viewers > 0) await this.conversation.attach().catch(() => undefined);
+        void this.schedules.refresh();
+        return { ok: true, previous };
+      }),
+    );
+
     router.add("POST", "/api/schedules/briefing", async () => run(() => this.schedules.addMorningBriefing()));
     router.add("POST", "/api/schedules/:id/pause", async (ctx) => run(() => this.schedules.pause(ctx.params.id!)));
     router.add("POST", "/api/schedules/:id/resume", async (ctx) => run(() => this.schedules.resume(ctx.params.id!)));

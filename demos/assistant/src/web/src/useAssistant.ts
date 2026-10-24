@@ -220,6 +220,7 @@ export function useAssistant() {
       },
       disconnectGoogle: () => run(() => api.disconnectGoogle(), "Google disconnected. Using the demo workspace."),
       resetDemo: () => run(() => api.resetDemo(), "Demo inbox and calendar reset"),
+      startOver: () => run(() => api.startOver(), "Started a new conversation"),
       toast,
     }),
     [run, toast],

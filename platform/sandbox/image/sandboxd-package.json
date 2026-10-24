@@ -1,0 +1,9 @@
+{
+  "name": "managed-copilot-sandboxd",
+  "private": true,
+  "type": "module",
+  "description": "Runtime dependencies of sandboxd and the relay inside the sandbox image.",
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

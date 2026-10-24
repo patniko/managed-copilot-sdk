@@ -118,7 +118,7 @@ export function ApprovalCard({
   };
 
   return (
-    <div className="ml-11 animate-rise">
+    <div className="ml-11 animate-rise" data-testid="approval" data-status={item.status} data-actionable={item.actionable ? "true" : "false"} data-tool={item.tool}>
       <div
         className={`overflow-hidden rounded-2xl bg-white ring-1 dark:bg-zinc-900 ${
           pending ? "shadow-md shadow-violet-500/5 ring-violet-300 dark:ring-violet-500/40" : "ring-zinc-200 dark:ring-zinc-800"
@@ -184,7 +184,9 @@ export function ApprovalCard({
               {item.decidedAt && <span className="text-xs text-zinc-400">{timeOf(item.decidedAt, timeZone)}</span>}
               {item.status === "approved" && outcome && (
                 <span className={`flex min-w-0 items-center gap-1.5 text-xs ${outcome.status === "failed" ? "text-red-600 dark:text-red-400" : "text-zinc-600 dark:text-zinc-300"}`}>
-                  <span aria-hidden>·</span>
+                  <span className="hidden sm:inline" aria-hidden>
+                    ·
+                  </span>
                   {outcome.status === "running" && <LoaderCircle className="size-3.5 animate-spin text-violet-500" aria-hidden />}
                   {outcome.status === "succeeded" && <Check className="size-3.5 text-emerald-500" aria-hidden />}
                   {outcome.status === "failed" && <X className="size-3.5" aria-hidden />}

@@ -7,6 +7,7 @@ import type { ScheduleView } from "../shared/protocol.js";
 import type { AssistantConfig } from "./config.js";
 import { describeCron } from "./cron.js";
 import { UserFacingError } from "./conversation.js";
+import { humanizeName } from "./describe.js";
 import { errorMessage, type Logger } from "./log.js";
 import type { Platform } from "./platform.js";
 import { formatWhen } from "./time.js";
@@ -36,7 +37,7 @@ function toView(schedule: ScheduleInfo, timeZone: string): ScheduleView {
       : "Once";
   return {
     id: schedule.id,
-    name: schedule.name,
+    name: displayName(schedule.name),
     cadence,
     cron: schedule.cron,
     runAt: schedule.runAt,
@@ -53,12 +54,16 @@ function toView(schedule: ScheduleInfo, timeZone: string): ScheduleView {
 }
 
 function friendly(error: unknown): string {
-  if (isManagedCopilotError(error, "capability_unavailable")) return "Schedules aren't available on this platform yet.";
+  if (isManagedCopilotError(error, "capability_unavailable") && /not available in this build/i.test(errorMessage(error))) {
+    return "Schedules aren't available on this platform yet.";
+  }
   if (isManagedCopilotError(error, "authentication_required")) {
     return "Scheduled work needs your background sign-in. Run `npx managed-copilot login` once, then try again.";
   }
   return errorMessage(error);
 }
+
+const displayName = humanizeName;
 
 export class Schedules {
   readonly #deps: SchedulesDeps;
@@ -66,6 +71,7 @@ export class Schedules {
   #raw = new Map<string, ScheduleInfo>();
   #error: string | undefined;
   #refreshing: Promise<void> | undefined;
+  #retry: NodeJS.Timeout | undefined;
 
   constructor(deps: SchedulesDeps) {
     this.#deps = deps;
@@ -83,7 +89,7 @@ export class Schedules {
   nameFor(text: string): string | undefined {
     const normalized = text.trim();
     for (const schedule of this.#raw.values()) {
-      if (schedule.prompt.trim() === normalized) return schedule.name;
+      if (schedule.prompt.trim() === normalized) return displayName(schedule.name);
     }
     return undefined;
   }
@@ -97,12 +103,15 @@ export class Schedules {
     const managed = this.#deps.platform.managed;
     const sessionId = this.#deps.sessionId();
     if (!managed) return;
+    clearTimeout(this.#retry);
     try {
       const all = await managed.schedules.list();
       const mine = all.filter((schedule) => sessionId !== undefined && schedule.target?.sessionId === sessionId);
+      // Keep finished one-shot reminders out of the way; their results are in the chat.
+      const visible = mine.filter((schedule) => schedule.cron || schedule.state === "paused" || schedule.nextRunAt);
       this.#raw = new Map(mine.map((schedule) => [schedule.id, schedule]));
       const timeZone = this.#deps.timeZone();
-      this.#schedules = mine
+      this.#schedules = visible
         .map((schedule) => toView(schedule, timeZone))
         .sort((a, b) => {
           if (a.state !== b.state) return a.state === "active" ? -1 : 1;
@@ -110,8 +119,13 @@ export class Schedules {
         });
       this.#error = undefined;
     } catch (error) {
+      // Keep showing the last known list; transient failures retry shortly.
       this.#error = friendly(error);
       this.#deps.log.debug("Couldn't list schedules", { error: errorMessage(error) });
+      if (!(isManagedCopilotError(error, "capability_unavailable") && /not available in this build/i.test(errorMessage(error)))) {
+        this.#retry = setTimeout(() => void this.refresh(), 15_000);
+        this.#retry.unref();
+      }
     }
     this.#deps.onChange(this.#schedules, this.#error);
   }
