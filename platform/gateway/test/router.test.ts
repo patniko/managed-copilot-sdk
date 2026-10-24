@@ -79,7 +79,7 @@ describe("core router with a stock-protocol runtime", () => {
     expect(forwarded["memory"]).toEqual({ enabled: false });
     expect(forwarded["allowedModels"]).toEqual(["claude-haiku-4.5"]);
     expect(String(forwarded["workingDirectory"])).toContain(sessionId);
-    expect(forwarded["systemMessage"]).toMatchObject({ mode: "customize", sections: { environment_context: { action: "remove" } } });
+    expect(forwarded["systemMessage"]).toMatchObject({ mode: "customize", sections: { environment_context: { action: "replace" }, code_change_rules: { action: "remove" } } });
     // The runtime asked the gateway for the session owner's token (never a shared service token).
     expect([ALICE, ALICE_SECOND]).toContain(runtime.sessions.get(sessionId)!.token);
     const lockdown = runtime.calls("session.options.update").find((call) => call.params["sessionId"] === sessionId);
