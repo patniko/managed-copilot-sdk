@@ -6,6 +6,7 @@
 // (set at publish time; newer stamps take over from older ones). PORT is the command's port, answered with 503 while
 // this instance waits.
 import { hostname } from "node:os";
+import { prepareGatewayEnvironment } from "./environment.js";
 import { Supervisor } from "./supervisor.js";
 
 const separator = process.argv.indexOf("--");
@@ -21,9 +22,11 @@ if (!Number.isInteger(port) || port <= 0 || port > 65535) {
   process.stderr.write(`PORT must be a TCP port (got "${env.PORT}")\n`);
   process.exit(64);
 }
-// In Container Apps the gateway's public address is <app>.<environment's default domain>, both known only at runtime.
-if (env.MANAGED_COPILOT_MODE === "azure" && !env.MANAGED_COPILOT_PUBLIC_URL && env.CONTAINER_APP_NAME && env.CONTAINER_APP_ENV_DNS_SUFFIX) {
-  env.MANAGED_COPILOT_PUBLIC_URL = `https://${env.CONTAINER_APP_NAME}.${env.CONTAINER_APP_ENV_DNS_SUFFIX}`;
+// In Container Apps some values are known only at runtime (the public address, the environment's domain).
+const problem = prepareGatewayEnvironment(env);
+if (problem) {
+  process.stderr.write(`${problem}\n`);
+  process.exit(64);
 }
 const holder = [env.CONTAINER_APP_REVISION, env.CONTAINER_APP_REPLICA_NAME ?? env.HOSTNAME ?? hostname()].filter(Boolean).join("/");
 

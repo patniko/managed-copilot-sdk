@@ -10,8 +10,11 @@
 // gateway, releases the lease, and goes back to standby. If the newer replica never takes the lease (for example
 // because it crashed), the old holder reclaims it and refuses that stamp for a while instead of flapping. Replicas of
 // the same deployment never hand over to each other; the extra one simply waits.
+//
+// The supervised process runs in its own process group (POSIX), so its descendants (the gateway's shared runtime)
+// are stopped with it: the lease is released only after every process in the group has exited.
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { join } from "node:path";
@@ -33,6 +36,11 @@ export interface SupervisorTimings {
   readonly reclaimAfterMs: number;
   /** After reclaiming, refuse handovers to the stamp that failed to take over for this long. */
   readonly refuseAfterReclaimMs: number;
+  /**
+   * How long after a handover a reclaim counts against the deployment it went to. Later, this instance waits like any
+   * other replica (it defers to every newer deployment, including that one).
+   */
+  readonly handoverSettleMs: number;
 }
 
 export const DEFAULT_TIMINGS: SupervisorTimings = {
@@ -42,6 +50,7 @@ export const DEFAULT_TIMINGS: SupervisorTimings = {
   stopGraceMs: 25_000,
   reclaimAfterMs: 60_000,
   refuseAfterReclaimMs: 10 * 60_000,
+  handoverSettleMs: 5 * 60_000,
 };
 
 export interface SupervisorOptions {
@@ -85,6 +94,35 @@ function safeName(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
 }
 
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Whether any process in a process group is still running. Linux reads /proc so zombies (exited, not yet reaped by
+ * their new parent) do not count; elsewhere a zero signal to the group answers.
+ */
+export function groupAlive(group: number): boolean {
+  if (process.platform === "linux" && existsSync("/proc/self/stat")) {
+    for (const entry of readdirSync("/proc")) {
+      if (!/^\d+$/.test(entry)) continue;
+      try {
+        const stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+        // "pid (comm) state ppid pgrp ...": comm may contain spaces and parentheses, so parse after the last ")".
+        const [state, , pgrp] = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+        if (Number(pgrp) === group && state !== "Z" && state !== "X") return true;
+      } catch {
+        // The process exited while we looked.
+      }
+    }
+    return false;
+  }
+  try {
+    process.kill(-group, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 const consoleLogger: Logger = (level, message, fields) => {
   const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [lease] ${message}${fields && Object.keys(fields).length ? ` ${JSON.stringify(fields)}` : ""}`;
   if (level === "error" || level === "warn") process.stderr.write(`${line}\n`);
@@ -101,8 +139,14 @@ export class Supervisor {
   readonly #requestFile: string;
   #state: SupervisorState = "standby";
   #lease: Lease | undefined;
+  /** The supervised process, until it has exited (stops, handovers, and fencing all wait for that). */
   #child: ChildProcess | undefined;
   #childExit: Promise<number> | undefined;
+  /** Its process group (POSIX): kept until every member has exited. */
+  #group: number | undefined;
+  #stopping: Promise<void> | undefined;
+  #reaping: Promise<void> | undefined;
+  #fencing = false;
   #standby: Server | undefined;
   #standbyReason: string;
   #timer: NodeJS.Timeout | undefined;
@@ -146,6 +190,7 @@ export class Supervisor {
     this.#state = "stopping";
     this.#log("info", "Stopping", { reason });
     this.#clearTimer();
+    // Shares a stop already in progress (a handover): the lease is released only once the process group is gone.
     await this.#stopChild();
     this.#releaseLease();
     this.#removeRequest();
@@ -183,27 +228,36 @@ export class Supervisor {
     this.#state = "standby";
     this.#standbyReason = reason;
     await this.#openStandby();
+    if (this.#state !== "standby") {
+      // Stopped or fenced while the standby server was starting.
+      await this.#closeStandby();
+      return;
+    }
     this.#log("info", "Waiting for the single-writer lease", { holder: this.#options.identity.holder, stamp: this.#options.identity.stamp, reason });
     this.#schedule(0, () => this.#tryTakeLease());
   }
 
   async #tryTakeLease(): Promise<void> {
     if (this.#state !== "standby") return;
-    const handingOverSince = this.#handedOverAt;
-    if (handingOverSince && Date.now() - handingOverSince < this.#timings.reclaimAfterMs) {
+    const sinceHandover = this.#handedOverAt ? Date.now() - this.#handedOverAt : undefined;
+    if (sinceHandover !== undefined && sinceHandover < this.#timings.reclaimAfterMs) {
       // Just handed over: give the newer instance time to take the lease before considering a reclaim.
       this.#schedule(this.#timings.pollMs, () => this.#tryTakeLease());
       return;
     }
-    if (!handingOverSince) {
-      this.#fileRequest();
-      // A newer deployment is waiting too: leave the lease to it rather than starting an older gateway in between.
-      const newer = this.#newerRequests()[0];
-      if (newer) {
-        this.#standbyReason = `a newer deployment (${newer.holder}) is taking over`;
-        this.#schedule(this.#timings.pollMs, () => this.#tryTakeLease());
-        return;
-      }
+    if (sinceHandover !== undefined && sinceHandover >= this.#timings.handoverSettleMs) {
+      // The handover is history: from now on this instance waits like any other replica.
+      this.#handedOverAt = 0;
+      this.#handedOverTo = undefined;
+    }
+    this.#fileRequest();
+    // A newer deployment is waiting: leave the lease to it rather than starting an older gateway in between. The
+    // deployment we recently handed over to already had its chance; if it did not keep the lease, we reclaim first.
+    const newer = this.#newerRequests().find((request) => request.stamp !== this.#handedOverTo);
+    if (newer) {
+      this.#standbyReason = `a newer deployment (${newer.holder}) is taking over`;
+      this.#schedule(this.#timings.pollMs, () => this.#tryTakeLease());
+      return;
     }
     let lease: Lease | undefined;
     try {
@@ -223,7 +277,7 @@ export class Supervisor {
       this.#schedule(this.#timings.pollMs, () => this.#tryTakeLease());
       return;
     }
-    if (handingOverSince) {
+    if (this.#handedOverAt) {
       // Nobody newer kept the lease after we handed it over: serve again, and do not hand over to them for a while.
       if (this.#handedOverTo !== undefined) this.#refused.set(this.#handedOverTo, Date.now() + this.#timings.refuseAfterReclaimMs);
       this.#log("warn", `No newer ${this.#subject} kept the lease after the handover; reclaiming it`, { generation: lease.generation, refused: this.#handedOverTo });
@@ -314,15 +368,20 @@ export class Supervisor {
     const lease = this.#lease!;
     this.#state = "starting";
     await this.#closeStandby();
+    if (this.#state !== "starting") return; // stopped meanwhile; stop() released the lease
     const [command, ...args] = this.#options.command;
     if (!command) throw new Error(`No ${this.#subject} command was given.`);
     this.#log("info", `Took the single-writer lease; starting the ${this.#subject}`, { generation: lease.generation, holder: this.#options.identity.holder });
+    const posix = process.platform !== "win32";
     const child = spawn(command, args, {
       cwd: this.#options.cwd,
       env: { ...(this.#options.env ?? process.env), MANAGED_COPILOT_LEASE_GENERATION: String(lease.generation) },
       stdio: "inherit",
+      // Its own process group, so its descendants (the shared runtime) can be signalled and awaited with it.
+      detached: posix,
     });
     this.#child = child;
+    this.#group = posix && child.pid !== undefined ? child.pid : undefined;
     this.#childExit = new Promise<number>((resolve) => {
       child.once("exit", (code, signal) => resolve(code ?? (signal ? 128 + (signalNumbers[signal] ?? 15) : 1)));
       child.once("error", (error) => {
@@ -335,13 +394,16 @@ export class Supervisor {
     this.#schedule(this.#timings.heartbeatMs, () => this.#heartbeat());
   }
 
-  #onChildExit(child: ChildProcess, code: number): void {
+  async #onChildExit(child: ChildProcess, code: number): Promise<void> {
     if (this.#child !== child) return;
     this.#child = undefined;
     if (this.#state !== "serving" && this.#state !== "starting") return; // stop, handover, and fencing handle their own exits
+    this.#state = "stopping";
     this.#log(code === 0 ? "info" : "error", `The ${this.#subject} exited; releasing the lease`, { code });
     this.#clearTimer();
+    await this.#reapGroup();
     this.#releaseLease();
+    this.#removeRequest();
     this.#finish(code);
   }
 
@@ -366,23 +428,23 @@ export class Supervisor {
     this.#state = "handing-over";
     this.#log("info", `A newer deployment is waiting; handing the ${this.#subject} over`, { to: request.holder, stamp: request.stamp, generation: this.#lease?.generation });
     await this.#stopChild();
+    if (this.#state !== "handing-over") return; // stopped or fenced meanwhile; they released the lease
     this.#releaseLease();
     this.#handedOverAt = Date.now();
     this.#handedOverTo = request.stamp;
     await this.#enterStandby(`handed over to a newer deployment (${request.holder})`);
   }
 
-  /** Kills the gateway without a grace period and exits: another holder may already be writing. */
+  /** Kills the process group without a grace period and exits: another holder may already be writing. */
   async #fence(reason: string): Promise<void> {
-    if (this.#state === "stopped") return;
+    if (this.#state === "stopped" || this.#fencing) return;
+    this.#fencing = true;
     this.#state = "stopping";
     this.#clearTimer();
-    const child = this.#child;
-    this.#child = undefined;
-    if (child && child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGKILL");
-      await this.#childExit;
-    }
+    // Even while a graceful stop (stop() or a handover) is waiting for the process to exit.
+    this.#signal("SIGKILL");
+    if (this.#child && this.#childExit) await this.#childExit;
+    await this.#reapGroup();
     this.#releaseLease();
     this.#removeRequest();
     await this.#closeStandby();
@@ -390,20 +452,76 @@ export class Supervisor {
     this.#finish(EXIT.fenced);
   }
 
-  async #stopChild(): Promise<void> {
-    const child = this.#child;
-    this.#child = undefined;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    child.kill("SIGTERM");
-    const exited = this.#childExit!;
-    const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), this.#timings.stopGraceMs).unref());
-    if ((await Promise.race([exited, timeout])) === "timeout") {
-      this.#log("warn", `The ${this.#subject} did not stop in time; killing it`, { graceMs: this.#timings.stopGraceMs });
-      child.kill("SIGKILL");
-      await exited;
-    }
+  /** SIGTERM, then SIGKILL after the grace period; resolves once the whole process group has exited. Shared by concurrent callers. */
+  #stopChild(): Promise<void> {
+    this.#stopping ??= this.#terminate().finally(() => {
+      this.#stopping = undefined;
+    });
+    return this.#stopping;
   }
 
+  async #terminate(): Promise<void> {
+    const child = this.#child;
+    const exited = this.#childExit;
+    if (child && exited && child.exitCode === null && child.signalCode === null) {
+      this.#signal("SIGTERM");
+      let timer: NodeJS.Timeout | undefined;
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), this.#timings.stopGraceMs);
+      });
+      const outcome = await Promise.race([exited, timeout]);
+      clearTimeout(timer);
+      if (outcome === "timeout") {
+        this.#log("warn", `The ${this.#subject} did not stop in time; killing it`, { graceMs: this.#timings.stopGraceMs });
+        this.#signal("SIGKILL");
+        await exited;
+      }
+    }
+    await this.#reapGroup();
+  }
+
+  /** Signals the supervised process group (POSIX), or the process itself. */
+  #signal(signal: NodeJS.Signals): void {
+    if (this.#group !== undefined) {
+      try {
+        process.kill(-this.#group, signal);
+        return;
+      } catch {
+        // The group is gone; signal the process directly below in case it is not.
+      }
+    }
+    const child = this.#child;
+    if (child && child.exitCode === null && child.signalCode === null) child.kill(signal);
+  }
+
+  /** Kills whatever is left of the process group (descendants can outlive the process) and waits until none runs. */
+  #reapGroup(): Promise<void> {
+    this.#reaping ??= this.#killGroup().finally(() => {
+      this.#reaping = undefined;
+    });
+    return this.#reaping;
+  }
+
+  async #killGroup(): Promise<void> {
+    const group = this.#group;
+    if (group === undefined) return;
+    const started = Date.now();
+    let warned = false;
+    while (groupAlive(group)) {
+      try {
+        process.kill(-group, "SIGKILL");
+      } catch {
+        // Exited meanwhile.
+      }
+      // Keep the lease until they are gone, however long that takes: a process stuck in I/O may still write.
+      if (!warned && Date.now() - started > 10_000) {
+        warned = true;
+        this.#log("warn", `Processes started by the ${this.#subject} have not exited yet; keeping the lease until they do`, { group });
+      }
+      await delay(50);
+    }
+    if (this.#group === group) this.#group = undefined;
+  }
   #releaseLease(): void {
     const lease = this.#lease;
     this.#lease = undefined;

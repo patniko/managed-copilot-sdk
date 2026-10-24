@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { Lease, LeaseLostError } from "../src/lease/lease.js";
 import { compareStamps, EXIT, Supervisor, type LogLevel, type SupervisorTimings } from "../src/lease/supervisor.js";
 
 const fakeGateway = fileURLToPath(new URL("./fixtures/fake-gateway.mjs", import.meta.url));
-const fast: SupervisorTimings = { pollMs: 50, heartbeatMs: 100, requestTtlMs: 5_000, stopGraceMs: 2_000, reclaimAfterMs: 800, refuseAfterReclaimMs: 60_000 };
+const fast: SupervisorTimings = { pollMs: 50, heartbeatMs: 100, requestTtlMs: 5_000, stopGraceMs: 2_000, reclaimAfterMs: 800, refuseAfterReclaimMs: 60_000, handoverSettleMs: 60_000 };
 const cleanups: (() => Promise<void> | void)[] = [];
 
 afterEach(async () => {
@@ -61,6 +61,25 @@ const standby = (port: number) => until(async () => {
   const result = await probe(port);
   return result?.status === 503 && result.body.status === "standby" ? result.body : undefined;
 }, `a standby answer on ${port}`);
+
+/** Whether a process runs (on Linux a zombie, exited but not yet reaped by its new parent, does not). */
+function running(pid: number): boolean {
+  if (process.platform === "linux") {
+    try {
+      return !/^\S+ \(.*\) [ZX] /.test(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    } catch {
+      return false;
+    }
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 interface Started {
   readonly supervisor: Supervisor;
@@ -154,6 +173,66 @@ describe("Supervisor", () => {
     expect((await probe(older.port))?.status).toBe(503);
     expect(older.logs.some((entry) => /Took the single-writer lease/.test(entry.message))).toBe(false);
   }, 45_000);
+
+  it("after a handover, defers to an even newer deployment instead of reclaiming ahead of it", async () => {
+    const dataDir = tempDir();
+    // The original holder polls far more often than the newest deployment, so it would win a free lease if it raced.
+    const original = await start(dataDir, "100", { timings: { pollMs: 5 } });
+    await serving(original.port);
+    const second = await start(dataDir, "200");
+    expect((await serving(second.port)).generation).toBe("2");
+    await sleep(1_200); // past the original's reclaim window: it would now take a free lease
+    const newest = await start(dataDir, "300", { timings: { pollMs: 300 } });
+    expect((await serving(newest.port)).generation).toBe("3");
+    await standby(second.port);
+    expect((await probe(original.port))?.status).toBe(503);
+    expect(original.logs.filter((entry) => /Took the single-writer lease/.test(entry.message))).toHaveLength(1);
+    expect(original.logs.some((entry) => /reclaiming/.test(entry.message))).toBe(false);
+  }, 45_000);
+
+  it("treats a settled handover as history: a later restart of the newer deployment is not refused", async () => {
+    const dataDir = tempDir();
+    const original = await start(dataDir, "100", { timings: { handoverSettleMs: 1_500 } });
+    await serving(original.port);
+    const newer = await start(dataDir, "200");
+    await serving(newer.port);
+    await sleep(2_000); // past the settle window
+    await newer.supervisor.stop("replica restart");
+    expect(await newer.exit).toBe(EXIT.ok);
+    // Nothing newer waits, so the original takes the free lease: as a waiting replica, not as a reclaim that refuses 200.
+    await serving(original.port);
+    const restarted = await start(dataDir, "200");
+    await serving(restarted.port);
+    await standby(original.port);
+    expect(original.logs.some((entry) => /reclaiming/.test(entry.message))).toBe(false);
+  }, 45_000);
+
+  it.skipIf(process.platform === "win32")("a stop during a handover waits for the old process and its descendants, then stays stopped", async () => {
+    const dataDir = tempDir();
+    const holder = await start(dataDir, "100", { env: { FAKE_GATEWAY_STOP_DELAY_MS: "1000", FAKE_GATEWAY_SPAWN_CHILD: "1" } });
+    const body = await serving(holder.port);
+    const [pid, descendant] = [Number(body.pid), Number(body.descendant)];
+    expect(running(descendant)).toBe(true);
+    const newer = await start(dataDir, "200");
+    await until(async () => holder.logs.some((entry) => /handing the gateway over/.test(entry.message)) || undefined, "the handover to start");
+    await holder.supervisor.stop("SIGTERM during the handover");
+    // Released only now: the old gateway and the process it started are both gone.
+    expect(running(pid)).toBe(false);
+    expect(running(descendant)).toBe(false);
+    expect(await holder.exit).toBe(EXIT.ok);
+    expect((await serving(newer.port)).generation).toBe("2");
+    await sleep(300);
+    expect(holder.supervisor.state).toBe("stopped");
+    expect(await probe(holder.port)).toBeUndefined();
+  }, 45_000);
+
+  it.skipIf(process.platform === "win32")("kills processes the gateway left behind before releasing the lease", async () => {
+    const dataDir = tempDir();
+    const holder = await start(dataDir, "100", { env: { FAKE_GATEWAY_SPAWN_CHILD: "1", FAKE_GATEWAY_EXIT_AFTER_MS: "1500", FAKE_GATEWAY_EXIT_CODE: "4" } });
+    const descendant = Number((await serving(holder.port)).descendant);
+    expect(await holder.exit).toBe(4);
+    expect(running(descendant)).toBe(false);
+  }, 30_000);
 
   it("kills the gateway at once and exits when the lease cannot be renewed", async () => {
     const dataDir = tempDir();
