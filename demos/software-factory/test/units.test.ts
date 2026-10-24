@@ -189,10 +189,33 @@ describe("platform interruptions", () => {
       new Error("CLI server exited with code 1\n[managed-copilot] Managed Copilot closed the connection: gateway shutting down (close code 1001)"),
       new Error("[managed-copilot] Managed Copilot rejected the connection: HTTP 503"),
       new Error("[managed-copilot] Managed Copilot rejected the connection: The gateway is draining (capability_unavailable)"),
+      // The SDK gave up on a request in transit (`details.stage`).
+      new ManagedCopilotError(
+        "timeout",
+        "The Managed Copilot deployment at http://127.0.0.1:7410 did not answer GET /v1/sessions/s1 within 30 s. It may be restarting or unreachable; try again shortly.",
+        { method: "GET", path: "/v1/sessions/s1", timeoutMs: 30_000, stage: "answer" },
+      ),
+      // A registration step the session's runtime never answered: the gateway closed that connection (`details.step`).
+      Object.assign(
+        new Error("The runtime of session s1 did not answer session.resume within 1 minute and its connection stopped responding, so the gateway closed it. Try again; the session reconnects. [timeout]"),
+        { code: -32001, data: { code: "timeout", details: { sessionId: "s1", step: "session.resume" } } },
+      ),
+      // A turn the gateway ended because it lost the runtime connection, as the turn's completion wait sees it (no code).
+      Object.assign(
+        new Error("This turn was interrupted because the platform lost the connection to the session's runtime (for example, during an update or restart). Send your message again to continue."),
+        { code: -32603, data: { completionEventId: "evt_1" } },
+      ),
+      Object.assign(
+        new Error("Managed Copilot lost the connection to the session's runtime before this message's answer arrived. Check the session before sending again."),
+        { code: -32603, data: { completionEventId: "evt_1" } },
+      ),
     ];
     const failures = [
       rpc("Session sess_1 was not found", "not_found"),
       rpc("Unknown model", "invalid_request"),
+      // Timeouts that are outcomes rather than a lost connection.
+      new ManagedCopilotError("timeout", "Turn t1 published nothing within 120 s", { turnId: "t1", timeoutMs: 120_000 }),
+      rpc("Waiting for the publication took too long", "timeout"),
       new StationError("timeout", "The builder agent didn't finish within 20 minutes."),
       new ManagedCopilotError("not_found", "Session sess_1 was not found"),
       new ManagedCopilotError("internal", "Unexpected error response (HTTP 400)"),
