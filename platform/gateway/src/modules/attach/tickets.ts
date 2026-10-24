@@ -1,8 +1,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { ATTACH_TICKET_PREFIX } from "@managed-copilot/protocol";
 import { migrate, transaction, type Database } from "../../db.js";
 
 /** Recognizable prefix so attach tickets are easy to spot and redact. */
-export const TICKET_PREFIX = "mcat_";
+export const TICKET_PREFIX = ATTACH_TICKET_PREFIX;
 
 const MIGRATIONS = [
   `CREATE TABLE attach_tickets (

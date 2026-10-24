@@ -1,71 +1,9 @@
 import type { Socket } from "node:net";
 import type { Duplex } from "node:stream";
+import { filterAhpClientFrame } from "@managed-copilot/protocol";
 import { WebSocket, type RawData } from "ws";
 import type { Logger } from "../../log.js";
 import type { AhpHost } from "./hosts.js";
-
-/** AHP method or action names that present credentials; requests carrying them never travel upstream. */
-const CREDENTIAL_NAME = /auth|token|credential|secret/i;
-
-export const CREDENTIAL_REFUSAL =
-  "Managed Copilot authenticates Copilot CLI attachments itself; credentials are never forwarded to the session's runtime.";
-
-interface RpcMessage {
-  readonly id?: unknown;
-  readonly method?: unknown;
-  readonly params?: { readonly action?: { readonly type?: unknown } };
-}
-
-function carriesCredential(message: unknown): boolean {
-  if (!message || typeof message !== "object") return false;
-  const { method, params } = message as RpcMessage;
-  if (typeof method !== "string") return false;
-  if (/auth/i.test(method)) return true;
-  const action = params?.action?.type;
-  return typeof action === "string" && CREDENTIAL_NAME.test(action);
-}
-
-export interface FilteredFrame {
-  /** Text to send upstream, if anything is left after filtering. */
-  readonly forward?: string;
-  /** JSON-RPC error replies for refused requests, to send back to the client. */
-  readonly replies: readonly string[];
-  readonly refused: readonly string[];
-  /** The frame is not JSON, so it is not AHP. */
-  readonly invalid?: boolean;
-}
-
-/**
- * Removes credential-bearing AHP messages from a client frame. The stock Copilot CLI presents its own GitHub token
- * with `authenticate`; attach is authorized by the gateway, so those requests are answered here with an error (the
- * CLI continues without them) and the token never reaches a runtime, including sandbox runtimes.
- */
-export function filterClientFrame(text: string): FilteredFrame {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return { replies: [], refused: [], invalid: true };
-  }
-  const batch = Array.isArray(parsed);
-  const items: unknown[] = batch ? (parsed as unknown[]) : [parsed];
-  const kept: unknown[] = [];
-  const errors: object[] = [];
-  const refused: string[] = [];
-  for (const item of items) {
-    if (carriesCredential(item)) {
-      const { id, method } = item as RpcMessage;
-      refused.push(String(method));
-      if (id !== undefined && id !== null) errors.push({ jsonrpc: "2.0", id, error: { code: -32602, message: CREDENTIAL_REFUSAL } });
-      continue;
-    }
-    kept.push(item);
-  }
-  if (refused.length === 0) return { forward: text, replies: [], refused };
-  const replies = errors.length === 0 ? [] : batch ? [JSON.stringify(errors)] : errors.map((error) => JSON.stringify(error));
-  const forward = kept.length === 0 ? undefined : JSON.stringify(batch ? kept : kept[0]);
-  return { ...(forward !== undefined ? { forward } : {}), replies, refused };
-}
 
 /** `ws` treats its transport as a net.Socket; tunnels from the sandbox relay are plain duplex streams. */
 function asSocket(stream: Duplex): Socket {
@@ -117,7 +55,7 @@ export function bridge(client: WebSocket, upstream: WebSocket, options: { readon
       client.close(1003, "Copilot CLI attach carries JSON text frames only.");
       return;
     }
-    const filtered = filterClientFrame(data.toString());
+    const filtered = filterAhpClientFrame(data.toString());
     if (filtered.invalid) {
       client.close(1007, "Copilot CLI attach carries JSON-RPC messages only.");
       return;

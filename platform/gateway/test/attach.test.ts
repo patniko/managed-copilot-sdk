@@ -12,7 +12,7 @@ import { loadConfig } from "../src/config.js";
 import { openDatabase } from "../src/db.js";
 import { createLogger } from "../src/log.js";
 import { attachModule, type AttachSessions, type SessionLifecycleEvent, type SessionRuntime } from "../src/modules/attach/index.js";
-import { CREDENTIAL_REFUSAL, filterClientFrame } from "../src/modules/attach/proxy.js";
+import { CREDENTIAL_REFUSAL, filterAhpClientFrame as filterClientFrame } from "@managed-copilot/protocol";
 import { AttachTickets } from "../src/modules/attach/tickets.js";
 
 const OWNER = 42;

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { ATTACH_CLOSE_CODES, ManagedCopilotError } from "@managed-copilot/protocol";
 import type { WebSocket } from "ws";
 import type { Logger } from "../../log.js";
 import type { SessionRuntime } from "./types.js";
@@ -30,7 +30,7 @@ interface HostPublishResult {
 }
 
 /** WebSocket close code for attachments ended by the platform (deleted, moved, runtime stopped). */
-export const CLOSE_SESSION_GONE = 4410;
+export const CLOSE_SESSION_GONE = ATTACH_CLOSE_CODES.sessionGone;
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
