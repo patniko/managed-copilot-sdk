@@ -135,9 +135,18 @@ export const SHARED_ENVIRONMENT_CONTEXT = [
   "</environment_context>",
 ].join("\n");
 
+/** The environment section of promotable sessions while they are shared: steer work that needs a workspace to the move. */
+export const PROMOTABLE_ENVIRONMENT_CONTEXT = [
+  "<environment_context>",
+  "This session runs in a Managed Copilot shared environment. Right now it has no shell, no file system, and no direct network access.",
+  "It can move into its own Linux sandbox with a shell, Python, and files: when a task needs to run code or commands, or to read or write files, call request_sandbox first; the conversation continues there.",
+  "Use only the tools available in this session. Never write tool calls, shell commands, or code meant to be executed as plain text.",
+  "</environment_context>",
+].join("\n");
+
 /** Replaces the runtime's host environment section in shared sessions' system prompts. */
-export function lockSystemMessage(supplied: unknown): unknown {
-  const environment = { action: "replace", content: SHARED_ENVIRONMENT_CONTEXT };
+export function lockSystemMessage(supplied: unknown, options: { readonly promotable?: boolean } = {}): unknown {
+  const environment = { action: "replace", content: options.promotable ? PROMOTABLE_ENVIRONMENT_CONTEXT : SHARED_ENVIRONMENT_CONTEXT };
   const defaults = { environment_context: environment, code_change_rules: { action: "remove" } };
   if (supplied === undefined || supplied === null) return { mode: "customize", sections: defaults };
   if (!isRecord(supplied)) throw new ManagedCopilotError("invalid_request", "systemMessage must be an object");
@@ -308,6 +317,8 @@ function sandboxPath(value: unknown, field: string, root: string): string {
 export function admitSession(raw: unknown, context: AdmissionContext, mode: "create" | "resume"): AdmittedSession {
   if (!isRecord(raw)) throw new ManagedCopilotError("invalid_request", `${mode === "create" ? "session.create" : "session.resume"} params must be an object`);
   const shared = context.placement === "shared";
+  // Promotable sessions (request_sandbox injected) are told how to get a workspace instead of to do without one.
+  const promotable = context.platformTools.some((tool) => tool.name === "request_sandbox");
   const environment = context.environment;
   const bundle = environment.customizations;
   const remoteMcp: { name: string; url: string; agent?: string }[] = [];
@@ -376,7 +387,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
       if (typeof value !== "string") throw new ManagedCopilotError("invalid_request", "agent must be a string");
       return value;
     },
-    systemMessage: (value) => (shared ? lockSystemMessage(value) : value === undefined ? DROP : value),
+    systemMessage: (value) => (shared ? lockSystemMessage(value, { promotable }) : value === undefined ? DROP : value),
     largeOutput: (value) => {
       if (value === undefined || value === null) return DROP;
       if (!isRecord(value)) throw new ManagedCopilotError("invalid_request", "largeOutput must be an object");
@@ -499,7 +510,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     params["enableSessionStore"] = false;
     params["memory"] = { enabled: false };
     params["embeddingCacheStorage"] = "in-memory";
-    if (params["systemMessage"] === undefined) params["systemMessage"] = lockSystemMessage(undefined);
+    if (params["systemMessage"] === undefined) params["systemMessage"] = lockSystemMessage(undefined, { promotable });
     params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(directories.skills);
     if (directories.skills) params["skillDirectories"] = [directories.skills];
     if (directories.agents) params["agentDirectories"] = [directories.agents];

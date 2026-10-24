@@ -221,6 +221,11 @@ export class SharedRuntime {
     return join(this.#options.root, "workspaces");
   }
 
+  /** Where the spawned runtime keeps a session's state; undefined for an external runtime. */
+  sessionStateDirectory(sessionId: string): string | undefined {
+    return this.#options.externalUrl ? undefined : join(this.#options.root, "copilot-home", "session-state", sessionId);
+  }
+
   get lastError(): string | undefined {
     return this.#lastError;
   }
