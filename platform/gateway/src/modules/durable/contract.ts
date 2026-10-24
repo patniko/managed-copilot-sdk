@@ -211,8 +211,17 @@ export interface ActionRouterHooks {
   onSessionEvent(input: SessionEventInput): Promise<SessionEventDecision>;
   onClientAnswer(input: ClientAnswerInput): Promise<ClientAnswerDecision>;
   onAttached(input: AttachInput): Promise<readonly RuntimeSessionEvent[]>;
-  onDetached(connectionId: string): void;
+  /**
+   * A connection stopped answering. Pass `sessionId` when it detached from one session (`session.disconnect`, a
+   * failed resume, session deletion) so only that session's live claims are released; omit it when the whole
+   * connection closed.
+   */
+  onDetached(connectionId: string, sessionId?: string): void;
   releaseLiveClaim(actionId: string, claimToken: string): void;
+  /** The session was deleted: its open actions are cancelled and nothing more is delivered for it. */
+  onSessionDeleted?(sessionId: string): void;
+  /** The session moved to a new placement generation (promotion): fences actions owned under older generations. */
+  onGenerationChanged?(sessionId: string, generation: number): void;
 }
 
 export interface ActionRecordSummary {
@@ -246,6 +255,8 @@ export interface WebhookDeliveryInfo {
 export interface WebhooksService {
   /** Queues a platform event for every authorized subscription (environment and event type). */
   enqueue(event: PlatformEvent, meta: PlatformEventMeta): number;
+  /** Stops pending `session.action_required` deliveries for a deleted session (their actions were cancelled). */
+  dropSession?(sessionId: string): number;
   /** Names of AppHost webhooks that cover an environment and event type. */
   subscribers(environment: string, eventType: string): string[];
   deliveries(options?: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number }): WebhookDeliveryInfo[];
