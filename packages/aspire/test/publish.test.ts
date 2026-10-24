@@ -6,9 +6,20 @@ import { afterEach, describe, expect, it } from "vitest";
 import { APPHOST_DIR_IN_IMAGE, AzurePublishError, applyAccessRules, listSetting, prepareAzureConfig, rewriteWebhooks } from "../src/publish/config.js";
 import { expr } from "../src/publish/expressions.js";
 import { writeGatewayBuildFiles } from "../src/publish/gateway-image.js";
+import { EGRESS_BICEP } from "../src/publish/egress.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const appHost = repoRoot;
+
+describe("Azure egress persistence", () => {
+  it("mounts the same restricted NFS CA directory for initialization and the non-root proxy", () => {
+    expect(EGRESS_BICEP).toContain("storageType: 'NfsAzureFile'");
+    expect(EGRESS_BICEP.match(/subPath: 'egress'/g)).toHaveLength(2);
+    expect(EGRESS_BICEP.match(/mountPath: '\/var\/lib\/managed-copilot-egress'/g)).toHaveLength(2);
+    expect(EGRESS_BICEP).toContain("chown 1000:1000 /var/lib/managed-copilot-egress && chmod 700");
+    expect(EGRESS_BICEP).toContain("name: 'EGRESS_DATA_DIR'");
+  });
+});
 
 function config(overrides: Partial<ManagedCopilotConfig> = {}): ManagedCopilotConfig {
   return {

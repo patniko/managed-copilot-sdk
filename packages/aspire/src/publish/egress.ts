@@ -5,14 +5,18 @@
  * transport rule that allows nothing else (measured in deploy/azure/qualify). The proxy connects to the gateway's
  * egress hub over HTTPS with the shared egress key and enforces each sandbox's network policy and vault credentials.
  *
- * Its CA is generated per proxy start (the image runs as `node`, which cannot own a directory on the NFS share): after a
- * proxy restart, running sandboxes that use vault credentials need a restart to trust the new CA.
+ * Its CA lives in a dedicated NFS subdirectory shared across revisions. A root-only init container sets directory
+ * ownership; the proxy itself stays non-root. Atomic first-creation in platform/egress makes concurrent revisions
+ * use the same CA instead of invalidating running sandboxes' TLS trust.
  */
 export const EGRESS_BICEP = `@description('The location for the resource(s) to be deployed.')
 param location string = resourceGroup().location
 
 @description('The egress subnet (delegated to Microsoft.App/environments).')
 param subnetId string
+
+@description('The platform NFS storage account; the proxy mounts only the egress subdirectory of its share.')
+param storageAccountName string
 
 @description('Log Analytics workspace of the platform environment, for the proxy logs.')
 param logAnalyticsWorkspaceName string
@@ -67,6 +71,18 @@ resource environment 'Microsoft.App/managedEnvironments@2025-07-01' = {
   }
 }
 
+resource caStorage 'Microsoft.App/managedEnvironments/storages@2025-07-01' = {
+  parent: environment
+  name: 'egress-ca'
+  properties: {
+    nfsAzureFile: {
+      server: '\${storageAccountName}.file.\${az.environment().suffixes.storage}'
+      shareName: '/\${storageAccountName}/managed-copilot'
+      accessMode: 'ReadWrite'
+    }
+  }
+}
+
 resource proxy 'Microsoft.App/containerApps@2025-07-01' = {
   name: 'egress'
   location: location
@@ -101,6 +117,28 @@ resource proxy 'Microsoft.App/containerApps@2025-07-01' = {
       ]
     }
     template: {
+      initContainers: [
+        {
+          name: 'prepare-ca-directory'
+          image: 'node:24-alpine'
+          command: [
+            'sh'
+            '-ec'
+            'chown 1000:1000 /var/lib/managed-copilot-egress && chmod 700 /var/lib/managed-copilot-egress'
+          ]
+          resources: {
+            cpu: json('0.25')
+            memory: '0.5Gi'
+          }
+          volumeMounts: [
+            {
+              volumeName: 'ca'
+              mountPath: '/var/lib/managed-copilot-egress'
+              subPath: 'egress'
+            }
+          ]
+        }
+      ]
       containers: [
         {
           name: 'egress'
@@ -121,6 +159,17 @@ resource proxy 'Microsoft.App/containerApps@2025-07-01' = {
             {
               name: 'EGRESS_PROTECTED_CIDRS'
               value: protectedCidrs
+            }
+            {
+              name: 'EGRESS_DATA_DIR'
+              value: '/var/lib/managed-copilot-egress'
+            }
+          ]
+          volumeMounts: [
+            {
+              volumeName: 'ca'
+              mountPath: '/var/lib/managed-copilot-egress'
+              subPath: 'egress'
             }
           ]
           probes: [
@@ -147,8 +196,18 @@ resource proxy 'Microsoft.App/containerApps@2025-07-01' = {
         minReplicas: 1
         maxReplicas: 1
       }
+      volumes: [
+        {
+          name: 'ca'
+          storageType: 'NfsAzureFile'
+          storageName: caStorage.name
+        }
+      ]
     }
   }
+  dependsOn: [
+    caStorage
+  ]
 }
 
 @description('Where sandboxes reach the proxy: the internal load balancer of its environment.')

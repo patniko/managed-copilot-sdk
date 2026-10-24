@@ -821,7 +821,8 @@ checks passed; remaining acceptance and demo qualification is tracked in the dep
   `MANAGED_COPILOT_EGRESS_KEY` and gives each sandbox a platform egress policy that denies HTTP(S) and allows only TCP
   to the proxy (`MANAGED_COPILOT_AZURE_EGRESS_PROXY`). The proxy sees translated source addresses, so
   `capabilities.addressPinning` is false; the per-sandbox `Proxy-Authorization` identifies each sandbox. The proxy's CA
-  is ephemeral (a restart needs sandboxes that use vault TLS to restart). Without sandboxes the gateway runs
+  persists under the NFS share's `egress/` directory, with atomic key-pair creation across revisions and a non-root
+  proxy process. Without sandboxes the gateway runs
   `MANAGED_COPILOT_EGRESS=off`.
 
 ## Ports and environment

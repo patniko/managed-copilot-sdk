@@ -25,7 +25,7 @@ public static class ManagedCopilotAzureExtensions
     /// <summary>
     /// Places the Container Apps environment in a new virtual network and gives it an Azure Files NFS share for durable
     /// state. NFS keeps POSIX locks, permissions, and symbolic links, which the gateway's SQLite ledger and the stock
-    /// runtime's session store need; Azure Files SMB does not. The share is reachable only from the environment's subnet.
+    /// runtime's session store need; Azure Files SMB does not. Only the platform and trusted egress subnets may access it.
     /// </summary>
     /// <param name="builder">The Container Apps environment.</param>
     /// <param name="addressSpace">The virtual network's address space, a /16 such as 10.42.0.0/16.</param>
@@ -75,6 +75,7 @@ public static class ManagedCopilotAzureExtensions
                 Name = "egress",
                 AddressPrefix = prefixes.Egress,
                 Delegations = { new ServiceDelegation { Name = "containerapps", ServiceName = "Microsoft.App/environments" } },
+                ServiceEndpoints = { new ServiceEndpointProperties { Service = "Microsoft.Storage" } },
             };
             // Azure applies one change per virtual network at a time; create the subnets in order.
             sandboxes.DependsOn.Add(platform);
@@ -94,7 +95,11 @@ public static class ManagedCopilotAzureExtensions
                 {
                     DefaultAction = StorageNetworkDefaultAction.Deny,
                     Bypass = StorageNetworkBypass.None,
-                    VirtualNetworkRules = { new StorageAccountVirtualNetworkRule { VirtualNetworkResourceId = platform.Id } },
+                    VirtualNetworkRules =
+                    {
+                        new StorageAccountVirtualNetworkRule { VirtualNetworkResourceId = platform.Id },
+                        new StorageAccountVirtualNetworkRule { VirtualNetworkResourceId = egress.Id },
+                    },
                 },
             };
             var files = new FileService("mcDataFiles") { Parent = account };
@@ -133,6 +138,7 @@ public static class ManagedCopilotAzureExtensions
             infra.Add(new ProvisioningOutput("MANAGED_COPILOT_SANDBOX_SUBNET_ID", typeof(string)) { Value = sandboxes.Id });
             infra.Add(new ProvisioningOutput("MANAGED_COPILOT_EGRESS_SUBNET_ID", typeof(string)) { Value = egress.Id });
             infra.Add(new ProvisioningOutput("MANAGED_COPILOT_DATA_STORAGE", typeof(string)) { Value = storage.Name });
+            infra.Add(new ProvisioningOutput("MANAGED_COPILOT_DATA_ACCOUNT_NAME", typeof(string)) { Value = account.Name });
         });
     }
 

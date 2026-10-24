@@ -58,11 +58,11 @@ function unconfirmed(what: string, cause: unknown): ManagedCopilotError {
 }
 
 /**
- * A failure that proves Azure did not carry out the request: it never left the gateway, or Azure refused it (4xx).
+ * A failure that proves Azure did not carry out the request: it never left the gateway, or Azure explicitly refused it.
  * Anything else (no complete answer, a server error, an unexpected exception) may hide a request Azure carried out.
  */
 function isDefinite(error: unknown): boolean {
-  return error instanceof SandboxApiError && (!error.sent || (error.status >= 400 && error.status < 500));
+  return error instanceof SandboxApiError && (!error.sent || [400, 401, 403, 404, 405, 413, 415, 422, 429].includes(error.status));
 }
 const CUSTOMIZATION_LIMITS = { files: 256, bytes: 8 * 1024 * 1024 };
 /** How long a successful readiness check is trusted. */
@@ -74,8 +74,8 @@ export interface AzureProviderOverrides {
   readonly registryCredentials?: (image: string) => Promise<RegistryCredentials | undefined>;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly pollMs?: number;
-  /** reconcileMs: how long one call looks for an unconfirmed create; unconfirmedMs: how long later calls still wait for it. */
-  readonly timeouts?: Partial<{ createMs: number; deleteMs: number; imageMs: number; reconcileMs: number; unconfirmedMs: number }>;
+  /** reconcileMs bounds one reconciliation attempt, not the lifetime of an unknown-outcome record. */
+  readonly timeouts?: Partial<{ createMs: number; deleteMs: number; imageMs: number; reconcileMs: number }>;
 }
 
 function unavailable(message: string, cause?: unknown): ManagedCopilotError {
@@ -103,7 +103,7 @@ export class AzureSandboxProvider implements SandboxProvider {
   readonly #log: Logger;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #pollMs: number;
-  readonly #timeouts: { createMs: number; deleteMs: number; imageMs: number; reconcileMs: number; unconfirmedMs: number };
+  readonly #timeouts: { createMs: number; deleteMs: number; imageMs: number; reconcileMs: number };
   readonly #unconfirmed: UnconfirmedCreates;
   readonly #registryCredentials: (image: string) => Promise<RegistryCredentials | undefined>;
   readonly #remoteIds = new Map<string, string>();
@@ -119,8 +119,8 @@ export class AzureSandboxProvider implements SandboxProvider {
     this.#log = deps.log.child("azure");
     this.#sleep = overrides.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#pollMs = overrides.pollMs ?? 2_000;
-    this.#timeouts = { createMs: 10 * 60_000, deleteMs: 5 * 60_000, imageMs: 30 * 60_000, reconcileMs: 60_000, unconfirmedMs: 5 * 60_000, ...overrides.timeouts };
-    this.#unconfirmed = new UnconfirmedCreates(join(deps.dataDir, "sandbox-azure", "unconfirmed-creates.json"), this.#timeouts.unconfirmedMs);
+    this.#timeouts = { createMs: 10 * 60_000, deleteMs: 5 * 60_000, imageMs: 30 * 60_000, reconcileMs: 60_000, ...overrides.timeouts };
+    this.#unconfirmed = new UnconfirmedCreates(join(deps.dataDir, "sandbox-azure", "unconfirmed-creates.json"));
     this.#registryCredentials = overrides.registryCredentials ?? (async () => undefined);
   }
 
@@ -235,7 +235,7 @@ export class AzureSandboxProvider implements SandboxProvider {
    * Submits a create at most once while its outcome is unknown. The attempt is recorded (durably) before the request
    * goes out and forgotten once Azure's answer is definite, so neither a lost answer nor a crash mid-request leads to
    * a second create: later calls, also from a restarted gateway, look the resource up by its labels instead until it
-   * appears or the horizon passes. After a failure without a definite answer, this call also keeps looking for the
+   * appears. After a failure without a definite answer, this call also keeps looking for the
    * resource until the reconciliation window ends.
    */
   async #createOnce<T>(key: string, what: string, create: () => Promise<T>, lookup: () => Promise<T | undefined>): Promise<T> {
@@ -246,8 +246,7 @@ export class AzureSandboxProvider implements SandboxProvider {
         this.#unconfirmed.clear(key);
         return adopted;
       }
-      const waitS = Math.max(1, Math.ceil((since + this.#timeouts.unconfirmedMs - Date.now()) / 1000));
-      throw unavailable(`An earlier attempt to create ${what} has not been confirmed by Azure yet. Try again in ${waitS} s.`);
+      throw unavailable(`An earlier attempt to create ${what} has not been confirmed by Azure yet. Retry to reconcile it; no second create will be submitted without a definite outcome.`);
     }
     this.#unconfirmed.record(key);
     let created: T;
@@ -259,7 +258,7 @@ export class AzureSandboxProvider implements SandboxProvider {
         throw error;
       }
       const adopted = await this.#reconcile(lookup);
-      if (!adopted) throw unconfirmed(what, error); // the record stays until the resource appears or the horizon passes
+      if (!adopted) throw unconfirmed(what, error);
       this.#unconfirmed.clear(key);
       this.#log.warn("Adopted a resource Azure created without answering", { resource: what });
       return adopted;
@@ -402,7 +401,7 @@ export class AzureSandboxProvider implements SandboxProvider {
     await this.#ensureDisks(spec, options);
     const existing = await this.#remotes(spec.sandboxId);
     let remote = existing.find((sandbox) => LIVE_SANDBOX_STATES.has(stateOf(sandbox)));
-    if (remote) this.#unconfirmed.clear(`sandbox:${spec.sandboxId}`);
+    if (existing.length > 0) this.#unconfirmed.clear(`sandbox:${spec.sandboxId}`);
     for (const leftover of existing) {
       if (leftover === remote) continue;
       // Compute left from before (stopped by the platform, failed, or still being deleted) holds the disks.
@@ -462,6 +461,7 @@ export class AzureSandboxProvider implements SandboxProvider {
 
   async start(sandboxId: string, options: SandboxOperationOptions = {}): Promise<SandboxStartResult> {
     const remotes = await this.#remotes(sandboxId);
+    if (remotes.length > 0) this.#unconfirmed.clear(`sandbox:${sandboxId}`);
     const live = remotes.find((sandbox) => stateOf(sandbox) === "running") ?? remotes.find((sandbox) => LIVE_SANDBOX_STATES.has(stateOf(sandbox)));
     if (live) {
       this.#remoteIds.set(sandboxId, live.id);
@@ -492,15 +492,18 @@ export class AzureSandboxProvider implements SandboxProvider {
 
   /** Deletes compute; the data disks (and with them every declared piece of state) survive. */
   async stop(sandboxId: string): Promise<void> {
-    for (const remote of await this.#remotes(sandboxId)) await this.#deleteCompute(sandboxId, remote);
+    const remotes = await this.#remotes(sandboxId);
+    if (remotes.length > 0) this.#unconfirmed.clear(`sandbox:${sandboxId}`);
+    if (this.#unconfirmed.outstanding(`sandbox:${sandboxId}`) !== undefined) {
+      throw unavailable(`Azure has not confirmed creation of sandbox ${sandboxId}. Its disks must be preserved until the outstanding creation can be reconciled.`);
+    }
+    for (const remote of remotes) await this.#deleteCompute(sandboxId, remote);
     this.#remoteIds.delete(sandboxId);
   }
 
   async remove(sandboxId: string): Promise<void> {
     const { api } = this.#require();
     await this.stop(sandboxId);
-    // A create that never confirmed is no longer awaited; if it appears later, its labels put it in the orphan sweep.
-    this.#unconfirmed.clear(`sandbox:${sandboxId}`);
     for (const disk of DISKS) {
       const name = this.#diskName(sandboxId, disk.role);
       const deadline = Date.now() + this.#timeouts.deleteMs;
@@ -543,6 +546,9 @@ export class AzureSandboxProvider implements SandboxProvider {
   async inventory(): Promise<Set<string>> {
     const { api } = this.#require();
     const ids = new Set<string>();
+    for (const key of this.#unconfirmed.keys()) {
+      if (key.startsWith("sandbox:")) ids.add(key.slice("sandbox:".length));
+    }
     for (const sandbox of await api.listSandboxes({ [LABELS.instance]: this.#instance })) {
       const id = sandbox.labels?.[LABELS.sandbox];
       if (id && sandbox.labels?.[LABELS.instance] === this.#instance) ids.add(id);

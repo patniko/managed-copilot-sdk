@@ -258,6 +258,7 @@ async function sandboxGroup(
   const egress = await builder
     .addBicepTemplateString(`${name}-egress`, EGRESS_BICEP)
     .withParameter("subnetId", { value: await environment.getOutput("MANAGED_COPILOT_EGRESS_SUBNET_ID") })
+    .withParameter("storageAccountName", { value: await environment.getOutput("MANAGED_COPILOT_DATA_ACCOUNT_NAME") })
     .withParameter("logAnalyticsWorkspaceName", { value: await environment.getOutput("AZURE_LOG_ANALYTICS_WORKSPACE_NAME") })
     .withParameter("registryServer", { value: loginServer })
     .withParameter("registryIdentityId", { value: await environment.getOutput("AZURE_CONTAINER_REGISTRY_MANAGED_IDENTITY_ID") })

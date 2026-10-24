@@ -514,14 +514,25 @@ describe("Azure sandbox provider", () => {
     expect(JSON.parse(readFileSync(join(dataDir, "sandbox-azure", "unconfirmed-creates.json"), "utf8"))).toEqual({});
   });
 
-  it("creates again only once an unconfirmed create is past its horizon", async () => {
+  it("does not treat elapsed time or removal as proof an unconfirmed create failed", async () => {
     plane.dropSandboxCreates = 1;
-    plane.dropCommitAfterLists = "never";
-    const subject = provider(env(), { timeouts: { reconcileMs: 20, unconfirmedMs: 0 } });
+    plane.dropCommitAfterLists = 1_000_000;
+    const subject = provider(env(), { timeouts: { reconcileMs: 20 } });
     await expect(subject.create(spec())).rejects.toThrow(/did not confirm/);
-    await subject.create(spec());
-    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(2);
-    expect(plane.sandboxes.size).toBe(1);
+    const journal = join(dataDir, "sandbox-azure", "unconfirmed-creates.json");
+    const records = JSON.parse(readFileSync(journal, "utf8"));
+    records["sandbox:sbx_0123456789abcdef01234567"] = Date.now() - 24 * 60 * 60_000;
+    writeFileSync(journal, JSON.stringify(records));
+    const restarted = provider(env(), { timeouts: { reconcileMs: 20 } });
+    await expect(restarted.create(spec())).rejects.toThrow(/earlier attempt/);
+    await expect(restarted.remove(spec().sandboxId)).rejects.toThrow(/disks must be preserved/);
+    expect(plane.volumes.size).toBe(3);
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+    expect(await restarted.inventory()).toContain(spec().sandboxId);
+    plane.commitPending();
+    await restarted.remove(spec().sandboxId);
+    expect(plane.sandboxes.size).toBe(0);
+    expect(plane.volumes.size).toBe(0);
   });
 
   it("records a create before submitting it, so a gateway that crashed mid-request does not submit it again", async () => {

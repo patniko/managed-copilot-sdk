@@ -1,33 +1,30 @@
 // Creates whose outcome is not known yet. A record is written (and flushed) before a create is submitted and removed
 // once Azure's answer is definite, so neither a lost answer nor a gateway crash mid-request can lead to a second
-// create while Azure may still carry out the first. Records expire after the horizon (by then Azure has finished or
-// dropped the request). Kept in the gateway's data directory, so a restarted gateway honors them.
+// create while Azure may still carry out the first. Time passing is not evidence of failure: records remain until a
+// definite outcome is observed. Kept in the gateway's data directory, so a restarted gateway honors them.
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 
 export class UnconfirmedCreates {
   readonly #file: string;
-  readonly #horizonMs: number;
   /** Loaded lazily, so a transient read error is retried on the next operation rather than fixed at start. */
   #records: Record<string, number> | undefined;
 
-  constructor(file: string, horizonMs: number) {
+  constructor(file: string) {
     this.#file = file;
-    this.#horizonMs = horizonMs;
   }
 
   /**
    * When the outstanding create for this key was first submitted, or undefined if there is none (any more). Throws
    * capability_unavailable when the records cannot be read: without them a second create could duplicate a resource.
    */
-  outstanding(key: string, now = Date.now()): number | undefined {
-    const records = this.#load();
-    const since = records[key];
-    if (since === undefined) return undefined;
-    if (now - since < this.#horizonMs) return since;
-    this.clear(key);
-    return undefined;
+  outstanding(key: string): number | undefined {
+    return this.#load()[key];
+  }
+
+  keys(): string[] {
+    return Object.keys(this.#load());
   }
 
   /** Records a create about to be submitted; durable before it returns (throws if it cannot be made durable). */
@@ -45,21 +42,18 @@ export class UnconfirmedCreates {
     this.#records = next; // only once durable: a failed save must not leave a record of a create never sent
   }
 
-  /** Forgets a create whose outcome is now definite. Best effort: a record left behind only makes a later call look first. */
+  /** Forgets a create whose outcome is now definite, without hiding a failed journal update. */
   clear(key: string): void {
-    let records: Record<string, number>;
-    try {
-      records = this.#load();
-    } catch {
-      return;
-    }
+    const records = this.#load();
     if (records[key] === undefined) return;
-    delete records[key];
+    const next = { ...records };
+    delete next[key];
     try {
-      this.#save(records);
-    } catch {
-      // Kept in memory; the next successful save writes it.
+      this.#save(next);
+    } catch (error) {
+      throw new ManagedCopilotError("capability_unavailable", `The Azure creation journal (${this.#file}) could not be updated: ${(error as Error).message}. Check the gateway's data volume before retrying.`);
     }
+    this.#records = next;
   }
 
   #load(): Record<string, number> {
@@ -77,7 +71,7 @@ export class UnconfirmedCreates {
     } catch (error) {
       throw this.#unreadable((error as Error).message);
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((since) => typeof since !== "number")) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || Object.values(parsed).some((since) => typeof since !== "number" || !Number.isSafeInteger(since) || since < 0)) {
       throw this.#unreadable("it is not a record of creates");
     }
     return (this.#records = { ...(parsed as Record<string, number>) });
@@ -87,15 +81,16 @@ export class UnconfirmedCreates {
     return new ManagedCopilotError(
       "capability_unavailable",
       `The record of Azure creates that may still take effect (${this.#file}) cannot be read (${reason}), so no sandbox or disk image is created until it can: ` +
-        "a second create could duplicate one Azure is still making. If the file is damaged, check the sandbox group for duplicates, then remove it.",
+        "a second create could duplicate one Azure is still making. Restore the journal from backup or establish the outstanding operations' outcomes before repairing it.",
     );
   }
 
   #save(records: Record<string, number>): void {
     const directory = dirname(this.#file);
     mkdirSync(directory, { recursive: true });
+    syncDirectory(dirname(directory));
     const temporary = `${this.#file}.${process.pid}.tmp`;
-    const fd = openSync(temporary, "w");
+    const fd = openSync(temporary, "w", 0o600);
     try {
       writeFileSync(fd, JSON.stringify(records)); // writes every byte (a short write is retried, not ignored)
       fsyncSync(fd);

@@ -236,8 +236,9 @@ outlive their compute, and a default-deny egress engine; managed session-worker 
   changes live, while the platform policy keeps a sandbox that ignores its proxy settings off the Internet. Limits: DNS
   resolution stays available to sandboxes (connections still need the proxy); the proxy sees translated source
   addresses, so the platform does not pin credentials to a sandbox's address (the per-sandbox credential still
-  authenticates every request); and the proxy's CA is generated when it starts, so after a proxy restart, running
-  sandboxes that use vault credentials over TLS need a restart (stop and resume the session).
+  authenticates every request). The proxy's CA is stored in the NFS share's `egress/` directory. An init container
+  makes only that mounted directory writable by uid 1000; the proxy remains non-root. Atomic CA creation makes
+  overlapping revisions share the same key pair. An intentional CA rotation still requires sandbox re-registration.
 
 Qualification (2026-10-24, westus2): a probe deployment (`deploy/azure/qualify`) checked the service directly, and a
 gateway using this provider passed the isolated end-to-end suite (`deploy/azure/qualify/isolated.live.ts`: session
@@ -323,6 +324,8 @@ identities. Your AppHost's user secrets stay on your machine.
   cannot reach) and that its key matches the gateway's (`Parameters:<name>-egress-key`).
 - **The image step fails at `az acr login`**: install the Azure CLI and sign in with the account you deploy with.
 - **"Azure did not confirm whether … was created" / "An earlier attempt … has not been confirmed"**: Azure's answer to a
-  create was lost. The gateway never submits a second create while the first may still take effect (for up to 5
-  minutes); retry when the message says, and it adopts the resource if Azure created it.
+  create was lost. The gateway retains its write-ahead record across restarts and retries only the lookup, not the
+  create. Neither elapsed time nor an empty lookup proves failure. It preserves associated disks until the operation
+  is reconciled. If Azure never reports the outcome, establish it with Azure support before repairing the journal;
+  do not delete the journal simply to force a retry.
 - **A gateway replica stays "not ready"**: it is waiting for the lease; its log says which replica holds it.
