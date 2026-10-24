@@ -12,6 +12,7 @@ description: The software factory's release checklist for integrating parallel t
    and that cross-task imports use the paths and exports the plan's interfaces promise. Fix mismatches minimally.
 4. **Integration test.** Create `test/integration.test.js` that exercises the integration notes end to end through
    the public entry points, for example by running each command with `child_process.spawnSync(process.execPath, ...)`.
+   Follow the `node-project` skill's portability rules: resolve files with `fileURLToPath`, never `URL.pathname`.
 5. **README.md.** Cover: what the project does, requirements (Node.js 24), usage for every command with flags and an
    example, the library API if any, and how to run the tests (`npm test`).
 6. **Verify.** Run `npm run check:release`. Fix failures and repeat until it passes. If a task's own tests fail
@@ -28,6 +29,9 @@ description: The software factory's release checklist for integrating parallel t
 
    ## Verification
    - <N> tests passed (<task tests> task tests + <M> integration tests)
+
+   ## Review
+   - <one bullet per task: approved in round N, or sent back and what changed (from .factory/REVIEWS.md)>
 
    ## Notes
    - <integration fixes you made, accepted review findings, known limitations>

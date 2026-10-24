@@ -408,6 +408,18 @@ describe("Factory pipeline", () => {
     expect(factory.activity(created.id).some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(true);
   });
 
+  it("reconciles finished work orders with the platform's session list", async () => {
+    const { platform, factory } = setup({ planner, builder: builder(), reviewer, release });
+    const created = factory.create(CREATE);
+    await settle(factory, created.id);
+    const releaseSession = factory.get(created.id)!.stations.find((station) => station.id === "release")!.sessionId!;
+    platform.lost.add(releaseSession);
+    await factory.reconcileSessions();
+    const wo = factory.get(created.id)!;
+    expect(wo.stations.find((station) => station.id === "release")!.sessionState).toBe("deleted");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.sessionState).toBe("idle");
+  });
+
   it("leaves files a builder deleted in a later round out of the release", async () => {
     const shrinking: Script = async (session, prompt, platform) => {
       const task = taskOf(platform, session);

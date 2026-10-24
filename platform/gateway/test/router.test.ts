@@ -367,4 +367,35 @@ describe("core router across gateway restarts", () => {
       await github.close();
     }
   });
+
+  it("re-creates a session the restarted runtime forgot if it never ran a turn, and never papers over lost history", async () => {
+    const runtime = new FakeRuntime();
+    await runtime.start();
+    const github = await startGitHubStub({ [ALICE]: { id: 1001, login: "alice" } });
+    const gateway = await startTestGateway({ runtime, githubUrl: github.url });
+    try {
+      const client = await RawClient.connect(gateway.url, ALICE, "chat");
+      const fresh = crypto.randomUUID();
+      const used = crypto.randomUUID();
+      await client.request("session.create", { sessionId: fresh });
+      await client.request("session.create", { sessionId: used });
+      await client.request("session.sendAndWait", { sessionId: used, prompt: "hello" });
+      // The runtime restarts without state for either session (the stock runtime persists a session with its first turn).
+      runtime.sessions.delete(fresh);
+      runtime.sessions.delete(used);
+      runtime.dropConnections();
+      await sleep(1500);
+      await client.request("session.sendAndWait", { sessionId: fresh, prompt: "first turn" });
+      const creates = runtime.calls("session.create").filter((call) => call.params["sessionId"] === fresh);
+      expect(creates).toHaveLength(2);
+      expect(creates[1]!.params).toMatchObject({ availableTools: creates[0]!.params["availableTools"], gitHubTokenProviderRegistrationId: expect.stringMatching(/^mc-/) });
+      await expect(client.request("session.send", { sessionId: used, prompt: "where did it go?" })).rejects.toMatchObject({ data: { code: "state_restore_failed" } });
+      expect(runtime.calls("session.create").filter((call) => call.params["sessionId"] === used)).toHaveLength(1);
+      await client.close();
+    } finally {
+      await gateway.close();
+      await runtime.close();
+      await github.close();
+    }
+  });
 });

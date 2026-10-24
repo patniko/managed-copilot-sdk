@@ -225,8 +225,11 @@ export class Router {
     } catch (error) {
       const managed = toManagedError(error);
       if (managed.code === "internal") app.log.error("Unhandled request error", { method: req.method, path: url.pathname, error: (error as Error)?.stack ?? String(error) });
-      if (!res.headersSent) sendJson(res, managed.status, managed.toBody());
-      else res.destroy();
+      if (!res.headersSent) {
+        const retryAfter = retryAfterSeconds(managed);
+        if (retryAfter !== undefined) res.setHeader("retry-after", String(retryAfter));
+        sendJson(res, managed.status, managed.toBody());
+      } else res.destroy();
     }
   }
 }
@@ -261,7 +264,14 @@ export class UpgradeRouter {
       if (managed.code === "internal") app.log.error("Unhandled upgrade error", { path: url.pathname, error: (error as Error)?.stack ?? String(error) });
       if (socket.destroyed || !socket.writable) return;
       const body = JSON.stringify(managed.toBody());
-      socket.end(`HTTP/1.1 ${managed.status} Error\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`);
+      const retryAfter = retryAfterSeconds(managed);
+      socket.end(`HTTP/1.1 ${managed.status} Error\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\n${retryAfter !== undefined ? `retry-after: ${retryAfter}\r\n` : ""}connection: close\r\n\r\n${body}`);
     }
   }
+}
+
+/** `Retry-After` for retryable errors that say when to retry (`details.retryAfterSeconds`). */
+function retryAfterSeconds(error: ManagedCopilotError): number | undefined {
+  const value = error.details?.["retryAfterSeconds"];
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value) : undefined;
 }

@@ -108,13 +108,17 @@ function reviewsMarkdown(outcomes: readonly TaskOutcome[]): string {
     const status = acceptedWithFindings
       ? `accepted after ${reviews.length} rounds with findings still open`
       : last
-        ? `approved in round ${last.round}`
+        ? `approved in round ${last.round}${reviews.length > 1 ? ` after ${reviews.length - 1} round${reviews.length > 2 ? "s" : ""} of requested changes` : ""}`
         : "not reviewed";
-    const open = acceptedWithFindings ? (last?.findings ?? []) : (last?.findings ?? []).filter((finding) => finding.severity === "minor");
-    const lines = [`## ${task.id}: ${status}`, "", last?.summary ?? ""];
-    if (open.length > 0) {
-      lines.push("", "Open findings:", ...open.map((finding) => `- [${finding.severity}] ${finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ""}: ` : ""}${finding.message}`));
+    const lines = [`## ${task.id}: ${status}`];
+    for (const review of reviews) {
+      lines.push("", `Round ${review.round}: ${review.verdict === "approve" ? "approved" : "changes requested"}. ${review.summary}`);
+      const shown = review.verdict === "approve" && !acceptedWithFindings ? review.findings.filter((finding) => finding.severity === "minor") : review.findings;
+      lines.push(
+        ...shown.map((finding) => `- [${finding.severity}] ${finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ""}: ` : ""}${finding.message}`),
+      );
     }
+    if (acceptedWithFindings) lines.push("", "The findings from the last round are still open: list them in the release notes.");
     return lines.join("\n");
   });
   return `# Review outcomes\n\n${sections.join("\n\n")}\n`;

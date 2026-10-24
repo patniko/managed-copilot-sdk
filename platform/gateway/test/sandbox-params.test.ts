@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isManagedCopilotError } from "@managed-copilot/protocol";
-import { resolveDockerEndpoints } from "../src/modules/sandbox/docker.js";
+import { resolveDockerEndpoints } from "../src/modules/sandbox/providers/docker/docker.js";
 import { deferAgentSelection, relativeWithin, rewriteSessionParams } from "../src/modules/sandbox/params.js";
 
 describe("deferAgentSelection", () => {

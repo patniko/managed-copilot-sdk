@@ -30,6 +30,7 @@ platform.onStatus((status) => {
   hub.publish({ type: "platform", platform: status });
   const ready = status.features.runs;
   if (ready && !wasReady) factory.resumeInterrupted();
+  if (status.state === "connected" || status.state === "misconfigured") void factory.reconcileSessions();
   wasReady = ready;
 });
 

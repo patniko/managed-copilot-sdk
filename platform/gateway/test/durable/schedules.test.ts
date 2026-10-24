@@ -543,7 +543,7 @@ describe("durable schedules", () => {
       expect(sessions.sends.map((send) => send.prompt)).toEqual(["a"]);
     });
 
-    it("stops an overdue run's turn before admitting the next one, or pauses when it cannot", async () => {
+    it("stops an overdue run only when its own turn is the one running, and otherwise pauses", async () => {
       await schedules.stop();
       schedules = build({ maxRunLifetimeMs: 60_000 });
       const aborted: string[] = [];
@@ -551,7 +551,6 @@ describe("durable schedules", () => {
       sessions.request = (async (sessionId: string, method: string, params: Record<string, unknown>) => {
         if (method === "session.abort") {
           aborted.push(sessionId);
-          if (aborted.length > 1) throw new Error("runtime unavailable");
           return {};
         }
         return request(sessionId, method);
@@ -560,18 +559,88 @@ describe("durable schedules", () => {
       const schedule = await schedules.create(OWNER, { name: "frequent", cron: "*/5 * * * *", environment: "chat", prompt: "p" });
       now = START + 5 * 60_000;
       await tick();
+      const first = sessions.creates[0]!.sessionId;
+      // The run's prompt was consumed and its turn is the session's current turn: stopping it is safe.
+      sessions.emit(first, "user.message", { messageId: "msg-1" });
+      sessions.views.set(first, { ...sessions.views.get(first)!, state: "running", lastTurn: { turnId: "msg-1", status: "running" } });
       now += 2 * 60_000;
       await tick();
-      expect(aborted).toEqual([sessions.creates[0]!.sessionId]);
+      expect(aborted).toEqual([first]);
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/its turn was stopped/) });
 
+      // The next run's prompt never started (queued behind other work): never abort someone else's turn; pause.
       now += 3 * 60_000;
       await tick();
       now += 2 * 60_000;
       await tick();
-      expect(aborted).toHaveLength(2);
-      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/could not be stopped/) });
-      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/could not be stopped/) });
+      expect(aborted).toHaveLength(1);
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/never started/) });
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/never started/) });
+    });
+
+    it("blocks every run, including queued manual ones, while the platform has a schedule paused", async () => {
+      const schedule = await schedules.create(OWNER, { name: "daily", cron: "0 9 * * *", environment: "chat", prompt: "p" });
+      const queued = await schedules.runNow(OWNER.accountId, schedule.id, "before-pause");
+      await schedules.idle();
+      // A person's pause still allows an explicit run now.
+      schedules.pause(OWNER.accountId, schedule.id);
+      sessions.finishTurn(sessions.creates[0]!.sessionId, "msg-1");
+      const manual = await schedules.runNow(OWNER.accountId, schedule.id, "after-user-pause");
+      await schedules.idle();
+      expect(schedules.runs(OWNER.accountId, schedule.id).find((run) => run.id === manual.id)!.status).toBe("running");
+      expect(queued.id).not.toBe(manual.id);
+
+      // A platform pause (here: sign-in revoked) refuses new manual runs and skips any still queued.
+      schedules.pauseAllForOwner(OWNER.accountId, "Paused: signed out");
+      schedules.resume(OWNER.accountId, schedule.id);
+      schedules.pauseAllForOwner(OWNER.accountId, "Paused: signed out");
+      await expectCode(schedules.runNow(OWNER.accountId, schedule.id, "after-platform-pause"), "conflict", /paused by the platform/);
+    });
+
+    it("skips a manual run queued before a platform pause", async () => {
+      const schedule = await schedules.create(OWNER, { name: "daily", cron: "0 9 * * *", environment: "chat", prompt: "p" });
+      await schedules.runNow(OWNER.accountId, schedule.id, "first");
+      await schedules.idle();
+      const second = await schedules.runNow(OWNER.accountId, schedule.id, "second");
+      expect(second.status).toBe("queued");
+      schedules.pauseAllForOwner(OWNER.accountId, "Paused: a run could not be stopped");
+      sessions.finishTurn(sessions.creates[0]!.sessionId, "msg-1");
+      await tick();
+      expect(schedules.runs(OWNER.accountId, schedule.id).find((run) => run.id === second.id)).toMatchObject({ status: "skipped", reason: expect.stringMatching(/could not be stopped/) });
+      expect(sessions.creates).toHaveLength(1);
+    });
+
+    it("pauses schedules that continue a deleted session and skips their queued runs", async () => {
+      sessions.views.set("s-chat", { id: "s-chat", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0 });
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", cron: "0 9 * * *", target: { sessionId: "s-chat" }, prompt: "Check" });
+      sessions.sendFailures.push("refused-transient");
+      await schedules.runNow(OWNER.accountId, schedule.id, "x");
+      await schedules.idle();
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "queued", reason: expect.stringMatching(/^Retrying/) });
+      schedules.onSessionDeleted("s-chat");
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/was deleted/) });
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "skipped", reason: "The session was deleted before this run started" });
+    });
+
+    it("lets a message belong to only one run, and serializes dispatch per session", async () => {
+      sessions.views.set("s-chat", { id: "s-chat", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0 });
+      sessions.history.set("s-chat", []);
+      const a = await schedules.create(OWNER, { name: "a", runAt: new Date(START + 60_000).toISOString(), target: { sessionId: "s-chat" }, prompt: "Check my calendar" });
+      const b = await schedules.create(OWNER, { name: "b", runAt: new Date(START + 60_000).toISOString(), target: { sessionId: "s-chat" }, prompt: "Check my calendar" });
+      now += 60_000;
+      sessions.sendFailures.push("lost");
+      await tick();
+      now += 5_000;
+      await tick();
+      now += 5_000;
+      await tick();
+      const ids = [...schedules.runs(OWNER.accountId, a.id), ...schedules.runs(OWNER.accountId, b.id)].map((run) => run.messageId);
+      expect(new Set(ids).size).toBe(2);
+      expect(sessions.sends).toHaveLength(2);
+      expect(() =>
+        db.prepare("UPDATE durable_schedule_runs SET message_id = ? WHERE schedule_id = ?").run(ids[0]!, b.id),
+      ).toThrow(/UNIQUE/);
     });
 
     it("pauses the owner's schedule with a visible reason when background sign-in is gone at run time", async () => {

@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@managed-copilot/aspire':
+        specifier: workspace:*
+        version: link:packages/aspire
+      '@managed-copilot/cli':
+        specifier: workspace:*
+        version: link:packages/cli
       '@types/node':
         specifier: ^24.0.0
         version: 24.19.2
@@ -20,6 +26,9 @@ importers:
       vitest:
         specifier: ^4.0.0
         version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+      vscode-jsonrpc:
+        specifier: 8.2.1
+        version: 8.2.1
 
   demos/assistant:
     dependencies:
@@ -81,6 +90,37 @@ importers:
       vitest:
         specifier: ^4.0.0
         version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  demos/quickstart:
+    dependencies:
+      '@github/copilot-sdk':
+        specifier: 1.0.26
+        version: 1.0.26
+      '@managed-copilot/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      '@managed-copilot/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+      ws:
+        specifier: ^8.22.0
+        version: 8.22.0
+      zod:
+        specifier: ^4.3.6
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.2
+      tsx:
+        specifier: ^4.21.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
 
   demos/software-factory:
     dependencies:
@@ -146,6 +186,50 @@ importers:
         specifier: ^4.0.0
         version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
+  packages/aspire:
+    dependencies:
+      '@managed-copilot/gateway':
+        specifier: workspace:*
+        version: link:../../platform/gateway
+      '@managed-copilot/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: ^4.3.6
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  packages/cli:
+    dependencies:
+      '@github/copilot-sdk':
+        specifier: 1.0.26
+        version: 1.0.26
+      '@managed-copilot/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@managed-copilot/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   packages/protocol:
     dependencies:
       zod:
@@ -180,6 +264,25 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.2
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
+  platform/egress:
+    dependencies:
+      '@managed-copilot/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      esbuild:
+        specifier: ^0.28.2
+        version: 0.28.2
       typescript:
         specifier: ^5.9.3
         version: 5.9.3

@@ -143,4 +143,7 @@ export const DURABLE_MIGRATIONS: readonly string[] = [
     updated_at INTEGER NOT NULL,
     last_verified_at INTEGER
   );`,
+
+  // 5: a runtime message belongs to at most one run (schedule input reconciliation claims it atomically).
+  `CREATE UNIQUE INDEX durable_schedule_runs_message ON durable_schedule_runs (session_id, message_id) WHERE message_id IS NOT NULL;`,
 ];

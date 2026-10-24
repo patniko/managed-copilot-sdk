@@ -2,7 +2,7 @@
 // real model. Opt in with MANAGED_COPILOT_E2E=1 after `pnpm build`; it needs Docker and a GitHub sign-in (`gh auth
 // login` or GH_TOKEN) with Copilot access. Everything it creates is labelled with a unique instance and removed.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,8 +25,28 @@ const container = (sandboxId: string) => `${instance}-${sandboxId.replace("_", "
 // A tiny npm CLI installed offline during setup proves the persisted tool environment survives idle stop and resume.
 const INSTALL_DEMO_CLI = String.raw`mkdir -p /tmp/npmdemo && cd /tmp/npmdemo && printf '{"name":"demo-cli","version":"1.2.3","bin":{"demo-cli":"cli.js"}}' > package.json && printf '#!/usr/bin/env node\nconsole.log("demo-cli 1.2.3")\n' > cli.js && npm pack --silent && npm install -g --offline --no-audit --no-fund ./demo-cli-1.2.3.tgz`;
 
+/**
+ * Hosts pip needs for setup installs: the configured index (the gateway bakes the same one into the image), else PyPI.
+ * Azure Artifacts feeds behind packagefeedproxy redirect wheel downloads to *.pkgs.visualstudio.com and then to blob
+ * storage (*.vsblob.vsassets.io).
+ */
+function pipHosts(): string[] {
+  let index = process.env.MANAGED_COPILOT_PIP_INDEX_URL;
+  if (!index && enabled) {
+    try {
+      index = /global\.index-url='([^']+)'/.exec(execFileSync("python", ["-m", "pip", "config", "list"], { encoding: "utf8" }))?.[1];
+    } catch {
+      index = undefined;
+    }
+  }
+  if (!index) return ["pypi.org", "files.pythonhosted.org"];
+  const host = new URL(index).hostname;
+  return host.endsWith("packagefeedproxy.microsoft.io") ? [host, "*.pkgs.visualstudio.com", "*.vsblob.vsassets.io"] : [host];
+}
+const PIP_HOSTS = pipHosts();
+
 describe.runIf(enabled)("isolated placement end to end", () => {
-  let gateway: { close(): Promise<void>; server: import("node:http").Server };
+  let gateway: { close(): Promise<void>; server: import("node:http").Server; app: { services: Record<string, unknown> } };
   let managed: any;
   let client: CopilotClient;
   let session: CopilotSession;
@@ -54,6 +74,7 @@ describe.runIf(enabled)("isolated placement end to end", () => {
           name: "copilot",
           environments: {
             coder: { type: "isolated", size: "small", network: false, setupCommands: ["git config --global user.name 'Contoso Agent'", INSTALL_DEMO_CLI], env: { REPORT_TITLE: "Q3 sales" } },
+            egress: { type: "isolated", size: "small", network: { access: "restricted", allowedDomains: PIP_HOSTS }, packages: { python: ["six==1.16.0"] } },
             broken: { type: "isolated", size: "small", network: false, setupCommands: ["echo starting && exit 3"] },
           },
         }),
@@ -70,6 +91,10 @@ describe.runIf(enabled)("isolated placement end to end", () => {
     for (const name of tryDocker("ps", "-a", "--filter", `label=managed-copilot.instance=${instance}`, "--format", "{{.Names}}").split("\n").filter(Boolean)) tryDocker("rm", "-f", name);
     for (const name of tryDocker("volume", "ls", "--filter", `label=managed-copilot.instance=${instance}`, "--format", "{{.Name}}").split("\n").filter(Boolean)) tryDocker("volume", "rm", "-f", name);
     for (const name of tryDocker("network", "ls", "--filter", `label=managed-copilot.instance=${instance}`, "--format", "{{.Name}}").split("\n").filter(Boolean)) tryDocker("network", "rm", name);
+    // Egress resources may carry only the instance prefix.
+    for (const name of tryDocker("ps", "-a", "--filter", `name=${instance}-`, "--format", "{{.Names}}").split("\n").filter(Boolean)) tryDocker("rm", "-f", name);
+    for (const name of tryDocker("volume", "ls", "--filter", `name=${instance}-`, "--format", "{{.Name}}").split("\n").filter(Boolean)) tryDocker("volume", "rm", "-f", name);
+    for (const name of tryDocker("network", "ls", "--filter", `name=${instance}-`, "--format", "{{.Name}}").split("\n").filter(Boolean)) tryDocker("network", "rm", name);
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   }, 120_000);
@@ -121,6 +146,49 @@ describe.runIf(enabled)("isolated placement end to end", () => {
       tryDocker("network", "ls", "--filter", `name=${container(b.id)}`, "--format", "{{.Name}}"),
     ].join("");
     expect(leftovers).toBe("");
+  }, 300_000);
+
+  it("installs setup packages through the egress proxy for a restricted network", async () => {
+    const egress = await managed.client("egress");
+    const restricted = await egress.createSession({ onPermissionRequest: approveAll });
+    const sandboxes = gateway.app.services.sandboxes as any;
+    const setup = sandboxes.setupRecord(restricted.sessionId);
+    expect(setup.state).toBe("succeeded");
+    expect(setup.resolved.python?.six).toBe("1.16.0");
+    const info = (await managed.sessions.get(restricted.sessionId)).sandbox;
+    expect(info.network.access).toBe("restricted");
+    // The workload has no direct route: only the proxy env sandboxd gives the runtime reaches the index.
+    expect(tryDocker("exec", "--user", "10001:10001", container(info.id), "sh", "-c", `curl -sS -m 4 https://${PIP_HOSTS[0]!.replace(/^\*\./, "")}; echo exit=$?`)).toMatch(/exit=(6|7|28)/);
+    await egress.deleteSession(restricted.sessionId);
+  }, 600_000);
+
+  it("imports exported runtime state into a running sandbox for promotion", async () => {
+    const target = await client.createSession({ onPermissionRequest: approveAll });
+    const sandboxes = gateway.app.services.sandboxes as any;
+    const exported = mkdtempSync(join(tmpdir(), "mc-e2e-export-"));
+    try {
+      writeFileSync(join(exported, "events.jsonl"), '{"type":"session.start"}\n');
+      writeFileSync(join(exported, "workspace.yaml"), "id: imported\n");
+      mkdirSync(join(exported, "checkpoints"));
+      writeFileSync(join(exported, "checkpoints", "index.md"), "# Checkpoints\n");
+      writeFileSync(join(exported, "inuse.lock"), "lock");
+      expect(await sandboxes.importRuntimeState(target.sessionId, { sessionStateDir: exported, activeTurnId: "carried-turn" })).toEqual({ files: 3, bytes: 25 + 13 + 14 });
+      const id = (await managed.sessions.get(target.sessionId)).sandbox.id;
+      const list = () =>
+        docker("exec", "--user", "10001:10001", container(id), "sh", "-c", `cd /var/lib/managed-copilot/runtime/session-state/${target.sessionId} && find . -type f | sort && stat -c %u events.jsonl && ls -a ..`);
+      const first = list();
+      expect(first).toContain("./events.jsonl");
+      expect(first).toContain("./checkpoints/index.md");
+      expect(first).not.toContain("inuse.lock");
+      expect(first).toMatch(/^10001$/m);
+      // A retried import replaces the directory instead of merging into it.
+      rmSync(join(exported, "workspace.yaml"));
+      expect((await sandboxes.importRuntimeState(target.sessionId, { sessionStateDir: exported })).files).toBe(2);
+      expect(list()).not.toContain("workspace.yaml");
+    } finally {
+      rmSync(exported, { recursive: true, force: true });
+      await client.deleteSession(target.sessionId);
+    }
   }, 300_000);
 
   it("fails creation explicitly when setup fails", async () => {
