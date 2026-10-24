@@ -137,6 +137,11 @@ describe("vault helpers", () => {
     for (const host of ["api.stripe.com", "invalid.example.com", "localhost.example", "vault.mc.test"]) expect(isUnresolvableName(host), host).toBe(false);
   });
 
+  it("rejects IP addresses and numeric forms as host patterns", () => {
+    for (const pattern of ["10.0.0.1", "93.184.216.34", "*.10.0.0.1", "a.0x7f"]) expect(() => normalizeNetwork([pattern]), pattern).toThrow(/Invalid network host pattern/);
+    expect(normalizeNetwork(["1password.com", "x.1e100.net"]).allowedDomains).toEqual(["1password.com", "x.1e100.net"]);
+  });
+
   it("describes policies", () => {
     expect(describeNetwork(normalizeNetwork(["github.com"]))).toBe("restricted to github.com");
     expect(describeNetwork(normalizeNetwork(false))).toMatch(/network: false/);

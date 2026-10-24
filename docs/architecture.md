@@ -296,17 +296,25 @@ applies the session's policy and attaches vault credentials. Anything else is re
 ### Network policy, egress, and vaults (as built)
 
 - **Effective policy.** `policy.bindSession` computes `narrowNetwork(ceiling, caller request)` where the ceiling is the
-  environment's `network` over the deployment default (`inline-*` environments use the default), persists it in
+  environment's `network` over the deployment default (inline sessions use the default; a declared environment always
+  uses its own setting, whatever its name), persists it in
   `network_sessions`, and returns it. Every later read re-narrows the stored policy by the environment's *current*
   ceiling (an operator can narrow, never broaden a session; a removed environment means no egress).
-  `promoteSession(id, target)` narrows by the isolated target's ceiling, so `network: false` survives promotion.
+  `promoteSession(id, target)` narrows the session's *current* effective policy by the isolated target's ceiling, so
+  `network: false` (including a source tightened after creation) survives promotion. Until `commitPromotion(id)`,
+  `revertPromotion(id)` restores the pre-promotion environment, type, and policy (spec 9.5 pre-commit rollback; kept
+  in SQLite across restarts). Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
+  promotable sessions, and a sandbox left behind by a reverted promotion is pushed with no access.
 - **Shared decision logic.** `evaluateDestination` in `packages/protocol/src/network.ts` is the single rule set for the
-  proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex), ports (default
+  proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex; IP addresses and
+  numeric final labels are not patterns), ports (default
   80/443), canonical hosts (numeric forms such as `2130706433` or `0x7f.1` are rejected before DNS), IP literals
   (refused under host lists), and the address classes allowed after DNS (public only; operator-named private hosts may
   reach RFC 1918/ULA/CGNAT space outside protected ranges; loopback, link-local, metadata including Azure
-  `168.63.129.16`, IPv6 transition forms, multicast, and reserved space never). Callers connect only to the returned
-  addresses, so rebinding cannot redirect them. `.invalid`, `.local`, and `.onion` fail without a lookup.
+  `168.63.129.16`, IPv6 transition forms, multicast, and reserved space never). Operator-blocked and protected ranges
+  apply to every address, public ones included, and to the IPv4 address inside IPv4-mapped and NAT64 forms. Callers
+  connect only to the returned addresses, so rebinding cannot redirect them. `.invalid`, `.local`, and `.onion` fail
+  without a lookup.
 - **Egress proxy** (`platform/egress`, one bundled file, image `managed-copilot-egress:<content hash>`). The gateway's
   supervisor runs it as `${MANAGED_COPILOT_INSTANCE:-mc}-egress` (read-only root, no capabilities, CA volume
   `${instance}-egress-data`) on `${instance}-egress-wan` (its default route) and `${instance}-sandboxes`; the sandbox
@@ -314,14 +322,18 @@ applies the session's policy and attaches vault credentials. Anything else is re
   gateway at `http://host.docker.internal:<port>` with an egress-scoped key (never the platform key). Every connection
   needs the sandbox's proxy credential (Basic, `sandboxId:secret`; the proxy only holds its SHA-256), optionally
   pinned to the sandbox's address; until the first registration snapshot, or 30 s after the gateway stream drops, it
-  fails closed with 503. CONNECT tunnels must start with a TLS ClientHello whose SNI equals the authorized host.
+  fails closed with 503, and at that 30 s deadline it also closes every open connection. Registrations are re-checked
+  after DNS and before each connection is admitted, so revocation or narrowing during a lookup or dial still applies.
+  CONNECT tunnels, vault tunnels included, must start with a TLS ClientHello whose SNI equals the authorized host
+  (parsed strictly: repeated extensions or server names are refused) before any certificate is presented.
   Blocks answer 403 with the reason in the status line and body and are reported to the gateway (no credentials, no
   query strings). The subnets of its non-default interfaces and `10.213.0.0/16` are always protected.
 - **Internal API** (`EGRESS_ROUTES`): `hello` (instance and CA certificate), `stream` (SSE `snapshot`/`upsert`/`remove`/
   `ping`), `secrets/resolve` (authorizes one vault use), `reports`. Registrations carry the policy, credential hash,
   pinned address, and vault bindings (placeholder, exact destinations, header names), never values.
-- **Sandbox registration.** `await policy.registerSandbox({ sandboxId, sessionId })` rotates the proxy credential and
-  returns `{ proxyUrl, env, caCertificate, policy }`. `env` holds `HTTP(S)_PROXY`/`http(s)_proxy` (both cases),
+- **Sandbox registration.** `await policy.registerSandbox({ sandboxId, sessionId, proxy? })` rotates the proxy
+  credential and returns `{ proxyUrl, env, caCertificate, policy }`. `proxyUrl` points at `mc-egress:3128` unless the
+  provider passes `proxy: { host, port }` (for example on Azure). `env` holds `HTTP(S)_PROXY`/`http(s)_proxy` (both cases),
   `NO_PROXY=localhost,127.0.0.1,::1`, `NODE_USE_ENV_PROXY=1`, and one placeholder per vault environment variable.
   The sandbox installs `caCertificate` into the system store (`update-ca-certificates`) and sets `NODE_EXTRA_CA_CERTS`,
   `REQUESTS_CA_BUNDLE`, `SSL_CERT_FILE`, and `PIP_CERT`. With the platform-managed proxy every registration waits for
@@ -332,20 +344,27 @@ applies the session's policy and attaches vault credentials. Anything else is re
   (`POST/GET/DELETE /v1/vaults`, `managed.vaults`) belong to the creating account, are sealed with AES-256-GCM
   (`MANAGED_COPILOT_VAULT_KEY`, else `<data>/network/vault.key`) with the row bound as AAD, and are never returned.
   Binding validates ownership (others' vaults are `not_found`), environment membership for AppHost vaults, and kind
-  (sandbox `env` credentials are refused in shared environments). Placeholders (`mcv_placeholder_` + 40 hex) are
+  (sandbox `env` credentials are refused in shared environments). AppHost vault credentials stay usable only while the
+  session's current environment still grants the vault (inline sessions get none), and user vaults only while the
+  owner still owns them. Placeholders (`mcv_placeholder_` + 40 hex) are
   stable per session and credential; deleting a vault revokes it from running sandboxes at once.
 - **Substitution.** The proxy terminates TLS (ECDSA P-256 platform CA, key kept in the proxy's volume) only for a
   session's vault hosts on port 443. Per request it re-checks the registration, policy, and `Host`; substitutes a
   placeholder only as literal text in that credential's named headers (default `authorization`); rejects
   placeholders in URLs, Basic credentials, other headers, other sessions, other hosts, plain HTTP, and WebSocket
   upgrades; asks the gateway to authorize each use; writes nothing upstream until the destination's certificate
-  verifies; forces `Accept-Encoding: identity` and redacts reflected values (defense in depth only). Clients that
+  verifies (within the connect deadline) and the registration and binding are re-checked once more; forces
+  `Accept-Encoding: identity` and redacts reflected values (defense in depth only). Clients that
   reject the platform CA or pin certificates are reported as `tls_client_untrusted`.
 - **Shared placement.** `web_fetch` (`overridesBuiltInTool`) follows redirects itself, re-evaluating each hop, with
-  size/time limits and HTML-to-text. `adaptMcpServer` rewrites a server to `http://127.0.0.1:<port>/internal/mcp/<route>`
-  plus an HMAC capability header; the adapter re-checks policy per request, does not follow redirects, rewrites legacy
-  SSE `endpoint` events, and attaches the vault MCP credential (`Bearer` unless the vault names a header) at request
-  time. For sandbox placement, `vaults.mcpHeaders(id, url, "sandbox")` returns placeholder headers the proxy fills.
+  size/time limits (30 s for the whole call, body included) and HTML-to-text; it explains failures instead of
+  throwing. `adaptMcpServer` rewrites a server to `http://127.0.0.1:<port>/internal/mcp/<route>`
+  plus an HMAC capability header; the adapter re-checks policy per request, does not follow redirects, asks upstreams
+  for `Accept-Encoding: identity` (a compressed event stream fails with 502), rewrites legacy SSE `endpoint` events
+  (parsed as SSE clients parse them; an event that only becomes `endpoint` after its data passed is renamed so clients
+  ignore it), and attaches the vault MCP credential (`Bearer` unless the vault names a header) at request
+  time. Gateway-side dials and TLS handshakes are bounded by the connect timeout and the caller's cancellation. For
+  sandbox placement, `vaults.mcpHeaders(id, url, "sandbox")` returns placeholder headers the proxy fills.
 - **Visibility.** Blocks are stored per session (`GET /v1/sessions/:id/network`: policy, vaults, newest blocks) and
   published as `network.blocked` platform events (rate-limited).
 - **Limits.** Vault destinations are exact host names on port 443; request bodies, query strings, Basic encodings,
@@ -438,7 +457,7 @@ structurally (they may add members).
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
 | `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
-| `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy`. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
+| `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |
 | `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions`, REST claim/result, capabilities, reconciliation |
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
@@ -622,7 +641,7 @@ sequenceDiagram
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
-| `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` disables it (sandboxes with network access then fail) |
+| `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
 | `MANAGED_COPILOT_EGRESS_KEY` | generated, sealed in the ledger | Egress-scoped internal API key (set it on both sides for `external`) |
 | `MANAGED_COPILOT_EGRESS_ALLOWED_PORTS` / `_PRIVATE_HOSTS` / `_PROTECTED_CIDRS` / `_BLOCKED_CIDRS` | `80,443` / none / `10.213.0.0/16` / none | Operator destination rules shared by the proxy and gateway-side fetches |

@@ -1,4 +1,4 @@
-import { X509Certificate } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createServer, type Server } from "node:https";
 import { tmpdir } from "node:os";
@@ -60,6 +60,34 @@ describe("certificate authority", () => {
   it("caches secure contexts per host", () => {
     expect(ca.contextFor("a.vault.test")).toBe(ca.contextFor("a.vault.test"));
     expect(ca.contextFor("a.vault.test")).not.toBe(ca.contextFor("b.vault.test"));
+  });
+
+  it("uses RFC 5280 key identifiers", () => {
+    const jwk = ca.certificate.publicKey.export({ format: "jwk" });
+    const point = Buffer.concat([Buffer.from([0x04]), Buffer.from(jwk.x!, "base64url"), Buffer.from(jwk.y!, "base64url")]);
+    const expected = createHash("sha1").update(point).digest();
+    expect(ca.certificate.raw.includes(Buffer.concat([Buffer.from([0x04, 0x14]), expected]))).toBe(true);
+  });
+
+  it("chains leaves to CAs whose subject key identifier uses another method", async () => {
+    const operator = new CertificateAuthority(createCaMaterial({ commonName: "Operator CA", keyIdentifier: randomBytes(20) }));
+    const issued = operator.issue("api.vault.test");
+    expect(new X509Certificate(issued.certPem).checkIssued(operator.certificate)).toBe(true);
+    const server: Server = createServer({ key: issued.keyPem, cert: issued.certPem }, (_req, res) => res.end("ok"));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const port = (server.address() as { port: number }).port;
+      const outcome = await new Promise<string>((resolve) => {
+        const socket = connect({ host: "127.0.0.1", port, servername: "api.vault.test", ca: operator.certPem }, () => {
+          resolve(socket.authorized ? "authorized" : "unauthorized");
+          socket.end();
+        });
+        socket.on("error", (error: NodeJS.ErrnoException) => resolve(error.code ?? error.message));
+      });
+      expect(outcome).toBe("authorized");
+    } finally {
+      server.close();
+    }
   });
 
   it("rejects mismatched key material", () => {

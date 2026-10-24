@@ -4,7 +4,6 @@
  * connects only to validated addresses, and verifies TLS against the requested host.
  */
 import { lookup } from "node:dns/promises";
-import { once } from "node:events";
 import { request as httpRequest, type IncomingMessage, type OutgoingHttpHeaders } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import type { Readable } from "node:stream";
@@ -68,6 +67,26 @@ export function defaultPort(url: URL): number {
   return url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
 }
 
+/** Resolves when `socket` emits `event`; rejects on an error, an early close, an abort, or after `timeoutMs`. */
+function settle(socket: Socket, event: "connect" | "secureConnect", what: string, timeoutMs: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const done = (error?: unknown) => {
+      clearTimeout(timer);
+      socket.off(event, onEvent).off("error", done).off("close", onClose);
+      signal?.removeEventListener("abort", onAbort);
+      if (error === undefined) resolve();
+      else reject(error);
+    };
+    const onEvent = () => done();
+    const onClose = () => done(new Error(`${what} was closed early`));
+    const onAbort = () => done(signal?.reason);
+    const timer = setTimeout(() => done(new Error(`${what} timed out`)), timeoutMs);
+    socket.once(event, onEvent).once("error", done).once("close", onClose);
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export class GatewayEgress {
   readonly #options: GatewayEgressOptions;
   readonly #roots: string[];
@@ -87,27 +106,24 @@ export class GatewayEgress {
     return evaluateDestination(policy, url.hostname, defaultPort(url), this.#options.destination);
   }
 
-  /** Connects to a validated destination; for https, resolves after the certificate verified for the host. */
-  async open(decision: Extract<DestinationDecision, { ok: true }>, url: URL): Promise<Socket> {
+  /**
+   * Connects to a validated destination; for https, resolves after the certificate verified for the host. Each dial
+   * and TLS handshake is bounded by the connect timeout and `signal`. A failed attempt moves on to the next validated
+   * address, except a certificate that fails verification, which is reported as is.
+   */
+  async open(decision: Extract<DestinationDecision, { ok: true }>, url: URL, signal?: AbortSignal): Promise<Socket> {
     const connect = this.#options.connect ?? ((address: string, port: number) => netConnect({ host: address, port }));
     const timeoutMs = this.#options.connectTimeoutMs ?? 10_000;
+    const target = `${decision.host}:${decision.port}`;
     let lastError: Error | undefined;
     for (const address of decision.addresses) {
+      signal?.throwIfAborted();
       const socket = connect(address, decision.port);
       try {
-        await new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error(`Connection to ${decision.host}:${decision.port} timed out`)), timeoutMs);
-          socket.once("connect", () => {
-            clearTimeout(timer);
-            resolve();
-          });
-          socket.once("error", (error) => {
-            clearTimeout(timer);
-            reject(error);
-          });
-        });
+        await settle(socket, "connect", `Connection to ${target}`, timeoutMs, signal);
       } catch (error) {
         socket.destroy();
+        if (signal?.aborted) throw error;
         lastError = error as Error;
         continue;
       }
@@ -119,7 +135,15 @@ export class GatewayEgress {
         ALPNProtocols: ["http/1.1"],
         checkServerIdentity: (_name, certificate) => checkServerIdentity(decision.host, certificate),
       });
-      await once(tls, "secureConnect");
+      try {
+        await settle(tls, "secureConnect", `TLS handshake with ${target}`, timeoutMs, signal);
+      } catch (error) {
+        tls.destroy();
+        socket.destroy();
+        if (signal?.aborted || tls.authorizationError) throw error;
+        lastError = error as Error;
+        continue;
+      }
       return tls;
     }
     throw lastError ?? new Error(`Could not connect to ${decision.host}`);
@@ -133,7 +157,7 @@ export class GatewayEgress {
   ): Promise<OutboundResult> {
     const decision = await this.evaluate(policy, url);
     if (!decision.ok) return { decision };
-    const socket = await this.open(decision, url);
+    const socket = await this.open(decision, url, init.signal);
     return await new Promise<OutboundResult>((resolve, reject) => {
       const req = httpRequest({
         method: init.method ?? "GET",
