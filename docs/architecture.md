@@ -476,23 +476,28 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   The export copies the directory into `<dataDir>/promotion/<operation>`: lock files skipped; host paths under the
   data directory rewritten (the session's shared working directory becomes `/workspace`, its deployed customizations
   `/opt/managed-copilot/customizations`, where the sandbox mounts the same bundle, and anything else `/platform`;
-  plain and JSON-escaped separators are matched separately so nested `\n` escapes survive, and punctuation after a
-  path stays outside it); JSONL split on `\n` only, with only lines that mention a path re-serialized; JSON and text
-  files up to 32 MiB rewritten, other files copied byte for byte; refused with `policy_violation` if any file holds a
-  GitHub token (`gh[pousr]_…`, `github_pat_…`, also inside Markdown emphasis, or the owner's live token); at most
-  10,000 files and 1 GiB; any read or write failure fails the export. `sandboxes.importRuntimeState` writes it into
-  the sandbox runtime's `COPILOT_HOME` as uid 10001; a tool promotion passes `activeTurnId` so the carried turn's
-  `outputs/` publish when it completes.
+  each path is read once, in the style its separators show, so nested `\n` escapes survive: plain or JSON-escaped,
+  a forward-slash root continued with backslashes that cannot be JSON escapes is one plain path, a UNC root keeps its
+  `\\` prefix, and punctuation after a path stays outside it); JSONL split on `\n` only, with only lines that mention
+  a path re-serialized; JSON and text files up to 32 MiB rewritten, other files copied byte for byte; refused with
+  `policy_violation` if any file holds a GitHub token (`gh[pousr]_…`, `github_pat_…`, also inside Markdown emphasis,
+  or the owner's live token); at most 10,000 files and 1 GiB; any read or write failure fails the export.
+  `sandboxes.importRuntimeState` writes it into the sandbox runtime's `COPILOT_HOME` as uid 10001; a tool promotion
+  passes `activeTurnId` so the carried turn's `outputs/` publish when it completes.
 - **Open and commit.** `cutover.open({ continuePendingWork })` resumes the session on the sandbox runtime with the
   sandbox admission and the union of attached clients' registrations; a tool promotion verifies the carried call is
-  pending there and records its request ID. `commit()` moves placement and generation in one transaction and switches
-  routing; the old owner stays fenced, and nothing after the commit can roll the move back. Then:
+  pending there and records its request ID. The destination does not keep the shared prompt's `request_sandbox`
+  section: `systemMessage` is per-resume configuration (see the stock facts above), so it gets only what `open()`
+  sends. `await commit()` moves placement and generation in one ledger update, switches routing, delivers what the
+  cutover held back, and lifts the fence; the old owner never runs again, and nothing after the ledger update can roll
+  the move back (a commit that reports an error after it is finished, not undone). Then:
   `policy.commitPromotion`, `actions.onGenerationChanged(id, generation, { carried: [requestId] })` (the carried call
   keeps its platform claim and its answer is delivered into the new generation), the `session.promoted` platform
   event (id `evt_promoted_<operation>`, top-level `sessionId` and `sandboxId`; `data: SessionPromotedData` with
-  `generation`, `target`, `trigger`, `toolCallId`, `network`, `durationMs`), and removal of the source's copy of the
-  state, so the fenced owner can never be reactivated. Only then does `request_sandbox` return; durable delivers its
-  result to the sandbox runtime and the turn continues there with the shell.
+  `generation`, `target`, `trigger`, `toolCallId`, `network`, `durationMs`; published again with the same ID at the
+  next start if the event ledger reports it did not store it), and removal of the source's copy of the state, so the
+  fenced owner can never be reactivated. Only then does `request_sandbox` return; durable delivers its result to the
+  sandbox runtime and the turn continues there with the shell.
 - **One `sendAndWait` across the move.** The caller's in-flight `session.sendAndWait` is answered by the source with
   `aborted: true` when it is suspended; core holds that reply and completes the request from the owning runtime's
   events exactly as the stock runtime does (next root `session.idle`; `response` is that message's last root
@@ -507,11 +512,14 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   only log, and core recovers the destination.
 - **Restarts.** While modules register (before durable replays platform tools), open attempts are reconciled against
   core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
-  generation at once; any other is marked failed, its network narrowing reverted, and its candidate sandbox and
-  staging released at start (core returns `promoting` rows to `idle`). Committed attempts then finish what they owe
-  (the event, staging, the source's copy of the state), but only for the incarnation that was promoted: a session ID
-  reused after deletion is never touched. A restart still interrupts the turn that was moving, as it interrupts any
-  running turn.
+  generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried
+  `request_sandbox` call re-applies that before answering); any other is marked failed and its network narrowing
+  reverted (core returns `promoting` rows to `idle`). Candidate sandboxes left behind are released at start or by the
+  session's next attempt before it allocates: releases and allocations run one at a time per session, and a release
+  happens only while it is still owed, so it never undoes a newer attempt's candidate. Committed attempts then finish
+  what they owe (the event, staging, the source's copy of the state) for the incarnation that was promoted, or after
+  that session was deleted; a session ID reused by a new session is never touched. A restart still interrupts the
+  turn that was moving, as it interrupts any running turn.
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
   attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
   publishes the same session on the sandbox runtime's AHP host.
