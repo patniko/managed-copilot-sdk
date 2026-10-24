@@ -44,6 +44,7 @@ export class SandboxAgent {
   #starting = false;
   #secrets: string[] = [];
   #envKey: string | undefined;
+  #persisting: Promise<void> = Promise.resolve();
 
   constructor(config: AgentConfig, log: Log) {
     this.#config = config;
@@ -77,10 +78,19 @@ export class SandboxAgent {
     }
   }
 
-  async #persist(record: SandboxSetupRecord): Promise<void> {
-    const temp = `${this.#setupFile}.${randomBytes(4).toString("hex")}`;
-    await fs.writeFile(temp, JSON.stringify(record), { mode: 0o600 });
-    await fs.rename(temp, this.#setupFile);
+  /**
+   * Writes the setup record atomically. Writes are queued so they land in call order: progress updates are not
+   * awaited, and an older "running" record must never replace the final one (a resume would then refuse to start).
+   */
+  #persist(record: SandboxSetupRecord): Promise<void> {
+    const write = async (): Promise<void> => {
+      const temp = `${this.#setupFile}.${randomBytes(4).toString("hex")}`;
+      await fs.writeFile(temp, JSON.stringify(record), { mode: 0o600 });
+      await fs.rename(temp, this.#setupFile);
+    };
+    const next = this.#persisting.then(write, write);
+    this.#persisting = next.catch(() => undefined);
+    return next;
   }
 
   status(): SandboxdStatus {
@@ -251,10 +261,10 @@ export class SandboxAgent {
 
   #spawnWorker(args: readonly string[]) {
     // The worker enters /workspace itself, after dropping to the workload identity.
-    const target = asWorkload(IDENTITY, "/", process.execPath, [WORKER, ...args]);
+    const target = asWorkload(IDENTITY, "/", process.execPath, [WORKER, ...args], { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: PATHS.home });
     return spawn(target.command, target.args, {
       cwd: target.cwd,
-      env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: PATHS.home },
+      env: target.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
   }

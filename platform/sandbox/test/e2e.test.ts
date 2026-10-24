@@ -75,6 +75,8 @@ describe.runIf(enabled)("isolated placement end to end", () => {
           environments: {
             coder: { type: "isolated", size: "small", network: false, setupCommands: ["git config --global user.name 'Contoso Agent'", INSTALL_DEMO_CLI], env: { REPORT_TITLE: "Q3 sales" } },
             egress: { type: "isolated", size: "small", network: { access: "restricted", allowedDomains: PIP_HOSTS }, packages: { python: ["six==1.16.0"] } },
+            // glibc writes one LD_DEBUG_OUTPUT file per process that honored the loader variables.
+            ldprobe: { type: "isolated", size: "small", network: false, env: { LD_DEBUG: "libs", LD_DEBUG_OUTPUT: "/tmp/lddebug" }, setupCommands: ["true"] },
             broken: { type: "isolated", size: "small", network: false, setupCommands: ["echo starting && exit 3"] },
           },
         }),
@@ -188,6 +190,20 @@ describe.runIf(enabled)("isolated placement end to end", () => {
     } finally {
       rmSync(exported, { recursive: true, force: true });
       await client.deleteSession(target.sessionId);
+    }
+  }, 300_000);
+
+  it("never lets the workload environment reach a process that still runs as root", async () => {
+    const probe = await managed.client("ldprobe");
+    const probeSession = await probe.createSession({ onPermissionRequest: approveAll });
+    try {
+      const id = (await managed.sessions.get(probeSession.sessionId)).sandbox.id;
+      // Setup commands and the runtime honor the workload's LD_DEBUG as uid 10001. setpriv, the only launcher process
+      // that runs as root (and the only one linking libcap-ng), must never see it: LD_AUDIT would run code as root.
+      expect(docker("exec", container(id), "sh", "-c", "stat -c %u /tmp/lddebug.* | sort -u")).toBe("10001");
+      expect(docker("exec", container(id), "sh", "-c", "grep -l libcap-ng /tmp/lddebug.* || true")).toBe("");
+    } finally {
+      await probe.deleteSession(probeSession.sessionId);
     }
   }, 300_000);
 

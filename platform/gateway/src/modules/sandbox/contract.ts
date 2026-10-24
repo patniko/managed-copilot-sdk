@@ -132,6 +132,13 @@ export interface FileDownload {
 }
 
 export interface SandboxesService {
+  /**
+   * True while the backend answered its latest readiness check (at registration, every 30 s, and before every backend
+   * operation). `/v1/info` advertises `isolated` and `files` only while this is true.
+   */
+  readonly available: boolean;
+  /** Re-checks the backend now and returns the new `available`. */
+  probe(): Promise<boolean>;
   create(request: CreateSandboxRequest): Promise<SandboxHandle>;
   /** Idempotent; restarts stopped compute and restores declared state without replaying setup. */
   ensureRunning(sessionId: string): Promise<SandboxHandle>;
