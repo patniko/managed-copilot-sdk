@@ -1,10 +1,17 @@
 // Local Docker backend for isolated placement: one container per session on its own internal network, per-session
 // volumes for /workspace, HOME, and runtime state, and a relay container the host gateway reaches each sandboxd through.
 import { createHash } from "node:crypto";
-import { SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, ManagedCopilotError, type SandboxSize } from "@managed-copilot/protocol";
-import type { Logger } from "../../log.js";
-import { DockerError, type DockerClient } from "./docker.js";
-import type { RelayTarget } from "./agent-client.js";
+import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, ManagedCopilotError, type EnvironmentConfig } from "@managed-copilot/protocol";
+import type { Logger } from "../../../../log.js";
+import type { SandboxEndpoint, SandboxImageRef, SandboxProvider, SandboxProviderDeps, SandboxSpec, SandboxStartResult } from "../types.js";
+import { DockerClient, DockerError, resolveDockerEndpoints } from "./docker.js";
+import { SandboxImages } from "./images.js";
+
+interface RelayTarget {
+  /** e.g. http://127.0.0.1:52011 */
+  readonly baseUrl: string;
+  readonly platformKey: string;
+}
 
 export const LABELS = {
   instance: "managed-copilot.instance",
@@ -24,26 +31,12 @@ export interface SandboxResources {
   readonly volumes: { readonly workspace: string; readonly home: string; readonly state: string };
 }
 
-export interface CreateContainerInput {
-  readonly sandboxId: string;
-  readonly sessionId: string;
-  readonly ownerId: number;
-  readonly environment: string;
-  readonly size: SandboxSize;
-  readonly imageId: string;
-  readonly key: string;
-  readonly runtimeToken: string;
-  /** Host path of the pinned customizations bundle, mounted read-only. */
-  readonly customizations?: string;
-}
-
 export interface ProviderOptions {
   readonly docker: DockerClient;
+  readonly images: SandboxImages;
   readonly instance: string;
   readonly platformKey: string;
   readonly log: Logger;
-  /** The image the relay runs from (the base sandbox image). */
-  readonly relayImage: () => Promise<string>;
   /** Base of the subnet pool for per-sandbox networks, e.g. 10.213.0.0 (a /16), carved into /28s. */
   readonly subnetPool?: string;
 }
@@ -60,12 +53,79 @@ function isPoolOverlap(error: unknown): boolean {
   return error instanceof DockerError && /overlap|pool|subnet|address/i.test(error.message);
 }
 
-export class DockerSandboxProvider {
+/** Builds the local Docker provider from gateway settings (`DOCKER_HOST`, `MANAGED_COPILOT_SANDBOX_*`). */
+export function createDockerSandboxProvider(deps: SandboxProviderDeps): DockerSandboxProvider {
+  const { env, log } = deps;
+  const docker = new DockerClient(resolveDockerEndpoints(env));
+  const images = new SandboxImages({ docker, log, env, appHostDir: deps.appHostDir, ...(env.MANAGED_COPILOT_SANDBOX_CONTEXT ? { contextDir: env.MANAGED_COPILOT_SANDBOX_CONTEXT } : {}) });
+  return new DockerSandboxProvider({
+    docker,
+    images,
+    instance: deps.instance,
+    platformKey: deps.platformKey,
+    log,
+    ...(env.MANAGED_COPILOT_SANDBOX_SUBNET_POOL ? { subnetPool: env.MANAGED_COPILOT_SANDBOX_SUBNET_POOL } : {}),
+  });
+}
+
+export class DockerSandboxProvider implements SandboxProvider {
+  readonly kind = "docker";
+  /** Warm sandboxes would need prepared, unassigned containers that never held another session's state; not offered locally. */
+  readonly capabilities = { warm: false, addressPinning: true };
   readonly #options: ProviderOptions;
   #relay: Promise<RelayTarget> | undefined;
+  #ready: Promise<void> | undefined;
 
   constructor(options: ProviderOptions) {
     this.#options = options;
+  }
+
+  ready(): Promise<void> {
+    const { docker, log } = this.#options;
+    this.#ready ??= docker.ping().then(
+      (info) => {
+        log.info("Docker is available for sandboxes", { version: info.version, platform: `${info.os}/${info.arch}`, endpoint: docker.endpoint.label });
+      },
+      (error: unknown) => {
+        this.#ready = undefined;
+        throw new ManagedCopilotError("capability_unavailable", `Isolated sandboxes need Docker, which is not reachable (${(error as Error).message}). Start Docker Desktop and retry.`);
+      },
+    );
+    return this.#ready;
+  }
+
+  async prepare(): Promise<void> {
+    await this.ready();
+    await this.#options.images.ensureBase();
+    await this.relay();
+  }
+
+  async ensureImage(environment: string, config: EnvironmentConfig): Promise<SandboxImageRef> {
+    const image = await this.#options.images.ensureEnvironment(environment, config);
+    return { ref: image.tag, id: image.id };
+  }
+
+  async hasImage(id: string): Promise<boolean> {
+    return Boolean(await this.#options.docker.inspectImage(id));
+  }
+
+  async endpoint(sandboxId: string): Promise<SandboxEndpoint> {
+    const relay = await this.relay();
+    return { url: `${relay.baseUrl}/relay/${sandboxId}`, headers: { [PLATFORM_KEY_HEADER]: relay.platformKey } };
+  }
+
+  reportUnreachable(): void {
+    this.#relay = undefined;
+  }
+
+  async reattach(sandboxId: string): Promise<void> {
+    await this.attachPlatform(this.resources(sandboxId).network);
+  }
+
+  async shutdown(): Promise<void> {
+    if (!this.#ready) return;
+    this.#relay = undefined;
+    await this.#options.docker.removeContainer(this.relayName);
   }
 
   get instance(): string {
@@ -118,16 +178,13 @@ export class DockerSandboxProvider {
     return this.#relay;
   }
 
-  /** Forgets the cached relay address so the next call re-checks the container. */
-  resetRelay(): void {
-    this.#relay = undefined;
-  }
-
   async #startRelay(): Promise<RelayTarget> {
     const { docker, log, platformKey } = this.#options;
+    await this.ready();
     await this.#ensureNetwork(this.edgeNetwork, { Driver: "bridge", Internal: false, Labels: this.#labels("edge-network") });
     await this.#ensureNetwork(this.sandboxesNetwork, { Driver: "bridge", Internal: true, Labels: this.#labels("sandboxes-network") });
-    const image = await this.#options.relayImage();
+    // The relay runs from the base sandbox image.
+    const image = (await this.#options.images.ensureBase()).id;
     const keyHash = hashKey(platformKey);
     let existing = await docker.inspectContainer(this.relayName);
     if (existing && (existing.Config.Labels?.[LABELS.keyHash] !== keyHash || existing.Image !== image)) {
@@ -217,32 +274,33 @@ export class DockerSandboxProvider {
     if (await docker.inspectContainer(this.egressName)) await docker.connectNetwork(network, this.egressName, ["mc-egress"]);
   }
 
-  async create(input: CreateContainerInput): Promise<{ resources: SandboxResources; subnet: string }> {
-    const { docker } = this.#options;
-    const resources = this.resources(input.sandboxId);
+  async create(spec: SandboxSpec): Promise<void> {
+    const { docker, log } = this.#options;
+    await this.ready();
+    const resources = this.resources(spec.sandboxId);
     const labels = this.#labels("sandbox", {
-      [LABELS.sandbox]: input.sandboxId,
-      [LABELS.session]: input.sessionId,
-      [LABELS.owner]: String(input.ownerId),
-      [LABELS.environment]: input.environment,
+      [LABELS.sandbox]: spec.sandboxId,
+      [LABELS.session]: spec.sessionId,
+      [LABELS.owner]: String(spec.ownerId),
+      [LABELS.environment]: spec.environment,
     });
-    const subnet = await this.#createSandboxNetwork(input.sandboxId, resources.network);
+    const subnet = await this.#createSandboxNetwork(spec.sandboxId, resources.network);
     await this.attachPlatform(resources.network);
     for (const volume of Object.values(resources.volumes)) await docker.createVolume(volume, labels);
-    const size = SANDBOX_SIZES[input.size];
+    const size = SANDBOX_SIZES[spec.size];
     const mounts: Record<string, unknown>[] = [
       { Type: "volume", Source: resources.volumes.workspace, Target: SANDBOX_PATHS.workspace },
       { Type: "volume", Source: resources.volumes.home, Target: SANDBOX_PATHS.home },
       { Type: "volume", Source: resources.volumes.state, Target: SANDBOX_PATHS.state },
     ];
-    if (input.customizations) mounts.push({ Type: "bind", Source: input.customizations, Target: SANDBOX_PATHS.customizations, ReadOnly: true });
+    if (spec.customizations) mounts.push({ Type: "bind", Source: spec.customizations, Target: SANDBOX_PATHS.customizations, ReadOnly: true });
     try {
       await docker.createContainer(resources.container, {
-        Image: input.imageId,
+        Image: spec.imageId,
         User: "0:0",
         Hostname: "sandbox",
         WorkingDir: SANDBOX_PATHS.workspace,
-        Env: [`SANDBOX_ID=${input.sandboxId}`, `SANDBOXD_KEY=${input.key}`, `SANDBOXD_RUNTIME_TOKEN=${input.runtimeToken}`],
+        Env: Object.entries(spec.env).map(([name, value]) => `${name}=${value}`),
         Labels: labels,
         HostConfig: {
           NanoCpus: size.cpus * 1_000_000_000,
@@ -264,25 +322,26 @@ export class DockerSandboxProvider {
       if (!isConflict(error)) throw error;
     }
     await docker.startContainer(resources.container);
-    return { resources, subnet };
+    log.debug("Sandbox container started", { sandboxId: spec.sandboxId, network: resources.network, subnet });
   }
 
-  /** Starts a stopped sandbox, recreating its network attachment if needed. Returns false if the container is gone. */
-  async start(sandboxId: string): Promise<boolean> {
+  /** Starts a stopped sandbox, recreating its network attachment if needed. */
+  async start(sandboxId: string): Promise<SandboxStartResult> {
     const { docker } = this.#options;
+    await this.ready();
     const resources = this.resources(sandboxId);
     const container = await docker.inspectContainer(resources.container);
-    if (!container) return false;
+    if (!container) return (await this.#volumesExist(sandboxId)) ? "recreate" : "gone";
     if (!(await docker.inspectNetwork(resources.network))) {
       await this.#createSandboxNetwork(sandboxId, resources.network);
       await docker.connectNetwork(resources.network, resources.container, [resources.alias]);
     }
     await this.attachPlatform(resources.network);
     if (!container.State.Running) await docker.startContainer(resources.container);
-    return true;
+    return "started";
   }
 
-  async volumesExist(sandboxId: string): Promise<boolean> {
+  async #volumesExist(sandboxId: string): Promise<boolean> {
     const resources = this.resources(sandboxId);
     const volumes = await this.#options.docker.listVolumes({ label: [`${LABELS.sandbox}=${sandboxId}`] });
     const names = new Set(volumes.map((volume) => volume.Name));
@@ -350,11 +409,5 @@ export class DockerSandboxProvider {
       if (id) ids.add(id);
     }
     return ids;
-  }
-
-  /** Removes the relay (on gateway shutdown). */
-  async removeRelay(): Promise<void> {
-    this.#relay = undefined;
-    await this.#options.docker.removeContainer(this.relayName);
   }
 }
