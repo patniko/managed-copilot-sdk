@@ -22,7 +22,10 @@ export interface AzureSandboxConfig {
   readonly credential: "managed-identity" | "cli";
   /** Client ID of the user-assigned managed identity the gateway authenticates as. */
   readonly clientId?: string;
-  /** Environment name → registry image built by `aspire deploy` (`*` covers environments without their own image). */
+  /**
+   * Environment name → registry image built by `aspire deploy` (`*` covers environments without their own image).
+   * Images without a registry host are in `MANAGED_COPILOT_AZURE_REGISTRY`.
+   */
   readonly images: Readonly<Record<string, string>>;
   /** Resource ID of the managed identity the sandbox group uses to pull those images. */
   readonly registryIdentity?: string;
@@ -83,6 +86,14 @@ function isCidr(value: string): boolean {
   return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255) && Number(bits) <= 32;
 }
 
+/** Whether an image reference starts with a registry host (`host.domain/...`, `host:port/...`, or `localhost/...`). */
+function hasRegistryHost(reference: string): boolean {
+  const slash = reference.indexOf("/");
+  if (slash < 0) return false;
+  const first = reference.slice(0, slash);
+  return first === "localhost" || first.includes(".") || first.includes(":");
+}
+
 export function loadAzureConfig(env: Readonly<Record<string, string | undefined>>): LoadedConfig {
   const problems: string[] = [];
   const required = (name: string): string => {
@@ -104,10 +115,18 @@ export function loadAzureConfig(env: Readonly<Record<string, string | undefined>
   }
 
   const images = parseJson<Record<string, unknown>>(env.MANAGED_COPILOT_AZURE_SANDBOX_IMAGES, "MANAGED_COPILOT_AZURE_SANDBOX_IMAGES", problems) ?? {};
+  const registry = env.MANAGED_COPILOT_AZURE_REGISTRY?.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
   const imageMap: Record<string, string> = {};
   for (const [name, value] of Object.entries(images)) {
-    if (typeof value === "string" && value.trim()) imageMap[name] = value.trim();
-    else problems.push(`MANAGED_COPILOT_AZURE_SANDBOX_IMAGES["${name}"] must be an image reference.`);
+    if (typeof value !== "string" || !value.trim()) {
+      problems.push(`MANAGED_COPILOT_AZURE_SANDBOX_IMAGES["${name}"] must be an image reference.`);
+    } else if (hasRegistryHost(value.trim())) {
+      imageMap[name] = value.trim();
+    } else if (registry) {
+      imageMap[name] = `${registry}/${value.trim()}`;
+    } else {
+      problems.push(`MANAGED_COPILOT_AZURE_SANDBOX_IMAGES["${name}"] names no registry and MANAGED_COPILOT_AZURE_REGISTRY is not set.`);
+    }
   }
   if (Object.keys(imageMap).length === 0 && !problems.some((problem) => problem.startsWith("MANAGED_COPILOT_AZURE_SANDBOX_IMAGES"))) {
     problems.push("MANAGED_COPILOT_AZURE_SANDBOX_IMAGES is not set: no sandbox images were built for this deployment. Redeploy with `aspire deploy`.");

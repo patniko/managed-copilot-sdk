@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isManagedCopilotError, type EnvironmentConfig } from "@managed-copilot/protocol";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogger } from "../src/log.js";
 import { SandboxApi } from "../src/modules/sandbox/providers/azure/api.js";
 import { loadAzureConfig } from "../src/modules/sandbox/providers/azure/config.js";
@@ -214,6 +214,38 @@ describe("Azure sandbox provider", () => {
     const error = await provider().ready().catch((caught: unknown) => caught);
     expect(isManagedCopilotError(error, "capability_unavailable")).toBe(true);
     expect((error as Error).message).toMatch(/Container Apps SandboxGroup Data Owner/);
+  });
+
+  it("resolves registry-relative images against MANAGED_COPILOT_AZURE_REGISTRY", () => {
+    const images = JSON.stringify({ "*": "copilot-sandbox:abc", coder: "other.example/coder:def", local: "localhost/x:1" });
+    expect(loadAzureConfig(env({ MANAGED_COPILOT_AZURE_SANDBOX_IMAGES: images, MANAGED_COPILOT_AZURE_REGISTRY: "myacr.azurecr.io" })).config?.images).toEqual({
+      "*": "myacr.azurecr.io/copilot-sandbox:abc",
+      coder: "other.example/coder:def",
+      local: "localhost/x:1",
+    });
+    const missing = loadAzureConfig(env({ MANAGED_COPILOT_AZURE_SANDBOX_IMAGES: images }));
+    expect(missing.config).toBeUndefined();
+    expect(missing.problems.join(" ")).toMatch(/\["\*"\] names no registry and MANAGED_COPILOT_AZURE_REGISTRY is not set/);
+  });
+
+  it("trusts a successful readiness check only briefly, and re-checks right after a failure", async () => {
+    let now = 1_000_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const subject = provider();
+      const lists = () => plane.requests.filter((request) => request === "GET /sandboxes").length;
+      await subject.ready();
+      await subject.ready();
+      expect(lists()).toBe(1);
+      now += 31_000;
+      plane.denyAll = true;
+      await expect(subject.ready()).rejects.toThrow(/SandboxGroup Data Owner/);
+      plane.denyAll = false;
+      await subject.ready();
+      expect(lists()).toBe(3);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("converts each deployed image into a disk image once and reuses it", async () => {

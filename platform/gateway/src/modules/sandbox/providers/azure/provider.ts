@@ -44,6 +44,8 @@ const READY_IMAGE_STATES = new Set(["ready", "succeeded"]);
 const FAILED_IMAGE_STATES = new Set(["failed"]);
 const FAILED_SANDBOX_STATES = new Set(["failed", "stopfailed"]);
 const CUSTOMIZATION_LIMITS = { files: 256, bytes: 8 * 1024 * 1024 };
+/** How long a successful readiness check is trusted. */
+const READY_TRUST_MS = 30_000;
 
 export interface AzureProviderOverrides {
   readonly api?: SandboxApi;
@@ -81,6 +83,7 @@ export class AzureSandboxProvider implements SandboxProvider {
   readonly #remoteIds = new Map<string, string>();
   readonly #images = new Map<string, Promise<SandboxImageRef>>();
   #readyUntil = 0;
+  #warnedOpenPorts = false;
 
   constructor(deps: SandboxProviderDeps, loaded: LoadedConfig, api: SandboxApi | undefined, overrides: AzureProviderOverrides = {}) {
     this.#deps = deps;
@@ -108,16 +111,19 @@ export class AzureSandboxProvider implements SandboxProvider {
 
   async ready(): Promise<void> {
     const { config, api } = this.#require();
+    // Also the service's availability probe (every 30 s and before backend operations): trust a success only briefly.
     if (Date.now() < this.#readyUntil) return;
     try {
       await api.listSandboxes({ [LABELS.instance]: this.#instance });
     } catch (error) {
+      this.#readyUntil = 0;
       throw unavailable(`Isolated sessions are not available: ${describeApiError(error, config)}`, error);
     }
-    if (config.ingressCidrs.length === 0) {
+    if (config.ingressCidrs.length === 0 && !this.#warnedOpenPorts) {
+      this.#warnedOpenPorts = true;
       this.#log.warn("Sandbox ports accept any source address; only sandboxd's per-sandbox key protects them. Set MANAGED_COPILOT_AZURE_INGRESS_CIDRS to the gateway's outbound addresses.");
     }
-    this.#readyUntil = Date.now() + 5 * 60_000;
+    this.#readyUntil = Date.now() + READY_TRUST_MS;
   }
 
   /** Converts every deployed sandbox image into a disk image ahead of the first session. */
