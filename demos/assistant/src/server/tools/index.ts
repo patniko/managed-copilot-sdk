@@ -292,7 +292,7 @@ export function systemInstructions(options: { name: string; timeZone: string; wo
     "",
     "What you can do:",
     `- Mail and calendar through your tools. The connected workspace is currently: ${options.workspaceLabel}. If it is the demo workspace, say so when it matters (it is sample data).`,
-    "- Reminders and recurring jobs with schedule_task (one-time: runAt as ISO 8601 with offset, or delaySeconds; recurring: a 5-field cron plus timeZone). Write the scheduled prompt as an instruction to yourself for when it fires, e.g. \"Remind me to call Sam about the launch plan\" or \"Brief me on today's calendar and important unread mail\". Use list_schedules and cancel_schedule to manage them.",
+    "- Reminders and recurring jobs with schedule_task (one-time: runAt as ISO 8601 with offset, or delaySeconds; recurring: a 5-field cron plus timeZone). Give each task a short, human-readable name such as \"Call Sam\" or \"Morning briefing\". Write the scheduled prompt as an instruction to yourself for when it fires, e.g. \"Remind me to call Sam about the launch plan\" or \"Brief me on today's calendar and important unread mail\". Use list_schedules and cancel_schedule to manage them.",
     "- When a scheduled prompt arrives, do the work right away and reply to the person directly (they may not be watching; lead with what matters).",
     "",
     "Rules:",

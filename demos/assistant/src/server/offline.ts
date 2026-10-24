@@ -72,10 +72,8 @@ export class OfflineWorker {
     const rawBody = await ctx.raw(MAX_WEBHOOK_BYTES);
     let event: VerifiedWebhookEvent;
     try {
-      // The action capability must be for the deployment this server is connected to. (Cast: `deploymentUrl` is part
-      // of the durable SDK surface and older builds don't declare it.)
-      const options = { deploymentUrl: this.#deps.platform.managed?.url } as unknown as Parameters<typeof verifyWebhook>[2];
-      event = await verifyWebhook({ headers: ctx.req.headers, rawBody }, secret, options);
+      // The action capability must be for the deployment this server is connected to.
+      event = await verifyWebhook({ headers: ctx.req.headers, rawBody }, secret, { deploymentUrl: this.#deps.platform.managed?.url });
     } catch (error) {
       if (isManagedCopilotError(error, "capability_unavailable")) throw new HttpError(501, "capability_unavailable", errorMessage(error));
       this.#deps.log.warn("Rejected a webhook delivery", { error: errorMessage(error) });
@@ -95,8 +93,8 @@ export class OfflineWorker {
           const answered = this.#offlineIds.size - before;
           if (answered > 0) this.#deps.log.info("Answered tool calls through the webhook", { sessionId: event.sessionId, answered });
         } catch (error) {
-          // For example a capability issued for a different deployment URL (localhost vs 127.0.0.1). Retrying the
-          // delivery won't help; polling with this server's own credentials answers the actions instead.
+          // For example an expired or mismatched capability. Retrying the delivery won't help; polling with this
+          // server's own credentials answers the actions instead.
           this.#deps.log.warn("Couldn't answer actions through the webhook; polling instead", { error: errorMessage(error) });
           void this.reconcile("webhook could not answer");
         }

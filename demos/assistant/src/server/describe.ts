@@ -76,8 +76,15 @@ export function humanizeName(name: string): string {
   return words.charAt(0).toUpperCase() + words.slice(1);
 }
 
+/** The platform names unnamed agent schedules `task-<id>`; those read better as their prompt. */
+export function scheduleDisplayName(name: string, prompt: string): string {
+  if (!/^task-[A-Za-z0-9_-]{4,}$/.test(name)) return humanizeName(name);
+  const clean = prompt.replace(/\s+/g, " ").trim().replace(/[.!]$/, "");
+  return clean.length > 48 ? `${clean.slice(0, 47)}…` : clean || humanizeName(name);
+}
+
 export function scheduleSummary(args: Args, timeZone: string, at: Date): string {
-  const name = (text(args.name) && humanizeName(text(args.name)!)) ?? text(args.prompt) ?? "a task";
+  const name = text(args.name) ? humanizeName(text(args.name)!) : (text(args.prompt) ?? "a task");
   const cron = text(args.cron);
   if (cron) return `${quote(name)} · ${describeCron(cron)}`;
   const runAt = text(args.runAt);

@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
-import { describeApproval, describeTool, humanizeName, scheduleIdFrom } from "../src/server/describe.js";
+import { describeApproval, describeTool, humanizeName, scheduleDisplayName, scheduleIdFrom } from "../src/server/describe.js";
 import { Timeline } from "../src/server/timeline.js";
 
 let seq = 0;
@@ -113,6 +113,8 @@ describe("descriptions", () => {
     expect(humanizeName("stretch-water-reminder-2QQq")).toBe("Stretch water reminder");
     expect(humanizeName("q3-launch-plan")).toBe("Q3 launch plan");
     expect(humanizeName("Weekday morning briefing")).toBe("Weekday morning briefing");
+    expect(scheduleDisplayName("task-Yb4iEB", "Remind Patrick to stretch and grab some water.")).toBe("Remind Patrick to stretch and grab some water");
+    expect(scheduleDisplayName("call-sam", "Remind me to call Sam")).toBe("Call sam");
   });
 
   it("describes scheduling tools and extracts schedule IDs", () => {
