@@ -139,6 +139,22 @@ describe("Supervisor", () => {
     expect((await probe(retry.port))?.status).toBe(503);
   }, 45_000);
 
+  it("lets the newest waiting deployment take over without starting an older one in between", async () => {
+    const dataDir = tempDir();
+    const current = await start(dataDir, "200");
+    await serving(current.port);
+    // The older replica polls far more often, so without deferring it would win the lock the moment it is released.
+    const older = await start(dataDir, "100", { timings: { pollMs: 5 } });
+    await standby(older.port);
+
+    const newest = await start(dataDir, "300", { timings: { pollMs: 300 } });
+    expect((await serving(newest.port)).generation).toBe("2");
+    await standby(current.port);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect((await probe(older.port))?.status).toBe(503);
+    expect(older.logs.some((entry) => /Took the single-writer lease/.test(entry.message))).toBe(false);
+  }, 45_000);
+
   it("kills the gateway at once and exits when the lease cannot be renewed", async () => {
     const dataDir = tempDir();
     const holder = await start(dataDir, "100");

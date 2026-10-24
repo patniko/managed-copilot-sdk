@@ -189,7 +189,16 @@ export class Supervisor {
       this.#schedule(this.#timings.pollMs, () => this.#tryTakeLease());
       return;
     }
-    if (!handingOverSince) this.#fileRequest();
+    if (!handingOverSince) {
+      this.#fileRequest();
+      // A newer deployment is waiting too: leave the lease to it rather than starting an older gateway in between.
+      const newer = this.#newerRequests()[0];
+      if (newer) {
+        this.#standbyReason = `a newer deployment (${newer.holder}) is taking over`;
+        this.#schedule(this.#timings.pollMs, () => this.#tryTakeLease());
+        return;
+      }
+    }
     let lease: Lease | undefined;
     try {
       lease = Lease.tryAcquire(this.#leaseFile, this.#options.identity);
@@ -234,7 +243,7 @@ export class Supervisor {
     rmSync(this.#requestFile, { force: true });
   }
 
-  /** Fresh takeover requests from deployments newer than ours that we have not refused. */
+  /** Fresh takeover requests from deployments newer than ours that we have not refused, newest first. */
   #newerRequests(): TakeoverRequest[] {
     const now = Date.now();
     for (const [stamp, until] of this.#refused) if (until <= now) this.#refused.delete(stamp);
@@ -259,7 +268,7 @@ export class Supervisor {
         // Being written or removed: look again on the next heartbeat.
       }
     }
-    return requests;
+    return requests.sort((a, b) => compareStamps(b.stamp, a.stamp));
   }
 
   async #openStandby(): Promise<void> {
