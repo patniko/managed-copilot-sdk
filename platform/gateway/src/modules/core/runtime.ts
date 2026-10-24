@@ -343,7 +343,8 @@ export class SharedRuntime {
     const binary = resolveRuntimeBinary(this.#options.binary);
     const copilotHome = join(root, "copilot-home");
     const home = join(root, "home");
-    for (const dir of [copilotHome, home, this.workspacesRoot]) mkdirSync(dir, { recursive: true });    const token = randomBytes(32).toString("base64url");
+    for (const dir of [copilotHome, home, this.workspacesRoot]) mkdirSync(dir, { recursive: true });
+    const token = randomBytes(32).toString("base64url");
     const env = runtimeEnvironment(this.#options.env, {
       COPILOT_HOME: copilotHome,
       HOME: home,

@@ -9,9 +9,40 @@ import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
 import { createLogger } from "../src/log.js";
-import { startGitHubStub } from "./harness.js";
+import { sleep, startGitHubStub } from "./harness.js";
 
 const log = createLogger("test", "error");
+
+type GitHubStep = "reset" | "timeout" | number | { readonly status: number; readonly headers?: Record<string, string> };
+
+/** A scripted GitHub API: each call consumes one step (an HTTP status, a dropped connection, or a timeout). */
+function scriptedGitHub(steps: GitHubStep[], user = { id: 7, login: "octo" }) {
+  const state = { calls: 0 };
+  const script = [...steps];
+  const fetchImpl = async () => {
+    state.calls++;
+    const step = script.shift() ?? 200;
+    if (step === "reset") throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
+    if (step === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    const { status, headers = {} } = typeof step === "number" ? { status: step } : step;
+    return new Response(status === 204 ? null : JSON.stringify(status === 200 ? user : { message: `HTTP ${status}` }), { status, headers: { "content-type": "application/json", ...headers } });
+  };
+  return {
+    fetch: fetchImpl as unknown as typeof fetch,
+    script,
+    get calls() {
+      return state.calls;
+    },
+  };
+}
+
+async function waitUntil(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("Condition not met in time");
+    await sleep(2);
+  }
+}
 
 function environments(deployment: unknown, baseDir = tmpdir()): Environments {
   return new Environments({ deployment: parseConfig(deployment), baseDir, pinDir: mkdtempSync(join(tmpdir(), "mc-pin-")), log });
@@ -202,9 +233,82 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("outsider")).rejects.toMatchObject({ code: "forbidden" });
   });
 
-  it("reports GitHub outages as capability_unavailable, not as a bad token", async () => {
-    const auth = new GitHubAuthenticator({ apiUrl: "http://127.0.0.1:9", log });
-    await expect(auth.authenticate("member")).rejects.toMatchObject({ code: "capability_unavailable" });
+  it("reports persistent GitHub outages as retryable upstream_unavailable, not as a bad token", async () => {
+    const auth = new GitHubAuthenticator({ apiUrl: "http://127.0.0.1:9", log, retryDelaysMs: [1, 1] });
+    const error = await auth.authenticate("member").catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: "upstream_unavailable", details: { upstream: "github", retryAfterSeconds: 5 } });
+    expect((error as { status: number }).status).toBe(503);
+    expect((error as Error).message).toMatch(/GitHub is unreachable/);
+  });
+
+  it("retries transport errors and 5xx answers before giving up", async () => {
+    const github = scriptedGitHub(["reset", 502, 200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1, 1, 1] });
+    await expect(auth.authenticate("token-a")).resolves.toMatchObject({ accountId: 7, login: "octo" });
+    expect(github.calls).toBe(3);
+
+    const failing = scriptedGitHub(["reset", "timeout", 503, "reset"]);
+    const strict = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: failing.fetch, retryDelaysMs: [1, 1, 1] });
+    await expect(strict.authenticate("token-b")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    expect(failing.calls).toBe(4);
+  });
+
+  it("accepts a recent verification while GitHub is unreachable, and never after GitHub rejected the token", async () => {
+    const github = scriptedGitHub([200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, negativeTtlMs: 200, outageRecheckMs: 1, staleGraceMs: 60_000 });
+    const principal = await auth.authenticate("token-c");
+    await sleep(5);
+    // GitHub drops connections: the verification from moments ago stands in.
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-c")).resolves.toEqual(principal);
+    expect(github.calls).toBe(3);
+    await sleep(5);
+    // Still in the outage: callers get the standing principal at once while the re-check runs, which now gets a 401.
+    github.script.push(401);
+    await expect(auth.authenticate("token-c")).resolves.toEqual(principal);
+    await waitUntil(() => github.calls === 4);
+    await sleep(5);
+    await expect(auth.authenticate("token-c")).rejects.toMatchObject({ code: "authentication_required" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+    // The rejection replaced the earlier verification: a later outage cannot revive it.
+    await sleep(250);
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-c")).rejects.toMatchObject({ code: "upstream_unavailable" });
+  });
+
+  it("stops accepting a stale verification once its grace period ends", async () => {
+    const github = scriptedGitHub([200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 20 });
+    await auth.authenticate("token-d");
+    await sleep(40);
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-d")).rejects.toMatchObject({ code: "upstream_unavailable" });
+  });
+
+  it("treats rate limits as an outage without retrying, and other 403s as a token problem", async () => {
+    const reset = Math.ceil(Date.now() / 1000) + 120;
+    const limited = scriptedGitHub([{ status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) } }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: limited.fetch, retryDelaysMs: [1, 1] });
+    const error = (await auth.authenticate("token-e").catch((caught: unknown) => caught)) as { code: string; details: { retryAfterSeconds: number } };
+    expect(error.code).toBe("upstream_unavailable");
+    expect(error.details.retryAfterSeconds).toBeGreaterThan(100);
+    expect(limited.calls).toBe(1);
+
+    const secondary = scriptedGitHub([{ status: 429, headers: { "retry-after": "7" } }]);
+    const other = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: secondary.fetch, retryDelaysMs: [1] });
+    await expect(other.authenticate("token-f")).rejects.toMatchObject({ code: "upstream_unavailable", details: { retryAfterSeconds: 7 } });
+
+    const refused = scriptedGitHub([403]);
+    const integration = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: refused.fetch, retryDelaysMs: [1] });
+    await expect(integration.authenticate("token-g")).rejects.toMatchObject({ code: "authentication_required" });
+  });
+
+  it("never reads an organization-membership outage as 'not a member'", async () => {
+    const github = scriptedGitHub([200, "reset", "reset"]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], access: { githubOrgs: ["contoso"] } });
+    await expect(auth.authenticate("token-h")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    github.script.push(200, 404);
+    await expect(auth.authenticate("token-h")).rejects.toMatchObject({ code: "forbidden" });
   });
 
   it("parses GitHub token expiration headers", () => {

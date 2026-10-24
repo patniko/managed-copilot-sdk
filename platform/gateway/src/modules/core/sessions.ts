@@ -2,9 +2,9 @@
 // session the gateway hosts. Client connections attach to sessions; the gateway owns the upstream runtime
 // connections, so detaching or disconnecting a client never stops a session or cancels accepted work.
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, realpathSync } from "node:fs";
 import { connect as connectTcp } from "node:net";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { Duplex } from "node:stream";
 import {
   isManagedCopilotError,
@@ -25,7 +25,7 @@ import {
   type AttachedResponder,
   type RuntimeSessionEvent,
 } from "../durable/contract.js";
-import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, type AdmissionContext, type AdmittedSession } from "./admission.js";
+import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, SANDBOX_CUSTOMIZATIONS_DIR, type AdmissionContext, type AdmittedSession } from "./admission.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -206,7 +206,7 @@ export class SessionManager implements SessionsService {
     this.#options = options;
     this.#log = options.log;
     this.#ledger = options.ledger;
-    this.#scrubber = options.sharedRuntime ? pathScrubber(join(options.app.config.dataDir, "runtime", "shared")) : undefined;
+    this.#scrubber = options.sharedRuntime ? pathScrubber(options.app.config.dataDir) : undefined;
     this.#upstreamHandlers = {
       onNotification: (upstream, method, params) => this.#onUpstreamNotification(upstream, method, params),
       onRequest: (upstream, method, params, context) => this.#onUpstreamRequest(upstream, method, params, context),
@@ -481,11 +481,11 @@ export class SessionManager implements SessionsService {
     let result: unknown;
     const resumeOn = async (upstream: RuntimeUpstream) => {
       const prepared = await this.#prepare(live, "session.resume", admitted.params);
-      this.#attach(live, peer, admitted, prepared);
-      const forwarded = this.#withRegistrations(live, prepared);
+      this.#attach(live, peer, admitted, prepared.params);
+      const forwarded = this.#withRegistrations(live, prepared.params);
       try {
         result = await upstream.request("session.resume", forwarded);
-        await this.#opened(live, upstream, admitted.optionsPatch);
+        await this.#opened(live, upstream, admitted.optionsPatch, prepared.agent);
       } catch (error) {
         this.#detach(live, peer.id);
         throw error;
@@ -504,11 +504,16 @@ export class SessionManager implements SessionsService {
         return upstream;
       });
     }
-    this.#persist(sessionId, (stored) => ({
-      params: storedParams(admitted.params),
-      ...(stored.tools ? { tools: stored.tools } : {}),
-      optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
-    }));
+    this.#persist(sessionId, (stored) => {
+      const params = storedParams(admitted.params);
+      // A resume without `agent` keeps the session's current agent.
+      if (params["agent"] === undefined && typeof stored.params["agent"] === "string") params["agent"] = stored.params["agent"];
+      return {
+        params,
+        ...(stored.tools ? { tools: stored.tools } : {}),
+        optionsPatch: { ...stored.optionsPatch, ...admitted.optionsPatch },
+      };
+    });
     this.#ledger.update(sessionId, { state: record.state === "failed" || record.state === "stopped" ? "ready" : record.state, ...(admitted.model ? { model: admitted.model } : {}) });
     return { result: this.#scrub(live, this.#sanitizeResponse(live, result)), after: () => this.#afterAttach(peer, sessionId) };
   }
@@ -577,6 +582,18 @@ export class SessionManager implements SessionsService {
       const model = params["modelId"];
       this.#ledger.update(sessionId, { model });
       this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, model } }));
+    }
+    // Restores re-select the agent the session last had, not the one it was created with.
+    if (method === "session.agent.select" && typeof params["name"] === "string" && params["name"]) {
+      const agent = params["name"];
+      this.#ledger.update(sessionId, { agent });
+      this.#persist(sessionId, (stored) => ({ ...stored, params: { ...stored.params, agent } }));
+    } else if (method === "session.agent.deselect") {
+      this.#ledger.update(sessionId, { agent: "" });
+      this.#persist(sessionId, (stored) => {
+        const { agent: _agent, ...rest } = stored.params;
+        return { ...stored, params: rest };
+      });
     }
     if (method === "session.getMessages" && live.placement === "shared" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
       const events = (result as { events: RuntimeSessionEvent[] }).events;
@@ -727,10 +744,10 @@ export class SessionManager implements SessionsService {
           upstream = await this.#options.sharedRuntime!.ready();
           created.upstream = upstream;
         }
-        const forwarded = await this.#prepare(created, "session.create", admitted.params);
-        if (input.peer) this.#attach(created, input.peer, admitted, forwarded);
-        result = await upstream.request("session.create", forwarded);
-        await this.#opened(created, upstream, admitted.optionsPatch);
+        const prepared = await this.#prepare(created, "session.create", admitted.params);
+        if (input.peer) this.#attach(created, input.peer, admitted, prepared.params);
+        result = await upstream.request("session.create", prepared.params);
+        await this.#opened(created, upstream, admitted.optionsPatch, prepared.agent);
         created.ready = true;
         return upstream;
       });
@@ -910,7 +927,7 @@ export class SessionManager implements SessionsService {
       const upstream = await this.#connect(live);
       const admitted = this.#ledger.admitted(live.id);
       if (!admitted) throw new ManagedCopilotError("state_restore_failed", `Session ${live.id} has no stored configuration to resume with`);
-      const params = await this.#prepare(live, "session.resume", {
+      const prepared = await this.#prepare(live, "session.resume", {
         ...admitted.params,
         sessionId: live.id,
         tools: [...live.wire.tools, ...this.#platformToolDeclarations(live)],
@@ -918,8 +935,8 @@ export class SessionManager implements SessionsService {
         ...(live.placement === "shared" ? { gitHubTokenProviderRegistrationId: live.tokenRegistrationId } : {}),
       });
       try {
-        await upstream.request("session.resume", params);
-        await this.#opened(live, upstream, admitted.optionsPatch);
+        await upstream.request("session.resume", prepared.params);
+        await this.#opened(live, upstream, admitted.optionsPatch, prepared.agent);
       } catch (error) {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
       }
@@ -949,12 +966,20 @@ export class SessionManager implements SessionsService {
     return upstream;
   }
 
-  async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, params) : params;
+  /**
+   * Sandbox runtimes get the owner's credential only in `sessionOpened` (after create/resume), and the stock runtime
+   * resolves custom agents only for an authenticated session. So a requested agent is selected after that instead.
+   */
+  async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<{ params: Record<string, unknown>; agent: string | undefined }> {
+    if (live.placement !== "sandbox") return { params, agent: undefined };
+    const { agent, ...rest } = params;
+    const prepared = live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, rest) : rest;
+    return { params: prepared, agent: typeof agent === "string" && agent ? agent : undefined };
   }
 
-  async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>): Promise<void> {
+  async #opened(live: LiveSession, upstream: RuntimeUpstream, optionsPatch: Record<string, unknown>, agent?: string): Promise<void> {
     if (live.sandbox?.sessionOpened) await live.sandbox.sessionOpened(live.id);
+    if (agent) await upstream.request("session.agent.select", { sessionId: live.id, name: agent });
     if (Object.keys(optionsPatch).length > 0) {
       const result = await upstream.request<{ success?: boolean; error?: string }>("session.options.update", { ...optionsPatch, sessionId: live.id });
       if (result && result.success === false) throw new ManagedCopilotError("internal", `The runtime rejected the session lockdown: ${result.error ?? "unknown error"}`);
@@ -1338,15 +1363,36 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Builds a deep string replacer for a platform directory, tolerant of slash direction (and case on Windows). */
-export function pathScrubber(root: string): (value: unknown) => unknown {
-  const normalized = root.replace(/[\\/]+$/, "");
+/**
+ * Builds a deep string replacer for platform host paths under the gateway's data directory, tolerant of slash
+ * direction, case on Windows, and the directory's resolved form (8.3 names, symlinks): a shared session's directory
+ * becomes `/workspace`, a pinned customizations bundle the path sandboxes mount it at, anything else `/platform`.
+ */
+export function pathScrubber(dataDir: string): (value: unknown) => unknown {
   const separators = String.raw`[\\/]+`;
-  const rootPattern = normalized.split(/[\\/]+/).map(escapeRegExp).join(separators);
+  const segment = String.raw`[^\\/\s"'\`]+`;
+  // The rest of the path (segments without spaces), rewritten with POSIX separators.
+  const tail = String.raw`((?:[\\/]+[^\\/\s"'\`]+)*)`;
   const flags = process.platform === "win32" ? "gi" : "g";
-  const workspace = new RegExp(`${rootPattern}${separators}workspaces${separators}[^\\\\/\\s"'\`]+`, flags);
-  const anyPath = new RegExp(rootPattern, flags);
-  const replaceString = (text: string) => (text.length < normalized.length ? text : text.replace(workspace, "/workspace").replace(anyPath, "/platform"));
+  const variants = new Set([resolvePath(dataDir)]);
+  try {
+    variants.add(realpathSync.native(dataDir));
+  } catch {
+    // Not created yet: the configured form is the one the runtime sees.
+  }
+  const rules: [RegExp, string][] = [];
+  for (const variant of variants) {
+    const root = variant.replace(/[\\/]+$/, "").split(/[\\/]+/).map(escapeRegExp).join(separators);
+    rules.push(
+      [new RegExp(`${root}${separators}runtime${separators}shared${separators}workspaces${separators}${segment}${tail}`, flags), "/workspace"],
+      [new RegExp(`${root}${separators}customizations${separators}${segment}${separators}${segment}${tail}`, flags), SANDBOX_CUSTOMIZATIONS_DIR],
+      [new RegExp(`${root}${separators}runtime${separators}shared${tail}`, flags), "/platform"],
+      [new RegExp(`${root}${tail}`, flags), "/platform"],
+    );
+  }
+  const shortest = Math.min(...[...variants].map((variant) => variant.length));
+  const replaceString = (text: string) =>
+    text.length < shortest ? text : rules.reduce((out, [pattern, base]) => out.replace(pattern, (_match, rest: string) => `${base}${rest.replace(/[\\/]+/g, "/")}`), text);
   const walk = (value: unknown, depth: number): unknown => {
     if (typeof value === "string") return replaceString(value);
     if (depth > 12 || value === null || typeof value !== "object") return value;
