@@ -345,6 +345,10 @@ export class ArtifactService implements ArtifactsService {
         }
       }
     } catch (error) {
+      // Whether shutdown had started stopping compute when the failure surfaced. Decided now: the cleanup and the wait
+      // for queued sandbox work below can outlast the shutdown drain, and must not turn a failure that happened while
+      // compute was still up into a shutdown interruption.
+      const stopping = this.#options.stopping?.() === true;
       // Remove only blobs this attempt stored that no committed version references.
       for (const blob of created) {
         const digest = blob.slice(blob.length - 64);
@@ -354,11 +358,12 @@ export class ArtifactService implements ArtifactsService {
       // A failure the publication decided itself (rejected or changing files, a superseding turn) keeps its reason; only
       // a session's deletion overrides it, since the session's publication records are removed with it.
       const own = OWN_FAILURES.has(error as Error);
-      let interruption = this.#interruption(sessionId, turnId, own);
+      const stopped = stopping && !own;
+      let interruption = this.#interruption(sessionId, turnId, stopped);
       if (!interruption && !own && this.#options.settled) {
         // A deletion queued behind the publication's own sandbox calls is decided once that queue drains.
         await this.#options.settled(sessionId);
-        interruption = this.#interruption(sessionId, turnId, own);
+        interruption = this.#interruption(sessionId, turnId, stopped);
       }
       const message = interruption ?? (error instanceof ManagedCopilotError ? error.message : `Publishing the turn's outputs failed: ${(error as Error).message}`);
       if (interruption === DELETED) this.#options.log.info("Skipped publishing outputs of a session that is being deleted", { sessionId, turnId });
@@ -374,18 +379,18 @@ export class ArtifactService implements ArtifactsService {
 
   /**
    * Why a publication that failed was interrupted, if it was: the session is being deleted (its sandbox, a queued
-   * delete, core's session state, or its publication record already removed by the deletion), or gateway shutdown is
-   * stopping compute. A failure of the publication's own (`own`) is never attributed to the shutdown. Undefined when
-   * nothing interrupted it.
+   * delete, core's session state, or its publication record already removed by the deletion), or `stopped`: gateway
+   * shutdown had started stopping compute when the failure surfaced (never for a failure of the publication's own).
+   * Deletion is checked at call time and wins. Undefined when nothing interrupted it.
    */
-  #interruption(sessionId: string, turnId: string, own: boolean): typeof DELETED | typeof STOPPED | undefined {
+  #interruption(sessionId: string, turnId: string, stopped: boolean): typeof DELETED | typeof STOPPED | undefined {
     try {
       if (this.#options.sessionGone?.(sessionId)) return DELETED;
       if (!this.#options.db.prepare("SELECT 1 FROM sandbox_publications WHERE session_id = ? AND turn_id = ?").get(sessionId, turnId)) return DELETED;
     } catch {
       // The ledger is closing with the gateway; the stop check below covers it.
     }
-    return !own && this.#options.stopping?.() ? STOPPED : undefined;
+    return stopped ? STOPPED : undefined;
   }
 
   /** Resolves true once every publication already under way has finished, or false after `timeoutMs`. */

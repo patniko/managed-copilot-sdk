@@ -294,9 +294,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   delete of its sandbox is queued, its sandbox is `deleting`/`deleted`, or the deletion removed the turn's records; a
   failure is classified only after sandbox operations already queued for the session (such as the delete) have run.
   Gateway shutdown lets publications under way finish (up to 10 s) before it stops sandboxes. Only a publication
-  that fails once shutdown has started stopping sandboxes is recorded as interrupted by the shutdown (at info); one
-  that fails during the drain, while compute is still up, or for reasons of its own at any time (rejected or
-  changing files) keeps its reason and warns. `artifact.published` (through core's events) lists only new
+  whose failure surfaced once shutdown had started stopping sandboxes is recorded as interrupted by the shutdown (at
+  info; judged when the failure surfaces, not after waiting out queued sandbox work); one that fails during the drain,
+  while compute is still up, or for reasons of its own at any time (rejected or changing files) keeps its reason and
+  warns. `artifact.published` (through core's events) lists only new
   versions; a turn that changed nothing under `outputs/` emits no event.
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the

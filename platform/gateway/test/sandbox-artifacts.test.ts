@@ -262,6 +262,24 @@ describe("ArtifactService", () => {
       expect(lines.filter((line) => line.level === "warn")).toEqual([]);
     });
 
+    it("judges a shutdown interruption when the failure surfaced, not after waiting out queued sandbox work", async () => {
+      // The failure surfaces during the shutdown drain, while compute is still up; queued sandbox work (another operation
+      // holding the session's lock) then outlasts the drain, and shutdown starts stopping compute during the wait.
+      let stoppingCompute = false;
+      const { artifacts, lines, publish } = interrupted({
+        gone: () => false,
+        stopping: () => stoppingCompute,
+        settled: async () => {
+          stoppingCompute = true;
+        },
+        agentFor: connectionFailed,
+      });
+      await publish("turn-1");
+      await expect(artifacts.waitForPublication(SESSION, { turnId: "turn-1" })).rejects.toThrow(/^The sandbox connection failed\.$/);
+      expect(lines).toContainEqual({ level: "warn", message: "Publication failed" });
+      expect(lines.some((line) => /gateway is stopping/.test(line.message))).toBe(false);
+    });
+
     it("logs a publication superseded by the caller's next turn at info, and the later turn publishes the outputs", async () => {
       const { artifacts, lines } = interrupted({ gone: () => false, settled: async () => undefined, stopping: () => false });
       agent.files.set("report.md", "turn 1");
