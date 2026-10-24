@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { parseConfig, WEBHOOK_HEADERS, type ActionCapability, type PlatformEvent } from "@managed-copilot/protocol";
 import { migrate, openDatabase, type Database } from "../../src/db.js";
-import { createLogger } from "../../src/log.js";
+import type { Logger } from "../../src/log.js";
 import type { ActionsService } from "../../src/modules/durable/contract.js";
 import { DURABLE_MIGRATIONS } from "../../src/modules/durable/migrations.js";
 import { DurableWebhooks } from "../../src/modules/durable/webhooks/service.js";
@@ -14,6 +14,7 @@ interface Received {
 }
 
 const SECRET = "whsec_test_secret";
+const silent: Logger = { debug() {}, info() {}, warn() {}, error() {}, child: () => silent };
 
 describe("durable webhooks", () => {
   let server: Server;
@@ -68,7 +69,7 @@ describe("durable webhooks", () => {
     } as unknown as ActionsService;
     return new DurableWebhooks({
       db,
-      log: createLogger("test", "error"),
+      log: silent,
       deployment,
       mode: "local",
       env,
