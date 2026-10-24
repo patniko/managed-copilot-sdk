@@ -20,7 +20,7 @@ import type { GatewayApp } from "../../app.js";
 import type { Principal } from "../../http.js";
 import type { Logger } from "../../log.js";
 import { optionalService, type PlacementCutover, type PlatformToolCallContext, type PlatformToolResult, type SessionRecord, type SessionsService } from "../core/contracts.js";
-import type { PromotionActionsPort, PromotionOperation, PromotionPolicyPort, PromotionSandboxesPort, PromotionService } from "./contract.js";
+import type { PromotionActionsPort, PromotionOperation, PromotionParticipant, PromotionParticipantOutcome, PromotionPolicyPort, PromotionSandboxesPort, PromotionService } from "./contract.js";
 import { exportSessionState } from "./export.js";
 import type { PromotionStore } from "./store.js";
 
@@ -43,6 +43,8 @@ export interface PromotionManagerOptions {
   /** How long a tool promotion waits for unrelated work to drain before `promotion_busy`. */
   readonly drainTimeoutMs?: number;
   readonly drainPollMs?: number;
+  /** How long participants (attached clients' own paths into the source) get to pause before `promotion_busy`. */
+  readonly participantFenceTimeoutMs?: number;
   /** Promotions in flight at the same time (each allocates a sandbox). */
   readonly maxConcurrent?: number;
 }
@@ -72,6 +74,8 @@ interface Progress {
   /** The candidate sandbox's ID, as soon as creation returned it. */
   candidate?: string;
   fenced: boolean;
+  /** Participants whose `fence` was called; each is released once when the cutover ends. */
+  readonly participants: PromotionParticipant[];
   /** `session.suspend` or `sessions.close` was attempted: the source may no longer hold the session. */
   sourceTouched: boolean;
 }
@@ -111,6 +115,7 @@ export class PromotionManager implements PromotionService {
   readonly #inflight = new Map<string, InFlight>();
   /** The tail of each session's candidate work (see `#candidateWork`). */
   readonly #candidates = new Map<string, Promise<void>>();
+  readonly #participants = new Set<PromotionParticipant>();
   #running = 0;
   #closed = false;
 
@@ -158,6 +163,13 @@ export class PromotionManager implements PromotionService {
 
   latest(sessionId: string): PromotionOperation | undefined {
     return this.#store.latest(sessionId);
+  }
+
+  participate(participant: PromotionParticipant): () => void {
+    this.#participants.add(participant);
+    return () => {
+      this.#participants.delete(participant);
+    };
   }
 
   /** At shutdown: recovery stops before its next step (what is left is retried at the next start). */
@@ -279,7 +291,7 @@ export class PromotionManager implements PromotionService {
       ...(attempt.toolCallId ? { toolCallId: attempt.toolCallId } : {}),
       target,
     });
-    const progress: Progress = { operation, attempt, staging: join(this.#options.stagingRoot, operation.id), narrowed: false, allocated: false, fenced: false, sourceTouched: false };
+    const progress: Progress = { operation, attempt, staging: join(this.#options.stagingRoot, operation.id), narrowed: false, allocated: false, fenced: false, participants: [], sourceTouched: false };
     this.#log.info("Promoting session", { sessionId: record.id, operation: operation.id, trigger: attempt.trigger, target });
     const sessions = this.#sessions();
     const sandboxes = this.#sandboxes()!;
@@ -338,8 +350,14 @@ export class PromotionManager implements PromotionService {
         // Quiesce at a supported checkpoint, then fence the source and re-check what may have started meanwhile.
         if (attempt.trigger === "tool") await this.#drain(progress);
         else await this.#requireIdle(progress);
+        // In the same synchronous step as the fence: a session deleted during the last probe (core then aborted the
+        // cutover, so fencing it is a no-op) stops here, before anything else is fenced for it.
+        this.#current(progress);
         cutover.fence();
         progress.fenced = true;
+        // Paths into the source that core's fence does not cover (an attached Copilot CLI) are fenced before the
+        // re-check, so it also sees what they started.
+        await this.#fenceParticipants(progress);
         if (attempt.trigger === "tool") {
           const check = await this.#quiescent(progress);
           if (!check.ok) throw check.fatal ?? new ManagedCopilotError("promotion_busy", `Other work started while the session was moving (${check.reason}); try again when it completes`);
@@ -390,6 +408,7 @@ export class PromotionManager implements PromotionService {
     }
 
     // The commit is the point of no return: nothing below may undo the move, and core recovers only the destination.
+    this.#releaseParticipants(progress, { committed: true, sealed: true });
     try {
       this.#update(progress, { state: "committed", toGeneration: committed.generation, committedAt: new Date().toISOString(), sandboxId });
     } catch (error) {
@@ -531,6 +550,57 @@ export class PromotionManager implements PromotionService {
     }
   }
 
+  /**
+   * Fences the registered participants (paths into the source that core's fence does not cover), all at once and
+   * bounded. A participant that fails or does not finish in time fails the promotion before the checkpoint.
+   */
+  async #fenceParticipants(progress: Progress): Promise<void> {
+    const participants = [...this.#participants];
+    if (participants.length === 0) return;
+    const sessionId = progress.attempt.record.id;
+    const controller = new AbortController();
+    // Released once each, whatever happens below.
+    progress.participants.push(...participants);
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new ManagedCopilotError("promotion_busy", "A client attached to the session could not be paused in time, so the session stays where it is; try again in a moment", { sessionId }));
+      }, this.#options.participantFenceTimeoutMs ?? 15_000);
+      timer.unref();
+    });
+    const fenced = Promise.all(
+      participants.map(async (participant) => {
+        try {
+          await participant.fence(sessionId, controller.signal);
+        } catch (error) {
+          throw new ManagedCopilotError("promotion_busy", `The session's ${participant.name} connection could not be paused (${(error as Error)?.message ?? String(error)}), so the session stays where it is; try again in a moment`, { sessionId });
+        }
+      }),
+    );
+    try {
+      await Promise.race([fenced, deadline]);
+    } catch (error) {
+      controller.abort();
+      // The losing side settles later; nothing waits for it.
+      fenced.catch(() => undefined);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Ends the participants' fence once the cutover ended (after commit, or after the abort settled the source). */
+  #releaseParticipants(progress: Progress, outcome: PromotionParticipantOutcome): void {
+    const sessionId = progress.attempt.record.id;
+    for (const participant of progress.participants.splice(0)) {
+      try {
+        participant.release(sessionId, outcome);
+      } catch (error) {
+        this.#log.warn("A promotion participant could not release the session", { sessionId, participant: participant.name, error: (error as Error)?.message ?? String(error) });
+      }
+    }
+  }
+
   /** Whether the agent's own call is the only open work. Every probe must answer; a failed probe fails the move. */
   async #quiescent(progress: Progress): Promise<Quiescence> {
     const cutover = progress.cutover!;
@@ -587,6 +657,8 @@ export class PromotionManager implements PromotionService {
         this.#log.error("Could not abort the placement cutover", { sessionId: record.id, error: (abortError as Error).message });
       }
     }
+    // Once the abort settled the source (its state restored, its requests flowing): attached clients may continue there.
+    this.#releaseParticipants(progress, { committed: false, sealed: progress.sourceTouched });
     let released = !progress.allocated;
     if (progress.allocated) {
       try {
