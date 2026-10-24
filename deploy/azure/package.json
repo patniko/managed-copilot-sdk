@@ -1,0 +1,23 @@
+{
+  "name": "@managed-copilot/azure",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Azure deployment for Managed Copilot: the gateway's single-writer lease supervisor, the storage qualification probe, and deployment assets.",
+  "type": "module",
+  "bin": {
+    "managed-copilot-lease": "./dist/lease/main.js",
+    "managed-copilot-storage-probe": "./dist/probe/main.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0",
+    "tsx": "^4.21.0"
+  }
+}

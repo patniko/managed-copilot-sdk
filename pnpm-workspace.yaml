@@ -3,6 +3,7 @@ packages:
   - platform/*
   - demos/*
   - tests/*
+  - deploy/*
 
 # Allow install scripts only for packages that need them.
 onlyBuiltDependencies:
