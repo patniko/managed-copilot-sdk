@@ -1,6 +1,6 @@
 import { CalendarPlus, CalendarX, CalendarClock, Check, LoaderCircle, MapPin, MessageSquare, Send, ShieldCheck, Users, X } from "lucide-react";
 import { useState } from "react";
-import type { ApprovalItem, ApprovalPreview } from "../../../shared/protocol";
+import type { ApprovalItem, ApprovalPreview, ToolItem } from "../../../shared/protocol";
 import { dayLabel, timeOf, timeRange } from "../format";
 
 const LABELS: Record<string, { approve: string; deny: string; icon: typeof Send }> = {
@@ -89,7 +89,18 @@ function EventPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "
   );
 }
 
-export function ApprovalCard({ item, timeZone, onDecide }: { item: ApprovalItem; timeZone: string; onDecide(decision: "approve" | "deny", feedback?: string): Promise<unknown> }) {
+export function ApprovalCard({
+  item,
+  outcome,
+  timeZone,
+  onDecide,
+}: {
+  item: ApprovalItem;
+  /** The approved tool call's progress, shown in the footer once the person decides. */
+  outcome?: ToolItem;
+  timeZone: string;
+  onDecide(decision: "approve" | "deny", feedback?: string): Promise<unknown>;
+}) {
   const [busy, setBusy] = useState<"approve" | "deny" | undefined>();
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState("");
@@ -158,7 +169,7 @@ export function ApprovalCard({ item, timeZone, onDecide }: { item: ApprovalItem;
               </div>
             </div>
           ) : (
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
               {item.status === "approved" && (
                 <span className="chip bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20">
                   <Check className="size-3" aria-hidden /> Approved
@@ -171,6 +182,15 @@ export function ApprovalCard({ item, timeZone, onDecide }: { item: ApprovalItem;
               )}
               {item.status === "expired" && <span className="chip bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">No longer waiting</span>}
               {item.decidedAt && <span className="text-xs text-zinc-400">{timeOf(item.decidedAt, timeZone)}</span>}
+              {item.status === "approved" && outcome && (
+                <span className={`flex min-w-0 items-center gap-1.5 text-xs ${outcome.status === "failed" ? "text-red-600 dark:text-red-400" : "text-zinc-600 dark:text-zinc-300"}`}>
+                  <span aria-hidden>·</span>
+                  {outcome.status === "running" && <LoaderCircle className="size-3.5 animate-spin text-violet-500" aria-hidden />}
+                  {outcome.status === "succeeded" && <Check className="size-3.5 text-emerald-500" aria-hidden />}
+                  {outcome.status === "failed" && <X className="size-3.5" aria-hidden />}
+                  <span className="truncate">{outcome.status === "failed" ? (outcome.error ?? outcome.title) : outcome.title}</span>
+                </span>
+              )}
               {item.feedback && <span className="truncate text-xs text-zinc-500">“{item.feedback}”</span>}
             </div>
           )}

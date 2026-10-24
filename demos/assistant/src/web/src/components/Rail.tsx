@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AgendaView, ConnectionsView, OfflineView, PlatformStatus, ScheduleView } from "../../../shared/protocol";
-import { fullDate, relativeTime, timeOf, timeRange, whenLabel } from "../format";
+import { dayLabel, fullDate, relativeTime, timeOf, timeRange, whenLabel } from "../format";
 import type { AssistantActions } from "../useAssistant";
 
 function Card({ title, icon, badge, children }: { title: string; icon: ReactNode; badge?: ReactNode; children: ReactNode }) {
@@ -43,10 +43,17 @@ function DemoBadge() {
 export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; timeZone: string; demo: boolean }) {
   const now = Date.now();
   const events = agenda?.events ?? [];
-  const upcoming = events.filter((event) => Date.parse(event.end) > now);
-  const nextId = upcoming.find((event) => !event.allDay)?.id;
+  const upcoming = events.filter((event) => Date.parse(event.end) > now).slice(0, 7);
+  const nextId = upcoming.find((event) => !event.allDay && Date.parse(event.start) > now)?.id;
+  const groups: { label: string; events: typeof upcoming }[] = [];
+  for (const event of upcoming) {
+    const label = dayLabel(event.start, timeZone);
+    const last = groups[groups.length - 1];
+    if (last?.label === label) last.events.push(event);
+    else groups.push({ label, events: [event] });
+  }
   return (
-    <Card title={agenda ? fullDate(new Date(), timeZone) : "Today"} icon={<CalendarDays className="size-4" />} badge={demo ? <DemoBadge /> : undefined}>
+    <Card title="Up next" icon={<CalendarDays className="size-4" />} badge={demo ? <DemoBadge /> : undefined}>
       {!agenda ? (
         <div className="space-y-2">
           <div className="h-3 w-3/4 animate-pulse rounded-full bg-zinc-200 dark:bg-zinc-800" />
@@ -55,33 +62,40 @@ export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; tim
       ) : agenda.error ? (
         <p className="text-sm text-red-600 dark:text-red-400">{agenda.error}</p>
       ) : upcoming.length === 0 ? (
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">{events.length ? "That's everything for today." : "Nothing on your calendar today."}</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">Nothing on your calendar this week.</p>
       ) : (
-        <ol className="space-y-1">
-          {upcoming.slice(0, 6).map((event) => {
-            const live = Date.parse(event.start) <= now;
-            return (
-              <li key={event.id} className={`flex gap-3 rounded-lg px-2 py-1.5 ${event.id === nextId ? "bg-violet-50 dark:bg-violet-500/10" : ""}`}>
-                <div className="w-16 shrink-0 text-right text-xs leading-5 text-zinc-500 tabular-nums dark:text-zinc-400">{event.allDay ? "All day" : timeOf(event.start, timeZone)}</div>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                    {event.title}
-                    {live && !event.allDay && <span className="ml-1.5 chip bg-emerald-100 align-middle text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">Now</span>}
-                  </div>
-                  <div className="flex items-center gap-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                    {!event.allDay && timeRange(event.start, event.end, timeZone)}
-                    {event.location && (
-                      <>
-                        <MapPin className="ml-1 size-3" aria-hidden />
-                        <span className="truncate">{event.location}</span>
-                      </>
-                    )}
-                  </div>
-                </div>
-              </li>
-            );
-          })}
-        </ol>
+        <div className="space-y-3">
+          {groups.map((group) => (
+            <div key={group.label}>
+              <div className="mb-1 px-2 text-[11px] font-semibold tracking-wide text-zinc-400 uppercase">{group.label === "Today" ? `Today · ${fullDate(new Date(), timeZone)}` : group.label}</div>
+              <ol className="space-y-0.5">
+                {group.events.map((event) => {
+                  const live = Date.parse(event.start) <= now;
+                  return (
+                    <li key={event.id} className={`flex gap-3 rounded-lg px-2 py-1.5 ${event.id === nextId ? "bg-violet-50 dark:bg-violet-500/10" : ""}`}>
+                      <div className="w-16 shrink-0 text-right text-xs leading-5 text-zinc-500 tabular-nums dark:text-zinc-400">{event.allDay ? "All day" : timeOf(event.start, timeZone)}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                          {event.title}
+                          {live && !event.allDay && <span className="ml-1.5 chip bg-emerald-100 align-middle text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">Now</span>}
+                        </div>
+                        <div className="flex items-center gap-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
+                          {!event.allDay && timeRange(event.start, event.end, timeZone)}
+                          {event.location && (
+                            <>
+                              <MapPin className="ml-1 size-3 shrink-0" aria-hidden />
+                              <span className="truncate">{event.location}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          ))}
+        </div>
       )}
     </Card>
   );

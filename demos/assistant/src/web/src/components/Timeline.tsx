@@ -9,7 +9,7 @@ import { AssistantMessage, NoticeLine, ToolRow, TriggerPill, TypingIndicator, Us
 type Block =
   | { type: "day"; key: string; label: string }
   | { type: "unread"; key: string }
-  | { type: "item"; key: string; item: TimelineItem; scheduleLabel?: string }
+  | { type: "item"; key: string; item: TimelineItem; scheduleLabel?: string; outcome?: ToolItem }
   | { type: "tools"; key: string; items: ToolItem[] };
 
 export interface TimelineProps {
@@ -28,6 +28,12 @@ export interface TimelineProps {
 
 function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnchor: string | undefined): Block[] {
   const blocks: Block[] = [];
+  // A consequential tool call's progress is shown inside its approval card instead of as a separate row.
+  const approvalIds = new Set(items.filter((item) => item.kind === "approval").map((item) => item.id));
+  const outcomes = new Map<string, ToolItem>();
+  for (const item of items) {
+    if (item.kind === "tool" && approvalIds.has(`approval:${item.id}`)) outcomes.set(`approval:${item.id}`, item);
+  }
   let lastDay: string | undefined;
   let tools: ToolItem[] | undefined;
   let scheduleLabel: string | undefined;
@@ -36,6 +42,7 @@ function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnc
     tools = undefined;
   };
   for (const item of items) {
+    if (item.kind === "tool" && outcomes.has(`approval:${item.id}`)) continue;
     const day = dayKey(item.at, timeZone);
     if (day !== lastDay) {
       flush();
@@ -53,7 +60,13 @@ function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnc
     flush();
     if (item.kind === "trigger") scheduleLabel = item.scheduleName;
     if (item.kind === "user") scheduleLabel = undefined;
-    blocks.push({ type: "item", key: item.id, item, scheduleLabel: item.kind === "assistant" && item.proactive ? scheduleLabel : undefined });
+    blocks.push({
+      type: "item",
+      key: item.id,
+      item,
+      scheduleLabel: item.kind === "assistant" && item.proactive ? scheduleLabel : undefined,
+      outcome: item.kind === "approval" ? outcomes.get(item.id) : undefined,
+    });
   }
   flush();
   return blocks;
@@ -154,7 +167,9 @@ export function Timeline(props: TimelineProps) {
                       {item.kind === "assistant" && <AssistantMessage item={item} timeZone={timeZone} scheduleLabel={block.scheduleLabel} />}
                       {item.kind === "trigger" && <TriggerPill item={item} timeZone={timeZone} />}
                       {item.kind === "notice" && <NoticeLine item={item} />}
-                      {item.kind === "approval" && <ApprovalCard item={item} timeZone={timeZone} onDecide={(decision, feedback) => props.onDecide(item.id, decision, feedback)} />}
+                      {item.kind === "approval" && (
+                        <ApprovalCard item={item} outcome={block.outcome} timeZone={timeZone} onDecide={(decision, feedback) => props.onDecide(item.id, decision, feedback)} />
+                      )}
                     </Fragment>
                   );
                 }

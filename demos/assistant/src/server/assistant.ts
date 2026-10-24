@@ -259,7 +259,7 @@ export class Assistant {
     try {
       const workspace = await this.workspace();
       if (workspace instanceof DemoWorkspace) workspace.ensureSeeded(now);
-      const events = await workspace.calendar.list({ start: startOfDay(now, timeZone), end: addDays(now, 1, timeZone), max: 25 });
+      const events = await workspace.calendar.list({ start: startOfDay(now, timeZone), end: addDays(now, 7, timeZone), max: 60 });
       this.#agenda = {
         date: dayKey(now, timeZone),
         events: events.map((event) => ({ id: event.id, title: event.title, start: event.start, end: event.end, allDay: event.allDay, location: event.location })),

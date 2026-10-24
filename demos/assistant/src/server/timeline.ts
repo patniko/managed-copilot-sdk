@@ -52,6 +52,8 @@ export class Timeline {
   readonly #approvals = new Map<string, string>();
   #origin: "user" | "schedule" = "user";
   #busy = false;
+  /** A turn started and has not ended (`session.idle` is not persisted, so history replays rely on this). */
+  #turnOpen = false;
   #lastProactive: { itemId: string; text: string } | undefined;
 
   constructor(ctx: TimelineContext) {
@@ -85,6 +87,7 @@ export class Timeline {
     this.#approvals.clear();
     this.#origin = "user";
     this.#busy = false;
+    this.#turnOpen = false;
     this.#lastProactive = undefined;
   }
 
@@ -93,7 +96,13 @@ export class Timeline {
     const notices = this.list().filter((item) => item.kind === "notice" && item.id.startsWith("notice:"));
     this.clear();
     for (const event of events) this.apply(event);
-    // History ends mid-turn only if the run is still going; an idle session reports busy=false on its next event.
+    // `session.idle` is not persisted: a run is still going only if its last turn never ended.
+    this.#busy = this.#turnOpen;
+    if (!this.#busy) {
+      for (const item of this.#items.values()) {
+        if (item.kind === "assistant" && item.streaming) this.#items.set(item.id, { ...item, streaming: false });
+      }
+    }
     this.#lastProactive = undefined;
     for (const notice of notices) this.set(notice);
   }
@@ -134,9 +143,13 @@ export class Timeline {
         return [this.set({ kind: "user", id, at, text: content })];
       }
       case "assistant.turn_start":
+        this.#turnOpen = true;
         if (this.#busy) return [];
         this.#busy = true;
         return [{ type: "busy", busy: true }];
+      case "assistant.turn_end":
+        this.#turnOpen = false;
+        return [];
       case "assistant.message_delta": {
         const { messageId, deltaContent, parentToolCallId } = event.data;
         if (parentToolCallId || !deltaContent) return [];
