@@ -342,7 +342,8 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   bounded retries the run ends `needs_reconciliation` and is never resent. Runs of one schedule never overlap (one
   occurrence may wait; more are skipped), owners have a concurrency cap, occurrences later than the grace window (5 min
   cron, 60 min one-shot) are `skipped` with a recorded reason, and delegation, environment policy, webhook routes, and
-  the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`).
+  the owner's background credential are rechecked at run time (failures pause the schedule with `pausedReason`, which
+  blocks every run, including manual ones, and takes over a person's pause until the owner resumes).
   `schedule.run_started` / `schedule.run_completed` carry `{ scheduleId, scheduleName, runId, occurrenceId, status,
   sessionId, scheduledFor, messageId?, reason? }`.
 - **Agent scheduling.** With operator-approved `scheduling: true`, sessions get `schedule_task` (`prompt` plus exactly
@@ -355,10 +356,14 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
   schedules with a visible reason. No refresh: a revoked or expired token requires `managed-copilot login` again.
 - **Session lifecycle.** Deleting a session cancels its open actions (claims and late results are refused), stops
   undeliverable answers, fails its pending `session.action_required` deliveries, and pauses schedules that continue
-  it. On `session.promoted` (or `actions.onGenerationChanged`), waiting actions move to the new placement generation;
-  actions owned under the old generation are fenced (their claims are void, tools in flight become
-  `needs_reconciliation`, prompts are offered again). `onDetached(connectionId, sessionId?)` releases only that
-  session's live claims when `sessionId` is given.
+  it; nothing is recorded or claimed for it afterwards, even by a reconciliation already in flight. Promotion calls
+  `actions.onGenerationChanged(sessionId, generation, { carried })` right after committing the new generation
+  (`session.promoted` repeats it as a no-op): waiting actions move; actions whose request the new placement still
+  awaits (`carried`, kept by `continuePendingWork`) and gateway platform tools keep their claims, so their answers
+  resume the turn there; every other claim from the old placement is void (tools become `needs_reconciliation`,
+  prompts are offered again but never back to the client whose claim was voided). A recorded answer reaches the
+  current placement only if its runtime still waits for that exact request. `onDetached(connectionId, sessionId?)`
+  releases only that session's live claims when `sessionId` is given.
 - Durable REST: `GET /v1/sessions/:id/actions[?state=]`, `POST .../actions/:actionId/claim` (`{ claimToken? }` renews,
   `{ reconcile: true }` takes over uncertain actions), `POST .../actions/:actionId/result` (`{ claimToken, result |
   error | release }`), `/v1/schedules` CRUD with runs, pause, resume, and `run` (`{ invocationId }`), and

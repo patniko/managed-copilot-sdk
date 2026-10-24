@@ -5,6 +5,8 @@ import { parseJson, toIso } from "../ids.js";
 /** States in which an action still needs (or may still receive) an answer. */
 export const OPEN_STATES: readonly ActionState[] = ["pending", "claimed", "executing", "needs_reconciliation"];
 export const OWNED_STATES: readonly ActionState[] = ["claimed", "executing"];
+/** States with an answer the runtime must receive (an expiry is delivered as an error, refusal, or cancel). */
+export const ANSWERED_STATES: readonly ActionState[] = ["completed", "failed", "expired"];
 
 export interface ActionRow {
   readonly id: string;
@@ -281,7 +283,10 @@ export class ActionStore {
     return changed(this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params));
   }
 
-  /** Moves an open action to a new placement generation; voiding its claim bumps the claim sequence (fencing). */
+  /**
+   * Moves an open action to a newer placement generation (never back); voiding its claim bumps the claim sequence,
+   * so tokens and live connections from before the move can no longer commit (fencing).
+   */
   moveToGeneration(
     id: string,
     seq: number,
@@ -292,17 +297,45 @@ export class ActionStore {
       : "";
     return changed(
       this.#db
-        .prepare(`UPDATE durable_actions SET generation = ?, state = ?, reason = ?, updated_at = ?${claim} WHERE id = ? AND claim_seq = ? AND state IN (${placeholders(OPEN_STATES)})`)
-        .run(change.generation, change.state, change.reason, change.now, id, seq, ...OPEN_STATES),
+        .prepare(
+          `UPDATE durable_actions SET generation = ?, state = ?, reason = ?, updated_at = ?${claim}
+           WHERE id = ? AND claim_seq = ? AND generation < ? AND state IN (${placeholders(OPEN_STATES)})`,
+        )
+        .run(change.generation, change.state, change.reason, change.now, id, seq, change.generation, ...OPEN_STATES),
     );
   }
 
-  markForwarded(id: string, now: number, reason?: string): void {
-    if (reason === undefined) {
-      this.#db.prepare("UPDATE durable_actions SET forwarded = 1, next_forward_at = NULL, updated_at = ? WHERE id = ?").run(now, id);
-    } else {
-      this.#db.prepare("UPDATE durable_actions SET forwarded = 1, next_forward_at = NULL, reason = ?, updated_at = ? WHERE id = ?").run(reason, now, id);
+  /**
+   * A newer placement still waits for a request answered under an older one (it was carried across promotion): the
+   * recorded answer moves to that generation and is delivered again from a fresh retry budget.
+   */
+  adoptAnswer(id: string, fromGeneration: number, toGeneration: number, now: number): boolean {
+    return changed(
+      this.#db
+        .prepare(
+          `UPDATE durable_actions SET generation = ?, forwarded = 0, next_forward_at = NULL, forward_attempts = 0,
+             reason = CASE WHEN state = 'expired' THEN reason ELSE NULL END, updated_at = ?
+           WHERE id = ? AND generation = ? AND generation < ? AND state IN (${placeholders(ANSWERED_STATES)})`,
+        )
+        .run(toGeneration, now, id, fromGeneration, toGeneration, ...ANSWERED_STATES),
+    );
+  }
+
+  /** Marks an answer as delivered (or as never deliverable, with a reason); `generation` limits it to that placement. */
+  markForwarded(id: string, now: number, reason?: string, generation?: number): void {
+    const sets = ["forwarded = 1", "next_forward_at = NULL", "updated_at = ?"];
+    const params: Bindable[] = [now];
+    if (reason !== undefined) {
+      sets.push("reason = ?");
+      params.push(reason);
     }
+    const conditions = ["id = ?"];
+    params.push(id);
+    if (generation !== undefined) {
+      conditions.push("generation = ?");
+      params.push(generation);
+    }
+    this.#db.prepare(`UPDATE durable_actions SET ${sets.join(", ")} WHERE ${conditions.join(" AND ")}`).run(...params);
   }
 
   deferForward(id: string, nextAt: number, now: number): void {
@@ -312,6 +345,11 @@ export class ActionStore {
   markNotified(ids: readonly string[], now: number): void {
     if (ids.length === 0) return;
     this.#db.prepare(`UPDATE durable_actions SET notified_at = ? WHERE notified_at IS NULL AND id IN (${placeholders(ids)})`).run(now, ...ids);
+  }
+
+  /** The action is offered again and needs a fresh announcement; until one is published, the sweeper repairs it. */
+  clearNotified(id: string): void {
+    this.#db.prepare("UPDATE durable_actions SET notified_at = NULL WHERE id = ? AND notified_at IS NOT NULL").run(id);
   }
 
   /** Pending actions created before `createdBefore` that no `session.action_required` announced yet. */

@@ -578,6 +578,59 @@ describe("durable schedules", () => {
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "failed", reason: expect.stringMatching(/never started/) });
     });
 
+    it("lets a safety pause take over a person's pause, so a run that could not be stopped is never overlapped", async () => {
+      await schedules.stop();
+      schedules = build({ maxRunLifetimeMs: 60_000 });
+      const request = sessions.request.bind(sessions);
+      sessions.request = (async (sessionId: string, method: string) => {
+        if (method === "session.abort") throw new Error("runtime unavailable");
+        return request(sessionId, method);
+      }) as typeof sessions.request;
+      const schedule = await schedules.create(OWNER, { name: "daily", cron: "0 9 * * *", environment: "chat", prompt: "p" });
+      await schedules.runNow(OWNER.accountId, schedule.id, "first");
+      await schedules.idle();
+      const first = sessions.creates[0]!.sessionId;
+      sessions.emit(first, "user.message", { messageId: "msg-1" });
+      sessions.views.set(first, { ...sessions.views.get(first)!, state: "running", lastTurn: { turnId: "msg-1", status: "running" } });
+      schedules.pause(OWNER.accountId, schedule.id);
+      now += 2 * 60_000;
+      await tick();
+      expect(schedules.get(OWNER.accountId, schedule.id)).toMatchObject({ state: "paused", pausedReason: expect.stringMatching(/could not be stopped/) });
+      // Pausing again cannot clear it, and nothing else runs until the owner checks the session and resumes.
+      schedules.pause(OWNER.accountId, schedule.id);
+      await expectCode(schedules.runNow(OWNER.accountId, schedule.id, "second"), "conflict", /paused by the platform/);
+      expect(sessions.creates).toHaveLength(1);
+    });
+
+    it("upgrades ledgers that already attribute one message to several runs, without running anything again", () => {
+      const legacy = openDatabase(":memory:");
+      migrate(legacy, "durable", DURABLE_MIGRATIONS.slice(0, 4));
+      const insert = legacy.prepare(
+        `INSERT INTO durable_schedule_runs (id, schedule_id, owner_id, occurrence_id, trigger, scheduled_for, status, reason, session_mode, session_id, message_id, created_at, updated_at)
+         VALUES (?, 'sch', 1, ?, 'cron', 0, ?, ?, 'target', 's1', ?, 0, 0)`,
+      );
+      insert.run("run1", "occ1", "completed", null, "m1");
+      insert.run("run2", "occ2", "running", null, "m1");
+      insert.run("run3", "occ3", "completed", "Done", "m1");
+      insert.run("run4", "occ4", "completed", null, "m2");
+      insert.run("run5", "occ5", "skipped", null, null);
+      insert.run("run6", "occ6", "skipped", null, null);
+      migrate(legacy, "durable", DURABLE_MIGRATIONS);
+      const rows = legacy.prepare("SELECT id, status, message_id, reason, completed_at FROM durable_schedule_runs ORDER BY id").all() as Record<string, unknown>[];
+      const shared = "Runtime message m1 was also attributed to an earlier run of this session";
+      expect(rows).toMatchObject([
+        { id: "run1", status: "completed", message_id: "m1", reason: null },
+        { id: "run2", status: "needs_reconciliation", message_id: null, reason: shared },
+        { id: "run3", status: "completed", message_id: null, reason: `${shared}; Done` },
+        { id: "run4", status: "completed", message_id: "m2", reason: null },
+        { id: "run5", status: "skipped", message_id: null },
+        { id: "run6", status: "skipped", message_id: null },
+      ]);
+      expect(rows[1]!.completed_at).toBeGreaterThan(0);
+      expect(() => legacy.prepare("UPDATE durable_schedule_runs SET message_id = 'm1' WHERE id = 'run4'").run()).toThrow(/UNIQUE/);
+      legacy.close();
+    });
+
     it("blocks every run, including queued manual ones, while the platform has a schedule paused", async () => {
       const schedule = await schedules.create(OWNER, { name: "daily", cron: "0 9 * * *", environment: "chat", prompt: "p" });
       const queued = await schedules.runNow(OWNER.accountId, schedule.id, "before-pause");
