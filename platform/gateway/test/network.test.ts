@@ -486,13 +486,16 @@ describe("policy service across deployment changes", () => {
     });
     const policy = start(db, config());
     const now = new Date().toISOString();
-    const core = (id: string, environment: string) =>
+    const core = (id: string, environment: string, request: Record<string, unknown>) =>
       db
-        .prepare("INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, network, environment_request, admitted, created_at, updated_at) VALUES (?, 1, ?, 'promotable', 'sandbox', 'idle', '{}', '{}', '{}', ?, ?)")
-        .run(id, environment, now, now);
+        .prepare("INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, network, environment_request, admitted, created_at, updated_at) VALUES (?, 1, ?, 'promotable', 'sandbox', 'idle', '{}', ?, '{}', ?, ?)")
+        .run(id, environment, JSON.stringify(request), now, now);
     for (const id of ["s-committed", "s-pending", "s-orphan"]) policy.bindSession({ sessionId: id, owner: 1, environment: "helper", type: "promotable", requested: undefined, vaults: undefined });
     policy.bindSession({ sessionId: "s-inline", owner: 1, environment: undefined, type: "promotable", requested: undefined, vaults: undefined });
     policy.bindSession({ sessionId: "s-plain", owner: 1, environment: "plain", type: "isolated", requested: undefined, vaults: undefined });
+    // A declared source named "inline-helper", removed from the AppHost later (before the upgrade).
+    const declaredThen = start(db, { ...config(), environments: { ...config().environments, "inline-helper": { type: "promotable", promoteTo: "worker", network: true } } });
+    declaredThen.bindSession({ sessionId: "s-removed", owner: 1, environment: "inline-helper", type: "promotable", requested: undefined, vaults: undefined });
     // The layout the earlier promoteSession left: the target as the environment, the source only in a pending snapshot.
     const legacy = (id: string, pending: boolean) => {
       const row = db.prepare("SELECT environment, type, policy FROM network_sessions WHERE session_id = ?").get(id) as { environment: string | null; type: string; policy: string };
@@ -506,14 +509,19 @@ describe("policy service across deployment changes", () => {
     legacy("s-pending", true);
     legacy("s-orphan", false);
     legacy("s-inline", false);
-    core("s-committed", "helper");
-    core("s-pending", "helper");
-    core("s-inline", "inline-promotable");
-    core("s-plain", "plain");
+    legacy("s-removed", false);
+    core("s-committed", "helper", { name: "helper" });
+    core("s-pending", "helper", { name: "helper" });
+    core("s-inline", "inline-promotable-small", { type: "promotable" });
+    core("s-plain", "plain", { name: "plain" });
+    core("s-removed", "inline-helper", { name: "inline-helper" });
     db.prepare("INSERT INTO promotion_operations (id, session_id, owner_id, from_generation, trigger, target, state, created_at, updated_at) VALUES ('prm_1', 's-orphan', 1, 0, 'api', 'worker', 'committed', ?, ?)").run(now, now);
     expect(policy.session("s-committed")).toMatchObject({ environment: "worker", vaults: [] });
 
-    expect(policy.convertLegacyPromotions()).toBe(4);
+    // The declared source "inline-helper" was removed from the AppHost before the upgrade.
+    const upgraded = start(db, config());
+    expect(upgraded.convertLegacyPromotions()).toBe(5);
+    expect(upgraded.session("s-removed")).toMatchObject({ environment: "inline-helper", promotedTo: "worker", policy: { access: "disabled" } });
     expect(policy.session("s-committed")).toMatchObject({ environment: "helper", promotedTo: "worker", type: "isolated", vaults: ["payments"] });
     expect(policy.session("s-pending")).toMatchObject({ environment: "helper", promotedTo: "worker" });
     expect(policy.session("s-inline")).toMatchObject({ promotedTo: "worker", policy: { access: "restricted", allowedDomains: ["api.stripe.com", "pypi.org"] } });

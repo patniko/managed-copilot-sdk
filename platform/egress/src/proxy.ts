@@ -178,12 +178,15 @@ export function redactingStream(secrets: readonly string[]): Transform {
       const cached = next[n]!;
       return cached === -1 || cached >= from ? cached : (next[n] = data.indexOf(needles[n]!, from));
     };
-    /** Grows the span [start, end) over every secret that starts inside it. */
+    /** Grows the span [start, end) over every secret that starts inside it. Each secret's searches cover disjoint ranges. */
     const extend = (start: number, end: number): number => {
+      const from = needles.map(() => start);
       for (let grown = true; grown; ) {
         grown = false;
         needles.forEach((needle, n) => {
-          const at = nextFrom(n, start);
+          const at = nextFrom(n, from[n]!);
+          // Occurrences starting before `end` are settled below: the last of them reaches furthest.
+          from[n] = end;
           if (at < 0 || at >= end) return;
           const last = data.lastIndexOf(needle, end - 1);
           if (last + needle.length > end) {

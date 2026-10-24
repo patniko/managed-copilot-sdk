@@ -101,6 +101,17 @@ describe("response redaction", () => {
     expect(out).toBe("[redacted]_|tail");
   });
 
+  it("grows a span over alternating overlapping secrets in linear time within one chunk", async () => {
+    const started = performance.now();
+    const { final } = await run(["init_aaaa", "aaaa_bbbb", "bbbb_aaaa"], [`init_${"aaaa_bbbb_".repeat(50_000)}`]);
+    // The reviewed version spent seconds on this 500 KB chunk; the final "_" belongs to no occurrence.
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(final).toBe("[redacted]_");
+    const second = performance.now();
+    expect((await run(["baaa", "aaaa"], [`b${"a".repeat(512 * 1024)}`])).final).toBe("[redacted]");
+    expect(performance.now() - second).toBeLessThan(1_000);
+  });
+
   it("gives the same result however a body is chunked, and never lets a secret through", async () => {
     let seed = 20261024;
     const random = (n: number) => {
