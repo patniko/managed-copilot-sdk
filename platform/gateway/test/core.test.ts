@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -8,24 +8,46 @@ import { redact } from "../src/log.js";
 import { admitOptionsUpdate, admitSession, lockSystemMessage, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
+import { pathScrubber } from "../src/modules/core/sessions.js";
 import { createLogger } from "../src/log.js";
 import { sleep, startGitHubStub } from "./harness.js";
 
 const log = createLogger("test", "error");
 
-type GitHubStep = "reset" | "timeout" | number | { readonly status: number; readonly headers?: Record<string, string> };
+type GitHubStep = "reset" | "timeout" | number | { readonly status: number; readonly headers?: Record<string, string>; readonly delayMs?: number; readonly truncated?: boolean };
 
 /** A scripted GitHub API: each call consumes one step (an HTTP status, a dropped connection, or a timeout). */
 function scriptedGitHub(steps: GitHubStep[], user = { id: 7, login: "octo" }) {
   const state = { calls: 0 };
   const script = [...steps];
-  const fetchImpl = async () => {
+  const fetchImpl = async (_url: string, init?: { signal?: AbortSignal }) => {
     state.calls++;
     const step = script.shift() ?? 200;
     if (step === "reset") throw Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("socket hang up"), { code: "ECONNRESET" }) });
     if (step === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
-    const { status, headers = {} } = typeof step === "number" ? { status: step } : step;
-    return new Response(status === 204 ? null : JSON.stringify(status === 200 ? user : { message: `HTTP ${status}` }), { status, headers: { "content-type": "application/json", ...headers } });
+    const { status, headers = {}, delayMs = 0, truncated = false } = typeof step === "number" ? { status: step } : step;
+    if (delayMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, delayMs);
+        init?.signal?.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(init.signal!.reason);
+        });
+      });
+    }
+    const text = status === 200 ? JSON.stringify(user) : JSON.stringify({ message: `HTTP ${status}` });
+    // A connection lost after the headers: the body stream fails partway.
+    const body = truncated
+      ? new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(text.slice(0, 5)));
+            controller.error(new TypeError("terminated"));
+          },
+        })
+      : status === 204
+        ? null
+        : text;
+    return new Response(body, { status, headers: { "content-type": "application/json", ...headers } });
   };
   return {
     fetch: fetchImpl as unknown as typeof fetch,
@@ -311,6 +333,61 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("token-h")).rejects.toMatchObject({ code: "forbidden" });
   });
 
+  it("stops serving an account's credential to runtimes once the account loses access", async () => {
+    const github = scriptedGitHub([200, 204]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, access: { githubOrgs: ["contoso"] } });
+    await auth.authenticate("token-i");
+    expect(auth.liveCredential(7)?.token).toBe("token-i");
+    await sleep(5);
+    github.script.push(200, 404);
+    await expect(auth.authenticate("token-i")).rejects.toMatchObject({ code: "forbidden" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+  });
+
+  it("treats a membership 401 as a rejected token, even when another organization's check then fails", async () => {
+    const github = scriptedGitHub([200, 204]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 60_000, access: { githubOrgs: ["first", "second"] } });
+    await auth.authenticate("token-j");
+    await sleep(5);
+    github.script.push(200, 401, "reset", "reset");
+    await expect(auth.authenticate("token-j")).rejects.toMatchObject({ code: "authentication_required" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+  });
+
+  it("treats a connection lost while reading the answer as an outage", async () => {
+    const github = scriptedGitHub([{ status: 200, truncated: true }, { status: 200, truncated: true }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 60_000 });
+    await expect(auth.authenticate("token-k")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    github.script.push({ status: 200, truncated: true }, 200);
+    await expect(auth.authenticate("token-k")).resolves.toMatchObject({ login: "octo" });
+    expect(github.calls).toBe(4);
+    // A recent verification stands in when the body keeps failing.
+    await sleep(5);
+    github.script.push({ status: 200, truncated: true }, { status: 200, truncated: true });
+    await expect(auth.authenticate("token-k")).resolves.toMatchObject({ login: "octo" });
+  });
+
+  it("lets an invalidation during a verification win", async () => {
+    const github = scriptedGitHub([{ status: 200, delayMs: 50 }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1] });
+    const verifying = auth.authenticate("token-l");
+    await sleep(10);
+    auth.invalidate("token-l");
+    await expect(verifying).rejects.toMatchObject({ code: "authentication_required" });
+    expect(auth.liveCredential(7)).toBeUndefined();
+    // Nothing was cached: the next call asks GitHub again.
+    await expect(auth.authenticate("token-l")).resolves.toMatchObject({ login: "octo" });
+    expect(github.calls).toBe(2);
+  });
+
+  it("bounds a whole verification, membership checks included, by one deadline", async () => {
+    const github = scriptedGitHub([{ status: 200, delayMs: 150 }, { status: 204, delayMs: 400 }, { status: 204, delayMs: 400 }]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1, 1, 1], deadlineMs: 300, access: { githubOrgs: ["contoso"] } });
+    const started = Date.now();
+    await expect(auth.authenticate("token-m")).rejects.toMatchObject({ code: "upstream_unavailable" });
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it("parses GitHub token expiration headers", () => {
     expect(parseExpiration("2026-11-01 08:00:00 UTC")).toBe(Date.parse("2026-11-01T08:00:00Z"));
     expect(parseExpiration("2026-11-01 08:00:00 -0700")).toBe(Date.parse("2026-11-01T15:00:00Z"));
@@ -319,6 +396,26 @@ describe("GitHub authentication", () => {
 });
 
 describe("gateway primitives", () => {
+  it("scrubs host paths under the data directory without eating the punctuation around them", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "mc-scrub-"));
+    try {
+      const scrub = pathScrubber(dataDir) as (value: unknown) => unknown;
+      const workspace = join(dataDir, "runtime", "shared", "workspaces", "0b1c2d3e-aaaa-bbbb-cccc-000000000001");
+      const bundle = join(dataDir, "customizations", "chat", "3303eed202f7e4a6");
+      expect(scrub(`(${workspace})`)).toBe("(/workspace)");
+      expect(scrub(`Working in ${workspace}.`)).toBe("Working in /workspace.");
+      expect(scrub(join(workspace, "src", "app.ts"))).toBe("/workspace/src/app.ts");
+      expect(scrub({ agent: { path: join(bundle, "agents", "builder.agent.md") } })).toEqual({ agent: { path: "/opt/managed-copilot/customizations/agents/builder.agent.md" } });
+      expect(scrub([join(dataDir, "runtime", "shared", "copilot-home", "logs")])).toEqual(["/platform/copilot-home/logs"]);
+      expect(scrub(`key at ${join(dataDir, "network", "vault.key")}, see logs`)).toBe("key at /platform/network/vault.key, see logs");
+      // The runtime may report the directory's resolved form (8.3 names on Windows, symlinks elsewhere).
+      expect(scrub(join(realpathSync.native(dataDir), "runtime", "shared", "workspaces", "abc"))).toBe("/workspace");
+      expect(scrub("unrelated /etc/hosts and C:\\Windows")).toBe("unrelated /etc/hosts and C:\\Windows");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
   it("redacts credentials without masking identifiers", () => {
     const circular: Record<string, unknown> = { idempotencyKey: "k1", value: "secret", headers: { authorization: "x" }, nested: { placeholder: "mcrt_1", token: "t" }, big: 10n };
     circular["self"] = circular;

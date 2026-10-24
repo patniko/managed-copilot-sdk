@@ -28,6 +28,8 @@ export interface GitHubAuthOptions {
   readonly retryDelaysMs?: readonly number[];
   /** While GitHub is unreachable, how often a token standing in on its recent verification is re-checked. */
   readonly outageRecheckMs?: number;
+  /** Overall budget of one verification (user lookup, membership checks, retries). Default 35 s. */
+  readonly deadlineMs?: number;
   readonly fetch?: typeof fetch;
   readonly userAgent?: string;
 }
@@ -69,6 +71,8 @@ export class GitHubAuthenticator implements Authenticator {
   readonly #options: GitHubAuthOptions;
   readonly #cache = new Map<string, CacheEntry>();
   readonly #inflight = new Map<string, Promise<Principal>>();
+  /** When a token was last invalidated: verifications that started earlier must not store a result for it. */
+  readonly #invalidatedAt = new Map<string, number>();
   readonly #credentials = new Map<number, LiveCredential>();
   readonly #listeners = new Set<(principal: Principal) => void>();
 
@@ -96,8 +100,11 @@ export class GitHubAuthenticator implements Authenticator {
     }
     let pending = this.#inflight.get(key);
     if (!pending) {
-      pending = this.#verify(token, key).finally(() => this.#inflight.delete(key));
-      this.#inflight.set(key, pending);
+      const started = this.#verify(token, key).finally(() => {
+        if (this.#inflight.get(key) === started) this.#inflight.delete(key);
+      });
+      pending = started;
+      this.#inflight.set(key, started);
     }
     // During a GitHub outage, a token already standing in on its recent verification keeps answering while the
     // re-check runs in the background, so callers don't wait out the retry budget on every re-check.
@@ -125,23 +132,41 @@ export class GitHubAuthenticator implements Authenticator {
     return () => this.#listeners.delete(listener);
   }
 
-  /** Forgets a token (e.g. after GitHub rejected it for model calls). */
+  /**
+   * Forgets a token (e.g. after GitHub rejected it for model calls): its cached verification, its live credential,
+   * and any verification already in flight, which can no longer store a result.
+   */
   invalidate(token: string): void {
-    this.#cache.delete(tokenFingerprint(token));
+    const key = tokenFingerprint(token);
+    const now = Date.now();
+    this.#cache.delete(key);
+    this.#inflight.delete(key);
+    this.#invalidatedAt.set(key, now);
+    if (this.#invalidatedAt.size > 1000) {
+      for (const [entry, at] of this.#invalidatedAt) if (now - at > 10 * 60_000) this.#invalidatedAt.delete(entry);
+    }
     for (const [accountId, credential] of this.#credentials) {
       if (credential.token === token) this.#credentials.delete(accountId);
     }
   }
 
+  /** Whether nothing invalidated the token since a verification started at `startedAt`. */
+  #current(key: string, startedAt: number): boolean {
+    const at = this.#invalidatedAt.get(key);
+    return at === undefined || at < startedAt;
+  }
+
   async #verify(token: string, key: string): Promise<Principal> {
+    const startedAt = Date.now();
     try {
-      return await this.#verifyWithGitHub(token, key);
+      // One budget for the whole verification (user lookup, membership checks, retries, and body reads).
+      return await this.#verifyWithGitHub(token, key, startedAt, startedAt + (this.#options.deadlineMs ?? GITHUB_DEADLINE_MS));
     } catch (error) {
       if (!(error instanceof GitHubUnavailable)) throw error;
       const { log } = this.#options;
       const now = Date.now();
       const previous = this.#cache.get(key);
-      if (previous?.principal && previous.staleUntil !== undefined && previous.staleUntil > now) {
+      if (previous?.principal && previous.staleUntil !== undefined && previous.staleUntil > now && this.#current(key, startedAt)) {
         // GitHub is briefly unreachable. This token verified recently and GitHub has not rejected it since (a
         // rejection replaces the entry), so its last verification stands in until the stale window closes.
         log.warn("GitHub is unreachable; accepting the token's recent verification", {
@@ -160,8 +185,8 @@ export class GitHubAuthenticator implements Authenticator {
     }
   }
 
-  async #verifyWithGitHub(token: string, key: string): Promise<Principal> {
-    const response = await this.#get("/user", token);
+  async #verifyWithGitHub(token: string, key: string, startedAt: number, deadline: number): Promise<Principal> {
+    const response = await this.#get("/user", token, deadline, { json: true });
     if (response.status === 401) {
       this.invalidate(token);
       return this.#reject(key, new ManagedCopilotError("authentication_required", "GitHub rejected this token. Sign in again (for example `gh auth login`) and retry."));
@@ -170,8 +195,8 @@ export class GitHubAuthenticator implements Authenticator {
       this.invalidate(token);
       return this.#reject(key, new ManagedCopilotError("authentication_required", "This token cannot identify a GitHub user (GitHub returned HTTP 403). Use a user token, for example from `gh auth token`."));
     }
-    if (!response.ok) throw new GitHubUnavailable(`GitHub returned HTTP ${response.status}`);
-    const user = (await response.json()) as { id?: unknown; login?: unknown; name?: unknown; avatar_url?: unknown; type?: unknown };
+    if (response.status !== 200) throw new GitHubUnavailable(`GitHub returned HTTP ${response.status}`);
+    const user = (response.body ?? {}) as { id?: unknown; login?: unknown; name?: unknown; avatar_url?: unknown; type?: unknown };
     if (typeof user.id !== "number" || typeof user.login !== "string") {
       throw new ManagedCopilotError("authentication_required", "The token does not identify a GitHub user account");
     }
@@ -183,7 +208,10 @@ export class GitHubAuthenticator implements Authenticator {
       token,
     };
     const expiresAt = parseExpiration(response.headers.get("github-authentication-token-expiration"));
-    await this.#checkAccess(principal, key);
+    await this.#checkAccess(principal, key, deadline);
+    if (!this.#current(key, startedAt)) {
+      throw new ManagedCopilotError("authentication_required", "This token was revoked while it was being verified. Sign in again and retry.");
+    }
     const now = Date.now();
     const limit = expiresAt ?? Number.POSITIVE_INFINITY;
     this.#cache.set(key, {
@@ -197,7 +225,7 @@ export class GitHubAuthenticator implements Authenticator {
     return principal;
   }
 
-  async #checkAccess(principal: Principal, key: string): Promise<void> {
+  async #checkAccess(principal: Principal, key: string, deadline: number): Promise<void> {
     const access = this.#options.access;
     const users = access?.githubUsers ?? [];
     const orgs = access?.githubOrgs ?? [];
@@ -205,12 +233,18 @@ export class GitHubAuthenticator implements Authenticator {
     if (users.some((user) => user.toLowerCase() === principal.login.toLowerCase())) return;
     for (const org of orgs) {
       // The caller checks their own membership, so private memberships are visible to them. Outages throw
-      // GitHubUnavailable (never "not a member"); 404 and other refusals mean not a member of this org.
-      const response = await this.#get(`/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(principal.login)}`, principal.token);
-      await response.body?.cancel().catch(() => undefined);
+      // GitHubUnavailable (never "not a member"); a 401 rejects the token outright; 404 and other refusals mean
+      // not a member of this org.
+      const response = await this.#get(`/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(principal.login)}`, principal.token, deadline, { json: false });
       if (response.status === 204) return;
+      if (response.status === 401) {
+        this.invalidate(principal.token);
+        this.#reject(key, new ManagedCopilotError("authentication_required", "GitHub rejected this token. Sign in again (for example `gh auth login`) and retry."));
+      }
       if (response.status >= 500) throw new GitHubUnavailable(`GitHub returned HTTP ${response.status} for an organization membership check`);
     }
+    // The account lost (or never had) access: its live credential must not keep serving its sessions' runtimes.
+    if (this.#credentials.get(principal.accountId)) this.#credentials.delete(principal.accountId);
     const allowed = [...orgs.map((org) => `members of ${org}`), ...users.map((user) => `@${user}`)].join(", ");
     this.#reject(key, new ManagedCopilotError("forbidden", `@${principal.login} is not allowed to use this deployment (allowed: ${allowed})`));
   }
@@ -246,10 +280,11 @@ export class GitHubAuthenticator implements Authenticator {
 
   /**
    * GETs are idempotent, so transport errors (resets, refused connections, a cold DNS/TLS path that stalls past one
-   * attempt's timeout) and 5xx answers are retried with jittered backoff within an overall deadline. Rate limits are
-   * not retried. Throws GitHubUnavailable when GitHub could not answer; any other status is returned.
+   * attempt's timeout, a connection lost while reading the body) and 5xx answers are retried with jittered backoff
+   * until the caller's deadline. Rate limits are not retried. Throws GitHubUnavailable when GitHub could not answer;
+   * any other status is returned, with the parsed body of a 200 when `json` is set.
    */
-  async #get(path: string, token: string): Promise<Response> {
+  async #get(path: string, token: string, deadline: number, options: { readonly json: boolean }): Promise<GitHubResponse> {
     const doFetch = this.#options.fetch ?? fetch;
     const url = `${this.#options.apiUrl.replace(/\/+$/, "")}${path}`;
     const init = {
@@ -262,18 +297,23 @@ export class GitHubAuthenticator implements Authenticator {
       redirect: "manual" as const,
     };
     const delays = this.#options.retryDelaysMs ?? GITHUB_RETRY_DELAYS_MS;
-    const deadline = Date.now() + GITHUB_DEADLINE_MS;
     for (let attempt = 0; ; attempt++) {
-      const timeout = Math.max(1_000, Math.min(GITHUB_ATTEMPT_TIMEOUT_MS, deadline - Date.now()));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new GitHubUnavailable("GitHub did not answer in time");
       let problem: string;
       try {
-        const response = await doFetch(url, { ...init, signal: AbortSignal.timeout(timeout) });
+        const response = await doFetch(url, { ...init, signal: AbortSignal.timeout(Math.min(GITHUB_ATTEMPT_TIMEOUT_MS, remaining)) });
         const retryAfter = rateLimitRetryAfter(response);
         if (retryAfter !== undefined) {
           await response.body?.cancel().catch(() => undefined);
           throw new GitHubUnavailable(`GitHub rate-limited the gateway (HTTP ${response.status})`, retryAfter);
         }
-        if (!TRANSIENT_STATUSES.has(response.status)) return response;
+        if (!TRANSIENT_STATUSES.has(response.status)) {
+          // The body is read inside the retry boundary: a connection lost mid-body is an outage, not a bad token.
+          if (options.json && response.status === 200) return { status: 200, headers: response.headers, body: (await response.json()) as unknown };
+          await response.body?.cancel().catch(() => undefined);
+          return { status: response.status, headers: response.headers };
+        }
         await response.body?.cancel().catch(() => undefined);
         problem = `GitHub returned HTTP ${response.status}`;
       } catch (error) {
@@ -285,6 +325,12 @@ export class GitHubAuthenticator implements Authenticator {
       await new Promise((resolve) => setTimeout(resolve, Math.round(base * (0.5 + Math.random()))));
     }
   }
+}
+
+interface GitHubResponse {
+  readonly status: number;
+  readonly headers: Headers;
+  readonly body?: unknown;
 }
 
 /** GitHub could not answer (transport error, timeout, 5xx, rate limit). Says nothing about the token itself. */
