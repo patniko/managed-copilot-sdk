@@ -14,6 +14,8 @@ export function platformPill(platform: PlatformStatus): PlatformPill {
       return { label: platform.deployment?.name ?? "Connected", tone: "success", pulse: false, mode: platform.deployment?.mode };
     case "connecting":
       return { label: "Connecting…", tone: "warning", pulse: true };
+    case "reconnecting":
+      return { label: "Reconnecting…", tone: "warning", pulse: true, mode: platform.deployment?.mode };
     case "misconfigured":
       return { label: "Misconfigured", tone: "danger", pulse: false };
     default:
@@ -25,6 +27,7 @@ export function platformPill(platform: PlatformStatus): PlatformPill {
 export function runsBlockedReason(platform: PlatformStatus | undefined): string | undefined {
   if (!platform) return "Waiting for the factory server…";
   if (platform.state === "connecting") return "The factory is still connecting to Managed Copilot.";
+  if (platform.state === "reconnecting") return "The factory is reconnecting to Managed Copilot; new work orders can start once it's back.";
   if (platform.state === "unavailable") return "Managed Copilot is unavailable, so the factory can't start runs.";
   if (platform.state === "misconfigured") return "The platform is missing factory environments, so runs can't start.";
   if (!platform.features.runs) return "This deployment doesn't allow the factory to start runs.";
