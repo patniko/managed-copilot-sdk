@@ -14,6 +14,7 @@ import { GatewayApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { openDatabase } from "../src/db.js";
 import { createLogger, type Logger } from "../src/log.js";
+import type { Principal } from "../src/http.js";
 import { attachModule, type AttachSessions, type SessionLifecycleEvent, type SessionRuntime } from "../src/modules/attach/index.js";
 import { CREDENTIAL_REFUSAL, filterAhpClientFrame as filterClientFrame } from "@managed-copilot/protocol";
 import { AttachTickets } from "../src/modules/attach/tickets.js";
@@ -190,6 +191,15 @@ class FakeSessions implements AttachSessions {
   onLifecycle(listener: (event: SessionLifecycleEvent) => void) {
     this.listener = listener;
     return () => (this.listener = undefined);
+  }
+  /** Presences attach took (core: the principal serves as the session's credential until released). */
+  readonly presences: { sessionId: string; principal: Principal; released: boolean }[] = [];
+  presence(sessionId: string, principal: Principal): () => void {
+    const entry = { sessionId, principal, released: false };
+    this.presences.push(entry);
+    return () => {
+      entry.released = true;
+    };
   }
 }
 
@@ -727,6 +737,26 @@ describe("attach module", () => {
     expect(runtime.count("host.start")).toBe(2);
     dispatch(again.ws, 1, CHAT, { type: "chat/turnStarted", turnId: "t1", startedAt: "x", message: { text: "Back", origin: { kind: "user" } } });
     await waitFor(() => listener.dispatched("chat/turnStarted").length === 1);
+  });
+
+  it("keeps an attached CLI's credential on the session through a move, until the move ends", async () => {
+    await fresh();
+    // Nothing attached: nothing to keep.
+    await participant!.fence("s2", new AbortController().signal);
+    participant!.release("s2", { committed: false, sealed: false });
+    expect(sessions.presences).toEqual([]);
+    // Live, a CLI that approved request_sandbox with no app connected was the session's only credential: the fence
+    // ended its attachment and the destination couldn't open the session (authentication_required).
+    const { ws, attachment } = await connect();
+    const closed = once(ws, "close");
+    const fencing = participant!.fence("s1", new AbortController().signal);
+    expect(sessions.presences).toEqual([{ sessionId: "s1", principal: expect.objectContaining({ accountId: OWNER, login: "octo" }), released: false }]);
+    await fencing;
+    await closed;
+    expect(attachment.closed).toBe(true);
+    expect(sessions.presences[0]!.released).toBe(false);
+    participant!.release("s1", { committed: true, sealed: true });
+    expect(sessions.presences[0]!.released).toBe(true);
   });
 
   it("waits for a host still starting on the source, disposes it, and refuses that attach", async () => {

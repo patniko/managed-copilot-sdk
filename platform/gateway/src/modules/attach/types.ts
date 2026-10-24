@@ -1,5 +1,6 @@
 import type { Duplex } from "node:stream";
 import type { PendingAction, SessionInfo } from "@managed-copilot/protocol";
+import type { Principal } from "../../http.js";
 import type { CliAttachment, CliAttachOptions } from "../core/contracts.js";
 import type { AttachedResponder } from "../durable/contract.js";
 
@@ -26,6 +27,8 @@ export interface AttachSessions {
   get?(sessionId: string): AttachSessionRecord | undefined;
   /** Registers an attached Copilot CLI as a `cli` responder and gates its writes and answers (core). */
   attachCli?(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment>;
+  /** Keeps the owner's verified `principal` serving the session's credential until the returned release (core). */
+  presence?(sessionId: string, principal: Principal): () => void;
   onLifecycle?(listener: (event: SessionLifecycleEvent) => void): () => void;
 }
 

@@ -972,6 +972,10 @@ sequenceDiagram
   unsealed abort) the next attach starts a fresh host through a
   fresh `sessions.runtime()`, even when the runtime connection is the same. Lifecycle releases (`promoted`,
   `stopped`) end only hosts whose runtime lookup started before the event, so a host already on the new runtime stays.
+  The fence ends the attached CLIs' attachments, and with them their credential, but the person is still there (the
+  CLI reconnects after the move) and may be the session's only credential, which the destination needs to open the
+  session: before closing the relays, the fence keeps each attached CLI's principal present on the session
+  (`sessions.presence`) until `release`.
 - **Reconnects.** The stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
   1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
   into 1012 and reconnects the CLI with a fresh ticket to the same session wherever it now runs; while a move is under
@@ -989,7 +993,15 @@ sequenceDiagram
   `defaultDirectory`; the CLI no longer opens a host terminal for `!`. Promoting an attached session: the fence closed
   the CLI 1 s after the request, before the state export, attaches answered `session_busy` until the commit (2.8 s),
   the stock CLI reconnected by itself, and its next turn ran in the sandbox (`agent`, `/workspace`, `Linux`) with the
-  approval recorded as the CLI's.
+  approval recorded as the CLI's. Again after the Argon and Astra fixes, with durable's `promptVisibility` in place: an
+  app-held prompt's CLI approval was refused ("Your application is answering this request.") and the app's answer
+  completed it; with the app gone, the real CLI's turn asked for `request_sandbox`, its "Approve once" (recorded as
+  `cli:<connection>`) moved the session with the CLI's credential as the only one (before the credential was kept
+  through the fence, that move failed with `authentication_required`), the CLI showed "Connection lost.
+  Reconnecting...", reconnected through the relay by itself, and approved the shell command in the sandbox
+  (`cli-ok`, `Linux`, `/workspace`); Esc on a running turn sent `chat/turnCancelled` through `write({ kind: "abort" })`
+  and the runtime ended the turn; `managed-copilot attach` exited 0 with "Detached from ...". 132 more CLI-bound frames
+  had no host path.
 - Hosts are disposed after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one
   alive), on `deleted` and `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on
   `promoted` or a new runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the
