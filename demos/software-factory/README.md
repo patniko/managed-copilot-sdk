@@ -52,7 +52,7 @@ aspire run          # the platform, sandboxes, and the factory; open the "softwa
 
 The factory floor opens at <http://localhost:7480>. Pick the **CSV ⇄ JSON toolkit** template and press
 **Start work order**: two builders work side by side, the reviewer usually sends one of them back once, and the release
-lands in about five minutes.
+lands in about eight minutes.
 
 ### Scripted happy path
 
