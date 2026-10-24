@@ -532,7 +532,11 @@ sequenceDiagram
   turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
   after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one alive), on `deleted` and
   `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on `promoted` or a new
-  runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`).
+  runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the listener
+  connection drops abnormally, the client stays open for 500 ms so the lifecycle event that usually follows closes it
+  with its own code and reason; otherwise it closes with 1011. Host starts and releases for a session run in order,
+  and each start resolves the session's runtime only after earlier releases, so it never lands on a runtime the session
+  just left.
 - Reconnects: the stock CLI redials the same `--ahp` URL and sends AHP `reconnect` after a dropped connection or a
   1012 (service restart) close, but gives up on private 4xxx codes. The relay therefore turns `moved` and `expired`
   into 1012: the CLI reconnects through the relay, which re-verifies its GitHub account and attaches it with a fresh

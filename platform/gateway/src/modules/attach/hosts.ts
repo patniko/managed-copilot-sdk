@@ -60,9 +60,13 @@ export class AhpHosts {
     this.#idleMs = idleMs;
   }
 
-  /** The session's host on its current runtime connection, started and published on first use. */
-  ensure(sessionId: string, runtime: SessionRuntime): Promise<AhpHost> {
+  /**
+   * The session's host on its current runtime connection, started and published on first use. `currentRuntime` is
+   * resolved in the session's queue, after any earlier release, so a lifecycle change is never undone by a stale runtime.
+   */
+  ensure(sessionId: string, currentRuntime: () => Promise<SessionRuntime>): Promise<AhpHost> {
     return this.#serialize(sessionId, async () => {
+      const runtime = await currentRuntime();
       let host = this.#hosts.get(sessionId);
       if (!host || host.closed || host.runtime.connectionId !== runtime.connectionId) {
         if (host) await this.#dispose(host, "The session moved to a new runtime. Reconnecting.", ATTACH_CLOSE_CODES.moved);
