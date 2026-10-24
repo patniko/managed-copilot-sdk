@@ -1,6 +1,8 @@
 import { BellRing, CalendarDays, Inbox, Lock, Repeat, Users } from "lucide-react";
+import type { BackgroundView } from "../../../shared/protocol";
 import { firstName, greeting } from "../format";
 import { AssistantAvatar } from "./Items";
+import { schedulingBlockedReason } from "./Rail";
 
 export const SUGGESTIONS = [
   { icon: CalendarDays, title: "What's on today?", text: "What's on my calendar today? Anything I should prepare for?" },
@@ -10,12 +12,28 @@ export const SUGGESTIONS = [
   { icon: Repeat, title: "Daily briefing", text: "Every weekday at 8am, brief me on my calendar and the important unread mail.", scheduling: true },
 ];
 
+/** The short note on a scheduling suggestion that waits for background work, or undefined once it's confirmed on. */
+function schedulingNote(background: BackgroundView | undefined): string | undefined {
+  switch (background?.state) {
+    case "on":
+      return undefined;
+    case "off":
+      return "Needs background work · turn it on in the side panel";
+    case "unavailable":
+      return "Not available on this deployment";
+    case "error":
+      return "Couldn't check background work";
+    default:
+      return "Checking background work…";
+  }
+}
+
 export function EmptyState({
   name,
   login,
   timeZone,
   demo,
-  backgroundOff,
+  background,
   onPick,
   onNeedBackground,
 }: {
@@ -23,8 +41,8 @@ export function EmptyState({
   login?: string;
   timeZone: string;
   demo: boolean;
-  /** Scheduling suggestions wait until background work is on. */
-  backgroundOff?: boolean;
+  /** Scheduling suggestions wait until background work is confirmed on. */
+  background?: BackgroundView;
   onPick(text: string): void;
   onNeedBackground?(): void;
 }) {
@@ -44,16 +62,20 @@ export function EmptyState({
       )}
       <div className="mt-8 grid w-full gap-2.5 sm:grid-cols-2">
         {SUGGESTIONS.map(({ icon: Icon, title, text, scheduling }, index) => {
-          const blocked = Boolean(scheduling && backgroundOff);
+          const note = scheduling ? schedulingNote(background) : undefined;
+          const blocked = note !== undefined;
+          // While it's off, the suggestion leads to the consent card; in other states it simply waits.
+          const leadsToConsent = blocked && background?.state === "off";
           return (
             <button
               key={title}
               type="button"
-              onClick={() => (blocked ? onNeedBackground?.() : onPick(text))}
+              onClick={() => (leadsToConsent ? onNeedBackground?.() : onPick(text))}
+              disabled={blocked && !leadsToConsent}
               data-testid="suggestion"
               data-blocked={blocked ? "true" : "false"}
-              title={blocked ? "Turn on background work first, so this can run while you're away" : undefined}
-              className={`card group flex items-start gap-3 p-3.5 text-left transition hover:-translate-y-0.5 hover:shadow-md ${
+              title={blocked ? schedulingBlockedReason(background) : undefined}
+              className={`card group flex items-start gap-3 p-3.5 text-left transition enabled:hover:-translate-y-0.5 enabled:hover:shadow-md disabled:cursor-not-allowed ${
                 blocked ? "hover:ring-amber-300 dark:hover:ring-amber-500/50" : "hover:ring-violet-300 dark:hover:ring-violet-500/50"
               } ${index === SUGGESTIONS.length - 1 ? "sm:col-span-2" : ""}`}
             >
@@ -69,8 +91,8 @@ export function EmptyState({
               <span className="min-w-0">
                 <span className={`block text-sm font-semibold ${blocked ? "text-zinc-500 dark:text-zinc-400" : "text-zinc-900 dark:text-zinc-100"}`}>{title}</span>
                 {blocked ? (
-                  <span className="mt-0.5 inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-300">
-                    <Lock className="size-3" aria-hidden /> Needs background work · turn it on in the side panel
+                  <span className={`mt-0.5 inline-flex items-center gap-1 text-xs ${leadsToConsent ? "text-amber-700 dark:text-amber-300" : "text-zinc-500 dark:text-zinc-400"}`}>
+                    <Lock className="size-3" aria-hidden /> {note}
                   </span>
                 ) : (
                   <span className="line-clamp-2 text-xs text-zinc-500 dark:text-zinc-400">{text}</span>

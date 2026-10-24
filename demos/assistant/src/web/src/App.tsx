@@ -167,7 +167,7 @@ export function App() {
                 login={snapshot?.account?.login}
                 timeZone={timeZone}
                 demo={demo}
-                backgroundOff={backgroundOff}
+                background={snapshot?.background}
                 onPick={(text) => void actions.send(text)}
                 onNeedBackground={() => {
                   openBackground();
