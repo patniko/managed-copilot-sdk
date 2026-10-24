@@ -32,13 +32,14 @@ class FakeAgent {
 
 describe("ArtifactService", () => {
   let dir: string;
+  let db: ReturnType<typeof openDatabase>;
   let agent: FakeAgent;
   let events: { type: string; data: Record<string, unknown> }[];
   let service: ArtifactService;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "mc-artifacts-"));
-    const db = openDatabase(":memory:");
+    db = openDatabase(":memory:");
     new SandboxStore(db);
     agent = new FakeAgent();
     events = [];
@@ -125,6 +126,34 @@ describe("ArtifactService", () => {
     await turn("turn-1");
     await service.deleteSession(SESSION);
     expect(service.list(SESSION)).toEqual([]);
+  });
+
+  it("announces only new versions and records a deleted session's publication with a clear reason", async () => {
+    agent.files.set("a.txt", "a");
+    await turn("turn-1");
+    await turn("turn-2");
+    expect((await service.waitForPublication(SESSION, { turnId: "turn-2" })).artifacts.map((artifact) => `${artifact.path}@${artifact.version}`)).toEqual(["a.txt@1"]);
+    expect(events).toHaveLength(1);
+
+    let gone = false;
+    const deleting = new ArtifactService({
+      db,
+      dataDir: dir,
+      log: createLogger("test", "error"),
+      agentFor: async () => {
+        gone = true;
+        throw new Error("The sandbox connection failed.");
+      },
+      track: (_sessionId, work) => work,
+      ownerOf: () => 42,
+      sessionGone: () => gone,
+      events: () => undefined,
+    });
+    deleting.turnStarted(SESSION, "turn-3");
+    await deleting.publish(SESSION, deleting.turnsCompleted(SESSION, "completed"), "completed");
+    await expect(deleting.waitForPublication(SESSION, { turnId: "turn-3" })).rejects.toSatisfy(
+      (error: unknown) => isManagedCopilotError(error, "publication_failed") && /deleted before its outputs were published/.test((error as Error).message),
+    );
   });
 
   it("maps common content types", () => {

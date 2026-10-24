@@ -49,6 +49,8 @@ export function contentTypeFor(path: string): string {
   return CONTENT_TYPES[extname(path).toLowerCase()] ?? "application/octet-stream";
 }
 
+const DELETED = "The session was deleted before its outputs were published.";
+
 type TurnOutcome = "completed" | "cancelled" | "failed";
 
 interface ArtifactRow {
@@ -101,6 +103,8 @@ export interface ArtifactServiceOptions {
   /** Marks the session busy while publication runs, so idle stop waits for it. */
   track<T>(sessionId: string, work: Promise<T>): Promise<T>;
   ownerOf(sessionId: string): number | undefined;
+  /** True when the session's sandbox is being deleted or is gone (publication then records that, not a transport error). */
+  sessionGone?(sessionId: string): boolean;
   events(): SandboxEventsPort | undefined;
 }
 
@@ -198,6 +202,11 @@ export class ArtifactService implements ArtifactsService {
       return;
     }
     const turnId = turnIds[turnIds.length - 1]!;
+    if (this.#options.sessionGone?.(sessionId)) {
+      finish("failed", DELETED, []);
+      for (const id of turnIds) this.#notify(sessionId, id);
+      return;
+    }
     const dir = this.#dir(sessionId);
     const created: string[] = [];
     try {
@@ -304,8 +313,14 @@ export class ArtifactService implements ArtifactsService {
         const referenced = db.prepare("SELECT 1 FROM sandbox_artifacts WHERE session_id = ? AND digest = ? LIMIT 1").get(sessionId, digest);
         if (!referenced) await fs.rm(blob, { force: true }).catch(() => undefined);
       }
-      const message = error instanceof ManagedCopilotError ? error.message : `Publishing the turn's outputs failed: ${(error as Error).message}`;
-      this.#options.log.warn("Publication failed", { sessionId, turnId, error: message });
+      const message =
+        this.#options.sessionGone?.(sessionId) === true
+          ? DELETED
+          : error instanceof ManagedCopilotError
+            ? error.message
+            : `Publishing the turn's outputs failed: ${(error as Error).message}`;
+      if (message === DELETED) this.#options.log.info("Skipped publishing outputs of a session that is being deleted", { sessionId, turnId });
+      else this.#options.log.warn("Publication failed", { sessionId, turnId, error: message });
       finish("failed", message, []);
     } finally {
       for (const id of turnIds) this.#notify(sessionId, id);

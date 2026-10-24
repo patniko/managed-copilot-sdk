@@ -61,6 +61,10 @@ export const sandboxModule: GatewayModule = {
       agentFor: (sessionId) => service.agentFor(sessionId),
       track: (sessionId, work) => service.track(sessionId, work),
       ownerOf: (sessionId) => store.bySession(sessionId)?.ownerId,
+      sessionGone: (sessionId) => {
+        const row = store.bySession(sessionId);
+        return !row || row.state === "deleting" || row.state === "deleted";
+      },
       events: () => (app.services as Record<string, unknown>)["events"] as SandboxEventsPort | undefined,
     });
     service.attachArtifacts(artifacts);
