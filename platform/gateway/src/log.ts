@@ -1,17 +1,32 @@
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 type Level = keyof typeof LEVELS;
 
-const SENSITIVE_KEY = /token|secret|authorization|password|cookie|credential|apikey|api_key|key$/i;
+/**
+ * Keys whose values are masked. Matches credential-bearing names (`token`, `secret`, `authorization`, `value`,
+ * `headers`, `placeholder`, ...) but not identifiers that merely end in "key" (`idempotencyKey`, `cacheKey`).
+ */
+const SENSITIVE_KEY = /token|secret|authorization|password|passwd|cookie|credential|^value$|^values$|^headers$|placeholder|private|^apikey$|^api_key$|^key$|accesskey|access_key|signingkey|signing_key|platformkey|platform_key/i;
 
 /** Masks values whose keys look sensitive. Logs must never carry credentials, placeholders, or vault values. */
-export function redact(value: unknown, depth = 0): unknown {
+export function redact(value: unknown, depth = 0, seen: WeakSet<object> = new WeakSet()): unknown {
+  if (typeof value === "bigint") return value.toString();
   if (depth > 6 || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => redact(item, depth + 1));
+  if (seen.has(value)) return "[circular]";
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => redact(item, depth + 1, seen));
   const out: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    out[key] = SENSITIVE_KEY.test(key) ? "[redacted]" : redact(item, depth + 1);
+    out[key] = SENSITIVE_KEY.test(key) ? "[redacted]" : redact(item, depth + 1, seen);
   }
   return out;
+}
+
+function stringify(fields: Record<string, unknown>): string {
+  try {
+    return JSON.stringify(redact(fields));
+  } catch {
+    return '"[unserializable fields]"';
+  }
 }
 
 export interface Logger {
@@ -26,7 +41,7 @@ export function createLogger(name: string, level: string = process.env.LOG_LEVEL
   const threshold = LEVELS[(level as Level) in LEVELS ? (level as Level) : "info"];
   const write = (at: Level, message: string, fields?: Record<string, unknown>) => {
     if (LEVELS[at] < threshold) return;
-    const suffix = fields && Object.keys(fields).length > 0 ? ` ${JSON.stringify(redact(fields))}` : "";
+    const suffix = fields && Object.keys(fields).length > 0 ? ` ${stringify(fields)}` : "";
     const line = `${new Date().toISOString()} ${at.toUpperCase().padEnd(5)} [${name}] ${message}${suffix}\n`;
     (at === "error" || at === "warn" ? process.stderr : process.stdout).write(line);
   };
