@@ -108,17 +108,20 @@ describe("isolated placement through the sandboxes port", () => {
     expect(runtime.sessions.get(second)!.events.some((event) => event.data["content"] === "echo: hello second")).toBe(true);
   });
 
-  it("advertises isolated sandboxes and files only while the sandbox backend is available", async () => {
+  it("advertises isolated sandboxes, files, and promotion only while the sandbox backend is available", async () => {
     const capabilities = async () => ((await (await fetch(`${gateway.url}/v1/info`, { headers: { authorization: `Bearer ${ALICE}` } })).json()) as { capabilities: string[] }).capabilities;
-    expect(await capabilities()).toEqual(expect.arrayContaining(["isolated", "files"]));
-    sandboxes.available = false;
+    const moduleCapabilities = gateway.gateway.app.capabilities;
+    const hadPromotion = moduleCapabilities.has("promotion");
+    moduleCapabilities.add("promotion");
     try {
+      expect(await capabilities()).toEqual(expect.arrayContaining(["isolated", "files", "promotion"]));
+      sandboxes.available = false;
       const unavailable = await capabilities();
-      expect(unavailable).not.toContain("isolated");
-      expect(unavailable).not.toContain("files");
+      for (const capability of ["isolated", "files", "promotion"]) expect(unavailable).not.toContain(capability);
       expect(unavailable).toContain("shared");
     } finally {
       sandboxes.available = true;
+      if (!hadPromotion) moduleCapabilities.delete("promotion");
     }
   });
 

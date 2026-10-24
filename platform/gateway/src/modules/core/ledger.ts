@@ -235,11 +235,17 @@ export class SessionLedger {
     return rows.map(toRecord);
   }
 
-  appendEvent(event: PlatformEvent, ownerId: number): number {
+  /**
+   * Stores a platform event. Storing an ID again is a no-op for the same owner (a publisher retrying with a stable ID)
+   * and an error for another owner.
+   */
+  appendEvent(event: PlatformEvent, ownerId: number): void {
     const result = this.#db
-      .prepare("INSERT INTO core_events (id, owner_id, type, session_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .prepare("INSERT INTO core_events (id, owner_id, type, session_id, body, created_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING")
       .run(event.id, ownerId, event.type, event.sessionId ?? null, JSON.stringify(event), event.createdAt);
-    return Number(result.lastInsertRowid);
+    if (Number(result.changes) > 0) return;
+    const existing = this.#db.prepare("SELECT owner_id FROM core_events WHERE id = ?").get(event.id) as { owner_id: number } | undefined;
+    if (existing?.owner_id !== ownerId) throw new Error(`Platform event ${event.id} already exists for another owner`);
   }
 
   /** Events for an owner after `afterId` (the SSE `Last-Event-ID`), oldest first. */

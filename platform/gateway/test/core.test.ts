@@ -3,12 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isManagedCopilotError, NETWORK_ENABLED, parseConfig } from "@managed-copilot/protocol";
+import { isManagedCopilotError, NETWORK_ENABLED, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
 import { redact } from "../src/log.js";
 import { admitOptionsUpdate, admitSession, lockSystemMessage, PROMOTABLE_ENVIRONMENT_CONTEXT, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
+import { PlatformEvents } from "../src/modules/core/events.js";
+import { SessionLedger } from "../src/modules/core/ledger.js";
 import { processStartTime, reapStaleRuntime } from "../src/modules/core/runtime.js";
 import { pathScrubber } from "../src/modules/core/sessions.js";
 import { createLogger } from "../src/log.js";
@@ -476,5 +478,32 @@ describe("gateway primitives", () => {
     expect(() => transaction(db, () => Promise.resolve(1))).toThrowError(/synchronous/);
     expect(db.prepare("SELECT COUNT(*) AS n FROM t").get()).toEqual({ n: 1 });
     db.close();
+  });
+});
+
+describe("platform events", () => {
+  const event = (id: string, type: PlatformEvent["type"] = "session.promoted"): PlatformEvent => ({ id, type, createdAt: new Date().toISOString(), sessionId: "s1", data: {} });
+
+  it("reports whether an event is stored, idempotently for a stable ID, while notifying listeners every time", () => {
+    const db = openDatabase(":memory:");
+    const ledger = new SessionLedger(db);
+    const events = new PlatformEvents(ledger, log);
+    const heard: string[] = [];
+    events.subscribe((published, meta) => heard.push(`${published.id}@${meta.ownerId}`));
+
+    expect(events.publish(event("evt_anchor"), { ownerId: 7 })).toBe(true);
+    expect(events.publish(event("evt_promoted_op1"), { ownerId: 7 })).toBe(true);
+    // A publisher retrying with the same ID (after a crash or an unknown outcome) is told it is stored, without a duplicate.
+    expect(events.publish(event("evt_promoted_op1"), { ownerId: 7 })).toBe(true);
+    expect(ledger.eventsAfter(7, "evt_anchor").map(({ event: stored }) => stored.id)).toEqual(["evt_promoted_op1"]);
+    // Another owner can't claim (or replay) an existing ID.
+    expect(events.publish(event("evt_promoted_op1"), { ownerId: 8 })).toBe(false);
+    expect(ledger.eventsAfter(8, "evt_promoted_op1")).toEqual([]);
+    expect(heard).toEqual(["evt_anchor@7", "evt_promoted_op1@7", "evt_promoted_op1@7", "evt_promoted_op1@8"]);
+
+    // When the ledger can't store it, live listeners still hear it and the publisher learns it isn't replayable.
+    db.close();
+    expect(events.publish(event("evt_promoted_op2"), { ownerId: 7 })).toBe(false);
+    expect(heard.at(-1)).toBe("evt_promoted_op2@7");
   });
 });
