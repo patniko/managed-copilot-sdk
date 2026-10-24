@@ -799,7 +799,7 @@ export class Factory {
       turn: undefined,
     });
     const mapper = this.#newMapper(run, station);
-    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, extra));
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, extra), (text) => mapper.status(text, "warning"));
     const active: ActiveSession = { session, mapper, capture };
     run.sessions.set(station.id, active);
     this.#updateStation(run, station, { sessionId: session.sessionId });
@@ -816,7 +816,7 @@ export class Factory {
       const mapper = this.#newMapper(run, station);
       try {
         this.#updateStation(run, station, { status: "starting", detail: "Reattaching to the sandbox" });
-        const session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}));
+        const session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
         const active: ActiveSession = { session, mapper, capture: {} };
         run.sessions.set(station.id, active);
         await this.#refreshSandbox(run, station);
@@ -855,7 +855,7 @@ export class Factory {
       model: this.#platform.models[station.role],
     });
     const mapper = this.#newMapper(run, station);
-    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}));
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
     const active: ActiveSession = { session, mapper, capture: {} };
     run.sessions.set(station.id, active);
     this.#updateStation(run, station, { sessionId: session.sessionId, seeded: false });
