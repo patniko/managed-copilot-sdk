@@ -223,6 +223,13 @@ describe("turns a lost runtime connection cut", () => {
         runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "0" });
         runtime.emitEvent(sessionId, "assistant.turn_start", { turnId: "1" });
       }),
+      // The same, with the later model call ending too, without a reply (it was interrupted).
+      await cut((sessionId) => {
+        runtime.emitEvent(sessionId, "assistant.message", { messageId: "m-0", content: "First pass." });
+        runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "0" });
+        runtime.emitEvent(sessionId, "assistant.turn_start", { turnId: "1" });
+        runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "1" });
+      }),
       // The runtime lost the turn's history altogether.
       await cut((sessionId) => {
         runtime.sessions.get(sessionId)!.events.length = 0;
@@ -232,7 +239,8 @@ describe("turns a lost runtime connection cut", () => {
       await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
       expect(client.events("session.error").map((event) => (event["data"] as Record<string, unknown>)["errorType"])).toEqual(["interrupted"]);
     }
-  });
+    // Four runtime reconnects, each after the supervisor's backoff.
+  }, 20_000);
 
   it("keeps a turn when the restore cannot check it (its connection drops mid-check)", async () => {
     const client = await connect("coder", (method) => (method === "hooks.invoke" ? { output: {} } : {}));

@@ -819,8 +819,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   wins, and a client resume overtaken that way is admitted again where the session moved. An external shared runtime
   (`MANAGED_COPILOT_RUNTIME_URL`) keeps running its turns, so nothing ends while its connection is down. A turn it
   no longer processes ends as its history records. Its own root `session.error` fails it, and an abort cancels it. It
-  is `completed` only on evidence: a root `session.idle`, a final reply that requested no tools whose
-  `assistant.turn_end` no later model call followed, or a later run. Steering messages, autopilot continuations, and
+  is `completed` only on evidence: a root `session.idle`, a final reply that requested no tools whose model call ended
+  (`assistant.turn_end`) with no later model call started, or a later run. Steering messages, autopilot continuations, and
   skill prompts are user messages inside the turn, not new runs. A turn with no recorded ending, or missing from the
   history, was lost to a runtime restart and is interrupted.
 - **Reopening a sandbox runtime.** Because the stock runtime refuses `llmInference.setProvider` while a lost
@@ -848,7 +848,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   ledger), and rows left `creating` are discarded (sandbox and policy released), so a schedule retrying its
   deterministic session ID creates the session instead of finding a ghost. Until then such a create is not a session
   for its owner: `get`, `list`, and resumes do not find it, and a client or service create of the same ID cleans it up
-  first.
+  first. Events that still arrive for a session being deleted (such as those a cutover the deletion aborted flushes)
+  update its last turn but never replace its `deleting` state.
 - **Incarnations.** Session IDs are client-chosen and reusable after deletion, so every ledger row gets an immutable
   `incarnation` (`inc_…`). `sessions.get` returns it, and `create` returns the one it created (or found); durable's
   hooks (`onSessionEvent`, `onAttached`, `onClientAnswer`, `hasOpenActions`, `list`) and the

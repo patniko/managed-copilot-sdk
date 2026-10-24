@@ -288,6 +288,25 @@ describe("placement cutover", () => {
     await expect(client.request("session.sendAndWait", { sessionId, prompt: "still here" })).resolves.toMatchObject({ response: { data: { content: "echo: still here" } } });
   });
 
+  it("keeps a session it is deleting marked deleting while an aborted cutover flushes its events", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const cut = await sessions().cutover!(sessionId, { generation: sessions().get(sessionId)!.generation });
+    cut.fence();
+    // The source says something while the session is fenced: it waits in the cutover's buffer.
+    runtime.emitEvent(sessionId, "session.idle", {});
+    await sleep(50);
+    // Deleting aborts the cutover, which flushes that event; the runtime's delete is still pending.
+    const removal = runtime.holdNext("session.delete", sessionId);
+    const deleting = fetch(`${gateway.url}/v1/sessions/${sessionId}`, { method: "DELETE", headers: { authorization: `Bearer ${ALICE}` } });
+    await removal.held;
+    // Startup recovery finishes deletions by this state: the flushed event must not have replaced it.
+    expect(sessions().get(sessionId)?.state).toBe("deleting");
+    removal.release();
+    expect((await deleting).status).toBe(204);
+  });
+
   it("moves remote MCP servers with their original endpoints and carries the caller's option changes", async (ctx) => {
     if (!(gateway.gateway.app.services as Record<string, unknown>)["policy"]) return ctx.skip();
     const client = await connect();

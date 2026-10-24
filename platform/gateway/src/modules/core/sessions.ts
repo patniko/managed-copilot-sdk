@@ -2431,8 +2431,9 @@ export class SessionManager implements SessionsService {
     const reply = own.findLastIndex((event) => event.type === "assistant.message");
     const requested = own[reply]?.data?.["toolRequests"];
     const final = reply >= 0 && (!Array.isArray(requested) || requested.length === 0);
-    const end = own.findLastIndex((event) => event.type === "assistant.turn_end");
-    if (final && end > reply && !own.slice(end + 1).some((event) => event.type === "assistant.turn_start")) return "completed";
+    // The reply's own model call ended, and no later one started (a later call that ended without a reply was cut).
+    const ended = own.slice(reply + 1);
+    if (final && ended.some((event) => event.type === "assistant.turn_end") && !ended.some((event) => event.type === "assistant.turn_start")) return "completed";
     return "interrupted";
   }
 
@@ -3079,10 +3080,13 @@ export class SessionManager implements SessionsService {
   #track(live: LiveSession, event: RuntimeSessionEvent): void {
     const data = event.data ?? {};
     try {
+      // A session being deleted keeps that state (startup recovery finishes deletions by it), whatever events still
+      // arrive for it, such as those a cutover the deletion aborted flushes.
+      const state = (next: "running" | "idle") => (live.deleting ? {} : { state: next });
       switch (event.type) {
         case "user.message":
           if (!event.agentId) {
-            this.#ledger.update(live.id, { state: "running", lastTurn: { turnId: String(data["messageId"] ?? event.id), status: "running" } });
+            this.#ledger.update(live.id, { ...state("running"), lastTurn: { turnId: String(data["messageId"] ?? event.id), status: "running" } });
           }
           break;
         case "session.idle": {
@@ -3090,7 +3094,7 @@ export class SessionManager implements SessionsService {
           const record = this.get(live.id);
           const turn = record?.lastTurn;
           const status = data["aborted"] === true ? "cancelled" : turn?.status === "failed" ? "failed" : "completed";
-          this.#ledger.update(live.id, { state: "idle", ...(turn ? { lastTurn: { turnId: turn.turnId, status, completedAt: new Date().toISOString() } } : {}) });
+          this.#ledger.update(live.id, { ...state("idle"), ...(turn ? { lastTurn: { turnId: turn.turnId, status, completedAt: new Date().toISOString() } } : {}) });
           if (record) this.#options.events.emit("session.idle", { ownerId: record.ownerId, sessionId: live.id, environment: record.environment, data: { status, incarnation: record.incarnation } });
           break;
         }
