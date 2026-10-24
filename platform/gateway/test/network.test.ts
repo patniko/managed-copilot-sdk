@@ -9,10 +9,12 @@ import { createCaMaterial } from "../../egress/src/x509.js";
 import { loadConfig } from "../src/config.js";
 import { openDatabase, type Database } from "../src/db.js";
 import { createLogger } from "../src/log.js";
+import { SessionLedger } from "../src/modules/core/ledger.js";
 import { PolicyService } from "../src/modules/network/policy.js";
 import { Sealer } from "../src/modules/network/sealing.js";
-import { migrateNetwork } from "../src/modules/network/store.js";
+import { getState, migrateNetwork } from "../src/modules/network/store.js";
 import { VaultStore } from "../src/modules/network/vaults.js";
+import { PromotionStore } from "../src/modules/promotion/store.js";
 import { startGateway, type RunningGateway } from "../src/server.js";
 
 const ALICE = { token: "tok-alice", id: 101, login: "alice" };
@@ -334,6 +336,10 @@ describe("network module", () => {
     const info = await call("GET", "/v1/info", ALICE);
     expect(info.body?.capabilities).toEqual(expect.arrayContaining(["network.policy", "vaults", "web_fetch"]));
   });
+
+  it("checks for sessions promoted by earlier versions at startup, with core's ledger available", () => {
+    expect(getState(gateway.app.db, "legacy_promotions_converted")).toEqual(expect.any(String));
+  });
 });
 
 describe("policy service across deployment changes", () => {
@@ -346,7 +352,7 @@ describe("policy service across deployment changes", () => {
     return db;
   };
   /** The policy service as the gateway builds it at startup, over an existing database (a restart with new config). */
-  const start = (db: Database, config: { readonly network?: unknown; readonly vaults?: unknown; readonly environments: Record<string, unknown> }, pushed: EgressRegistration[] = []) => {
+  const start = (db: Database, config: { readonly network?: unknown; readonly vaults?: unknown; readonly inline?: unknown; readonly environments: Record<string, unknown> }, pushed: EgressRegistration[] = []) => {
     const deployment = parseConfig({ name: "copilot", vaults, ...config });
     const store = new VaultStore({ db, sealer, deployment, env: { TEST_STRIPE_KEY: "sk_test_stripe_123" }, log });
     const channel = { ready: true, caCertificate: () => "", waitReady: async () => undefined, upsert: (registration: EgressRegistration) => void pushed.push(registration), remove: (_sandboxId: string) => undefined };
@@ -463,6 +469,67 @@ describe("policy service across deployment changes", () => {
     restarted.commitPromotion("s-roll");
     expect(restarted.revertPromotion("s-roll")).toBeUndefined();
     expect(restarted.session("s-roll")).toMatchObject({ environment: "helper", promotedTo: "worker", type: "isolated", policy: { allowedDomains: ["pypi.org"] } });
+  });
+
+  it("converts sessions promoted by earlier versions, from the pending snapshot or core's ledger, once", () => {
+    const db = database();
+    new SessionLedger(db);
+    new PromotionStore(db);
+    const config = (helper: Record<string, unknown> = {}) => ({
+      network: ["api.stripe.com", "pypi.org"],
+      inline: { types: ["promotable"] },
+      environments: {
+        helper: { type: "promotable", promoteTo: "worker", vaults: ["payments"], network: ["api.stripe.com", "pypi.org"], ...helper },
+        worker: { type: "isolated", network: ["api.stripe.com", "pypi.org", "github.com"] },
+        plain: { type: "isolated", network: ["github.com"] },
+      },
+    });
+    const policy = start(db, config());
+    const now = new Date().toISOString();
+    const core = (id: string, environment: string) =>
+      db
+        .prepare("INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, network, environment_request, admitted, created_at, updated_at) VALUES (?, 1, ?, 'promotable', 'sandbox', 'idle', '{}', '{}', '{}', ?, ?)")
+        .run(id, environment, now, now);
+    for (const id of ["s-committed", "s-pending", "s-orphan"]) policy.bindSession({ sessionId: id, owner: 1, environment: "helper", type: "promotable", requested: undefined, vaults: undefined });
+    policy.bindSession({ sessionId: "s-inline", owner: 1, environment: undefined, type: "promotable", requested: undefined, vaults: undefined });
+    policy.bindSession({ sessionId: "s-plain", owner: 1, environment: "plain", type: "isolated", requested: undefined, vaults: undefined });
+    // The layout the earlier promoteSession left: the target as the environment, the source only in a pending snapshot.
+    const legacy = (id: string, pending: boolean) => {
+      const row = db.prepare("SELECT environment, type, policy FROM network_sessions WHERE session_id = ?").get(id) as { environment: string | null; type: string; policy: string };
+      db.prepare("UPDATE network_sessions SET environment = 'worker', type = 'isolated', policy = ?, promoted_from = ? WHERE session_id = ?").run(
+        JSON.stringify({ access: "restricted", allowedDomains: ["api.stripe.com", "pypi.org"] }),
+        pending ? JSON.stringify({ environment: row.environment, type: row.type, policy: row.policy }) : null,
+        id,
+      );
+    };
+    legacy("s-committed", false);
+    legacy("s-pending", true);
+    legacy("s-orphan", false);
+    legacy("s-inline", false);
+    core("s-committed", "helper");
+    core("s-pending", "helper");
+    core("s-inline", "inline-promotable");
+    core("s-plain", "plain");
+    db.prepare("INSERT INTO promotion_operations (id, session_id, owner_id, from_generation, trigger, target, state, created_at, updated_at) VALUES ('prm_1', 's-orphan', 1, 0, 'api', 'worker', 'committed', ?, ?)").run(now, now);
+    expect(policy.session("s-committed")).toMatchObject({ environment: "worker", vaults: [] });
+
+    expect(policy.convertLegacyPromotions()).toBe(4);
+    expect(policy.session("s-committed")).toMatchObject({ environment: "helper", promotedTo: "worker", type: "isolated", vaults: ["payments"] });
+    expect(policy.session("s-pending")).toMatchObject({ environment: "helper", promotedTo: "worker" });
+    expect(policy.session("s-inline")).toMatchObject({ promotedTo: "worker", policy: { access: "restricted", allowedDomains: ["api.stripe.com", "pypi.org"] } });
+    expect(policy.session("s-inline")?.environment).toBeUndefined();
+    expect(policy.session("s-orphan")).toMatchObject({ promotedTo: "worker", policy: { access: "disabled" }, vaults: [] });
+    expect(policy.session("s-plain")).toEqual(expect.objectContaining({ environment: "plain", type: "isolated" }));
+    expect(policy.session("s-plain")?.promotedTo).toBeUndefined();
+    // The source's restrictions and grants apply again, and a pending promotion still reverts to its source.
+    expect(start(db, config({ network: false, vaults: [] })).session("s-committed")).toMatchObject({ policy: { access: "disabled" }, vaults: [] });
+    policy.revertPromotion("s-pending");
+    expect(policy.session("s-pending")).toMatchObject({ environment: "helper", type: "promotable" });
+    expect(policy.session("s-pending")?.promotedTo).toBeUndefined();
+    // Once per database.
+    legacy("s-plain", false);
+    expect(policy.convertLegacyPromotions()).toBe(0);
+    expect(start(db, config()).convertLegacyPromotions()).toBe(0);
   });
 
   it("refuses vault secrets to a reverted promotion's candidate sandbox", async () => {

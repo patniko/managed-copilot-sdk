@@ -77,6 +77,30 @@ describe("response redaction", () => {
     }
   });
 
+  it("handles endless overlapping secrets in bounded time and memory, sending the marker at once", async () => {
+    const stream = redactingStream(["aba_aba"]);
+    let out = "";
+    stream.on("data", (chunk: Buffer) => (out += chunk.toString("utf8")));
+    const chunk = Buffer.from("aba_".repeat(1024));
+    const started = performance.now();
+    for (let i = 0; i < 1024; i++) {
+      stream.write(chunk);
+      if (i === 0) {
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(out).toBe("[redacted]");
+      }
+    }
+    // 4 MiB of one continuous overlapping secret: linear work (the reviewed version took seconds for 512 KiB).
+    expect(performance.now() - started).toBeLessThan(3_000);
+    stream.write(Buffer.from("|tail"));
+    await new Promise((resolve) => setImmediate(resolve));
+    // The final "_" of "…aba_aba_" belongs to no occurrence of the secret.
+    expect(out).toBe("[redacted]_|tail");
+    stream.end();
+    await new Promise((resolve) => stream.on("end", resolve));
+    expect(out).toBe("[redacted]_|tail");
+  });
+
   it("gives the same result however a body is chunked, and never lets a secret through", async () => {
     let seed = 20261024;
     const random = (n: number) => {

@@ -30,6 +30,7 @@ import {
 } from "@managed-copilot/protocol";
 import { transaction, type Database } from "../../db.js";
 import type { Logger } from "../../log.js";
+import { getState, setState } from "./store.js";
 import type { CredentialMeta, VaultRecord, VaultStore } from "./vaults.js";
 
 /** What core passes to `bindSession` (matches `PolicyBinding` in modules/core/contracts.ts). */
@@ -138,6 +139,8 @@ interface SandboxRow {
 const SANDBOX_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const EVENTS_PER_SESSION = 200;
 const NO_PROXY = "localhost,127.0.0.1,::1";
+/** `network_state` key set once bindings promoted by earlier versions were converted (see convertLegacyPromotions). */
+const LEGACY_PROMOTIONS_STATE = "legacy_promotions_converted";
 
 export interface PolicyServiceOptions {
   readonly db: Database;
@@ -350,6 +353,53 @@ export class PolicyService {
   /** The promotion committed: its binding is final, and a later `revertPromotion` is a no-op. */
   commitPromotion(sessionId: string): void {
     this.#db.prepare("UPDATE network_sessions SET promoted_from = NULL, updated_at = ? WHERE session_id = ? AND promoted_from IS NOT NULL").run(new Date().toISOString(), sessionId);
+  }
+
+  /**
+   * Converts bindings promoted by earlier versions, which stored the promotion target as the session's environment and
+   * so lost the source that owns its ceiling and AppHost vault grants. Runs once per database, before any request. The
+   * source comes from a pending promotion's snapshot, else from core's session ledger, whose environment a promotion
+   * never changes (read only). A binding that promotion records show was promoted, but whose core session is gone,
+   * fails closed. Returns the number of bindings converted.
+   */
+  convertLegacyPromotions(): number {
+    const db = this.#db;
+    if (getState(db, LEGACY_PROMOTIONS_STATE)) return 0;
+    const tables = new Set((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]).map((row) => row.name));
+    if (!tables.has("core_sessions")) return 0;
+    const candidates = db
+      .prepare("SELECT session_id, environment, promoted_from FROM network_sessions WHERE type = 'isolated' AND promoted_to IS NULL AND environment IS NOT NULL")
+      .all() as { session_id: string; environment: string; promoted_from: string | null }[];
+    const coreSession = db.prepare("SELECT environment FROM core_sessions WHERE id = ?");
+    const committedTo = tables.has("promotion_operations") ? db.prepare("SELECT 1 FROM promotion_operations WHERE session_id = ? AND target = ? AND state = 'committed' LIMIT 1") : undefined;
+    const now = new Date().toISOString();
+    let converted = 0;
+    transaction(db, () => {
+      for (const row of candidates) {
+        // null: an inline source; undefined: promoted, but the source is unknown.
+        let source: string | null | undefined;
+        if (row.promoted_from) {
+          source = (JSON.parse(row.promoted_from) as Partial<PromotionSnapshot>).environment ?? null;
+        } else {
+          const core = coreSession.get(row.session_id) as { environment: string } | undefined;
+          if (core) source = this.#isInline(core.environment) ? null : core.environment;
+          else if (committedTo?.get(row.session_id, row.environment)) source = undefined;
+          else continue;
+        }
+        if (source === row.environment) continue;
+        if (source === undefined) {
+          // No environment grants AppHost vaults, and the stored policy allows nothing.
+          db.prepare("UPDATE network_sessions SET environment = NULL, promoted_to = ?, policy = ?, updated_at = ? WHERE session_id = ?").run(row.environment, JSON.stringify(NETWORK_DISABLED), now, row.session_id);
+          this.#log.warn("A session promoted by an earlier version has no recoverable source environment; its network access is disabled", { sessionId: row.session_id, promotedTo: row.environment });
+        } else {
+          db.prepare("UPDATE network_sessions SET environment = ?, promoted_to = ?, updated_at = ? WHERE session_id = ?").run(source, row.environment, now, row.session_id);
+        }
+        converted++;
+      }
+      setState(db, LEGACY_PROMOTIONS_STATE, now);
+    });
+    if (converted > 0) this.#log.info("Converted sessions promoted by an earlier version", { sessions: converted });
+    return converted;
   }
 
   /** The session was deleted: revoke its sandboxes, placeholders, MCP routes, and history. */

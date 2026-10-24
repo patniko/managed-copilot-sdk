@@ -129,69 +129,123 @@ function isCertificateError(error: NodeJS.ErrnoException): boolean {
   return /CERT|SIGNATURE|ALTNAME|ISSUER|SELF_SIGNED/i.test(error.code ?? "");
 }
 
+/** KMP failure table: `table[k]` is the length of the longest proper border of `needle`'s first `k` bytes. */
+function borders(needle: Buffer): Int32Array {
+  const table = new Int32Array(needle.length + 1);
+  for (let i = 1, k = 0; i < needle.length; i++) {
+    while (k > 0 && needle[i] !== needle[k]) k = table[k]!;
+    if (needle[i] === needle[k]) k++;
+    table[i + 1] = k;
+  }
+  return table;
+}
+
 /**
  * Streams a body while replacing any secret value with `[redacted]`, including values split across chunks. Secrets are
  * matched leftmost first, and the longest at a position wins; a redacted span grows over every secret that overlaps
  * it, so neither a secret that begins another nor overlapping secrets can expose a readable tail. Only a tail that
- * could still grow into a secret is held back, so streamed responses (server-sent events, MCP) are not delayed.
+ * could still grow into a secret is held back (always shorter than the longest secret), so streamed responses
+ * (server-sent events, MCP) are not delayed, and adversarial bodies cannot make the proxy buffer or rescan without
+ * bound: every chunk is processed in time linear in its length.
  */
 export function redactingStream(secrets: readonly string[]): Transform {
   const needles = [...new Set(secrets.filter((secret) => secret.length >= 4))].map((secret) => Buffer.from(secret, "utf8")).sort((a, b) => b.length - a.length);
-  const longest = needles[0]?.length ?? 0;
+  const tables = needles.map(borders);
   const marker = Buffer.from("[redacted]");
-  /** The earliest position at or after `from` where the rest of `data` is a proper prefix of a secret, or -1. */
-  const pendingFrom = (data: Buffer, from: number): number => {
-    for (let position = Math.max(from, data.length - longest + 1); position < data.length; position++) {
-      const rest = data.subarray(position);
-      if (needles.some((needle) => needle.length > rest.length && needle.subarray(0, rest.length).equals(rest))) return position;
-    }
-    return -1;
+  /** The earliest position where the rest of `data` is a proper prefix of a secret (one that may still be arriving), or -1. */
+  const pendingStart = (data: Buffer): number => {
+    let earliest = -1;
+    needles.forEach((needle, n) => {
+      const table = tables[n]!;
+      let state = 0;
+      for (let i = Math.max(0, data.length - needle.length + 1); i < data.length; i++) {
+        while (state > 0 && data[i] !== needle[state]) state = table[state]!;
+        if (data[i] === needle[state]) state++;
+      }
+      if (state > 0 && (earliest < 0 || data.length - state < earliest)) earliest = data.length - state;
+    });
+    return earliest;
   };
-  /** Length of the longest secret that occurs in full at `at`, or 0. */
-  const matchAt = (data: Buffer, at: number): number => needles.find((needle) => at + needle.length <= data.length && data.subarray(at, at + needle.length).equals(needle))?.length ?? 0;
-  /** Replaces whole secrets; unless the body ended, keeps back a tail that could still become one. */
-  const process = (data: Buffer, ended: boolean): { readonly out: Buffer; readonly rest: Buffer } => {
+  let carry: Buffer = Buffer.alloc(0);
+  /** Leading bytes of `carry` inside a redacted span whose marker was already sent. */
+  let covered = 0;
+  /** Redacts `data`; unless the body ended, keeps back in `carry` a tail that could still grow into a secret. */
+  const process = (data: Buffer, ended: boolean): Buffer => {
+    const pending = ended ? -1 : pendingStart(data);
+    // Next occurrence of each secret at or after the last search position (-1: none left in `data`).
+    const next = needles.map(() => -2);
+    const nextFrom = (n: number, from: number): number => {
+      const cached = next[n]!;
+      return cached === -1 || cached >= from ? cached : (next[n] = data.indexOf(needles[n]!, from));
+    };
+    /** Grows the span [start, end) over every secret that starts inside it. */
+    const extend = (start: number, end: number): number => {
+      for (let grown = true; grown; ) {
+        grown = false;
+        needles.forEach((needle, n) => {
+          const at = nextFrom(n, start);
+          if (at < 0 || at >= end) return;
+          const last = data.lastIndexOf(needle, end - 1);
+          if (last + needle.length > end) {
+            end = last + needle.length;
+            grown = true;
+          }
+        });
+      }
+      return end;
+    };
+    /** Ends the call; a span still growing at `pending` stays open in `covered`. */
+    const keep = (from: number, openUntil = 0): void => {
+      carry = from < 0 ? Buffer.alloc(0) : Buffer.from(data.subarray(from));
+      covered = Math.max(0, openUntil - Math.max(from, 0));
+    };
     const parts: Buffer[] = [];
     let index = 0;
+    if (covered > 0) {
+      const end = extend(0, covered);
+      if (pending >= 0 && pending < end) {
+        keep(pending, end);
+        return Buffer.alloc(0);
+      }
+      index = end;
+    }
     for (;;) {
       let found = -1;
       let length = 0;
-      for (const needle of needles) {
-        const at = data.indexOf(needle, index);
+      needles.forEach((needle, n) => {
+        const at = nextFrom(n, index);
         if (at >= 0 && (found < 0 || at < found)) {
           found = at;
           length = needle.length;
         }
-      }
-      const hold = ended ? -1 : pendingFrom(data, index);
-      if (hold >= 0 && (found < 0 || hold <= found)) {
-        parts.push(data.subarray(index, hold));
-        return { out: Buffer.concat(parts), rest: Buffer.from(data.subarray(hold)) };
+      });
+      if (pending >= 0 && (found < 0 || pending <= found)) {
+        parts.push(data.subarray(index, pending));
+        keep(pending);
+        return Buffer.concat(parts);
       }
       if (found < 0) {
         parts.push(data.subarray(index));
-        return { out: Buffer.concat(parts), rest: Buffer.alloc(0) };
-      }
-      let end = found + length;
-      for (let overlap = found + 1; overlap < end; overlap++) end = Math.max(end, overlap + matchAt(data, overlap));
-      // A secret overlapping this span may still be arriving: decide once it is complete.
-      if (hold >= 0 && hold < end) {
-        parts.push(data.subarray(index, found));
-        return { out: Buffer.concat(parts), rest: Buffer.from(data.subarray(found)) };
+        keep(-1);
+        return Buffer.concat(parts);
       }
       parts.push(data.subarray(index, found), marker);
+      const end = extend(found, found + length);
+      if (pending >= 0 && pending < end) {
+        keep(pending, end);
+        return Buffer.concat(parts);
+      }
       index = end;
     }
   };
-  let carry: Buffer = Buffer.alloc(0);
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      const { out, rest } = process(carry.length === 0 ? chunk : Buffer.concat([carry, chunk]), false);
-      carry = rest;
-      callback(null, out);
+      const out = process(carry.length === 0 ? chunk : Buffer.concat([carry, chunk]), false);
+      callback(null, out.length > 0 ? out : undefined);
     },
     flush(callback) {
-      callback(null, process(carry, true).out);
+      const out = process(carry, true);
+      callback(null, out.length > 0 ? out : undefined);
     },
   });
 }

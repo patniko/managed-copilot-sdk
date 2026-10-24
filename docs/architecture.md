@@ -306,7 +306,9 @@ applies the session's policy and attaches vault credentials. Anything else is re
   current ceilings. So `network: false`, a source tightened after creation, and later tightening of either environment
   all survive promotion, and the target neither adds nor removes vaults. Until `commitPromotion(id)`,
   `revertPromotion(id)` restores the pre-promotion type, policy, and target (spec 9.5 pre-commit rollback; kept
-  in SQLite across restarts). Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
+  in SQLite across restarts). Bindings promoted by earlier versions (target stored as the environment) are converted
+  once at startup: the source comes from a pending snapshot or core's ledger, and fails closed (no access) when only
+  promotion records show the promotion. Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
   promotable sessions, and a sandbox left behind by a reverted promotion is pushed with no access.
 - **Shared decision logic.** `evaluateDestination` in `packages/protocol/src/network.ts` is the single rule set for the
   proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex; IP addresses and
@@ -359,7 +361,7 @@ applies the session's policy and attaches vault credentials. Anything else is re
   verifies (within the connect deadline) and the registration and binding are re-checked once more; forces
   `Accept-Encoding: identity` and redacts reflected values (defense in depth only; matching is leftmost-longest and
   covers overlapping secrets, and streamed bodies such as server-sent events pass through immediately, holding back
-  only a tail that could still become a secret). Clients that
+  only a tail shorter than the longest secret, in time linear in each chunk). Clients that
   reject the platform CA or pin certificates are reported as `tls_client_untrusted`.
 - **Shared placement.** `web_fetch` (`overridesBuiltInTool`) follows redirects itself, re-evaluating each hop, with
   size/time limits (30 s for the whole call, body included) and HTML-to-text; it explains failures instead of
