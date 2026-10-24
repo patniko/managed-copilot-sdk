@@ -23,7 +23,11 @@ only from the stock `@github/copilot-sdk` and `@managed-copilot/sdk`.
   </tr>
   <tr>
     <td><img src="docs/screenshots/offline.png" alt="A scheduled check-in whose calendar lookup was handled while no tab was open"></td>
+    <td><img src="docs/screenshots/background.png" alt="The side panel asking to turn on background work, with what that means"></td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/dark.png" alt="The assistant in dark mode"></td>
+    <td><img src="docs/screenshots/mobile.png" alt="The assistant on a phone"></td>
   </tr>
 </table>
 
