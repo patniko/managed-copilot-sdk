@@ -518,7 +518,7 @@ describe("agent-initiated promotion (request_sandbox)", () => {
 describe("recovery after a restart", () => {
   it("finishes attempts whose commit reached the ledger and releases the others", async () => {
     const committedId = store.insert({ id: "prm_a", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" }).id;
-    store.update(committedId, { state: "opening", sandboxId: "sbx_test" });
+    store.update(committedId, { state: "opening", sandboxId: "sbx_test", sourceStateDir: stateDir });
     sessions.records.set(SESSION, record({ placement: "sandbox", generation: 1 }));
 
     const other = "7a7a7a7a-1111-4222-8333-944444444444";

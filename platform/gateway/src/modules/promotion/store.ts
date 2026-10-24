@@ -20,6 +20,7 @@ const MIGRATIONS = [
      sandbox_id TEXT,
      error_code TEXT,
      error TEXT,
+     source_state_dir TEXT,
      source_cleaned INTEGER NOT NULL DEFAULT 0,
      created_at TEXT NOT NULL,
      updated_at TEXT NOT NULL,
@@ -43,6 +44,7 @@ interface Row {
   sandbox_id: string | null;
   error_code: string | null;
   error: string | null;
+  source_state_dir: string | null;
   source_cleaned: number;
   created_at: string;
   updated_at: string;
@@ -64,6 +66,7 @@ function toOperation(row: Row): PromotionOperation {
     ...(row.sandbox_id ? { sandboxId: row.sandbox_id } : {}),
     ...(row.error_code ? { errorCode: row.error_code } : {}),
     ...(row.error ? { error: row.error } : {}),
+    ...(row.source_state_dir ? { sourceStateDir: row.source_state_dir } : {}),
     sourceCleaned: row.source_cleaned === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -88,6 +91,7 @@ export type OperationUpdate = Partial<{
   sandboxId: string;
   errorCode: string;
   error: string;
+  sourceStateDir: string;
   sourceCleaned: boolean;
   committedAt: string;
 }>;
@@ -99,6 +103,7 @@ const COLUMNS: Record<keyof OperationUpdate, string> = {
   sandboxId: "sandbox_id",
   errorCode: "error_code",
   error: "error",
+  sourceStateDir: "source_state_dir",
   sourceCleaned: "source_cleaned",
   committedAt: "committed_at",
 };

@@ -255,6 +255,7 @@ export class PromotionManager implements PromotionService {
       if (!cutover.sourceStateDir) {
         throw new ManagedCopilotError("capability_unavailable", "The shared runtime runs outside this gateway, so its session state cannot be moved into a sandbox");
       }
+      this.#update(progress, { sourceStateDir: cutover.sourceStateDir });
       if (attempt.trigger === "api") await this.#requireIdle(progress);
 
       // Allocation: the source keeps serving while the target's image and setup are prepared.
@@ -511,25 +512,23 @@ export class PromotionManager implements PromotionService {
       this.#log.warn("Could not publish session.promoted", { sessionId: record.id, error: (error as Error).message });
     }
     await rm(progress.staging, { recursive: true, force: true, maxRetries: 3 }).catch(() => undefined);
-    await this.#cleanSource(progress.operation, progress.cutover?.sourceStateDir);
+    await this.#cleanSource(progress.operation);
     this.#log.info("Session promoted", { sessionId: record.id, operation: progress.operation.id, sandboxId, generation: committed.generation, trigger, ms: input.durationMs });
   }
 
   /** Removes the source runtime's copy of the session state, so the fenced owner can never be reactivated. */
-  async #cleanSource(operation: PromotionOperation, directory: string | undefined): Promise<void> {
-    const target = directory ?? this.#sourceStateDir(operation.sessionId);
-    if (!target) return;
+  async #cleanSource(operation: PromotionOperation): Promise<void> {
+    const target = operation.sourceStateDir;
+    if (!target) {
+      this.#store.update(operation.id, { sourceCleaned: true });
+      return;
+    }
     try {
       await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
       this.#store.update(operation.id, { sourceCleaned: true });
     } catch (error) {
       this.#log.warn("Could not remove the session's state from the shared runtime yet; it is retried at the next start", { sessionId: operation.sessionId, error: (error as Error).message });
     }
-  }
-
-  #sourceStateDir(sessionId: string): string | undefined {
-    const root = this.#options.platformRoots[0];
-    return root ? join(root, "copilot-home", "session-state", sessionId) : undefined;
   }
 
   // Recovery -------------------------------------------------------------------------------------------------------
@@ -561,7 +560,7 @@ export class PromotionManager implements PromotionService {
       await rm(join(this.#options.stagingRoot, operation.id), { recursive: true, force: true }).catch(() => undefined);
       this.#store.update(operation.id, { state: "failed", errorCode: "internal", error: "The gateway restarted before the promotion committed; the session stayed on shared placement" });
     }
-    for (const operation of this.#store.uncleaned()) await this.#cleanSource(operation, undefined);
+    for (const operation of this.#store.uncleaned()) await this.#cleanSource(operation);
   }
 }
 

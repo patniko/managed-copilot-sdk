@@ -55,6 +55,8 @@ export interface PromotionOperation {
   readonly sandboxId?: string;
   readonly errorCode?: string;
   readonly error?: string;
+  /** The source runtime's copy of the session state (removed after commit). */
+  readonly sourceStateDir?: string;
   /** Whether the source runtime's copy of the session state was removed after commit. */
   readonly sourceCleaned: boolean;
   readonly createdAt: string;
