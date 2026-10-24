@@ -165,13 +165,11 @@ function isEligible(responder: AttachedResponder, action: { readonly kind: Actio
 }
 
 /**
- * The most recently attached eligible application client owns the action (it is the one most likely alive and
- * driving the session, e.g. after a resume); an attached person answers prompts only when no application handler is.
- * `eligible` is in attach order, oldest first.
+ * Preference order (shared with core's fallback): the creating connection, then the others by attach time. An
+ * attached person answers prompts only when no application handler is attached.
  */
 function chooseOwner(eligible: readonly AttachedResponder[], kind: ActionKind): AttachedResponder | undefined {
-  const latest = (predicate: (responder: AttachedResponder) => boolean) => [...eligible].reverse().find(predicate);
-  return latest((responder) => responder.kind === "sdk") ?? (kind === "tool" ? undefined : latest((responder) => responder.kind === "cli"));
+  return eligible.find((responder) => responder.kind === "sdk") ?? (kind === "tool" ? undefined : eligible.find((responder) => responder.kind === "cli"));
 }
 
 /** Mirrors the stock SDK: nullish → "", strings and `ToolResultObject`s unchanged, anything else JSON-encoded. */
@@ -492,10 +490,10 @@ export class DurableActions implements ActionsService {
       if (!this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "pending", clearClaim: true, now })) {
         throw conflict("This action changed while the claim was being released", this.#store.get(row.id));
       }
-      // Announce it if no notification ever covered it (a poller claimed it first). Re-announcing an action a webhook
-      // already saw would loop: the same handler would release it again.
-      if (row.notified_at === null) this.#scheduleNotify(row);
-      else this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
+      // Announce it again, except when the webhook worker it was announced to releases it: that handler could not
+      // decide, and re-announcing to it would loop. A poller's release must reach webhooks that skipped it while held.
+      if (caller.type === "capability" && row.notified_at !== null) this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
+      else this.#scheduleNotify(row);
       return { actionId: row.id, state: "pending" };
     }
 

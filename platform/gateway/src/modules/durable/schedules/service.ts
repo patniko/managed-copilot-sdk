@@ -858,9 +858,13 @@ export class DurableSchedules implements SchedulesService {
     const view = await sessions.get(run.session_id);
     const turn = view?.lastTurn;
     if (!turn || turn.status === "running") return;
-    // Turns run in order: a later prompt's turn means this run's turn already ended.
     if (turn.turnId !== undefined && run.message_id && turn.turnId !== run.message_id) {
-      this.#finishRun(run, "completed", "The run's turn finished while the platform was restarting");
+      // A continued session's ledger may still show an earlier turn. Only a turn that finished after this run's
+      // prompt was sent proves this run's turn (which runs first) already ended.
+      const finishedAt = turn.completedAt ? Date.parse(turn.completedAt) : Number.NaN;
+      if (Number.isFinite(finishedAt) && finishedAt > (run.input_started_at ?? run.created_at)) {
+        this.#finishRun(run, "completed", "The run's turn finished while the platform was restarting");
+      }
       return;
     }
     if (turn.status === "completed") this.#finishRun(run, "completed", "The agent finished the run's turn");

@@ -399,6 +399,20 @@ describe("durable schedules", () => {
       expect(schedules.runs(OWNER.accountId, schedule.id)[0]!.status).toBe("completed");
     });
 
+    it("does not mistake a continued session's earlier turn for this run's when recovering", async () => {
+      sessions.views.set("s-chat", { id: "s-chat", ownerId: OWNER.accountId, environment: "chat", state: "idle", generation: 0, lastTurn: { turnId: "earlier", status: "completed", completedAt: new Date(START - 3_600_000).toISOString() } });
+      sessions.history.set("s-chat", []);
+      const schedule = await schedules.create(OWNER, { name: "check", runAt: new Date(START + 60_000).toISOString(), target: { sessionId: "s-chat" }, prompt: "Check my calendar" });
+      now += 60_000;
+      sessions.sendFailures.push("lost");
+      await tick();
+      now += 5_000;
+      await tick();
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]).toMatchObject({ status: "running", messageId: "msg-1" });
+      sessions.emit("s-chat", "session.idle");
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]!.status).toBe("completed");
+    });
+
     it("never resends a prompt found in history without a message ID", async () => {
       const schedule = await dueOccurrence();
       sessions.sendFailures.push("lost");
