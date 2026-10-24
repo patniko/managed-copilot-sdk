@@ -19,7 +19,7 @@ flowchart LR
     SR["shared runtime<br/>stock copilot --headless"]
     Relay["sandbox relay<br/>(dual-homed container)"]
     Egress["egress proxy<br/>policy + vault substitution<br/>(dual-homed container)"]
-    subgraph Net["internal Docker network: no direct Internet"]
+    subgraph Net["per-sandbox internal networks: no direct Internet"]
       S1["sandbox: sandboxd + stock runtime<br/>/workspace, uid 10001"]
       S2["sandbox ..."]
     end
@@ -78,10 +78,10 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 
 ### Data plane
 
-1. `managed.client(env, options)` constructs a stock `CopilotClient` with
+1. `managed.client(env, options)` constructs a stock `CopilotClient` in the default `copilot-cli` mode with
    `RuntimeConnection.forStdio({ path: <sdk>/dist/bridge.js, env: { MANAGED_COPILOT_BRIDGE: JSON(BridgeConfig) } })`
-   and starts it. The bridge opens `WSS /v1/connect` with `Authorization: Bearer <token>` and the
-   `x-managed-copilot-environment` header.
+   and starts it. The bridge opens `WSS /v1/connect` (bearer GitHub token, `BRIDGE_SUBPROTOCOL`), sends one
+   `BridgeHello` frame with the environment request, and waits for `BridgeWelcome` before relaying JSON-RPC.
 2. The gateway authenticates the GitHub caller, resolves the environment (policy ceilings, caller narrowing), and
    creates a **client connection**. Each client connection can own many sessions.
 3. The gateway owns **persistent upstream connections** to runtimes: one to the shared runtime, one per sandbox.
@@ -93,33 +93,86 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 6. `session.event` notifications fan out to every attached client and observer. Execution-bearing events
    (`external_tool.requested`, `permission.requested`, ...) are **claimed before emission**: exactly one responder
    receives the actionable event; others get progress-only views. Unclaimed actions stay durable for webhook or poll
-   responders.
+   responders. The contract is `platform/gateway/src/modules/durable/contract.ts`.
 7. Server-to-client requests for platform concerns (`gitHubToken.getToken`, `llmInference.*`, `sessionFs.*`) are
    answered by the gateway, never forwarded to customer code.
+8. Connection-global RPCs are **virtualized per client connection, deny by default**. The stock `client.stop()` over
+   stdio sends detach/shutdown RPCs (including `runtime.shutdown`); these detach only that client connection and are
+   never forwarded upstream. `session.list`, `models.list`, `status.get`, `auth.getStatus`, foreground calls, and
+   provider registrations (`sessionFs.setProvider`, `llmInference.setProvider`, `plugins.builtin.set`) are answered or
+   rejected by the gateway, scoped to the caller.
+
+### Client mode and safe defaults
+
+The stock `mode: "empty"` validates on the client before transmission (it requires `baseDirectory`/`sessionFs` and an
+explicit `availableTools` on every `createSession`, and it sends a post-create `session.options.update`), so the
+spec's short snippets cannot run in that mode. Managed clients therefore use the default `copilot-cli` mode, and the
+**gateway** enforces the safe configuration: it rewrites upstream `session.create`, `session.resume`, and
+`session.options.update` (tool ceilings, discovery off, deployed customizations on, no caller working directory), and
+denies configuration RPCs it does not understand.
+
+### Identity
+
+- Gateway callers are one of: a GitHub **user principal**, an internal **platform service** (platform key), or a
+  scoped **action capability** (webhook workers). Capabilities authorize only their exact session/action operations
+  and are rejected on general user routes.
+- `managed.client(env, { gitHubToken })` creates sessions owned by that account. SDK helpers (`files`, `artifacts`,
+  `sessions`, actions) must use the identity of the client that created or resumed a session, tracked from the stock
+  client's session lifecycle events. Owner checks are never weakened to make a helper work.
+- The SDK validates the deployment URL before sending a credential: HTTPS for remote deployments, HTTP only for
+  verified loopback, no embedded credentials, and a validated discovery record.
 
 ### Credentials and inference
 
-- Shared runtime: per-session user tokens supplied by the gateway at create/resume (in memory), never a shared
+- Shared runtime: per-session user credentials supplied by the gateway at create/resume (in memory), never a shared
   service token. Model attribution follows the session owner.
-- Sandboxes: the GitHub token never enters the sandbox environment or disk. Preferred mechanism: the gateway answers
-  the runtime's `llmInference.*` requests itself (public request-handler hook) and attaches the owner's credential;
-  any other credential the runtime needs is a placeholder substituted by trusted infrastructure. If a stock
-  mechanism cannot achieve this, document the limitation and fail closed rather than injecting the token.
+- Sandboxes: the GitHub token never enters the sandbox environment or disk. Stock runtime 1.0.103 refuses to send
+  without a GitHub token or a Copilot HMAC key, and with a provider-supplied token it validates the account with a
+  direct call to `api.github.com/copilot_internal/user` that does **not** pass through `llmInference.*`. Two stock,
+  configuration-only candidates (the sandbox workstream picks one with evidence and documents its limits):
+  - **A.** The gateway answers `gitHubToken.getToken` with a per-session placeholder; the egress proxy substitutes the
+    owner's token only on the path-scoped `api.github.com/copilot_internal/*` calls; the gateway swaps the placeholder
+    in model requests it receives through `llmInference.*`.
+  - **B.** The runtime gets a placeholder `COPILOT_HMAC_KEY`, so it skips account validation and sends model traffic
+    through `llmInference.*`, where the gateway strips the HMAC headers and attaches the owner's credential. Reported
+    working on 1.0.103 by the Argon review; must be re-verified.
+  If neither holds, fail closed with `inference_unavailable` rather than injecting the token.
+- Runtime binary: the stock SDK spawns the dedicated headless runtime shipped in `@github/copilot-sdk-<platform>`;
+  `@github/copilot` is the larger interactive CLI. Prefer the SDK's headless runtime for the shared runtime and
+  sandboxes (both are stock), resolved through public package metadata.
 
 ### Isolated placement
 
-- Docker network `mc-sandboxes` is **internal** (no route to the Internet). Sandboxes attach only to it.
+- Every sandbox gets its **own internal Docker network** (explicit small subnets, so Docker's default address pools
+  are not exhausted) with no route to the Internet. A single shared internal network would let sandboxes reach each
+  other's ports, so peers must not share a network. Tests include direct peer-IP access attempts.
 - Each sandbox runs `sandboxd` (platform-owned, not uid 10001) which starts the stock runtime as uid 10001 with
   `COPILOT_CONNECTION_TOKEN`, workdir `/workspace`, and `HTTP(S)_PROXY` pointing at the egress proxy with a
   per-sandbox proxy credential. `sandboxd` exposes, behind a per-sandbox bearer key: health, `/runtime` (WebSocket ⇄
   runtime TCP), streamed workspace files, output snapshots for artifact publication, and setup execution.
-- The **sandbox relay** container joins `mc-sandboxes` and a published bridge network so the host gateway can reach
-  each `sandboxd` (`/relay/<sandboxId>/...`, platform-key authenticated).
-- The **egress proxy** container joins both networks; sandboxes reach the Internet only through it. It applies each
-  sandbox's effective network policy (fetched from or pushed by the gateway), blocks platform internals,
-  loopback/link-local, and metadata addresses, and substitutes vault placeholders in permitted HTTPS headers.
+- The **sandbox relay** container is connected to each sandbox network and to a published bridge network so the host
+  gateway can reach each `sandboxd` (`/relay/<sandboxId>/...`, platform-key authenticated).
+- The **egress proxy** container is connected to each sandbox network and to a bridge network with Internet access;
+  sandboxes reach the Internet only through it. It applies each sandbox's effective network policy (fetched from or
+  pushed by the gateway), blocks platform internals, loopback/link-local, private, and metadata addresses after DNS
+  resolution, and substitutes vault placeholders in permitted HTTPS headers.
 - Per-session volumes hold `/workspace`, `HOME`, and runtime state so compute can be replaced without losing them.
 
+### Shared placement egress
+
+One shared runtime process cannot carry per-session egress identity through a proxy. Shared sessions therefore get
+no direct workload egress: built-in web tools are disabled by admission, web access is the gateway-executed
+`web_fetch` platform tool (per-session policy), and remote MCP servers are reached through a gateway MCP adapter that
+applies the session's policy and attaches vault credentials. Anything else is refused with `capability_unavailable`.
+
+### Durable actions and schedules
+
+- `PendingAction.requestId` is the runtime request ID the answer RPC is keyed on; `payload` carries the permission
+  request or elicitation data a handler needs. One invocation identity (`idempotencyKey`) survives live callbacks,
+  webhooks, polling, resume, and placement changes.
+- Stock `session.send` has no idempotency key. Schedules persist dispatch phases per occurrence; when a crash leaves
+  acceptance unknown, reconcile against the session's runtime state instead of resending, or surface
+  `needs_reconciliation`. `runNow` accepts a retry-stable `invocationId`.
 ## Gateway extension points
 
 Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
