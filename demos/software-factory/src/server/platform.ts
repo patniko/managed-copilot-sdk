@@ -46,6 +46,8 @@ export interface FactoryPlatform {
   createSession(role: StationRole, config: SessionConfig): Promise<StationSession>;
   resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession>;
   sessionInfo(sessionId: string): Promise<SessionInfo>;
+  /** The signed-in user's sessions on the platform (owner-scoped). */
+  listSessions(): Promise<SessionInfo[]>;
   deleteSession(sessionId: string): Promise<void>;
   files(sessionId: string): StationFiles;
   artifacts(sessionId: string): StationArtifacts;
@@ -182,6 +184,10 @@ export class Platform implements FactoryPlatform {
 
   sessionInfo(sessionId: string): Promise<SessionInfo> {
     return this.#managedOrThrow().sessions.get(sessionId);
+  }
+
+  listSessions(): Promise<SessionInfo[]> {
+    return this.#managedOrThrow().sessions.list({ limit: 1000 });
   }
 
   deleteSession(sessionId: string): Promise<void> {
