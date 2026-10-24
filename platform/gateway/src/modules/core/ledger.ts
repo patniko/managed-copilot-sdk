@@ -104,6 +104,8 @@ export class SessionLedger {
   constructor(db: Database) {
     this.#db = db;
     migrate(db, "core", MIGRATIONS);
+    // A create that was in flight when the gateway stopped never completed.
+    db.prepare("UPDATE core_sessions SET state = 'failed', updated_at = ? WHERE state = 'creating'").run(new Date().toISOString());
   }
 
   upsertAccount(account: AccountInfo): void {

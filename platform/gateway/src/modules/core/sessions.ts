@@ -501,6 +501,10 @@ export class SessionManager implements SessionsService {
     const upstream = await this.#resident(live);
     const result = await upstream.request(method, forwarded, { signal });
     if (method === "session.model.switchTo" && typeof params["modelId"] === "string") this.#ledger.update(sessionId, { model: params["modelId"] });
+    if (method === "session.getMessages" && live.placement === "shared" && result && typeof result === "object" && Array.isArray((result as { events?: unknown }).events)) {
+      const events = (result as { events: RuntimeSessionEvent[] }).events;
+      return { ...(result as Record<string, unknown>), events: events.map((event) => this.#sanitizeEvent(live, event)) };
+    }
     return result;
   }
 

@@ -176,33 +176,78 @@ applies the session's policy and attaches vault credentials. Anything else is re
 ## Gateway extension points
 
 Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
-and `app.service(key)`. Proposed services (owners finalize the exact shapes and keep this table current):
+and `app.service(key)`. Core's consumer contracts live in `platform/gateway/src/modules/core/contracts.ts`; durable's
+in `modules/durable/contract.ts`; sandbox's in `modules/sandbox/contract.ts`. Providers implement the shapes below
+structurally (they may add members).
 
-| Service key | Provided by | Purpose |
+| Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
-| `auth` | core | Verify GitHub tokens, apply AppHost access rules, return a `Principal` |
-| `sessions` | core | Ledger lookups with owner checks, internal create/resume/send for schedules, session event subscription |
-| `events` | core | Publish platform events (SSE `/v1/events`, webhooks subscribe) |
-| `platformTools` | core | Register gateway-executed tools (`schedule_task`, `request_sandbox`, ...) injected per environment |
-| `sandboxes` | sandbox | Create, resume, stop, and delete sandboxes; open runtime streams; files; output snapshots |
+| `auth` | core | `authenticate(token) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected); `liveCredential(accountId)` |
+| `sessions` | core | `get(id)` (`{ id, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `onLifecycle` |
+| `events` | core | `publish(event, { ownerId })`, `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
+| `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
+| `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
+| `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
+| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions })`, `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }`, `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` |
 | `artifacts` | sandbox | Turn-scoped publication and immutable storage |
-| `policy` | network | Effective network policy, vault bindings, and egress registration per sandbox/session |
+| `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id)` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server |
 | `vaults` | network | AppHost and per-user vault storage (sealed at rest) |
-| `actions` | durable | Durable action ledger, claims, results, reconciliation, polling |
+| `actions` | durable | Core calls `onSessionEvent` (claim before emit), `onClientAnswer`, `onAttached` (replay), `onDetached`, `releaseLiveClaim`, and `list(id, { open: true })` for `SessionInfo.pendingActions` |
 | `webhooks` | durable | Signed delivery with retries and replay protection |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, agent scheduling tools |
-| `credentials` | durable | Background GitHub credential per user (sealed), revocation |
+| `credentials` | durable | Core calls `principalFor(accountId)` when a session owner has no live verified token (background work) |
+
+`/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`),
+`artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background` (`credentials`) when those services are
+registered, and anything a module adds to `app.capabilities` (for example `promotion`, `attach.cli`).
+
+## Core: shared runtime and router
+
+- **Shared runtime.** The gateway spawns the SDK's stock headless runtime
+  (`@github/copilot-sdk-<platform>/prebuilds/<platform>/copilot-runtime`, the binary `CopilotClient` itself uses;
+  falls back to the `@github/copilot` CLI binary of the same version) with the SDK's TCP flags plus
+  `--no-auto-login`, a random `COPILOT_CONNECTION_TOKEN`, a platform-owned `COPILOT_HOME`/`HOME` under
+  `<data>/runtime/shared`, and an allowlisted environment (no `GH_TOKEN`, BYOK provider, or allow-all variables). Its
+  cwd contains every shared session's working directory (`<data>/runtime/shared/workspaces/<id>`), which AHP
+  publication requires. It is supervised and restarted with backoff; sessions are re-resumed upstream lazily with
+  their stored admitted configuration. `MANAGED_COPILOT_RUNTIME_URL`/`_TOKEN` connect to an external runtime instead.
+- **Per-session credentials.** Shared sessions get a gateway-owned `gitHubTokenProviderRegistrationId`; the runtime's
+  `gitHubToken.getToken` is answered with the owner's freshest verified token (else `credentials.principalFor`),
+  scoped to that session's registration, or `cancelled` (fail closed).
+- **Supported operations** (deny by default). Connection-level: `connect`, `ping`, `status.get`, `auth.getStatus`
+  (caller), `models.list` (caller's entitlement via the shared runtime, filtered by the environment's `models`),
+  `session.create`/`resume` (admission + placement), `session.list`/`getMetadata`/`getLastId` (ledger, owner-scoped),
+  `session.delete`, `session.detach` and `runtime.shutdown` (answered locally, never forwarded). Session-scoped methods
+  are forwarded after an ownership and attachment check from an allowlist (`send`, `sendAndWait`, `abort`,
+  `getMessages`, `log`, pending-answer RPCs, model/mode/name/agent/skills/usage/quota/plan/canvas reads and
+  selections, `options.update` and `tools.set` through admission). Everything else, including `host.*`,
+  `sessionFs.setProvider`, `llmInference.setProvider`, shell, workspace, plugin, auth, and permission-mode RPCs, fails
+  with JSON-RPC MethodNotFound carrying `capability_unavailable`.
+- **Fan-out.** Runtime events are processed in order per session: ledger tracking, `sessions.subscribe` observers, then
+  delivery. Execution-bearing events go through `actions.onSessionEvent` when present; otherwise the most recently
+  attached client able to answer gets them and other eligible clients are withheld. `session.lifecycle` goes only to
+  the session's attachments; runtime-wide notifications (`host.event`) are never relayed. Shared events and responses
+  are stripped of platform host paths (`session.start.context`, `external_tool.requested.workingDirectory`,
+  `workspacePath`).
+- **Known gaps** (stock behavior, reported rather than patched): the stock runtime does not re-emit pending tool or
+  permission requests on resume (durable's `onAttached` replay covers it); `session.resume` of a session that is busy
+  in another client's turn re-registers tools for the gateway's single upstream connection, so the last resumer's
+  tool set wins; `models.list` requires the shared runtime even for isolated environments.
 
 ## Ports and environment
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Gateway `PORT` | 7400 | Aspire assigns it in `aspire run` |
-| `MANAGED_COPILOT_CONFIG` | dev defaults | Normalized AppHost JSON (`ManagedCopilotConfig`) |
-| `MANAGED_COPILOT_DATA_DIR` | `./.managed-copilot/data` | SQLite ledger, artifacts, runtime homes |
+| Gateway `PORT` | 7400 | Aspire assigns it in `aspire run`; `0` picks a free port |
+| `MANAGED_COPILOT_CONFIG` / `_CONFIG_FILE` | dev defaults | Normalized AppHost JSON (`ManagedCopilotConfig`) |
+| `MANAGED_COPILOT_APPHOST_DIR` | config file dir or cwd | Base for relative `customizations` paths |
+| `MANAGED_COPILOT_DATA_DIR` | `./.managed-copilot/data` | SQLite ledger, artifacts, runtime homes, pinned customizations |
 | `MANAGED_COPILOT_PLATFORM_KEY` | random per run | Internal service credential (relay, egress, sandboxd provisioning) |
-| `MANAGED_COPILOT_PUBLIC_URL` | `http://localhost:<port>` | URL clients use |
-| Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway; read by `ManagedCopilot.connect()` |
+| `MANAGED_COPILOT_PUBLIC_URL` | the listening address | URL clients use (`app.config.publicUrl` is always the real URL) |
+| `MANAGED_COPILOT_GITHUB_API_URL` | `https://api.github.com` | Loopback `http://` allowed for test stubs only |
+| `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
+| `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
+| Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 
 ## Workstreams and ownership
 
