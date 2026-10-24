@@ -3,6 +3,7 @@
 // the session, and the connection is closed, so the session's next request connects afresh. A runtime that still
 // answers pings is still working on the step, which may yet apply: it is waited for, with nothing else sent meanwhile.
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { SessionManager } from "../src/modules/core/sessions.js";
 import { upstreamTimings } from "../src/modules/core/sessions.js";
 import { FakeRuntime, FakeSandboxes, RawClient, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
@@ -130,6 +131,40 @@ describe("registration path deadlines", () => {
     resume.release();
     ping.release();
     await expect(sessions.request(sessionId, "session.getMessages", {})).resolves.toMatchObject({ events: expect.any(Array) });
+  });
+
+  it("deletes a sandbox session while its runtime is still working on a registration step", async () => {
+    upstreamTimings.answerMs = 300;
+    upstreamTimings.probeMs = 200;
+    const owner = await connect();
+    const sessionId = crypto.randomUUID();
+    await owner.request("session.create", { sessionId, requestPermission: true });
+    const resume = runtime.holdNext("session.resume", sessionId);
+    const client = await connect();
+    const resuming = failure(client.request("session.resume", { sessionId }));
+    await resume.held;
+    // The runtime answers pings, so the resume is waited for; deleting the session ends that wait by closing the
+    // sandbox's connection (the sandbox goes with the session), instead of waiting for the runtime forever.
+    const started = Date.now();
+    const deleted = await fetch(`${gateway.url}/v1/sessions/${sessionId}`, { method: "DELETE", headers: { authorization: `Bearer ${ALICE}` } });
+    expect(deleted.status).toBe(204);
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(await resuming).toMatchObject({ data: { code: "not_found" }, message: expect.stringContaining(`Session ${sessionId} was deleted`) });
+    expect(sandboxes.ops(sessionId)).toContain("delete");
+    resume.release();
+  });
+
+  it("keeps a sandbox session whose deletion failed usable", async () => {
+    const owner = await connect();
+    const sessionId = crypto.randomUUID();
+    await owner.request("session.create", { sessionId, requestPermission: true });
+    sandboxes.failNextDelete = new ManagedCopilotError("capability_unavailable", "The sandbox backend is unreachable right now");
+    const deleted = await fetch(`${gateway.url}/v1/sessions/${sessionId}`, { method: "DELETE", headers: { authorization: `Bearer ${ALICE}` } });
+    expect(deleted.ok).toBe(false);
+    // The session stays (failed, deletable again) and its owner can still resume it: its sandbox runtime opens again.
+    const client = await connect();
+    await expect(client.request("session.resume", { sessionId })).resolves.toBeDefined();
+    await expect(client.request("session.sendAndWait", { sessionId, prompt: "after" })).resolves.toMatchObject({ response: { data: { content: "echo: after" } } });
   });
 
   it("bounds a tools update on a connection that stopped responding, so the session's next registration goes through", async () => {

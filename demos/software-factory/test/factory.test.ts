@@ -1,3 +1,4 @@
+import { ManagedCopilotError } from "@managed-copilot/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventHub } from "../src/server/hub.js";
 import { Factory, type FactoryOptions } from "../src/server/pipeline/factory.js";
@@ -715,6 +716,90 @@ describe("Factory pipeline", () => {
     expect(cancelled).toBe(true);
     expect(wo.status).toBe("completed");
     expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Completion wait cancelled)"))).toBe(true);
+  });
+
+  it("pauses, rather than fails, when the gateway ends a turn whose runtime connection it lost", async () => {
+    let lost = false;
+    const cut: Script = async (session, prompt, platform) => {
+      if (!lost && taskOf(platform, session).id === "csv2json") {
+        lost = true;
+        // The turn's `session.error`, as its completion wait sees it: a message and no platform code.
+        throw Object.assign(
+          new Error("Managed Copilot lost the connection to the session's runtime before this message's answer arrived. Check the session before sending again."),
+          { code: -32603, data: { completionEventId: "evt_1" } },
+        );
+      }
+      await builder()(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: cut, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(lost).toBe(true);
+    expect(wo.status).toBe("completed");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.previousSessionIds).toBeUndefined();
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Managed Copilot lost the connection"))).toBe(true);
+  });
+
+  it("pauses, rather than fails, when a turn runs into the gateway's registration deadline", async () => {
+    let timedOut = false;
+    const stalled: Script = async (session, prompt, platform) => {
+      if (!timedOut && taskOf(platform, session).id === "json2csv") {
+        timedOut = true;
+        // The runtime never answered a step that readies the session for this turn: not the agent's own timeout.
+        throw Object.assign(
+          new Error(`The runtime of session ${session.sessionId} did not answer session.resume within 1 minute and its connection stopped responding, so the gateway closed it. Try again; the session reconnects. [timeout]`),
+          { code: -32001, data: { code: "timeout", details: { sessionId: session.sessionId, step: "session.resume" } } },
+        );
+      }
+      await builder()(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: stalled, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(timedOut).toBe(true);
+    expect(wo.status).toBe("completed");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime of session"))).toBe(true);
+  });
+
+  it("pauses, keeping the sandbox, when reattaching runs into the gateway's or the SDK's deadline", async () => {
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        // The next two reattaches run out of time: a registration step the runtime never answered, then a request the
+        // SDK gave up on in transit.
+        platform.resumeErrors.push(
+          Object.assign(
+            new Error(`The runtime of session ${session.sessionId} did not answer session.resume within 1 minute and its connection stopped responding, so the gateway closed it. Try again; the session reconnects. [timeout]`),
+            { code: -32001, data: { code: "timeout", details: { sessionId: session.sessionId, step: "session.resume" } } },
+          ),
+          new ManagedCopilotError("timeout", "The Managed Copilot deployment did not answer POST /v1/connect within 30 s. It may be restarting or unreachable; try again shortly.", {
+            method: "POST",
+            path: "/v1/connect",
+            timeoutMs: 30_000,
+            stage: "answer",
+          }),
+        );
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    await until(() => dropped);
+    const original = factory.get(created.id)!.stations.find((station) => station.id === "build:csv2json")!.sessionId;
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    const build = wo.stations.find((station) => station.id === "build:csv2json")!;
+    expect(build.sessionId).toBe(original);
+    expect(build.previousSessionIds).toBeUndefined();
+    const activity = factory.activity(created.id);
+    expect(activity.some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(false);
+    expect(activity.filter((item) => item.text?.startsWith("Paused:")).map((item) => item.text)).toEqual([
+      expect.stringContaining("(Session disconnected while waiting for a response)"),
+      expect.stringContaining("did not answer session.resume within 1 minute"),
+      expect.stringContaining("did not answer POST /v1/connect within 30 s"),
+    ]);
   });
 
   it("keeps a user's cancel a cancel, even when the turn reports a cancelled completion wait", async () => {

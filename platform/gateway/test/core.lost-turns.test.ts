@@ -82,8 +82,8 @@ describe("turns a lost runtime connection cut", () => {
       const turnId = record(sessionId).lastTurn!.turnId;
       // The runtime connection is lost mid-inference (a gateway handover, a relay drop, a runtime restart).
       runtime.dropConnections();
-      // The caller's wait settles with what happened, not with a closed connection.
-      expect(await waiting).toMatchObject({ message: expect.stringContaining("This turn was interrupted"), data: { code: "capability_unavailable" } });
+      // The caller's wait settles with what happened, in plain words, not with an internal connection error.
+      expect(await waiting).toMatchObject({ message: expect.stringContaining("lost the connection to the session's runtime before this message's answer arrived"), data: { code: "capability_unavailable" } });
       await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
       expect(record(sessionId)).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
       const error = client.events("session.error").find((event) => (event["data"] as Record<string, unknown>)["originatingMessageId"] === turnId);
@@ -191,14 +191,56 @@ describe("turns a lost runtime connection cut", () => {
     await waitUntil(() => record(sessionId).lastTurn?.status === "running");
     const later = record(sessionId).lastTurn!.turnId;
     runtime.dropConnections();
-    // The later turn is the one interrupted; the first call gets the connection error, never "send it again".
+    // The later turn is the one interrupted; the first call learns the connection was lost, never "send it again".
     const error = await waiting;
-    expect(error?.message).toBeDefined();
+    expect(error?.message).toContain("before this message's answer arrived");
     expect(error?.message).not.toContain("interrupted");
     await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
     expect(record(sessionId).lastTurn?.turnId).toBe(later);
     reply.release();
   });
+
+  it("does not end an external runtime's turn at a steering message, a model call after a turn end, or as completed when it is gone", async () => {
+    // Each turn is cut while the gateway is away (the runtime restarted); what its history holds must not read as an ending.
+    const cut = async (record_: (sessionId: string) => void): Promise<{ sessionId: string; client: RawClient }> => {
+      const client = await connect("chat");
+      const sessionId = crypto.randomUUID();
+      await client.request("session.create", { sessionId, requestPermission: true });
+      await client.request("session.send", { sessionId, prompt: "stall" });
+      await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+      runtime.dropConnections();
+      await sleep(100);
+      record_(sessionId);
+      await sessions().request(sessionId, "session.getMessages", {});
+      return { sessionId, client };
+    };
+    const outcomes = [
+      // A message steered into the running turn is part of it, not the start of a later one.
+      await cut((sessionId) => runtime.emitEvent(sessionId, "user.message", { content: "also this", messageId: "steer-1", delivery: "steering" })),
+      // A final reply and its turn end, then another model call the restart cut.
+      await cut((sessionId) => {
+        runtime.emitEvent(sessionId, "assistant.message", { messageId: "m-0", content: "First pass." });
+        runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "0" });
+        runtime.emitEvent(sessionId, "assistant.turn_start", { turnId: "1" });
+      }),
+      // The same, with the later model call ending too, without a reply (it was interrupted).
+      await cut((sessionId) => {
+        runtime.emitEvent(sessionId, "assistant.message", { messageId: "m-0", content: "First pass." });
+        runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "0" });
+        runtime.emitEvent(sessionId, "assistant.turn_start", { turnId: "1" });
+        runtime.emitEvent(sessionId, "assistant.turn_end", { turnId: "1" });
+      }),
+      // The runtime lost the turn's history altogether.
+      await cut((sessionId) => {
+        runtime.sessions.get(sessionId)!.events.length = 0;
+      }),
+    ];
+    for (const { sessionId, client } of outcomes) {
+      await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
+      expect(client.events("session.error").map((event) => (event["data"] as Record<string, unknown>)["errorType"])).toEqual(["interrupted"]);
+    }
+    // Four runtime reconnects, each after the supervisor's backoff.
+  }, 20_000);
 
   it("keeps a turn when the restore cannot check it (its connection drops mid-check)", async () => {
     const client = await connect("coder", (method) => (method === "hooks.invoke" ? { output: {} } : {}));
@@ -244,7 +286,7 @@ describe("turns a lost runtime connection cut", () => {
     await waitUntil(() => record(sessionId).lastTurn?.status === "completed");
     runtime.dropConnections();
     const error = await waiting;
-    expect(error?.message).toBeDefined();
+    expect(error?.message).toContain("before this message's answer arrived");
     expect(error?.message).not.toContain("interrupted");
     expect(record(sessionId).lastTurn?.status).toBe("completed");
     expect(client.events("session.error")).toHaveLength(0);
