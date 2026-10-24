@@ -65,15 +65,32 @@ describe("normalizeOptions", () => {
       },
       { baseDirectory: base },
     );
-    expect(config.vaults?.payments?.[0]).toEqual({ env: "STRIPE_API_KEY", value: { secretEnv: "MANAGED_COPILOT_SECRET_VAULT_PAYMENTS_0" }, hosts: ["api.stripe.com"] });
-    expect(config.vaults?.docs?.[0]).toEqual({ mcpServer: "https://mcp.contoso.example/docs", value: { secretEnv: "MANAGED_COPILOT_SECRET_VAULT_DOCS_0" } });
-    expect(config.webhooks?.orders?.secret).toEqual({ secretEnv: "MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS" });
+    expect(config.vaults?.payments?.[0]).toEqual({ env: "STRIPE_API_KEY", value: { secretEnv: "MANAGED_COPILOT_SECRET_VAULT_PAYMENTS_DF384AE9_0" }, hosts: ["api.stripe.com"] });
+    expect(config.vaults?.docs?.[0]).toEqual({ mcpServer: "https://mcp.contoso.example/docs", value: { secretEnv: "MANAGED_COPILOT_SECRET_VAULT_DOCS_46B42B42_0" } });
+    expect(config.webhooks?.orders?.secret).toEqual({ secretEnv: "MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS_1C168ADB" });
     expect(secrets.map((secret) => [secret.env, secret.value, secret.source])).toEqual([
-      ["MANAGED_COPILOT_SECRET_VAULT_PAYMENTS_0", stripeKey, "vaults.payments[0].value"],
-      ["MANAGED_COPILOT_SECRET_VAULT_DOCS_0", docsToken, "vaults.docs[0].value"],
-      ["MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS", webhookSecret, "webhooks.orders.secret"],
+      ["MANAGED_COPILOT_SECRET_VAULT_PAYMENTS_DF384AE9_0", stripeKey, "vaults.payments[0].value"],
+      ["MANAGED_COPILOT_SECRET_VAULT_DOCS_46B42B42_0", docsToken, "vaults.docs[0].value"],
+      ["MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS_1C168ADB", webhookSecret, "webhooks.orders.secret"],
     ]);
     expect(JSON.stringify(config)).not.toContain("stripe-key");
+  });
+
+  it("gives vaults whose names differ only in punctuation their own secret variables", () => {
+    const prod = new FakeParameter("billing-prod-key");
+    const other = new FakeParameter("billing-other-key");
+    const { secrets } = normalizeOptions(
+      "copilot",
+      {
+        vaults: {
+          "billing-prod": [{ env: "BILLING_KEY", value: prod, hosts: ["billing.contoso.example"] }],
+          "billing--prod": [{ env: "BILLING_KEY", value: other, hosts: ["billing.fabrikam.example"] }],
+        },
+        environments: { coder: { type: "isolated", vaults: ["billing-prod", "billing--prod"] } },
+      },
+      { baseDirectory: base },
+    );
+    expect(secrets.map((secret) => secret.env)).toEqual(["MANAGED_COPILOT_SECRET_VAULT_BILLING_PROD_5EC36BB9_0", "MANAGED_COPILOT_SECRET_VAULT_BILLING_PROD_CB7C304F_0"]);
   });
 
   it("passes existing secretEnv references through", () => {

@@ -81,10 +81,16 @@ export function stableCode(error: unknown): string | undefined {
   return match?.[1];
 }
 
+/** The deployment couldn't be reached at all: a failure, never a feature that hasn't landed. */
+function isTransportFailure(message: string): boolean {
+  return /^Cannot reach |ECONNREFUSED|ECONNRESET|ETIMEDOUT|fetch failed|socket hang up/i.test(message);
+}
+
 /** A feature that has not landed on this deployment yet, as opposed to a failure of one that has. */
 export function isUnavailable(error: unknown): boolean {
   const code = stableCode(error);
   const message = String((error as { message?: unknown })?.message ?? "");
+  if (isTransportFailure(message)) return false;
   return code === "capability_unavailable" || (code === "not_found" && /^No route for /.test(message)) || /not available in this build/.test(message);
 }
 

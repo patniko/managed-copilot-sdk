@@ -38,7 +38,10 @@ export default snippet(import.meta.url, { title: "Run on a schedule", section: "
   t.check(schedule.session?.tools?.[0]?.name === "lookup_order" && !("handler" in (schedule.session.tools[0] ?? {})), "only the tool's declaration was stored");
   const run = await managed.schedules.runNow(schedule.id, { invocationId: randomUUID() });
   const finished = await eventually(
-    async () => (await managed.schedules.runs(schedule.id)).find((candidate) => candidate.id === run.id && ["completed", "failed", "skipped"].includes(candidate.status)),
+    async () =>
+      (await managed.schedules.runs(schedule.id)).find(
+        (candidate) => candidate.id === run.id && ["completed", "failed", "skipped", "needs_reconciliation"].includes(candidate.status),
+      ),
     { timeoutMs: 6 * 60_000, what: "the run to finish" },
   );
   console.log(finished.startedAt, finished.status, finished.sessionId);

@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { createServer, type Server } from "node:http";
+import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { AttachMaterial } from "@managed-copilot/protocol";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -15,6 +16,8 @@ const used = new Set<string>();
 const received: unknown[] = [];
 const gatewaySockets = new Set<WebSocket>();
 const upgradeHeaders: Record<string, unknown>[] = [];
+/** GitHub tokens the fake API now rejects, as if their owner revoked them. */
+const revoked = new Set<string>();
 
 async function listen(server: Server): Promise<string> {
   server.listen(0, "127.0.0.1");
@@ -25,7 +28,7 @@ async function listen(server: Server): Promise<string> {
 beforeAll(async () => {
   github = createServer((req, res) => {
     const token = req.headers.authorization?.replace(/^Bearer /, "");
-    const user = token === "gho_owner" ? OWNER : token === "gho_other" ? { id: 7, login: "other" } : undefined;
+    const user = token && revoked.has(token) ? undefined : token === "gho_owner" ? OWNER : token === "gho_other" ? { id: 7, login: "other" } : undefined;
     res.writeHead(user ? 200 : 401, { "content-type": "application/json" }).end(JSON.stringify(user ?? { message: "Bad credentials" }));
   });
   process.env.MANAGED_COPILOT_GITHUB_API_URL = await listen(github);
@@ -146,6 +149,68 @@ describe("Copilot CLI attach relay", () => {
     expect(minted.length).toBe(before + 1);
     second.close();
   });
+
+  it("admits exactly one of two CLIs that connect at the same moment", async () => {
+    const { url } = await startRelay();
+    const results = await Promise.allSettled([connect(url, "gho_owner"), connect(url, "gho_owner")]);
+    const opened = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+    const refused = results.flatMap((result) => (result.status === "rejected" ? [result.reason as { status?: number }] : []));
+    expect(opened).toHaveLength(1);
+    expect(refused.map((reason) => reason.status)).toEqual([409]);
+    opened[0]!.close();
+  });
+
+  it("refuses a malformed Sec-WebSocket-Protocol header before asking the deployment for a ticket", async () => {
+    const { url } = await startRelay();
+    const before = minted.length;
+    expect(await rawUpgrade(url, new URL(url).pathname, { "sec-websocket-protocol": "ahp, ahp" })).toBe(400);
+    expect(minted.length).toBe(before);
+  });
+
+  it("answers a malformed request target with 400 rather than failing the launcher's process", async () => {
+    const { url } = await startRelay();
+    expect(await rawUpgrade(url, "//[")).toBe(400);
+    const cli = await connect(url, "gho_owner");
+    cli.close();
+  });
+
+  it("verifies the CLI's GitHub sign-in again on every connection", async () => {
+    const { url } = await startRelay();
+    const first = await connect(url, "gho_owner");
+    first.close();
+    await once(first, "close");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    revoked.add("gho_owner");
+    try {
+      await expect(connect(url, "gho_owner")).rejects.toMatchObject({ status: 401 });
+    } finally {
+      revoked.delete("gho_owner");
+    }
+  });
+
+  /** Sends a WebSocket upgrade by hand, so the request can break rules the ws client enforces. */
+  function rawUpgrade(relayUrl: string, path: string, extra: Record<string, string> = {}): Promise<number> {
+    const { hostname, port } = new URL(relayUrl);
+    return new Promise<number>((resolve, reject) => {
+      const req = request({
+        host: hostname,
+        port,
+        path,
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": randomBytes(16).toString("base64"),
+          authorization: ["Bearer", "gho_owner"].join(" "),
+          ...extra,
+        },
+      });
+      req.on("response", (res) => resolve(res.statusCode ?? 0));
+      req.on("upgrade", () => reject(new Error("The relay accepted an invalid request")));
+      req.on("error", reject);
+      req.end();
+    });
+  }
 
   it("passes the platform's close reason to the CLI and records it", async () => {
     const { relay, url } = await startRelay();

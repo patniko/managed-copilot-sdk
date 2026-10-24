@@ -53,6 +53,8 @@ export async function connectDeployment(options: { readonly url?: string }): Pro
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** The most sessions the gateway lists in one response. */
+const SESSION_LIST_MAX = 1000;
 
 /** Resolves a full session ID or any unique prefix of at least four characters (`attach 7f3a2c1`). */
 export async function resolveSession(managed: ManagedApi, input: string | undefined): Promise<SessionInfo> {
@@ -60,10 +62,17 @@ export async function resolveSession(managed: ManagedApi, input: string | undefi
   if (UUID.test(input)) return managed.sessions.get(input);
   if (input.length < 4) throw new UsageError(`"${input}" is too short to identify a session; use at least 4 characters of its ID.`);
   const prefix = input.toLowerCase();
-  const matches = (await managed.sessions.list()).filter((session) => session.id.toLowerCase().startsWith(prefix));
+  const sessions = await managed.sessions.list({ limit: SESSION_LIST_MAX });
+  const matches = sessions.filter((session) => session.id.toLowerCase().startsWith(prefix));
+  if (matches.length > 1) {
+    throw new UsageError(`"${input}" matches ${matches.length} sessions (${matches.slice(0, 4).map((session) => shortId(session.id)).join(", ")}). Use more characters.`);
+  }
+  // Only the newest sessions are listed; with that many, an older one could share the prefix.
+  if (sessions.length >= SESSION_LIST_MAX) {
+    throw new UsageError(`You have more than ${SESSION_LIST_MAX} sessions, so "${input}" can't be checked for uniqueness. Use the full session ID.`, "Copy it from `npx managed-copilot sessions`.");
+  }
   if (matches.length === 1) return matches[0]!;
-  if (matches.length === 0) throw new UsageError(`No session matches "${input}".`, "List your sessions with `npx managed-copilot sessions`.");
-  throw new UsageError(`"${input}" matches ${matches.length} sessions (${matches.slice(0, 4).map((session) => shortId(session.id)).join(", ")}). Use more characters.`);
+  throw new UsageError(`No session matches "${input}".`, "List your sessions with `npx managed-copilot sessions`.");
 }
 
 /** Resolves a schedule by ID, by name, or by a unique ID prefix. */

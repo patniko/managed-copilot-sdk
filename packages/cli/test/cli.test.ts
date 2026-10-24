@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ManagedCopilotError, type ArtifactInfo, type ScheduleInfo, type SessionInfo } from "@managed-copilot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { downloadTarget } from "../src/commands/artifacts.js";
+import { assertNoLinks, downloadTarget } from "../src/commands/artifacts.js";
 import { run, type CliIo, type Deployment, type ManagedApi } from "../src/cli.js";
 import { createStyle, formatBytes, relativeTime, table } from "../src/output.js";
 
@@ -244,7 +244,51 @@ describe("managed-copilot", () => {
     expect(out()).toContain("Saved 2 files");
     expect(readFileSync(join(directory, "charts", "revenue.png"), "utf8")).toBe("contents of charts/revenue.png");
     expect(managed.calls.filter((call) => call.startsWith("download"))).toHaveLength(2);
-    expect(() => downloadTarget(directory, "../escape.txt")).toThrow(/outside/);
+  });
+
+  it("refuses artifact names that could escape or clobber files in the download folder", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mc-cli-"));
+    cleanup.push(directory);
+    expect(() => downloadTarget(directory, "../escape.txt")).toThrow(/'\.\.' segment/);
+    expect(() => downloadTarget(directory, "a//b.txt")).toThrow(/empty/);
+    expect(() => downloadTarget(directory, "sub\\..\\..\\other.txt")).toThrow(/backslash/);
+    expect(() => downloadTarget(directory, "C:/outside.txt", "win32")).toThrow(/valid Windows file name/);
+    expect(() => downloadTarget(directory, "logs/NUL.txt", "win32")).toThrow(/valid Windows file name/);
+    expect(() => downloadTarget(directory, "notes. ", "win32")).toThrow(/valid Windows file name/);
+    expect(downloadTarget(directory, "logs/nul.txt", "linux")).toBe(join(directory, "logs", "nul.txt"));
+
+    const managed = new FakeManaged();
+    managed.artifactList = [
+      { id: "a1", path: "Report.md", size: 1, digest: "d", turnId: "t1", version: 1, state: "published", publishedAt: "2026-10-24T05:50:00Z" },
+      { id: "a2", path: "report.md", size: 1, digest: "d", turnId: "t1", version: 1, state: "published", publishedAt: "2026-10-24T05:50:00Z" },
+    ];
+    const { io, err } = harness(managed);
+    const caseInsensitive = process.platform === "win32" || process.platform === "darwin";
+    expect(await run(["artifacts", "37f2", "--download", directory], io)).toBe(caseInsensitive ? 2 : 0);
+    if (caseInsensitive) {
+      expect(err()).toContain('"Report.md" and "report.md" would be saved to the same file');
+      expect(managed.calls.filter((call) => call.startsWith("download"))).toHaveLength(0);
+    }
+  });
+
+  it("never saves an artifact through a link or junction inside the download folder", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "mc-cli-"));
+    const outside = mkdtempSync(join(tmpdir(), "mc-cli-outside-"));
+    cleanup.push(directory, outside);
+    symlinkSync(outside, join(directory, "charts"), "junction");
+    const target = downloadTarget(directory, "charts/revenue.png");
+    await expect(assertNoLinks(directory, target)).rejects.toThrow(/through the link/);
+    await expect(assertNoLinks(directory, downloadTarget(directory, "notes/report.md"))).resolves.toBeUndefined();
+  });
+
+  it("refuses to guess a session from a prefix when the list may be incomplete", async () => {
+    const managed = new FakeManaged();
+    managed.sessionsList = Array.from({ length: 1000 }, (_, index) => session(`${index.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`));
+    const { io, err } = harness(managed);
+    expect(await run(["artifacts", "000003e7"], io)).toBe(2);
+    expect(err()).toContain("more than 1000 sessions");
+    expect(await run(["artifacts", "0000000"], io)).toBe(2);
+    expect(err()).toMatch(/matches \d+ sessions/);
   });
 
   it("manages schedules by name, with confirmation for deletes and a retry-safe run", async () => {

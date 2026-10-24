@@ -1,7 +1,7 @@
 // Owner: devloop workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
 // WebSocket that relays the stock CLI's AHP connection to a per-session listener on the session's own runtime.
 import type { IncomingMessage } from "node:http";
-import { ManagedCopilotError, ROUTES, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
+import { ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
 import { WebSocketServer } from "ws";
 import type { GatewayApp, GatewayModule } from "../../app.js";
 import { AhpHosts } from "./hosts.js";
@@ -31,6 +31,19 @@ function ticketFrom(req: IncomingMessage, url: URL): string | undefined {
   // The stock Copilot CLI sends its own GitHub token as Authorization; only an attach ticket counts here.
   const match = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "");
   return match?.[1]?.startsWith(TICKET_PREFIX) ? match[1] : undefined;
+}
+
+/** The checks ws applies before accepting a handshake, made before a ticket is spent or the runtime is contacted. */
+function isWebSocketHandshake(req: IncomingMessage): boolean {
+  const key = req.headers["sec-websocket-key"];
+  const version = req.headers["sec-websocket-version"];
+  return (
+    req.method === "GET" &&
+    req.headers.upgrade?.toLowerCase() === "websocket" &&
+    typeof key === "string" &&
+    /^[+/0-9A-Za-z]{22}==$/.test(key) &&
+    (version === "13" || version === "8")
+  );
 }
 
 function lifecycleReason(type: SessionLifecycleEvent["type"]): string {
@@ -75,9 +88,12 @@ export const attachModule: GatewayModule = {
 
     app.upgrades.add(
       "/v1/sessions/:id/ahp",
-      async (req, socket, head) => {
-        const url = new URL(req.url ?? "/", "http://gateway.local");
-        const sessionId = decodeURIComponent(url.pathname.split("/")[3] ?? "");
+      async (req, socket, head, _principal, { url, params }) => {
+        socket.on("error", () => socket.destroy());
+        const sessionId = params.id ?? "";
+        if (!isWebSocketHandshake(req)) throw new ManagedCopilotError("invalid_request", "This endpoint only accepts a WebSocket handshake.");
+        const protocols = parseWebSocketProtocols(req.headers["sec-websocket-protocol"]);
+        if (!protocols) throw new ManagedCopilotError("invalid_request", "The Sec-WebSocket-Protocol header is malformed.");
         const presented = ticketFrom(req, url);
         if (!presented) throw new ManagedCopilotError("authentication_required", `Attach with a ticket from POST ${ROUTES.attach(sessionId)}`);
         const ticket = tickets.redeem(presented, sessionId);
@@ -85,23 +101,30 @@ export const attachModule: GatewayModule = {
         const sessions = sessionsOf(app);
         assertAttachable(await sessions.info(ticket.accountId, sessionId));
         const host = await hosts.ensure(sessionId, await sessions.runtime(sessionId));
-        const protocols = (req.headers["sec-websocket-protocol"] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
         let upstream;
         try {
           upstream = await openUpstream(host, protocols);
         } catch (error) {
           throw new ManagedCopilotError("capability_unavailable", `Cannot reach this session's Copilot CLI listener: ${(error as Error).message}`);
         }
+        if (host.closed) {
+          upstream.terminate();
+          throw new ManagedCopilotError("conflict", "The session's Copilot CLI hosting ended while connecting. Attach again.");
+        }
         if (socket.destroyed) {
           upstream.terminate();
           return;
         }
         const server = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_CLIENT_FRAME_BYTES, handleProtocols: () => upstream.protocol || false });
+        let attached = false;
         server.handleUpgrade(req, socket, head, (client) => {
+          attached = true;
           hosts.track(host, client);
           bridge(client, upstream, { log, sessionId, maxLifetimeMs });
           log.info("Copilot CLI attached", { sessionId, accountId: ticket.accountId });
         });
+        // ws completes or refuses the handshake synchronously; a refused one leaves nothing to own the upstream.
+        if (!attached) upstream.terminate();
       },
       { auth: "none" },
     );

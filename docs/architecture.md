@@ -381,8 +381,9 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   unproxied** port (default 7400) with `/healthz`. Relative `image` and `customizations` paths resolve against the
   AppHost directory. It refuses publish mode (`aspire deploy`) until gate G3.
 - Secrets must be Aspire secret parameters. Each becomes a `{ secretEnv }` reference in `MANAGED_COPILOT_CONFIG` and
-  an environment variable on the gateway: `MANAGED_COPILOT_SECRET_VAULT_<VAULT>_<INDEX>` and
-  `MANAGED_COPILOT_SECRET_WEBHOOK_<NAME>`. Literal strings are rejected. Schedule `session.tools` accept stock
+  an environment variable on the gateway: `MANAGED_COPILOT_SECRET_VAULT_<VAULT>_<HASH>_<INDEX>` and
+  `MANAGED_COPILOT_SECRET_WEBHOOK_<NAME>_<HASH>`, where `<HASH>` is the first 8 hex digits of the SHA-256 of the exact
+  vault or webhook name, so distinct names never share a variable. Literal strings are rejected. Schedule `session.tools` accept stock
   `defineTool` objects; only the declaration (zod schemas via the same `toJSONSchema()` the SDK sends, flags, and a
   stable `sha256:` revision) is stored.
 - The gateway gets a generated persistent `<name>-platform-key`, `MANAGED_COPILOT_DATA_DIR`

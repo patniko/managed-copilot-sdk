@@ -88,6 +88,12 @@ function envSegment(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
+/** Readable, plus a hash of the exact name, so distinct names (`billing-prod`, `billing--prod`) never share a variable. */
+function secretEnvName(kind: "VAULT" | "WEBHOOK", name: string, index?: number): string {
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8).toUpperCase();
+  return `MANAGED_COPILOT_SECRET_${kind}_${envSegment(name) || "NAMED"}_${hash}${index === undefined ? "" : `_${index}`}`;
+}
+
 function isSecretRef(value: unknown): value is SecretRef {
   return (
     typeof value === "object" &&
@@ -143,7 +149,9 @@ export function normalizeOptions(name: string, options: ManagedCopilotOptions, {
     } else if (value === null || typeof value !== "object") {
       problems.push(`${source} is missing. Use an Aspire secret parameter, e.g. await builder.addParameter("my-secret", { secret: true }).`);
     } else {
-      secrets.push({ env, value, source });
+      const clash = secrets.find((binding) => binding.env === env);
+      if (clash) problems.push(`${source} and ${clash.source} would share the environment variable ${env}. Rename one of them.`);
+      else secrets.push({ env, value, source });
     }
     return { secretEnv: env };
   };
@@ -157,7 +165,7 @@ export function normalizeOptions(name: string, options: ManagedCopilotOptions, {
         vault,
         (credentials ?? []).map((credential, index) => ({
           ...credential,
-          value: secretRef(`vaults.${vault}[${index}].value`, credential.value, `MANAGED_COPILOT_SECRET_VAULT_${envSegment(vault)}_${index}`),
+          value: secretRef(`vaults.${vault}[${index}].value`, credential.value, secretEnvName("VAULT", vault, index)),
         })),
       ]),
     );
@@ -166,7 +174,7 @@ export function normalizeOptions(name: string, options: ManagedCopilotOptions, {
     input.webhooks = Object.fromEntries(
       Object.entries(options.webhooks).map(([hook, webhook]) => [
         hook,
-        { ...webhook, secret: secretRef(`webhooks.${hook}.secret`, webhook.secret, `MANAGED_COPILOT_SECRET_WEBHOOK_${envSegment(hook)}`) },
+        { ...webhook, secret: secretRef(`webhooks.${hook}.secret`, webhook.secret, secretEnvName("WEBHOOK", hook)) },
       ]),
     );
   }

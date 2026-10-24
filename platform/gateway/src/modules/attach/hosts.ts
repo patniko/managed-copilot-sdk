@@ -38,10 +38,12 @@ function describe(error: unknown): string {
 
 /**
  * Starts, reuses, and disposes per-session AHP hosts on the session's own runtime connection. A host is reused while
- * that connection lives, disposed after it has had no attached clients for `idleMs`, and re-created on demand.
+ * that connection lives, disposed after it has had no attached clients for `idleMs`, and re-created on demand. Starting
+ * and disposing a session's host run one at a time, in order, so a release never interleaves with a start.
  */
 export class AhpHosts {
-  readonly #hosts = new Map<string, Promise<AhpHost>>();
+  readonly #hosts = new Map<string, AhpHost>();
+  readonly #queues = new Map<string, Promise<unknown>>();
   readonly #log: Logger;
   readonly #idleMs: number;
 
@@ -50,49 +52,74 @@ export class AhpHosts {
     this.#idleMs = idleMs;
   }
 
-  /** The session's host on its current runtime connection, started and published on first use. Calls are serialized per session. */
+  /** The session's host on its current runtime connection, started and published on first use. */
   ensure(sessionId: string, runtime: SessionRuntime): Promise<AhpHost> {
-    const previous = this.#hosts.get(sessionId);
-    const next = (async () => {
-      const host = previous ? await previous.catch(() => undefined) : undefined;
-      if (host && !host.closed && host.runtime.connectionId === runtime.connectionId) return host;
-      if (host && !host.closed) await this.#dispose(host, "The session moved to a new runtime connection. Attach again.");
-      return this.#start(sessionId, runtime);
-    })();
-    this.#hosts.set(sessionId, next);
-    next.catch(() => {
-      if (this.#hosts.get(sessionId) === next) this.#hosts.delete(sessionId);
+    return this.#serialize(sessionId, async () => {
+      let host = this.#hosts.get(sessionId);
+      if (!host || host.closed || host.runtime.connectionId !== runtime.connectionId) {
+        if (host) await this.#dispose(host, "The session moved to a new runtime connection. Attach again.");
+        host = await this.#start(sessionId, runtime);
+        this.#hosts.set(sessionId, host);
+      }
+      // Each use restarts the idle countdown, so a ticket being redeemed keeps its host alive.
+      this.#armIdle(host);
+      return host;
     });
-    return next;
   }
 
   /** Records an attached client so lifecycle events can close it and idle hosts can be disposed. */
   track(host: AhpHost, socket: WebSocket): void {
-    if (host.idleTimer) clearTimeout(host.idleTimer);
-    host.idleTimer = undefined;
+    if (host.closed) {
+      socket.close(CLOSE_SESSION_GONE, "The session's Copilot CLI hosting ended. Attach again.");
+      return;
+    }
     host.sockets.add(socket);
+    this.#armIdle(host);
     socket.once("close", () => {
       host.sockets.delete(socket);
-      if (host.sockets.size > 0 || host.closed) return;
-      host.idleTimer = setTimeout(() => {
-        if (host.sockets.size === 0) void this.release(host.sessionId, "idle", host);
-      }, this.#idleMs);
-      host.idleTimer.unref();
+      this.#armIdle(host);
     });
   }
 
-  /** Disposes the session's host and closes its attached clients with `reason`. */
-  async release(sessionId: string, reason: string, only?: AhpHost): Promise<void> {
-    const current = this.#hosts.get(sessionId);
-    if (!current) return;
-    const host = await current.catch(() => undefined);
-    if (!host || (only && host !== only)) return;
-    if (this.#hosts.get(sessionId) === current) this.#hosts.delete(sessionId);
-    await this.#dispose(host, reason);
+  /** Disposes the host after `idleMs` with no attached clients, including when its tickets are never redeemed. */
+  #armIdle(host: AhpHost): void {
+    if (host.idleTimer) clearTimeout(host.idleTimer);
+    host.idleTimer = undefined;
+    if (host.closed || host.sockets.size > 0) return;
+    host.idleTimer = setTimeout(() => {
+      if (host.sockets.size === 0) void this.release(host.sessionId, "idle", host);
+    }, this.#idleMs);
+    host.idleTimer.unref();
+  }
+
+  /** Disposes the session's host (only `only`, when given) and closes its attached clients with `reason`. */
+  release(sessionId: string, reason: string, only?: AhpHost): Promise<void> {
+    return this.#serialize(sessionId, async () => {
+      const host = this.#hosts.get(sessionId);
+      if (!host || (only && host !== only)) return;
+      await this.#dispose(host, reason);
+    });
   }
 
   async disposeAll(reason: string): Promise<void> {
-    await Promise.all([...this.#hosts.keys()].map((sessionId) => this.release(sessionId, reason)));
+    // Includes sessions whose host is still starting: their release runs after the start settles.
+    const sessionIds = new Set([...this.#hosts.keys(), ...this.#queues.keys()]);
+    await Promise.all([...sessionIds].map((sessionId) => this.release(sessionId, reason)));
+  }
+
+  /** Runs `task` after every earlier start or release of this session has settled. */
+  #serialize<T>(sessionId: string, task: () => Promise<T>): Promise<T> {
+    const previous = this.#queues.get(sessionId) ?? Promise.resolve();
+    const result = previous.then(task, task);
+    const settled = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#queues.set(sessionId, settled);
+    void settled.then(() => {
+      if (this.#queues.get(sessionId) === settled) this.#queues.delete(sessionId);
+    });
+    return result;
   }
 
   async #start(sessionId: string, runtime: SessionRuntime): Promise<AhpHost> {
@@ -146,6 +173,7 @@ export class AhpHosts {
   async #dispose(host: AhpHost, reason: string): Promise<void> {
     if (host.closed) return;
     host.closed = true;
+    if (this.#hosts.get(host.sessionId) === host) this.#hosts.delete(host.sessionId);
     if (host.idleTimer) clearTimeout(host.idleTimer);
     for (const socket of host.sockets) socket.close(CLOSE_SESSION_GONE, reason.slice(0, 120));
     host.sockets.clear();

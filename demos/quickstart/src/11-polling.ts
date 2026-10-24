@@ -15,17 +15,22 @@ export default snippet(import.meta.url, { title: "Keep working while your app is
   const managed = await ManagedCopilot.connect();
   t.cleanup(() => managed.close());
   t.cleanup(() => managed.sessions.delete(sessionId));
-  await eventually(async () => (await managed.sessions.get(sessionId)).pendingActions.some((action) => action.tool === "lookup_order"), {
-    what: "the lookup_order action to wait for a responder",
-  });
 
-  const { pendingActions } = await managed.sessions.get(sessionId);
-  console.log(pendingActions.map(({ id, kind, tool, state, arguments: args }) => ({ id, kind, tool, state, arguments: args })));
-  // [{ id: "...", kind: "tool", tool: "lookup_order", state: "pending", arguments: { id: "1234" } }]
-  await managed.sessions.handleActions(sessionId, {
-    tools: [lookupOrder],
-    onPermissionRequest: approveAll,
-  });
+  // Each poll answers whatever is waiting: first the permission request for lookup_order, then the call itself.
+  await eventually(
+    async () => {
+      const { pendingActions } = await managed.sessions.get(sessionId);
+      if (pendingActions.length === 0) return undefined;
+      console.log(pendingActions.map(({ kind, tool, state, arguments: args }) => ({ kind, tool, state, arguments: args })));
+      // [{ kind: "tool", tool: "lookup_order", state: "pending", arguments: { id: "1234" } }]
+      await managed.sessions.handleActions(sessionId, {
+        tools: [lookupOrder],
+        onPermissionRequest: approveAll,
+      });
+      return lookups.includes("1234") || undefined;
+    },
+    { timeoutMs: 4 * 60_000, what: "a poll to answer lookup_order" },
+  );
 
   // Acceptance checks
   t.check(lookups.includes("1234"), "handleActions claimed the action and ran lookup_order in this process");

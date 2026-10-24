@@ -17,6 +17,20 @@ export const ATTACH_CLOSE_CODES = {
 export const CREDENTIAL_REFUSAL =
   "Managed Copilot authenticates Copilot CLI attachments itself; credentials are never forwarded to the session's runtime.";
 
+/** RFC 6455 subprotocol tokens: the rule `ws` enforces before it opens a connection. */
+const SUBPROTOCOL_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/** Parses a `Sec-WebSocket-Protocol` request header. Undefined when it is malformed (an invalid or repeated token). */
+export function parseWebSocketProtocols(header: string | readonly string[] | undefined): string[] | undefined {
+  const text = typeof header === "string" ? header : (header ?? []).join(",");
+  const protocols = text
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (protocols.some((value) => !SUBPROTOCOL_TOKEN.test(value))) return undefined;
+  return new Set(protocols).size === protocols.length ? protocols : undefined;
+}
+
 /** AHP action names that carry credentials. */
 const CREDENTIAL_ACTION = /auth|token|credential|secret/i;
 

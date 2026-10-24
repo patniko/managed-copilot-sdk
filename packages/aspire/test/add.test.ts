@@ -118,9 +118,9 @@ describe("addManagedCopilot", () => {
     expect(env.get("MANAGED_COPILOT_APPHOST_DIR")).toBe(appHost);
     expect(env.get("MANAGED_COPILOT_INSTANCE")).toMatch(/^mc-[0-9a-f]{8}$/);
     expect(env.get("MANAGED_COPILOT_PLATFORM_KEY")).toEqual(new FakeParameter("copilot-platform-key"));
-    expect(env.get("MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS")).toBe(webhookSecret);
+    expect(env.get("MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS_1C168ADB")).toBe(webhookSecret);
     const config = JSON.parse(env.get("MANAGED_COPILOT_CONFIG") as string);
-    expect(config.webhooks.orders.secret).toEqual({ secretEnv: "MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS" });
+    expect(config.webhooks.orders.secret).toEqual({ secretEnv: "MANAGED_COPILOT_SECRET_WEBHOOK_ORDERS_1C168ADB" });
     expect(builder.parameters).toEqual([{ name: "copilot-platform-key", options: { secret: true, persist: true } }]);
 
     expect(copilot.name).toBe("copilot");

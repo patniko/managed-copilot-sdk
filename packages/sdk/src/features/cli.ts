@@ -7,10 +7,10 @@
 // locally and never leave this machine.
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve as resolvePath } from "node:path";
 import type { Duplex } from "node:stream";
 import {
   ATTACH_CLOSE_CODES,
@@ -18,6 +18,7 @@ import {
   ROUTES,
   discoveryDirectory,
   filterAhpClientFrame,
+  parseWebSocketProtocols,
   type AttachMaterial,
   type ErrorCode,
   type SessionInfo,
@@ -43,30 +44,82 @@ export interface AttachedCliResult {
 
 interface CopilotCommand {
   readonly file: string;
+  /** A Windows batch file (`copilot.cmd` from npm), which only cmd.exe can run. */
   readonly shell: boolean;
 }
 
-/** Finds the stock Copilot CLI on PATH (`copilot.exe`/`.cmd` on Windows). */
-export function findCopilot(explicit?: string): CopilotCommand {
-  const isScript = (file: string) => /\.(cmd|bat)$/i.test(file);
-  if (explicit) return { file: explicit, shell: isScript(explicit) };
-  const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean) : [""];
+const BATCH_FILE = /\.(cmd|bat)$/i;
+
+/** Executable extensions to try on Windows, in PATHEXT order (scripts such as `.js` don't run directly). */
+function executableExtensions(): string[] {
+  const runnable = [".com", ".exe", ".bat", ".cmd"];
+  const listed = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").map((extension) => extension.toLowerCase());
+  return listed.filter((extension) => runnable.includes(extension));
+}
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Resolves a command name or path the way the shell would: PATH, and on Windows PATHEXT extensions. */
+function resolveExecutable(command: string): string | undefined {
+  const names =
+    process.platform === "win32"
+      ? [...(/\.[^\\/.]+$/.test(command) ? [command] : []), ...executableExtensions().map((extension) => `${command}${extension}`)]
+      : [command];
+  if (isAbsolute(command) || /[\\/]/.test(command)) return names.map((name) => resolvePath(name)).find(isFile);
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     const clean = directory.replace(/^"|"$/g, "");
     if (!clean) continue;
-    for (const extension of extensions) {
-      const candidate = join(clean, `copilot${extension.toLowerCase()}`);
-      if (existsSync(candidate)) return { file: candidate, shell: isScript(candidate) };
-    }
+    const found = names.map((name) => join(clean, name)).find(isFile);
+    if (found) return found;
   }
+  return undefined;
+}
+
+/** Finds the stock Copilot CLI: `explicit` (a path or command name) or `copilot` on PATH (`copilot.exe`/`.cmd` on Windows). */
+export function findCopilot(explicit?: string): CopilotCommand {
+  const file = resolveExecutable(explicit ?? "copilot");
+  if (file) return { file, shell: process.platform === "win32" && BATCH_FILE.test(file) };
+  if (explicit) throw new ManagedCopilotError("capability_unavailable", `Copilot CLI was not found at ${explicit}.`);
   throw new ManagedCopilotError(
     "capability_unavailable",
     "Copilot CLI is not installed. Install it (winget install GitHub.Copilot, or npm install -g @github/copilot), then attach again.",
   );
 }
 
-function quote(value: string): string {
-  return /^[\w\-.:/\\=@]+$/.test(value) ? value : `"${value.replace(/"/g, '\\"')}"`;
+/** cmd.exe metacharacters, escaped with `^` so cmd passes them through literally. */
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/** Quotes one argument for CommandLineToArgvW: backslashes double only before a quote or the closing quote. */
+function quoteArgument(value: string): string {
+  let quoted = '"';
+  let backslashes = 0;
+  for (const character of value) {
+    if (character === "\\") {
+      backslashes++;
+      continue;
+    }
+    quoted += character === '"' ? `${"\\".repeat(backslashes * 2 + 1)}"` : `${"\\".repeat(backslashes)}${character}`;
+    backslashes = 0;
+  }
+  return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+}
+
+/**
+ * How to spawn the CLI without `shell: true`. A batch file runs as `cmd.exe /d /s /c "..."` with every argument quoted
+ * and its metacharacters escaped twice (cmd parses the line, then the batch file re-parses `%*`), so no argument can
+ * expand a variable or start another command.
+ */
+export function copilotSpawnArguments(copilot: CopilotCommand, args: readonly string[]): { file: string; args: string[]; windowsVerbatimArguments: boolean } {
+  if (!copilot.shell) return { file: copilot.file, args: [...args], windowsVerbatimArguments: false };
+  const escape = (value: string) => value.replace(CMD_META, "^$1");
+  const line = [escape(copilot.file), ...args.map((arg) => escape(escape(quoteArgument(arg))))].join(" ");
+  return { file: process.env.ComSpec ?? "cmd.exe", args: ["/d", "/s", "/c", `"${line}"`], windowsVerbatimArguments: true };
 }
 
 function socketOrigin(deploymentUrl: string): string {
@@ -93,16 +146,26 @@ export class AttachRelay {
   readonly #nonce = randomBytes(24).toString("base64url");
   readonly #server: Server;
   readonly #wss = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: MAX_FRAME_BYTES });
-  readonly #verified = new Map<string, Promise<{ id: number; login: string }>>();
+  /** GitHub identity lookups in flight, shared by concurrent connections; every new connection verifies again. */
+  readonly #verifying = new Map<string, Promise<{ id: number; login: string }>>();
+  /** Every upstream connection, including handshakes in flight, so `close()` can end them all. */
+  readonly #upstreams = new Set<WebSocket>();
   #pending: AttachMaterial | undefined;
   #active: { client: WebSocket; upstream: WebSocket } | undefined;
+  /** A CLI connection is being verified or connected; reserved before the first await so only one can win. */
+  #connecting = false;
+  #closed = false;
   outcome: AttachOutcome | undefined;
 
   constructor(options: RelayOptions) {
     this.#options = options;
     this.#pending = options.first;
     this.#server = createServer((_req, res) => res.writeHead(404).end());
-    this.#server.on("upgrade", (req, socket, head) => void this.#upgrade(req, socket, head));
+    this.#server.on("upgrade", (req, socket, head) => {
+      // Until ws takes the socket over, a reset from the client must not become an uncaught error.
+      socket.on("error", () => socket.destroy());
+      this.#upgrade(req, socket, head).catch(() => socket.destroy());
+    });
   }
 
   async listen(): Promise<string> {
@@ -115,8 +178,10 @@ export class AttachRelay {
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
     this.#active?.client.terminate();
-    this.#active?.upstream.terminate();
+    for (const upstream of this.#upstreams) upstream.terminate();
+    this.#upstreams.clear();
     this.#server.closeAllConnections();
     await new Promise<void>((resolve) => this.#server.close(() => resolve()));
   }
@@ -129,7 +194,7 @@ export class AttachRelay {
       return { code: "authentication_required", message: `Copilot CLI is not signed in. Run \`copilot login\` as @${owner.login}, then attach to ${sessionId} again.` };
     }
     const key = createHash("sha256").update(token).digest("hex");
-    let lookup = this.#verified.get(key);
+    let lookup = this.#verifying.get(key);
     if (!lookup) {
       lookup = (async () => {
         const response = await fetch(`${GITHUB_API_URL}/user`, { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "user-agent": "managed-copilot" } });
@@ -137,13 +202,14 @@ export class AttachRelay {
         const user = (await response.json()) as { id: number; login: string };
         return { id: user.id, login: user.login };
       })();
-      this.#verified.set(key, lookup);
+      this.#verifying.set(key, lookup);
+      const settled = () => this.#verifying.delete(key);
+      lookup.then(settled, settled);
     }
     let cliAccount: { id: number; login: string };
     try {
       cliAccount = await lookup;
     } catch (error) {
-      this.#verified.delete(key);
       return { code: "authentication_required", message: `Could not verify Copilot CLI's GitHub sign-in: ${(error as Error).message}. Run \`copilot login\` and attach again.` };
     }
     if (cliAccount.id !== owner.id) {
@@ -173,6 +239,8 @@ export class AttachRelay {
         handshakeTimeout: 15_000,
         maxPayload: 256 * 1024 * 1024,
       });
+      this.#upstreams.add(upstream);
+      upstream.once("close", () => this.#upstreams.delete(upstream));
       const status = await new Promise<number | undefined>((resolve) => {
         upstream.once("open", () => resolve(undefined));
         upstream.once("unexpected-response", (_request, response) => {
@@ -188,27 +256,46 @@ export class AttachRelay {
   }
 
   async #upgrade(req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> {
-    const url = new URL(req.url ?? "/", "http://relay.local");
-    if (url.pathname !== `/ahp/${this.#nonce}`) return reject(socket, 404, "not_found", "Unknown attach endpoint.");
-    if (this.#active) return reject(socket, 409, "conflict", "Another Copilot CLI is already attached through this launcher.");
-    const refusal = await this.#verify(req);
-    if (refusal) {
-      this.outcome = refusal;
-      return reject(socket, refusal.code === "forbidden" ? 403 : 401, refusal.code as ErrorCode, refusal.message);
-    }
-    const protocols = (req.headers["sec-websocket-protocol"] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-    let upstream: WebSocket;
+    let pathname: string;
     try {
-      upstream = await this.#connectUpstream(protocols);
-    } catch (error) {
-      this.outcome = { code: "capability_unavailable", message: (error as Error).message };
-      return reject(socket, 502, "capability_unavailable", (error as Error).message);
+      pathname = new URL(req.url ?? "/", "http://relay.local").pathname;
+    } catch {
+      return reject(socket, 400, "invalid_request", "Malformed request target.");
     }
-    if (socket.destroyed) {
-      upstream.terminate();
-      return;
+    if (pathname !== `/ahp/${this.#nonce}`) return reject(socket, 404, "not_found", "Unknown attach endpoint.");
+    if (this.#closed) return reject(socket, 503, "capability_unavailable", "This launcher is shutting down.");
+    if (this.#active || this.#connecting) return reject(socket, 409, "conflict", "Another Copilot CLI is already attached through this launcher.");
+    const protocols = parseWebSocketProtocols(req.headers["sec-websocket-protocol"]);
+    if (!protocols) return reject(socket, 400, "invalid_request", "The Sec-WebSocket-Protocol header is malformed.");
+    this.#connecting = true;
+    try {
+      const refusal = await this.#verify(req);
+      if (refusal) {
+        this.outcome = refusal;
+        return reject(socket, refusal.code === "forbidden" ? 403 : 401, refusal.code as ErrorCode, refusal.message);
+      }
+      let upstream: WebSocket;
+      try {
+        upstream = await this.#connectUpstream(protocols);
+      } catch (error) {
+        this.outcome = { code: "capability_unavailable", message: (error as Error).message };
+        return reject(socket, 502, "capability_unavailable", (error as Error).message);
+      }
+      if (socket.destroyed || this.#closed) {
+        upstream.terminate();
+        return;
+      }
+      this.#wss.handleUpgrade(req, socket, head, (client) => this.#bridge(client, upstream));
+      // ws completes or refuses the handshake synchronously; a refused one leaves nothing to own the upstream.
+      if (!this.#bridged(upstream)) upstream.terminate();
+    } finally {
+      this.#connecting = false;
     }
-    this.#wss.handleUpgrade(req, socket, head, (client) => this.#bridge(client, upstream));
+  }
+
+  /** Whether `upstream` is bridged to an attached CLI. */
+  #bridged(upstream: WebSocket): boolean {
+    return this.#active?.upstream === upstream;
   }
 
   #bridge(client: WebSocket, upstream: WebSocket): void {
@@ -267,9 +354,8 @@ export async function launchAttachedCli(
   process.on("SIGINT", ignoreInterrupt);
   try {
     const exitCode = await new Promise<number>((resolve, reject) => {
-      const child = copilot.shell
-        ? spawn(quote(copilot.file), args.map(quote), { stdio: "inherit", cwd: folder, shell: true, windowsHide: false })
-        : spawn(copilot.file, args, { stdio: "inherit", cwd: folder, windowsHide: false });
+      const command = copilotSpawnArguments(copilot, args);
+      const child = spawn(command.file, command.args, { stdio: "inherit", cwd: folder, windowsHide: false, windowsVerbatimArguments: command.windowsVerbatimArguments });
       child.once("error", (error) => reject(new ManagedCopilotError("capability_unavailable", `Could not start Copilot CLI: ${error.message}`)));
       child.once("exit", (code, signal) => resolve(code ?? (signal ? 130 : 1)));
     });

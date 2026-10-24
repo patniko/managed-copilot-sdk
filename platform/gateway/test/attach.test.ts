@@ -1,5 +1,6 @@
+import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { createServer, type Server } from "node:http";
+import { createServer, request, type Server } from "node:http";
 import { connect as netConnect, type AddressInfo } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +15,7 @@ import { createLogger } from "../src/log.js";
 import { attachModule, type AttachSessions, type SessionLifecycleEvent, type SessionRuntime } from "../src/modules/attach/index.js";
 import { CREDENTIAL_REFUSAL, filterAhpClientFrame as filterClientFrame } from "@managed-copilot/protocol";
 import { AttachTickets } from "../src/modules/attach/tickets.js";
+import { AhpHosts } from "../src/modules/attach/hosts.js";
 
 const OWNER = 42;
 const LISTENER_TOKEN = "listener-secret-token";
@@ -273,6 +275,34 @@ describe("attach module", () => {
     expect(replacement.count("host.start")).toBe(1);
   });
 
+  it("refuses a malformed Sec-WebSocket-Protocol header without spending the ticket", async () => {
+    await fresh();
+    const { token } = await material("s1");
+    const { hostname, port } = new URL(base);
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = request({
+        host: hostname,
+        port,
+        path: "/v1/sessions/s1/ahp",
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": randomBytes(16).toString("base64"),
+          "sec-websocket-protocol": "ahp, ahp",
+          authorization: ["Bearer", token].join(" "),
+        },
+      });
+      req.on("response", (res) => resolve(res.statusCode ?? 0));
+      req.on("upgrade", () => reject(new Error("The gateway accepted a malformed header")));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(status).toBe(400);
+    expect(runtime.count("host.start")).toBe(1);
+    await open("s1", token);
+  });
+
   it("closes attached clients when the session is deleted or its runtime connection closes", async () => {
     await fresh();
     const ws = await open("s1", (await material("s1")).token);
@@ -292,6 +322,39 @@ describe("attach module", () => {
     const closedAgain = once(again, "close");
     runtime.close();
     expect(((await closedAgain) as [number])[0]).toBe(4410);
+  });
+});
+
+describe("AhpHosts", () => {
+  it("runs a session's starts and releases in order, so a release never interleaves with a start", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    class SlowRuntime extends FakeRuntime {
+      override async request<T>(method: string, params: any): Promise<T> {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return super.request<T>(method, params);
+      }
+    }
+    const slow = new SlowRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
+    const [first, , second] = await Promise.all([hosts.ensure("s1", slow), hosts.release("s1", "The session was deleted."), hosts.ensure("s1", slow)]);
+    expect(first.closed).toBe(true);
+    expect(second.closed).toBe(false);
+    expect(second).not.toBe(first);
+    expect(slow.requests.map((request) => request.method)).toEqual(["host.start", "host.publishSession", "host.dispose", "host.start", "host.publishSession"]);
+    await hosts.disposeAll("done");
+    expect(second.closed).toBe(true);
+  });
+
+  it("disposes a host whose attach ticket is never redeemed once it has been idle", async () => {
+    const listener = new FakeListener();
+    listener.port = 1;
+    const quiet = new FakeRuntime("conn-1", listener);
+    const hosts = new AhpHosts(createLogger("test", "error"), 15);
+    const host = await hosts.ensure("s1", quiet);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(host.closed).toBe(true);
+    expect(quiet.count("host.dispose")).toBe(1);
   });
 });
 

@@ -21,14 +21,21 @@ export async function openUpstream(host: AhpHost, protocols: readonly string[]):
   const stream = asSocket(await host.runtime.connect(host.port));
   const url = new URL(`ws://127.0.0.1:${host.port}/`);
   url.searchParams.set("tkn", host.token);
-  const upstream = new WebSocket(url, [...protocols], {
-    createConnection: () => stream,
-    perMessageDeflate: false,
-    handshakeTimeout: 15_000,
-  });
+  let upstream: WebSocket;
+  try {
+    upstream = new WebSocket(url, [...protocols], {
+      createConnection: () => stream,
+      perMessageDeflate: false,
+      handshakeTimeout: 15_000,
+    });
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
   return new Promise<WebSocket>((resolve, reject) => {
     const fail = (error: Error) => {
       upstream.terminate();
+      stream.destroy();
       reject(error);
     };
     upstream.once("open", () => {
