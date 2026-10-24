@@ -123,6 +123,7 @@ export class SandboxService implements SandboxesService {
         }),
       row.id,
       row.key,
+      () => this.#options.provider.resetRelay(),
     );
   }
 
@@ -671,6 +672,8 @@ export class SandboxService implements SandboxesService {
   }
 
   async start(): Promise<void> {
+    const interrupted = this.#artifacts?.failInterruptedTurns() ?? 0;
+    if (interrupted > 0) this.#log.warn("Marked turns interrupted by a gateway restart as failed", { turns: interrupted });
     const sessions = this.#sessions();
     if (sessions?.subscribe) this.#unsubscribe = sessions.subscribe((sessionId, event) => this.#onEvent(sessionId, event));
     else this.#log.warn("The sessions service is unavailable; artifact publication and idle tracking are disabled");

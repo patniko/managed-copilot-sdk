@@ -54,11 +54,13 @@ export class SandboxAgentClient {
   readonly #relay: () => Promise<RelayTarget>;
   readonly #sandboxId: string;
   readonly #key: string;
+  readonly #onUnreachable: (() => void) | undefined;
 
-  constructor(relay: () => Promise<RelayTarget>, sandboxId: string, key: string) {
+  constructor(relay: () => Promise<RelayTarget>, sandboxId: string, key: string, onUnreachable?: () => void) {
     this.#relay = relay;
     this.#sandboxId = sandboxId;
     this.#key = key;
+    this.#onUnreachable = onUnreachable;
   }
 
   async #headers(): Promise<{ base: URL; headers: Record<string, string> }> {
@@ -84,6 +86,7 @@ export class SandboxAgentClient {
       );
       req.on("error", (error: NodeJS.ErrnoException) => {
         if (error.name === "AbortError") return reject(new ManagedCopilotError("invalid_request", "The sandbox request was cancelled."));
+        if (error.code === "ECONNREFUSED" || error.code === "ECONNRESET") this.#onUnreachable?.();
         reject(new ManagedCopilotError("capability_unavailable", `The sandbox relay is not reachable: ${error.message}`));
       });
       if (options.timeoutMs) req.setTimeout(options.timeoutMs, () => req.destroy(new Error(`timed out after ${options.timeoutMs} ms`)));
@@ -183,7 +186,10 @@ export class SandboxAgentClient {
       ws.once("unexpected-response", (_req, res) => {
         void errorFrom(res, `Opening ${route} failed`).then(reject, reject);
       });
-      ws.once("error", (error) => reject(new ManagedCopilotError("capability_unavailable", `The sandbox relay is not reachable: ${error.message}`)));
+      ws.once("error", (error: NodeJS.ErrnoException) => {
+        if (error.code === "ECONNREFUSED" || error.code === "ECONNRESET") this.#onUnreachable?.();
+        reject(new ManagedCopilotError("capability_unavailable", `The sandbox relay is not reachable: ${error.message}`));
+      });
     });
     const stream = createWebSocketStream(ws, { allowHalfOpen: false });
     stream.on("error", () => stream.destroy());

@@ -155,6 +155,26 @@ export class ArtifactService implements ArtifactsService {
     return this.#options.track(sessionId, this.#publish(sessionId, turnIds, outcome));
   }
 
+  /**
+   * Turns still running when the gateway (re)starts lost their completion event with the old connection; their
+   * outputs are not labeled successful. Marks them failed so waiters get an explicit answer.
+   */
+  failInterruptedTurns(): number {
+    const db = this.#options.db;
+    const rows = db.prepare("SELECT session_id, turn_id FROM sandbox_turns WHERE state = 'running'").all() as { session_id: string; turn_id: string }[];
+    if (rows.length === 0) return 0;
+    const now = new Date().toISOString();
+    transaction(db, () => {
+      for (const row of rows) {
+        db.prepare("UPDATE sandbox_turns SET state = 'failed', completed_at = ? WHERE session_id = ? AND turn_id = ?").run(now, row.session_id, row.turn_id);
+        db.prepare(
+          "INSERT INTO sandbox_publications (session_id, turn_id, state, error, created_at, completed_at) VALUES (?, ?, 'failed', ?, ?, ?) ON CONFLICT (session_id, turn_id) DO UPDATE SET state = 'failed', error = excluded.error, completed_at = excluded.completed_at",
+        ).run(row.session_id, row.turn_id, "The gateway restarted while this turn was running, so its outputs were not published.", now, now);
+      }
+    });
+    return rows.length;
+  }
+
   async #publish(sessionId: string, turnIds: readonly string[], outcome: TurnOutcome): Promise<void> {
     const db = this.#options.db;
     const finish = (state: "published" | "failed", error: string | null, artifactIds: readonly string[]) => {
