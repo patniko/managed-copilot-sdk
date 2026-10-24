@@ -522,12 +522,13 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   core's ledger: one whose commit reached the ledger is marked committed and its carried call moved to the new
   generation at once (as are committed attempts whose post-commit steps a restart cut short, and a retried
   `request_sandbox` call re-applies that before answering); any other is marked failed and its network narrowing
-  reverted (core returns `promoting` rows to `idle`). Candidate sandboxes left behind are released at start or by the
-  session's next attempt before it allocates: releases and allocations run one at a time per session, and a release
-  happens only while it is still owed, so it never undoes a newer attempt's candidate. Committed attempts then finish
-  what they owe (the event, staging, the source's copy of the state) for the incarnation that was promoted, or after
-  that session was deleted; a session ID reused by a new session is never touched. A restart still interrupts the
-  turn that was moving, as it interrupts any running turn.
+  reverted (core returns `promoting` rows to `idle`). Candidate sandboxes left behind are released at start (in the
+  background, so the gateway is ready without waiting) or by the session's next attempt before it allocates: releases
+  and allocations run one at a time per session, and a release happens only while it is still owed, so it never
+  undoes a newer attempt's candidate. Committed attempts then finish what they owe (the event, staging, the source's
+  copy of the state) for the incarnation that was promoted, or after that session was deleted; a session ID reused by
+  a new session is never touched. A restart still interrupts the turn that was moving, as it interrupts any running
+  turn.
 - **Attach.** Core emits `onLifecycle({ type: "promoted" })` after placement, upstream, and ledger state switched; the
   attach module closes attached clients with `ATTACH_CLOSE_CODES.moved`, the CLI relay redials, and the gateway
   publishes the same session on the sandbox runtime's AHP host.

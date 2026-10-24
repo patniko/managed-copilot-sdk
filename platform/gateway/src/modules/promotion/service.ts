@@ -110,6 +110,7 @@ export class PromotionManager implements PromotionService {
   /** The tail of each session's candidate work (see `#candidateWork`). */
   readonly #candidates = new Map<string, Promise<void>>();
   #running = 0;
+  #closed = false;
 
   constructor(options: PromotionManagerOptions) {
     this.#options = options;
@@ -155,6 +156,11 @@ export class PromotionManager implements PromotionService {
 
   latest(sessionId: string): PromotionOperation | undefined {
     return this.#store.latest(sessionId);
+  }
+
+  /** At shutdown: recovery stops before its next step (what is left is retried at the next start). */
+  close(): void {
+    this.#closed = true;
   }
 
   /** The `request_sandbox` platform tool. Its call is carried into the sandbox and answered there. */
@@ -723,6 +729,7 @@ export class PromotionManager implements PromotionService {
   async recover(): Promise<void> {
     const sessions = optionalService<SessionsService>(this.#app.services, "sessions");
     for (const operation of this.#store.owing()) {
+      if (this.#closed) return;
       const record = sessions?.get(operation.sessionId);
       try {
         if (operation.state === "committed") {

@@ -61,10 +61,18 @@ export const promotionModule: GatewayModule = {
       log.error("Promotion reconciliation failed", { error: (error as Error).message });
     }
 
-    app.onStart(async () => {
+    let recovering: Promise<void> | undefined;
+    app.onStart(() => {
       if (manager.available()) app.capabilities.add("promotion");
       else log.warn("Promotion is unavailable: it needs the router's placement cutover and sandboxes that import session state");
-      await manager.recover().catch((error: unknown) => log.error("Promotion recovery failed", { error: (error as Error).message }));
+      // In the background: releasing a candidate can wait for that session's allocation in flight, and the gateway is
+      // ready (and discoverable) without it. Every step is idempotent and retried at the next start.
+      recovering = manager.recover().catch((error: unknown) => log.error("Promotion recovery failed", { error: (error as Error).message }));
+    });
+    app.onStop(async () => {
+      manager.close();
+      // The step in progress may be waiting for a sandbox; it is not worth holding up shutdown for.
+      await Promise.race([recovering, new Promise((resolve) => setTimeout(resolve, 2_000).unref())]);
     });
   },
 };

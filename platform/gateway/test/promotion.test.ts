@@ -736,6 +736,15 @@ describe("recovery after a restart", () => {
     expect(published.map((event) => event.id)).toEqual([`evt_promoted_${operation.id}`, `evt_promoted_${operation.id}`]);
     expect(manager.latest(SESSION)).toMatchObject({ eventPublished: true, finalized: true });
   });
+
+  it("stops recovering at shutdown and leaves the rest for the next start", async () => {
+    store.insert({ id: "prm_i", sessionId: SESSION, ownerId: OWNER.accountId, fromGeneration: 0, trigger: "api", target: "coder" });
+    store.update("prm_i", { state: "failed", cleanupPending: true });
+    manager.close();
+    await manager.recover();
+    expect(sandboxes.deleted).toEqual([]);
+    expect(store.get("prm_i")).toMatchObject({ cleanupPending: true });
+  });
 });
 
 describe("promotion store", () => {
