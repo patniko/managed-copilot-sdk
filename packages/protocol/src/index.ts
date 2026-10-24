@@ -6,5 +6,6 @@ export * from "./errors.js";
 export * from "./events.js";
 export * from "./network.js";
 export * from "./paths.js";
+export * from "./promotion.js";
 export * from "./sandbox.js";
 export * from "./tools.js";
