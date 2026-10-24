@@ -79,8 +79,9 @@ async function hostConfig(command: string): Promise<string | undefined> {
  * Validates a registry or package-index URL before it is baked into sandbox images. The URL becomes a Docker build
  * argument (on the build's command line and in the image history) and is written to every sandbox's npm or pip
  * configuration, which workloads can read, so it must never carry credentials: user info (`user:password@`,
- * `token@`), query strings, and fragments are refused, and so are spaces, backslashes, and control characters (a line
- * break, or an escape a shell's `echo` expands, would add a configuration line of its own, such as an `_authToken`).
+ * `token@`), extra slashes before the host (which hide user info from the image's guard), query strings, and
+ * fragments are refused, and so are spaces, backslashes, and control characters (a line break, or an escape a shell's
+ * `echo` expands, would add a configuration line of its own, such as an `_authToken`).
  * Authenticated registries need their own mechanism (build secrets for image preparation, vaults for session-time
  * installs), which is not available yet. Returns the trimmed URL. Messages show only the scheme and host, never the
  * credential or the path (which some registries use for tokens). Mirrors the image's guard
@@ -107,6 +108,8 @@ export function checkRegistryUrl(value: string, source: { readonly setting: stri
     );
   }
   if (!/^https?:\/\//i.test(candidate)) refuse("must start with http:// or https://.");
+  // URL parsing skips extra slashes before the host; the image's guard (which judges the authority as written) does not.
+  if (!written) refuse(`must name the registry host right after the scheme (${url.protocol}//${url.host}/...), without extra slashes.`);
   if (url.search || url.hash || /[?#]/.test(candidate)) {
     refuse(`has a query string or fragment (${url.protocol}//${url.host}), which can carry credentials; use the registry's plain URL.`);
   }

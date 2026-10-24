@@ -1,4 +1,5 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,6 +53,10 @@ describe("checkRegistryUrl", () => {
     // The image's guard requires the scheme's `//` and refuses an empty query; so does the gateway.
     refusal(() => checkRegistryUrl("https:/registry.example/", source), /must start with http:\/\/ or https:\/\//);
     refusal(() => checkRegistryUrl("https://registry.example/simple/?", source), /query string or fragment/);
+    // URL parsing skips extra slashes before the host, where the image's guard would find no host (and no user info).
+    refusal(() => checkRegistryUrl(`https:///user:${SECRET}@registry.example/`, source), /contains credentials/);
+    refusal(() => checkRegistryUrl(`https:////registry.example/${SECRET}/`, source), /must name the registry host right after the scheme \(https:\/\/registry\.example\/\.\.\.\), without extra slashes/);
+    refusal(() => checkRegistryUrl("HTTPS:///registry.example/", source), /without extra slashes/);
     // Messages never show the path, which some registries use for tokens.
     refusal(() => checkRegistryUrl(`https://registry.example/${SECRET}/npm/?x=1`, source), /query string or fragment/);
   });
@@ -63,6 +68,59 @@ describe("checkRegistryUrl", () => {
     expect(problems[0]).toMatch(/^MANAGED_COPILOT_NPM_REGISTRY contains credentials/);
     expect(problems[1]).toMatch(/^MANAGED_COPILOT_PIP_INDEX_URL has a query string/);
     expect(problems.join("\n")).not.toContain("hunter2");
+  });
+});
+
+// The image's guard (platform/sandbox/image/check-registry-url.sh) refuses the same URLs when an image is built, so
+// anything the gateway accepts must pass it, or builds fail late with a less helpful message.
+const sh = spawnSync("sh", ["-c", "exit 0"], { encoding: "utf8" }).status === 0;
+
+describe.runIf(sh)("checkRegistryUrl and the image's registry guard", () => {
+  it("never accepts a URL that the image's guard refuses", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mc-registry-guard-"));
+    try {
+      const script = join(dir, "check-registry-url.sh");
+      writeFileSync(script, readFileSync(join(import.meta.dirname, "..", "..", "sandbox", "image", "check-registry-url.sh"), "utf8").replace(/\r\n/g, "\n"));
+      const corpus = [
+        "https://registry.npmjs.org/",
+        "http://proxy.internal:8080/npm/",
+        "HTTPS://packagefeedproxy.microsoft.io/pypi/simple/",
+        "https://host/npm/@scope/",
+        "https://[::1]:8080/npm/",
+        "https://registry.example/%40/",
+        "  https://registry.example/  ",
+        "http://a",
+        "https://",
+        "https:///",
+        "https:///registry.example/",
+        "https:////registry.example/",
+        "https:///user:pw@registry.example/",
+        "https://@registry.example/",
+        "https://user@registry.example/",
+        "https:/registry.example/",
+        "https:registry.example/",
+        "https://registry.example\\x@y/",
+        "https://registry.example?x@y/",
+        "https://registry.example#@y/",
+        "https://registry.example/\u00a0x",
+        "https://reg istry.example/",
+      ];
+      let accepted = 0;
+      for (const value of corpus) {
+        let url: string;
+        try {
+          url = checkRegistryUrl(value, source);
+        } catch {
+          continue;
+        }
+        accepted++;
+        const result = spawnSync("sh", ["-c", 'sh "$0" NPM_REGISTRY "${GUARD_VALUE}"', script], { encoding: "utf8", env: { ...process.env, GUARD_VALUE: url } });
+        expect({ status: result.status, stderr: result.stderr }, value).toEqual({ status: 0, stderr: "" });
+      }
+      expect(accepted).toBe(8);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

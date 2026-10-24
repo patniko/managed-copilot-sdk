@@ -33,6 +33,11 @@ describe.runIf(sh)("image registry guard", () => {
       ["https://user:hunter2-secret@registry.example/", /credentials/],
       ["https://tok_hunter2-secret@registry.example/npm/", /credentials/],
       ["https://@registry.example/", /credentials/],
+      // URL parsers (and so npm and pip) skip extra slashes before the host: these carry or could hide user info.
+      ["https:///user:hunter2-secret@registry.example/", /extra slashes/],
+      ["https:////hunter2-secret@registry.example/", /extra slashes/],
+      ["HTTPS:///registry.example/hunter2-secret/", /extra slashes/],
+      ["https://", /extra slashes/],
       ["https://registry.example\\user:hunter2-secret@evil.example/", /backslashes/],
       ["https://registry.example/simple?token=hunter2-secret", /query string or fragment/],
       ["https://registry.example/simple#hunter2-secret", /query string or fragment/],

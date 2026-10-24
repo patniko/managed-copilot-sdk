@@ -59,7 +59,7 @@ export const sandboxModule: GatewayModule = {
       ownerOf: (sessionId) => store.bySession(sessionId)?.ownerId,
       sessionGone: (sessionId) => service.isGone(sessionId),
       settled: (sessionId) => service.settled(sessionId),
-      stopping: () => service.stopping,
+      stopping: () => service.stoppingCompute,
       events: () => (app.services as Record<string, unknown>)["events"] as SandboxEventsPort | undefined,
     });
     service.attachArtifacts(artifacts);

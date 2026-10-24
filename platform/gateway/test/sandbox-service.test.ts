@@ -4,11 +4,13 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WebSocketServer } from "ws";
 import { isManagedCopilotError, ManagedCopilotError, NETWORK_DISABLED, type SandboxSetupRecord } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../src/app.js";
 import { openDatabase } from "../src/db.js";
 import { createLogger, type Logger } from "../src/log.js";
 import { ArtifactService } from "../src/modules/sandbox/artifacts.js";
+import type { SandboxRuntime } from "../src/modules/sandbox/contract.js";
 import type { SandboxProvider, SandboxSpec, SandboxStartResult } from "../src/modules/sandbox/providers/types.js";
 import { SandboxService } from "../src/modules/sandbox/service.js";
 import { SandboxStore, type SandboxRow } from "../src/modules/sandbox/store.js";
@@ -289,6 +291,41 @@ describe("SandboxService lifecycle", () => {
     expect(store.bySession(row.sessionId)?.state).toBe("deleted");
   });
 
+  it("tells core's authenticator about an owner token the Copilot API rejected for the sandbox's session", async () => {
+    const { server, url } = await fakeSandboxd();
+    const runtimes = new WebSocketServer({ noServer: true });
+    server.on("upgrade", (req, socket, head) => runtimes.handleUpgrade(req, socket, head, () => undefined));
+    const capi = vi.fn(async () => new Response("{}", { status: 401 }));
+    vi.stubGlobal("fetch", capi);
+    let runtime: SandboxRuntime | undefined;
+    try {
+      provider.sandboxdUrl = url;
+      const invalidated: string[] = [];
+      services["auth"] = { authenticate: async () => Promise.reject(new Error("not used")), invalidate: (token: string) => void invalidated.push(token) };
+      const row = sandbox("running", { running: true });
+      runtime = await createService().openRuntime(row.sessionId, { resolveToken: async () => "gho_rejected_by_the_copilot_api" });
+      await runtime.initialize(async () => ({ success: true }));
+      await runtime.handlers.get("llmInference.httpRequestStart")!({
+        requestId: "r1",
+        sessionId: row.sessionId,
+        method: "POST",
+        transport: "http",
+        url: "https://api.githubcopilot.com/v1/messages",
+        headers: { authorization: [`Bearer ${row.placeholder}`] },
+      });
+      await runtime.handlers.get("llmInference.httpRequestChunk")!({ requestId: "r1", data: "{}", end: true });
+      await vi.waitFor(() => expect(invalidated).toEqual(["gho_rejected_by_the_copilot_api"]));
+      expect(capi).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+      runtime?.close();
+      for (const client of runtimes.clients) client.terminate();
+      runtimes.close();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   describe("publications interrupted by deletion or shutdown", () => {
     let server: Server | undefined;
     let dataDir: string;
@@ -314,7 +351,7 @@ describe("SandboxService lifecycle", () => {
         ownerOf: () => 1,
         sessionGone: (sessionId) => sandboxes.isGone(sessionId),
         settled: (sessionId) => sandboxes.settled(sessionId, 500),
-        stopping: () => sandboxes.stopping,
+        stopping: () => sandboxes.stoppingCompute,
         events: () => undefined,
       });
       sandboxes.attachArtifacts(artifacts);
@@ -417,6 +454,56 @@ describe("SandboxService lifecycle", () => {
       expect(order).toEqual(["outputs read", "compute stopped"]);
       expect((await artifacts.waitForPublication(row.sessionId, { turnId: "m1" })).state).toBe("published");
       expect(lines.filter((line) => line.level === "warn")).toEqual([]);
+    });
+
+    /** Starts gateway shutdown while the turn's manifest is being read, then answers the manifest with `answer`. */
+    async function failDuringShutdownDrain(answer: (res: ServerResponse) => void): Promise<{ failure: Error | undefined; lines: { level: string; message: string }[]; order: string[] }> {
+      const order: string[] = [];
+      let sandboxes!: SandboxService;
+      let shuttingDown: Promise<void> | undefined;
+      ({ server } = await fakeSandboxd({
+        manifest: (res) => {
+          shuttingDown = sandboxes.shutdown();
+          order.push("outputs read");
+          answer(res);
+        },
+      }));
+      provider.sandboxdUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      provider.onStop = () => void order.push("compute stopped");
+      const row = sandbox("running", { running: true });
+      const emitter = sessionsWith(row.sessionId, () => "running");
+      sandboxes = createService();
+      const { log, lines } = recordingLogger();
+      const artifacts = withArtifacts(sandboxes, log);
+      await sandboxes.start();
+      completeTurn(emitter(), row.sessionId, "m1");
+      await vi.waitFor(() => expect(shuttingDown).toBeDefined(), { timeout: 5_000 });
+      await shuttingDown;
+      const failure = await artifacts.waitForPublication(row.sessionId, { turnId: "m1" }).then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+      return { failure, lines, order };
+    }
+
+    it("keeps a publication's own failure during the shutdown drain, while compute is still up", async () => {
+      const { failure, lines, order } = await failDuringShutdownDrain((res) => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ files: [], rejected: [{ path: "link", reason: "symbolic links are not published" }] }));
+      });
+      expect(failure?.message).toMatch(/outputs\/link \(symbolic links are not published\)/);
+      expect(lines).toContainEqual({ level: "warn", message: "Publication failed" });
+      expect(order).toEqual(["outputs read", "compute stopped"]);
+    });
+
+    it("reports a sandbox failure during the shutdown drain as such, since shutdown has not touched compute yet", async () => {
+      const { failure, lines } = await failDuringShutdownDrain((res) => {
+        res.writeHead(502, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "unavailable", message: "The sandbox connection failed." } }));
+      });
+      expect(failure?.message).toBe("The sandbox connection failed.");
+      expect(lines).toContainEqual({ level: "warn", message: "Publication failed" });
+      expect(lines.some((line) => /gateway is stopping/.test(line.message))).toBe(false);
     });
   });
 

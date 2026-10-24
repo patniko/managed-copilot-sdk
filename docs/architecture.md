@@ -160,6 +160,9 @@ denies configuration RPCs it does not understand.
      Copilot API hosts (the identity's `endpoints.api` plus `api[.individual|.business|.enterprise].githubcopilot.com`):
      it swaps the placeholder for the owner's current token (`resolveToken`) and streams the response back with
      `llmInference.httpResponseStart`/`httpResponseChunk`. Anything else is refused.
+  5. When GitHub rejects that token (HTTP 401 from the Copilot API, including a refused WebSocket upgrade, or from
+     `copilot_internal/user`), the gateway calls core's `auth.invalidate(token)` and drops the token's cached Copilot
+     identity, so the next `resolveToken` verifies the token with GitHub again rather than reusing it.
 
   Evidence (2026-10-23, Windows ARM64, both the SDK's `copilot-runtime` and the `@github/copilot` CLI binary, 1.0.103,
   with all direct network egress blocked): session creation without a token succeeded, `GET <endpoints.api>/models` and
@@ -238,10 +241,12 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   `managed-copilot-sandbox:<hash>`, also tagged `ghcr.io/patniko/managed-copilot-sandbox:0.1.0` for customer `FROM`
   lines) with the operator's npm registry and pip index baked in as session defaults. Those URLs reach every
   workload's npm and pip configuration and are recorded as build arguments in the image history, so they must not
-  carry credentials: user info (`user:password@`, `token@`), query strings, fragments, and spaces, backslashes, or
+  carry credentials: user info (`user:password@`, `token@`), extra slashes before the host (URL parsers skip them,
+  so `https:///user:token@host/` still carries user info), query strings, fragments, and spaces, backslashes, or
   control characters (which could smuggle in a configuration line such as an `_authToken`) are refused, both by the
   gateway before any build (a clear `capability_unavailable` naming the setting, and a startup warning when an
-  explicit setting is refused) and by the image's own guard for builds outside the gateway. Credentials hidden in a
+  explicit setting is refused) and by the image's own guard for builds outside the gateway; a test runs the guard on
+  every URL the gateway accepts. Credentials hidden in a
   URL's path cannot be detected and must not be used; error messages show only the scheme and host. Authenticated
   registries are not supported yet; they need build secrets for image preparation and vault-scoped credentials for
   session-time installs. Environment images are built FROM the base, must carry the base label, and are pinned by
@@ -288,8 +293,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   "deleted" (logged at info), wherever the race lands: the session counts as deleted once core marks it `deleting`, a
   delete of its sandbox is queued, its sandbox is `deleting`/`deleted`, or the deletion removed the turn's records; a
   failure is classified only after sandbox operations already queued for the session (such as the delete) have run.
-  Gateway shutdown lets publications under way finish (up to 10 s) before it stops sandboxes; one cut off anyway is
-  recorded as interrupted by the shutdown, also at info. `artifact.published` (through core's events) lists only new
+  Gateway shutdown lets publications under way finish (up to 10 s) before it stops sandboxes. Only a publication
+  that fails once shutdown has started stopping sandboxes is recorded as interrupted by the shutdown (at info); one
+  that fails during the drain, while compute is still up, or for reasons of its own at any time (rejected or
+  changing files) keeps its reason and warns. `artifact.published` (through core's events) lists only new
   versions; a turn that changed nothing under `outputs/` emits no event.
 - **Known limits (local backend).** No per-volume disk quota; model ceilings are enforced by core's admission, not
   re-checked per brokered request; the built-in GitHub MCP server is unavailable in sandboxes (it only sees the

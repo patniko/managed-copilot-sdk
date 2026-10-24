@@ -294,6 +294,20 @@ describe("ArtifactService", () => {
       expect(lines).toContainEqual({ level: "warn", message: "Publication failed" });
     });
 
+    it("keeps the reason of a failure the publication decided itself, even once shutdown is stopping compute", async () => {
+      const { artifacts, lines, publish } = interrupted({ gone: () => false, settled: async () => undefined, stopping: () => true });
+      agent.files.set("ok.txt", "ok");
+      agent.rejected = [{ path: "link", reason: "symbolic links are not published" }];
+      await publish("turn-1");
+      await expect(artifacts.waitForPublication(SESSION, { turnId: "turn-1" })).rejects.toThrow(/outputs\/link \(symbolic links are not published\)/);
+      agent.rejected = [];
+      agent.mutate = "ok.txt";
+      await publish("turn-2");
+      await expect(artifacts.waitForPublication(SESSION, { turnId: "turn-2" })).rejects.toThrow(/outputs\/ok\.txt changed while it was being published/);
+      expect(lines.filter((line) => line.level === "warn").map((line) => line.message)).toEqual(["Publication failed", "Publication failed"]);
+      expect(lines.some((line) => /gateway is stopping/.test(line.message))).toBe(false);
+    });
+
     it("drains publications under way", async () => {
       const { artifacts, publish } = interrupted({});
       expect(await artifacts.drain(10)).toBe(true);

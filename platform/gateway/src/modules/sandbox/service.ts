@@ -153,6 +153,7 @@ export class SandboxService implements SandboxesService {
   #timers: NodeJS.Timeout[] = [];
   #unsubscribe: (() => void) | undefined;
   #stopping = false;
+  #stoppingCompute = false;
   /** Deletes requested through `delete()` that have not finished: the sandbox each targets (undefined = the current one). */
   readonly #pendingDeletes = new Map<string, (string | undefined)[]>();
 
@@ -557,7 +558,14 @@ export class SandboxService implements SandboxesService {
     if (row.state !== "running") throw new ManagedCopilotError("capability_unavailable", `The session's sandbox is ${row.state}; resume the session first.`, { sandboxId: row.id });
     const stream = await this.#agent(row).openStream(SANDBOXD_ROUTES.runtime);
     const live = this.#liveFor(sessionId);
-    const broker = new InferenceBroker({ sessionId, placeholder: row.placeholder, resolveToken: () => options.resolveToken(), githubApiUrl: this.#options.app.config.githubApiUrl, log: this.#log });
+    const broker = new InferenceBroker({
+      sessionId,
+      placeholder: row.placeholder,
+      resolveToken: () => options.resolveToken(),
+      invalidateToken: (token) => this.#invalidateToken(token),
+      githubApiUrl: this.#options.app.config.githubApiUrl,
+      log: this.#log,
+    });
     const deferredAgents = new Map<string, string>();
     const runtime: SandboxRuntime = {
       sandboxId: row.id,
@@ -590,6 +598,15 @@ export class SandboxService implements SandboxesService {
       live.runtimes.delete(runtime);
     });
     return runtime;
+  }
+
+  /**
+   * Core's authenticator forgets a token GitHub rejected for this session's inference, so the next `resolveToken`
+   * verifies it with GitHub again instead of handing it out from its cache.
+   */
+  #invalidateToken(token: string): void {
+    const auth = (this.#options.app.services as Record<string, unknown>)["auth"] as { invalidate?(token: string): void } | undefined;
+    auth?.invalidate?.(token);
   }
 
   async connect(sessionId: string, port: number): Promise<Duplex> {
@@ -716,9 +733,13 @@ export class SandboxService implements SandboxesService {
     clearTimeout(timer);
   }
 
-  /** True once gateway shutdown has started. */
-  get stopping(): boolean {
-    return this.#stopping;
+  /**
+   * True once shutdown has started stopping sandboxes, after publications under way had their chance to finish: a
+   * publication that fails from then on was cut off by the shutdown. (During the drain before it, compute is healthy and
+   * failures are the publications' own.)
+   */
+  get stoppingCompute(): boolean {
+    return this.#stoppingCompute;
   }
 
   async #delete(sessionId: string, expected: string | undefined): Promise<void> {
@@ -839,7 +860,7 @@ export class SandboxService implements SandboxesService {
       if (artifacts && turnIds.length > 0) {
         void artifacts.publish(sessionId, turnIds, outcome).catch((error: unknown) => {
           // Only possible when the ledger closes under a publication that outlasted the shutdown drain.
-          if (this.#stopping) this.#log.info("A publication was cut off by gateway shutdown", { sessionId, error: (error as Error).message });
+          if (this.#stoppingCompute) this.#log.info("A publication was cut off by gateway shutdown", { sessionId, error: (error as Error).message });
           else this.#log.warn("Publication crashed", { sessionId, error: (error as Error).message });
         });
       }
@@ -968,6 +989,7 @@ export class SandboxService implements SandboxesService {
     if (this.#artifacts && !(await this.#artifacts.drain(SHUTDOWN_DRAIN_MS))) {
       this.#log.info("Stopping sandboxes while turn outputs are still being published; those publications are recorded as interrupted");
     }
+    this.#stoppingCompute = true;
     const running = this.#options.store.inStates(["running"]);
     for (const live of this.#live.values()) for (const runtime of [...live.runtimes]) runtime.close();
     await Promise.all(
