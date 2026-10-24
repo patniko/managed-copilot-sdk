@@ -66,6 +66,11 @@ class FakeGateway {
     this.#standbyConnects = connects;
   }
 
+  /** Ends the held upgrades, as a proxy cutting them would: their clients fail. */
+  dropHeldUpgrades(): void {
+    for (const socket of this.#sockets.splice(0)) socket.destroy();
+  }
+
   async start(): Promise<void> {
     await new Promise<void>((resolve) => this.#server.listen(0, "127.0.0.1", () => resolve()));
     this.url = `http://127.0.0.1:${(this.#server.address() as AddressInfo).port}`;
@@ -212,6 +217,17 @@ describe("platform connection", () => {
     expect(failure).toBeInstanceOf(PlatformUnavailableError);
     expect((failure as Error).message).toBe("Reattaching to session sess-1 took longer than 0.3 s.");
     expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("makes no further calls for a reattach it gave up on, even when its client fails afterwards", async () => {
+    const { platform, gateway } = await connected({ holdUpgrades: true, timings: { discoveryTimeoutMs: 300, resumeTimeoutMs: 300 } });
+    await expect(platform.resumeSession("builder", "sess-1", {} as ResumeSessionConfig)).rejects.toBeInstanceOf(PlatformUnavailableError);
+    // Model discovery's client and the builder client, both held.
+    expect(gateway.upgrades).toBe(2);
+    // A retry on a fresh client now could replace a newer resume of the session there, so there must be none.
+    gateway.dropHeldUpgrades();
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(gateway.upgrades).toBe(2);
   });
 
   it("backs off exponentially with jitter, up to the cap, and retries only what retrying can fix", () => {

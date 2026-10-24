@@ -130,12 +130,13 @@ function formatSeconds(ms: number): string {
 
 /**
  * Waits for an SDK call at most `ms`. The SDK's requests can't be aborted, so a call that misses its deadline is
- * abandoned, and `onLate` disposes of whatever it resolves to afterwards.
+ * abandoned: `onTimeout` runs when it does, and `onLate` disposes of whatever it resolves to afterwards.
  */
-function withDeadline<T>(promise: Promise<T>, ms: number, what: string, onLate?: (value: T) => void): Promise<T> {
+function withDeadline<T>(promise: Promise<T>, ms: number, what: string, onLate?: (value: T) => void, onTimeout?: () => void): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
+      onTimeout?.();
       if (onLate) promise.then(onLate, () => undefined);
       reject(new DeadlineError(`${what} took longer than ${formatSeconds(ms)}.`));
     }, ms);
@@ -326,13 +327,20 @@ export class Platform implements FactoryPlatform {
   /**
    * Runs `use` on the environment's client, retrying once on a fresh client when its transport broke. Sessions are
    * created and resumed only through these tracked clients, so a lost connection stops (or forces) every one of them.
+   * Once `attempt` is abandoned (its caller's deadline passed), no further SDK call is made: a late resume would replace
+   * the session object, and so the event handlers, of a newer resume of the same session on the current client.
    */
-  async #withClient<T>(role: StationRole, use: (client: CopilotClient) => Promise<T>): Promise<T> {
+  async #withClient<T>(role: StationRole, use: (client: CopilotClient) => Promise<T>, attempt?: { abandoned: boolean }): Promise<T> {
+    const run = async (pending: Promise<CopilotClient>): Promise<T> => {
+      const client = await pending;
+      if (attempt?.abandoned) throw new PlatformUnavailableError("The platform didn't answer in time.");
+      return use(client);
+    };
     const client = this.#client(role);
     try {
-      return await use(await client);
+      return await run(client);
     } catch (error) {
-      if (isManagedCopilotError(error)) throw error;
+      if (attempt?.abandoned || isManagedCopilotError(error)) throw error;
       // Only a broken transport warrants a new client: a healthy client serves other sessions, and a session-level
       // rejection (admission, setup) must surface as is. A ping tells them apart.
       if (await this.#alive(client)) throw error;
@@ -341,7 +349,7 @@ export class Platform implements FactoryPlatform {
         this.#clients.delete(role);
         void client.then((stale) => stopClient(stale, this.#timings.stopTimeoutMs), () => undefined);
       }
-      return use(await this.#client(role));
+      return run(this.#client(role));
     }
   }
 
@@ -378,11 +386,16 @@ export class Platform implements FactoryPlatform {
    */
   async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession> {
     const { agent, ...rest } = config;
+    const attempt = { abandoned: false };
     const session = await unanswered(
       withDeadline(
-        this.#withClient(role, (client) => client.resumeSession(sessionId, rest)),
+        this.#withClient(role, (client) => client.resumeSession(sessionId, rest), attempt),
         this.#timings.resumeTimeoutMs,
         `Reattaching to session ${sessionId}`,
+        undefined,
+        () => {
+          attempt.abandoned = true;
+        },
       ),
     );
     if (agent) {

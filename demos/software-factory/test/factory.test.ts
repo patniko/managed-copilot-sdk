@@ -431,6 +431,22 @@ describe("Factory pipeline", () => {
     expect(second.factory.activity(second.id).some((item) => /^Paused|showed no activity|sandbox restarted/.test(item.text ?? ""))).toBe(false);
   });
 
+  it("pauses, rather than failing the station, when the in-flight turn's status keeps failing to load", async () => {
+    const second = await releaseInFlight({ stallMs: 60_000, restartGraceMs: 60_000, resumeBackoffMs: 100 });
+    second.platform.lastTurnStatus.set(second.releaseSession, "running");
+    second.factory.resumeInterrupted();
+    const releaseStation = () => second.factory.get(second.id)!.stations.find((station) => station.id === "release")!;
+    await until(() => releaseStation().detail === "Resuming the in-flight turn");
+    const unreadable = new PlatformUnavailableError("Reading the session's status took longer than 10 s.");
+    second.platform.sessionInfoErrors.push(...Array.from({ length: 5 }, () => unreadable));
+    await until(() => second.factory.activity(second.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Reading the session's status")));
+    // Readable again, and the platform reports the turn failed: the work order resumes and the agent continues.
+    second.platform.lastTurnStatus.set(second.releaseSession, "failed");
+    const wo = await settle(second.factory, second.id);
+    expect(wo.status).toBe("completed");
+    expect(second.platform.sessions.get(second.releaseSession)!.prompts[0]).toContain("Your previous turn was interrupted");
+  });
+
   it("detaches on shutdown without failing work, and resumes it on the next start", async () => {
     let gate!: () => void;
     const opened = new Promise<void>((resolve) => {
