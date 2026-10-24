@@ -13,11 +13,11 @@ reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public U
 > isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
 > requests for them fail with `capability_unavailable` naming what is missing.
 >
-> **Remaining rollout gate.** Bounded reconnect operations fixed an earlier 240-second HTTP 504 stall: a real
-> gateway-only rollover recovered both services in 28.8 seconds, with the same factory replica and no restart.
-> An in-flight work order still failed a shared review with `Completion wait cancelled` during that rollover,
-> rather than pausing. The active-work recovery fix and repeat live check are pending; idle-client recovery alone
-> does not qualify uninterrupted factory work across deployments.
+> **Remaining rollout gate.** Bounded reconnect operations fixed an earlier 240-second HTTP 504 stall: the latest
+> gateway-only rollover recovered both services in 26.3 seconds, with the same factory replica and no restart.
+> The active work order now pauses and reattaches, but its interrupted native turns remain reported as running
+> after compute replacement and do not finish. Native-turn state reconciliation is pending. Quiesce active factory
+> work before deployment; retaining files and conversation history does not establish in-flight execution recovery.
 
 ## What gets deployed
 
@@ -349,8 +349,8 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Gateway revision canaries | One shared conversation retained its marker; two isolated sessions retained different files at the same path and their distinct sandbox identities |
 | Scheduled recovery | A one-shot schedule created before redeployment automatically completed exactly once on the replacement gateway, using the renewed same-account background credential |
 | Proxy trust | Identical CA fingerprint across two real proxy revisions; NFS directory owned by uid 1000 with mode 0700; proxy remains non-root |
-| Gateway-only rollover | Gateway interruption about 18 seconds; factory recovered 10.5 seconds after the gateway served (28.8 seconds total), then stayed healthy for 20 seconds. Same factory replica, zero restarts |
-| Software factory | Happy path passed: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). **Active-work recovery pending:** a shared review failed with `Completion wait cancelled` during the gateway-only rollover rather than pausing |
+| Gateway-only rollover | Latest check: gateway interruption about 17 seconds; factory recovered 9 seconds after the gateway served (26.3 seconds total), then stayed healthy for 20 seconds. Same factory replica, zero restarts |
+| Software factory | Happy path passed: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). A failed order also retried from preserved builder checkpoints into a 37-test release, independently checked offline. **Active-work recovery pending:** the latest order pauses and reattaches but its interrupted native turns remain running without forward progress |
 | Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
 
 The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real

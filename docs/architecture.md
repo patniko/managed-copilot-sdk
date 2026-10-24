@@ -1046,10 +1046,11 @@ conversation history over the same three data disks. The two
 local-quickstart webhook snippets are skipped; the deployed assistant's webhook/reminder journeys were checked
 separately. Precise evidence and limits (including no partition-tolerant HA or live Google OAuth claim) are in the
 deployment guide.
-Bounded factory reconnect operations fixed a 240-second ingress timeout: a gateway-only rollover recovered both
-services in 28.8 seconds without restarting the factory. Active-work recovery remains gated: a shared review in the
-in-flight work order failed with `Completion wait cancelled` instead of pausing. The factory owner is addressing
-that case before the rollout qualification can close.
+Bounded factory reconnect operations fixed a 240-second ingress timeout: the latest gateway-only rollover recovered
+both services in 26.3 seconds without restarting the factory. Active-work recovery remains gated: interrupted native
+turns are still exposed as running after the old gateway stops the sandbox compute and the new gateway recreates it.
+The factory now pauses and reattaches, but cannot finish those turns. Sandbox and core are reconciling the native-turn
+state before this qualification can close; file/history persistence alone is not execution recovery.
 
 - **Publish path.** In publish mode `addManagedCopilot` calls `publishManagedCopilot`: a Container Apps environment in
   a new VNet (`platform` and `sandboxes` /23 subnets, `egress` /24) with an Azure Files NFS 4.1 share, and the gateway as a
