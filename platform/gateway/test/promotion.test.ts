@@ -143,6 +143,16 @@ class FakeSandboxes {
   importFails: ManagedCopilotError | undefined;
   createDelayMs = 0;
   deleteDelayMs = 0;
+  /** The backend's readiness as the sandbox service reports it, and what a fresh probe finds. */
+  available: boolean | undefined = undefined;
+  probeFinds = false;
+  probes = 0;
+
+  async probe() {
+    this.probes++;
+    this.available = this.probeFinds;
+    return this.probeFinds;
+  }
 
   async create(request: Record<string, unknown>) {
     this.created.push(request);
@@ -432,6 +442,18 @@ describe("API promotion (managed.promote)", () => {
     sessions.stateDir = () => undefined;
     expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "capability_unavailable");
     expect(sandboxes.created).toHaveLength(0);
+  });
+
+  it("refuses while the sandbox backend is down, after probing it once more", async () => {
+    sandboxes.available = false;
+    expectError(await manager.promote(OWNER, SESSION).catch((error: unknown) => error), "capability_unavailable");
+    expect(sandboxes.probes).toBe(1);
+    expect(sessions.cutovers).toBe(0);
+    expect(manager.latest(SESSION)).toBeUndefined();
+
+    sandboxes.probeFinds = true;
+    expect(await manager.promote(OWNER, SESSION)).toMatchObject({ placement: "sandbox", generation: 1 });
+    expect(sandboxes.probes).toBe(2);
   });
 
   it("rejects sessions that are not promotable, other owners, and targets that would change the billing route", async () => {

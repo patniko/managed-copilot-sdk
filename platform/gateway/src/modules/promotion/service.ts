@@ -212,6 +212,14 @@ export class PromotionManager implements PromotionService {
     return { sessionId: record.id, placement: "sandbox", sandboxId, generation: record.generation };
   }
 
+  /** A sandbox backend reported down (Docker stopped, Azure not configured) is probed once more before refusing. */
+  async #requireBackend(): Promise<void> {
+    const ready = await Promise.resolve(this.#sandboxes()?.probe?.()).catch(() => false);
+    if (ready !== true) {
+      throw new ManagedCopilotError("capability_unavailable", "Sandboxes are unavailable on this deployment right now, so the session stays on shared placement; try again later");
+    }
+  }
+
   /** Checks everything that does not need the runtime, before anything is allocated. */
   #admit(attempt: Attempt): { target: string; targetConfig: EnvironmentConfig } {
     const { record } = attempt;
@@ -248,7 +256,12 @@ export class PromotionManager implements PromotionService {
   async #execute(attempt: Attempt): Promise<PromoteResult> {
     const started = Date.now();
     const { record } = attempt;
-    const { target, targetConfig } = this.#admit(attempt);
+    let admission = this.#admit(attempt);
+    if (this.#sandboxes()?.available === false) {
+      await this.#requireBackend();
+      admission = this.#admit(attempt);
+    }
+    const { target, targetConfig } = admission;
     const operation = this.#store.insert({
       id: `prm_${randomUUID().replace(/-/g, "")}`,
       sessionId: record.id,

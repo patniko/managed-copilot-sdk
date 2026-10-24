@@ -84,6 +84,10 @@ export interface PromotionService {
 
 /** From sandbox: `sandboxes`. */
 export interface PromotionSandboxesPort {
+  /** False while the backend fails its readiness checks (Docker down, Azure not configured). */
+  readonly available?: boolean;
+  /** Re-checks the backend now and returns the new `available`. */
+  probe?(): Promise<boolean>;
   create(request: CreateSandboxRequest): Promise<{ readonly sandboxId: string; readonly info: SandboxInfo }>;
   /**
    * Copies a staged `session-state/<sessionId>` directory into the running sandbox runtime's COPILOT_HOME (as the
