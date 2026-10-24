@@ -69,9 +69,13 @@ export interface PendingAction {
   readonly sessionId: string;
   readonly kind: ActionKind;
   readonly state: ActionState;
+  /** The runtime request ID the answer RPC is keyed on (`handlePendingToolCall`, `handlePendingPermissionRequest`, ...). */
+  readonly requestId: string;
   readonly tool?: string;
   readonly toolCallId?: string;
   readonly arguments?: unknown;
+  /** The runtime's request data a handler needs, e.g. the permission request or elicitation schema. */
+  readonly payload?: unknown;
   /** Stable identity to pass to side-effecting downstream services. */
   readonly idempotencyKey: string;
   readonly turnId?: string;

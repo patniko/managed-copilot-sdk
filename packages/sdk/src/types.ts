@@ -41,8 +41,16 @@ export interface ConnectOptions {
   clientName?: string;
 }
 
+/**
+ * SDK-side environment descriptor. Same fields as the wire `EnvironmentRequest`, but `files` accept bytes
+ * (e.g. `await readFile(...)`) or UTF-8 text; the SDK encodes them for transport.
+ */
+export interface EnvironmentDescriptor extends Omit<EnvironmentRequest, "files"> {
+  files?: Record<string, string | Uint8Array>;
+}
+
 /** An environment name declared in the AppHost, or a descriptor that names one (or an allowed inline type). */
-export type EnvironmentSelector = string | EnvironmentRequest;
+export type EnvironmentSelector = string | EnvironmentDescriptor;
 
 /**
  * Options for `managed.client(...)`. These are defaults for every session the client creates; callers can add
@@ -51,12 +59,18 @@ export type EnvironmentSelector = string | EnvironmentRequest;
 export interface ManagedClientOptions
   extends Omit<
     CopilotClientOptions,
-    "connection" | "gitHubToken" | "useLoggedInUser" | "baseDirectory" | "workingDirectory" | "sessionFs" | "requestHandler" | "env"
+    "connection" | "gitHubToken" | "useLoggedInUser" | "baseDirectory" | "workingDirectory" | "sessionFs" | "requestHandler" | "env" | "mode"
   > {
   /** Act as this GitHub user, e.g. a backend serving signed-in users. Ownership binds to that account. */
   gitHubToken?: string;
   vaults?: string[];
   network?: NetworkSetting;
+  /** Python/npm packages installed into each session's sandbox (system packages belong in the image). */
+  packages?: { python?: string[]; npm?: string[] };
+  /** Non-secret environment variables visible to sandbox code. */
+  env?: Record<string, string>;
+  /** Small workspace-relative files written into each session's sandbox before the agent starts. */
+  files?: Record<string, string | Uint8Array>;
 }
 
 /** A session object or its ID. */
@@ -123,7 +137,8 @@ export interface ManagedSchedules {
   pause(scheduleId: string): Promise<ScheduleInfo>;
   resume(scheduleId: string): Promise<ScheduleInfo>;
   delete(scheduleId: string): Promise<void>;
-  runNow(scheduleId: string): Promise<ScheduleRun>;
+  /** Pass a retry-stable `invocationId` so a retried call never starts a second run. */
+  runNow(scheduleId: string, options?: { invocationId?: string }): Promise<ScheduleRun>;
 }
 
 export interface OpenCliOptions {

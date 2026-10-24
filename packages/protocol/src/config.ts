@@ -34,6 +34,20 @@ const HostPatternSchema = z.string().min(1).refine(
   { message: 'Expected a host name such as "example.com" or "*.example.com"' },
 );
 
+/** Exact HTTPS host for credential substitution: no wildcards, schemes, ports, or paths. */
+const ExactHostSchema = z.string().min(1).refine(
+  (value) => {
+    if (value.trim().startsWith("*.")) return false;
+    try {
+      normalizeHostPattern(value);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: 'Expected an exact host name such as "api.stripe.com" (no wildcards, schemes, or ports)' },
+);
+
 export const NetworkSettingSchema = z.union([
   z.boolean(),
   z.array(HostPatternSchema),
@@ -60,7 +74,7 @@ export const SandboxCredentialSchema = z
     env: z.string().regex(ENV_NAME),
     value: SecretRefSchema,
     /** Exact HTTPS hosts (no wildcards) where the proxy substitutes the real value. */
-    hosts: z.array(z.string().min(1)).min(1),
+    hosts: z.array(ExactHostSchema).min(1),
     /** Request headers eligible for substitution. Defaults to `authorization`. */
     headers: z.array(z.string().min(1)).optional(),
   })
@@ -115,6 +129,9 @@ export const ToolDeclarationSchema = z
     description: z.string().optional(),
     parameters: z.record(z.string(), z.unknown()).optional(),
     revision: z.string().optional(),
+    /** Stock SDK `Tool` flags that change runtime behavior. */
+    overridesBuiltInTool: z.boolean().optional(),
+    skipPermission: z.boolean().optional(),
   })
   .strict();
 export type ToolDeclaration = z.infer<typeof ToolDeclarationSchema>;
@@ -183,16 +200,23 @@ export const ManagedCopilotConfigSchema = z
     const envs = config.environments;
     const vaults = config.vaults ?? {};
     for (const [name, env] of Object.entries(envs)) {
+      if (env.type === "promotable" && env.promoteTo === undefined) {
+        ctx.addIssue({ code: "custom", path: ["environments", name, "promoteTo"], message: "promotable environments must name an isolated environment in promoteTo" });
+      }
       if (env.promoteTo !== undefined) {
         const target = envs[env.promoteTo];
         if (env.type !== "promotable") ctx.addIssue({ code: "custom", path: ["environments", name, "promoteTo"], message: "promoteTo is only valid on promotable environments" });
         else if (!target || target.type !== "isolated") ctx.addIssue({ code: "custom", path: ["environments", name, "promoteTo"], message: `promoteTo must name an isolated environment` });
       }
-      if (env.type === "shared" && (env.image || env.size || env.warm || env.setupCommands || env.packages)) {
-        ctx.addIssue({ code: "custom", path: ["environments", name], message: "shared environments have no sandbox: image, size, warm, packages, and setupCommands are not allowed" });
+      if (env.type === "shared" && (env.image || env.size || env.warm || env.setupCommands || env.packages || env.env)) {
+        ctx.addIssue({ code: "custom", path: ["environments", name], message: "shared environments have no sandbox: image, size, warm, packages, setupCommands, and env are not allowed" });
       }
       for (const vault of env.vaults ?? []) {
-        if (!vaults[vault]) ctx.addIssue({ code: "custom", path: ["environments", name, "vaults"], message: `Unknown vault "${vault}"` });
+        const credentials = vaults[vault];
+        if (!credentials) ctx.addIssue({ code: "custom", path: ["environments", name, "vaults"], message: `Unknown vault "${vault}"` });
+        else if (env.type === "shared" && credentials.some((credential) => "env" in credential)) {
+          ctx.addIssue({ code: "custom", path: ["environments", name, "vaults"], message: `Vault "${vault}" holds sandbox credentials, which shared environments cannot use; use MCP credentials instead` });
+        }
       }
     }
     for (const [name, hook] of Object.entries(config.webhooks ?? {})) {
@@ -213,10 +237,10 @@ export function parseConfig(input: unknown): ManagedCopilotConfig {
 }
 
 /**
- * Environment selection sent by a client when it connects (spec sections 1, 5, 7, 8).
- * Per-session inputs (`files`, `packages`, `env`) apply to every session created through that client.
- * The gateway resolves this against the named environment's ceiling; callers can only add permitted
- * setup and narrow permissions.
+ * Environment selection sent by a client when it connects (spec sections 1, 5, 7, 8), as the first bridge frame
+ * (`BridgeHello`), never in a header. Per-session inputs (`files`, `packages`, `env`) apply to every session created
+ * through that client. The gateway resolves this against the named environment's ceiling; callers can only add
+ * permitted setup and narrow permissions.
  */
 export const EnvironmentRequestSchema = z
   .object({
@@ -227,9 +251,14 @@ export const EnvironmentRequestSchema = z
     vaults: z.array(z.string().min(1)).optional(),
     packages: PackagesSchema.omit({ system: true }).strict().optional(),
     env: z.record(z.string().regex(ENV_NAME), z.string()).optional(),
-    /** Small workspace-relative files, base64 encoded. Use the files API for large uploads. */
+    /** Small workspace-relative files, base64 encoded on the wire. Use the files API for large uploads. */
     files: z.record(z.string().min(1), z.string()).optional(),
   })
   .strict()
-  .refine((value) => value.name !== undefined || value.type !== undefined, { message: "An environment request needs a name or a type" });
+  .superRefine((value, ctx) => {
+    if (value.name === undefined && value.type === undefined) ctx.addIssue({ code: "custom", message: "An environment request needs a name or a type" });
+    if (value.type === "shared" && (value.size || value.packages || value.env || value.files)) {
+      ctx.addIssue({ code: "custom", message: "shared environments have no sandbox: size, packages, env, and files are not allowed" });
+    }
+  });
 export type EnvironmentRequest = z.infer<typeof EnvironmentRequestSchema>;
