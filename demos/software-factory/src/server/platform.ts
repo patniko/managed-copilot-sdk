@@ -61,8 +61,6 @@ export const REQUIRED_CAPABILITIES = ["shared", "isolated", "files", "artifacts"
 
 type StatusListener = (status: PlatformStatus) => void;
 
-const AGENT_NOT_FOUND = /Custom agent '[^']+' not found/;
-
 function describeFailure(error: unknown, url: string | undefined): Pick<PlatformStatus, "message" | "hint" | "state"> {
   if (isManagedCopilotError(error)) {
     switch (error.code) {
@@ -159,24 +157,9 @@ export class Platform implements FactoryPlatform {
     return created;
   }
 
-  /**
-   * Creates a session with the station's deployed custom agent. Known platform issue: sandbox runtimes can reject a
-   * deployed agent at `session.create` ("Custom agent '<name>' not found") although they load it; on exactly that
-   * error the session is created without `agent` and the same agent is selected with the stock `session.rpc.agent`.
-   */
-  async createSession(role: StationRole, config: SessionConfig, note?: (text: string) => void): Promise<StationSession> {
-    try {
-      return await this.#create(role, config);
-    } catch (error) {
-      const agent = config.agent;
-      if (!agent || !AGENT_NOT_FOUND.test(String((error as Error).message))) throw error;
-      log.warn("Selecting the custom agent after creation (platform rejected it at create time)", { role, agent });
-      const { agent: _omitted, ...rest } = config;
-      const session = await this.#create(role, rest);
-      await session.rpc.agent.select({ name: agent });
-      note?.(`Selected the deployed "${agent}" agent after creating the session (platform workaround)`);
-      return session;
-    }
+  /** Creates a session with the station's deployed custom agent (`agent`), retrying once on a fresh client. */
+  async createSession(role: StationRole, config: SessionConfig, _note?: (text: string) => void): Promise<StationSession> {
+    return this.#create(role, config);
   }
 
   async #create(role: StationRole, config: SessionConfig): Promise<CopilotSession> {
