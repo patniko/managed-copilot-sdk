@@ -43,6 +43,8 @@ class FakeDataPlane {
   hangSandboxCreates = 0;
   /** Sandbox creates Azure refuses outright (a definite outcome). */
   rejectSandboxCreates = 0;
+  /** Sandbox creates Azure carries out, whose answer then breaks off after its status line (with this status). */
+  breakSandboxCreateBodies: number[] = [];
   readonly #hung: IncomingMessage[] = [];
   readonly #pending: { sandbox: FakeSandbox; lists: number }[] = [];
   #next = 0;
@@ -130,6 +132,13 @@ class FakeDataPlane {
         }
         this.sandboxes.set(id, sandbox);
         this.#attach(sandbox, true);
+        const broken = this.breakSandboxCreateBodies.shift();
+        if (broken !== undefined) {
+          res.writeHead(broken, { "content-type": "application/json", "content-length": "4096" });
+          res.write('{"id":"');
+          setTimeout(() => req.socket.destroy(), 20);
+          return;
+        }
         return send(201, this.#view(sandbox));
       }
       const sandbox = this.sandboxes.get(path[1] ?? "");
@@ -517,6 +526,31 @@ describe("Azure sandbox provider", () => {
     writeFileSync(journal, "{}"); // readable again: nothing from the failed read is kept
     await subject.create(spec());
     expect(plane.sandboxes.size).toBe(1);
+  });
+
+  it.each([201, 503])("keeps the record when an answer (%i) breaks off, and adopts what Azure created", async (status) => {
+    plane.breakSandboxCreateBodies = [status];
+    const subject = provider(env(), { timeouts: { reconcileMs: 20 } });
+    await subject.create(spec());
+    expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(1);
+    expect(plane.sandboxes.size).toBe(1);
+    expect(await subject.isRunning("sbx_0123456789abcdef01234567")).toBe(true);
+  });
+
+  it("knows a request that never left the gateway cannot have created anything", async () => {
+    const closed = await new Promise<number>((resolve) => {
+      const server = createServer();
+      server.listen(0, "127.0.0.1", () => {
+        const { port } = server.address() as AddressInfo;
+        server.close(() => resolve(port));
+      });
+    });
+    const offline = new SandboxApi({ endpoint: `http://127.0.0.1:${closed}`, subscriptionId: "sub-1", resourceGroup: "rg-1", sandboxGroup: "grp-1", apiVersion: "2026-02-01-preview", tokens, sleep: async () => {} });
+    const refused = await offline.createSandbox({} as never).catch((caught: unknown) => caught);
+    expect(refused).toMatchObject({ name: "SandboxApiError", status: 0, sent: false });
+    const noCredential = new SandboxApi({ endpoint: plane.url, subscriptionId: "sub-1", resourceGroup: "rg-1", sandboxGroup: "grp-1", apiVersion: "2026-02-01-preview", tokens: { token: async () => { throw new Error("no managed identity"); } }, sleep: async () => {} });
+    expect(await noCredential.createSandbox({} as never).catch((caught: unknown) => caught)).toMatchObject({ code: "credential", sent: false });
+    expect(plane.requests).toHaveLength(0);
   });
 
   it("forgets a create Azure refused outright, so the next attempt submits it", async () => {

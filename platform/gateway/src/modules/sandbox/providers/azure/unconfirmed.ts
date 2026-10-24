@@ -2,7 +2,7 @@
 // once Azure's answer is definite, so neither a lost answer nor a gateway crash mid-request can lead to a second
 // create while Azure may still carry out the first. Records expire after the horizon (by then Azure has finished or
 // dropped the request). Kept in the gateway's data directory, so a restarted gateway honors them.
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 
@@ -89,7 +89,7 @@ export class UnconfirmedCreates {
     const temporary = `${this.#file}.${process.pid}.tmp`;
     const fd = openSync(temporary, "w");
     try {
-      writeSync(fd, JSON.stringify(records));
+      writeFileSync(fd, JSON.stringify(records)); // writes every byte (a short write is retried, not ignored)
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -99,15 +99,13 @@ export class UnconfirmedCreates {
   }
 }
 
-/** Makes a rename durable where directories can be synced (Linux); elsewhere best effort. */
+/** Makes the rename durable. Windows cannot open a directory for syncing; everywhere else a failure is an error. */
 function syncDirectory(directory: string): void {
-  let fd: number | undefined;
+  if (process.platform === "win32") return;
+  const fd = openSync(directory, "r");
   try {
-    fd = openSync(directory, "r");
     fsyncSync(fd);
-  } catch {
-    // Windows cannot open a directory for syncing.
   } finally {
-    if (fd !== undefined) closeSync(fd);
+    closeSync(fd);
   }
 }

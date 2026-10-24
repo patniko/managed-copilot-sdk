@@ -197,6 +197,19 @@ export async function runProbe(options: ProbeOptions): Promise<ProbeReport> {
       return `4 KiB write+fsync median ${timings[10]!.toFixed(1)} ms, p95 ${timings[18]!.toFixed(1)} ms`;
     });
 
+    if (process.platform !== "win32") {
+      // The Azure sandbox provider makes its record of in-flight creates durable this way (write, rename, sync the directory).
+      await check(results, "directory-fsync", () => {
+        const fd = openSync(directory, "r");
+        try {
+          fsyncSync(fd);
+        } finally {
+          closeSync(fd);
+        }
+        return "a directory can be synced after a rename";
+      });
+    }
+
     await check(results, "lock-exclusion", async () => {
       const file = join(directory, "probe.lease");
       const holder = startHelper(options.childCommand, ["hold-lease", file]);

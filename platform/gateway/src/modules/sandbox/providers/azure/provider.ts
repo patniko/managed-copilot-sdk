@@ -56,9 +56,12 @@ function unconfirmed(what: string, cause: unknown): ManagedCopilotError {
   return unavailable(`Azure did not confirm whether ${what} was created (${(cause as Error)?.message ?? String(cause)}), and it has not appeared yet. Try again in a minute.`, cause);
 }
 
-/** A failure that does not say whether Azure carried out the request (no answer, or a server error). */
-function isAmbiguous(error: unknown): boolean {
-  return error instanceof SandboxApiError && (error.status === 0 || error.status >= 500);
+/**
+ * A failure that proves Azure did not carry out the request: it never left the gateway, or Azure refused it (4xx).
+ * Anything else (no complete answer, a server error, an unexpected exception) may hide a request Azure carried out.
+ */
+function isDefinite(error: unknown): boolean {
+  return error instanceof SandboxApiError && (!error.sent || (error.status >= 400 && error.status < 500));
 }
 const CUSTOMIZATION_LIMITS = { files: 256, bytes: 8 * 1024 * 1024 };
 /** How long a successful readiness check is trusted. */
@@ -238,8 +241,8 @@ export class AzureSandboxProvider implements SandboxProvider {
     try {
       created = await create();
     } catch (error) {
-      if (!isAmbiguous(error)) {
-        this.#unconfirmed.clear(key); // Azure refused it: nothing will appear
+      if (isDefinite(error)) {
+        this.#unconfirmed.clear(key); // never sent, or refused: nothing will appear
         throw error;
       }
       const adopted = await this.#reconcile(lookup);

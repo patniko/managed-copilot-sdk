@@ -52,13 +52,17 @@ export interface CreateSandboxBody {
 /** An unsuccessful data-plane response. */
 export class SandboxApiError extends Error {
   override readonly name = "SandboxApiError";
+  /** HTTP status, or 0 when no complete answer arrived. */
   readonly status: number;
   readonly code: string | undefined;
+  /** False when the request never left the gateway (for example, no credential), so Azure cannot have acted on it. */
+  readonly sent: boolean;
 
-  constructor(status: number, code: string | undefined, message: string) {
+  constructor(status: number, code: string | undefined, message: string, options: { sent?: boolean } = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.sent = options.sent ?? true;
   }
 }
 
@@ -112,7 +116,12 @@ export class SandboxApi {
     const retries = this.#options.retries ?? 4;
     const retryAmbiguous = init.idempotent ?? true;
     for (let attempt = 0; ; attempt++) {
-      const token = await this.#options.tokens.token(DATA_PLANE_RESOURCE);
+      let token: string;
+      try {
+        token = await this.#options.tokens.token(DATA_PLANE_RESOURCE);
+      } catch (error) {
+        throw new SandboxApiError(0, "credential", `The gateway could not get a token for Azure Container Apps Sandboxes: ${(error as Error).message}`, { sent: false });
+      }
       const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "application/json" };
       let body: RequestInit["body"] | undefined;
       if (init.raw) {
@@ -130,7 +139,11 @@ export class SandboxApi {
           await this.#sleep(backoff(attempt));
           continue;
         }
-        throw new SandboxApiError(0, "network", `Azure Container Apps Sandboxes is not reachable: ${(error as Error).message}`);
+        // Failing to connect at all proves the request never reached Azure; any later failure may hide one it received.
+        const code = ((error as { cause?: { code?: unknown } }).cause?.code ?? (error as { code?: unknown }).code) as string | undefined;
+        throw new SandboxApiError(0, "network", `Azure Container Apps Sandboxes is not reachable: ${(error as Error).message}`, {
+          sent: !(code !== undefined && NOT_SENT_CODES.has(code)),
+        });
       }
       if (response.status === 404 && init.allow404) {
         await response.body?.cancel();
@@ -142,7 +155,14 @@ export class SandboxApi {
         await this.#sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 30_000) : backoff(attempt));
         continue;
       }
-      const text = await response.text();
+      let text: string;
+      try {
+        text = await response.text();
+      } catch (error) {
+        // The answer broke off after its status line: for a success the request was carried out, and for a server error
+        // it may have been, so only a client error stays a definite answer.
+        throw new SandboxApiError(response.ok ? 0 : response.status, "network", `The answer from Azure Container Apps Sandboxes broke off: ${(error as Error).message}`);
+      }
       let parsed: unknown = undefined;
       if (text) {
         try {
@@ -253,3 +273,6 @@ export function formatLabels(labels: Readonly<Record<string, string>>): string {
 function backoff(attempt: number): number {
   return Math.min(500 * 2 ** attempt, 8_000) + Math.floor(Math.random() * 250);
 }
+
+/** Connection failures that happen before any byte of the request is sent. */
+const NOT_SENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);

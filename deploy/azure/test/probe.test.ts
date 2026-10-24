@@ -26,6 +26,7 @@ describe("storage probe", () => {
       "posix-metadata",
       "atomic-rename",
       "fsync",
+      ...(process.platform === "win32" ? [] : ["directory-fsync"]),
       "lock-exclusion",
       "sqlite-wal",
       "sqlite-rollback",
