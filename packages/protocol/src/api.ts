@@ -79,6 +79,12 @@ export interface PendingAction {
   readonly expiresAt?: string;
   readonly claimedBy?: string;
   readonly result?: unknown;
+  /** Error text a responder reported (state `failed`). */
+  readonly error?: string;
+  /** Why the action is in its current state, e.g. why it needs reconciliation or expired. */
+  readonly reason?: string;
+  /** Permission request details (`kind: "permission"`), as the stock SDK passes them to `onPermissionRequest`. */
+  readonly permissionRequest?: unknown;
 }
 
 export interface SessionInfo {
@@ -165,7 +171,16 @@ export interface ScheduleRun {
   readonly completedAt?: string;
   readonly status: ScheduleRunStatus;
   readonly sessionId?: string;
+  /** Runtime message ID of the delivered prompt (matches the `user.message` event's `data.messageId`). */
+  readonly messageId?: string;
+  /** `cron`, `once` (runAt), or `manual` (runNow). */
+  readonly trigger?: "cron" | "once" | "manual";
   readonly reason?: string;
+}
+
+/** `POST /v1/schedules/:id/run`. The invocation ID makes retries of the same request idempotent. */
+export interface RunScheduleRequest {
+  readonly invocationId?: string;
 }
 
 export interface ScheduleInfo {
@@ -178,6 +193,8 @@ export interface ScheduleInfo {
   readonly environment: string;
   readonly prompt: string;
   readonly state: ScheduleState;
+  /** Why the schedule is paused when the platform paused it (logout, revoked sign-in, policy change). */
+  readonly pausedReason?: string;
   readonly createdBy: "user" | "agent" | "apphost";
   readonly target?: { readonly sessionId: string };
   readonly session?: { readonly agent?: string; readonly model?: string; readonly tools?: readonly ToolDeclaration[] };
@@ -225,6 +242,18 @@ export interface ActionResultRequest {
   readonly claimToken: string;
   readonly result?: unknown;
   readonly error?: string;
+  /** Give the claim back without answering (for example a permission handler that returned `no-result`). */
+  readonly release?: boolean;
+}
+
+/** `POST /v1/sessions/:id/actions/:actionId/claim`. Repeat with `claimToken` to renew the lease. */
+export interface ActionClaimRequest {
+  readonly claimToken?: string;
+  readonly leaseSeconds?: number;
+  /** Take over an action in `needs_reconciliation` after checking its downstream effect with the idempotency key. */
+  readonly reconcile?: boolean;
+  /** Label recorded with the claim, for example a worker name. */
+  readonly responder?: string;
 }
 
 export interface ActionClaim {
@@ -238,4 +267,8 @@ export interface BackgroundCredentialStatus {
   readonly active: boolean;
   readonly createdAt?: string;
   readonly expiresAt?: string;
+  /** When the platform last verified the stored credential with GitHub. */
+  readonly lastVerifiedAt?: string;
+  /** Why background work is unavailable, e.g. after `logout` or a revoked token. */
+  readonly reason?: string;
 }
