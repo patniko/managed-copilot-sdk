@@ -169,7 +169,7 @@ describe("factory HTTP API", () => {
     expect((await fetch(`${base}/api/nope`)).status).toBe(404);
     expect((await fetch(`${base}/api/work-orders`, { method: "PATCH" })).status).toBe(405);
     expect((await post("/api/sessions/not-ours/attach", {})).status).toBe(404);
-    expect((await fetch(`${base}/api/work-orders/%E0%A4%A`)).status).toBe(404);
+    expect((await fetch(`${base}/api/work-orders/%E0%A4%A`)).status).toBe(400);
     expect((await fetch(`${base}/%`)).status).toBe(503); // no crash: the "UI isn't built" page in this test setup
     const page = await fetch(`${base}/`);
     expect(page.status).toBe(503);

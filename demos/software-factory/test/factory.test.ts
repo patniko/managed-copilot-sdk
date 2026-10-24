@@ -407,4 +407,82 @@ describe("Factory pipeline", () => {
     expect(report.versions.map((version) => version.version)).toEqual([1]);
     expect(factory.activity(created.id).some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(true);
   });
+
+  it("leaves files a builder deleted in a later round out of the release", async () => {
+    const shrinking: Script = async (session, prompt, platform) => {
+      const task = taskOf(platform, session);
+      const fix = prompt.includes("requested changes");
+      const files = fix ? task.files.filter((file) => file !== "src/csv.js") : task.files;
+      platform.publish(session.sessionId, {
+        ...Object.fromEntries(files.map((file) => [`files/${file}`, `// ${task.id} ${file}${fix ? " (fixed)" : ""}`])),
+        "test-report.json": testReport(3) + " ".repeat(session.prompts.length),
+        "manifest.json": manifest(files),
+      });
+    };
+    const { platform, factory } = setup({ planner, builder: shrinking, reviewer, release });
+    const wo = await settle(factory, factory.create(CREATE).id);
+    expect(wo.status).toBe("completed");
+    const releaseWorkspace = platform.workspaces.get(platform.sessionsFor("release")[0]!.sessionId)!;
+    expect(releaseWorkspace.has("src/csv.js")).toBe(false);
+    expect(releaseWorkspace.get("bin/csv2json.js")).toBe("// csv2json bin/csv2json.js (fixed)");
+  });
+
+  it("retries transient artifact downloads instead of dropping the file", async () => {
+    const { platform, factory } = setup({ planner, builder: builder(), reviewer, release });
+    platform.readFailures.set("files/src/csv.js", 2);
+    const wo = await settle(factory, factory.create(CREATE).id);
+    expect(wo.status).toBe("completed");
+    expect(factory.artifact(wo.id, "build:csv2json", "files/src/csv.js", 1)?.content).toBe("// csv2json src/csv.js");
+  });
+
+  it("repairs an interrupted seed on retry before the first prompt", async () => {
+    const { platform, factory } = setup({ planner, builder: builder(), reviewer, release });
+    platform.writeFailures.set(".factory/task.json", 1);
+    const created = factory.create(CREATE);
+    const failed = await settle(factory, created.id);
+    expect(failed.status).toBe("failed");
+    const unseeded = failed.stations.find((station) => station.kind === "build" && station.seeded === false)!;
+    factory.retry(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("completed");
+    expect(platform.workspaces.get(unseeded.sessionId!)!.has(".factory/task.json")).toBe(true);
+    expect(wo.stations.find((station) => station.id === unseeded.id)!.sessionId).toBe(unseeded.sessionId);
+  });
+
+  it("seeds a dependency chain's ancestors into the last task", async () => {
+    const chain = {
+      ...PLAN,
+      bin: {},
+      tasks: [
+        { id: "a", title: "A", description: "A", files: ["src/a.js", "test/a.test.js"], acceptance: ["a"], dependsOn: [] },
+        { id: "b", title: "B", description: "B", files: ["src/b.js", "test/b.test.js"], acceptance: ["b"], dependsOn: ["a"] },
+        { id: "c", title: "C", description: "C", files: ["src/c.js", "test/c.test.js"], acceptance: ["c"], dependsOn: ["b"] },
+      ],
+    };
+    const { platform, factory } = setup({ planner: async (session) => void (await session.callTool("submit_plan", chain)), builder: builder(), reviewer, release });
+    const wo = await settle(factory, factory.create(CREATE).id);
+    expect(wo.status).toBe("completed");
+    const last = platform.sessionsFor("builder").find((session) => taskOf(platform, session).id === "c")!;
+    const workspace = platform.workspaces.get(last.sessionId)!;
+    expect(workspace.has("src/a.js")).toBe(true);
+    expect(workspace.has("src/b.js")).toBe(true);
+  });
+
+  it("doesn't accept a test report where every test was skipped", async () => {
+    const skipping: Script = async (session, prompt, platform) => {
+      if (prompt.includes("check did not pass")) return builder()(session, prompt, platform);
+      const task = taskOf(platform, session);
+      const report = JSON.parse(testReport(0));
+      report.summary = { total: 2, passed: 0, failed: 0, skipped: 2 };
+      platform.publish(session.sessionId, {
+        ...Object.fromEntries(task.files.map((file) => [`files/${file}`, `// ${task.id}`])),
+        "test-report.json": JSON.stringify(report) + " ".repeat(session.prompts.length),
+        "manifest.json": manifest(task.files),
+      });
+    };
+    const { platform, factory } = setup({ planner, builder: skipping, reviewer, release });
+    const wo = await settle(factory, factory.create(CREATE).id);
+    expect(wo.status).toBe("completed");
+    expect(platform.sessionsFor("builder")[0]!.prompts.some((prompt) => prompt.includes("every test was skipped"))).toBe(true);
+  });
 });

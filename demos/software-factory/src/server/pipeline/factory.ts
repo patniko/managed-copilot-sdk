@@ -122,6 +122,8 @@ interface Run {
   readonly wo: MWorkOrder;
   readonly abort: AbortController;
   readonly sessions: Map<string, ActiveSession>;
+  /** Set once the run has finished; late asynchronous results must not touch the work order anymore. */
+  closed: boolean;
   done: Promise<void>;
 }
 
@@ -208,17 +210,15 @@ export class Factory {
     return this.#store.getArtifact(id, stationId, path, version);
   }
 
-  /** The release bundle (`bundle/**`) plus release notes, patch, and test report, for the zip download. */
+  /** The release bundle plus release notes, patch, and test report, for the zip download. */
   releaseFiles(id: string): { projectName: string; files: { path: string; content: string }[] } | undefined {
     const wo = this.get(id);
     if (!wo?.plan || !wo.release) return undefined;
-    const latest = this.#store.latestArtifacts(id, "release").filter((artifact) => artifact.content !== undefined);
-    const files = latest
-      .filter((artifact) => artifact.path.startsWith("bundle/"))
-      .map((artifact) => ({ path: `${wo.plan!.projectName}/${artifact.path.slice("bundle/".length)}`, content: artifact.content! }));
+    const files = [...this.#currentFiles(id, "release", "bundle/")].map(([path, content]) => ({ path: `${wo.plan!.projectName}/${path}`, content }));
+    const latest = this.#store.latestArtifacts(id, "release");
     for (const name of ["RELEASE.md", "project.patch", "test-report.json"]) {
-      const artifact = latest.find((candidate) => candidate.path === name);
-      if (artifact) files.push({ path: name, content: artifact.content! });
+      const content = latest.find((candidate) => candidate.path === name)?.content;
+      if (content !== undefined) files.push({ path: name, content });
     }
     return { projectName: wo.plan.projectName, files };
   }
@@ -355,7 +355,7 @@ export class Factory {
   }
 
   #start(wo: MWorkOrder): void {
-    const run: Run = { wo, abort: new AbortController(), sessions: new Map(), done: Promise.resolve() };
+    const run: Run = { wo, abort: new AbortController(), sessions: new Map(), closed: false, done: Promise.resolve() };
     this.#runs.set(wo.id, run);
     run.done = this.#execute(run).finally(() => this.#finish(run));
   }
@@ -395,6 +395,7 @@ export class Factory {
     if (timer) clearTimeout(timer);
     if (this.#stopping) return;
     this.#persist(run.wo);
+    run.closed = true;
     await Promise.allSettled([...run.sessions.keys()].map((stationId) => this.#closeSession(run, stationId)));
   }
 
@@ -489,16 +490,42 @@ export class Factory {
   }
 
   #dependencyFiles(run: Run, task: PlanTask): Map<string, string> {
+    // The whole dependency closure, ancestors first: a dependency publishes only its own changes, so a chain
+    // (C needs B needs A) must also bring A's files.
+    const byId = new Map(run.wo.plan!.tasks.map((item) => [item.id, item]));
+    const order: string[] = [];
+    const seen = new Set<string>();
+    const visit = (id: string): void => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      for (const dep of byId.get(id)?.dependsOn ?? []) visit(dep);
+      order.push(id);
+    };
+    for (const dep of task.dependsOn) visit(dep);
     const files = new Map<string, string>();
-    for (const dep of task.dependsOn) for (const [path, content] of this.#taskFiles(run, dep)) files.set(path, content);
+    for (const id of order) for (const [path, content] of this.#taskFiles(run, id)) files.set(path, content);
     return files;
   }
 
-  /** A task's newest published files (`outputs/files/**`), keyed by project path. */
+  /** The files a task currently publishes: its latest manifest's inventory, read from `outputs/files/**`. */
   #taskFiles(run: Run, taskId: string): Map<string, string> {
+    return this.#currentFiles(run.wo.id, `build:${taskId}`, "files/");
+  }
+
+  /**
+   * A station's current files under `prefix`, keyed by project path. The harness's latest manifest is the inventory,
+   * so files deleted in a later round don't come back from the artifact history.
+   */
+  #currentFiles(workOrderId: string, stationId: string, prefix: string): Map<string, string> {
+    const latest = new Map(this.#store.latestArtifacts(workOrderId, stationId).map((artifact) => [artifact.path, artifact]));
+    const manifest = parseJson<OutputManifest>(latest.get("manifest.json")?.content);
+    const paths = manifest
+      ? manifest.files.map((file) => file.path)
+      : [...latest.keys()].filter((path) => path.startsWith(prefix)).map((path) => path.slice(prefix.length));
     const files = new Map<string, string>();
-    for (const artifact of this.#store.latestArtifacts(run.wo.id, `build:${taskId}`)) {
-      if (artifact.path.startsWith("files/") && artifact.content !== undefined) files.set(artifact.path.slice("files/".length), artifact.content);
+    for (const path of paths) {
+      const content = latest.get(`${prefix}${path}`)?.content;
+      if (content !== undefined) files.set(path, content);
     }
     return files;
   }
@@ -761,6 +788,8 @@ export class Factory {
         run.sessions.set(station.id, active);
         await this.#refreshSandbox(run, station);
         mapper.status(`Reattached to session ${session.sessionId}`);
+        // Seeding was interrupted before the first prompt: finish it (writes are idempotent).
+        if (!station.seeded && !station.turn) await this.#seed(run, station, active, seed);
         return active;
       } catch (error) {
         if (run.abort.signal.aborted) throw new CancelledError();
@@ -776,6 +805,7 @@ export class Factory {
           reportVersion: undefined,
           passedRound: undefined,
           retryNote: undefined,
+          seeded: undefined,
           tests: undefined,
         });
         if (station.kind === "build" && station.taskId) {
@@ -795,7 +825,7 @@ export class Factory {
     const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}));
     const active: ActiveSession = { session, mapper, capture: {} };
     run.sessions.set(station.id, active);
-    this.#updateStation(run, station, { sessionId: session.sessionId });
+    this.#updateStation(run, station, { sessionId: session.sessionId, seeded: false });
     await this.#refreshSandbox(run, station);
     const sandbox = station.sandbox;
     mapper.status(
@@ -803,12 +833,20 @@ export class Factory {
         ? `Sandbox ${sandbox.id} ready: ${sandbox.size} (${SANDBOX_SIZES[sandbox.size].cpus} vCPU · ${SANDBOX_SIZES[sandbox.size].memoryGiB} GiB), ${describeNetwork(sandbox.network)}`
         : `Session ${session.sessionId} ready on ${station.environment}`,
     );
-    this.#updateStation(run, station, { detail: "Seeding the workspace" });
-    const files = seed();
-    const writer = this.#platform.files(session.sessionId);
-    for (const file of files) await writer.write(file.path, file.content);
-    mapper.status(`Seeded ${files.length} files: ${files.map((file) => file.path).filter((path) => !path.startsWith(".factory/conflicts/")).slice(0, 8).join(", ")}${files.length > 8 ? ", …" : ""}`);
+    await this.#seed(run, station, active, seed);
     return active;
+  }
+
+  /** Writes the station's seed files into its sandbox, then records the checkpoint. */
+  async #seed(run: Run, station: MStation, active: ActiveSession, seed: () => SeedFile[]): Promise<void> {
+    this.#updateStation(run, station, { status: "starting", detail: "Seeding the workspace" });
+    const files = seed();
+    const writer = this.#platform.files(active.session.sessionId);
+    for (const file of files) await writer.write(file.path, file.content);
+    this.#updateStation(run, station, { seeded: true });
+    active.mapper.status(
+      `Seeded ${files.length} files: ${files.map((file) => file.path).filter((path) => !path.startsWith(".factory/conflicts/")).slice(0, 8).join(", ")}${files.length > 8 ? ", …" : ""}`,
+    );
   }
 
   async #refreshSandbox(run: Run, station: MStation): Promise<void> {
@@ -909,7 +947,7 @@ export class Factory {
   async #collect(run: Run, station: MStation, release: boolean): Promise<CheckOutcome> {
     this.#updateStation(run, station, { status: "collecting", detail: "Collecting artifacts" });
     await this.#capturePublication(run, station);
-    void this.#refreshSandbox(run, station);
+    await this.#refreshSandbox(run, station);
     const latest = this.#store.latestArtifacts(run.wo.id, station.id);
     const reportArtifact = latest.find((artifact) => artifact.path === "test-report.json");
     const report = parseJson<TestReport>(reportArtifact?.content);
@@ -923,6 +961,7 @@ export class Factory {
     if (previousVersion !== undefined && reportArtifact!.version === previousVersion) return fail("check_not_run", `\`${check}\` wasn't run after the latest changes`);
     if (report.summary.total === 0) return fail("no_tests", "no tests ran (name test files like test/<name>.test.js)");
     if (report.summary.failed > 0) return fail("tests_failed", `${report.summary.failed} of ${report.summary.total} tests failed`);
+    if (report.summary.passed === 0) return fail("no_tests", "no test passed: every test was skipped");
     if (report.exitCode !== 0) return fail("tests_failed", `the test run exited with status ${report.exitCode}`);
     if (!manifest || manifest.files.length === 0) return fail("nothing_published", `no files were published (run \`${check}\`)`);
     return { passed: true, code: "ok", problem: "", report, manifest };
@@ -939,12 +978,8 @@ export class Factory {
       if (info.state !== "published" || this.#store.hasArtifact(run.wo.id, station.id, info.path, info.version)) continue;
       let content: string | undefined;
       if (isTextPath(info.path) && info.size <= MAX_TEXT_BYTES) {
-        try {
-          const text = await artifacts.read(info.path, { version: info.version });
-          content = text.includes("\u0000") ? undefined : text;
-        } catch (error) {
-          log.warn("Couldn't read artifact", { station: station.id, path: info.path, error: (error as Error).message });
-        }
+        const text = await this.#readArtifact(artifacts, station, info.path, info.version);
+        content = text.includes("\u0000") ? undefined : text;
       }
       this.#store.putArtifact({
         workOrderId: run.wo.id,
@@ -964,6 +999,24 @@ export class Factory {
       this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
       this.#emitItem(run.wo, { stationId: station.id, kind: "artifact", text: `Published ${added} file${added === 1 ? "" : "s"}`, level: "info" });
     }
+  }
+
+  /**
+   * Downloads a text artifact, retrying transient failures. A file that can't be read fails the collection rather
+   * than being recorded without content, so a retry downloads it again instead of silently dropping it.
+   */
+  async #readArtifact(artifacts: ReturnType<FactoryPlatform["artifacts"]>, station: MStation, path: string, version: number): Promise<string> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        return await artifacts.read(path, { version });
+      } catch (error) {
+        lastError = error;
+        log.warn("Couldn't read artifact", { station: station.id, path, attempt, error: (error as Error).message });
+        await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+      }
+    }
+    throw new StationError("artifact_unavailable", `Couldn't download ${path} from the platform: ${toFactoryError(lastError).message}`);
   }
 
   // ─── State helpers ──────────────────────────────────────────────────────────────────────────────────────────
@@ -1005,6 +1058,7 @@ export class Factory {
   }
 
   #updateStation(run: Run, station: MStation, patch: Partial<MStation>): void {
+    if (run.closed) return;
     for (const [key, value] of Object.entries(patch)) {
       if (value === undefined) delete (station as Record<string, unknown>)[key];
       else (station as Record<string, unknown>)[key] = value;
@@ -1013,6 +1067,7 @@ export class Factory {
   }
 
   #setWorkOrder(run: Run, patch: Partial<MWorkOrder>): void {
+    if (run.closed) return;
     Object.assign(run.wo, patch);
     this.#persist(run.wo);
   }

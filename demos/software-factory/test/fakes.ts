@@ -99,6 +99,9 @@ export class FakePlatform implements FactoryPlatform {
   readonly lastTurnStatus = new Map<string, "running" | "completed" | "failed" | "cancelled">();
   /** Session IDs whose resume fails, as if the platform lost them. */
   readonly lost = new Set<string>();
+  /** Remaining injected failures per artifact path (reads) and workspace path (writes). */
+  readonly readFailures = new Map<string, number>();
+  readonly writeFailures = new Map<string, number>();
   createCount = 0;
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
@@ -155,6 +158,11 @@ export class FakePlatform implements FactoryPlatform {
   files(sessionId: string): StationFiles {
     return {
       write: async (path, data) => {
+        const failures = this.writeFailures.get(path) ?? 0;
+        if (failures > 0) {
+          this.writeFailures.set(path, failures - 1);
+          throw new Error(`upload of ${path} failed`);
+        }
         this.workspaces.get(sessionId)!.set(path, typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
         return { path, type: "file", size: data.length, modifiedAt: new Date().toISOString() };
       },
@@ -191,6 +199,11 @@ export class FakePlatform implements FactoryPlatform {
       }),
       list: async () => [...outputs()].map(([path, file]) => info(path, file)),
       read: async (path) => {
+        const failures = this.readFailures.get(path) ?? 0;
+        if (failures > 0) {
+          this.readFailures.set(path, failures - 1);
+          throw new Error(`download of ${path} failed`);
+        }
         const file = outputs().get(path);
         if (!file) throw new Error(`No artifact ${path}`);
         return file.content;

@@ -272,6 +272,7 @@ export function createRequestHandler(ctx: ApiContext, ui?: Middleware): (req: In
     const url = new URL(req.url ?? "/", "http://localhost");
     const method = req.method ?? "GET";
     if (url.pathname.startsWith("/api/")) {
+      if (safeDecode(url.pathname) === undefined) return sendError(res, 400, "invalid_request", "The request path is malformed.");
       if (method !== "GET" && method !== "HEAD" && !originAllowed(req)) {
         sendError(res, 403, "forbidden", "Cross-site requests aren't allowed.");
         return;

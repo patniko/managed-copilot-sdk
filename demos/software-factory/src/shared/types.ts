@@ -172,6 +172,8 @@ export interface Station {
   readonly passedRound?: number;
   /** Checkpoint: set by a retry so the agent first hears why its previous attempt stopped. */
   readonly retryNote?: string;
+  /** Checkpoint: every seed file was written into the sandbox. */
+  readonly seeded?: boolean;
   readonly error?: FactoryError;
 }
 

@@ -154,14 +154,25 @@ export class Platform implements FactoryPlatform {
       return await (await client).createSession(config);
     } catch (error) {
       if (isManagedCopilotError(error)) throw error;
-      // The environment's bridge may have dropped (for example after a gateway restart): retry once on a fresh client.
-      // Only evict the client this call used, so concurrent retries never stop each other's replacement.
-      log.warn("Session creation failed; retrying on a fresh client", { role, error: (error as Error).message });
+      // Only a broken transport warrants a new client: a healthy client serves other sessions, and a session-level
+      // rejection (admission, setup) must surface as is. A ping tells them apart.
+      if (await this.#alive(client)) throw error;
+      log.warn("The environment's connection dropped; retrying on a fresh client", { role, error: (error as Error).message });
       if (this.#clients.get(role) === client) {
         this.#clients.delete(role);
         void client.then((stale) => stale.stop()).catch(() => undefined);
       }
       return (await this.#client(role)).createSession(config);
+    }
+  }
+
+  async #alive(client: Promise<CopilotClient>): Promise<boolean> {
+    try {
+      const resolved = await client;
+      await Promise.race([resolved.ping(), new Promise((_, reject) => setTimeout(() => reject(new Error("ping timed out")), 5_000).unref())]);
+      return true;
+    } catch {
+      return false;
     }
   }
 

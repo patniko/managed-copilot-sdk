@@ -50,6 +50,8 @@ async function main() {
   const tests = run ? withRunnerFailure(run) : [];
   const summary = { total: tests.length, passed: count(tests, "passed"), failed: count(tests, "failed"), skipped: count(tests, "skipped") };
   const durationMs = run?.durationMs ?? 0;
+  // One exit code for the report and the process: 0 only when tests ran and passed.
+  const exitCode = !run ? 2 : summary.failed > 0 ? 1 : summary.passed > 0 ? 0 : 2;
 
   fs.mkdirSync(path.join(root, "outputs"), { recursive: true });
   writeJson(path.join(root, "outputs", "test-report.json"), {
@@ -59,7 +61,7 @@ async function main() {
     command: ["node", "--test", ...testFiles.map(quote)].join(" "),
     startedAt: run?.startedAt ?? new Date().toISOString(),
     durationMs,
-    exitCode: run ? run.code || (summary.failed > 0 ? 1 : 0) : 2,
+    exitCode,
     summary,
     files: testFiles,
     tests,
@@ -76,9 +78,7 @@ async function main() {
   }
   console.log(published);
   console.log(`${MARKER} ${JSON.stringify({ ...summary, durationMs })}`);
-  if (!run) return 2;
-  if (summary.failed > 0) return 1;
-  return summary.passed > 0 ? 0 : 2;
+  return exitCode;
 }
 
 function parseOptions() {
