@@ -1,10 +1,12 @@
 // The Managed Copilot AppHost. `aspire run` starts the platform with the spec's example environments, then the demos.
 import { createBuilder } from "./.aspire/modules/aspire.mjs";
-import { addManagedCopilot } from "@managed-copilot/aspire";
+import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
+// `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
+const publishing = await builder.executionContext().isPublishMode();
 
 // Fixed local ports. MANAGED_COPILOT_PORT_OFFSET (for example 300) runs a second copy beside this one; that copy leaves
 // zero-config discovery to the first. Google sign-in redirects to the assistant's own URL, so with an offset, add that
@@ -27,6 +29,8 @@ const quickstartWebhook = { port: ports.quickstartWebhook, secret: await generat
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
   discovery: offset === 0,
+  // A deployed gateway is on the Internet: `aspire deploy` refuses to publish it until Parameters:copilot-github-users
+  // (or Parameters:copilot-github-orgs) names who may use it, for example `aspire secret set Parameters:copilot-github-users <your-login>`.
   environments: {
     chat: {
       type: "shared",
@@ -44,21 +48,30 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   inline: { types: ["shared", "isolated"], sizes: ["small"] },
 
   webhooks: {
-    // The quickstart's offline snippets answer tool calls here while their app is away (section 12).
-    quickstart: {
-      url: `http://localhost:${quickstartWebhook.port}/api/copilot-events`,
-      environments: ["chat"],
-      events: ["session.action_required", "session.idle", "session.failed", "schedule.run_started"],
-      secret: quickstartWebhook.secret,
-    },
+    // The quickstart's offline snippets answer tool calls here while their app is away (section 12). Local only.
+    ...(publishing
+      ? {}
+      : {
+          quickstart: {
+            url: `http://localhost:${quickstartWebhook.port}/api/copilot-events`,
+            environments: ["chat"],
+            events: ["session.action_required", "session.idle", "session.failed", "schedule.run_started"],
+            secret: quickstartWebhook.secret,
+          },
+        }),
     ...assistant.webhooks,
     // The assistant receives its events on its own port.
     assistant: { ...assistant.webhooks.assistant, url: `${assistantUrl}/api/copilot-events` },
   },
 });
 
-/** A demo's built Node server on its fixed port, connected to the platform. */
-function addDemo(demo: { name: string; workingDirectory: string; script: string; port: number; healthPath: string; env?: Readonly<Record<string, string>> }) {
+type Demo = { name: string; workingDirectory: string; script: string; port: number; healthPath: string; env?: Readonly<Record<string, string>> };
+/** How a demo is deployed by `aspire deploy`: its image and the settings that receive its Azure addresses. */
+type DemoDeployment = { dockerfile: string; publicUrlEnv?: string; allowedHostsEnv?: string; gatewayUrlEnv?: string[] };
+
+/** A demo's built Node server on its fixed port, connected to the platform (a container app when publishing). */
+function addDemo(demo: Demo, deployment: DemoDeployment) {
+  if (publishing) return publishApp(builder, copilot, { ...demo, ...deployment });
   let app = builder
     .addNodeApp(demo.name, demo.workingDirectory, demo.script)
     .withPnpm({ install: false })
@@ -71,10 +84,15 @@ function addDemo(demo: { name: string; workingDirectory: string; script: string;
 }
 
 // An AI software factory: plans a work order, builds tasks in parallel sandboxes, reviews, and releases.
-await addDemo(factory.app);
+await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", allowedHostsEnv: "FACTORY_ALLOWED_HOSTS", gatewayUrlEnv: ["FACTORY_ATTACH_URL"] });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, and Google Calendar.
-const assistantApp = await addDemo({ ...ASSISTANT_DEMO, port: ports.assistant, env: { ...ASSISTANT_DEMO.env, ASSISTANT_PUBLIC_URL: assistantUrl } })
+const assistantApp = await (
+  await addDemo(
+    { ...ASSISTANT_DEMO, port: ports.assistant, env: { ...ASSISTANT_DEMO.env, ASSISTANT_PUBLIC_URL: assistantUrl } },
+    { dockerfile: "demos/assistant/Dockerfile", publicUrlEnv: "ASSISTANT_PUBLIC_URL", allowedHostsEnv: "ASSISTANT_ALLOWED_HOSTS" },
+  )
+)
   .withEnvironment("ASSISTANT_WEBHOOK_SECRET", assistant.webhooks.assistant.secret)
   .withEnvironment("ASSISTANT_SEALING_KEY", await generatedSecret("assistant-sealing-key"));
 
@@ -87,8 +105,9 @@ if (await configuration.exists("Parameters:google-client-id")) {
     .withEnvironment("GOOGLE_CLIENT_SECRET", await builder.addParameter("google-client-secret", { secret: true }));
 }
 
-// Every spec snippet as an acceptance check against this platform. Start it from the dashboard.
-await builder
+// Every spec snippet as an acceptance check against this platform. Start it from the dashboard. Local only: against
+// Azure, run it from your machine with MANAGED_COPILOT_URL set to the deployed gateway.
+if (!publishing) await builder
   .addJavaScriptApp("quickstart", "./demos/quickstart", { runScriptName: "acceptance" })
   .withPnpm({ install: false })
   .withEnvironment("MANAGED_COPILOT_URL", copilot.url)

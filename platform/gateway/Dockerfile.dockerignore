@@ -1,0 +1,17 @@
+# Build context for platform/gateway/Dockerfile (the repository root): only what the gateway build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!packages/protocol/**
+!packages/sdk/package.json
+!platform/gateway/**
+!deploy/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+platform/gateway/test
+deploy/azure/test
+deploy/azure/hosting
+deploy/azure/sandbox

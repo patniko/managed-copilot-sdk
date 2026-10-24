@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addManagedCopilot } from "../src/add.js";
 import type { AspireBuilder, AspireNodeAppBuilder, AspireNodeAppResource } from "../src/aspire.js";
+import { AzurePublishError } from "../src/publish/index.js";
 
 interface Call {
   readonly method: string;
@@ -157,9 +158,15 @@ describe("addManagedCopilot", () => {
     );
   });
 
-  it("refuses publish mode until the Azure gate is qualified", async () => {
-    const builder = new FakeBuilder(appHost, true);
-    await expect(addManagedCopilot(builder, "copilot", { gatewayDirectory, environments: { chat: { type: "shared" } } })).rejects.toThrow(/Azure deployment is not available yet/);
+  it("deploys through the Azure publisher, which refuses a platform that has no access rules", async () => {
+    // Publish mode with no Parameters:copilot-github-users / -github-orgs set and no `access` in the options.
+    const builder = Object.assign(new FakeBuilder(appHost, true), {
+      getConfiguration: () => Promise.resolve({ exists: () => Promise.resolve(false), getConfigValue: () => Promise.resolve("") }),
+    });
+    const deploy = addManagedCopilot(builder, "copilot", { gatewayDirectory, environments: { chat: { type: "shared" } } });
+    await expect(deploy).rejects.toBeInstanceOf(AzurePublishError);
+    await expect(deploy).rejects.toThrow(/has no access rules.*Parameters:copilot-github-users to the GitHub logins allowed to use this deployment/);
+    expect(builder.apps).toHaveLength(0);
   });
 
   it("rejects invalid resource names", async () => {

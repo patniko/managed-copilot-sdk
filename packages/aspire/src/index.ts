@@ -1,4 +1,5 @@
 export { addManagedCopilot, DEFAULT_GATEWAY_PORT, type ManagedCopilotResource } from "./add.js";
+export { AzurePublishError, publishApp, type PublishAppOptions } from "./publish/index.js";
 export {
   ManagedCopilotOptionsError,
   normalizeOptions,
