@@ -156,10 +156,11 @@ export class HttpClient {
     }
     // An upload is bounded by its progress, and the answer is due once it has been sent.
     const streamed = body instanceof ReadableStream || body instanceof Uint8Array;
+    let upload: { readonly stream: ReadableStream<Uint8Array>; release(): void } | undefined;
     if (streamed) {
       const idleMs = options.idleTimeoutMs ?? timings.streamIdleMs;
       let sending = true;
-      body = progress(body instanceof Uint8Array ? chunked(body) : (body as ReadableStream<Uint8Array>), {
+      upload = progress(body instanceof Uint8Array ? chunked(body) : (body as ReadableStream<Uint8Array>), call.controller.signal, {
         moved: () => {
           if (sending && !call.answered) call.arm("send", idleMs);
         },
@@ -168,16 +169,24 @@ export class HttpClient {
           if (!call.answered) call.arm("answer", answerMs);
         },
       });
+      body = upload.stream;
     } else {
       call.arm("answer", answerMs);
     }
-    const response = await fetch(this.url(path, options.query), {
-      method,
-      headers,
-      body,
-      signal: call.controller.signal,
-      ...(streamed || options.duplex ? { duplex: "half" } : {}),
-    } as RequestInit);
+    let response: Response;
+    try {
+      response = await fetch(this.url(path, options.query), {
+        method,
+        headers,
+        body,
+        signal: call.controller.signal,
+        ...(streamed || options.duplex ? { duplex: "half" } : {}),
+      } as RequestInit);
+    } catch (error) {
+      // The request never took (all of) its body: release the source (a file stream's descriptor).
+      upload?.release();
+      throw error;
+    }
     call.answered = true;
     // Answered while uploading (refusing the upload): only the answer's own bound applies to reading it.
     if (streamed) call.arm("answer", answerMs);
@@ -188,6 +197,8 @@ export class HttpClient {
       } catch {
         payload = undefined;
       }
+      // A refusal may come before the whole upload was read.
+      upload?.release();
       throw ManagedCopilotError.fromBody(payload as ErrorBody | undefined, response.status);
     }
     return response;
@@ -234,7 +245,7 @@ export class HttpClient {
           : expired.kind === "send"
             ? `Sending ${method} ${path} to ${where} made no progress for ${duration(expired.ms)}.`
             : `Reading the answer to ${method} ${path} from ${where} made no progress for ${duration(expired.ms)}.`;
-      return new ManagedCopilotError("timeout", `${message} It may be restarting or unreachable; try again shortly.`, { method, path, timeoutMs: expired.ms });
+      return new ManagedCopilotError("timeout", `${message} It may be restarting or unreachable; try again shortly.`, { method, path, timeoutMs: expired.ms, stage: expired.kind });
     }
     // Cancelled by the caller: rejects with its reason, like fetch.
     if (call.signal?.aborted) return call.signal.reason;
@@ -248,27 +259,51 @@ export class HttpClient {
   }
 }
 
-/** Re-reads an upload chunk by chunk, reporting each time the request takes more (`moved`) and its end (`sent`). */
-function progress(source: ReadableStream<Uint8Array>, on: { moved(): void; sent(): void }): ReadableStream<Uint8Array> {
+/**
+ * Re-reads an upload chunk by chunk, reporting each time the request takes more (`moved`) and its end (`sent`).
+ * `release` cancels the source when the request ends without taking all of it (an abort, a refusal, a failed
+ * connection): undici does not always cancel a body it stopped reading, and a file stream would keep its descriptor.
+ */
+function progress(source: ReadableStream<Uint8Array>, signal: AbortSignal, on: { moved(): void; sent(): void }): { readonly stream: ReadableStream<Uint8Array>; release(): void } {
   const reader = source.getReader();
+  let finished = false;
+  const settle = () => {
+    finished = true;
+    signal.removeEventListener("abort", release);
+  };
+  function release(): void {
+    if (finished) return;
+    settle();
+    void reader.cancel(signal.aborted ? signal.reason : undefined).catch(() => undefined);
+  }
+  signal.addEventListener("abort", release, { once: true });
+  if (signal.aborted) release();
   // The request starts: its body must start moving.
   on.moved();
-  return new ReadableStream<Uint8Array>(
+  const stream = new ReadableStream<Uint8Array>(
     {
       async pull(controller) {
         on.moved();
-        const { value, done } = await reader.read();
-        if (done) {
-          on.sent();
+        const chunk = await reader.read();
+        if (chunk.done) {
+          // Only an upload that was read to its end counts as sent (not one `release` cut short).
+          const sent = !finished;
+          settle();
+          if (sent) on.sent();
           controller.close();
         } else {
-          controller.enqueue(value);
+          controller.enqueue(chunk.value);
         }
       },
-      cancel: (reason) => reader.cancel(reason),
+      cancel: (reason) => {
+        if (finished) return;
+        settle();
+        return reader.cancel(reason);
+      },
     },
     { highWaterMark: 0 },
   );
+  return { stream, release };
 }
 
 /** Bytes as an upload stream, so their progress is bounded like a file's. */

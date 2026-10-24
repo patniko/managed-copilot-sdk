@@ -65,6 +65,7 @@ describe("call deadlines", () => {
     await expect(http.get("/v1/sessions")).rejects.toMatchObject({
       code: "timeout",
       message: `The Managed Copilot deployment at ${base} did not answer GET /v1/sessions within 150 ms. It may be restarting or unreachable; try again shortly.`,
+      details: { method: "GET", path: "/v1/sessions", timeoutMs: 150, stage: "answer" },
     });
     expect(Date.now() - started).toBeLessThan(3_000);
     await expect(http.get("/v1/sessions")).resolves.toEqual({ ok: true });
@@ -173,16 +174,59 @@ describe("call deadlines", () => {
       },
     });
     expect(await (await http.fetch("PUT", "/upload", { rawBody: steady })).json()).toEqual({ size: 60 });
+    const stalledSource = { cancelled: false };
     const stalled = new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(new Uint8Array(10));
       },
+      cancel() {
+        stalledSource.cancelled = true;
+      },
     });
-    await expect(http.fetch("PUT", "/upload", { rawBody: stalled })).rejects.toMatchObject({ code: "timeout", message: expect.stringContaining("Sending PUT /upload") });
+    await expect(http.fetch("PUT", "/upload", { rawBody: stalled })).rejects.toMatchObject({
+      code: "timeout",
+      message: expect.stringContaining("Sending PUT /upload"),
+      details: { method: "PUT", path: "/upload", timeoutMs: 300, stage: "send" },
+    });
+    // The stalled source is released (a file stream's descriptor closes), not left locked.
+    await waitUntil(() => stalledSource.cancelled);
     await expect(http.fetch("PUT", "/silent", { rawBody: new Uint8Array(1_000) })).rejects.toMatchObject({
       code: "timeout",
       message: expect.stringContaining("did not answer PUT /silent within 100 ms"),
     });
+  });
+
+  it("releases an upload's source when the request ends without taking all of it", async () => {
+    handler = (_req, res) => {
+      // Refuses at once, without reading the upload (like an existing file with overwrite: false).
+      json(res, 409, { error: { code: "conflict", message: "outputs/report.md already exists" } });
+    };
+    const endless = () => {
+      const state = { cancelled: false };
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64 * 1024));
+        },
+        cancel() {
+          state.cancelled = true;
+        },
+      });
+      return { state, stream };
+    };
+    const refused = endless();
+    await expect(new HttpClient(base, "t").fetch("PUT", "/refuse", { rawBody: refused.stream })).rejects.toMatchObject({ code: "conflict", message: "outputs/report.md already exists" });
+    await waitUntil(() => refused.state.cancelled);
+
+    const unreachable = endless();
+    await expect(new HttpClient("http://127.0.0.1:9", "t").fetch("PUT", "/x", { rawBody: unreachable.stream })).rejects.toMatchObject({ code: "capability_unavailable" });
+    await waitUntil(() => unreachable.state.cancelled);
+
+    const controller = new AbortController();
+    const reason = new Error("stopped before it started");
+    controller.abort(reason);
+    const aborted = endless();
+    await expect(new HttpClient(base, "t").fetch("PUT", "/x", { rawBody: aborted.stream, signal: controller.signal })).rejects.toBe(reason);
+    await waitUntil(() => aborted.state.cancelled);
   });
 
   it("reconnects the event stream when its connection or heartbeats stop, resuming after the last event", async () => {
