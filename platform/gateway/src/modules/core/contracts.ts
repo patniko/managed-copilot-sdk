@@ -252,19 +252,33 @@ export interface CliAttachment {
   close(): void;
 }
 
+/** Options of service calls on a session. */
+export interface SessionCallOptions {
+  /**
+   * The session incarnation the call is for. The call fails with `not_found` unless it is still the session's current
+   * one when the call is written to the runtime (checked in the same step), so a deleted and re-created ID never
+   * receives it.
+   */
+  readonly incarnation?: string;
+}
+
 export interface SessionsService {
+  /** The session's ledger record; undefined for unknown and deleted sessions and for creates the gateway never finished. */
   get(sessionId: string): SessionRecord | undefined;
   /** Owner-scoped lookup; throws `not_found` for other accounts (existence is not revealed). */
   getOwned(accountId: number, sessionId: string): SessionRecord;
   /** Owner-scoped `SessionInfo` (REST shape, including sandbox and pending actions). */
   info(accountId: number, sessionId: string): Promise<SessionInfo>;
   list(accountId: number, query?: { readonly environment?: string; readonly state?: SessionState; readonly limit?: number }): SessionRecord[];
-  /** Creates a session as `principal` with no client attached (schedules, background work). */
-  create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean }>;
+  /**
+   * Creates a session as `principal` with no client attached (schedules, background work). `incarnation` is the one it
+   * created, or the existing session's when `created` is false.
+   */
+  create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
   /** Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. */
-  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }): Promise<{ readonly messageId: string }>;
+  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }, options?: SessionCallOptions): Promise<{ readonly messageId: string }>;
   /** Forwards a session-scoped RPC to the runtime that owns the session. The caller is responsible for authorization. */
-  request<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>): Promise<T>;
+  request<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, options?: SessionCallOptions): Promise<T>;
   abort(sessionId: string): Promise<void>;
   /** Owner-scoped delete: stops new work and removes runtime state, sandbox, and ledger entry. */
   delete(accountId: number, sessionId: string): Promise<void>;

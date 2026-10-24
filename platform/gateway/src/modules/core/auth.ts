@@ -117,9 +117,15 @@ export class GitHubAuthenticator implements Authenticator {
       this.#inflight.set(key, started);
     }
     // During a GitHub outage, a token already standing in on its recent verification keeps answering while the
-    // re-check runs in the background, so callers don't wait out the retry budget on every re-check.
+    // re-check runs in the background, so callers don't wait out the retry budget on every re-check. A connected
+    // caller's token becomes the account's live credential once that re-check succeeds.
     if (cached?.principal && cached.outage && cached.staleUntil !== undefined && cached.staleUntil > now) {
-      pending.catch(() => undefined);
+      pending.then(
+        (principal) => {
+          if (!options.background) this.#remember(key, principal);
+        },
+        () => undefined,
+      );
       return cached.principal;
     }
     const principal = await pending;

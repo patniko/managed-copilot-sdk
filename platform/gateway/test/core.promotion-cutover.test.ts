@@ -559,6 +559,16 @@ describe("placement cutover", () => {
     // A session the gateway does not run at all.
     const unknown = (await runtime.requestOn(source, "hooks.invoke", { sessionId: crypto.randomUUID(), hookType: "preToolUse", input: {} })) as { output?: Record<string, unknown> };
     expect(unknown.output).toMatchObject({ permissionDecision: "deny" });
+    // A result the source still produced is withheld, and it gets no GitHub token for a session it no longer hosts.
+    const post = (await runtime.requestOn(source, "hooks.invoke", { sessionId, hookType: "postToolUse", input: { toolName: "bash", toolArgs: {}, toolResult: { textResultForLlm: "secret", resultType: "success" } } })) as { output?: Record<string, unknown> };
+    expect(post.output).toMatchObject({ modifiedResult: { resultType: "denied" } });
+    const registrationId = runtime.calls("session.create").find((call) => call.params["sessionId"] === sessionId)!.params["gitHubTokenProviderRegistrationId"];
+    expect(typeof registrationId).toBe("string");
+    const asked = await runtime.requestOn(source, "gitHubToken.getToken", { registrationId, sessionId, host: "https://github.com", reason: "refresh" }).catch((error: unknown) => ({ error }));
+    expect(asked).not.toHaveProperty("accessToken");
+    // Even where the request is not stale (a restore of the sandbox in progress), the registration no longer answers.
+    const manager = sessions() as unknown as { answerTokenRequest(params: unknown): Promise<unknown> };
+    await expect(manager.answerTokenRequest({ registrationId, sessionId, host: "https://github.com" })).resolves.toEqual({ kind: "cancelled" });
     expect(client.requests.filter((request) => request.method === "hooks.invoke")).toHaveLength(0);
   });
 

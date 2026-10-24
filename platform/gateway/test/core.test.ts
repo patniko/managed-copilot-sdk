@@ -323,6 +323,23 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("token-c")).rejects.toMatchObject({ code: "upstream_unavailable" });
   });
 
+  it("makes a connected caller's token the live credential again once an outage's re-check succeeds", async () => {
+    const github = scriptedGitHub([200]);
+    const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 30, outageRecheckMs: 1, staleGraceMs: 60_000 });
+    await auth.authenticate("token-m");
+    expect(auth.liveCredential(7)?.token).toBe("token-m");
+    await sleep(40);
+    // GitHub is unreachable: the recent verification stands in, but an outage's stand-in is not a live credential.
+    github.script.push("reset", "reset");
+    await expect(auth.authenticate("token-m")).resolves.toMatchObject({ accountId: 7 });
+    expect(auth.liveCredential(7)).toBeUndefined();
+    await sleep(5);
+    // Still standing in, the caller is answered at once; the re-check in the background succeeds.
+    github.script.push(200);
+    await expect(auth.authenticate("token-m")).resolves.toMatchObject({ accountId: 7 });
+    await waitUntil(() => auth.liveCredential(7)?.token === "token-m");
+  });
+
   it("stops accepting a stale verification once its grace period ends", async () => {
     const github = scriptedGitHub([200]);
     const auth = new GitHubAuthenticator({ apiUrl: "https://github.test", log, fetch: github.fetch, retryDelaysMs: [1], cacheTtlMs: 1, staleGraceMs: 20 });

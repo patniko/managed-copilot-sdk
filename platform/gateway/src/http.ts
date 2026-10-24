@@ -19,9 +19,17 @@ export interface Principal {
 export interface Authenticator {
   /**
    * Verifies a bearer token (GitHub user, service, or scoped capability) and applies the AppHost access rules. Pass
-   * `background` when re-verifying a stored credential rather than a connected caller's.
+   * `background` when re-verifying a stored credential rather than a connected caller's: it never becomes the
+   * account's live credential.
    */
   authenticate(token: string, options?: { readonly background?: boolean }): Promise<Principal>;
+  /**
+   * Forgets a token GitHub rejected (a 401 from the Copilot API, for example): its cached verification and every
+   * reference to it. Its next use is verified with GitHub again.
+   */
+  invalidate?(token: string): void;
+  /** Drops the account references to a stored token being removed (logout), without forgetting its verification. */
+  forgetCredential?(token: string): void;
 }
 
 /**

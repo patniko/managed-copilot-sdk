@@ -142,6 +142,22 @@ describe("isolated placement through the sandboxes port", () => {
     }
   });
 
+  it("restores a stopped sandbox for an attaching Copilot CLI with the CLI's own credential", async () => {
+    const client = await connect("coder");
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    await client.close();
+    sandboxes.streams.get(sessionId)!.destroy();
+    await sleep(100);
+    const sessions = gateway.gateway.app.service("sessions");
+    const alice = await gateway.gateway.app.service("auth").authenticate(ALICE);
+    // No connected client and no background sign-in: only the CLI's credential can open the sandbox again.
+    const cli = await sessions.attachCli!(1001, sessionId, { connectionId: `cli_${sessionId}`, notify: () => undefined, principal: alice });
+    expect(sandboxes.ops(sessionId).slice(-5)).toEqual(["ensureRunning", "openRuntime", "initialize", "prepare session.resume", "sessionOpened"]);
+    expect(sessions.attached(sessionId)).toEqual([expect.objectContaining({ connectionId: `cli_${sessionId}`, kind: "cli" })]);
+    cli.close();
+  });
+
   it("runs each isolated session of one client on its own runtime connection", async () => {
     const client = await connect("coder");
     const first = crypto.randomUUID();

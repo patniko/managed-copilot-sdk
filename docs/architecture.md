@@ -588,8 +588,8 @@ structurally (they may add members).
 
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
-| `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials); `liveCredential(accountId)` (tokens connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` |
-| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created }`, `send(principal, id, { prompt, source?, mode? = "enqueue" })`, `request(id, method, params)`, `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
+| `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials, never a live credential); `liveCredential(accountId)` (tokens attached connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` (GitHub rejected it, e.g. a 401 from the Copilot API) |
+| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
 | `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
@@ -623,14 +623,18 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - **Per-session credentials.** Shared sessions get a gateway-owned `gitHubTokenProviderRegistrationId`. The runtime's
   `gitHubToken.getToken` (and a sandbox broker's `resolveToken`) is answered with the token of a connected client of
   the owner, re-verified: one attached to the session, or one present on it (`sessions.presence(id, principal)`, held
-  by an attached Copilot CLI and by service `create`/`send` while they run). Without one, only the owner's current
-  background sign-in (`credentials.principalFor`) serves the session, never a token remembered from an earlier
-  connection; otherwise the answer is `cancelled` (fail closed). Answers expire 300 s past the runtime's one-hour
+  by an attached Copilot CLI while it attaches and by service `create`/`send` while they run). Without one, only the
+  owner's current background sign-in (`credentials.principalFor`, then re-verified by `auth` too, so a token GitHub
+  rejected since is never used) serves the session, never a token remembered from an earlier connection; otherwise the
+  answer is `cancelled` (fail closed). A registration answers only while its session is on shared placement and not
+  being deleted. Answers expire 300 s past the runtime's one-hour
   refresh threshold (or with the token): the runtime asks again only when a token is within an hour of expiry, and a
   cancelled refresh fails its next model call rather than reusing the old token (verified on 1.0.103), so a departed
-  client's token stops serving the session within five minutes. `auth.liveCredential` only remembers tokens connected
-  callers presented within the cache TTL (never background re-verifications, `authenticate(token, { background })`);
-  promotion uses it to find secrets an export must not contain, and `auth.forgetCredential(token)` drops it at logout.
+  client's token stops serving the session within five minutes. `auth.liveCredential` only remembers tokens attached
+  connected callers presented within the cache TTL (never background re-verifications, `authenticate(token, {
+  background })`, and never presences, which may be background work such as a schedule's send; a token standing in
+  during a GitHub outage counts again once its re-check succeeds); promotion uses it to find secrets an export must not
+  contain, and `auth.forgetCredential(token)` drops it at logout.
 - **Supported operations** (deny by default). Connection-level: `connect`, `ping`, `status.get`, `auth.getStatus`
   (caller), `models.list` (caller's entitlement via the shared runtime, filtered by the environment's `models`),
   `session.create`/`resume` (admission + placement), `session.list`/`getMetadata`/`getLastId` (ledger, owner-scoped),
@@ -651,25 +655,32 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
   (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
   else under the data directory (including its resolved form) `/platform`.
-- **Agents.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a restore
-  (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent` keeps it.
-  Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out of
-  create/resume params and selects it in `sessionOpened`.
+- **Agents and models.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a
+  restore (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent`
+  keeps it. Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out
+  of create/resume params and selects it in `sessionOpened`. A model selection (`session.model.switchTo`, or an attached
+  CLI's) is recorded the same way and replaces the model an earlier `session.options.update` set, since restores apply
+  option changes after the session's params.
 - **Restores.** The stock runtime persists a session with its first turn, so a restarted runtime does not know a
   session that never ran one: it is created again with the same ID and stored configuration. A session whose history
   the runtime lost fails with `state_restore_failed`. A shared runtime left running by a dead gateway (recorded with its
   pid and start time in `<data>/runtime/shared/runtime.json`) is stopped before a new one starts. Restores and client
   resumes pass `continuePendingWork: true` while durable still owns something the runtime may await
-  (`actions.hasOpenActions`, else open `actions.list`), because a resume without it drops the runtime's pending tool
-  calls; a caller's own `continuePendingWork` stands.
+  (`actions.hasOpenActions(id, { incarnation })`, else open `actions.list`), because a resume without it drops the
+  runtime's pending tool calls; a caller's own `continuePendingWork` stands.
 - **Interrupted creates and deletions.** At startup (in the background) and on the next request for the session,
   rows a stopped gateway left `deleting` finish their deletion (sandbox, runtime state, policy, `session.deleted`,
   ledger), and rows left `creating` are discarded (sandbox and policy released), so a schedule retrying its
-  deterministic session ID creates the session instead of finding a ghost.
+  deterministic session ID creates the session instead of finding a ghost. Until then such a create is not a session
+  for its owner: `get`, `list`, and resumes do not find it, and a client or service create of the same ID cleans it up
+  first.
 - **Incarnations.** Session IDs are client-chosen and reusable after deletion, so every ledger row gets an immutable
-  `incarnation` (`inc_…`). `sessions.get` returns it; durable's hooks (`onSessionEvent`, `onAttached`,
-  `onClientAnswer`) and the `session.created`/`idle`/`failed`/`deleted` platform events carry it in `data`, so state
-  about one session never applies to a later one with the same ID.
+  `incarnation` (`inc_…`). `sessions.get` returns it, and `create` returns the one it created (or found); durable's
+  hooks (`onSessionEvent`, `onAttached`, `onClientAnswer`, `hasOpenActions`, `list`) and the
+  `session.created`/`idle`/`failed`/`deleted` platform events carry it in `data`, so state about one session never
+  applies to a later one with the same ID. `send` and `request` take `{ incarnation }`: the call fails with `not_found`
+  unless that is still the session's incarnation when it is written to the runtime (checked in the same step).
+  `SessionInfo` is read for one incarnation (a list skips a session deleted while it was read).
 - **Placement cutover** (`sessions.cutover`, used by promotion). `fence()` marks the session `promoting`, holds new
   client and service requests behind its residency, and buffers what the source sends. The first
   `source("session.suspend" | "sessions.close")` seals it: until a sealing call is answered, what the suspend causes
@@ -711,6 +722,11 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   a restore with no client attached keeps the tools declared and the callbacks required. Only the connection that
   registered something can withdraw it (by registering again without it), and only that registration: each tool and
   flag records the revision it was registered at, so a withdrawal never removes what another client registered since.
+  A withdrawal of something other attached clients still register passes the stored registration to them, so the last
+  of them can withdraw it. Every handler flag is sent explicitly (`false` once nobody registers it), so a withdrawn
+  handler is turned off on the runtime. A registration on its way to the runtime counts for concurrent ones (they never
+  undo it upstream); one that fails leaves the client's registration as it was. A client that disconnects while its
+  create or resume is in flight is never attached (what it registered stays in the inventory).
   Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, and user-input
   requests go to the newest connected client that registered that handler, else fail with
   `background_callback_unsupported` (no fabricated answer).
@@ -719,8 +735,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   with `conflict`; `hooks.invoke` goes to the handler only. Without a connected handler (or its answer), and for a
   runtime that does not own the session (a fenced, sealed, or former source, or an unknown session), gating hooks get
   an explicit closed answer, because runtime 1.0.103 treats an error from `hooks.invoke` as "no output" and carries on
-  (verified): `preToolUse` denies the tool call, `userPromptSubmitted` blocks the prompt; other hooks fail with
-  `background_callback_unsupported`. While hooks are required and no handler is connected, new turns (client, service,
+  (verified): `preToolUse` denies the tool call, `userPromptSubmitted` blocks the prompt, and `postToolUse` withholds
+  the tool's result from the model (`modifiedResult`, `resultType: "denied"`; a result the hooks could not review, for
+  example to redact it, never reaches the model); other hooks fail with `background_callback_unsupported`. While hooks
+  are required and no handler is connected, new turns (client, service,
   or attached CLI) and resumes without hooks are refused with `background_callback_unsupported`. A client that resumes
   with hooks takes them over (and can withdraw them by resuming again without). A connected handler's own answer is
   passed through unchanged, including the stock SDK's empty answer when one of its hook callbacks throws (native
@@ -733,7 +751,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - **Attached Copilot CLI** (`sessions.attachCli`, used by the attach module). The CLI speaks AHP to the runtime, so it is
   not a `/v1/connect` client; `attachCli` makes it a `cli` responder of one session incarnation (permission and
   elicitation prompts only; no tools, hooks, or other callbacks, and no change to the runtime's registrations) and pins
-  the incarnation, placement, generation, and runtime it attached to (refused with `session_busy` while fenced).
+  the incarnation, placement, generation, and runtime it attached to (refused with `session_busy` while fenced). The
+  CLI's principal serves a restore the attach needs (a stopped sandbox), then the attachment supplies it.
   `write(op, send)` admits a native AHP operation (a text-only turn, which also needs any required SDK hooks connected; an
   allowed model, recorded for restores; an abort; an answer to `ask_user`, refused with `conflict` while a connected app
   answers questions) and runs the AHP write in the same synchronous step as the checks,
@@ -752,6 +771,14 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   permission requests on resume (durable's `onAttached` replay covers it); `models.list` requires the shared runtime
   even for isolated environments. Verified on runtime 1.0.103: custom agents' and `task` subagents' tool lists cannot
   escape the session's `availableTools` ceiling.
+- **Known limitations** (each fails closed): a registration's owner is the client that registered it last, so when the
+  clients that registered the same tool or handler include one that is away, a withdrawal by the newest registrant also
+  removes it for the away client until that client resumes (the session then lacks the tool rather than calling an
+  unanswered one). A registration that fails upstream after a concurrent registration already carried it leaves the
+  runtime without it until the session's next registration or restore (the inventory still has it). Hooks other than
+  `preToolUse`, `userPromptSubmitted`, and `postToolUse` have no closing answer on the stock wire; turns that would
+  need them are refused while no handler is connected, but a turn already running when the handler leaves runs them
+  without it.
 
 ## Devloop: AppHost, CLI, and Copilot CLI attach
 
