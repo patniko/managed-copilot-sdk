@@ -176,6 +176,31 @@ describe("placement cutover", () => {
     expect(sessions().get(sessionId)).toMatchObject({ placement: "shared", generation: 0 });
   });
 
+  it("fails held completions when the session is deleted or cannot return to its source", async () => {
+    const client = await connect();
+    const deleted = crypto.randomUUID();
+    await client.request("session.create", { sessionId: deleted, tools: [{ name: "lookup_order" }] });
+    const waiting = client.request("session.sendAndWait", { sessionId: deleted, prompt: "tool:lookup_order" }).catch((error: unknown) => error);
+    await waitUntil(() => client.events("external_tool.requested").some((event) => runtimeSessionOf(event) === deleted));
+    const cut = await sessions().cutover!(deleted, { generation: 0 });
+    cut.fence();
+    await cut.source("session.suspend");
+    await sessions().delete(1001, deleted);
+    expect(await waiting).toMatchObject({ data: { code: "not_found" } });
+
+    const lost = crypto.randomUUID();
+    await client.request("session.create", { sessionId: lost, tools: [{ name: "lookup_order" }] });
+    const stranded = client.request("session.sendAndWait", { sessionId: lost, prompt: "tool:lookup_order" }).catch((error: unknown) => error);
+    await waitUntil(() => client.events("external_tool.requested").some((event) => runtimeSessionOf(event) === lost));
+    const move = await sessions().cutover!(lost, { generation: 0 });
+    move.fence();
+    await move.source("session.suspend");
+    // The source runtime lost the session's state, so the abort cannot put it back there.
+    runtime.sessions.delete(lost);
+    await move.abort({ resume: { continuePendingWork: true } });
+    expect(await stranded).toMatchObject({ data: { code: "state_restore_failed" } });
+  });
+
   it("refuses stale generations and a second cutover, and ends an open cutover when the session is deleted", async () => {
     const client = await connect();
     const sessionId = crypto.randomUUID();

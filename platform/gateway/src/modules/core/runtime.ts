@@ -536,13 +536,16 @@ export async function reapStaleRuntime(root: string, log: Logger): Promise<void>
     log.warn("Another gateway may be using this data directory; leaving its shared runtime alone", { pid, gatewayPid });
     return;
   }
-  rmSync(file, { force: true });
-  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) return;
+  // The record goes only once the recorded runtime is known gone, so a gateway that dies mid-reap leaves it for the next.
+  if (!isRunning(pid) || (await processStartTime(pid)) !== startTime) {
+    rmSync(file, { force: true });
+    return;
+  }
   log.warn("Stopping the shared runtime a previous gateway left running", { pid });
   try {
     process.kill(pid);
   } catch {
-    return;
+    // Already gone.
   }
   for (let waited = 0; waited < 5000 && isRunning(pid); waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
   if (isRunning(pid)) {
@@ -552,6 +555,7 @@ export async function reapStaleRuntime(root: string, log: Logger): Promise<void>
       // Already gone.
     }
   }
+  if (!isRunning(pid)) rmSync(file, { force: true });
 }
 
 function openTcp(host: string, port: number): Promise<MessageTransport> {

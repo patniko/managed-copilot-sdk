@@ -398,10 +398,12 @@ export class SessionManager implements SessionsService {
     this.#ledger.update(sessionId, { state: "deleting" });
     // A placement cutover in progress ends here (its owner cleans up the candidate sandbox on `deleted`).
     if (live?.cutover) await this.#abortCutover(live, live.cutover, undefined).catch(() => undefined);
+    if (live) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `Session ${sessionId} was deleted`, { code: "not_found" }));
     // Let an in-flight create/resume settle so it cannot reopen the session after deletion.
     await live?.residency?.catch(() => undefined);
+    const placement = (this.get(sessionId) ?? record).placement;
     try {
-      if (record.placement === "sandbox") {
+      if (placement === "sandbox") {
         const sandboxes = this.#sandboxes;
         if (!sandboxes) throw new ManagedCopilotError("capability_unavailable", "The sandbox service is not available, so the sandbox cannot be deleted yet");
         live?.upstream?.close();
@@ -698,9 +700,7 @@ export class SessionManager implements SessionsService {
     state.release?.();
     this.#log.info("Session move aborted; it stays on its source", { sessionId: live.id });
     // Held completions continue from the source once it runs again.
-    if (state.sealed && live.held.length > 0 && !live.deleting) {
-      void this.#resident(live).catch((error: unknown) => this.#log.warn("Resuming the session on its source after an aborted move failed", { sessionId: live.id, error: (error as Error).message }));
-    }
+    if (state.sealed) this.#driveHeld(live);
   }
 
   // ------------------------------------------------------------------------------------------------------------
@@ -728,12 +728,18 @@ export class SessionManager implements SessionsService {
     }
     if (record.state === "deleting") throw new ManagedCopilotError("conflict", `Session ${sessionId} is being deleted`);
     const live = this.#liveFor(sessionId);
-    // An open placement cutover decides where the session lives next, and so which admission rules apply.
-    if (live.cutover) await live.residency?.catch(() => undefined);
-    const binding = await this.#policy?.session?.(sessionId);
-    const network = binding?.policy ?? record.network;
-    const admitted = await this.#admit(live.environment, live.placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
-    await this.#checkRemoteMcp(admitted, sessionId, live.placement, network);
+    // Admit for where the session lives; a placement cutover that opens or commits meanwhile means admitting again.
+    let admitted: AdmittedSession;
+    for (;;) {
+      if (live.cutover) await live.residency?.catch(() => undefined);
+      const placement = live.placement;
+      const binding = await this.#policy?.session?.(sessionId);
+      const network = binding?.policy ?? record.network;
+      admitted = await this.#admit(live.environment, placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
+      await this.#checkRemoteMcp(admitted, sessionId, placement, network);
+      await live.residency?.catch(() => undefined);
+      if (live.placement === placement) break;
+    }
 
     let result: unknown;
     const resumeOn = async (upstream: RuntimeUpstream) => {
@@ -749,7 +755,8 @@ export class SessionManager implements SessionsService {
         throw error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
-      live.ready = true;
+      // A cutover fenced while this resume ran keeps the session fenced.
+      if (!live.cutover?.fenced) live.ready = true;
     };
     await live.residency?.catch(() => undefined);
     if (live.upstream && !live.upstream.closed && live.ready) {
@@ -797,15 +804,16 @@ export class SessionManager implements SessionsService {
     }
     // An open placement cutover decides where the session lives next, and so which admission rules apply.
     if (live.cutover?.fenced) await live.residency?.catch(() => undefined);
+    const placement = live.placement;
     const record = this.getOwned(peer.principal.accountId, sessionId);
     let forwarded: Record<string, unknown> = params;
     let patch: Record<string, unknown> | undefined;
     const context = (): AdmissionContext => ({
       environment: live.environment,
-      placement: live.placement,
+      placement,
       network: record.network,
-      platformTools: this.#platformToolsFor(live.environment, live.placement),
-      workingDirectory: this.#workingDirectory(live.placement, sessionId),
+      platformTools: this.#platformToolsFor(live.environment, placement),
+      workingDirectory: this.#workingDirectory(placement, sessionId),
       tokenRegistrationId: live.tokenRegistrationId,
       allowMcp: hasRemoteMcp(this.#ledger.admitted(sessionId)?.params),
     });
@@ -845,6 +853,8 @@ export class SessionManager implements SessionsService {
         }
     }
     const upstream = await this.#resident(live);
+    // A cutover that committed while this call waited moved the session: admit the call again where it lives now.
+    if (live.placement !== placement) return this.forwardForClient(peer, method, params, signal);
     if (method === "session.sendAndWait") return this.#scrub(live, await this.#sendAndWait(live, upstream, forwarded, signal));
     const result = await upstream.request(method, forwarded, { signal });
     if (patch && Object.keys(patch).length > 0) {
@@ -912,6 +922,24 @@ export class SessionManager implements SessionsService {
         },
         { once: true },
       );
+      this.#driveHeld(live);
+    });
+  }
+
+  /**
+   * Held completions need their session running somewhere. Outside a cutover: fail them for a deleted session, else
+   * resume the session if it is not running (failing them if that fails), so they never wait on nothing.
+   */
+  #driveHeld(live: LiveSession): void {
+    if (live.held.length === 0 || live.cutover) return;
+    if (live.deleting || this.#live.get(live.id) !== live) {
+      for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `Session ${live.id} was deleted`, { code: "not_found" }));
+      return;
+    }
+    if (live.ready && live.upstream && !live.upstream.closed) return;
+    void this.#resident(live).catch((error: unknown) => {
+      this.#log.warn("Resuming a session with held completions failed", { sessionId: live.id, error: (error as Error).message });
+      for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, `The session could not be resumed: ${(error as Error).message}`, { code: "state_restore_failed" }));
     });
   }
 
@@ -1261,9 +1289,14 @@ export class SessionManager implements SessionsService {
         throw error instanceof RpcError ? new ManagedCopilotError("state_restore_failed", `Session ${live.id} could not be restored: ${error.message}`) : error;
       }
       if (live.resumeExtras === extras) live.resumeExtras = undefined;
-      live.ready = true;
+      // A cutover fenced while this restore ran keeps the session fenced.
+      if (!live.cutover?.fenced) live.ready = true;
       this.#log.info("Session resumed upstream", { sessionId: live.id, upstream: upstream.info.id });
       return upstream;
+    }).then((upstream) => {
+      // A fence that went up during the restore holds this caller too, until the cutover commits or aborts.
+      const fenced = live.cutover?.fenced ? live.residency : undefined;
+      return fenced ?? upstream;
     });
   }
 
