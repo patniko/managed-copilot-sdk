@@ -48,19 +48,28 @@ const PERMANENT_CODES: ReadonlySet<string> = new Set([
 export function isPlatformInterruption(error: unknown): boolean {
   if (error instanceof PlatformUnavailableError) return true;
   if (isManagedCopilotError(error)) {
+    // The SDK gave up on a request in transit (`details.stage`): the deployment didn't answer in time. Other timeouts,
+    // such as waiting for a publication, are outcomes.
+    if (error.code === "timeout") return typeof error.details?.["stage"] === "string";
     // Proxies in front of the gateway answer 502/503/504 without a platform error body.
     return TRANSIENT_CODES.has(error.code) || (error.code === "internal" && /\(HTTP 5\d\d\)/.test(error.message));
   }
   if (!(error instanceof Error)) return false;
   // Gateway errors on a session's JSON-RPC connection arrive as the SDK's ResponseError, with the platform code in `data.code`.
-  const rpcCode = (error as { data?: { code?: unknown } }).data?.code;
+  const data = (error as { data?: { code?: unknown; details?: { step?: unknown } } }).data;
+  const rpcCode = data?.code;
+  // A registration step (a resume, a reconcile) the session's runtime never answered (`details.step`): the gateway
+  // closed that runtime connection, and a retry reconnects. Other timeouts are outcomes.
+  if (rpcCode === "timeout") return typeof data?.details?.step === "string";
   if (typeof rpcCode === "string" && (TRANSIENT_CODES.has(rpcCode) || PERMANENT_CODES.has(rpcCode))) return TRANSIENT_CODES.has(rpcCode);
   // The bridge reports gateway closes and rejections as "[managed-copilot] ... (<code>)".
   const bridge = /\[managed-copilot\][^\n]*?(?:\((\w+)\))?\s*$/m.exec(error.message);
   if (bridge) return bridge[1] === undefined || !PERMANENT_CODES.has(bridge[1]);
   // "Completion wait cancelled": the runtime gave up a turn's completion wait, as when a gateway shuts down mid-turn.
   // A cancel by the factory itself never gets here: the run is marked cancelled first.
-  return /session (?:is )?disconnected|client not connected|connection (?:is |got )?(?:closed|disposed)|cli (?:server|process) (?:connection closed|exited)|completion wait cancelled|cannot reach managed copilot|ECONNRESET|ECONNREFUSED|socket hang up/i.test(
+  // "... lost the connection ...": the gateway ended a turn (or the wait for its answer) whose runtime connection it lost;
+  // a turn's `session.error` reaches a completion wait without a code.
+  return /session (?:is )?disconnected|client not connected|connection (?:is |got )?(?:closed|disposed)|lost the connection|cli (?:server|process) (?:connection closed|exited)|completion wait cancelled|cannot reach managed copilot|ECONNRESET|ECONNREFUSED|socket hang up/i.test(
     error.message,
   );
 }
