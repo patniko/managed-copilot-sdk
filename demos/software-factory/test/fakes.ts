@@ -104,6 +104,8 @@ export class FakePlatform implements FactoryPlatform {
   readonly writeFailures = new Map<string, number>();
   /** Like the gateway's list cap: only the newest sessions are listed. */
   listLimit = Number.POSITIVE_INFINITY;
+  /** Errors the next resumeSession calls throw, in order (e.g. a connection that drops again while reattaching). */
+  readonly resumeErrors: unknown[] = [];
   createCount = 0;
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
@@ -128,6 +130,8 @@ export class FakePlatform implements FactoryPlatform {
   }
 
   async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession> {
+    const failure = this.resumeErrors.shift();
+    if (failure !== undefined) throw failure;
     if (!this.sessions.has(sessionId) || this.lost.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
     const session = new FakeSession(this, role, config, sessionId);
     this.sessions.set(sessionId, session);

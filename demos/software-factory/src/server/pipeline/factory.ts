@@ -513,6 +513,8 @@ export class Factory {
     this.#runs.delete(run.wo.id);
     const timer = this.#usageTimers.get(run.wo.id);
     if (timer) clearTimeout(timer);
+    // The next run of this work order (a resume or retry) schedules its own usage saves.
+    this.#usageTimers.delete(run.wo.id);
     if (this.#stopping) return;
     this.#persist(run.wo);
     run.closed = true;
@@ -879,6 +881,7 @@ export class Factory {
       delta: (messageId, text) => this.#options.hub.publish({ type: "delta", workOrderId: run.wo.id, stationId: station.id, messageId, text }),
       tests: (tests) => this.#updateStation(run, station, { tests, detail: tests.failed > 0 ? `${tests.failed} of ${tests.total} tests failing` : `${tests.passed} tests passed` }),
       usage: (usage) => {
+        if (run.closed) return;
         station.usage = usage;
         this.#scheduleUsageSave(run);
       },
@@ -913,20 +916,15 @@ export class Factory {
     if (existing) return existing;
     if (station.sessionId) {
       const mapper = this.#newMapper(run, station);
+      let session: StationSession | undefined;
       try {
         this.#updateStation(run, station, { status: "starting", detail: "Reattaching to the sandbox" });
-        const session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
-        const active: ActiveSession = { session, mapper, capture: {} };
-        run.sessions.set(station.id, active);
-        await this.#refreshSandbox(run, station);
-        mapper.status(`Reattached to session ${session.sessionId}`);
-        // Seeding was interrupted before the first prompt: finish it (writes are idempotent).
-        if (!station.seeded && !station.turn) await this.#seed(run, station, active, seed);
-        return active;
+        session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
       } catch (error) {
         if (run.abort.signal.aborted) throw new CancelledError();
-        // A dropped connection isn't a lost sandbox: keep the workspace and reattach once the platform is back.
-        if (this.#interrupts(run, error)) throw error;
+        // A dropped connection isn't a lost sandbox: keep the workspace and its checkpoint, whether the work order pauses
+        // or (out of pauses) fails.
+        if (this.#isInterruption(error)) throw error;
         mapper.status(`Couldn't reattach to session ${station.sessionId} (${toFactoryError(error).message}); starting a fresh sandbox`, "warning");
         // The new sandbox starts over: its artifact versions restart at 1 and its rounds need fresh reviews.
         this.#store.deleteStationArtifacts(run.wo.id, station.id);
@@ -947,6 +945,15 @@ export class Factory {
           this.#updateStation(run, review, { status: "waiting", detail: "Waits for the build", reviews: undefined, round: 0, acceptedWithFindings: undefined });
         }
         this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
+      }
+      if (session) {
+        const active: ActiveSession = { session, mapper, capture: {} };
+        run.sessions.set(station.id, active);
+        await this.#refreshSandbox(run, station);
+        mapper.status(`Reattached to session ${session.sessionId}`);
+        // Seeding was interrupted before the first prompt: finish it (writes are idempotent).
+        if (!station.seeded && !station.turn) await this.#seed(run, station, active, seed);
+        return active;
       }
     }
     this.#updateStation(run, station, {
@@ -1205,14 +1212,16 @@ export class Factory {
     this.#emitItem(run.wo, { stationId: station.id, kind: "error", text: failure.message, level: "error" });
   }
 
-  /**
-   * Whether an error means the run lost its platform connection (or the platform is down), so the work order should
-   * pause and resume rather than fail. After MAX_AUTO_RESUMES pauses, the next one fails it.
-   */
-  #interrupts(run: Run, error: unknown): boolean {
-    if (this.#stopping || run.abort.signal.aborted || error instanceof CancelledError) return false;
-    if ((this.#pauses.get(run.wo.id) ?? 0) >= MAX_AUTO_RESUMES) return false;
+  /** Whether an error is the platform connection dropping (or the platform being down) rather than the station's own failure. */
+  #isInterruption(error: unknown): boolean {
+    if (this.#stopping || error instanceof CancelledError) return false;
     return isPlatformInterruption(error) || !this.#options.readiness().ready;
+  }
+
+  /** Whether the work order pauses for an interruption: after MAX_AUTO_RESUMES pauses, the next one fails it instead. */
+  #interrupts(run: Run, error: unknown): boolean {
+    if (run.abort.signal.aborted || !this.#isInterruption(error)) return false;
+    return (this.#pauses.get(run.wo.id) ?? 0) < MAX_AUTO_RESUMES;
   }
 
   /** Leaves an interrupted work order at its checkpoint: running stations wait, and nothing is marked failed. */
@@ -1313,10 +1322,11 @@ export class Factory {
   }
 
   #scheduleUsageSave(run: Run): void {
-    if (this.#usageTimers.has(run.wo.id)) return;
+    if (run.closed || this.#usageTimers.has(run.wo.id)) return;
     const timer = setTimeout(() => {
       this.#usageTimers.delete(run.wo.id);
-      this.#persist(run.wo);
+      // A finished (or paused) run's snapshot must never overwrite the work order a later run is updating.
+      if (!run.closed) this.#persist(run.wo);
     }, 1_500);
     timer.unref();
     this.#usageTimers.set(run.wo.id, timer);

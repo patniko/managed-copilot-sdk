@@ -572,6 +572,51 @@ describe("Factory pipeline", () => {
     expect(factory.activity(created.id).filter((item) => item.text?.startsWith("Paused:")).length).toBe(5);
   });
 
+  it("fails with its sandbox intact when it runs out of pauses while reattaching", async () => {
+    const lostAgain = () => new Error("Session disconnected while waiting for a response");
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        // Every reattach that follows loses the connection again.
+        platform.resumeErrors.push(...Array.from({ length: 5 }, lostAgain));
+        throw lostAgain();
+      }
+    };
+    const { platform, factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 1 });
+    const created = factory.create(CREATE);
+    await until(() => dropped);
+    const original = factory.get(created.id)!.stations.find((station) => station.id === "build:csv2json")!.sessionId;
+    const wo = await settle(factory, created.id, 10_000);
+    expect(wo.status).toBe("failed");
+    const build = wo.stations.find((station) => station.id === "build:csv2json")!;
+    expect(build.sessionId).toBe(original);
+    expect(build.previousSessionIds).toBeUndefined();
+    expect(platform.sessionsFor("builder")).toHaveLength(2);
+    expect(factory.activity(created.id).some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(false);
+  });
+
+  it("ignores late events from a session it let go of", async () => {
+    let dropped: FakeSession | undefined;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = session;
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("completed");
+    // The detach was never answered, so the old session can still deliver events.
+    dropped!.emit("assistant.usage", { model: "fake", inputTokens: 5, outputTokens: 5, duration: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    const stored = store.getWorkOrder(created.id)!;
+    expect(stored.status).toBe("completed");
+    expect(stored.release).toBeDefined();
+  });
+
   it("leaves files a builder deleted in a later round out of the release", async () => {
     const shrinking: Script = async (session, prompt, platform) => {
       const task = taskOf(platform, session);

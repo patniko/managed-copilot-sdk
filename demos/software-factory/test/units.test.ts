@@ -170,7 +170,11 @@ describe("attach commands", () => {
 
 describe("platform interruptions", () => {
   it("tells a lost connection apart from a station's own failure", () => {
+    // Gateway errors on a session's JSON-RPC connection: the SDK's ResponseError carries the platform code in `data.code`.
+    const rpc = (message: string, code: string) => Object.assign(new Error(`${message} [${code}]`), { code: -32001, data: { code } });
     const lost = [
+      rpc("The shared runtime is restarting", "upstream_unavailable"),
+      rpc("The gateway is draining", "capability_unavailable"),
       new PlatformUnavailableError("The factory is reconnecting to Managed Copilot."),
       new ManagedCopilotError("capability_unavailable", "The gateway is not serving on this instance yet: handed over to a newer deployment. Retry shortly."),
       new ManagedCopilotError("upstream_unavailable", "GitHub is unreachable"),
@@ -184,6 +188,8 @@ describe("platform interruptions", () => {
       new Error("[managed-copilot] Managed Copilot rejected the connection: The gateway is draining (capability_unavailable)"),
     ];
     const failures = [
+      rpc("Session sess_1 was not found", "not_found"),
+      rpc("Unknown model", "invalid_request"),
       new StationError("timeout", "The builder agent didn't finish within 20 minutes."),
       new ManagedCopilotError("not_found", "Session sess_1 was not found"),
       new ManagedCopilotError("internal", "Unexpected error response (HTTP 400)"),
@@ -194,6 +200,6 @@ describe("platform interruptions", () => {
     ];
     for (const error of lost) expect(isPlatformInterruption(error), String(error)).toBe(true);
     for (const error of failures) expect(isPlatformInterruption(error), String(error)).toBe(false);
-    expect(toFactoryError(lost[0])).toEqual({ code: "platform_unavailable", message: "The factory is reconnecting to Managed Copilot." });
+    expect(toFactoryError(lost[2])).toEqual({ code: "platform_unavailable", message: "The factory is reconnecting to Managed Copilot." });
   });
 });

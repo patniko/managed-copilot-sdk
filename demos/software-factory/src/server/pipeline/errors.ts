@@ -52,6 +52,9 @@ export function isPlatformInterruption(error: unknown): boolean {
     return TRANSIENT_CODES.has(error.code) || (error.code === "internal" && /\(HTTP 5\d\d\)/.test(error.message));
   }
   if (!(error instanceof Error)) return false;
+  // Gateway errors on a session's JSON-RPC connection arrive as the SDK's ResponseError, with the platform code in `data.code`.
+  const rpcCode = (error as { data?: { code?: unknown } }).data?.code;
+  if (typeof rpcCode === "string") return TRANSIENT_CODES.has(rpcCode);
   // The bridge reports gateway closes and rejections as "[managed-copilot] ... (<code>)".
   const bridge = /\[managed-copilot\][^\n]*?(?:\((\w+)\))?\s*$/m.exec(error.message);
   if (bridge) return bridge[1] === undefined || !PERMANENT_CODES.has(bridge[1]);
