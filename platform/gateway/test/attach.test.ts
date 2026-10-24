@@ -16,6 +16,7 @@ import { attachModule, type AttachSessions, type SessionLifecycleEvent, type Ses
 import { CREDENTIAL_REFUSAL, filterAhpClientFrame as filterClientFrame } from "@managed-copilot/protocol";
 import { AttachTickets } from "../src/modules/attach/tickets.js";
 import { AhpHosts } from "../src/modules/attach/hosts.js";
+import { LISTENER_LOSS_GRACE_MS } from "../src/modules/attach/proxy.js";
 
 const OWNER = 42;
 const LISTENER_TOKEN = "listener-secret-token";
@@ -86,6 +87,8 @@ class FakeSessions implements AttachSessions {
   runtimeFor: FakeRuntime;
   states = new Map<string, SessionInfo["state"]>([["s1", "idle"], ["s2", "idle"]]);
   listener: ((event: SessionLifecycleEvent) => void) | undefined;
+  /** When set, `runtime()` picks its answer, then waits here: a lookup that straddles a lifecycle change. */
+  gate: Promise<void> | undefined;
   constructor(runtime: FakeRuntime) {
     this.runtimeFor = runtime;
   }
@@ -95,7 +98,9 @@ class FakeSessions implements AttachSessions {
     return { id: sessionId, state } as SessionInfo;
   }
   async runtime(): Promise<SessionRuntime> {
-    return this.runtimeFor;
+    const runtime = this.runtimeFor;
+    if (this.gate) await this.gate;
+    return runtime;
   }
   onLifecycle(listener: (event: SessionLifecycleEvent) => void) {
     this.listener = listener;
@@ -320,6 +325,50 @@ describe("attach module", () => {
     again.close();
   });
 
+  it("never leaves a host on the runtime a session moved off while an attach was resolving it", async () => {
+    await fresh();
+    let proceed!: () => void;
+    sessions.gate = new Promise((resolve) => (proceed = resolve));
+    const pending = attach("s1"); // resolves the shared runtime, then waits
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const sandbox = new FakeRuntime("sandbox:s1#1", listener);
+    sessions.runtimeFor = sandbox;
+    sessions.listener?.({ sessionId: "s1", type: "promoted" });
+    sessions.gate = undefined;
+    proceed();
+    expect((await pending).status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The host started on the stale shared runtime was released by the promotion queued behind it.
+    expect(runtime.count("host.start")).toBe(1);
+    expect(runtime.count("host.dispose")).toBe(1);
+    const ws = await open("s1", (await material("s1")).token);
+    expect(sandbox.count("host.start")).toBe(1);
+    ws.close();
+  });
+
+  it("closes clients with the lifecycle's code when the listener connection drops just before the event", async () => {
+    await fresh();
+    const ws = await open("s1", (await material("s1")).token);
+    const closed = once(ws, "close");
+    for (const socket of listener.sockets) socket.terminate(); // the runtime went away
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    runtime.close();
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect(code).toBe(4410);
+    expect(reason.toString()).toBe("The session's runtime stopped. Attach again to resume it.");
+  });
+
+  it("closes clients with 1011 when the listener connection drops without a lifecycle event", async () => {
+    await fresh();
+    const ws = await open("s1", (await material("s1")).token);
+    const closed = once(ws, "close");
+    const dropped = Date.now();
+    for (const socket of listener.sockets) socket.terminate();
+    const [code] = (await closed) as [number];
+    expect(code).toBe(1011);
+    expect(Date.now() - dropped).toBeGreaterThanOrEqual(LISTENER_LOSS_GRACE_MS - 50);
+  });
+
   it("closes attached clients when the session is deleted or its runtime connection closes", async () => {
     await fresh();
     const ws = await open("s1", (await material("s1")).token);
@@ -354,7 +403,8 @@ describe("AhpHosts", () => {
     }
     const slow = new SlowRuntime("conn-1", listener);
     const hosts = new AhpHosts(createLogger("test", "error"), 60_000);
-    const [first, , second] = await Promise.all([hosts.ensure("s1", slow), hosts.release("s1", "The session was deleted."), hosts.ensure("s1", slow)]);
+    const current = async () => slow;
+    const [first, , second] = await Promise.all([hosts.ensure("s1", current), hosts.release("s1", "The session was deleted."), hosts.ensure("s1", current)]);
     expect(first.closed).toBe(true);
     expect(second.closed).toBe(false);
     expect(second).not.toBe(first);
@@ -368,7 +418,7 @@ describe("AhpHosts", () => {
     listener.port = 1;
     const quiet = new FakeRuntime("conn-1", listener);
     const hosts = new AhpHosts(createLogger("test", "error"), 15);
-    const host = await hosts.ensure("s1", quiet);
+    const host = await hosts.ensure("s1", async () => quiet);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(host.closed).toBe(true);
     expect(quiet.count("host.dispose")).toBe(1);

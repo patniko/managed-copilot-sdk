@@ -6,10 +6,15 @@ import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
 
-// Fixed local ports. MANAGED_COPILOT_PORT_OFFSET (for example 100) runs a second copy beside this one; that copy leaves
-// zero-config discovery to the first. Google sign-in in the assistant expects its default port.
+// Fixed local ports. MANAGED_COPILOT_PORT_OFFSET (for example 300) runs a second copy beside this one; that copy leaves
+// zero-config discovery to the first. Google sign-in redirects to the assistant's own URL, so with an offset, add that
+// callback URL to your Google OAuth client too.
 const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
+if (!Number.isInteger(offset) || offset < 0 || offset > 50_000) {
+  throw new Error(`MANAGED_COPILOT_PORT_OFFSET must be a whole number from 0 to 50000 (got "${process.env.MANAGED_COPILOT_PORT_OFFSET}").`);
+}
 const ports = { gateway: 7400 + offset, factory: 7480 + offset, quickstartWebhook: 7485 + offset, assistant: ASSISTANT_PORT + offset };
+const assistantUrl = `http://localhost:${ports.assistant}`;
 
 // Generated once and kept in the AppHost's user secrets, so restarts keep the same values.
 const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue(name, { minLength: 48, special: false }, { secret: true, persist: true });
@@ -48,7 +53,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     },
     ...assistant.webhooks,
     // The assistant receives its events on its own port.
-    assistant: { ...assistant.webhooks.assistant, url: `http://localhost:${ports.assistant}/api/copilot-events` },
+    assistant: { ...assistant.webhooks.assistant, url: `${assistantUrl}/api/copilot-events` },
   },
 });
 
@@ -69,7 +74,7 @@ function addDemo(demo: { name: string; workingDirectory: string; script: string;
 await addDemo(factory.app);
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, and Google Calendar.
-const assistantApp = await addDemo({ ...ASSISTANT_DEMO, port: ports.assistant })
+const assistantApp = await addDemo({ ...ASSISTANT_DEMO, port: ports.assistant, env: { ...ASSISTANT_DEMO.env, ASSISTANT_PUBLIC_URL: assistantUrl } })
   .withEnvironment("ASSISTANT_WEBHOOK_SECRET", assistant.webhooks.assistant.secret)
   .withEnvironment("ASSISTANT_SEALING_KEY", await generatedSecret("assistant-sealing-key"));
 

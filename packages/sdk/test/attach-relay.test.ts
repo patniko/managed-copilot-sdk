@@ -255,8 +255,27 @@ describe("Copilot CLI attach relay", () => {
     for (let attempt = 0; attempt < 5; attempt++) {
       expect(await platformCloses(await connect(url, "gho_owner"), 4408, "Attachment expired.")).toBe(1012);
     }
-    expect(await platformCloses(await connect(url, "gho_owner"), 4408, "Attachment expired.")).toBe(4408);
+    const last = await connect(url, "gho_owner");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const closed = once(last, "close");
+    for (const socket of gatewaySockets) socket.close(4408, "Attachment expired.");
+    const [code, reason] = (await closed) as [number, Buffer];
+    expect(code).toBe(4408);
+    expect(reason.toString()).toBe("The attachment was interrupted repeatedly. Attach again.");
     expect(relay.outcome).toEqual({ code: "expired", message: "The attachment was interrupted repeatedly. Attach again." });
+  });
+
+  it("shuts down promptly while a CLI is still closing after a reconnect request", async () => {
+    const { relay, url } = await startRelay();
+    const cli = await connect(url, "gho_owner");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    cli.pause(); // this CLI hasn't answered the close frame yet
+    for (const socket of gatewaySockets) socket.close(4307, "The session moved into a sandbox. Reconnecting.");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const started = Date.now();
+    await relay.close();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    cli.terminate();
   });
 
   it("refuses to reconnect the CLI to a different conversation", async () => {

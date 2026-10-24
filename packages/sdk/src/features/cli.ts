@@ -187,7 +187,8 @@ export class AttachRelay {
 
   async close(): Promise<void> {
     this.#closed = true;
-    this.#active?.client.terminate();
+    // Every CLI socket, including one still closing after a reconnect request, so shutdown never waits on it.
+    for (const client of this.#wss.clients) client.terminate();
     for (const upstream of this.#upstreams) upstream.terminate();
     this.#upstreams.clear();
     this.#server.closeAllConnections();
@@ -330,7 +331,7 @@ export class AttachRelay {
       if (upstream.readyState === WebSocket.OPEN) upstream.close(1000);
     });
     upstream.on("close", (code: number, reason: Buffer) => {
-      const text = reason.toString();
+      let text = reason.toString();
       if (code === ATTACH_CLOSE_CODES.moved || code === ATTACH_CLOSE_CODES.expired) {
         if (this.#mayReconnect()) {
           // The stock CLI reconnects to this relay after 1012 (service restart); the relay then attaches it again with a
@@ -340,7 +341,8 @@ export class AttachRelay {
           setTimeout(() => client.terminate(), 2_000).unref();
           return;
         }
-        this.outcome = { code: code === ATTACH_CLOSE_CODES.moved ? "session_gone" : "expired", message: "The attachment was interrupted repeatedly. Attach again." };
+        text = "The attachment was interrupted repeatedly. Attach again.";
+        this.outcome = { code: code === ATTACH_CLOSE_CODES.moved ? "session_gone" : "expired", message: text };
       } else if (code === ATTACH_CLOSE_CODES.sessionGone) {
         this.outcome = { code: "session_gone", message: text || "The session ended." };
       }
