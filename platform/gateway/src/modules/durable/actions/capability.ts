@@ -10,6 +10,8 @@ interface CapabilityClaims {
   readonly v: 1;
   /** Session the listed actions belong to. */
   readonly sid: string;
+  /** Incarnation of that session (session IDs are reusable after deletion). */
+  readonly inc?: string;
   /** Action IDs this capability may list, claim, and answer. */
   readonly aids: readonly string[];
   /** Deployment base URL; the capability is useless anywhere else. */
@@ -50,6 +52,7 @@ export function verifyCapabilityToken(key: Buffer, token: string, expected: { re
   if (claims.exp <= expected.now) throw invalid("it expired; wait for the next delivery or poll with your own credentials");
   return {
     sessionId: claims.sid,
+    ...(typeof claims.inc === "string" ? { incarnation: claims.inc } : {}),
     actionIds: claims.aids.filter((id): id is string => typeof id === "string"),
     audience: claims.aud,
     expiresAt: new Date(claims.exp).toISOString(),
