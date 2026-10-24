@@ -143,6 +143,8 @@ export interface PolicyServiceOptions {
   readonly egressWaitMs?: number;
   /** Wait for the egress proxy even for sandboxes without network access (true when the platform runs the proxy). */
   readonly alwaysWaitForEgress?: boolean;
+  /** `MANAGED_COPILOT_EGRESS`: with `off` nothing will start a proxy, so sandboxes that need one fail at once. */
+  readonly egressMode?: "auto" | "docker" | "external" | "off";
   /** Publishes `network.blocked` platform events (rate-limited by the caller). */
   readonly onBlocked?: (session: SessionNetwork, report: EgressReport) => void;
 }
@@ -422,14 +424,26 @@ export class PolicyService {
     // When the platform runs the egress proxy, every sandbox waits for it, so the proxy exists before the sandbox
     // provider attaches it to the sandbox's network (it then denies everything for network: false).
     if ((needsEgress || this.#options.alwaysWaitForEgress) && !this.#options.egress.ready) {
-      this.#options.egress.ensureStarted?.();
-      try {
-        await this.#options.egress.waitReady(this.#options.egressWaitMs ?? 120_000);
-      } catch {
-        throw new ManagedCopilotError(
-          "capability_unavailable",
-          "The egress proxy is not running, so a sandbox with network access or vault credentials cannot start. Check that Docker is running and see the gateway log (network).",
-        );
+      const mode = this.#options.egressMode ?? "auto";
+      if (mode === "off") {
+        if (needsEgress) {
+          throw new ManagedCopilotError(
+            "capability_unavailable",
+            "This deployment runs no egress proxy (MANAGED_COPILOT_EGRESS=off), so environments with network access or vault credentials are unavailable. Use an environment with network: false and no vault environment variables, or deploy the egress proxy.",
+          );
+        }
+      } else {
+        this.#options.egress.ensureStarted?.();
+        try {
+          await this.#options.egress.waitReady(this.#options.egressWaitMs ?? 120_000);
+        } catch {
+          throw new ManagedCopilotError(
+            "capability_unavailable",
+            mode === "external"
+              ? "The egress proxy (MANAGED_COPILOT_EGRESS=external) has not connected to the gateway, so a sandbox with network access or vault credentials cannot start. Check that the proxy is running with this gateway's URL and egress key, and see the gateway log (network)."
+              : "The egress proxy is not running, so a sandbox with network access or vault credentials cannot start. Check that Docker is running and see the gateway log (network).",
+          );
+        }
       }
     }
     const secret = randomBytes(32).toString("base64url");

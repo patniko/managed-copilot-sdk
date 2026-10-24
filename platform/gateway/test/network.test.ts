@@ -445,6 +445,39 @@ describe("policy service across deployment changes", () => {
     expect(() => policy.resolveSecret(use)).toThrow(/not running in an isolated sandbox/);
   });
 
+  it("fails fast, without waiting, when the deployment runs no egress proxy", async () => {
+    const db = database();
+    const deployment = parseConfig({
+      name: "copilot",
+      vaults,
+      environments: { coder: { type: "isolated", network: ["pypi.org"] }, offline: { type: "isolated", network: false }, keyed: { type: "isolated", network: ["api.stripe.com"], vaults: ["payments"] } },
+    });
+    const store = new VaultStore({ db, sealer, deployment, env: { TEST_STRIPE_KEY: "sk_test_stripe_123" }, log });
+    let waited = false;
+    const channel = {
+      ready: false,
+      caCertificate: () => undefined,
+      waitReady: () => {
+        waited = true;
+        return new Promise<void>(() => undefined);
+      },
+      upsert: (_registration: EgressRegistration) => undefined,
+      remove: (_sandboxId: string) => undefined,
+    };
+    const policy = new PolicyService({ db, deployment, vaults: store, egress: channel, log, egressMode: "off" });
+    for (const [sessionId, environment] of [
+      ["s-net", "coder"],
+      ["s-off", "offline"],
+      ["s-keyed", "keyed"],
+    ] as const) {
+      policy.bindSession({ sessionId, owner: 1, environment, type: "isolated", requested: undefined, vaults: undefined });
+    }
+    await expect(policy.registerSandbox({ sandboxId: "sbx_net", sessionId: "s-net" })).rejects.toMatchObject({ code: "capability_unavailable", message: expect.stringContaining("MANAGED_COPILOT_EGRESS=off") });
+    await expect(policy.registerSandbox({ sandboxId: "sbx_keyed", sessionId: "s-keyed" })).rejects.toMatchObject({ code: "capability_unavailable" });
+    expect((await policy.registerSandbox({ sandboxId: "sbx_off", sessionId: "s-off" })).policy.access).toBe("disabled");
+    expect(waited).toBe(false);
+  });
+
   it("builds proxy URLs for the address a sandbox provider names", async () => {
     const policy = start(database(), { environments: { coder: { type: "isolated", network: true } } });
     policy.bindSession({ sessionId: "s-proxy", owner: 1, environment: "coder", type: "isolated", requested: undefined, vaults: undefined });
