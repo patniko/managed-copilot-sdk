@@ -427,6 +427,24 @@ describe("policy service across deployment changes", () => {
     expect(restarted.session("s-roll")).toMatchObject({ environment: "worker", type: "isolated", policy: { allowedDomains: ["pypi.org"] } });
   });
 
+  it("refuses vault secrets to a reverted promotion's candidate sandbox", async () => {
+    const db = database();
+    const environments = {
+      helper: { type: "promotable", promoteTo: "worker", vaults: ["payments"], network: ["api.stripe.com"] },
+      worker: { type: "isolated", vaults: ["payments"], network: ["api.stripe.com"] },
+    };
+    const policy = start(db, { environments });
+    policy.bindSession({ sessionId: "s-cand", owner: 1, environment: "helper", type: "promotable", requested: undefined, vaults: undefined });
+    policy.promoteSession("s-cand", "worker");
+    const candidate = await policy.registerSandbox({ sandboxId: "sbx_cand", sessionId: "s-cand" });
+    const binding = policy.registrations().find((registration) => registration.sandboxId === "sbx_cand")!.credentials[0]!;
+    expect(binding.placeholder).toBe(candidate.env.STRIPE_API_KEY);
+    const use = { sandboxId: "sbx_cand", credentialId: binding.id, placeholder: binding.placeholder, host: "api.stripe.com", port: 443, header: "authorization" };
+    expect(policy.resolveSecret(use)).toBe("sk_test_stripe_123");
+    policy.revertPromotion("s-cand");
+    expect(() => policy.resolveSecret(use)).toThrow(/not running in an isolated sandbox/);
+  });
+
   it("builds proxy URLs for the address a sandbox provider names", async () => {
     const policy = start(database(), { environments: { coder: { type: "isolated", network: true } } });
     policy.bindSession({ sessionId: "s-proxy", owner: 1, environment: "coder", type: "isolated", requested: undefined, vaults: undefined });
