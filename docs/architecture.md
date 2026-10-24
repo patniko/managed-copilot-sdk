@@ -931,8 +931,9 @@ sequenceDiagram
   the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
   headers, so no CLI token reaches a runtime or sandbox.
 - Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
-  empty because the host cannot list models without an AHP credential; GitHub Copilot app publication is not
-  implemented (`github.publish`).
+  empty because the host cannot list models without an AHP credential. GitHub Copilot app publication is not
+  implemented: a deployment whose environment sets `github.publish: true` is refused at gateway startup with
+  `transport_unsupported`, naming the environment (never silently ignored).
 
 ### CLI and quickstart
 
