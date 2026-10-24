@@ -18,7 +18,9 @@ class FakeAgent {
   files = new Map<string, string>();
   rejected: { path: string; reason: string }[] = [];
   mutate: string | undefined;
+  gate: Promise<void> | undefined;
   async outputsManifest(): Promise<SandboxOutputsManifest> {
+    if (this.gate) await this.gate;
     return {
       files: [...this.files].map(([path, content]) => ({ path, size: Buffer.byteLength(content), sha256: sha(content), modifiedAt: new Date().toISOString() })),
       rejected: this.rejected,
@@ -119,6 +121,31 @@ describe("ArtifactService", () => {
     await service.publish(SESSION, ids, "completed");
     expect((await waiting).artifacts.map((artifact) => artifact.path)).toEqual(["out.txt"]);
     await expect(service.waitForPublication(SESSION, { turnId: "nope" })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "not_found"));
+  });
+
+  it("never attributes outputs to a turn once a later turn may have changed them", async () => {
+    agent.files.set("report.md", "turn 1");
+    let release!: () => void;
+    agent.gate = new Promise((resolve) => (release = resolve));
+    service.turnStarted(SESSION, "turn-1");
+    const publishing = service.publish(SESSION, service.turnsCompleted(SESSION, "completed"), "completed");
+    service.turnStarted(SESSION, "turn-2");
+    agent.files.set("report.md", "turn 2 (unfinished)");
+    release();
+    await publishing;
+    await expect(service.waitForPublication(SESSION, { turnId: "turn-1" })).rejects.toSatisfy(
+      (error: unknown) => isManagedCopilotError(error, "publication_failed") && /Another turn started/.test((error as Error).message),
+    );
+    expect(service.list(SESSION)).toEqual([]);
+  });
+
+  it("fails publications a gateway restart interrupted instead of leaving them pending", async () => {
+    service.turnStarted(SESSION, "turn-1");
+    service.turnsCompleted(SESSION, "completed");
+    expect(service.failInterruptedTurns()).toBe(1);
+    await expect(service.waitForPublication(SESSION, { turnId: "turn-1", timeoutMs: 100 })).rejects.toSatisfy(
+      (error: unknown) => isManagedCopilotError(error, "publication_failed") && /restarted/.test((error as Error).message),
+    );
   });
 
   it("deletes a session's artifacts", async () => {

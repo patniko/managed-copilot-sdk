@@ -175,7 +175,8 @@ export class ArtifactService implements ArtifactsService {
   failInterruptedTurns(): number {
     const db = this.#options.db;
     const rows = db.prepare("SELECT session_id, turn_id FROM sandbox_turns WHERE state = 'running'").all() as { session_id: string; turn_id: string }[];
-    if (rows.length === 0) return 0;
+    const pending = db.prepare("SELECT session_id, turn_id FROM sandbox_publications WHERE state = 'pending'").all() as { session_id: string; turn_id: string }[];
+    if (rows.length === 0 && pending.length === 0) return 0;
     const now = new Date().toISOString();
     transaction(db, () => {
       for (const row of rows) {
@@ -184,8 +185,17 @@ export class ArtifactService implements ArtifactsService {
           "INSERT INTO sandbox_publications (session_id, turn_id, state, error, created_at, completed_at) VALUES (?, ?, 'failed', ?, ?, ?) ON CONFLICT (session_id, turn_id) DO UPDATE SET state = 'failed', error = excluded.error, completed_at = excluded.completed_at",
         ).run(row.session_id, row.turn_id, "The gateway restarted while this turn was running, so its outputs were not published.", now, now);
       }
+      // A publication in flight when the gateway stopped had no immutable checkpoint to resume from.
+      for (const row of pending) {
+        db.prepare("UPDATE sandbox_publications SET state = 'failed', error = ?, completed_at = ? WHERE session_id = ? AND turn_id = ? AND state = 'pending'").run(
+          "The gateway restarted while this turn's outputs were being published, so they were not published. Run another turn to publish the current outputs.",
+          now,
+          row.session_id,
+          row.turn_id,
+        );
+      }
     });
-    return rows.length;
+    return rows.length + pending.length;
   }
 
   async #publish(sessionId: string, turnIds: readonly string[], outcome: TurnOutcome): Promise<void> {
@@ -207,11 +217,20 @@ export class ArtifactService implements ArtifactsService {
       for (const id of turnIds) this.#notify(sessionId, id);
       return;
     }
+    const lastSeq = (db.prepare("SELECT seq FROM sandbox_turns WHERE session_id = ? AND turn_id = ?").get(sessionId, turnId) as { seq: number } | undefined)?.seq ?? 0;
     const dir = this.#dir(sessionId);
     const created: string[] = [];
     try {
       const agent = await this.#options.agentFor(sessionId);
       const manifest = await agent.outputsManifest();
+      // The manifest fixes the bytes (downloads are verified against it). If a later turn had already started, it may
+      // have changed outputs/ first, so those bytes cannot be attributed to this turn.
+      if (db.prepare("SELECT 1 FROM sandbox_turns WHERE session_id = ? AND seq > ? LIMIT 1").get(sessionId, lastSeq)) {
+        throw new ManagedCopilotError(
+          "publication_failed",
+          "Another turn started before this turn's outputs were captured, so they cannot be attributed to this turn. The current outputs are published when the later turn completes.",
+        );
+      }
       if (manifest.rejected.length > 0) {
         const listed = manifest.rejected.slice(0, 5).map((entry) => `outputs/${entry.path} (${entry.reason})`).join(", ");
         throw new ManagedCopilotError("publication_failed", `${manifest.rejected.length} output file${manifest.rejected.length === 1 ? "" : "s"} could not be published: ${listed}${manifest.rejected.length > 5 ? ", …" : ""}. Remove or fix them and run another turn.`);

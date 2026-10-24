@@ -1,9 +1,9 @@
-// Gateway-side client for one sandbox's sandboxd, reached through the relay at /relay/<sandboxId>/<route>.
-import { request, type IncomingMessage } from "node:http";
+// Gateway-side client for one sandbox's sandboxd, reached at the provider's endpoint (the Docker relay locally).
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { Duplex, Readable } from "node:stream";
 import {
   ManagedCopilotError,
-  PLATFORM_KEY_HEADER,
   SANDBOXD_ROUTES,
   type ErrorCode,
   type FileEntry,
@@ -13,6 +13,7 @@ import {
   type SandboxStartRequest,
 } from "@managed-copilot/protocol";
 import WebSocket, { createWebSocketStream } from "ws";
+import type { SandboxEndpoint } from "./providers/types.js";
 
 const CODE_MAP: Record<string, ErrorCode> = {
   invalid_request: "invalid_request",
@@ -32,12 +33,6 @@ interface SendOptions {
   signal?: AbortSignal;
 }
 
-export interface RelayTarget {
-  /** e.g. http://127.0.0.1:52011 */
-  readonly baseUrl: string;
-  readonly platformKey: string;
-}
-
 async function errorFrom(res: IncomingMessage, fallback: string): Promise<ManagedCopilotError> {
   const chunks: Buffer[] = [];
   for await (const chunk of res) chunks.push(chunk as Buffer);
@@ -51,31 +46,30 @@ async function errorFrom(res: IncomingMessage, fallback: string): Promise<Manage
 }
 
 export class SandboxAgentClient {
-  readonly #relay: () => Promise<RelayTarget>;
-  readonly #sandboxId: string;
+  readonly #endpoint: () => Promise<SandboxEndpoint>;
   readonly #key: string;
   readonly #onUnreachable: (() => void) | undefined;
 
-  constructor(relay: () => Promise<RelayTarget>, sandboxId: string, key: string, onUnreachable?: () => void) {
-    this.#relay = relay;
-    this.#sandboxId = sandboxId;
+  constructor(endpoint: () => Promise<SandboxEndpoint>, key: string, onUnreachable?: () => void) {
+    this.#endpoint = endpoint;
     this.#key = key;
     this.#onUnreachable = onUnreachable;
   }
 
   async #headers(): Promise<{ base: URL; headers: Record<string, string> }> {
-    const relay = await this.#relay();
-    return { base: new URL(`${relay.baseUrl}/relay/${this.#sandboxId}`), headers: { [PLATFORM_KEY_HEADER]: relay.platformKey, authorization: `Bearer ${this.#key}` } };
+    const endpoint = await this.#endpoint();
+    return { base: new URL(endpoint.url.replace(/\/+$/, "")), headers: { ...endpoint.headers, authorization: "Bearer " + this.#key } };
   }
 
   /** Sends a request and returns the raw response for 2xx statuses; maps errors to ManagedCopilotError. */
   async #send(method: string, route: string, options: SendOptions = {}): Promise<IncomingMessage> {
     const { base, headers } = await this.#headers();
     const search = new URLSearchParams(options.query ?? {}).toString();
-    const path = `${base.pathname}${route}${search ? `?${search}` : ""}`;
+    const path = `${base.pathname === "/" ? "" : base.pathname}${route}${search ? `?${search}` : ""}`;
+    const request = (base.protocol === "https:" ? httpsRequest : httpRequest) as typeof httpRequest;
     return new Promise<IncomingMessage>((resolve, reject) => {
       const req = request(
-        { host: base.hostname, port: Number(base.port), method, path, headers: { ...headers, ...options.headers }, ...(options.signal ? { signal: options.signal } : {}) },
+        { protocol: base.protocol, hostname: base.hostname, ...(base.port ? { port: Number(base.port) } : {}), method, path, headers: { ...headers, ...options.headers }, ...(options.signal ? { signal: options.signal } : {}) },
         (res) => {
           if ((res.statusCode ?? 500) >= 400) {
             void errorFrom(res, `Sandbox request ${method} ${route} failed`).then(reject, reject);
@@ -87,7 +81,7 @@ export class SandboxAgentClient {
       req.on("error", (error: NodeJS.ErrnoException) => {
         if (error.name === "AbortError") return reject(new ManagedCopilotError("invalid_request", "The sandbox request was cancelled."));
         if (error.code === "ECONNREFUSED" || error.code === "ECONNRESET") this.#onUnreachable?.();
-        reject(new ManagedCopilotError("capability_unavailable", `The sandbox relay is not reachable: ${error.message}`));
+        reject(new ManagedCopilotError("capability_unavailable", `The sandbox is not reachable: ${error.message}`));
       });
       if (options.timeoutMs) req.setTimeout(options.timeoutMs, () => req.destroy(new Error(`timed out after ${options.timeoutMs} ms`)));
       const body = options.body;
@@ -179,7 +173,7 @@ export class SandboxAgentClient {
   async openStream(route: string, query?: Record<string, string>): Promise<Duplex> {
     const { base, headers } = await this.#headers();
     const search = new URLSearchParams(query ?? {}).toString();
-    const url = `ws://${base.host}${base.pathname}${route}${search ? `?${search}` : ""}`;
+    const url = `${base.protocol === "https:" ? "wss:" : "ws:"}//${base.host}${base.pathname === "/" ? "" : base.pathname}${route}${search ? `?${search}` : ""}`;
     const ws = new WebSocket(url, { headers, perMessageDeflate: false, maxPayload: 64 * 1024 * 1024, handshakeTimeout: 15_000 });
     await new Promise<void>((resolve, reject) => {
       ws.once("open", () => resolve());
@@ -188,7 +182,7 @@ export class SandboxAgentClient {
       });
       ws.once("error", (error: NodeJS.ErrnoException) => {
         if (error.code === "ECONNREFUSED" || error.code === "ECONNRESET") this.#onUnreachable?.();
-        reject(new ManagedCopilotError("capability_unavailable", `The sandbox relay is not reachable: ${error.message}`));
+        reject(new ManagedCopilotError("capability_unavailable", `The sandbox is not reachable: ${error.message}`));
       });
     });
     const stream = createWebSocketStream(ws, { allowHalfOpen: false });

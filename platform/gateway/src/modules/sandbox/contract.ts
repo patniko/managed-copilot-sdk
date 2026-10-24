@@ -177,11 +177,13 @@ export interface SandboxSessionView {
   readonly id: string;
   readonly ownerId: number;
   readonly environment?: string;
+  /** The ledger's last root turn; survives gateway restarts. */
+  readonly lastTurn?: { readonly turnId: string; readonly status: string };
 }
 
 /** From core: `sessions`. `subscribe` listeners run synchronously, in order, before fan-out to clients. */
 export interface SandboxSessionsPort {
-  get(sessionId: string): SandboxSessionView | undefined | Promise<SandboxSessionView | undefined>;
+  get(sessionId: string): SandboxSessionView | undefined;
   subscribe(listener: (sessionId: string, event: SandboxRuntimeEvent) => void): () => void;
 }
 
@@ -192,7 +194,7 @@ export interface SandboxEventsPort {
 
 /** From network: `policy`. Throws on any failure; never returns a partial registration. */
 export interface SandboxPolicyPort {
-  registerSandbox(request: { readonly sandboxId: string; readonly sessionId: string }): Promise<EgressRegistration> | EgressRegistration;
+  registerSandbox(request: { readonly sandboxId: string; readonly sessionId: string; readonly proxy?: { readonly host: string; readonly port: number } }): Promise<EgressRegistration> | EgressRegistration;
   updateSandbox(sandboxId: string, update: { readonly address: string }): Promise<void> | void;
   unregisterSandbox(sandboxId: string): Promise<void> | void;
 }

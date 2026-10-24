@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { connect } from "node:net";
 import type { SandboxdRuntimeState } from "@managed-copilot/protocol";
 import type { Log } from "../shared/log.js";
-import { inDirectory, type Identity } from "./exec.js";
+import { asWorkload, type Identity } from "./exec.js";
 
 export interface RuntimeOptions {
   readonly binary: string;
@@ -71,12 +71,10 @@ export class RuntimeSupervisor {
     const env = this.#env ?? {};
     this.#state = "starting";
     this.#exitCode = undefined;
-    const target = inDirectory(cwd, binary, ["--headless", "--no-auto-update", "--no-auto-login", "--port", String(port)]);
+    const target = asWorkload(identity, cwd, binary, ["--headless", "--no-auto-update", "--no-auto-login", "--port", String(port)]);
     const child = spawn(target.command, target.args, {
       cwd: target.cwd,
       env,
-      uid: identity.uid,
-      gid: identity.gid,
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.#child = child;

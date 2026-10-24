@@ -8,7 +8,7 @@ import type { FileEntry, SandboxdStatus, SandboxOutputsManifest, SandboxSetupRec
 import { LIMITS, PATHS, SANDBOX_GID, SANDBOX_RUNTIME_PORT, SANDBOX_UID } from "../shared/constants.js";
 import type { Log } from "../shared/log.js";
 import { PathError, type PathErrorCode } from "../shared/paths.js";
-import { redact, type Identity } from "./exec.js";
+import { asWorkload, redact, type Identity } from "./exec.js";
 import { runtimeEnvironment, secretValues, workloadEnvironment, type EnvironmentInput } from "./env.js";
 import { RuntimeSupervisor } from "./runtime.js";
 import { emptyRecord, runSetup } from "./setup.js";
@@ -236,11 +236,10 @@ export class SandboxAgent {
 
   #spawnWorker(args: readonly string[]) {
     // The worker enters /workspace itself, after dropping to the workload identity.
-    return spawn(process.execPath, [WORKER, ...args], {
-      cwd: "/",
+    const target = asWorkload(IDENTITY, "/", process.execPath, [WORKER, ...args]);
+    return spawn(target.command, target.args, {
+      cwd: target.cwd,
       env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: PATHS.home },
-      uid: IDENTITY.uid,
-      gid: IDENTITY.gid,
       stdio: ["pipe", "pipe", "pipe"],
     });
   }

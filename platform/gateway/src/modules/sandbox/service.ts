@@ -34,9 +34,7 @@ import type {
   SandboxRuntimeEvent,
   SandboxSessionsPort,
 } from "./contract.js";
-import type { DockerClient } from "./docker.js";
-import type { SandboxImages } from "./images.js";
-import type { DockerSandboxProvider } from "./provider.js";
+import type { SandboxOperationOptions, SandboxProvider, SandboxSpec } from "./providers/types.js";
 import { deferAgentSelection, rewriteSessionParams } from "./params.js";
 import type { SandboxRow, SandboxStore } from "./store.js";
 
@@ -44,6 +42,8 @@ const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.request
 const ACTION_COMPLETED = new Set(["external_tool.completed", "permission.completed", "elicitation.completed"]);
 const IDLE_SWEEP_MS = Number(process.env.MANAGED_COPILOT_SANDBOX_IDLE_SWEEP_MS ?? 30_000) || 30_000;
 const RECONCILE_MS = 5 * 60_000;
+/** How long a sandbox found running at startup stays protected while the ledger says its last turn was running. */
+const RECOVERY_GRACE_MS = 2 * 60 * 60_000;
 
 interface LiveState {
   readonly runtimes: Set<SandboxRuntime>;
@@ -52,14 +52,14 @@ interface LiveState {
   turnRunning: boolean;
   turnFailed: boolean;
   lastActivity: number;
+  /** Set when reconciliation found the sandbox running after a gateway restart; cleared once its events flow again. */
+  recoveredAt?: number;
 }
 
 export interface SandboxServiceOptions {
   readonly app: GatewayApp;
   readonly store: SandboxStore;
-  readonly provider: DockerSandboxProvider;
-  readonly images: SandboxImages;
-  readonly docker: DockerClient;
+  readonly provider: SandboxProvider;
   readonly log: Logger;
   readonly defaultIdleSeconds: number;
   /** Build the base image and reconcile on start even before any sandbox exists. */
@@ -99,7 +99,10 @@ export class SandboxService implements SandboxesService {
   /** Sessions with an active (non-deleted) sandbox; events for anything else are ignored cheaply. */
   readonly #active = new Set<string>();
   #artifacts: ArtifactService | undefined;
-  #dockerReady: Promise<void> | undefined;
+  /** Set once the backend answered, so shutdown only releases shared resources that may exist. */
+  #backendUsed = false;
+  /** Aborted at gateway shutdown; cancels slow backend operations. */
+  readonly #shutdown = new AbortController();
   #timers: NodeJS.Timeout[] = [];
   #unsubscribe: (() => void) | undefined;
   #stopping = false;
@@ -119,29 +122,39 @@ export class SandboxService implements SandboxesService {
 
   // Infrastructure helpers -------------------------------------------------------------------------------------
 
-  #docker(): Promise<void> {
-    this.#dockerReady ??= this.#options.docker.ping().then(
-      (info) => {
-        this.#log.info("Docker is available for sandboxes", { version: info.version, platform: `${info.os}/${info.arch}`, endpoint: this.#options.docker.endpoint.label });
-      },
-      (error: unknown) => {
-        this.#dockerReady = undefined;
-        throw new ManagedCopilotError("capability_unavailable", `Isolated sandboxes need Docker, which is not reachable (${(error as Error).message}). Start Docker Desktop and retry.`);
-      },
-    );
-    return this.#dockerReady;
+  async #ready(): Promise<void> {
+    try {
+      await this.#options.provider.ready();
+      this.#backendUsed = true;
+    } catch (error) {
+      throw toManaged(error, "capability_unavailable");
+    }
   }
 
   #agent(row: SandboxRow): SandboxAgentClient {
+    const { provider } = this.#options;
     return new SandboxAgentClient(
       () =>
-        this.#options.provider.relay().catch((error: unknown) => {
+        provider.endpoint(row.id).catch((error: unknown) => {
           throw toManaged(error, "capability_unavailable");
         }),
-      row.id,
       row.key,
-      () => this.#options.provider.resetRelay(),
+      () => provider.reportUnreachable?.(row.id),
     );
+  }
+
+  /** What the provider needs to (re)create this sandbox's compute. */
+  #spec(row: SandboxRow, imageId: string): SandboxSpec {
+    return {
+      sandboxId: row.id,
+      sessionId: row.sessionId,
+      ownerId: row.ownerId,
+      environment: row.environment,
+      size: row.size,
+      imageId,
+      env: { SANDBOX_ID: row.id, SANDBOXD_KEY: row.key, SANDBOXD_RUNTIME_TOKEN: row.runtimeToken },
+      ...(row.customizations ? { customizations: row.customizations } : {}),
+    };
   }
 
   #policy(): SandboxPolicyPort | undefined {
@@ -165,7 +178,8 @@ export class SandboxService implements SandboxesService {
       return { env: {} };
     }
     try {
-      return await policy.registerSandbox({ sandboxId: row.id, sessionId: row.sessionId });
+      const proxy = this.#options.provider.egressProxy?.();
+      return await policy.registerSandbox({ sandboxId: row.id, sessionId: row.sessionId, ...(proxy ? { proxy } : {}) });
     } catch (error) {
       throw toManaged(error, "capability_unavailable");
     }
@@ -173,10 +187,23 @@ export class SandboxService implements SandboxesService {
 
   async #pinAddress(row: SandboxRow): Promise<void> {
     const policy = this.#policy();
-    if (!policy) return;
+    // Without source pinning (e.g. ingress-proxied backends) the per-sandbox proxy credential is the only binding.
+    if (!policy || !this.#options.provider.capabilities.addressPinning) return;
     const address = await this.#options.provider.address(row.id);
     if (!address) throw new ManagedCopilotError("internal", "The sandbox has no address on its network.");
     await policy.updateSandbox(row.id, { address });
+  }
+
+  /** Progress and cancellation for slow backend operations. */
+  #operation(row: SandboxRow): SandboxOperationOptions {
+    return {
+      signal: this.#shutdown.signal,
+      onProgress: (message) => this.#log.info("Sandbox provisioning", { sessionId: row.sessionId, sandboxId: row.id, message }),
+    };
+  }
+
+  get #startTimeoutMs(): number {
+    return this.#options.provider.capabilities.startTimeoutMs ?? 60_000;
   }
 
   async #unregisterEgress(row: SandboxRow): Promise<void> {
@@ -303,10 +330,10 @@ export class SandboxService implements SandboxesService {
 
   async #create(request: CreateSandboxRequest): Promise<SandboxHandle> {
     const started = Date.now();
-    const { store, provider, images } = this.#options;
+    const { store, provider } = this.#options;
     const environment = this.#environment(request);
     const { plan, workloadEnv } = this.#setupPlan(environment.config, request);
-    await this.#docker();
+    await this.#ready();
     const previous = store.bySession(request.sessionId);
     if (previous) {
       if (previous.state !== "deleted" && previous.state !== "failed") throw new ManagedCopilotError("conflict", `Session ${request.sessionId} already has a sandbox.`);
@@ -332,25 +359,15 @@ export class SandboxService implements SandboxesService {
     this.#active.add(request.sessionId);
     this.#log.info("Creating sandbox", { sessionId: row.sessionId, sandboxId: row.id, environment: row.environment, size: row.size, network: row.network.access });
     try {
-      const image = await images.ensureEnvironment(request.environment, environment.config);
-      store.update(row.sessionId, { image: image.tag, imageId: image.id });
+      const image = await provider.ensureImage(request.environment, environment.config);
+      store.update(row.sessionId, { image: image.ref, imageId: image.id });
       const egress = await this.#registerEgress(row);
-      const { subnet } = await provider.create({
-        sandboxId: row.id,
-        sessionId: row.sessionId,
-        ownerId: row.ownerId,
-        environment: row.environment,
-        size: row.size,
-        imageId: image.id,
-        key: row.key,
-        runtimeToken: row.runtimeToken,
-        ...(row.customizations ? { customizations: row.customizations } : {}),
-      });
-      store.update(row.sessionId, { subnet, state: "setting_up", startedAt: new Date().toISOString() });
+      await provider.create(this.#spec(row, image.id), this.#operation(row));
+      store.update(row.sessionId, { state: "setting_up", startedAt: new Date().toISOString() });
       // Egress pins the proxy credential to the sandbox's source address; setup installs already go through it.
       await this.#pinAddress(row);
       const agent = this.#agent(row);
-      await agent.waitHealthy();
+      await agent.waitHealthy(this.#startTimeoutMs);
       const final = await agent.start(
         { mode: "create", setup: plan, platformEnv: egress.env, workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}) },
         (event) => {
@@ -387,7 +404,7 @@ export class SandboxService implements SandboxesService {
   }
 
   async #ensureRunning(sessionId: string): Promise<SandboxHandle> {
-    const { store, provider, docker } = this.#options;
+    const { store, provider } = this.#options;
     let row = this.#row(sessionId);
     switch (row.state) {
       case "deleting":
@@ -398,7 +415,7 @@ export class SandboxService implements SandboxesService {
       case "setting_up":
         throw new ManagedCopilotError("state_restore_failed", "The sandbox never finished its initial setup.", { sandboxId: row.id });
       case "running": {
-        await this.#docker();
+        await this.#ready();
         if (await provider.isRunning(row.id)) {
           try {
             const status = await this.#agent(row).health();
@@ -417,35 +434,26 @@ export class SandboxService implements SandboxesService {
       throw new ManagedCopilotError("state_restore_failed", "This sandbox cannot be resumed because its initial setup did not complete; setup is never replayed automatically.", { sandboxId: row.id });
     }
     const started = Date.now();
-    await this.#docker();
+    await this.#ready();
     let fresh = false;
-    if (!(await provider.start(row.id))) {
-      if (!(await provider.volumesExist(row.id))) {
-        store.update(sessionId, { state: "failed", errorCode: "state_restore_failed", error: "The sandbox's persistent storage no longer exists." });
-        throw new ManagedCopilotError("state_restore_failed", "The sandbox's persistent storage no longer exists, so the session cannot be restored.", { sandboxId: row.id });
-      }
-      if (!row.imageId || !(await docker.inspectImage(row.imageId))) {
+    const outcome = await provider.start(row.id, this.#operation(row));
+    if (outcome === "gone") {
+      store.update(sessionId, { state: "failed", errorCode: "state_restore_failed", error: "The sandbox's persistent storage no longer exists." });
+      throw new ManagedCopilotError("state_restore_failed", "The sandbox's persistent storage no longer exists, so the session cannot be restored.", { sandboxId: row.id });
+    }
+    if (outcome === "recreate") {
+      if (!row.imageId || !(await provider.hasImage(row.imageId))) {
         store.update(sessionId, { state: "failed", errorCode: "state_restore_failed", error: `The sandbox's pinned image ${row.image ?? ""} is no longer available.` });
         throw new ManagedCopilotError("state_restore_failed", `The sandbox's pinned image (${row.image ?? row.imageId ?? "unknown"}) is no longer available, so its toolchain cannot be restored.`, { sandboxId: row.id });
       }
-      await provider.create({
-        sandboxId: row.id,
-        sessionId: row.sessionId,
-        ownerId: row.ownerId,
-        environment: row.environment,
-        size: row.size,
-        imageId: row.imageId,
-        key: row.key,
-        runtimeToken: row.runtimeToken,
-        ...(row.customizations ? { customizations: row.customizations } : {}),
-      });
+      await provider.create(this.#spec(row, row.imageId), this.#operation(row));
       fresh = true;
     }
     try {
       const egress = await this.#registerEgress(row);
       await this.#pinAddress(row);
       const agent = this.#agent(row);
-      await agent.waitHealthy();
+      await agent.waitHealthy(this.#startTimeoutMs);
       const final = await agent.start({ mode: "resume", platformEnv: egress.env, workloadEnv: row.workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}) }, () => undefined);
       if (final.type === "failed") throw new ManagedCopilotError(final.code === "internal" ? "internal" : "state_restore_failed", final.message, { sandboxId: row.id });
       store.update(sessionId, { state: "running", startedAt: new Date().toISOString(), errorCode: null, error: null });
@@ -529,7 +537,7 @@ export class SandboxService implements SandboxesService {
     const row = store.bySession(sessionId);
     if (!row || row.state !== "running") return;
     const live = this.#live.get(sessionId);
-    if (idle && live && (live.turnRunning || live.pending.size > 0 || live.busy > 0 || Date.now() - live.lastActivity < row.idleTimeoutSeconds * 1000)) return;
+    if (idle && live && (live.turnRunning || live.pending.size > 0 || live.busy > 0 || this.#durablyBusy(sessionId, live) || Date.now() - live.lastActivity < row.idleTimeoutSeconds * 1000)) return;
     store.update(sessionId, { state: "stopping" });
     for (const runtime of [...(live?.runtimes ?? [])]) runtime.close();
     try {
@@ -559,7 +567,7 @@ export class SandboxService implements SandboxesService {
     store.update(sessionId, { state: "deleting" });
     for (const runtime of [...(this.#live.get(sessionId)?.runtimes ?? [])]) runtime.close();
     try {
-      await this.#docker();
+      await this.#ready();
       await provider.remove(row.id);
       await this.#unregisterEgress(row);
       await this.#artifacts?.deleteSession(sessionId);
@@ -628,6 +636,7 @@ export class SandboxService implements SandboxesService {
     if (!this.#active.has(sessionId)) return;
     const live = this.#liveFor(sessionId);
     live.lastActivity = Date.now();
+    live.recoveredAt = undefined;
     const data = (event.data ?? {}) as Record<string, unknown>;
     const requestId = typeof data["requestId"] === "string" ? (data["requestId"] as string) : typeof data["toolCallId"] === "string" ? (data["toolCallId"] as string) : undefined;
     if (ACTION_REQUESTED.has(event.type)) {
@@ -661,7 +670,7 @@ export class SandboxService implements SandboxesService {
     if (this.#stopping) return;
     for (const row of this.#options.store.inStates(["running"])) {
       const live = this.#liveFor(row.sessionId);
-      if (live.turnRunning || live.pending.size > 0 || live.busy > 0) continue;
+      if (live.turnRunning || live.pending.size > 0 || live.busy > 0 || this.#durablyBusy(row.sessionId, live)) continue;
       if (Date.now() - live.lastActivity < row.idleTimeoutSeconds * 1000) continue;
       void this.#withLock(row.sessionId, () => this.#stop(row.sessionId, "idle", true)).catch((error: unknown) =>
         this.#log.warn("Idle stop failed", { sessionId: row.sessionId, error: (error as Error).message }),
@@ -669,15 +678,34 @@ export class SandboxService implements SandboxesService {
     }
   }
 
-  /** Finishes interrupted work after a crash or restart and removes Docker resources no record owns. */
+  /**
+   * Work that in-memory tracking cannot see after a gateway restart: open durable actions (the stock runtime does not
+   * re-emit pending requests), and a turn the ledger last saw running in a sandbox recovered at startup, until its
+   * events are observed again or the recovery grace ends.
+   */
+  #durablyBusy(sessionId: string, live: LiveState): boolean {
+    const actions = optional<{ list(sessionId: string, options: { readonly open?: boolean }): readonly unknown[] }>(this.#options.app, "actions");
+    try {
+      if (actions && typeof actions.list === "function" && actions.list(sessionId, { open: true }).length > 0) return true;
+    } catch (error) {
+      this.#log.warn("Could not read pending actions; keeping the sandbox running", { sessionId, error: (error as Error).message });
+      return true;
+    }
+    if (live.recoveredAt !== undefined && Date.now() - live.recoveredAt < RECOVERY_GRACE_MS) {
+      return this.#sessions()?.get?.(sessionId)?.lastTurn?.status === "running";
+    }
+    return false;
+  }
+
+  /** Finishes interrupted work after a crash or restart and removes backend resources no record owns. */
   async reconcile(): Promise<void> {
     const { store, provider } = this.#options;
     const rows = store.all().filter((row) => row.state !== "deleted");
     if (rows.length === 0 && !this.#options.prepareOnStart) return;
     try {
-      await this.#docker();
+      await this.#ready();
     } catch (error) {
-      this.#log.warn("Skipping sandbox reconciliation: Docker is not reachable", { error: (error as Error).message });
+      this.#log.warn(`Skipping sandbox reconciliation: the ${provider.kind} backend is not reachable`, { error: (error as Error).message });
       return;
     }
     for (const row of rows) {
@@ -692,7 +720,10 @@ export class SandboxService implements SandboxesService {
           await this.delete(row.sessionId);
         } else if (row.state === "running" || row.state === "stopping") {
           if (!(await provider.isRunning(row.id))) store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });
-          else await provider.attachPlatform(provider.resources(row.id).network);
+          else {
+            await provider.reattach?.(row.id);
+            this.#liveFor(row.sessionId).recoveredAt = Date.now();
+          }
         } else if (row.state === "failed") {
           // Never-ready sandboxes hold no user state; failed resumes keep their volumes until the session is deleted.
           if (row.setup?.state === "succeeded") await provider.stop(row.id);
@@ -703,10 +734,10 @@ export class SandboxService implements SandboxesService {
       }
     }
     try {
-      const owned = new Set(rows.map((row) => row.id));
       for (const id of await provider.inventory()) {
+        // Decide on current ownership: a sandbox created while this sweep ran already has its row.
         const row = store.byId(id);
-        if (owned.has(id) && row && row.state !== "deleted") continue;
+        if (row && row.state !== "deleted") continue;
         this.#log.info("Removing orphaned sandbox resources", { sandboxId: id });
         await provider.remove(id);
       }
@@ -717,27 +748,29 @@ export class SandboxService implements SandboxesService {
 
   async start(): Promise<void> {
     const interrupted = this.#artifacts?.failInterruptedTurns() ?? 0;
-    if (interrupted > 0) this.#log.warn("Marked turns interrupted by a gateway restart as failed", { turns: interrupted });
+    if (interrupted > 0) this.#log.warn("Marked turns and publications interrupted by a gateway restart as failed", { count: interrupted });
     const sessions = this.#sessions();
     if (sessions?.subscribe) this.#unsubscribe = sessions.subscribe((sessionId, event) => this.#onEvent(sessionId, event));
     else this.#log.warn("The sessions service is unavailable; artifact publication and idle tracking are disabled");
+    await this.reconcile();
+    // Idle sweeps start only after reconciliation restored what in-memory state cannot know.
     this.#timers.push(setInterval(() => this.#sweepIdle(), IDLE_SWEEP_MS).unref());
     this.#timers.push(
       setInterval(() => {
         for (const row of this.#options.store.inStates(["deleting"])) void this.delete(row.sessionId).catch(() => undefined);
       }, RECONCILE_MS).unref(),
     );
-    await this.reconcile();
     if (this.#options.prepareOnStart) {
-      void this.#docker()
-        .then(() => this.#options.images.ensureBase())
-        .then(() => this.#options.provider.relay())
+      const { provider } = this.#options;
+      void this.#ready()
+        .then(() => provider.prepare?.())
         .catch((error: unknown) => this.#log.warn("Sandbox preparation failed; it will be retried on first use", { error: (error as Error).message }));
     }
   }
 
   async shutdown(): Promise<void> {
     this.#stopping = true;
+    this.#shutdown.abort();
     this.#unsubscribe?.();
     for (const timer of this.#timers) clearInterval(timer);
     this.#timers = [];
@@ -753,6 +786,6 @@ export class SandboxService implements SandboxesService {
       ),
     );
     if (running.length > 0) this.#log.info("Stopped sandboxes for shutdown; they resume on next use", { count: running.length });
-    if (this.#dockerReady) await this.#options.provider.removeRelay().catch(() => undefined);
+    if (this.#backendUsed) await this.#options.provider.shutdown?.().catch(() => undefined);
   }
 }
