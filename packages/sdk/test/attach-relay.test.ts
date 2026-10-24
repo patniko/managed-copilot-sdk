@@ -26,6 +26,9 @@ const busy = { tickets: 0, upgrades: 0 };
 /** How many more socket upgrades the fake deployment leaves unanswered (a handshake in flight), and those sockets. */
 const stall = { upgrades: 0 };
 const stalled: Duplex[] = [];
+/** How many more upgraded sockets go silent (a half-open link: no frames, no pongs), and pings the deployment got. */
+const silent = { upgrades: 0 };
+const pings = { count: 0 };
 const BUSY_BODY = JSON.stringify({ error: { code: "session_busy", message: "This session is moving into a sandbox. Attach again when the move finishes." } });
 
 async function listen(server: Server): Promise<string> {
@@ -43,6 +46,7 @@ beforeAll(async () => {
   process.env.MANAGED_COPILOT_GITHUB_API_URL = await listen(github);
 
   const wss = new WebSocketServer({ noServer: true });
+  const silentWss = new WebSocketServer({ noServer: true, autoPong: false });
   gateway = createServer((req, res) => {
     if (req.method === "POST" && req.url === "/v1/sessions/s1/attach") {
       if (busy.tickets > 0) {
@@ -76,8 +80,14 @@ beforeAll(async () => {
       socket.end(`HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(BUSY_BODY)}\r\nconnection: close\r\n\r\n${BUSY_BODY}`);
       return;
     }
+    if (silent.upgrades > 0) {
+      silent.upgrades--;
+      silentWss.handleUpgrade(req, socket, head, (ws) => gatewaySockets.add(ws));
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       gatewaySockets.add(ws);
+      ws.on("ping", () => pings.count++);
       ws.on("message", (data) => {
         const message = JSON.parse(data.toString()) as { id?: number; method?: string };
         received.push(message);
@@ -103,7 +113,7 @@ describe("Copilot CLI attach relay", () => {
     received.length = 0;
   });
 
-  async function startRelay(extra: { busyRetryMs?: number } = {}) {
+  async function startRelay(extra: { busyRetryMs?: number; keepAlive?: { intervalMs: number; timeoutMs: number } } = {}) {
     // Imported after the fake GitHub API URL is set, as the launcher reads it at load.
     const { AttachRelay } = await import("../src/features/cli.js");
     const http = new HttpClient(gatewayUrl, "user-token");
@@ -401,5 +411,33 @@ describe("Copilot CLI attach relay", () => {
     } finally {
       busy.upgrades = 0;
     }
+  });
+
+  it("pings the deployment while the CLI is idle, so an ingress keeps the link (Azure closes it after 240 s idle)", async () => {
+    const { relay, url } = await startRelay({ keepAlive: { intervalMs: 20, timeoutMs: 100 } });
+    const before = pings.count;
+    const cli = await connect(url, "gho_owner");
+    // Past the timeout with nothing but pings and their pongs: still attached.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(pings.count - before).toBeGreaterThanOrEqual(5);
+    expect(cli.readyState).toBe(WebSocket.OPEN);
+    expect(relay.outcome).toBeUndefined();
+    cli.close();
+  });
+
+  it("reconnects the CLI when the deployment stops responding, without waiting for the CLI to send", async () => {
+    const { relay, url } = await startRelay({ keepAlive: { intervalMs: 20, timeoutMs: 100 } });
+    // A half-open link: the deployment's end is gone without a close (no frames, no pongs).
+    silent.upgrades = 1;
+    const cli = await connect(url, "gho_owner");
+    const [code, reason] = (await once(cli, "close")) as [number, Buffer];
+    expect(code).toBe(1012);
+    expect(reason.toString()).toBe("Managed Copilot stopped responding. Reconnecting.");
+    // The stock CLI redials after 1012: attached again with a fresh ticket.
+    const again = await connect(url, "gho_owner");
+    again.send(JSON.stringify({ jsonrpc: "2.0", id: 8, method: "initialize", params: {} }));
+    expect((await next(again)).result).toEqual({ protocolVersion: "0.9.0" });
+    expect(relay.outcome).toBeUndefined();
+    again.close();
   });
 });

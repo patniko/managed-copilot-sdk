@@ -70,6 +70,13 @@ export const LISTENER_LOSS_GRACE_MS = 500;
  */
 export const LEDGER_WAIT_MS = 5_000;
 
+/**
+ * Attached clients are pinged this often (ingresses such as Azure Container Apps close a WebSocket idle for 240 s), and
+ * one silent for `timeoutMs` (no frame or pong: a half-open link) is ended, so its responder registration and any
+ * prompt it claimed are released instead of waiting on the operating system to notice.
+ */
+export const KEEPALIVE = { intervalMs: 30_000, timeoutMs: 90_000 } as const;
+
 const MAX_PENDING_REQUESTS = 1_000;
 /** How deeply a client message may nest (stock CLI messages stay under 10). */
 const MAX_CLIENT_NESTING = 64;
@@ -90,6 +97,8 @@ export interface BridgeOptions {
   readonly gate: () => void;
   /** Rewrites platform host paths in what the runtime sends (core's path scrubber). */
   readonly scrub: (value: unknown) => unknown;
+  /** Keepalive for the attached client (default `KEEPALIVE`). */
+  readonly keepAlive?: { readonly intervalMs: number; readonly timeoutMs: number };
 }
 
 function reasonOf(error: unknown): string {
@@ -135,6 +144,9 @@ export class AhpBridge implements AttachedBridge {
   #stopped = false;
   #lifetime: NodeJS.Timeout | undefined;
   #lossTimer: NodeJS.Timeout | undefined;
+  #keepAlive: NodeJS.Timeout | undefined;
+  /** When the client last sent anything (a frame, a ping, or a pong). */
+  #heard = Date.now();
 
   constructor(client: WebSocket, upstream: WebSocket, options: BridgeOptions) {
     this.#client = client;
@@ -144,6 +156,17 @@ export class AhpBridge implements AttachedBridge {
     const { log, sessionId } = options;
     this.#lifetime = setTimeout(() => this.close(ATTACH_CLOSE_CODES.expired, "Attachment expired. Attach again to continue."), options.maxLifetimeMs);
     this.#lifetime.unref();
+    const { intervalMs, timeoutMs } = options.keepAlive ?? KEEPALIVE;
+    this.#keepAlive = setInterval(() => {
+      try {
+        this.#ping(timeoutMs);
+      } catch {
+        // A timer callback that threw would take the gateway down; the bridge's own events report its failures.
+      }
+    }, intervalMs);
+    this.#keepAlive.unref();
+    client.on("pong", () => (this.#heard = Date.now()));
+    client.on("ping", () => (this.#heard = Date.now()));
 
     client.on("message", (data: RawData, isBinary: boolean) => this.#onClientFrame(data, isBinary));
     upstream.on("message", (data: RawData, isBinary: boolean) => this.#onUpstreamFrame(data, isBinary));
@@ -175,6 +198,7 @@ export class AhpBridge implements AttachedBridge {
     this.#stopped = true;
     clearTimeout(this.#lifetime);
     clearTimeout(this.#lossTimer);
+    clearInterval(this.#keepAlive);
     this.#upstream.terminate();
     try {
       this.#options.attachment.close();
@@ -191,10 +215,27 @@ export class AhpBridge implements AttachedBridge {
     this.#lossTimer.unref();
   }
 
+  /** Keeps idle intermediaries from closing the client's link, and ends a client that went silent. */
+  #ping(timeoutMs: number): void {
+    if (this.#stopped || this.#client.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - this.#heard >= timeoutMs) {
+      this.#stop();
+      this.#client.terminate();
+      this.#options.log.info("Ended a Copilot CLI attachment that stopped responding", { sessionId: this.#options.sessionId });
+      return;
+    }
+    try {
+      this.#client.ping();
+    } catch {
+      // Closing meanwhile: its close event ends the bridge.
+    }
+  }
+
   // ------------------------------------------------------------------------------------------------------------
   // Client → runtime
 
   #onClientFrame(data: RawData, isBinary: boolean): void {
+    this.#heard = Date.now();
     if (this.#stopped) return;
     try {
       this.#clientFrame(data, isBinary);

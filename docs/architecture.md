@@ -988,6 +988,13 @@ sequenceDiagram
   relay refuses a reconnect whose material names a different
   conversation (spec section 9), and stops after 5 platform-requested reconnects in a minute. Generic AHP clients
   attach again with new material.
+- **Keepalive.** Ingresses close idle WebSockets (Azure Container Apps after 240 s, with 1006). The relay pings the
+  deployment every 30 s, and when the deployment has sent nothing (no frame or pong) for 90 s, a half-open link after
+  sleep or a network change, it reconnects the CLI the same way ("Managed Copilot stopped responding. Reconnecting.",
+  counted against the same reconnect limit, then `upstream_unavailable`). The gateway pings each attached client every
+  30 s and ends one silent for 90 s, which detaches its `cli` responder and releases prompts it claimed instead of
+  waiting on the operating system to notice. The gateway's link to a sandbox's listener is a sandbox runtime stream,
+  which the sandbox module keeps alive; on shared placement it is loopback.
 - **Verified live** (stock Copilot CLI 1.0.92, runtime 1.0.103, real model, captured between the relay and the
   gateway): with an SDK app holding a permission prompt, the CLI's "Approve once" was refused ("Another responder owns
   this action"), the tool did not run, and the app's later answer completed the turn; with no app attached, the CLI's
@@ -1005,7 +1012,9 @@ sequenceDiagram
   Reconnecting...", reconnected through the relay by itself, and approved the shell command in the sandbox
   (`cli-ok`, `Linux`, `/workspace`); Esc on a running turn sent `chat/turnCancelled` through `write({ kind: "abort" })`
   and the runtime ended the turn; `managed-copilot attach` exited 0 with "Detached from ...". 132 more CLI-bound frames
-  had no host path.
+  had no host path. Through a proxy that cuts connections idle for 45 s (standing in for the ingress), the real CLI
+  stayed attached for 3 minutes, 2.5 of them idle (pings and pongs every 30 s both ways; an idle raw connection
+  through the same proxy was cut at 45 s), and its next turn answered without a reconnect.
 - Hosts are disposed after 5 idle minutes (counted from the last use, so an unredeemed ticket doesn't keep one
   alive), on `deleted` and `stopped` lifecycle events and when the runtime connection closes (close code 4410), and on
   `promoted` or a new runtime connection (4307, `moved`). Attachments are capped at 8 hours (4408, `expired`). When the

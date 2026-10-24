@@ -38,6 +38,13 @@ const RECONNECT_WINDOW_MS = 60_000;
 /** How long a reconnect keeps trying while the session moves into a sandbox (`session_busy`); a move takes seconds. */
 const BUSY_RETRY_MS = 120_000;
 const BUSY_BACKOFF_MS = [250, 500, 1_000, 2_000] as const;
+/**
+ * The link to the deployment is pinged this often (ingresses such as Azure Container Apps close a WebSocket idle for
+ * 240 s) and treated as dead after this long without a frame or pong from it (a half-open link after sleep or a
+ * network change).
+ */
+const KEEPALIVE = { intervalMs: 30_000, timeoutMs: 90_000 } as const;
+const STALLED = "Managed Copilot stopped responding. Reconnecting.";
 
 function isSessionBusy(error: unknown): boolean {
   return error instanceof ManagedCopilotError && error.code === "session_busy";
@@ -163,6 +170,8 @@ interface RelayOptions {
   readonly first: AttachMaterial;
   /** How long a reconnect keeps trying through `session_busy` (default `BUSY_RETRY_MS`). */
   readonly busyRetryMs?: number;
+  /** Keepalive for the link to the deployment (default `KEEPALIVE`). */
+  readonly keepAlive?: { readonly intervalMs: number; readonly timeoutMs: number };
 }
 
 /** The loopback relay between the stock CLI and the deployment's attach socket. Exported for tests. */
@@ -420,6 +429,26 @@ export class AttachRelay {
     this.#active = active;
     // Reflects the latest connection: a refused attempt the CLI recovered from is not the attachment's outcome.
     this.outcome = undefined;
+    // Keepalive: idle ingresses keep the link, and a dead one is noticed without waiting for the CLI to send.
+    const { intervalMs, timeoutMs } = this.#options.keepAlive ?? KEEPALIVE;
+    let heard = Date.now();
+    let stalled = false;
+    const keepAlive = setInterval(() => {
+      if (upstream.readyState !== WebSocket.OPEN) return;
+      if (Date.now() - heard >= timeoutMs) {
+        stalled = true;
+        upstream.terminate();
+        return;
+      }
+      try {
+        upstream.ping();
+      } catch {
+        // Closing meanwhile: its close event ends the bridge.
+      }
+    }, intervalMs);
+    keepAlive.unref();
+    upstream.on("pong", () => (heard = Date.now()));
+    upstream.on("ping", () => (heard = Date.now()));
     client.on("message", (data: RawData, isBinary: boolean) => {
       if (isBinary) return;
       let filtered: ReturnType<typeof filterAhpClientFrame>;
@@ -434,6 +463,7 @@ export class AttachRelay {
       if (filtered.forward !== undefined && upstream.readyState === WebSocket.OPEN) upstream.send(filtered.forward);
     });
     upstream.on("message", (data: RawData, isBinary: boolean) => {
+      heard = Date.now();
       if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
     });
     client.on("close", () => {
@@ -441,8 +471,10 @@ export class AttachRelay {
       if (upstream.readyState === WebSocket.OPEN) upstream.close(1000);
     });
     upstream.on("close", (code: number, reason: Buffer) => {
-      let text = reason.toString();
-      if (code === ATTACH_CLOSE_CODES.moved || code === ATTACH_CLOSE_CODES.expired) {
+      clearInterval(keepAlive);
+      let text = stalled ? STALLED : reason.toString();
+      // Moved, renewed, or silent past the keepalive timeout (a dropped network path): the same session, again.
+      if (code === ATTACH_CLOSE_CODES.moved || code === ATTACH_CLOSE_CODES.expired || stalled) {
         if (this.#mayReconnect()) {
           // The stock CLI reconnects to this relay after 1012 (service restart); the relay then attaches it again with a
           // fresh ticket, to the same session wherever it now runs. Free the slot now: the CLI redials within milliseconds.
@@ -451,8 +483,8 @@ export class AttachRelay {
           setTimeout(() => client.terminate(), 2_000).unref();
           return;
         }
-        text = "The attachment was interrupted repeatedly. Attach again.";
-        this.outcome = { code: code === ATTACH_CLOSE_CODES.moved ? "session_gone" : "expired", message: text };
+        text = stalled ? "Managed Copilot stopped responding repeatedly. Check your connection and attach again." : "The attachment was interrupted repeatedly. Attach again.";
+        this.outcome = { code: stalled ? "upstream_unavailable" : code === ATTACH_CLOSE_CODES.moved ? "session_gone" : "expired", message: text };
       } else if (code === ATTACH_CLOSE_CODES.sessionGone) {
         this.outcome = { code: "session_gone", message: text || "The session ended." };
       }
@@ -464,7 +496,7 @@ export class AttachRelay {
     });
   }
 
-  /** Allows a platform-requested reconnect unless they are happening in a loop. */
+  /** Allows a reconnect (platform-requested, or after the link stalled) unless they are happening in a loop. */
   #mayReconnect(): boolean {
     const now = Date.now();
     this.#reconnects = this.#reconnects.filter((at) => now - at < RECONNECT_WINDOW_MS);
