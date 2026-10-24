@@ -358,9 +358,10 @@ export class PolicyService {
   /**
    * Converts bindings promoted by earlier versions, which stored the promotion target as the session's environment and
    * so lost the source that owns its ceiling and AppHost vault grants. Runs once per database, before any request. The
-   * source comes from a pending promotion's snapshot, else from core's session ledger, whose environment a promotion
-   * never changes (read only). A binding that promotion records show was promoted, but whose core session is gone,
-   * fails closed. Returns the number of bindings converted.
+   * source comes from a pending promotion's snapshot, else from the environment request core's session ledger stored at
+   * creation, which a promotion never changes (read only). A binding whose source cannot be recovered (its core session
+   * is gone but promotion records show the promotion, or its request is unreadable) fails closed. Returns the number of
+   * bindings converted.
    */
   convertLegacyPromotions(): number {
     const db = this.#db;
@@ -370,7 +371,7 @@ export class PolicyService {
     const candidates = db
       .prepare("SELECT session_id, environment, promoted_from FROM network_sessions WHERE type = 'isolated' AND promoted_to IS NULL AND environment IS NOT NULL")
       .all() as { session_id: string; environment: string; promoted_from: string | null }[];
-    const coreSession = db.prepare("SELECT environment FROM core_sessions WHERE id = ?");
+    const coreSession = db.prepare("SELECT environment_request FROM core_sessions WHERE id = ?");
     const committedTo = tables.has("promotion_operations") ? db.prepare("SELECT 1 FROM promotion_operations WHERE session_id = ? AND target = ? AND state = 'committed' LIMIT 1") : undefined;
     const now = new Date().toISOString();
     let converted = 0;
@@ -381,8 +382,10 @@ export class PolicyService {
         if (row.promoted_from) {
           source = (JSON.parse(row.promoted_from) as Partial<PromotionSnapshot>).environment ?? null;
         } else {
-          const core = coreSession.get(row.session_id) as { environment: string } | undefined;
-          if (core) source = this.#isInline(core.environment) ? null : core.environment;
+          const core = coreSession.get(row.session_id) as { environment_request: string } | undefined;
+          // The request the session was created with says whether its source was named (declared then; perhaps
+          // removed since) or inline, independent of the current AppHost.
+          if (core) source = requestedEnvironment(core.environment_request);
           else if (committedTo?.get(row.session_id, row.environment)) source = undefined;
           else continue;
         }
@@ -715,6 +718,19 @@ function canonicalIp(value: string): string {
   const parsed = parseIpAddress(value);
   if (!parsed) throw new ManagedCopilotError("invalid_request", `"${value}" is not an IP address`);
   return value.trim().toLowerCase();
+}
+
+/**
+ * A session's source environment from core's persisted environment request: its name when it named a declared
+ * environment, null when it was inline, undefined when the request cannot be read (the source is unknown).
+ */
+function requestedEnvironment(environmentRequest: string): string | null | undefined {
+  try {
+    const request = JSON.parse(environmentRequest) as { name?: unknown };
+    return typeof request.name === "string" ? request.name : request.name === undefined ? null : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const PROXY_HOST_NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;

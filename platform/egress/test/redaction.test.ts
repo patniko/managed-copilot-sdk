@@ -107,6 +107,9 @@ describe("response redaction", () => {
     // The reviewed version spent seconds on this 500 KB chunk; the final "_" belongs to no occurrence.
     expect(performance.now() - started).toBeLessThan(1_000);
     expect(final).toBe("[redacted]_");
+    const second = performance.now();
+    expect((await run(["baaa", "aaaa"], [`b${"a".repeat(512 * 1024)}`])).final).toBe("[redacted]");
+    expect(performance.now() - second).toBeLessThan(1_000);
   });
 
   it("gives the same result however a body is chunked, and never lets a secret through", async () => {
