@@ -242,11 +242,76 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
   `models.list` requires the shared runtime even for isolated environments. Verified on runtime 1.0.103: custom
   agents' and `task` subagents' tool lists cannot escape the session's `availableTools` ceiling.
 
+## Devloop: AppHost, CLI, and Copilot CLI attach
+
+### AppHost (`@managed-copilot/aspire`, root `apphost.mts`)
+
+- `addManagedCopilot(builder, name, options)` validates the declaration with `ManagedCopilotConfigSchema` (all
+  problems reported at once, before anything starts) and runs the gateway as an Aspire Node app on a **fixed,
+  unproxied** port (default 7400) with `/healthz`. Relative `image` and `customizations` paths resolve against the
+  AppHost directory. It refuses publish mode (`aspire deploy`) until gate G3.
+- Secrets must be Aspire secret parameters. Each becomes a `{ secretEnv }` reference in `MANAGED_COPILOT_CONFIG` and
+  an environment variable on the gateway: `MANAGED_COPILOT_SECRET_VAULT_<VAULT>_<INDEX>` and
+  `MANAGED_COPILOT_SECRET_WEBHOOK_<NAME>`. Literal strings are rejected. Schedule `session.tools` accept stock
+  `defineTool` objects; only the declaration (zod schemas via the same `toJSONSchema()` the SDK sends, flags, and a
+  stable `sha256:` revision) is stored.
+- The gateway gets a generated persistent `<name>-platform-key`, `MANAGED_COPILOT_DATA_DIR`
+  (`<apphost>/.managed-copilot/data`), `MANAGED_COPILOT_APPHOST_DIR`, `MANAGED_COPILOT_NPM_REGISTRY` (from
+  `npm config get registry`), and `MANAGED_COPILOT_INSTANCE` (`mc-<hash of the AppHost path>`, so checkouts sharing one
+  Docker engine never collide). The gateway builds sandbox images and supervises the relay and egress containers
+  itself, so the AppHost declares no containers.
+- The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
+  `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
+  them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
+- `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
+  `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
+
+### Copilot CLI attach (spec section 14)
+
+```mermaid
+sequenceDiagram
+  participant CLI as Copilot CLI (stock)
+  participant Relay as managed-copilot / openCli<br/>loopback relay
+  participant GW as gateway attach module
+  participant RT as session runtime<br/>(AHP host, one-session catalog)
+  Relay->>GW: POST /v1/sessions/:id/attach (owner's GitHub token)
+  GW->>RT: host.start(computeId mc-session-<id>, creation denied) + host.publishSession
+  GW-->>Relay: AttachMaterial (single-use ticket, 60 s)
+  Relay->>CLI: copilot --ahp ws://127.0.0.1:<port>/ahp/<nonce> (no credential in argv)
+  CLI->>Relay: WebSocket (CLI's own GitHub token)
+  Relay->>Relay: CLI's GitHub account must be the session owner
+  Relay->>GW: WebSocket /v1/sessions/:id/ahp, Authorization: Bearer <ticket>
+  GW->>RT: WebSocket via runtime.connect(port), ?tkn=<listener token>
+  CLI-->>RT: AHP 0.9 (authenticate answered locally, never forwarded)
+```
+
+- Verified on Copilot CLI 1.0.92 with runtime 1.0.103 (shared placement): the CLI attaches, shows history, and its
+  turns reach the app's own `CopilotSession` events. Re-publishing after host disposal works, so hosts are disposed
+  after 5 idle minutes, on `deleted`/`promoted`/`stopped` lifecycle events (close code 4410), and when the runtime
+  connection closes. Attachments are capped at 8 hours (4408).
+- Tickets are 60-second, single-use, owner- and session-bound, stored as SHA-256 hashes (`attach_tickets`). Upgrades
+  re-check ownership and session state. Generic AHP clients may pass the ticket as `?tkn=`.
+- The stock CLI sends its GitHub OAuth token as `Authorization` and in an AHP `authenticate` request. The relay and
+  the gateway answer credential-bearing AHP methods and actions themselves, and the gateway never forwards client
+  headers, so no CLI token reaches a runtime or sandbox.
+- Limits: the CLI asks once to trust its working folder (`~/.managed-copilot/attach`, empty); its model picker is
+  empty because the host cannot list models without an AHP credential; sandbox sessions need the sandbox module's
+  `connect(sessionId, port)`; GitHub Copilot app publication is not implemented (`github.publish`).
+
+### CLI and quickstart
+
+- `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
+  `attach`, `promote`, `artifacts`, `schedules`. It uses the SDK and `@managed-copilot/sdk/internal` (first-party only:
+  `HttpClient`, URL/token resolution, `launchAttachedCli`). Tokens never come from argv. Errors print the stable code
+  and a hint; usage errors exit 2.
+- `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
+  `/v1/info`, or `capability_unavailable`), or skipped (a local prerequisite such as background sign-in).
+
 ## Ports and environment
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Gateway `PORT` | 7400 | Aspire assigns it in `aspire run`; `0` picks a free port |
+| Gateway `PORT` | 7400 | Fixed and unproxied under `aspire run` (`addManagedCopilot`'s `port` option); `0` picks a free port |
 | `MANAGED_COPILOT_CONFIG` / `_CONFIG_FILE` | dev defaults | Normalized AppHost JSON (`ManagedCopilotConfig`) |
 | `MANAGED_COPILOT_APPHOST_DIR` | config file dir or cwd | Base for relative `customizations` paths |
 | `MANAGED_COPILOT_DATA_DIR` | `./.managed-copilot/data` | SQLite ledger, artifacts, runtime homes, pinned customizations |
@@ -255,6 +320,10 @@ registered, and anything a module adds to `app.capabilities` (for example `promo
 | `MANAGED_COPILOT_GITHUB_API_URL` | `https://api.github.com` | Loopback `http://` allowed for test stubs only |
 | `MANAGED_COPILOT_SHARED_RUNTIME` | `1` | `0` disables shared placement (unit tests) |
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
+| `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker networks, containers, and volumes; the AppHost derives one per checkout |
+| `MANAGED_COPILOT_NPM_REGISTRY` | unset | Registry for the sandbox base image build; the AppHost passes `npm config get registry` |
+| `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
+| Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 
 ## Workstreams and ownership
@@ -267,7 +336,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **sandbox** | `platform/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
 | **network** | `platform/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
-| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `demos/quickstart/**`, SDK `features/cli.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
+| **devloop** | `packages/aspire/**`, `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach, runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
 
