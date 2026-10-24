@@ -68,30 +68,44 @@ export function createDockerSandboxProvider(deps: SandboxProviderDeps): DockerSa
   });
 }
 
+/** How long a successful Docker ping is trusted before the next readiness check pings again. */
+const READY_TTL_MS = 15_000;
+
 export class DockerSandboxProvider implements SandboxProvider {
   readonly kind = "docker";
   /** Warm sandboxes would need prepared, unassigned containers that never held another session's state; not offered locally. */
   readonly capabilities = { warm: false, addressPinning: true };
   readonly #options: ProviderOptions;
   #relay: Promise<RelayTarget> | undefined;
+  /** Set once this process started (or adopted) the relay; only then does shutdown remove it. */
+  #relayStarted = false;
   #ready: Promise<void> | undefined;
+  /** When the cached ping succeeded; 0 while one is in flight. */
+  #readyAt = 0;
+  #reachable: boolean | undefined;
 
   constructor(options: ProviderOptions) {
     this.#options = options;
   }
 
   ready(): Promise<void> {
+    if (this.#ready && (this.#readyAt === 0 || Date.now() - this.#readyAt < READY_TTL_MS)) return this.#ready;
     const { docker, log } = this.#options;
-    this.#ready ??= docker.ping().then(
+    this.#readyAt = 0;
+    const attempt: Promise<void> = docker.ping().then(
       (info) => {
-        log.info("Docker is available for sandboxes", { version: info.version, platform: `${info.os}/${info.arch}`, endpoint: docker.endpoint.label });
+        if (this.#ready === attempt) this.#readyAt = Date.now();
+        if (this.#reachable !== true) log.info("Docker is available for sandboxes", { version: info.version, platform: `${info.os}/${info.arch}`, endpoint: docker.endpoint.label });
+        this.#reachable = true;
       },
       (error: unknown) => {
-        this.#ready = undefined;
+        if (this.#ready === attempt) this.#ready = undefined;
+        this.#reachable = false;
         throw new ManagedCopilotError("capability_unavailable", `Isolated sandboxes need Docker, which is not reachable (${(error as Error).message}). Start Docker Desktop and retry.`);
       },
     );
-    return this.#ready;
+    this.#ready = attempt;
+    return attempt;
   }
 
   async prepare(): Promise<void> {
@@ -123,7 +137,8 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   async shutdown(): Promise<void> {
-    if (!this.#ready) return;
+    if (!this.#relayStarted) return;
+    this.#relayStarted = false;
     this.#relay = undefined;
     await this.#options.docker.removeContainer(this.relayName);
   }
@@ -181,6 +196,7 @@ export class DockerSandboxProvider implements SandboxProvider {
   async #startRelay(): Promise<RelayTarget> {
     const { docker, log, platformKey } = this.#options;
     await this.ready();
+    this.#relayStarted = true;
     await this.#ensureNetwork(this.edgeNetwork, { Driver: "bridge", Internal: false, Labels: this.#labels("edge-network") });
     await this.#ensureNetwork(this.sandboxesNetwork, { Driver: "bridge", Internal: true, Labels: this.#labels("sandboxes-network") });
     // The relay runs from the base sandbox image.

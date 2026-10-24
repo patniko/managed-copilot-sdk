@@ -190,6 +190,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   (`providers/azure/`, owned by the azure workstream). Providers must keep: sandboxd as root with only CHOWN, KILL,
   SETGID, and SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, `/var/lib/managed-copilot`; no
   route between sandboxes and no Internet except through the egress proxy; sandboxd reachable only through `endpoint`.
+  `sandboxes.available` is the result of the provider's latest `ready()` (checked at module registration with a 2 s
+  bound, every 30 s, and before every backend operation); `/v1/info` should advertise `isolated` and `files` only while
+  it is true, so a deployment whose backend is missing or unqualified never advertises a capability that cannot work.
+  Docker trusts a successful ping for 15 s.
 - **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
@@ -211,7 +215,10 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   env, and the customer `env` (reserved identity, proxy, trust, and runtime names are rejected), and restarts it after
   unexpected exits. Every workload process (the runtime, setup commands, file workers) starts through `setpriv`:
   uid/gid 10001, cleared groups, `no_new_privs`, and empty inheritable, ambient, and bounding capability sets, so the
-  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. Every
+  invariant holds on backends that cannot drop container capabilities; the image has no setuid/setgid files. The
+  launcher runs as root with only a fixed `PATH`; the workload's environment is installed by `env -i` after the drop,
+  so loader variables such as `LD_AUDIT` or `GLIBC_TUNABLES` never reach a root process (the gated e2e probes this
+  with `LD_DEBUG_OUTPUT`). Every
   workspace operation (list, read, write, mkdir, and the outputs manifest) runs in a short-lived worker as uid 10001
   that walks the path one segment at a time with `chdir`, refuses symbolic links, verifies the real directory after
   every step, and opens the final component with `O_NOFOLLOW`; sandboxd's root never touches workspace paths, and
@@ -235,8 +242,9 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
 - **Lifecycle.** Idle stop (environment `idleTimeoutSeconds`, default 900 s) happens only when no turn is running, no
   tool/permission/elicitation action is pending (including open durable actions, which survive gateway restarts), and
   no file transfer or publication is in flight; it closes runtime streams so core resumes on next use. A sandbox found
-  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until its
-  events flow again), and idle sweeps begin only after that reconciliation. `ensureRunning` restarts (or recreates
+  running at gateway start stays up while the ledger's last turn is still `running` (up to two hours, or until a root
+  `user.message` or `session.idle` re-establishes turn tracking), and idle sweeps begin only after that
+  reconciliation. A stop that a restart interrupted is finished. `ensureRunning` restarts (or recreates
   from the pinned image and existing volumes) and re-registers egress. Stops close runtime streams, stop the
   container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
   `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources
@@ -428,7 +436,7 @@ structurally (they may add members).
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
-| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete`, `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
+| `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy`. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for sandbox MCP servers; shared placement uses the adapter) |

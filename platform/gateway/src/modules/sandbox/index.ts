@@ -9,10 +9,11 @@ import { SandboxService } from "./service.js";
 import { SandboxStore } from "./store.js";
 
 const INSTANCE = /^[a-z][a-z0-9-]{0,23}$/;
+const FIRST_PROBE_WAIT_MS = 2_000;
 
 export const sandboxModule: GatewayModule = {
   name: "sandbox",
-  register(app) {
+  async register(app) {
     const log = app.log.child("sandbox");
     const env = app.config.env;
 
@@ -70,5 +71,9 @@ export const sandboxModule: GatewayModule = {
 
     app.onStart(() => service.start());
     app.onStop(() => service.shutdown());
+
+    // The gateway serves requests while start hooks run, so check the backend now: `/v1/info` then advertises isolated
+    // placement correctly from the first request. A slow backend gets a short wait; the check finishes in the background.
+    await Promise.race([service.probe(), new Promise((resolve) => setTimeout(resolve, FIRST_PROBE_WAIT_MS).unref())]);
   },
 };
