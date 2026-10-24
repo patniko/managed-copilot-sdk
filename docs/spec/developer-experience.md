@@ -364,6 +364,70 @@ flowchart LR
 | Platform images | Gateway, shared runtime, and the sandbox base image you can extend |
 | Samples | Runnable locally or in Azure: `shared-chat.ts`, `isolated-coder.ts`, `promotable-helper.ts`, `deployed-agent.ts`, `attach-cli.ts` |
 
+## Comparison with OpenAI's Agents API
+
+Reviewed on 2026-10-23 against OpenAI's documentation. Their API is in beta and can change.
+
+The concepts match: an agent configuration, an environment, and a durable session that you continue and steer. An
+`isolated` environment behaves like an OpenAI-hosted sandbox, with a fresh workspace for each session. The main
+differences are deliberate: the agent loop runs in your deployment instead of at OpenAI, you program it through the
+Copilot SDK instead of REST calls and webhooks, and identity and billing go through GitHub.
+
+### Where they match
+
+| Concept | OpenAI Agents API | Managed Copilot |
+| --- | --- | --- |
+| Session | Create with `input`, stream events, continue later, and steer during a turn | `createSession`, `send`, session events, `resumeSession`, and the SDK's steering |
+| Agent configuration | Inline `agent`, or a saved agent's `agent_id` with per-session overrides | `createSession` options, or a deployed `.agent.md` selected with `agent`, with per-session overrides |
+| No sandbox | `environment.type: "none"`: no shell or files; remote MCP servers and your functions still work | `shared` |
+| Sandbox | `openai_hosted`: a Linux workspace for each session | `isolated`: a fresh sandbox for each session |
+| Sizes | `small` (1 vCPU, 1 GB), `medium` (2 vCPU, 4 GB, the default), `large` (4 vCPU, 16 GB) | Proposed: `small` (1 vCPU, 2 GiB), `medium` (2 vCPU, 4 GiB), `large` (4 vCPU, 8 GiB) |
+| Reusable environment settings | Environment templates: packages, files, setup commands, and network policy | Named environments in the AppHost: image, size, and policy |
+| Fast starts | Pre-warm a sandbox before creating its session | `warm: n` ready sandboxes per environment |
+| Network control | `enabled`, `disabled`, or `restricted` to at most 100 exact host names | A `policy.network` host list; enforcement for sandbox shells is still to be validated |
+| Input files | `environment.files` at creation, then the environment Files API | `managed.files(session).write` |
+| Multi-agent | Subagents with their own context, created and coordinated by the main agent in the same environment | Copilot sub-agents within a session today; `orchestrator` workers in their own containers later |
+
+### Where they differ by design
+
+| Topic | OpenAI Agents API | Managed Copilot |
+| --- | --- | --- |
+| Where the agent loop runs | Always at OpenAI, in its hosted Codex harness. A `self_hosted` environment moves only command execution | In your deployment: the shared runtime or the session's own sandbox |
+| Programming model | REST: create sessions, post input events, stream events, answer `required_actions`, and receive webhooks | The Copilot SDK's live connection, with in-process tool, permission, and hook callbacks |
+| Your functions | Your app posts each `tool_result`; a pending call survives disconnects | `defineTool` handlers that the agent calls over the connection |
+| Choosing an environment | Per request: `environment: { type, container_size, network, packages, ... }` | By name, declared in the AppHost; inline `{ type, size }` only where allowed |
+| Custom images | Only with `self_hosted`, where you run the compute and manage its lifecycle | Any environment, built from a Dockerfile and run by the platform |
+| Changing a running session's environment | Not supported: session updates change only the model, reasoning effort, service tier, and metadata | `promotable` |
+| Attaching a person | Streaming and webhooks; no CLI attach documented | Copilot CLI, and the GitHub Copilot app where supported |
+| Identity and billing | API keys with scopes; model usage at API rates plus container rates | GitHub identity; Copilot entitlement or Foundry, with compute on your Azure bill |
+| Models | OpenAI models | Any model your Copilot entitlement offers, or your Foundry deployments |
+| Idle sandboxes | Deleted after an hour without activity, which isn't configurable; published artifacts remain | Stopped with their files kept; resuming the session wakes them |
+
+### Gaps we could close
+
+1. **Output artifacts.** OpenAI publishes files under `/workspace/outputs` as artifacts when a turn completes, and
+   they stay downloadable after the sandbox expires. We only read live sandbox files.
+2. **Network modes.** Adopt `enabled`, `disabled`, and `restricted` rather than a bare host list.
+3. **Per-session setup.** OpenAI accepts `packages`, `files`, `setup_commands`, and `env` per session or template. We
+   have only the image.
+4. **Working while disconnected.** An OpenAI session waits for a function result through `required_actions` and
+   webhooks, even while your app is offline. SDK callbacks need a live connection, which is awkward for serverless
+   backends.
+5. **Secrets for sandbox requests.** OpenAI vaults keep real credentials outside the sandbox. We have no equivalent.
+6. **Scheduled sessions.** OpenAI automations start or continue sessions on a schedule.
+
+Sources: OpenAI's Agents API
+[overview](https://developers.openai.com/api/docs/guides/agents-api/overview),
+[quickstart](https://developers.openai.com/api/docs/guides/agents-api/quickstart),
+[architecture](https://developers.openai.com/api/docs/guides/agents-api/architecture),
+[configuration](https://developers.openai.com/api/docs/guides/agents-api/configuration),
+[sessions](https://developers.openai.com/api/docs/guides/agents-api/sessions),
+[multi-agent](https://developers.openai.com/api/docs/guides/agents-api/multi-agent),
+[OpenAI-hosted sandboxes](https://developers.openai.com/api/docs/guides/agents-api/environments/openai-hosted),
+[sandbox lifecycle](https://developers.openai.com/api/docs/guides/agents-api/environments/lifecycle),
+[files and artifacts](https://developers.openai.com/api/docs/guides/agents-api/environments/files), and
+[functions](https://developers.openai.com/api/docs/guides/agents-api/tools/functions).
+
 ## Decision tracker
 
 Statuses: **Decided** (agreed in review), **Proposed** (recommended, needs your OK), **To validate** (needs a
