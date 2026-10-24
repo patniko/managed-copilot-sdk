@@ -949,7 +949,9 @@ sequenceDiagram
 As built (`packages/aspire/src/publish`, `deploy/azure`, gateway `modules/sandbox/providers/azure`); operator guide and
 capability matrix in [deployment.md](deployment.md). A sandbox-service probe (`deploy/azure/qualify`) and the root
 AppHost deployment ran in westus2 (2026-10-24). Eleven spec snippets, both deployed demos, ten NFS checks, healthy
-cross-host lease exclusion, revision canaries, scheduled recovery, and persistent proxy-CA checks passed. The two
+cross-host lease exclusion, revision canaries, scheduled recovery, and persistent proxy-CA checks passed. Explicit
+isolated compute replacement also retained workspace/HOME markers, the declared Python package, and native
+conversation history over the same three data disks. The two
 local-quickstart webhook snippets are skipped; the deployed assistant's webhook/reminder journeys were checked
 separately. Precise evidence and limits (including no partition-tolerant HA or live Google OAuth claim) are in the
 deployment guide.

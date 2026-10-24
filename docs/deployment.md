@@ -176,11 +176,11 @@ Updating the Container Apps secret and restarting the existing revision alone di
 live qualification; redeployment into a new revision did.
 
 An already-enabled background sign-in also stores a sealed copy of the credential in the gateway. Renew that existing
-grant with the replacement credential through the assistant's Background work control or
-`npx managed-copilot login --url <gateway-url>` using the updated sign-in. Do not re-enable background work if the
-account has turned it off. Rotating only the apps' secret does not rotate this stored grant. Expiry or revocation
-pauses background work with an explicit sign-in error; this deployment does not implement automatic GitHub App
-credential refresh.
+grant with `npx managed-copilot login --url <gateway-url>` using the updated sign-in (for example, supply the
+replacement through `MANAGED_COPILOT_GITHUB_TOKEN` for that command). Login replaces an enabled grant without revoking
+it first; toggling background work off would pause its schedules. Do not re-enable background work if the account has
+turned it off. Rotating only the apps' secret does not rotate this stored grant. Expiry or revocation pauses background
+work with an explicit sign-in error; this deployment does not implement automatic GitHub App credential refresh.
 
 ### Publishing your own apps
 
@@ -250,7 +250,8 @@ Isolated sessions run in **Azure Container Apps Sandboxes** (`Microsoft.App/sand
 the deployment's sandbox group (`platform/gateway/src/modules/sandbox/providers/azure`, selected with
 `MANAGED_COPILOT_SANDBOX_PROVIDER=azure`). It was chosen from the spec's Azure candidates (Container Apps dynamic
 sessions, Container Apps jobs, managed session-worker containers) because it gives per-session microVMs, data disks that
-outlive their compute, and a default-deny egress engine; managed session-worker containers remain the fallback.
+outlive their compute, and a default-deny egress engine. Managed session-worker containers remain a candidate fallback,
+not an implemented or automatic alternative.
 
 - **Images.** `aspire deploy` builds the base sandbox image, each isolated environment's own `image` folder FROM it, its
   `packages.system` in a layer of their own (as `aspire run` does), and an Azure layer (`deploy/azure/sandbox`) on top,
@@ -317,7 +318,7 @@ Alternatives when an address allowlist does not fit:
 | --- | --- | --- |
 | Gateway API, HTTPS/WSS ingress, GitHub sign-in, access rules | Yes (HTTP on localhost) | Configured-account SDK access verified; live two-account isolation is not qualified here |
 | Shared sessions (stock shared runtime) | Yes | Real tools and streaming; conversation history survives a gateway revision |
-| Durable state across restarts and redeploys, single writer | Yes (local disk) | NFS 10/10, healthy cross-host lease exclusion, shared history and two distinct isolated workspaces survive revision replacement; no partition-tolerant HA claim |
+| Durable state across restarts and redeploys, single writer | Yes (local disk) | NFS 10/10, healthy cross-host lease exclusion, revision canaries, and workspace/HOME/Python/native-history recovery after isolated compute replacement; no partition-tolerant HA claim |
 | Durable actions, webhooks, schedules | Yes | Polling without duplicate execution; assistant's tab-closed webhook and reminder; one automatic scheduled occurrence completes exactly once after gateway replacement |
 | Isolated sessions (`network: false`) | Yes (Docker) | Real model/files/idle-replacement probe passes; network-denied CONNECT returns 403 while inference works |
 | Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Enabled network returns 200; vault substitution and response redaction pass; CA fingerprint is unchanged across proxy revisions |
@@ -337,6 +338,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Spec snippets 01-09, 11, 13 | **11 passed**: genuine SDK objects/tools/streaming, repository work, setup, artifacts, network/vault behavior, promotion, resume, durable polling, and AHP attach |
 | Spec snippets 10 and 12 | **2 skipped**, not passed: they require the local quickstart receiver and its `COPILOT_WEBHOOK_SECRET`, deliberately not published by the root AppHost |
 | Isolated idle/recreate probe | **8/8 passed** in Phase A; real-model create and resume each took about 8 seconds; compute was replaced over retained disks |
+| Explicit isolated compute replacement | A new microVM retained the same three data disks, workspace and HOME markers, declared Python package version, and conversation-only native history marker; workload remained uid 10001 before and after |
 | NFS and lease | **10/10 storage checks**; a second host's contender was excluded while the original gateway served |
 | Gateway revision canaries | One shared conversation retained its marker; two isolated sessions retained different files at the same path and their distinct sandbox identities |
 | Scheduled recovery | A one-shot schedule created before redeployment automatically completed exactly once on the replacement gateway, using the renewed same-account background credential |
@@ -386,7 +388,7 @@ Cost Management had not posted its usage at the 18:52 UTC check; its **actual co
 Everything lives in the resource group you deployed to:
 
 ```powershell
-az group delete --name managed-copilot-dev --yes
+az group delete --subscription <subscription-id> --name managed-copilot-dev --yes
 ```
 
 Deleting the group deletes the sandbox group (with its sandboxes and disks), both Container Apps environments (and the
