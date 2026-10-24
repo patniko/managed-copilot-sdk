@@ -7,7 +7,7 @@ export const TEMPLATES: readonly WorkOrderTemplate[] = [
     id: HAPPY_PATH_TEMPLATE_ID,
     title: "CSV ⇄ JSON toolkit",
     tagline: "Two command-line tools built side by side in separate sandboxes, then integrated and released.",
-    estimate: "~5 min",
+    estimate: "~8 min",
     tags: ["Node.js", "CLI", "2 parallel builders"],
     featured: true,
     brief: `Build \`csvjson\`, a zero-dependency Node.js 24 toolkit with two command-line tools and tests.
