@@ -1,8 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
-/** Random, URL-safe identifier with a readable prefix, e.g. `act_3kq9...`. */
+/** Random, URL-safe identifier with a readable prefix, e.g. `act_3kq9...`. No `-`, so IDs survive word-boundary parsing. */
 export function newId(prefix: string, bytes = 16): string {
-  return `${prefix}_${randomBytes(bytes).toString("base64url")}`;
+  return `${prefix}_${randomBytes(bytes).toString("base64url").replace(/-/g, "0")}`;
 }
 
 export function sha256Hex(value: string | Buffer): string {
