@@ -1,0 +1,22 @@
+node_modules/
+dist/
+coverage/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+
+# Local platform state (SQLite ledger, artifacts, runtime homes, vault keys)
+.managed-copilot/
+.data/
+
+# Aspire
+.aspire/
+.modules/
+obj/
+bin/
+
+# Demo outputs
+demos/**/.output/
+recordings/

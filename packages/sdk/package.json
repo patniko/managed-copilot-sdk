@@ -1,0 +1,38 @@
+{
+  "name": "@managed-copilot/sdk",
+  "version": "0.1.0",
+  "description": "Run stock Copilot SDK clients and sessions in environments you deploy: locally under Aspire or in your Azure subscription.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./bridge": "./dist/bridge.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "peerDependencies": {
+    "@github/copilot-sdk": "^1.0.26"
+  },
+  "dependencies": {
+    "@managed-copilot/protocol": "workspace:*",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@github/copilot-sdk": "1.0.26",
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}

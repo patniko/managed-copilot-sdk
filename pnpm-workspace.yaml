@@ -1,0 +1,10 @@
+packages:
+  - packages/*
+  - platform/*
+  - demos/*
+  - tests/*
+
+# Allow install scripts only for packages that need them.
+onlyBuiltDependencies:
+  - esbuild
+  - koffi
