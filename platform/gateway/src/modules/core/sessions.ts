@@ -1051,6 +1051,8 @@ export class SessionManager implements SessionsService {
         // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
         const kept = stored.params["agent"];
         if (stable["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, stable)) stable["agent"] = kept;
+        // Likewise its model: restores select the model the session last had.
+        if (stable["model"] === undefined && typeof stored.params["model"] === "string") stable["model"] = stored.params["model"];
         // A resume configures the session again: what it sets replaces earlier option changes, and it is the caller's
         // configuration from now on (restores and placement changes apply the same thing; model and agent come from
         // the ledger).
@@ -2094,8 +2096,8 @@ export class SessionManager implements SessionsService {
 
   /**
    * What a client's registration changes in the inventory: it adds what the client registers, and withdraws only what
-   * this connection itself had registered before and no other attached client registers (what others still register
-   * is handed over to them).
+   * this connection itself had registered before and no other attached client registers. What others still register
+   * is handed over to them (when the registration in effect is this connection's), so the last of them can withdraw it.
    */
   #inventoryChange(live: LiveSession, peerId: string, previous: Attachment | undefined, next: { readonly tools: readonly Record<string, unknown>[]; readonly flags: Readonly<Record<string, unknown>> }, scope: "all" | "tools" = "all"): InventoryChange {
     const others = [...live.attachments.values()].filter((attachment) => attachment.peer.id !== peerId && !attachment.peer.closed);
@@ -2115,6 +2117,16 @@ export class SessionManager implements SessionsService {
         return revision === undefined ? [] : [{ key, revision }];
       });
     const handover = { tools: toolRevisions(withdrawnTools.filter(otherTool)), flags: flagRevisions(withdrawnFlags.filter(otherFlag)) };
+    // Handed over now, not once the change is stored: a concurrent withdrawal by one of those clients must see it.
+    const effective = this.#inventory(live).revisions;
+    for (const { name, revision } of handover.tools) {
+      if (effective?.tools[name] !== revision) continue;
+      for (const other of others) if (other.declarations.some((tool) => tool["name"] === name)) other.registered.tools[name] = revision;
+    }
+    for (const { key, revision } of handover.flags) {
+      if (effective?.flags[key] !== revision) continue;
+      for (const other of others) if (other.flags[key] === true) other.registered.flags[key] = revision;
+    }
     return {
       tools: next.tools,
       flags: scope === "all" ? next.flags : {},

@@ -532,6 +532,12 @@ describe("callback obligations and runtime credentials", () => {
     expect(restored.model).toBe("claude-haiku-4.5");
     expect(restored.patched).not.toContain("gpt-5.4");
     expect(sessions().get(sessionId)!.model).toBe("claude-haiku-4.5");
+
+    // A client that resumes without a model keeps the session's (like its agent).
+    const other = await connect(undefined, "open");
+    await other.request("session.resume", { sessionId, requestPermission: true });
+    restored = await restore();
+    expect(restored.model).toBe("claude-haiku-4.5");
   });
 
   it("never leaves a client attached after it disconnected during its resume", async () => {
@@ -602,5 +608,23 @@ describe("callback obligations and runtime credentials", () => {
     const resumed = lastResume(sessionId)!;
     expect((resumed["tools"] as { name: string }[]).map((tool) => tool.name)).not.toContain("lookup_order");
     expect(resumed).toMatchObject({ requestUserInput: false });
+  });
+
+  it("lets two clients that registered the same tool withdraw it concurrently", async () => {
+    const b = await connect();
+    const sessionId = crypto.randomUUID();
+    await b.request("session.create", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true });
+    const a = await connect();
+    await a.request("session.resume", { sessionId, tools: [{ name: "lookup_order" }], requestPermission: true });
+    // A's withdrawal (which hands its registration to B) is still on its way when B withdraws too.
+    const hold = runtime.holdNext("session.tools.set", sessionId);
+    const first = a.request("session.tools.set", { sessionId, tools: [] });
+    await hold.held;
+    await b.request("session.tools.set", { sessionId, tools: [] });
+    hold.release();
+    await first;
+    expect(storedCallbacks(sessionId).tools.map((tool) => tool.name)).not.toContain("lookup_order");
+    const sent = runtime.calls("session.tools.set").filter((call) => call.params["sessionId"] === sessionId).at(-1)!.params["tools"] as { name: string }[];
+    expect(sent.map((tool) => tool.name)).not.toContain("lookup_order");
   });
 });
