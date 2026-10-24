@@ -52,10 +52,15 @@ export function isPlatformInterruption(error: unknown): boolean {
     return TRANSIENT_CODES.has(error.code) || (error.code === "internal" && /\(HTTP 5\d\d\)/.test(error.message));
   }
   if (!(error instanceof Error)) return false;
+  // Gateway errors on a session's JSON-RPC connection arrive as the SDK's ResponseError, with the platform code in `data.code`.
+  const rpcCode = (error as { data?: { code?: unknown } }).data?.code;
+  if (typeof rpcCode === "string" && (TRANSIENT_CODES.has(rpcCode) || PERMANENT_CODES.has(rpcCode))) return TRANSIENT_CODES.has(rpcCode);
   // The bridge reports gateway closes and rejections as "[managed-copilot] ... (<code>)".
   const bridge = /\[managed-copilot\][^\n]*?(?:\((\w+)\))?\s*$/m.exec(error.message);
   if (bridge) return bridge[1] === undefined || !PERMANENT_CODES.has(bridge[1]);
-  return /session (?:is )?disconnected|client not connected|connection (?:is |got )?(?:closed|disposed)|cli (?:server|process) (?:connection closed|exited)|cannot reach managed copilot|ECONNRESET|ECONNREFUSED|socket hang up/i.test(
+  // "Completion wait cancelled": the runtime gave up a turn's completion wait, as when a gateway shuts down mid-turn.
+  // A cancel by the factory itself never gets here: the run is marked cancelled first.
+  return /session (?:is )?disconnected|client not connected|connection (?:is |got )?(?:closed|disposed)|cli (?:server|process) (?:connection closed|exited)|completion wait cancelled|cannot reach managed copilot|ECONNRESET|ECONNREFUSED|socket hang up/i.test(
     error.message,
   );
 }

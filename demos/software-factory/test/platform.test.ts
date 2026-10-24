@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
+import type { SessionConfig } from "@github/copilot-sdk";
 import { ManagedCopilotError } from "@managed-copilot/sdk";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/server/config.js";
@@ -35,16 +36,25 @@ class FakeGateway {
   /** Connect attempts (`GET /v1/info`) turned away while on standby. */
   rejectedConnects = 0;
   readonly held: string[] = [];
+  /** WebSocket upgrades (each a client's bridge connecting); `holdUpgrades` leaves them unanswered. */
+  upgrades = 0;
+  holdUpgrades = false;
   #standbyConnects = 0;
   readonly #responses: ServerResponse[] = [];
+  readonly #sockets: Duplex[] = [];
   readonly #server: Server;
 
   constructor() {
     this.#server = createServer((req, res) => this.#handle(req, res));
-    // Model discovery's bridge is turned away too: these tests don't need a live runtime. It exits as soon as it reads
-    // the answer, which can reset the connection.
+    // Bridges (model discovery, sessions) are turned away or held: these tests don't need a live runtime. A bridge
+    // exits as soon as it reads the answer, which can reset the connection.
     this.#server.on("upgrade", (_req: IncomingMessage, socket: Duplex) => {
+      this.upgrades++;
       socket.on("error", () => undefined);
+      if (this.holdUpgrades) {
+        this.#sockets.push(socket);
+        return;
+      }
       socket.end("HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n");
     });
   }
@@ -62,6 +72,7 @@ class FakeGateway {
 
   async stop(): Promise<void> {
     for (const res of this.#responses) res.destroy();
+    for (const socket of this.#sockets) socket.destroy();
     this.#server.closeAllConnections();
     await new Promise((resolve) => this.#server.close(resolve));
   }
@@ -113,10 +124,16 @@ async function until(predicate: () => boolean, what: string, timeoutMs = 10_000)
   }
 }
 
-async function connected(): Promise<{ platform: Platform; gateway: FakeGateway; seen: PlatformStatus[]; states: PlatformState[] }> {
+async function connected(
+  options: { holdUpgrades?: boolean; timings?: Partial<typeof TIMINGS> } = {},
+): Promise<{ platform: Platform; gateway: FakeGateway; seen: PlatformStatus[]; states: PlatformState[] }> {
   gateway = new FakeGateway();
+  gateway.holdUpgrades = options.holdUpgrades ?? false;
   await gateway.start();
-  platform = new Platform({ ...loadConfig({}), healthIntervalMs: 50 }, { url: gateway.url, gitHubToken: "gho_test", timings: TIMINGS });
+  platform = new Platform(
+    { ...loadConfig({}), healthIntervalMs: 50 },
+    { url: gateway.url, gitHubToken: "gho_test", timings: { ...TIMINGS, ...options.timings } },
+  );
   const seen: PlatformStatus[] = [];
   const states: PlatformState[] = [];
   platform.onStatus((status) => {
@@ -165,6 +182,14 @@ describe("platform connection", () => {
     expect(platform.status.state).toBe("reconnecting");
     gateway.mode = "healthy";
     await until(() => platform.status.state === "connected", "the reconnection");
+  });
+
+  it("doesn't let a client that never starts hold back later sessions", async () => {
+    const { platform, gateway } = await connected({ holdUpgrades: true, timings: { discoveryTimeoutMs: 300 } });
+    // Model discovery's client never got an answer and was abandoned at its deadline.
+    expect(gateway.upgrades).toBe(1);
+    void platform.createSession("planner", {} as SessionConfig).catch(() => undefined);
+    await until(() => gateway.upgrades === 2, "a fresh client for the planner session");
   });
 
   it("backs off exponentially with jitter, up to the cap, and retries only what retrying can fix", () => {

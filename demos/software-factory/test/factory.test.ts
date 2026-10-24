@@ -572,6 +572,118 @@ describe("Factory pipeline", () => {
     expect(factory.activity(created.id).filter((item) => item.text?.startsWith("Paused:")).length).toBe(5);
   });
 
+  it("fails with its sandbox intact when it runs out of pauses while reattaching", async () => {
+    const lostAgain = () => new Error("Session disconnected while waiting for a response");
+    let dropped = false;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = true;
+        // Every reattach that follows loses the connection again.
+        platform.resumeErrors.push(...Array.from({ length: 5 }, lostAgain));
+        throw lostAgain();
+      }
+    };
+    const { platform, factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 1 });
+    const created = factory.create(CREATE);
+    await until(() => dropped);
+    const original = factory.get(created.id)!.stations.find((station) => station.id === "build:csv2json")!.sessionId;
+    const wo = await settle(factory, created.id, 10_000);
+    expect(wo.status).toBe("failed");
+    const build = wo.stations.find((station) => station.id === "build:csv2json")!;
+    expect(build.sessionId).toBe(original);
+    expect(build.previousSessionIds).toBeUndefined();
+    expect(platform.sessionsFor("builder")).toHaveLength(2);
+    expect(factory.activity(created.id).some((item) => item.text?.includes("starting a fresh sandbox"))).toBe(false);
+  });
+
+  it("ignores late events from a session it let go of", async () => {
+    let dropped: FakeSession | undefined;
+    const dropping: Script = async (session, prompt, platform) => {
+      await builder()(session, prompt, platform);
+      if (!dropped && taskOf(platform, session).id === "csv2json") {
+        dropped = session;
+        throw new Error("Session disconnected while waiting for a response");
+      }
+    };
+    const { factory } = setup({ planner, builder: dropping, reviewer, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    expect((await settle(factory, created.id)).status).toBe("completed");
+    // The detach was never answered, so the old session can still deliver events.
+    dropped!.emit("assistant.usage", { model: "fake", inputTokens: 5, outputTokens: 5, duration: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 1_700));
+    const stored = store.getWorkOrder(created.id)!;
+    expect(stored.status).toBe("completed");
+    expect(stored.release).toBeDefined();
+  });
+
+  it("pauses, rather than fails, when the platform cancels a review's completion wait", async () => {
+    let cancelled = false;
+    const flaky: Script = async (session, prompt, platform) => {
+      if (!cancelled && prompt.includes('"csv2json: CSV to JSON" (round 1')) {
+        cancelled = true;
+        // What the runtime answers when its gateway shuts down mid-turn.
+        throw new Error("Completion wait cancelled");
+      }
+      await reviewer(session, prompt, platform);
+    };
+    const { factory } = setup({ planner, builder: builder(), reviewer: flaky, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    const wo = await settle(factory, created.id);
+    expect(cancelled).toBe(true);
+    expect(wo.status).toBe("completed");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (Completion wait cancelled)"))).toBe(true);
+  });
+
+  it("keeps a user's cancel a cancel, even when the turn reports a cancelled completion wait", async () => {
+    let reviewing = false;
+    const waiting: Script = async (session, prompt, platform) => {
+      if (!prompt.includes('"csv2json: CSV to JSON"')) return reviewer(session, prompt, platform);
+      session.abortError = new Error("Completion wait cancelled");
+      reviewing = true;
+      await new Promise(() => undefined);
+    };
+    const { factory } = setup({ planner, builder: builder(), reviewer: waiting, release }, undefined, { resumeBackoffMs: 10 });
+    const created = factory.create(CREATE);
+    await until(() => reviewing);
+    await factory.cancel(created.id);
+    const wo = await settle(factory, created.id);
+    expect(wo.status).toBe("cancelled");
+    expect(factory.activity(created.id).some((item) => item.text?.startsWith("Paused:"))).toBe(false);
+  });
+
+  it("pauses on an error it doesn't recognize while the platform doesn't answer, and fails on it when the platform does", async () => {
+    const strange: (count: number) => Script = (count) => {
+      let thrown = 0;
+      return async (session, prompt, platform) => {
+        if (thrown < count && taskOf(platform, session).id === "csv2json") {
+          thrown++;
+          throw new Error("The runtime went away");
+        }
+        await builder()(session, prompt, platform);
+      };
+    };
+    // The platform doesn't answer when the error happens (it starts reconnecting), then answers again.
+    let answers = false;
+    const outage = setup({ planner, builder: strange(1), reviewer, release }, undefined, {
+      resumeBackoffMs: 10,
+      checkPlatform: async () => {
+        const result = answers;
+        answers = true;
+        return result;
+      },
+    });
+    const paused = outage.factory.create(CREATE);
+    expect((await settle(outage.factory, paused.id)).status).toBe("completed");
+    expect(outage.factory.activity(paused.id).some((item) => item.text?.startsWith("Paused: lost the connection to Managed Copilot (The runtime went away)"))).toBe(true);
+
+    const healthy = setup({ planner, builder: strange(1), reviewer, release }, undefined, { checkPlatform: async () => true });
+    const failed = healthy.factory.create(CREATE);
+    const wo = await settle(healthy.factory, failed.id);
+    expect(wo.status).toBe("failed");
+    expect(wo.stations.find((station) => station.id === "build:csv2json")!.error?.message).toBe("The runtime went away");
+  });
+
   it("leaves files a builder deleted in a later round out of the release", async () => {
     const shrinking: Script = async (session, prompt, platform) => {
       const task = taskOf(platform, session);

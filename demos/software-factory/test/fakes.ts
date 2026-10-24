@@ -16,6 +16,8 @@ export class FakeSession implements StationSession {
   readonly #platform: FakePlatform;
   readonly #abort = new AbortController();
   aborted = false;
+  /** What an in-flight turn rejects with when the session is aborted (the runtime's answer to the abort). */
+  abortError: Error | undefined;
 
   constructor(platform: FakePlatform, role: StationRole, config: SessionConfig | ResumeSessionConfig, sessionId = id("sess")) {
     this.#platform = platform;
@@ -63,7 +65,7 @@ export class FakeSession implements StationSession {
     this.emit("assistant.turn_start", { turnId: id("turn") });
     this.emit("assistant.usage", { model: "fake", inputTokens: 100, outputTokens: 20, duration: 50 });
     const aborted = new Promise<never>((_, reject) => {
-      this.#abort.signal.addEventListener("abort", () => reject(new Error("Session aborted")), { once: true });
+      this.#abort.signal.addEventListener("abort", () => reject(this.abortError ?? new Error("Session aborted")), { once: true });
     });
     await Promise.race([this.#platform.script(this, options.prompt), aborted]);
     this.emit("session.idle", {});
@@ -104,6 +106,8 @@ export class FakePlatform implements FactoryPlatform {
   readonly writeFailures = new Map<string, number>();
   /** Like the gateway's list cap: only the newest sessions are listed. */
   listLimit = Number.POSITIVE_INFINITY;
+  /** Errors the next resumeSession calls throw, in order (e.g. a connection that drops again while reattaching). */
+  readonly resumeErrors: unknown[] = [];
   createCount = 0;
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
@@ -128,6 +132,8 @@ export class FakePlatform implements FactoryPlatform {
   }
 
   async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig): Promise<StationSession> {
+    const failure = this.resumeErrors.shift();
+    if (failure !== undefined) throw failure;
     if (!this.sessions.has(sessionId) || this.lost.has(sessionId)) throw new Error(`Session ${sessionId} not found`);
     const session = new FakeSession(this, role, config, sessionId);
     this.sessions.set(sessionId, session);

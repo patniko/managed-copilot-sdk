@@ -98,6 +98,8 @@ export class StationActivityMapper {
   #lastIntent: string | undefined;
   #usage: UsageSummary;
   #lastMessage: string | undefined;
+  /** Closed with its station's session: a detach that never completes can still deliver events, which must not count. */
+  #closed = false;
 
   constructor(workOrderId: string, stationId: string, sink: ActivitySink, usage?: UsageSummary) {
     this.#workOrderId = workOrderId;
@@ -136,6 +138,7 @@ export class StationActivityMapper {
   }
 
   handle(event: SessionEvent): void {
+    if (this.#closed) return;
     const subagent = event.agentId ? { subagent: event.agentId } : {};
     switch (event.type) {
       case "assistant.message_delta": {
@@ -242,5 +245,6 @@ export class StationActivityMapper {
 
   close(): void {
     this.#failRunningTools();
+    this.#closed = true;
   }
 }

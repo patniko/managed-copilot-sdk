@@ -1,7 +1,6 @@
 import type {
   AssistantMessageEvent,
   CopilotClient,
-  CopilotSession,
   MessageOptions,
   ResumeSessionConfig,
   SessionConfig,
@@ -283,35 +282,47 @@ export class Platform implements FactoryPlatform {
     return this.#managed?.info.environments.find((env) => env.name === FACTORY_ENVIRONMENTS[role]);
   }
 
-  async #client(role: StationRole): Promise<CopilotClient> {
+  /** The environment's client. Returns the cached promise itself, so callers can tell whether it was replaced. */
+  #client(role: StationRole): Promise<CopilotClient> {
     const existing = this.#clients.get(role);
     if (existing) return existing;
-    const created = this.#managedOrThrow().client(FACTORY_ENVIRONMENTS[role]);
+    let created: Promise<CopilotClient>;
+    try {
+      created = this.#managedOrThrow().client(FACTORY_ENVIRONMENTS[role]);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     this.#clients.set(role, created);
-    created.catch(() => this.#clients.delete(role));
+    created.catch(() => {
+      if (this.#clients.get(role) === created) this.#clients.delete(role);
+    });
     return created;
   }
 
   /** Creates a session with the station's deployed custom agent (`agent`), retrying once on a fresh client. */
   async createSession(role: StationRole, config: SessionConfig, _note?: (text: string) => void): Promise<StationSession> {
-    return this.#create(role, config);
+    return this.#withClient(role, (client) => client.createSession(config));
   }
 
-  async #create(role: StationRole, config: SessionConfig): Promise<CopilotSession> {
+  /**
+   * Runs `use` on the environment's client, retrying once on a fresh client when its transport broke. Sessions are
+   * created and resumed only through these tracked clients, so a lost connection stops (or forces) every one of them.
+   */
+  async #withClient<T>(role: StationRole, use: (client: CopilotClient) => Promise<T>): Promise<T> {
     const client = this.#client(role);
     try {
-      return await (await client).createSession(config);
+      return await use(await client);
     } catch (error) {
       if (isManagedCopilotError(error)) throw error;
       // Only a broken transport warrants a new client: a healthy client serves other sessions, and a session-level
       // rejection (admission, setup) must surface as is. A ping tells them apart.
       if (await this.#alive(client)) throw error;
-      log.warn("The environment's connection dropped; retrying on a fresh client", { role, error: (error as Error).message });
+      log.warn("The environment's connection dropped; retrying on a fresh client", { role, error: errorText(error) });
       if (this.#clients.get(role) === client) {
         this.#clients.delete(role);
-        void client.then((stale) => stale.stop()).catch(() => undefined);
+        void client.then((stale) => stopClient(stale, this.#timings.stopTimeoutMs), () => undefined);
       }
-      return (await this.#client(role)).createSession(config);
+      return use(await this.#client(role));
     }
   }
 
@@ -325,10 +336,10 @@ export class Platform implements FactoryPlatform {
     }
   }
 
-  /** Resumes a session and makes sure its station's agent is still the selected one. */
-  async resumeSession(_role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession> {
+  /** Resumes a session through the station's environment client and makes sure its agent is still the selected one. */
+  async resumeSession(role: StationRole, sessionId: string, config: ResumeSessionConfig, note?: (text: string) => void): Promise<StationSession> {
     const { agent, ...rest } = config;
-    const session = await this.#managedOrThrow().resumeSession(sessionId, rest);
+    const session = await this.#withClient(role, (client) => client.resumeSession(sessionId, rest));
     if (agent) {
       try {
         const current = await session.rpc.agent.getCurrent();
@@ -377,6 +388,7 @@ export class Platform implements FactoryPlatform {
     if (this.#stopped) return;
     const url = this.#options.url ?? process.env.MANAGED_COPILOT_URL;
     this.#attempt++;
+    const startedAt = Date.now();
     let managed: ManagedCopilot;
     try {
       managed = await withDeadline(
@@ -390,7 +402,7 @@ export class Platform implements FactoryPlatform {
         (late) => void closeQuietly(late, this.#timings.stopTimeoutMs),
       );
     } catch (error) {
-      this.#connectFailed(error, url);
+      this.#connectFailed(error, url, Date.now() - startedAt);
       return;
     }
     if (this.#stopped) {
@@ -414,9 +426,11 @@ export class Platform implements FactoryPlatform {
     this.#schedule(this.#config.healthIntervalMs, () => this.#healthCheck());
   }
 
-  #connectFailed(error: unknown, url: string | undefined): void {
+  /** Backoff spaces attempt starts: an attempt that ran into its deadline already waited, so the next one follows soon. */
+  #connectFailed(error: unknown, url: string | undefined, elapsedMs: number): void {
     const retryable = isRetryable(error);
-    const delay = retryable ? reconnectDelay(this.#attempt, this.#timings) : this.#timings.retryMaxMs;
+    const backoff = retryable ? reconnectDelay(this.#attempt, this.#timings) : this.#timings.retryMaxMs;
+    const delay = Math.max(Math.round(this.#timings.retryBaseMs / 4), backoff - elapsedMs);
     const failure = describeFailure(error, url);
     const status =
       retryable && this.#connectedOnce ? this.#reconnectingStatus(error, delay) : this.#baseStatus(failure.state, { ...failure, ...(url ? { url } : {}) });
