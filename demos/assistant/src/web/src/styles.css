@@ -1,0 +1,192 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI Variable Text", "Segoe UI", Inter, ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", Inter, ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Cascadia Code", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --animate-rise: rise 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  --animate-fade: fade 0.2s ease-out both;
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-100;
+    font-feature-settings: "ss01", "cv11";
+  }
+  ::selection {
+    @apply bg-violet-200 dark:bg-violet-800/60;
+  }
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-violet-500;
+  }
+}
+
+@utility card {
+  @apply rounded-2xl bg-white shadow-[0_1px_2px_rgba(0,0,0,0.04)] ring-1 ring-zinc-200/80 dark:bg-zinc-900 dark:shadow-none dark:ring-zinc-800;
+}
+@utility btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50;
+}
+@utility btn-primary {
+  @apply btn bg-violet-600 text-white hover:bg-violet-700 active:bg-violet-800 dark:bg-violet-500 dark:hover:bg-violet-400;
+}
+@utility btn-secondary {
+  @apply btn bg-white text-zinc-800 ring-1 ring-zinc-200 hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-100 dark:ring-zinc-700 dark:hover:bg-zinc-800;
+}
+@utility btn-ghost {
+  @apply btn text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100;
+}
+@utility chip {
+  @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium;
+}
+@utility kbd {
+  @apply rounded border border-zinc-300 bg-zinc-50 px-1 font-mono text-[10px] text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400;
+}
+
+/* Markdown in assistant messages */
+.prose-chat {
+  @apply text-[15px] leading-relaxed text-zinc-800 dark:text-zinc-200;
+}
+.prose-chat > * + * {
+  @apply mt-3;
+}
+.prose-chat h1,
+.prose-chat h2,
+.prose-chat h3 {
+  @apply font-semibold text-zinc-900 dark:text-zinc-50;
+}
+.prose-chat h1 {
+  @apply text-lg;
+}
+.prose-chat h2 {
+  @apply text-base;
+}
+.prose-chat h3 {
+  @apply text-[15px];
+}
+.prose-chat strong {
+  @apply font-semibold text-zinc-900 dark:text-zinc-50;
+}
+.prose-chat a {
+  @apply font-medium text-violet-700 underline decoration-violet-300 underline-offset-2 hover:decoration-violet-600 dark:text-violet-300 dark:decoration-violet-700;
+}
+.prose-chat ul {
+  @apply list-disc space-y-1 pl-5 marker:text-zinc-400;
+}
+.prose-chat ol {
+  @apply list-decimal space-y-1 pl-5 marker:text-zinc-400;
+}
+.prose-chat li > ul,
+.prose-chat li > ol {
+  @apply mt-1;
+}
+.prose-chat code {
+  @apply rounded bg-zinc-100 px-1 py-0.5 font-mono text-[13px] text-zinc-800 dark:bg-zinc-800 dark:text-zinc-200;
+}
+.prose-chat pre {
+  @apply overflow-x-auto rounded-xl bg-zinc-900 p-3 text-[13px] text-zinc-100 dark:bg-black/40;
+}
+.prose-chat pre code {
+  @apply bg-transparent p-0 text-inherit;
+}
+.prose-chat blockquote {
+  @apply border-l-2 border-violet-300 pl-3 text-zinc-600 dark:border-violet-700 dark:text-zinc-400;
+}
+.prose-chat table {
+  @apply w-full border-collapse overflow-hidden rounded-lg text-sm;
+}
+.prose-chat th {
+  @apply border-b border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-left font-semibold dark:border-zinc-700 dark:bg-zinc-800/60;
+}
+.prose-chat td {
+  @apply border-b border-zinc-100 px-2.5 py-1.5 align-top dark:border-zinc-800;
+}
+.prose-chat hr {
+  @apply border-zinc-200 dark:border-zinc-800;
+}
+
+.typing-dot {
+  animation: typing 1.2s infinite ease-in-out;
+}
+.typing-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.typing-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes typing {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.streaming-caret > :last-child:not(ul):not(ol):not(pre):not(table)::after,
+.streaming-caret > ul:last-child > li:last-child::after,
+.streaming-caret > ol:last-child > li:last-child::after {
+  content: "";
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.5;
+  animation: caret 1s steps(2) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(212 212 216 / 0.8) transparent;
+}
+@media (prefers-color-scheme: dark) {
+  .scrollbar-thin {
+    scrollbar-color: rgb(63 63 70 / 0.8) transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
