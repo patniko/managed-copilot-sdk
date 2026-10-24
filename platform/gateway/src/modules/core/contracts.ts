@@ -288,8 +288,12 @@ export interface PlatformEventMeta {
 }
 
 export interface EventsService {
-  /** Publishes to SSE subscribers (owner-scoped) and `subscribe` listeners (webhooks). */
-  publish(event: PlatformEvent, meta: PlatformEventMeta): void;
+  /**
+   * Publishes to SSE subscribers (owner-scoped) and `subscribe` listeners (webhooks). Returns whether the event is
+   * stored for `Last-Event-ID` replay, which includes an ID this owner already stored. Listeners are notified either
+   * way, so a publisher that retries with a stable event ID gets at-least-once delivery (consumers dedupe by `id`).
+   */
+  publish(event: PlatformEvent, meta: PlatformEventMeta): boolean;
   /** Builds, publishes, and returns a platform event. */
   emit(type: PlatformEventType, input: { readonly ownerId: number; readonly sessionId?: string; readonly environment?: string; readonly data?: Record<string, unknown> }): PlatformEvent;
   subscribe(listener: (event: PlatformEvent, meta: PlatformEventMeta) => void): () => void;

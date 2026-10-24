@@ -20,12 +20,21 @@ export class PlatformEvents implements EventsService {
     this.#log = log;
   }
 
-  publish(event: PlatformEvent, meta: PlatformEventMeta): void {
+  /** Returns whether the event is stored for `Last-Event-ID` replay; listeners are notified either way. */
+  publish(event: PlatformEvent, meta: PlatformEventMeta): boolean {
+    let stored = false;
     try {
       this.#ledger.appendEvent(event, meta.ownerId);
-      if (++this.#published % 1000 === 0) this.#ledger.pruneEvents();
+      stored = true;
     } catch (error) {
       this.#log.warn("Could not persist platform event", { type: event.type, error: (error as Error).message });
+    }
+    if (stored && ++this.#published % 1000 === 0) {
+      try {
+        this.#ledger.pruneEvents();
+      } catch (error) {
+        this.#log.warn("Could not prune platform events", { error: (error as Error).message });
+      }
     }
     for (const listener of this.#listeners) {
       try {
@@ -34,6 +43,7 @@ export class PlatformEvents implements EventsService {
         this.#log.warn("Platform event listener failed", { type: event.type, error: (error as Error).message });
       }
     }
+    return stored;
   }
 
   emit(type: PlatformEventType, input: { ownerId: number; sessionId?: string; environment?: string; data?: Record<string, unknown> }): PlatformEvent {
