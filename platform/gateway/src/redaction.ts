@@ -106,8 +106,13 @@ function decodeSegment(segment: string): string {
 /** Marks where a command's output starts inside an error message (sandbox setup failures). */
 export const OUTPUT_TAIL_MARKER = "\nLast output:\n";
 
-const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>`]+/gi;
+// Linear-time patterns only: these run over text clients and runtimes supply. The scheme is bounded, and user info may
+// hold quotes (`postgresql://alice:it's@db/…`), which end a URL anywhere else.
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]{0,31}:\/\/(?:[^\s"<>`/@]*@)?[^\s"'<>`]+/gi;
 const WORD_IN_TEXT = /[A-Za-z0-9_\-.~+]{16,}={0,2}/g;
+/** Punctuation that ends a sentence after a URL, and that surrounds a token without being part of it. */
+const AFTER_URL = ").,;:!?]";
+const AROUND_TOKEN = ".~+-";
 
 /**
  * Free text (error messages, reasons, log lines) as operators may see it: URLs redacted as by `redactUrl`, token-shaped
@@ -118,13 +123,17 @@ export function redactText(text: string): string {
   const visible = cut < 0 ? text : `${text.slice(0, cut)}\n(Command output is not shown to operators.)`;
   return visible
     .replace(URL_IN_TEXT, (match) => {
-      const trailing = /[).,;:!?\]]+$/.exec(match)?.[0] ?? "";
-      return `${redactUrl(match.slice(0, match.length - trailing.length))}${trailing}`;
+      let end = match.length;
+      while (end > 0 && AFTER_URL.includes(match[end - 1]!)) end--;
+      return `${redactUrl(match.slice(0, end))}${match.slice(end)}`;
     })
     .replace(WORD_IN_TEXT, (word) => {
-      // Punctuation around a token (a sentence's final period, a leading dash) is not part of it.
-      const [, lead = "", core = "", trail = ""] = /^([.~+-]*)(.*?)([.~+-]*)$/s.exec(word) ?? [];
-      return looksSecret(word) || looksSecret(core) ? `${lead}${REDACTED}${trail}` : word;
+      // A sentence's final period or a leading dash is not part of the token (index scans keep this linear).
+      let start = 0;
+      while (start < word.length && AROUND_TOKEN.includes(word[start]!)) start++;
+      let end = word.length;
+      while (end > start && AROUND_TOKEN.includes(word[end - 1]!)) end--;
+      return looksSecret(word) || looksSecret(word.slice(start, end)) ? `${word.slice(0, start)}${REDACTED}${word.slice(end)}` : word;
     });
 }
 

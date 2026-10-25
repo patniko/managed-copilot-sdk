@@ -42,6 +42,22 @@ describe("operator redaction", () => {
       PIP_INDEX_URL: "https://pypi.example.com/simple?token=***",
       REGION: "westus",
     });
+    // Quotes are valid in user info.
+    expect(redactValue({ DATABASE_URL: "postgresql://alice:example'password@db.example/orders" })).toEqual({ DATABASE_URL: "postgresql://***@db.example/orders" });
+    expect(redactText("connect to 'https://x.example/a' now")).toBe("connect to 'https://x.example/a' now");
+  });
+
+  it("stays linear on pathological text", () => {
+    const inputs = ["a" + ".".repeat(64_000) + "b", "a.".repeat(32_000), `https://x.example/${")".repeat(64_000)}b`, `${"a+".repeat(32_000)}://`, "-".repeat(64_000)];
+    for (const input of inputs) {
+      const started = performance.now();
+      redactText(input);
+      redactValue({ value: input });
+      expect(performance.now() - started, input.slice(0, 12)).toBeLessThan(1_000);
+    }
+  });
+
+  it("masks log records' messages and every text field", () => {
     expect(redactLogRecord({ seq: 1, at: "t", level: "warn", logger: "x", message: "Failed: http://a:b@h.example/", fields: { reason: "see https://h.example/?key=SECRET", nested: ["ghp_0123456789abcdefghijABCDEFGHIJ"] } })).toEqual({
       seq: 1,
       at: "t",
