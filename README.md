@@ -27,13 +27,16 @@ platform. Your code keeps using genuine `CopilotClient` and `CopilotSession` obj
   schedules and agent reminders run as you after `npx managed-copilot login`.
 - **Copilot CLI on a live session.** `npx managed-copilot attach <id>` opens the stock Copilot CLI on the same
   conversation your app uses, and it follows the session when it moves into a sandbox.
+- **An operator console.** `npx managed-copilot console` shows the platform as it runs: component health, every
+  owner's sessions with their sandboxes and harness configuration, environments, schedules, webhooks, and a live feed,
+  with secrets redacted and conversations private.
 
 | Start here | |
 | --- | --- |
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
 | [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail and Google Calendar |
-| [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, and schedules |
+| [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
 | [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
 | [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
 | [Architecture](docs/architecture.md) | Topology, protocol facts, and how the pieces fit |
@@ -46,7 +49,8 @@ platform. Your code keeps using genuine `CopilotClient` and `CopilotSession` obj
 | `packages/sdk` | `@managed-copilot/sdk`: `ManagedCopilot.connect()`, stock clients over a secure bridge |
 | `packages/aspire` | `@managed-copilot/aspire`: `addManagedCopilot(builder, name, options)` for Aspire TypeScript AppHosts |
 | `packages/cli` | `npx managed-copilot`: background sign-in, sessions, Copilot CLI attach, artifacts, schedules |
-| `platform/gateway` | Authenticated gateway: admission, routing, session ledger, platform services |
+| `platform/gateway` | Authenticated gateway: admission, routing, session ledger, platform services, operator API |
+| `platform/console` | The operator console the gateway serves at `/console` |
 | `platform/sandbox`, `platform/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
 | `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
 | `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
@@ -72,6 +76,7 @@ discovery record the local gateway writes. From another terminal:
 npx managed-copilot status             # the deployment, your account, and its environments
 npx managed-copilot sessions           # your sessions
 npx managed-copilot attach 7f3a2c1     # Copilot CLI on a live session (any unique ID prefix)
+npx managed-copilot console            # the operator console: health, sessions, harness configuration
 ```
 
 To run every snippet from the spec against your platform, start **quickstart** in the Aspire dashboard, or run

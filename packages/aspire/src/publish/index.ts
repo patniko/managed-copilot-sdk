@@ -11,7 +11,7 @@ import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
 import type { ManagedCopilotResource } from "../add.js";
 import type { AspireBuilder } from "../aspire.js";
 import type { ManagedCopilotOptions, SecretBinding } from "../options.js";
-import { AzurePublishError, applyAccessRules, listSetting, prepareAzureConfig, rewriteWebhooks } from "./config.js";
+import { AzurePublishError, applyAccessRules, applyOperators, listSetting, prepareAzureConfig, rewriteWebhooks } from "./config.js";
 import { expr, joinExpression } from "./expressions.js";
 import { writeGatewayBuildFiles } from "./gateway-image.js";
 import { EGRESS_BICEP } from "./egress.js";
@@ -164,10 +164,16 @@ function amd64(container: PublishContainer): PublishContainer {
 
 /** Declares the platform for Azure: a VNet-integrated Container Apps environment with NFS state, and the gateway. */
 export async function publishManagedCopilot(builder: PublishBuilder, name: string, input: PublishInput): Promise<PublishedManagedCopilot> {
-  const access = applyAccessRules(input.config, {
-    githubUsers: listSetting(await setting(builder, `Parameters:${name}-github-users`)),
-    githubOrgs: listSetting(await setting(builder, `Parameters:${name}-github-orgs`)),
-  });
+  const access = applyOperators(
+    applyAccessRules(input.config, {
+      githubUsers: listSetting(await setting(builder, `Parameters:${name}-github-users`)),
+      githubOrgs: listSetting(await setting(builder, `Parameters:${name}-github-orgs`)),
+    }),
+    {
+      githubUsers: listSetting(await setting(builder, `Parameters:${name}-operator-users`)),
+      githubOrgs: listSetting(await setting(builder, `Parameters:${name}-operator-orgs`)),
+    },
+  );
   const prepared = prepareAzureConfig(access, input.appHostDirectory);
   const addressSpace = (await setting(builder, `Parameters:${name}-address-space`)) ?? DEFAULT_ADDRESS_SPACE;
   const npmRegistry = hostNpmRegistry();

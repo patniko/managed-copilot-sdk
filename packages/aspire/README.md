@@ -34,6 +34,9 @@ await builder.build().run();
 - **Secrets.** Vault values and webhook secrets must be Aspire secret parameters. The gateway receives them as
   environment variables; its configuration holds only `{ secretEnv }` references.
 - **Schedules.** `session.tools` take stock SDK tools (`defineTool`); only their declarations are stored.
+- **Operators.** `operators: { githubUsers: [...], githubOrgs: [...] }` names who may open the operator console
+  (`npx managed-copilot console`) and operator API. A local gateway that names none lets every account that can use
+  it operate it; a deployment that names none keeps its console off.
 - **Hosting.** The gateway runs on a fixed port (7400 by default, `port` to change it) with a health check, a generated
   persistent platform key, and its data under `.managed-copilot/data` next to the AppHost. It builds sandbox images
   and runs the sandbox relay and egress proxy itself.

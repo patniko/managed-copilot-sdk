@@ -27,11 +27,13 @@ RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; e
  && pnpm fetch
 COPY packages/protocol/ packages/protocol/
 COPY platform/gateway/ platform/gateway/
+COPY platform/console/ platform/console/
 COPY deploy/azure/ deploy/azure/
 # The gateway's tests use the SDK (a dev dependency); pnpm only needs its manifest to resolve the workspace.
 COPY packages/sdk/package.json packages/sdk/
-RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure \
- && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure run build \
+# The operator console is static files the gateway serves at /console (built here, never installed in the image).
+RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure --filter @managed-copilot/console \
+ && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure --filter @managed-copilot/console run build \
  && mkdir -p /out-azure \
  && cp deploy/azure/package.json /out-azure/ && cp -r deploy/azure/dist /out-azure/ \
  && find /out-azure -name '*.map' -delete
@@ -40,13 +42,14 @@ RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol 
 # skipped because they would probe the build platform; native packages ship as per-platform prebuilt packages, and
 # the final stage checks that they load.
 RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; esac)" \
- && mkdir -p /out/packages/protocol /out/packages/sdk /out/platform/gateway \
+ && mkdir -p /out/packages/protocol /out/packages/sdk /out/platform/gateway /out/platform/console \
  && cp package.json pnpm-lock.yaml /out/ \
  && sed '/^supportedArchitectures:/,$d' pnpm-workspace.yaml > /out/pnpm-workspace.yaml \
  && printf 'supportedArchitectures:\n  os: [linux]\n  cpu: [%s]\n  libc: [glibc]\n' "${cpu}" >> /out/pnpm-workspace.yaml \
  && cp packages/protocol/package.json /out/packages/protocol/ && cp -r packages/protocol/dist /out/packages/protocol/ \
  && cp packages/sdk/package.json /out/packages/sdk/ \
  && cp platform/gateway/package.json /out/platform/gateway/ && cp -r platform/gateway/dist /out/platform/gateway/ \
+ && cp -r platform/console/dist /out/platform/console/ \
  && cd /out \
  && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/protocol --filter @managed-copilot/gateway \
  && find /out -name '*.map' -delete

@@ -81,8 +81,9 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | Protocol | `packages/protocol` | library | AppHost config schema, REST DTOs, errors, events, bridge constants, network policy math |
 | SDK | `packages/sdk` | library | `ManagedCopilot` API; stock `CopilotClient` over the bridge; REST features |
 | Aspire integration | `packages/aspire` | library | `addManagedCopilot(builder, name, options)` for TypeScript AppHosts |
-| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, `schedules` |
-| Gateway | `platform/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks |
+| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator` |
+| Gateway | `platform/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
+| Console | `platform/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
 | Sandbox | `platform/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `platform/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
 | Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant |
@@ -705,6 +706,68 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
   (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
 
+### Operator control plane (spec section 16)
+
+The operator module (`platform/gateway/src/modules/operator`, registered last) serves the operator API under
+`/v1/operator/*` and the console (`platform/console`, a React SPA built with Vite) at `/console`. The contract is
+`packages/protocol/src/operator.ts` (`OPERATOR_ROUTES`, DTOs; the browser-safe `@managed-copilot/protocol/operator`
+export). The CLI's `console` and `operator` commands use the same API.
+
+- **Who.** `OperatorAccess` reads the AppHost's `operators` (`githubUsers`, `githubOrgs`) and checks them with
+  `auth.satisfies(principal, rules)`: a login match, or org membership checked with the principal's own token (cached;
+  a GitHub outage is `upstream_unavailable`, never a grant). Operators authenticate through `auth.authenticate`, so
+  they must also pass `access`. With no operators named, a `local`-mode gateway listening on loopback grants every
+  account (`grant: "local"`); anything else answers `forbidden` with how to name operators, and the `operator`
+  capability is not advertised. Publishing merges `Parameters:<name>-operator-users`/`-operator-orgs`
+  (`applyOperators`).
+- **Console sign-in.** `POST /v1/operator/console/tickets` (bearer only) mints a one-time `mcct_` ticket (60 s, stored
+  hashed, at most 200 outstanding); the CLI opens `<publicUrl>/console/signin#ticket=…`, and the console posts the
+  ticket from the fragment to `POST /v1/operator/console/session`, which re-authenticates the ticket's credential and
+  sets an HttpOnly `SameSite=Strict` cookie (`mc_console`, or `__Host-mc_console` with `Secure` when `publicUrl` is
+  HTTPS). Sessions live in memory only (8 h, 1 h idle, at most 500; a gateway restart signs everyone out) and keep
+  the GitHub token there, never on disk. Every cookie request needs the `x-managed-copilot-console: 1` header and, when
+  the browser sends one, an `Origin` of this gateway; the gateway grants no CORS. Every request (bearer or cookie)
+  re-runs `auth.authenticate` and the operator check; a rejected credential or a removed operator ends the console
+  session and clears the cookie.
+- **Views.** Each module answers for its own state, reading without side effects (core never makes a session
+  resident; no runtime RPCs). Core's `coreOperator` service: gateway facts, storage sizes, the shared runtime's
+  status, sessions of every owner (filters, harness from the admitted parameters with host paths scrubbed), live
+  attachments and connections, accounts, environments and their pinned customization files (path-checked, at most
+  256 KiB, binary files flagged), and recent ledger events. Sandbox: `operatorStatus()` (backend `describe()` facts,
+  last probe and error), `operatorSandboxes()`. Network: `operatorEgress()` (mode, proxy connection, CA fingerprint,
+  registrations), `operatorBlocks()`. Durable: `operatorActions`/`operatorActionCounts` (metadata only),
+  `operatorSubscriptions`/`Deliveries`/`Counts`/`Status`, `operatorSchedules`/`operatorRuns`/`schedulerStatus`,
+  `credentials.operatorStatuses()`. `OperatorViews` combines them into health per component (`gateway`, `runtime`,
+  `sandboxes`, `egress`, `scheduler`, `webhooks`, `storage`: healthy, degraded, unavailable, disabled, or unknown), the
+  overview's counts and attention items (unavailable components, environments that cannot start sessions, failed
+  deliveries, unsigned webhooks, paused schedules, broken background sign-ins, open access), and session details.
+- **Content and secrets.** Operators get configuration, never content. Ledger events (the platform's own event
+  stream; the API never reads runtime conversation events) go through `sanitizeEventData`: content keys (`prompt`,
+  `content`, `arguments`, `result`, `payload`, `text`, `body`, `output`, …) and credential-like keys are dropped,
+  strings are cut at 500 characters and secret-looking ones redacted, and action and artifact lists keep only IDs,
+  states, tool names, paths, and sizes. Action views show tool names and states, not arguments. Harness, environment,
+  and webhook views pass through `redaction.ts` (`redactValue`, `redactUrl`: query values and user info become `***`,
+  credential-looking keys and values are replaced). MCP servers show their original URL (redacted) and only the
+  names of their headers and environment variables, with `adapter: true` when shared placement routes them through
+  the gateway's MCP adapter.
+- **Actions.** `POST` routes run through `act()`, which records the operator, action, target, outcome, and message
+  in the `operator_audit` table (newest 5000 kept; `GET /v1/operator/audit`): re-probe the sandbox backend, stop a
+  sandbox (`sandboxes.operatorStop`: `session_busy` while its session has a turn, a pending request, an open action,
+  or a busy sandbox; `conflict` unless running; files and state are kept), pause or resume a schedule (the pause
+  reason names the operator and blocks run-now until resumed; resume makes the owner's checks), and retry a failed
+  webhook delivery (one more attempt; refused for webhooks the AppHost no longer declares, or for `action_required`
+  deliveries whose actions are no longer open). Nothing deletes.
+- **Live feed.** `GET /v1/operator/stream` (SSE) sends `platform` events (sanitized, every owner) and `log` lines
+  from the in-memory log ring (`log.ts` `logRing`, the newest 1000 redacted records), a `: ping` every 15 s, and
+  re-authenticates every minute; a client that falls 1 MB behind is dropped and reconnects. `GET /v1/operator/logs`
+  and `/events` serve recent history. `metrics.ts` counts per-minute traffic for the last hour (HTTP requests and
+  errors outside the operator API, RPC requests and notifications, connections, events, sessions created, inference
+  requests).
+- **Static files.** `/console` redirects to `/console/`; files come from `MANAGED_COPILOT_CONSOLE_DIR` or
+  `platform/console/dist` beside the gateway (copied into the gateway image), with an SPA fallback to `index.html`, a
+  strict CSP (`default-src 'self'`, no inline scripts, `frame-ancestors 'none'`), `nosniff`, `no-referrer`, and
+  immutable caching for hashed assets. An unbuilt console serves a page that says to run `pnpm build`.
+
 ## Gateway extension points
 
 Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
@@ -729,6 +792,7 @@ structurally (they may add members).
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified as background work, never another account); tells core `auth.forgetCredential(token)` when a credential is removed or replaced |
 | `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
+| `coreOperator` | core | Read-only operator views for the operator module: `gateway()`, `info()`, `storage()`, `runtime()`, `sessions(query)`, `session(id)`, `sessionCounts()`, `connections()`, `upstreams()`, `accounts()`, `accountDirectory()`, `environments()`, `customizationFile(env, path)`, `events(query)`, `toOperatorEvent(event, owner)`. Other modules add optional `operator*` members to their own services (`sandboxes.operatorStatus`/`operatorSandboxes`/`operatorStop`, `policy.operatorEgress`/`operatorBlocks`, `actions.operatorActions`/`operatorActionCounts`, `webhooks.operator*`/`retry`, `schedules.operator*`/`schedulerStatus`, `credentials.operatorStatuses`), read through `modules/operator/contract.ts` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`
@@ -1146,7 +1210,9 @@ sequenceDiagram
 ### CLI and quickstart
 
 - `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
-  `attach`, `promote`, `artifacts`, `schedules`. It uses the SDK and `@managed-copilot/sdk/internal` (first-party only:
+  `attach`, `promote`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the sign-in link;
+  `--no-open` prints it), and `operator [overview|infra|environments|sessions|sandboxes|schedules|webhooks]`. It uses
+  the SDK and `@managed-copilot/sdk/internal` (first-party only:
   `HttpClient`, URL/token resolution, `launchAttachedCli`). Tokens never come from argv. Errors print the stable code
   and a hint; usage errors exit 2.
 - `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
@@ -1238,6 +1304,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64` | none | Extra CA certificates (base64 PEM) the proxy trusts for vault hosts |
 | `MANAGED_COPILOT_VAULT_KEY` | `<data>/network/vault.key` | 32-byte base64 key that seals vault values |
 | `MANAGED_COPILOT_MCP_ADAPTER_URL` | `http://127.0.0.1:<port>` | Base URL the shared runtime uses for the MCP adapter |
+| `MANAGED_COPILOT_CONSOLE_DIR` | `platform/console/dist` beside the gateway | Built operator console the gateway serves at `/console` |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix and `managed-copilot.instance` label for Docker networks, containers, and volumes (use a unique value per parallel gateway) |
 | `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs; must not contain credentials, a query, a fragment, or spaces, backslashes, or control characters (refused) |
@@ -1264,3 +1331,4 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
+| **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `platform/console/**`, `packages/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
