@@ -119,10 +119,12 @@ describe("operator API and console", () => {
   });
 
   it("admits only named operators and members of operator organizations", async () => {
-    expect((await call(OPERATOR_ROUTES.overview)).json.error?.code).toBe("authentication_required");
+    const anonymous = (await call(OPERATOR_ROUTES.overview)).json.error as { code: string; details?: Record<string, unknown> } | undefined;
+    expect(anonymous).toMatchObject({ code: "authentication_required", details: { reason: "signed_out" } });
     const bob = await call(OPERATOR_ROUTES.overview, { token: BOB });
     expect(bob.status).toBe(403);
     expect(bob.json.error?.message).toMatch(/@bob is not an operator.*@alice.*members of ops-team/);
+    expect(bob.json.error).toMatchObject({ details: { login: "bob", operators: "@alice, members of ops-team" } });
     expect((await call(OPERATOR_ROUTES.me, { token: ALICE })).json).toMatchObject({ account: { id: 1001, login: "alice" }, grant: "configured", via: "token" });
     expect((await call(OPERATOR_ROUTES.me, { token: CAROL })).json).toMatchObject({ account: { login: "carol" }, grant: "configured" });
     // The operator API never answers cross-origin reads.
@@ -164,7 +166,7 @@ describe("operator API and console", () => {
     expect(out.status).toBe(204);
     expect(out.headers.get("set-cookie")).toMatch(/^mc_console=; .*Max-Age=0/);
     const after = await call(OPERATOR_ROUTES.me, { cookie, console: true });
-    expect(after.json.error).toMatchObject({ code: "authentication_required", message: expect.stringMatching(/console session ended/) });
+    expect(after.json.error).toMatchObject({ code: "authentication_required", message: expect.stringMatching(/console session ended/), details: { reason: "session_ended" } });
     const audit = (await call(OPERATOR_ROUTES.audit, { token: ALICE })).json as unknown as { action: string; actor: { login: string } }[];
     expect(audit.map((entry) => entry.action)).toEqual(expect.arrayContaining(["console.signin", "console.signout"]));
   });
@@ -400,7 +402,12 @@ describe("operator API and console", () => {
     expect(asset.headers.get("content-type")).toMatch(/text\/javascript/);
     expect(asset.headers.get("cache-control")).toContain("immutable");
     expect((await call("/console/assets/missing.js")).status).toBe(404);
+    expect((await call("/console/missing.ico")).status).toBe(404);
     expect((await call("/console/%2e%2e/%2e%2e/package.json")).status).toBe(404);
+    // Deep links to IDs with dots are console routes, not files.
+    const dotted = await call("/console/sessions/my.session.v2");
+    expect(dotted.status).toBe(200);
+    expect(dotted.text).toContain("<div id=root>");
   });
 });
 

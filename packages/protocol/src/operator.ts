@@ -19,7 +19,10 @@ export const OPERATOR_ROUTES = {
   me: "/v1/operator/me",
   /** `POST` (GitHub bearer token): a one-time console sign-in ticket. */
   consoleTickets: "/v1/operator/console/tickets",
-  /** `POST { ticket }` redeems a ticket for a console session cookie; `DELETE` signs out. */
+  /**
+   * `POST { ticket }` redeems a ticket (used up even when the sign-in then fails) for a console session cookie and
+   * answers with the `OperatorIdentity`; `DELETE` signs out.
+   */
   consoleSession: "/v1/operator/console/session",
   overview: "/v1/operator/overview",
   infrastructure: "/v1/operator/infrastructure",
@@ -27,11 +30,11 @@ export const OPERATOR_ROUTES = {
   environment: (name: string) => `/v1/operator/environments/${e(name)}`,
   /** `GET ?path=agents/planner.agent.md`: one deployed customization file. */
   environmentFile: (name: string) => `/v1/operator/environments/${e(name)}/file`,
-  /** `GET ?owner=&environment=&state=&placement=&q=&limit=` */
+  /** `GET ?owner=&environment=&state=&placement=&q=&limit=` (deleted sessions are not listed). */
   sessions: "/v1/operator/sessions",
   session: (id: string) => `/v1/operator/sessions/${e(id)}`,
   connections: "/v1/operator/connections",
-  /** `GET ?state=&owner=&limit=` */
+  /** `GET ?state=&limit=` (without `state`: every sandbox but deleted ones). */
   sandboxes: "/v1/operator/sandboxes",
   /** `POST`: stops the session's sandbox compute after its work drains (state is kept). */
   sandboxStop: (sessionId: string) => `/v1/operator/sandboxes/${e(sessionId)}/stop`,
@@ -39,20 +42,25 @@ export const OPERATOR_ROUTES = {
   sandboxesProbe: "/v1/operator/sandboxes/probe",
   schedules: "/v1/operator/schedules",
   scheduleRuns: (id: string) => `/v1/operator/schedules/${e(id)}/runs`,
+  /** `POST { reason? }`: an operator's pause (blocks every run until lifted). */
   schedulePause: (id: string) => `/v1/operator/schedules/${e(id)}/pause`,
+  /** `POST`: lifts an operator's pause (an owner's or the platform's pause is the owner's to lift). */
   scheduleResume: (id: string) => `/v1/operator/schedules/${e(id)}/resume`,
   /** `GET ?state=&limit=` */
   webhooks: "/v1/operator/webhooks",
   /** `POST`: one more attempt for a failed delivery. */
   webhookRetry: (deliveryId: string) => `/v1/operator/webhooks/deliveries/${e(deliveryId)}/retry`,
-  /** `GET ?state=open|attention|<state>&session=&limit=` */
+  /** `GET ?state=open|attention|all|<state>&session=&limit=` (`open` by default; `attention` is needs_reconciliation). */
   actions: "/v1/operator/actions",
   accounts: "/v1/operator/accounts",
   /** `GET ?limit=&type=`: recent platform events of every owner (metadata only). */
   events: "/v1/operator/events",
-  /** Server-sent events: `event: platform` (an `OperatorEvent`), `event: log` (an `OperatorLogEntry`), and `: ping`. */
+  /**
+   * Server-sent events: `event: platform` (an `OperatorEvent`), `event: log` (an `OperatorLogEntry`), and `: ping`
+   * every 15 s. There are no `id:` lines to resume from: after reconnecting, read recent history from `events` and `logs`.
+   */
   stream: "/v1/operator/stream",
-  /** `GET ?level=&limit=`: the gateway's recent log entries (the same lines its own log output carries). */
+  /** `GET ?level=&limit=`: the gateway's recent log entries at `level` and above (`warn`: warnings and errors). */
   logs: "/v1/operator/logs",
   /** `GET ?limit=`: operator actions and console sign-ins. */
   audit: "/v1/operator/audit",
@@ -470,7 +478,8 @@ export interface OperatorSessionQuery {
   /** Owner login or numeric account ID. */
   readonly owner?: string;
   readonly environment?: string;
-  readonly state?: SessionState;
+  /** Any state but `deleted` (deleted sessions are not listed). */
+  readonly state?: Exclude<SessionState, "deleted">;
   readonly placement?: Placement;
   /** Session ID prefix. */
   readonly q?: string;

@@ -93,9 +93,11 @@ export function registerConsole(app: GatewayApp, options: { readonly log: Logger
       if (segments.some((segment) => segment === "." || segment === ".." || segment.includes("\\") || segment.includes("\0"))) {
         throw new ManagedCopilotError("not_found", "No such console file");
       }
-      const extension = extname(segments[segments.length - 1] ?? "");
+      // Files are the build's hashed assets and its root files (index.html, a favicon). Every other path is a console
+      // route, answered with index.html: deep links work, including IDs with dots (`/console/sessions/my.session`).
+      const isFile = segments[0] === "assets" || (segments.length === 1 && extname(segments[0]!) !== "");
       let file = join(base, "index.html");
-      if (extension) {
+      if (isFile) {
         const candidate = join(base, ...segments);
         let real: string | undefined;
         try {

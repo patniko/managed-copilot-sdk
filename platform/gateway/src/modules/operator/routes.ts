@@ -36,7 +36,7 @@ interface Operator {
   readonly session?: ConsoleSession;
 }
 
-const SESSION_STATES: readonly SessionState[] = ["creating", "ready", "running", "waiting", "idle", "stopped", "promoting", "deleting", "failed"];
+const SESSION_STATES: readonly Exclude<SessionState, "deleted">[] = ["creating", "ready", "running", "waiting", "idle", "stopped", "promoting", "deleting", "failed"];
 const PLACEMENTS: readonly Placement[] = ["shared", "sandbox"];
 const SANDBOX_STATES: readonly SandboxState[] = ["provisioning", "setting_up", "running", "stopping", "stopped", "deleting", "deleted", "failed"];
 const ACTION_FILTERS = ["open", "attention", "all", "pending", "claimed", "executing", "completed", "failed", "needs_reconciliation", "expired", "cancelled"] as const;
@@ -80,6 +80,7 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
       throw new ManagedCopilotError(
         "authentication_required",
         cookie ? "Your console session ended. Run `npx managed-copilot console` to sign in again." : "Sign in with `npx managed-copilot console`, or send a GitHub token (Authorization: Bearer).",
+        { reason: cookie ? "session_ended" : "signed_out" },
       );
     }
     access.assertConsoleRequest(ctx.req);
@@ -93,7 +94,10 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
       if (isManagedCopilotError(error, "authentication_required") || isManagedCopilotError(error, "forbidden")) {
         access.endSession(cookie);
         if (!ctx.res.headersSent) ctx.res.setHeader("set-cookie", access.clearCookie());
-        throw new ManagedCopilotError(error.code, `Your console session ended: ${error.message} Run \`npx managed-copilot console\` to sign in again.`);
+        throw new ManagedCopilotError(error.code, `Your console session ended: ${error.message} Run \`npx managed-copilot console\` to sign in again.`, {
+          ...error.details,
+          ...(error.code === "authentication_required" ? { reason: "credential_rejected" } : {}),
+        });
       }
       throw error;
     }

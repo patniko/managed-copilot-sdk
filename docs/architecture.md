@@ -778,9 +778,20 @@ export). The CLI's `console` and `operator` commands use the same API.
   `metrics.ts` counts per-minute traffic for the last hour (HTTP requests and errors outside the operator API, RPC
   requests and notifications, connections, events, sessions created, inference requests).
 - **Static files.** `/console` redirects to `/console/`; files come from `MANAGED_COPILOT_CONSOLE_DIR` or
-  `platform/console/dist` beside the gateway (copied into the gateway image), with an SPA fallback to `index.html`, a
+  `platform/console/dist` beside the gateway (copied into the gateway image). Only `assets/` and root-level files
+  (`index.html`) are files; every other path is a console route answered with `index.html` (deep links work, IDs with
+  dots included). Responses carry a
   strict CSP (`default-src 'self'`, no inline scripts, `frame-ancestors 'none'`), `nosniff`, `no-referrer`, and
   immutable caching for hashed assets. An unbuilt console serves a page that says to run `pnpm build`.
+- **Console app** (`platform/console`, details in its README). React SPA on the History API under `/console/`,
+  filters and tabs in the query string. Sign-in strips `#ticket=` from the address bar before rendering and redeems
+  it once (a retry checks `me` instead of posting it again). Every request is same-origin with the console header;
+  a 401 shows the signed-out screen (`details.reason`: `signed_out`, `session_ended`, `credential_rejected`) and a 403
+  the not-an-operator screen (`details.login` fills in its AppHost snippet). Views poll every 5 s while visible; the
+  live feed reads `/v1/operator/stream` with `fetch` and its own SSE parser (EventSource cannot send the header),
+  reconnecting with 1–30 s backoff and reloading history after a reconnect. Markdown from customization files renders
+  without raw HTML; only `http(s)` links are clickable and images are never loaded. Sample data (`?fixtures`) exists
+  in `vite dev` only.
 
 ## Gateway extension points
 

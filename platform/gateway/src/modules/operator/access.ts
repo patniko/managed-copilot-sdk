@@ -96,17 +96,18 @@ export class OperatorAccess {
     return this.#app.service("auth") as unknown as OperatorAuthPort;
   }
 
-  /** The principal's operator grant; `forbidden` (naming who may operate) when it has none. */
+  /** The principal's operator grant; `forbidden` (naming who may operate, and the caller's login) when it has none. */
   async authorize(principal: Principal): Promise<OperatorGrant> {
     if (this.configured) {
       if (await this.#auth().satisfies(principal, this.rules)) return "configured";
       const allowed = [...this.rules.githubUsers.map((user) => `@${user}`), ...this.rules.githubOrgs.map((org) => `members of ${org}`)].join(", ");
       throw new ManagedCopilotError("forbidden", `@${principal.login} is not an operator of this deployment (operators: ${allowed}). Operators are named in the AppHost: operators in addManagedCopilot.`, {
         operators: allowed,
+        login: principal.login,
       });
     }
     if (this.localDefault) return "local";
-    throw new ManagedCopilotError("forbidden", this.offReason!);
+    throw new ManagedCopilotError("forbidden", this.offReason!, { login: principal.login, reason: "console_off" });
   }
 
   // --- Tickets --------------------------------------------------------------------------------------------------
