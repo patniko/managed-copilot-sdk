@@ -3,6 +3,7 @@
 import type { AccountInfo, OperatorAuditAction, OperatorAuditEntry } from "@managed-copilot/protocol";
 import { migrate, type Database } from "../../db.js";
 import type { Logger } from "../../log.js";
+import { redactText } from "../../redaction.js";
 
 const MIGRATIONS = [
   `CREATE TABLE operator_audit (
@@ -43,7 +44,7 @@ export class OperatorAudit {
 
   record(entry: { readonly actor: AccountInfo; readonly action: OperatorAuditAction; readonly target?: string; readonly outcome: "succeeded" | "failed"; readonly detail?: string }): OperatorAuditEntry {
     const at = new Date().toISOString();
-    const detail = entry.detail?.slice(0, 1000);
+    const detail = entry.detail ? redactText(entry.detail).slice(0, 1000) : undefined;
     const result = this.#db
       .prepare("INSERT INTO operator_audit (at, actor_id, actor_login, action, target, outcome, detail) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(at, entry.actor.id, entry.actor.login, entry.action, entry.target ?? null, entry.outcome, detail ?? null);

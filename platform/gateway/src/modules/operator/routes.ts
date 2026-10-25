@@ -21,6 +21,7 @@ import type { GatewayApp } from "../../app.js";
 import { bearerToken, toManagedError, type RequestContext } from "../../http.js";
 import type { Principal } from "../../http.js";
 import { logRing, type Logger } from "../../log.js";
+import { redactLogRecord } from "../../redaction.js";
 import { accountInfo } from "../core/auth.js";
 import { CONSOLE_SESSION_MS, type ConsoleSession, type OperatorAccess, type OperatorAuthPort } from "./access.js";
 import type { OperatorAudit } from "./audit.js";
@@ -253,6 +254,7 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
       const resume = ports().schedules?.operatorResume;
       if (!resume) throw new ManagedCopilotError("capability_unavailable", "Schedules are not available on this gateway.");
       const schedule = resume.call(ports().schedules, id);
+      if (schedule.state === "paused") return `Lifted the operator pause on schedule ${schedule.name} (@${schedule.ownerLogin}); it stays paused by its owner.`;
       return `Resumed schedule ${schedule.name} (@${schedule.ownerLogin})${schedule.nextRunAt ? `; next run ${schedule.nextRunAt}` : ""}.`;
     });
   });
@@ -284,7 +286,7 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
   });
   route("GET", OPERATOR_ROUTES.logs, (ctx) => {
     const level = oneOf(ctx, "level", LOG_LEVELS);
-    return logRing.recent({ ...(level ? { level } : {}), limit: limit(ctx, 200) });
+    return logRing.recent({ ...(level ? { level } : {}), limit: limit(ctx, 200) }).map(redactLogRecord);
   });
   route("GET", OPERATOR_ROUTES.audit, (ctx) => audit.list(limit(ctx, 100), core().accountDirectory()));
 
@@ -307,7 +309,7 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
     const offEvents = app.service("events").subscribe((event, meta) => send("platform", core().toOperatorEvent(event, core().accountDirectory()(meta.ownerId))));
-    const offLogs = logRing.subscribe((entry) => send("log", entry));
+    const offLogs = logRing.subscribe((entry) => send("log", redactLogRecord(entry)));
     let beats = 0;
     const heartbeat = setInterval(() => {
       if (closed) return;

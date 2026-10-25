@@ -99,7 +99,11 @@ describe("operator API and console", () => {
       deployment: {
         ...TEST_DEPLOYMENT,
         operators: { githubUsers: ["alice"], githubOrgs: ["ops-team"] },
-        environments: { ...TEST_DEPLOYMENT.environments, support: { type: "shared", customizations: bundle, description: "Support desk" } },
+        environments: {
+          ...TEST_DEPLOYMENT.environments,
+          coder: { type: "isolated", size: "small", env: { API_TOKEN: "ENV-TOKEN-VALUE", REGION: "westus" }, setupCommands: ["git clone https://x-access:SETUP-SECRET@github.com/org/repo"] },
+          support: { type: "shared", customizations: bundle, description: "Support desk" },
+        },
         webhooks: { audit: { url: "http://127.0.0.1:9/hook", environments: ["chat"], events: ["session.created"], secret: { secretEnv: "OPERATOR_TEST_MISSING_SECRET" } } },
       },
       env: { MANAGED_COPILOT_CONSOLE_DIR: build, LOG_LEVEL: "info" },
@@ -257,6 +261,10 @@ describe("operator API and console", () => {
     expect(environments.find((environment) => environment.name === "chat")!.webhooks).toEqual(["audit"]);
     const coder = environments.find((environment) => environment.name === "coder")!;
     expect(coder).toMatchObject({ size: "small", resources: { cpus: 1, memoryMiB: 2048 }, tools: { builtins: "all", mcp: "any" } });
+    // Environment variables are meant to be non-secret; values that are not are masked anyway.
+    expect(coder.env).toEqual({ API_TOKEN: "[redacted]", REGION: "westus" });
+    expect(coder.setupCommands).toEqual(["git clone https://***@github.com/org/repo"]);
+    expect(JSON.stringify(environments)).not.toMatch(/ENV-TOKEN-VALUE|SETUP-SECRET/);
 
     const file = await call(`${OPERATOR_ROUTES.environmentFile("support")}?path=${encodeURIComponent("agents/support.agent.md")}`, { token: ALICE });
     expect(file.json).toMatchObject({ environment: "support", path: "agents/support.agent.md", kind: "agent", truncated: false, content: expect.stringContaining("You are a support agent.") });
@@ -308,6 +316,26 @@ describe("operator API and console", () => {
     expect((await call(`/v1/schedules/${scheduleId}`, { token: BOB })).json).toMatchObject({ state: "active" });
     const runs = await call(OPERATOR_ROUTES.scheduleRuns(scheduleId), { token: ALICE });
     expect(runs.json).toMatchObject({ schedule: { id: scheduleId }, runs: [] });
+
+    // The owner's own pause is theirs to lift. An operator's pause takes it over (manual runs stop too), and lifting
+    // the operator's pause leaves the owner's in place.
+    expect((await call(`/v1/schedules/${scheduleId}/pause`, { token: BOB, method: "POST", body: {} })).status).toBe(200);
+    const ownersPause = await call(OPERATOR_ROUTES.scheduleResume(scheduleId), { token: ALICE, method: "POST", body: {} });
+    expect(ownersPause.json.error).toMatchObject({ code: "conflict", message: expect.stringContaining("paused by its owner, @bob; only its owner can resume it") });
+    expect((await call(OPERATOR_ROUTES.schedulePause(scheduleId), { token: ALICE, method: "POST", body: { reason: "incident 42" } })).json).toMatchObject({ ok: true });
+    expect((await call(`/v1/schedules/${scheduleId}`, { token: BOB })).json).toMatchObject({ state: "paused", pausedReason: "Paused: an operator (@alice) paused this schedule (incident 42). Its owner had paused it too." });
+    expect((await call(`/v1/schedules/${scheduleId}/run`, { token: BOB, method: "POST", body: {} })).json.error?.code).toBe("conflict");
+    const lifted = await call(OPERATOR_ROUTES.scheduleResume(scheduleId), { token: ALICE, method: "POST", body: {} });
+    expect(lifted.json).toMatchObject({ ok: true, message: expect.stringContaining("it stays paused by its owner") });
+    const after = (await call(`/v1/schedules/${scheduleId}`, { token: BOB })).json;
+    expect(after).toMatchObject({ state: "paused" });
+    expect(after).not.toHaveProperty("pausedReason");
+
+    // A platform pause (here, the owner's background sign-in was removed) needs the owner too.
+    expect((await call("/v1/credentials/background", { token: BOB, method: "DELETE" })).status).toBeLessThan(300);
+    expect((await call(`/v1/schedules/${scheduleId}`, { token: BOB })).json).toMatchObject({ state: "paused", pausedReason: expect.any(String) });
+    const platformPause = await call(OPERATOR_ROUTES.scheduleResume(scheduleId), { token: ALICE, method: "POST", body: {} });
+    expect(platformPause.json.error).toMatchObject({ code: "conflict", message: expect.stringContaining("only its owner can resume it") });
   });
 
   it("refuses guarded sandbox actions it cannot carry out, explicitly", async () => {
@@ -315,6 +343,21 @@ describe("operator API and console", () => {
     expect(probe.json).toMatchObject({ ok: true, message: expect.stringMatching(/did not answer/) });
     const stop = await call(OPERATOR_ROUTES.sandboxStop(crypto.randomUUID()), { token: ALICE, method: "POST", body: {} });
     expect(stop.json.error?.code).toBe("not_found");
+  });
+
+  it("tells a sandbox stop when core has a call in flight to a session's runtime", async () => {
+    const bob = await connect(BOB);
+    const sessionId = crypto.randomUUID();
+    await bob.request("session.create", { sessionId });
+    const sessions = gateway.gateway.app.service("sessions") as unknown as { runtimeActivity(id: string): { busy?: string; lastRequestAt?: number } | undefined };
+    expect(sessions.runtimeActivity(sessionId)?.busy).toBeUndefined();
+    const hold = runtime.holdNext("session.send", sessionId);
+    const sending = bob.request("session.send", { sessionId, prompt: "hello" });
+    await hold.held;
+    expect(sessions.runtimeActivity(sessionId)).toMatchObject({ busy: "a call to its runtime is in progress", lastRequestAt: expect.any(Number) });
+    hold.release();
+    await sending;
+    expect(sessions.runtimeActivity(sessionId)).toEqual({ lastRequestAt: expect.any(Number) });
   });
 
   it("streams platform events and log lines to operators", async () => {

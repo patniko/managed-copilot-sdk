@@ -216,6 +216,10 @@ interface LiveSession {
   unreconciled: boolean;
   /** The runtime a registration was written to and has not answered yet (a cutover's end does not route there before). */
   inflight: RuntimeUpstream | undefined;
+  /** Calls written to the session's runtime that have not settled (an operator's sandbox stop waits for none). */
+  requests: number;
+  /** When a call to the session's runtime last started or settled. */
+  lastRequestAt: number | undefined;
   /** Ensures events of one session are processed in order even when routing awaits the actions hook. */
   queue: Promise<void>;
   /**
@@ -671,10 +675,45 @@ export class SessionManager implements SessionsService {
     for (;;) {
       const upstream = await this.#resident(live);
       if (live.placement !== placement) throw MOVED;
-      if (live.upstream === upstream && live.ready && !live.cutover?.fenced && !upstream.closed) return send(upstream);
+      if (live.upstream === upstream && live.ready && !live.cutover?.fenced && !upstream.closed) return this.#counted(live, () => send(upstream));
       if (live.deleting) throw new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id });
       await Promise.resolve(live.residency).catch(() => undefined);
     }
+  }
+
+  /** Counts a call to the session's runtime until it settles. `send` runs synchronously, in the caller's turn. */
+  async #counted<T>(live: LiveSession, send: () => Promise<T>): Promise<T> {
+    live.requests++;
+    live.lastRequestAt = Date.now();
+    try {
+      return await send();
+    } finally {
+      live.requests--;
+      live.lastRequestAt = Date.now();
+    }
+  }
+
+  /**
+   * How core is using a session's runtime, for an operator's sandbox stop: `busy` names work in progress, and
+   * `lastRequestAt` is when a call to the runtime last started or settled. Synchronous: a caller that checks it and
+   * closes the runtime in the same turn cannot miss a call written in between.
+   */
+  runtimeActivity(sessionId: string): { readonly busy?: string; readonly lastRequestAt?: number } | undefined {
+    const live = this.#live.get(sessionId);
+    if (!live) return undefined;
+    const busy =
+      live.requests > 0
+        ? "a call to its runtime is in progress"
+        : live.residency !== undefined
+          ? "its runtime is being opened"
+          : live.cutover !== undefined
+            ? "it is moving to another placement"
+            : live.deleting
+              ? "it is being deleted"
+              : live.presences.size > 0
+                ? "a Copilot CLI is attached to it"
+                : undefined;
+    return { ...(busy ? { busy } : {}), ...(live.lastRequestAt !== undefined ? { lastRequestAt: live.lastRequestAt } : {}) };
   }
 
   /** History reads never include events a placement cutover hid (the source's handoff after the seal). */
@@ -1945,6 +1984,8 @@ export class SessionManager implements SessionsService {
       registrations: Promise.resolve(),
       unreconciled: false,
       inflight: undefined,
+      requests: 0,
+      lastRequestAt: undefined,
       queue: Promise.resolve(),
       ending: new AbortController(),
       residency: undefined,

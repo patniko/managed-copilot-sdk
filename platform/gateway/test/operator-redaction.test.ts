@@ -3,7 +3,7 @@ import { LogRing } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
 import { harnessOf } from "../src/modules/core/harness.js";
 import { sanitizeEventData } from "../src/modules/core/operator.js";
-import { looksSecret, redactPath, redactUrl, redactValue, scrubArgs } from "../src/redaction.js";
+import { looksSecret, redactLogRecord, redactPath, redactText, redactUrl, redactValue, scrubArgs } from "../src/redaction.js";
 import { certificateFingerprint } from "../src/modules/network/index.js";
 
 describe("operator redaction", () => {
@@ -21,6 +21,25 @@ describe("operator redaction", () => {
     expect(redactUrl("https://user:pass@example.com/path")).toBe("https://***@example.com/path");
     expect(redactUrl("https://example.com/plain")).toBe("https://example.com/plain");
     expect(redactUrl("ghp_0123456789abcdefghijABCDEFGHIJ")).toBe("[redacted]");
+  });
+
+  it("masks credentials in free text, keeps identifiers, and leaves out command output", () => {
+    const text = redactText(
+      "Could not reach the webhook (TypeError: Request cannot be constructed from a URL that includes credentials: http://user:PASS-WORD@hooks.example.com/x?sig=abc).",
+    );
+    expect(text).toBe("Could not reach the webhook (TypeError: Request cannot be constructed from a URL that includes credentials: http://***@hooks.example.com/x?sig=***).");
+    expect(redactText("token ghp_0123456789abcdefghijABCDEFGHIJ expired")).toBe("token [redacted] expired");
+    expect(redactText("Delivery evt_8fb3ff8f-4abf-4a32-aa31-59624a012dc6 of session 614fdd39-ad63-46aa-b08b-480cf209eaaa")).toBe("Delivery evt_8fb3ff8f-4abf-4a32-aa31-59624a012dc6 of session 614fdd39-ad63-46aa-b08b-480cf209eaaa");
+    expect(redactText("pip install pandas failed with exit code 1.\nLast output:\nPRIVATE-LINE")).toBe("pip install pandas failed with exit code 1.\n(Command output is not shown to operators.)");
+    expect(redactUrl("https://discord.com/api/webhooks/123/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH")).toBe("https://discord.com/api/webhooks/123/[redacted]");
+    expect(redactLogRecord({ seq: 1, at: "t", level: "warn", logger: "x", message: "Failed: http://a:b@h.example/", fields: { reason: "see https://h.example/?key=SECRET", nested: ["ghp_0123456789abcdefghijABCDEFGHIJ"] } })).toEqual({
+      seq: 1,
+      at: "t",
+      level: "warn",
+      logger: "x",
+      message: "Failed: http://***@h.example/",
+      fields: { reason: "see https://h.example/?key=***", nested: ["[redacted]"] },
+    });
   });
 
   it("masks secret-looking path segments and query values of request paths", () => {

@@ -1,7 +1,7 @@
 // Operator views of harness configuration: what a session's runtime was told to run with (its stored admitted
 // configuration), and what an environment's sessions may use. Secrets are masked; none of this is conversation.
 import type { EnvironmentConfig, NetworkPolicy, OperatorCustomAgent, OperatorHarness, OperatorHarnessTool, OperatorMcpServer, OperatorToolPolicy, Placement } from "@managed-copilot/protocol";
-import { REDACTED, looksSecret, redactUrl, redactValue, scrubArgs } from "../../redaction.js";
+import { REDACTED, looksSecret, redactText, redactUrl, redactValue, scrubArgs } from "../../redaction.js";
 import { isRecord, sharedBuiltins } from "./admission.js";
 import type { CustomizationBundle, PlatformToolRegistry, RegisteredPlatformTool, ResolvedEnvironment } from "./contracts.js";
 import type { AdmittedConfig } from "./ledger.js";
@@ -113,7 +113,7 @@ export function harnessOf(admitted: AdmittedConfig, context: HarnessContext): Op
       ...(text(agent["description"]) ? { description: text(agent["description"])! } : {}),
       ...(text(agent["model"]) ? { model: text(agent["model"])! } : {}),
       ...(strings(agent["tools"]) ? { tools: strings(agent["tools"])! } : {}),
-      ...(text(agent["prompt"]) ? { prompt: text(agent["prompt"])! } : {}),
+      ...(text(agent["prompt"]) ? { prompt: redactText(text(agent["prompt"])!) } : {}),
       mcpServers: Object.keys(servers).sort(),
     });
   }
@@ -157,12 +157,12 @@ function systemMessageOf(value: unknown): OperatorHarness["systemMessage"] | und
   if (isRecord(value["sections"])) {
     for (const [name, section] of Object.entries(value["sections"])) {
       if (!isRecord(section)) continue;
-      sections[name] = { action: text(section["action"]) ?? "replace", ...(text(section["content"]) ? { content: text(section["content"])! } : {}) };
+      sections[name] = { action: text(section["action"]) ?? "replace", ...(text(section["content"]) ? { content: redactText(text(section["content"])!) } : {}) };
     }
   }
   return {
     mode: text(value["mode"]) ?? "append",
-    ...(text(value["content"]) ? { content: text(value["content"])! } : {}),
+    ...(text(value["content"]) ? { content: redactText(text(value["content"])!) } : {}),
     ...(Object.keys(sections).length > 0 ? { sections } : {}),
   };
 }

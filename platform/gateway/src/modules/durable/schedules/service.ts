@@ -14,6 +14,7 @@ import { z } from "zod";
 import { transaction, type Database } from "../../../db.js";
 import type { Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
+import { redactText } from "../../../redaction.js";
 import type { ActionChange } from "../actions/service.js";
 import type { ActionsService, CredentialsService, DurableSessionView, DurableSessionsPort, PlatformEventMeta, RuntimeSessionEvent, SchedulesService } from "../contract.js";
 import { canonicalJson, deterministicUuid, incarnationOf, isGone, newId, parseJson, sameIncarnation } from "../ids.js";
@@ -33,6 +34,11 @@ import {
 
 /** A schedule as the operator console shows it, with its owner (the prompt only for AppHost schedules). */
 export type ScheduleOperatorRecord = Omit<ScheduleInfo, "prompt"> & { readonly prompt?: string; readonly ownerId: number; readonly ownerLogin: string };
+
+/** How the reason of an operator's pause starts (spec section 16). */
+const OPERATOR_PAUSE = "Paused: an operator (@";
+/** How it ends when it took over the owner's own pause, which lifting the operator's pause restores. */
+const OWNER_PAUSED_TOO = " Its owner had paused it too.";
 
 export interface SchedulesOptions {
   readonly tickIntervalMs: number;
@@ -434,27 +440,52 @@ export class DurableSchedules implements SchedulesService {
   operatorRuns(scheduleId: string): { readonly schedule: ScheduleOperatorRecord; readonly runs: ScheduleRun[] } {
     const row = this.#store.schedule(scheduleId);
     if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
-    return { schedule: this.#operatorRecord(row), runs: this.#store.runsBySchedule(scheduleId).map(toScheduleRun) };
+    const runs = this.#store.runsBySchedule(scheduleId).map(toScheduleRun);
+    return { schedule: this.#operatorRecord(row), runs: runs.map((run) => (run.reason ? { ...run, reason: redactText(run.reason) } : run)) };
   }
 
   /**
    * An operator's pause, with a reason its owner sees. Like a platform pause, it blocks every run (manual ones too)
-   * until the schedule is resumed.
+   * until the schedule is resumed, and it takes over the owner's own pause (whose missing reason lets manual runs
+   * through), remembering it: lifting the operator's pause then leaves the owner's in place. A platform pause is kept.
    */
   operatorPause(scheduleId: string, operator: string, reason?: string): ScheduleOperatorRecord {
     const row = this.#store.schedule(scheduleId);
     if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
-    if (row.state === "paused") throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is already paused${row.paused_reason ? ` (${row.paused_reason.replace(/^Paused: /, "")})` : ""}.`);
+    if (row.state === "paused" && row.paused_reason) {
+      throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is already paused (${row.paused_reason.replace(/^Paused: /, "")}).`);
+    }
     const detail = reason?.trim() ? ` (${reason.trim().slice(0, 200)})` : "";
-    this.pause(row.owner_id, scheduleId, `Paused: an operator (@${operator}) paused this schedule${detail}.`);
+    const text = `${OPERATOR_PAUSE}${operator}) paused this schedule${detail}.${row.state === "paused" ? OWNER_PAUSED_TOO : ""}`;
+    const updated = this.#deps.db
+      .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND state = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL")
+      .run(text, this.#now(), row.id, row.state);
+    if (Number(updated.changes) !== 1) throw new ManagedCopilotError("conflict", `Schedule "${row.name}" changed while it was being paused; refresh and try again.`);
+    this.#log.info("Schedule paused by an operator", { scheduleId, operator, ownerPaused: row.state === "paused" });
     return this.#operatorRecord(this.#store.schedule(scheduleId)!);
   }
 
-  /** An operator's resume: the same checks as the owner's (background sign-in, target session, policy). */
+  /**
+   * Lifts an operator's pause, and only that: a pause by the owner or by the platform (a revoked sign-in, a definition
+   * the owner has not approved) is the owner's to lift. Resuming makes the owner's checks (background sign-in, target
+   * session, policy); an owner's pause the operator's took over stays.
+   */
   operatorResume(scheduleId: string): ScheduleOperatorRecord {
     const row = this.#store.schedule(scheduleId);
     if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
     if (row.state === "active") throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is not paused.`);
+    if (!row.paused_reason?.startsWith(OPERATOR_PAUSE)) {
+      const by = row.paused_reason ? `the platform (${row.paused_reason.replace(/^Paused: /, "")})` : `its owner, @${row.owner_login}`;
+      throw new ManagedCopilotError("conflict", `Schedule "${row.name}" was paused by ${by}; only its owner can resume it.`);
+    }
+    if (row.paused_reason.endsWith(OWNER_PAUSED_TOO)) {
+      const lifted = this.#deps.db
+        .prepare("UPDATE durable_schedules SET paused_reason = NULL, updated_at = ? WHERE id = ? AND state = 'paused' AND paused_reason = ? AND deleted_at IS NULL")
+        .run(this.#now(), row.id, row.paused_reason);
+      if (Number(lifted.changes) !== 1) throw new ManagedCopilotError("conflict", `Schedule "${row.name}" changed while it was being resumed; refresh and try again.`);
+      this.#log.info("Operator pause lifted; the owner's pause stays", { scheduleId });
+      return this.#operatorRecord(this.#store.schedule(scheduleId)!);
+    }
     try {
       this.resume(row.owner_id, scheduleId);
     } catch (error) {

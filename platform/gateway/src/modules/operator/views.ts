@@ -29,7 +29,7 @@ import {
   type WebhookWorkerStatus,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
-import { redactPath } from "../../redaction.js";
+import { redactPath, redactText } from "../../redaction.js";
 import type { CoreOperator } from "../core/operator.js";
 import type { ScheduleOperatorRecord } from "../durable/schedules/service.js";
 import type { OperatorAccess } from "./access.js";
@@ -351,7 +351,7 @@ export class OperatorViews {
           id: `schedule:${schedule.id}:last-run`,
           severity: "warning",
           title: `Schedule ${schedule.name}'s last run ${schedule.lastRun.status === "failed" ? "failed" : "needs reconciliation"}`,
-          ...(schedule.lastRun.reason ? { detail: schedule.lastRun.reason } : {}),
+          ...(schedule.lastRun.reason ? { detail: redactText(schedule.lastRun.reason) } : {}),
           target: { view: "schedules" },
           ...(schedule.lastRun.completedAt ? { at: schedule.lastRun.completedAt } : {}),
         });
@@ -411,7 +411,7 @@ export class OperatorViews {
                 ...(block.port ? { port: block.port } : {}),
                 ...(block.method ? { method: block.method } : {}),
                 ...(block.path ? { path: redactPath(block.path) } : {}),
-                message: block.message,
+                message: redactText(block.message),
               })),
             },
           }
@@ -429,7 +429,7 @@ export class OperatorViews {
               ...(promotion.toGeneration !== undefined ? { toGeneration: promotion.toGeneration } : {}),
               ...(promotion.sandboxId ? { sandboxId: promotion.sandboxId } : {}),
               ...(promotion.errorCode ? { errorCode: promotion.errorCode } : {}),
-              ...(promotion.error ? { error: promotion.error } : {}),
+              ...(promotion.error ? { error: redactText(promotion.error) } : {}),
               createdAt: promotion.createdAt,
               updatedAt: promotion.updatedAt,
               ...(promotion.committedAt ? { committedAt: promotion.committedAt } : {}),

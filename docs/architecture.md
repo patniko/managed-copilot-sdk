@@ -746,23 +746,37 @@ export). The CLI's `console` and `operator` commands use the same API.
   `content`, `arguments`, `result`, `payload`, `text`, `body`, `output`, …) and credential-like keys are dropped,
   strings are cut at 500 characters and secret-looking ones redacted, and action and artifact lists keep only IDs,
   states, tool names, paths, and sizes. Action views show tool names and states, not arguments. Harness, environment,
-  and webhook views pass through `redaction.ts` (`redactValue`, `redactUrl`: query values and user info become `***`,
-  credential-looking keys and values are replaced). MCP servers show their original URL (redacted) and only the
-  names of their headers and environment variables, with `adapter: true` when shared placement routes them through
-  the gateway's MCP adapter.
+  and webhook views pass through `redaction.ts` (`redactValue`; `redactUrl`: query values, user info, and
+  secret-looking path segments become `***` or `[redacted]`; environment `env` values under credential-like names are
+  masked). Free text an operator can read (error messages, reasons, setup commands, package specs, system prompts,
+  egress block messages, audit details, and log lines) goes through `redactText`: URLs as `redactUrl`, token-shaped
+  words masked, and command output a message carries (sandbox setup failures append it after
+  `OUTPUT_TAIL_MARKER`) left out. Sandbox setup records lose their steps' `output`. MCP servers show their original
+  URL (redacted) and only the names of their headers and environment variables, with `adapter: true` when shared
+  placement routes them through the gateway's MCP adapter. A harness is the stored params with the session's option
+  changes (`optionsPatch`) applied, as restores apply them.
 - **Actions.** `POST` routes run through `act()`, which records the operator, action, target, outcome, and message
-  in the `operator_audit` table (newest 5000 kept; `GET /v1/operator/audit`): re-probe the sandbox backend, stop a
-  sandbox (`sandboxes.operatorStop`: `session_busy` while its session has a turn, a pending request, an open action,
-  or a busy sandbox; `conflict` unless running; files and state are kept), pause or resume a schedule (the pause
-  reason names the operator and blocks run-now until resumed; resume makes the owner's checks), and retry a failed
-  webhook delivery (one more attempt; refused for webhooks the AppHost no longer declares, or for `action_required`
-  deliveries whose actions are no longer open). Nothing deletes.
+  in the `operator_audit` table (newest 5000 kept; `GET /v1/operator/audit`). Nothing deletes.
+  - Re-probe the sandbox backend.
+  - Stop a sandbox (`sandboxes.operatorStop`; `conflict` unless running; files and state are kept): `session_busy`
+    while the sandbox's own tracking shows a turn, a pending request, an open action, or a busy file transfer; while
+    core's `sessions.runtimeActivity(id)` names work (a call written to the runtime and not yet settled, counted in
+    `#onOwner`; a restore; a cutover; a deletion; an attached Copilot CLI); or within 5 s of the last activity, since
+    a turn the runtime just accepted may not have emitted `user.message` yet. The checks and the runtime's close run
+    in one synchronous step under the sandbox lock.
+  - Pause or resume a schedule: the pause reason (`Paused: an operator (@login) …`) blocks run-now and takes over the
+    owner's own pause (noted in the reason, and restored when the operator's pause is lifted); a platform pause is kept
+    (`conflict`). Resume lifts operator pauses only: an owner's pause or a platform pause (revoked sign-in, AppHost
+    consent, changed definition) is refused with `conflict`, since lifting it would run work as the owner without
+    their approval. Otherwise resume makes the owner's checks.
+  - Retry a failed webhook delivery: one more attempt; refused for webhooks the AppHost no longer declares, or for an
+    `action_required` delivery none of whose announced actions is still pending in the session's current incarnation.
 - **Live feed.** `GET /v1/operator/stream` (SSE) sends `platform` events (sanitized, every owner) and `log` lines
-  from the in-memory log ring (`log.ts` `logRing`, the newest 1000 redacted records), a `: ping` every 15 s, and
-  re-authenticates every minute; a client that falls 1 MB behind is dropped and reconnects. `GET /v1/operator/logs`
-  and `/events` serve recent history. `metrics.ts` counts per-minute traffic for the last hour (HTTP requests and
-  errors outside the operator API, RPC requests and notifications, connections, events, sessions created, inference
-  requests).
+  from the in-memory log ring (`log.ts` `logRing`, the newest 1000 records, masked by key like the output and passed
+  through `redactLogRecord` when served), a `: ping` every 15 s, and re-authenticates every minute; a client that
+  falls 1 MB behind is dropped and reconnects. `GET /v1/operator/logs` and `/events` serve recent history.
+  `metrics.ts` counts per-minute traffic for the last hour (HTTP requests and errors outside the operator API, RPC
+  requests and notifications, connections, events, sessions created, inference requests).
 - **Static files.** `/console` redirects to `/console/`; files come from `MANAGED_COPILOT_CONSOLE_DIR` or
   `platform/console/dist` beside the gateway (copied into the gateway image), with an SPA fallback to `index.html`, a
   strict CSP (`default-src 'self'`, no inline scripts, `frame-ancestors 'none'`), `nosniff`, `no-referrer`, and
@@ -778,7 +792,7 @@ structurally (they may add members).
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
 | `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials, never a live credential); `liveCredential(accountId)` (tokens attached connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` (GitHub rejected it, e.g. a 401 from the Copilot API) |
-| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core) |
+| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core), `runtimeActivity(id) → { busy?, lastRequestAt? }` (synchronous; read by an operator's sandbox stop) |
 | `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay (a stream without a usable cursor first gets one: an id-only block with the owner's newest event ID, or `start`) |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |

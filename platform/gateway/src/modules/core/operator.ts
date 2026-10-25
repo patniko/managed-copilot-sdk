@@ -32,7 +32,7 @@ import {
   type StorageStatus,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
-import { looksSecret, redactPath, redactUrl, REDACTED } from "../../redaction.js";
+import { looksSecret, redactPath, redactText, redactUrl, redactValue, REDACTED } from "../../redaction.js";
 import { isRecord } from "./admission.js";
 import { accountInfo } from "./auth.js";
 import type { CustomizationBundle, SessionRecord } from "./contracts.js";
@@ -172,7 +172,8 @@ export class CoreOperator {
     const runtime = this.#options.runtime;
     const sessions = this.#options.manager.operatorLive().filter((live) => live.placement === "shared" && live.resident).length;
     if (!runtime) return { state: "disabled", external: false, generation: 0, restarts: 0, sessions };
-    return { ...runtime.status(), sessions };
+    const status = runtime.status();
+    return { ...status, ...(status.lastError ? { lastError: redactText(status.lastError) } : {}), sessions };
   }
 
   // --- Sessions ---------------------------------------------------------------------------------------------------
@@ -223,7 +224,7 @@ export class CoreOperator {
       ...(request.size ? { size: request.size } : {}),
       ...(request.network !== undefined ? { network: request.network } : {}),
       ...(request.vaults ? { vaults: request.vaults } : {}),
-      ...(request.packages ? { packages: request.packages } : {}),
+      ...(request.packages ? { packages: redactPackages(request.packages) } : {}),
       ...(request.env ? { env: Object.keys(request.env).sort() } : {}),
       ...(request.files ? { files: Object.entries(request.files).map(([path, content]) => ({ path, bytes: base64Bytes(content) })) } : {}),
     };
@@ -350,9 +351,10 @@ export class CoreOperator {
         network,
         ...(size ? { size, resources: { cpus: SANDBOX_SIZES[size].cpus, memoryMiB: SANDBOX_SIZES[size].memoryMiB } } : {}),
         ...(image ? { image } : {}),
-        ...(config.packages ? { packages: config.packages } : {}),
-        ...(config.setupCommands ? { setupCommands: config.setupCommands } : {}),
-        ...(config.env ? { env: config.env } : {}),
+        ...(config.packages ? { packages: redactPackages(config.packages) } : {}),
+        ...(config.setupCommands ? { setupCommands: config.setupCommands.map(redactText) } : {}),
+        // Meant to be non-secret, but nothing enforces that: values under credential-like names or shapes are masked.
+        ...(config.env ? { env: redactValue(config.env) as Record<string, string> } : {}),
         vaults: (config.vaults ?? []).map((vault) => this.#vaultRef(vault)),
         scheduling: config.scheduling === true,
         ...(config.promoteTo ? { promoteTo: config.promoteTo } : {}),
@@ -559,6 +561,11 @@ function readPrefix(file: string, limit: number): Buffer {
   }
 }
 
+/** Package specs with credentials masked (`git+https://<token>@host/...`, index URLs with keys). */
+function redactPackages<T extends { readonly python?: readonly string[]; readonly npm?: readonly string[]; readonly system?: readonly string[] }>(packages: T): T {
+  return Object.fromEntries(Object.entries(packages).map(([kind, specs]) => [kind, Array.isArray(specs) ? specs.map((spec: string) => redactText(spec)) : specs])) as T;
+}
+
 function base64Bytes(value: string): number {
   const compact = value.replace(/\s+/g, "");
   const padding = compact.endsWith("==") ? 2 : compact.endsWith("=") ? 1 : 0;
@@ -608,7 +615,12 @@ function pick(value: Record<string, unknown>, keys: readonly string[]): Record<s
 
 function bound(value: unknown, depth: number): unknown {
   if (value === undefined || value === null) return undefined;
-  if (typeof value === "string") return looksSecret(value) ? REDACTED : value.length > 500 ? `${value.slice(0, 500)}…` : value;
+  if (typeof value === "string") {
+    if (looksSecret(value)) return REDACTED;
+    // Messages can quote URLs, tokens, or (setup failures) command output.
+    const text = redactText(value);
+    return text.length > 500 ? `${text.slice(0, 500)}…` : text;
+  }
   if (typeof value === "number" || typeof value === "boolean") return value;
   if (Array.isArray(value)) return depth > 1 ? undefined : value.slice(0, 20).map((item) => bound(item, depth + 1)).filter((item) => item !== undefined);
   return undefined;

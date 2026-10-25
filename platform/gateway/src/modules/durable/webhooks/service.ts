@@ -2,7 +2,7 @@ import type { ManagedCopilotConfig, PlatformEvent, WebhookEnvelope } from "@mana
 import { ManagedCopilotError, WEBHOOK_HEADERS } from "@managed-copilot/protocol";
 import type { Database } from "../../../db.js";
 import type { Logger } from "../../../log.js";
-import { redactUrl } from "../../../redaction.js";
+import { redactText, redactUrl } from "../../../redaction.js";
 import type { ActionsService, PlatformEventMeta, WebhookDeliveryInfo, WebhookDeliveryState, WebhooksService } from "../contract.js";
 import { newId, parseJson, toIso } from "../ids.js";
 import { signWebhook } from "./signing.js";
@@ -215,12 +215,17 @@ export class DurableWebhooks implements WebhooksService {
 
   /** Deliveries of every owner, newest first, with their owner and environment (never the event body). */
   operatorDeliveries(options: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly sessionId?: string } = {}): (WebhookDeliveryInfo & { ownerId?: number; environment?: string; updatedAt: string })[] {
-    return this.#deliveryRows(options).map((row) => ({
-      ...toDeliveryInfo(row),
-      ...(row.owner_id !== null ? { ownerId: row.owner_id } : {}),
-      ...(row.environment ? { environment: row.environment } : {}),
-      updatedAt: toIso(row.updated_at)!,
-    }));
+    return this.#deliveryRows(options).map((row) => {
+      const info = toDeliveryInfo(row);
+      return {
+        ...info,
+        // Errors stored before they were redacted at the source.
+        ...(info.lastError ? { lastError: redactText(info.lastError) } : {}),
+        ...(row.owner_id !== null ? { ownerId: row.owner_id } : {}),
+        ...(row.environment ? { environment: row.environment } : {}),
+        updatedAt: toIso(row.updated_at)!,
+      };
+    });
   }
 
   operatorCounts(): Partial<Record<WebhookDeliveryState, number>> {
@@ -234,15 +239,15 @@ export class DurableWebhooks implements WebhooksService {
 
   /**
    * An operator's retry of a failed delivery: one more attempt now, with the usual signing and authorization checks.
-   * Only `failed` deliveries can be retried; a `session.action_required` delivery whose actions were all answered or
-   * cancelled since is refused (it would carry nothing to act on).
+   * Only `failed` deliveries can be retried; a `session.action_required` delivery is retried only while an action it
+   * announced still waits for an answer in the session's current life (it would otherwise carry nothing to act on).
    */
   retry(deliveryId: string): WebhookDeliveryInfo {
     const row = this.#deps.db.prepare("SELECT * FROM durable_webhook_deliveries WHERE id = ?").get(deliveryId) as DeliveryRow | undefined;
     if (!row) throw new ManagedCopilotError("not_found", `Webhook delivery ${deliveryId} was not found`, { deliveryId });
     if (row.state !== "failed") throw new ManagedCopilotError("conflict", `Delivery ${deliveryId} is ${row.state}; only failed deliveries can be retried.`, { deliveryId, state: row.state });
     if (!this.#subscriptions.has(row.webhook)) throw new ManagedCopilotError("conflict", `Webhook "${row.webhook}" is no longer declared in the AppHost, so its deliveries cannot be retried.`, { deliveryId });
-    if (row.event_type === "session.action_required" && row.session_id && !this.#deps.actions()?.hasOpenActions(row.session_id)) {
+    if (row.event_type === "session.action_required" && !this.#announcesWaitingActions(row)) {
       throw new ManagedCopilotError("conflict", "Every action this delivery announced was answered or cancelled since, so retrying it would deliver nothing to act on.", { deliveryId });
     }
     const now = this.#now();
@@ -253,6 +258,16 @@ export class DurableWebhooks implements WebhooksService {
     this.#log.info("Webhook delivery retried by an operator", { webhook: row.webhook, eventId: row.event_id, deliveryId });
     queueMicrotask(() => void this.pump());
     return toDeliveryInfo(this.#deps.db.prepare("SELECT * FROM durable_webhook_deliveries WHERE id = ?").get(deliveryId) as unknown as DeliveryRow);
+  }
+
+  /** Whether an action a `session.action_required` delivery announced still waits for an answer (current incarnation). */
+  #announcesWaitingActions(row: DeliveryRow): boolean {
+    const event = parseJson<PlatformEvent>(row.event);
+    const sessionId = event?.sessionId ?? row.session_id;
+    const actions = this.#deps.actions();
+    if (!event || !sessionId || !actions) return false;
+    const announced = new Set(((event.data?.["actions"] as { id?: unknown }[] | undefined) ?? []).map((action) => action?.id).filter((id): id is string => typeof id === "string"));
+    return actions.list(sessionId, { open: true }).some((action) => action.state === "pending" && announced.has(action.id));
   }
 
   /** Delivers every due delivery (bounded concurrency). Safe to call concurrently; overlapping calls share one pass. */
@@ -323,7 +338,8 @@ export class DurableWebhooks implements WebhooksService {
           signal: AbortSignal.timeout(this.#options.requestTimeoutMs),
         });
       } catch (error) {
-        const reason = (error as Error)?.name === "TimeoutError" ? `No response within ${this.#options.requestTimeoutMs / 1000}s` : `Could not reach the webhook (${(error as Error).message})`;
+        // Native errors can quote the whole URL (credentials and query included): never store or log that.
+        const reason = (error as Error)?.name === "TimeoutError" ? `No response within ${this.#options.requestTimeoutMs / 1000}s` : `Could not reach the webhook (${redactText((error as Error).message)})`;
         return this.#finish(row, attempt, { ok: false, error: reason });
       }
       await response.body?.cancel().catch(() => undefined);

@@ -937,19 +937,21 @@ actions, webhook deliveries, schedules, and accounts; and a live feed of platfor
 
 Operators see configuration, never content:
 
-- **Secrets are redacted** everywhere: vault values, webhook secrets, tokens, header values, URL query values and
-  user info, and anything that looks like a credential. Vault references show names and destinations only.
-- **Conversations stay private.** Prompts, messages, tool arguments and results, and file contents stay with the
-  session owner; an operator sees an event's type, time, and size, not its content.
+- **Secrets are redacted** everywhere: vault values, webhook secrets, tokens, header values, URL query values, user
+  info, and secret-looking path segments, environment variables under credential-like names, and anything that looks
+  like a credential, including inside error messages and log lines. Vault references show names and destinations only.
+- **Conversations stay private.** Prompts, messages, tool arguments and results, file contents, and the output of
+  sandbox setup commands stay with the session owner; an operator sees an event's type, time, and size, not its
+  content.
 
 Operators can take a few guarded actions. Each is recorded in an audit log, and none deletes anything:
 
 | Action | Guard |
 | --- | --- |
 | Re-check the sandbox backend | None |
-| Stop an idle sandbox | Refused with `session_busy` while its session has a turn, a pending request, or an open action |
-| Pause or resume a schedule | The pause shows the operator and reason on the schedule; resuming makes the owner's checks (background sign-in, target session, policy) |
-| Retry a failed webhook delivery | Failed deliveries of webhooks the AppHost still declares |
+| Stop an idle sandbox | Refused with `session_busy` while its session has a turn, a call to its runtime, a pending request, an open action, or an attached Copilot CLI, or was active in the last few seconds |
+| Pause or resume a schedule | The pause shows the operator and reason on the schedule and blocks manual runs too. Operators resume only their own pauses; an owner's pause, or one the platform made (a revoked sign-in, a definition awaiting approval), is the owner's to lift |
+| Retry a failed webhook delivery | Failed deliveries of webhooks the AppHost still declares; for `session.action_required`, only while an action it announced still waits |
 
 Who may operate:
 

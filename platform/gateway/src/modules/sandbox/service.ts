@@ -24,6 +24,7 @@ import {
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
 import type { Logger } from "../../log.js";
+import { OUTPUT_TAIL_MARKER, redactText } from "../../redaction.js";
 import { SandboxAgentClient } from "./agent-client.js";
 import type { ArtifactService } from "./artifacts.js";
 import { InferenceBroker, isProviderTaken } from "./broker.js";
@@ -96,7 +97,20 @@ function toManaged(error: unknown, fallback: ErrorCode = "internal"): ManagedCop
 /** Appends the last lines of a failed step's (already redacted) output; clients may see only the error message. */
 function withOutputTail(message: string, output: string | undefined): string {
   const lines = (output ?? "").trim().split("\n").slice(-8).join("\n").slice(-800).trim();
-  return lines ? `${message}\nLast output:\n${lines}` : message;
+  // The marker lets operator views leave the output out: it is the session owner's to see.
+  return lines ? `${message}${OUTPUT_TAIL_MARKER}${lines}` : message;
+}
+
+/** How long a sandbox must have been quiet before an operator may stop it. */
+const OPERATOR_STOP_QUIET_MS = 5_000;
+
+/** A setup record as operators see it: what ran and how it ended, never what it printed. */
+function operatorSetup(setup: SandboxSetupRecord): SandboxSetupRecord {
+  return {
+    ...setup,
+    steps: setup.steps.map(({ output: _output, ...step }) => ({ ...step, name: redactText(step.name) })),
+    ...(setup.error ? { error: redactText(setup.error) } : {}),
+  };
 }
 
 const SETUP_PATH = /^(?!\/)(?![A-Za-z]:)(?!.*(?:^|\/)\.\.(?:\/|$))[^\u0000-\u001f\u007f\\]+$/;
@@ -256,7 +270,7 @@ export class SandboxService implements SandboxesService {
       provider: this.#options.provider.kind,
       available: this.#available,
       ...(this.#checkedAt ? { checkedAt: this.#checkedAt } : {}),
-      ...(this.#lastProbeError ? { lastError: this.#lastProbeError } : {}),
+      ...(this.#lastProbeError ? { lastError: redactText(this.#lastProbeError) } : {}),
       defaultIdleSeconds: this.#options.defaultIdleSeconds,
       facts,
       counts,
@@ -295,8 +309,8 @@ export class SandboxService implements SandboxesService {
       updatedAt: row.updatedAt,
       ...(row.startedAt ? { startedAt: row.startedAt } : {}),
       ...(row.stoppedAt ? { stoppedAt: row.stoppedAt } : {}),
-      ...(row.error ? { error: { ...(row.errorCode ? { code: row.errorCode } : {}), message: row.error } } : {}),
-      ...(row.setup ? { setup: row.setup } : {}),
+      ...(row.error ? { error: { ...(row.errorCode ? { code: row.errorCode } : {}), message: redactText(row.error) } } : {}),
+      ...(row.setup ? { setup: operatorSetup(row.setup) } : {}),
       ...(live
         ? {
             activity: {
@@ -313,8 +327,10 @@ export class SandboxService implements SandboxesService {
 
   /**
    * An operator's stop: like an idle stop, but without waiting out the idle timeout. Refused with `session_busy` while
-   * the sandbox has work (a running turn, pending tool calls, or open durable actions), so it never cuts a turn.
-   * State volumes are kept; the session restarts the sandbox on next use.
+   * the session has work (a running turn, pending tool calls, open durable actions, a call core has in flight to its
+   * runtime, an attached Copilot CLI) or was active moments ago, so it never cuts a turn that is starting. The checks
+   * and the runtime's close run in one synchronous step. State volumes are kept; the session restarts the sandbox on
+   * next use.
    */
   operatorStop(sessionId: string, reason: string): Promise<{ readonly sandboxId: string; readonly stopped: boolean }> {
     return this.#withLock(sessionId, async () => {
@@ -327,6 +343,13 @@ export class SandboxService implements SandboxesService {
       }
       if (live ? this.#durablyBusy(sessionId, live) : this.#hasOpenActions(sessionId)) {
         throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is waiting on actions (tool calls or prompts), or on a turn that was running when the gateway restarted. Stop it once the session is idle.`, { sandboxId: row.id });
+      }
+      const activity = this.#sessions()?.runtimeActivity?.(sessionId);
+      if (activity?.busy) throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is busy: ${activity.busy}. Stop it once the session is idle.`, { sandboxId: row.id });
+      // A turn the runtime accepted a moment ago may not have reported itself yet.
+      const lastActive = Math.max(live?.lastActivity ?? 0, activity?.lastRequestAt ?? 0);
+      if (Date.now() - lastActive < OPERATOR_STOP_QUIET_MS) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id} was in use moments ago. Try again in a few seconds, once the session is idle.`, { sandboxId: row.id });
       }
       await this.#stop(sessionId, reason);
       return { sandboxId: row.id, stopped: this.#options.store.bySession(sessionId)?.state === "stopped" };
