@@ -6,6 +6,7 @@
 !tsconfig.base.json
 !packages/protocol/**
 !packages/sdk/**
+!packages/github-theme/**
 !demos/software-factory/**
 !deploy/azure/**
 **/node_modules

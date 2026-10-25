@@ -28,9 +28,10 @@ RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; e
  && pnpm fetch
 COPY packages/protocol/ packages/protocol/
 COPY packages/sdk/ packages/sdk/
+COPY packages/github-theme/ packages/github-theme/
 COPY demos/assistant/ demos/assistant/
 COPY deploy/azure/ deploy/azure/
-RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-assistant --filter @managed-copilot/azure \
+RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/github-theme --filter @managed-copilot/demo-assistant --filter @managed-copilot/azure \
  && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-assistant --filter @managed-copilot/azure run build
 # The single-writer lease supervisor (no dependencies): one replica at a time owns the app's data directory.
 RUN mkdir -p /out-azure \
