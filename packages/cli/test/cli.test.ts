@@ -327,7 +327,9 @@ describe("output helpers", () => {
     expect(plain.ok).toBe("√");
     const fancy = createStyle({ isTTY: true, env: { WT_SESSION: "1" }, platform: "win32" });
     expect(fancy.green("ok")).toBe("\u001b[32mok\u001b[39m");
-    expect(fancy.ok).toBe("✔");
+    expect(fancy.ok).toBe("✓");
+    expect(fancy.fail).toBe("X");
+    expect(fancy.warn).toBe("!");
     expect(createStyle({ isTTY: false, env: {}, platform: "linux" }).red("x")).toBe("x");
   });
 
