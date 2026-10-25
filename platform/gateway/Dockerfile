@@ -28,11 +28,12 @@ RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; e
 COPY packages/protocol/ packages/protocol/
 COPY platform/gateway/ platform/gateway/
 COPY platform/console/ platform/console/
+COPY packages/github-theme/ packages/github-theme/
 COPY deploy/azure/ deploy/azure/
 # The gateway's tests use the SDK (a dev dependency); pnpm only needs its manifest to resolve the workspace.
 COPY packages/sdk/package.json packages/sdk/
 # The operator console is static files the gateway serves at /console (built here, never installed in the image).
-RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure --filter @managed-copilot/console \
+RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure --filter @managed-copilot/github-theme --filter @managed-copilot/console \
  && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/gateway --filter @managed-copilot/azure --filter @managed-copilot/console run build \
  && mkdir -p /out-azure \
  && cp deploy/azure/package.json /out-azure/ && cp -r deploy/azure/dist /out-azure/ \
