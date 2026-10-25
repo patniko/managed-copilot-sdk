@@ -4,113 +4,128 @@
 <meta charset="utf-8">
 <title>Managed Copilot tutorial slides</title>
 <style>
+/* GitHub dark (Primer) for the tour slides: Mona Sans, GitHub's canvas, borders, and accents. */
+@font-face {
+  font-family: "Mona Sans";
+  src: url("../../../packages/github-theme/node_modules/@fontsource-variable/mona-sans/files/mona-sans-latin-wdth-normal.woff2") format("woff2-variations");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-display: block;
+}
   :root {
-    --bg: #09090b; --panel: #121216; --panel2: #17171c; --line: #27272f; --text: #f4f4f5; --muted: #a1a1aa; --dim: #71717a;
-    --violet: #a78bfa; --violet2: #7c3aed; --amber: #f59e0b; --green: #34d399; --blue: #60a5fa; --rose: #fb7185;
-    --mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+    --bg: #0d1117; --inset: #010409; --panel: #151b23; --panel2: #151b23; --line: #3d444d; --line-muted: #3d444db3;
+    --text: #f0f6fc; --muted: #9198a1; --dim: #656c76;
+    --blue: #4493f8; --purple: #ab7df8; --violet: #ab7df8; --violet2: #8957e5; --green: #3fb950; --amber: #d29922;
+    --rose: #f85149; --coral: #f78166;
+    --sans: "Mona Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
-  body { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; color: var(--text); }
+  body { font-family: var(--sans); color: var(--text); }
   section { display: none; position: relative; width: 1920px; height: 1080px; overflow: hidden;
-    background: radial-gradient(1200px 700px at 85% -10%, rgba(124,58,237,.22), transparent 60%),
-                radial-gradient(900px 600px at -10% 110%, rgba(245,158,11,.12), transparent 60%), var(--bg); }
+    background: radial-gradient(1100px 650px at 86% -14%, rgba(137,87,229,.20), transparent 62%),
+                radial-gradient(900px 620px at -8% 114%, rgba(31,111,235,.15), transparent 60%), var(--bg); }
   section.on { display: block; }
   section.caption-layer { background: transparent; }
   .pad { position: absolute; inset: 96px 120px 230px 120px; }
-  .kicker { font-size: 26px; letter-spacing: .12em; text-transform: uppercase; color: var(--violet); font-weight: 600; }
-  h1 { font-size: 64px; line-height: 1.08; margin: 14px 0 0; font-weight: 700; letter-spacing: -.01em; }
-  h2 { font-size: 56px; line-height: 1.1; margin: 12px 0 0; font-weight: 700; letter-spacing: -.01em; }
+  .kicker { display: inline-flex; align-items: center; gap: 12px; font-size: 26px; font-weight: 600; color: var(--purple); }
+  .kicker::before { content: ""; width: 26px; height: 26px; flex: none; background: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M10.226 17.284c-2.965-.36-5.054-2.493-5.054-5.256 0-1.123.404-2.336 1.078-3.144-.292-.741-.247-2.314.09-2.965.898-.112 2.111.36 2.83 1.01.853-.269 1.752-.404 2.853-.404 1.1 0 1.999.135 2.807.382.696-.629 1.932-1.1 2.83-.988.315.606.36 2.179.067 2.942.72.854 1.101 2 1.101 3.167 0 2.763-2.089 4.852-5.098 5.234.763.494 1.28 1.572 1.28 2.807v2.336c0 .674.561 1.056 1.235.786 4.066-1.55 7.255-5.615 7.255-10.646C23.5 6.188 18.334 1 11.978 1 5.62 1 .5 6.188.5 12.545c0 4.986 3.167 9.12 7.435 10.669.606.225 1.19-.18 1.19-.786V20.63a2.9 2.9 0 0 1-1.078.224c-1.483 0-2.359-.808-2.987-2.313-.247-.607-.517-.966-1.034-1.033-.27-.023-.359-.135-.359-.27 0-.27.45-.471.898-.471.652 0 1.213.404 1.797 1.235.45.651.921.943 1.483.943.561 0 .92-.202 1.437-.719.382-.381.674-.718.944-.943'/%3E%3C/svg%3E") center / contain no-repeat;
+            mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M10.226 17.284c-2.965-.36-5.054-2.493-5.054-5.256 0-1.123.404-2.336 1.078-3.144-.292-.741-.247-2.314.09-2.965.898-.112 2.111.36 2.83 1.01.853-.269 1.752-.404 2.853-.404 1.1 0 1.999.135 2.807.382.696-.629 1.932-1.1 2.83-.988.315.606.36 2.179.067 2.942.72.854 1.101 2 1.101 3.167 0 2.763-2.089 4.852-5.098 5.234.763.494 1.28 1.572 1.28 2.807v2.336c0 .674.561 1.056 1.235.786 4.066-1.55 7.255-5.615 7.255-10.646C23.5 6.188 18.334 1 11.978 1 5.62 1 .5 6.188.5 12.545c0 4.986 3.167 9.12 7.435 10.669.606.225 1.19-.18 1.19-.786V20.63a2.9 2.9 0 0 1-1.078.224c-1.483 0-2.359-.808-2.987-2.313-.247-.607-.517-.966-1.034-1.033-.27-.023-.359-.135-.359-.27 0-.27.45-.471.898-.471.652 0 1.213.404 1.797 1.235.45.651.921.943 1.483.943.561 0 .92-.202 1.437-.719.382-.381.674-.718.944-.943'/%3E%3C/svg%3E") center / contain no-repeat; }
+  h1 { font-size: 64px; line-height: 1.08; margin: 14px 0 0; font-weight: 700; font-stretch: 112%; letter-spacing: -.02em; }
+  h2 { font-size: 56px; line-height: 1.1; margin: 12px 0 0; font-weight: 700; font-stretch: 112%; letter-spacing: -.02em; }
   .sub { font-size: 30px; color: var(--muted); margin-top: 18px; line-height: 1.4; }
-  .grad { background: linear-gradient(90deg, #c4b5fd, #a78bfa 35%, #fbbf24); -webkit-background-clip: text; background-clip: text; color: transparent; }
-  .card { background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); border-radius: 24px; }
+  .grad { background: linear-gradient(90deg, #f0f6fc 0%, #d2a8ff 55%, #a371f7 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
   code, .mono { font-family: var(--mono); }
-  .pill { display: inline-flex; align-items: center; gap: 10px; padding: 8px 18px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.04); font-size: 22px; color: var(--muted); }
+  .pill { display: inline-flex; align-items: center; gap: 10px; padding: 6px 16px; border-radius: 999px; border: 1px solid var(--line); background: transparent; font-size: 22px; font-weight: 500; color: var(--muted); }
 
   /* Title */
   #title .center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
-  #title h1 { font-size: 132px; margin-top: 26px; }
+  #title h1 { font-size: 132px; margin-top: 30px; font-weight: 800; font-stretch: 118%; letter-spacing: -.03em; }
   #title .sub { font-size: 36px; max-width: 1300px; margin: 28px auto 0; }
-  #title .foot { position: absolute; left: 0; right: 0; bottom: 250px; text-align: center; font-size: 22px; color: var(--dim); }
-  .logo { width: 108px; height: 108px; border-radius: 28px; display: grid; place-items: center; margin: 0 auto;
-    background: linear-gradient(135deg, #7c3aed, #a78bfa 55%, #f59e0b); box-shadow: 0 30px 80px rgba(124,58,237,.35); }
+  #title .foot { position: absolute; left: 0; right: 0; bottom: 250px; display: flex; justify-content: center; align-items: center; gap: 14px; font-size: 22px; color: var(--muted); }
+  .logo { width: 116px; height: 116px; border-radius: 28px; display: grid; place-items: center; margin: 0 auto; color: #ffffff;
+    background: var(--panel); border: 1px solid var(--line); box-shadow: 0 0 0 8px rgba(137,87,229,.10), 0 30px 80px rgba(137,87,229,.28); }
+  .octicon { fill: currentColor; flex: none; }
 
-  /* Code */
-  .code { font-family: var(--mono); font-size: 25px; line-height: 1.62; padding: 34px 40px; white-space: pre; color: #d4d4d8; }
-  .code .k { color: #c4b5fd; } .code .s { color: #86efac; } .code .c { color: #71717a; } .code .f { color: #93c5fd; }
-  .code .hl { display: inline-block; margin: 0 -14px; padding: 0 14px; border-radius: 8px; }
-  section.setup .code .hl { background: rgba(245,158,11,.16); box-shadow: inset 3px 0 0 var(--amber); }
+  /* Code: GitHub dark syntax colors */
+  .code { font-family: var(--mono); font-size: 25px; line-height: 1.62; padding: 34px 40px; white-space: pre; color: #f0f6fc; }
+  .code .k { color: #ff7b72; } .code .s { color: #a5d6ff; } .code .c { color: #9198a1; } .code .f { color: #d2a8ff; }
+  .code .hl { display: inline-block; margin: 0 -14px; padding: 0 14px; border-radius: 6px; }
+  section.setup .code .hl { background: rgba(56,139,253,.15); box-shadow: inset 3px 0 0 #1f6feb; }
   .bullets { list-style: none; padding: 0; margin: 0; display: grid; gap: 22px; }
-  .bullets li { font-size: 30px; line-height: 1.35; padding-left: 46px; position: relative; color: #e4e4e7; }
-  .bullets li::before { content: ""; position: absolute; left: 0; top: 10px; width: 22px; height: 22px; border-radius: 7px; background: linear-gradient(135deg, var(--violet2), var(--violet)); }
+  .bullets li { font-size: 30px; line-height: 1.35; padding-left: 46px; position: relative; color: var(--text); }
+  .bullets li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 16px; height: 16px; border-radius: 999px; background: var(--purple); box-shadow: 0 0 0 5px rgba(171,125,248,.18); }
 
   /* Environments */
   .envs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px; margin-top: 38px; }
   .env { padding: 28px 32px 30px; transition: none; }
-  .env .icon { width: 60px; height: 60px; border-radius: 16px; display: grid; place-items: center; margin-bottom: 16px; }
-  .env h3 { font-size: 36px; margin: 0 0 10px; }
+  .env .icon { width: 60px; height: 60px; border-radius: 12px; display: grid; place-items: center; margin-bottom: 16px; border: 1px solid transparent; }
+  .env h3 { font-size: 36px; margin: 0 0 10px; font-weight: 700; font-stretch: 108%; }
   .env p { font-size: 25px; line-height: 1.4; color: var(--muted); margin: 0; }
-  .env .tag { margin-top: 16px; font-family: var(--mono); font-size: 21px; color: var(--dim); }
+  .env .tag { margin-top: 16px; display: inline-block; font-family: var(--mono); font-size: 20px; color: var(--blue); background: rgba(56,139,253,.12); border-radius: 6px; padding: 2px 10px; }
   section.env-1 .env:nth-child(n+2), section.env-2 .env:not(:nth-child(2)), section.env-3 .env:not(:nth-child(3)) { opacity: .28; }
-  section.env-1 .env:nth-child(1), section.env-2 .env:nth-child(2), section.env-3 .env:nth-child(3) { border-color: rgba(167,139,250,.7); box-shadow: 0 0 0 1px rgba(167,139,250,.35), 0 30px 80px rgba(124,58,237,.25); }
+  section.env-1 .env:nth-child(1), section.env-2 .env:nth-child(2), section.env-3 .env:nth-child(3) { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue), 0 30px 80px rgba(31,111,235,.22); }
   .apphost { margin-top: 26px; padding: 20px 32px; font-size: 21px; line-height: 1.5; }
 
   /* Architecture */
   .stage { position: absolute; inset: 0; }
   .box { position: absolute; padding: 24px 28px; }
-  .box h4 { margin: 0 0 8px; font-size: 32px; font-weight: 700; display: flex; align-items: center; gap: 14px; }
+  .box h4 { margin: 0 0 8px; font-size: 32px; font-weight: 700; font-stretch: 108%; display: flex; align-items: center; gap: 14px; }
   .box p { margin: 0; font-size: 23px; line-height: 1.45; color: var(--muted); }
   .box ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
-  .box li { font-size: 23px; color: #d4d4d8; padding-left: 26px; position: relative; }
-  .box li::before { content: ""; position: absolute; left: 0; top: 11px; width: 10px; height: 10px; border-radius: 3px; background: var(--violet); }
+  .box li { font-size: 23px; color: var(--text); padding-left: 26px; position: relative; }
+  .box li::before { content: ""; position: absolute; left: 2px; top: 12px; width: 9px; height: 9px; border-radius: 999px; background: var(--purple); }
   .dot { width: 14px; height: 14px; border-radius: 99px; flex: none; }
   svg.wires { position: absolute; inset: 0; pointer-events: none; }
-  svg.wires path { fill: none; stroke: #3f3f46; stroke-width: 4; }
-  svg.wires path.on { stroke: var(--violet); }
-  svg.wires text { font: 600 20px "Segoe UI", sans-serif; fill: var(--muted); }
+  svg.wires path { fill: none; stroke: #3d444d; stroke-width: 4; }
+  svg.wires path.on { stroke: var(--purple); }
+  svg.wires text { font: 600 20px var(--sans); fill: var(--muted); }
   .dimmable { transition: none; }
   section.arch .dimmable { opacity: .26; }
   section.arch-1 .a1, section.arch-2 .a2, section.arch-3 .a3, section.arch-4 .a4 { opacity: 1; }
   section.arch-0 .dimmable { opacity: 1; }
-  section.arch-1 .a1.box, section.arch-2 .a2.box, section.arch-3 .a3.box, section.arch-4 .a4.box { border-color: rgba(167,139,250,.65); box-shadow: 0 0 0 1px rgba(167,139,250,.3), 0 24px 70px rgba(124,58,237,.22); }
-  .badge { position: absolute; display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-radius: 14px; font-size: 23px; font-weight: 600;
-    background: rgba(52,211,153,.12); border: 1px solid rgba(52,211,153,.5); color: #a7f3d0; }
+  section.arch-1 .a1.box, section.arch-2 .a2.box, section.arch-3 .a3.box, section.arch-4 .a4.box { border-color: var(--purple); box-shadow: 0 0 0 1px var(--purple), 0 24px 70px rgba(137,87,229,.22); }
+  .badge { position: absolute; display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-radius: 12px; font-size: 20px; font-weight: 600;
+    background: rgba(46,160,67,.15); border: 1px solid rgba(46,160,67,.4); color: var(--green); }
 
   /* Terminal */
   .term { position: absolute; overflow: hidden; }
-  .term .bar { height: 54px; display: flex; align-items: center; gap: 10px; padding: 0 22px; border-bottom: 1px solid var(--line); background: #0f0f13; }
+  .term .bar { height: 54px; display: flex; align-items: center; gap: 10px; padding: 0 22px; border-bottom: 1px solid var(--line); background: var(--inset); }
   .term .bar i { width: 14px; height: 14px; border-radius: 99px; display: block; }
-  .term .bar span { margin-left: 14px; font-size: 19px; color: var(--dim); font-family: var(--mono); }
-  .term .body { padding: 26px 34px; font-family: var(--mono); font-size: 23px; line-height: 1.58; white-space: pre; color: #d4d4d8; }
-  .ok { color: var(--green); } .muted { color: var(--dim); } .violet { color: var(--violet); } .amber { color: var(--amber); }
+  .term .bar span { margin-left: 14px; font-size: 19px; color: var(--muted); font-family: var(--mono); }
+  .term .body { padding: 26px 34px; font-family: var(--mono); font-size: 23px; line-height: 1.58; white-space: pre; color: var(--text); }
+  .ok { color: var(--green); } .muted { color: var(--muted); } .violet { color: var(--purple); } .amber { color: var(--amber); }
   table.res { border-collapse: collapse; width: 100%; font-size: 24px; }
-  table.res th { text-align: left; color: var(--dim); font-weight: 600; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 20px; text-transform: uppercase; letter-spacing: .08em; }
-  table.res td { padding: 18px; border-bottom: 1px solid #1f1f25; }
-  .state { display: inline-flex; align-items: center; gap: 10px; color: #a7f3d0; }
-  .state::before { content: ""; width: 12px; height: 12px; border-radius: 99px; background: var(--green); box-shadow: 0 0 12px rgba(52,211,153,.7); }
+  table.res th { text-align: left; color: var(--muted); font-weight: 600; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 20px; }
+  table.res td { padding: 18px; border-bottom: 1px solid var(--line-muted); }
+  .state { display: inline-flex; align-items: center; gap: 8px; padding: 2px 14px; border: 1px solid #238636; border-radius: 999px; color: var(--green); font-size: 20px; font-weight: 500; }
+  .state::before { content: ""; width: 10px; height: 10px; border-radius: 99px; background: var(--green); }
 
   /* Chapter */
   .chapter { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
-  .chapter .num { font-size: 30px; letter-spacing: .2em; text-transform: uppercase; color: var(--amber); font-weight: 700; }
-  .chapter h1 { font-size: 104px; margin-top: 18px; }
+  .chapter .num { display: inline-block; padding: 6px 22px; border: 1px solid var(--purple); border-radius: 999px; font-size: 28px; font-weight: 600; color: var(--purple); }
+  .chapter h1 { font-size: 104px; margin-top: 26px; font-weight: 800; font-stretch: 118%; }
   .chapter .sub { font-size: 34px; }
 
   /* Timeline */
   .timeline { position: relative; margin-top: 56px; display: grid; gap: 26px; }
   .step { display: grid; grid-template-columns: 170px 1fr; gap: 30px; align-items: center; padding: 26px 34px; }
-  .step .t { font-family: var(--mono); font-size: 26px; color: var(--amber); }
+  .step .t { font-family: var(--mono); font-size: 26px; color: var(--blue); }
   .step .w { font-size: 30px; line-height: 1.35; }
   .step .w small { display: block; font-size: 23px; color: var(--muted); margin-top: 6px; }
 
   /* Recap */
   .checks { list-style: none; padding: 0; margin: 46px 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 24px 46px; }
   .checks li { font-size: 30px; line-height: 1.35; display: grid; grid-template-columns: 46px 1fr; gap: 8px; align-items: start; }
-  .checks svg { margin-top: 4px; }
+  .checks svg { margin-top: 4px; color: var(--green); }
 
   /* Captions */
   .cap { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); max-width: 1560px; width: max-content;
-    padding: 18px 34px 20px; border-radius: 18px; background: rgba(8,8,11,.84); border: 1px solid rgba(255,255,255,.08);
-    font-size: 38px; line-height: 1.34; font-weight: 600; text-align: center; color: #fafafa; box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+    padding: 18px 34px 20px; border-radius: 12px; background: rgba(1,4,9,.88); border: 1px solid var(--line);
+    font-size: 38px; line-height: 1.34; font-weight: 600; text-align: center; color: var(--text); box-shadow: 0 18px 50px rgba(1,4,9,.5); }
 </style>
 </head>
 <body>
@@ -118,11 +133,11 @@
 <!-- Title -->
 <section id="title">
   <div class="center"><div>
-    <div class="logo"><svg width="58" height="58" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></div>
+    <div class="logo"><svg class="octicon" width="64" height="64" viewBox="0 0 24 24" aria-hidden="true"><path d="M23.922 16.992c-.861 1.495-5.859 5.023-11.922 5.023-6.063 0-11.061-3.528-11.922-5.023A.641.641 0 0 1 0 16.736v-2.869a.841.841 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656.167-.429.414-1.055.644-1.517a10.195 10.195 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368.397-.406.89-.717 1.474-.952 1.399-1.136 3.392-2.093 6.122-2.093 2.731 0 4.767.957 6.166 2.093.584.235 1.077.546 1.474.952.85.869 1.132 2.037 1.132 3.368 0 .368-.014.733-.052 1.086.23.462.477 1.088.644 1.517 1.258.364 2.233 1.721 2.605 2.656a.832.832 0 0 1 .053.22v2.869a.641.641 0 0 1-.078.256ZM12.172 11h-.344a4.323 4.323 0 0 1-.355.508C10.703 12.455 9.555 13 7.965 13c-1.725 0-2.989-.359-3.782-1.259a2.005 2.005 0 0 1-.085-.104L4 11.741v6.585c1.435.779 4.514 2.179 8 2.179 3.486 0 6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259-1.59 0-2.738-.545-3.508-1.492a4.323 4.323 0 0 1-.355-.508h-.016.016Zm.641-2.935c.136 1.057.403 1.913.878 2.497.442.544 1.134.938 2.344.938 1.573 0 2.292-.337 2.657-.751.384-.435.558-1.15.558-2.361 0-1.14-.243-1.847-.705-2.319-.477-.488-1.319-.862-2.824-1.025-1.487-.161-2.192.138-2.533.529-.269.307-.437.808-.438 1.578v.021c0 .265.021.562.063.893Zm-1.626 0c.042-.331.063-.628.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578-.341-.391-1.046-.69-2.533-.529-1.505.163-2.347.537-2.824 1.025-.462.472-.705 1.179-.705 2.319 0 1.211.175 1.926.558 2.361.365.414 1.084.751 2.657.751 1.21 0 1.902-.394 2.344-.938.475-.584.742-1.44.878-2.497Z"/><path d="M14.5 14.25a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Zm-5 0a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Z"/></svg></div>
     <h1><span class="grad">Managed Copilot</span></h1>
     <div class="sub">Run GitHub Copilot agents in environments you own: on your laptop, or in your Azure subscription.</div>
   </div></div>
-  <div class="foot">A tour of what we built · stock GitHub Copilot SDK 1.0.26 and runtime 1.0.103 · Aspire · Azure Container Apps</div>
+  <div class="foot"><svg class="octicon" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.226 17.284c-2.965-.36-5.054-2.493-5.054-5.256 0-1.123.404-2.336 1.078-3.144-.292-.741-.247-2.314.09-2.965.898-.112 2.111.36 2.83 1.01.853-.269 1.752-.404 2.853-.404 1.1 0 1.999.135 2.807.382.696-.629 1.932-1.1 2.83-.988.315.606.36 2.179.067 2.942.72.854 1.101 2 1.101 3.167 0 2.763-2.089 4.852-5.098 5.234.763.494 1.28 1.572 1.28 2.807v2.336c0 .674.561 1.056 1.235.786 4.066-1.55 7.255-5.615 7.255-10.646C23.5 6.188 18.334 1 11.978 1 5.62 1 .5 6.188.5 12.545c0 4.986 3.167 9.12 7.435 10.669.606.225 1.19-.18 1.19-.786V20.63a2.9 2.9 0 0 1-1.078.224c-1.483 0-2.359-.808-2.987-2.313-.247-.607-.517-.966-1.034-1.033-.27-.023-.359-.135-.359-.27 0-.27.45-.471.898-.471.652 0 1.213.404 1.797 1.235.45.651.921.943 1.483.943.561 0 .92-.202 1.437-.719.382-.381.674-.718.944-.943"/></svg><span>A tour of what we built · stock GitHub Copilot SDK 1.0.26 and runtime 1.0.103 · Aspire · Azure Container Apps</span></div>
 </section>
 
 <!-- Idea -->
@@ -158,19 +173,19 @@
     <h2>Three kinds of environments</h2>
     <div class="envs">
       <div class="card env">
-        <div class="icon" style="background:rgba(96,165,250,.14)"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <div class="icon" style="background:rgba(56,139,253,.15);border-color:rgba(56,139,253,.4);color:#4493f8"><svg class="octicon" width="32" height="32" viewBox="0 0 24 24" aria-hidden="true"><path d="M1.75 1h12.5c.966 0 1.75.784 1.75 1.75v9.5A1.75 1.75 0 0 1 14.25 14H8.061l-2.574 2.573A1.458 1.458 0 0 1 3 15.543V14H1.75A1.75 1.75 0 0 1 0 12.25v-9.5C0 1.784.784 1 1.75 1ZM1.5 2.75v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25H1.75a.25.25 0 0 0-.25.25Z"/><path d="M22.5 8.75a.25.25 0 0 0-.25-.25h-3.5a.75.75 0 0 1 0-1.5h3.5c.966 0 1.75.784 1.75 1.75v9.5A1.75 1.75 0 0 1 22.25 20H21v1.543a1.457 1.457 0 0 1-2.487 1.03L15.939 20H10.75A1.75 1.75 0 0 1 9 18.25v-1.465a.75.75 0 0 1 1.5 0v1.465c0 .138.112.25.25.25h5.5a.75.75 0 0 1 .53.22l2.72 2.72v-2.19a.75.75 0 0 1 .75-.75h2a.25.25 0 0 0 .25-.25v-9.5Z"/></svg></div>
         <h3>Shared</h3>
         <p>A lightweight chat agent on a shared runtime. Its tools run inside your app.</p>
         <div class="tag">type: "shared"</div>
       </div>
       <div class="card env">
-        <div class="icon" style="background:rgba(167,139,250,.16)"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7L12 12l8.7-5M12 22V12"/></svg></div>
+        <div class="icon" style="background:rgba(171,125,248,.15);border-color:rgba(171,125,248,.4);color:#ab7df8"><svg class="octicon" width="32" height="32" viewBox="0 0 24 24" aria-hidden="true"><path d="M13.152.682a2.251 2.251 0 0 1 2.269 0l.007.004 6.957 4.276a2.277 2.277 0 0 1 1.126 1.964v7.516c0 .81-.432 1.56-1.133 1.968l-.002.001-11.964 7.037-.004.003c-.706.41-1.578.41-2.284 0l-.026-.015-6.503-4.502a2.268 2.268 0 0 1-1.096-1.943V9.438c0-.392.1-.77.284-1.1l.003-.006.014-.026c.197-.342.48-.627.82-.827h.002L13.152.681Zm.757 1.295h-.001L2.648 8.616l6.248 4.247a.775.775 0 0 0 .758-.01h.001l11.633-6.804-6.629-4.074a.75.75 0 0 0-.75.003ZM8.517 14.33a2.286 2.286 0 0 1-.393-.18l-.023-.014-6.102-4.147v7.003c0 .275.145.528.379.664l.025.014 6.114 4.232V14.33ZM18 9.709l-3.25 1.9v7.548L18 17.245Zm-7.59 4.438-.002.002a2.296 2.296 0 0 1-.391.18v7.612l3.233-1.902v-7.552Zm9.09-5.316v7.532l2.124-1.25a.776.776 0 0 0 .387-.671V7.363Z"/></svg></div>
         <h3>Isolated</h3>
         <p>Every session gets its own sandbox: a workspace, a shell, your packages, and network rules you control.</p>
         <div class="tag">type: "isolated"</div>
       </div>
       <div class="card env">
-        <div class="icon" style="background:rgba(245,158,11,.14)"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+        <div class="icon" style="background:rgba(46,160,67,.15);border-color:rgba(46,160,67,.4);color:#3fb950"><svg class="octicon" width="32" height="32" viewBox="0 0 24 24" aria-hidden="true"><path d="M18.655 10.405a.75.75 0 0 1-1.06 0l-4.97-4.97v14.44a.75.75 0 0 1-1.5 0V5.435l-4.97 4.97a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l6.25-6.25a.75.75 0 0 1 1.06 0l6.25 6.25a.75.75 0 0 1 0 1.06Z"/></svg></div>
         <h3>Promotable</h3>
         <p>Starts cheap on the shared runtime, then moves into its own sandbox when it needs one.</p>
         <div class="tag">type: "promotable"</div>
@@ -237,7 +252,7 @@
       <p>Only what you allow</p>
     </div>
     <div class="badge dimmable a4" style="left:120px;top:640px">
-      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <svg class="octicon" width="26" height="26" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9V7.25C6 3.845 8.503 1 12 1s6 2.845 6 6.25V9h.5a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 19.5v-8A2.5 2.5 0 0 1 5.5 9Zm-1.5 2.5v8a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-8a1 1 0 0 0-1-1h-13a1 1 0 0 0-1 1Zm3-4.25V9h9V7.25c0-2.67-1.922-4.75-4.5-4.75-2.578 0-4.5 2.08-4.5 4.75Z"/></svg>
       Your GitHub token never enters a sandbox
     </div>
   </div>
@@ -249,7 +264,7 @@
     <div class="kicker">Run it</div>
     <h2>One command: <span class="mono violet">aspire run</span></h2>
     <div class="card term" style="left:0;right:0;top:190px;height:500px">
-      <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span>aspire run · resources</span></div>
+      <div class="bar"><i style="background:#f85149"></i><i style="background:#d29922"></i><i style="background:#3fb950"></i><span>aspire run · resources</span></div>
       <div style="padding:10px 34px 0">
         <table class="res">
           <tr><th>Resource</th><th>What it is</th><th>State</th><th>URL</th></tr>
@@ -269,7 +284,7 @@
     <div class="kicker">Verified</div>
     <h2>Every spec example is an automated check</h2>
     <div class="card term" style="left:0;right:0;top:170px;height:470px">
-      <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span>quickstart · real platform, real models</span></div>
+      <div class="bar"><i style="background:#f85149"></i><i style="background:#d29922"></i><i style="background:#3fb950"></i><span>quickstart · real platform, real models</span></div>
       <div class="body" style="display:grid;grid-template-columns:1fr 1fr;column-gap:60px;white-space:normal"><div><span class="ok">✓</span> 01 The idea in one snippet<br><span class="ok">✓</span> 02 Shared: a chat agent with your tools<br><span class="ok">✓</span> 03 Isolated: a coding agent in a sandbox<br><span class="ok">✓</span> 04 Set up the sandbox<br><span class="ok">✓</span> 05 Get results out<br><span class="ok">✓</span> 06 Control network access<br><span class="ok">✓</span> 07 Keep secrets out of the sandbox</div><div><span class="ok">✓</span> 08 Promotable: start cheap, move later<br><span class="ok">✓</span> 09 Come back later<br><span class="ok">✓</span> 10 Offline work: webhook<br><span class="ok">✓</span> 11 Offline work: polling<br><span class="ok">✓</span> 12 Run on a schedule<br><span class="ok">✓</span> 13 Open a session in Copilot CLI<br><br><span class="ok" style="font-size:30px;font-weight:700">13 passed</span></div></div>
     </div>
   </div>
@@ -329,14 +344,14 @@
     <div class="kicker">Recap</div>
     <h2>What we built</h2>
     <ul class="checks">
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Genuine Copilot SDK clients and sessions, unmodified</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Shared, isolated, and promotable environments</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Sandboxes with setup, files, and artifacts</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Network allowlists and secrets added at the edge</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Offline work and schedules that run as you</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Copilot CLI on the same live session</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Two demos, end to end with real models</li>
-      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Runs locally with Aspire and on Azure</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Genuine Copilot SDK clients and sessions, unmodified</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Shared, isolated, and promotable environments</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Sandboxes with setup, files, and artifacts</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Network allowlists and secrets added at the edge</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Offline work and schedules that run as you</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Copilot CLI on the same live session</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Two demos, end to end with real models</li>
+      <li><svg class="octicon" width="34" height="34" viewBox="0 0 24 24" aria-hidden="true"><path d="M1 12C1 5.925 5.925 1 12 1s11 4.925 11 11-4.925 11-11 11S1 18.075 1 12Zm16.28-2.72a.751.751 0 0 0-.018-1.042.751.751 0 0 0-1.042-.018l-5.97 5.97-2.47-2.47a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042l3 3a.75.75 0 0 0 1.06 0Z"/></svg>Runs locally with Aspire and on Azure</li>
     </ul>
   </div>
 </section>
@@ -348,7 +363,7 @@
     <h2>Run it yourself</h2>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:46px;margin-top:46px;align-items:start">
       <div class="card term" style="position:relative">
-        <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span>terminal</span></div>
+        <div class="bar"><i style="background:#f85149"></i><i style="background:#d29922"></i><i style="background:#3fb950"></i><span>terminal</span></div>
         <div class="body" style="font-size:28px;line-height:1.75"><span class="muted">&gt;</span> gh auth login
 <span class="muted">&gt;</span> pnpm install
 <span class="muted">&gt;</span> pnpm build
@@ -366,7 +381,7 @@
 
 <!-- Background for recorded footage: the video sits in the 1536x864 window at (192, 24). -->
 <section id="frame">
-  <div style="position:absolute;left:191px;top:23px;width:1538px;height:866px;border-radius:6px;border:1px solid rgba(255,255,255,.12);box-shadow:0 30px 90px rgba(0,0,0,.6), 0 0 0 1px rgba(167,139,250,.08)"></div>
+  <div style="position:absolute;left:191px;top:23px;width:1538px;height:866px;border-radius:6px;border:1px solid #3d444d;box-shadow:0 30px 90px rgba(1,4,9,.65)"></div>
 </section>
 
 <!-- Caption layer: filled by the renderer -->

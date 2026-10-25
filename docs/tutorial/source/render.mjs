@@ -39,7 +39,7 @@ writeFileSync(join(OUT, "narration.json"), JSON.stringify(narration, null, 1));
 const deck = slides.filter((name) => name !== "frame");
 const html = `<!doctype html><html><head><meta charset="utf-8"><style>
 @page { size: 1920px 1080px; margin: 0; }
-html, body { margin: 0; background: #09090b; }
+html, body { margin: 0; background: #0d1117; }
 img { display: block; width: 1920px; height: 1080px; }
 img:not(:last-child) { break-after: page; }
 </style></head><body>${deck.map((name) => `<img src="../slides/${name}.png">`).join("")}</body></html>`;
