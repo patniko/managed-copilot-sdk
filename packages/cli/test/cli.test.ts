@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ManagedCopilotError, type ArtifactInfo, type ScheduleInfo, type SessionInfo } from "@managed-copilot/protocol";
+import { ManagedCopilotError, OPERATOR_ROUTES, type ArtifactInfo, type OperatorOverview, type OperatorSessionSummary, type ScheduleInfo, type SessionInfo } from "@managed-copilot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertNoLinks, downloadTarget } from "../src/commands/artifacts.js";
 import { run, type CliIo, type Deployment, type ManagedApi } from "../src/cli.js";
@@ -344,5 +344,122 @@ describe("output helpers", () => {
     expect(relativeTime("2026-10-24T05:59:50Z", NOW)).toBe("just now");
     expect(relativeTime("2026-10-24T03:00:00Z", NOW)).toBe("3 hours ago");
     expect(relativeTime("2026-10-25T06:00:00Z", NOW)).toBe("tomorrow");
+  });
+});
+
+describe("managed-copilot console and operator", () => {
+  const OVERVIEW: OperatorOverview = {
+    deployment: { name: "copilot", version: "0.1.0", mode: "local", publicUrl: "http://localhost:7400", startedAt: "2026-10-24T05:00:00Z", capabilities: ["operator", "shared"], sdk: { copilotSdk: "1.0.26", copilotRuntime: "1.0.103" } },
+    health: [
+      { id: "gateway", name: "Gateway", status: "healthy", summary: "v0.1.0 · local · up 1 h 0 min" },
+      { id: "sandboxes", name: "Sandbox backend", status: "unavailable", summary: "docker · not reachable", detail: "Docker is not reachable." },
+    ],
+    counts: {
+      sessions: { total: 3, live: 1, byState: { idle: 2, failed: 1 }, byPlacement: { shared: 3 }, byEnvironment: { chat: 3 } },
+      connections: { sdk: 2, cli: 1 },
+      sandboxes: { total: 0, byState: {} },
+      schedules: { active: 1, paused: 0 },
+      actions: { open: 2, needsReconciliation: 1 },
+      webhooks: { pending: 0, failed: 2 },
+      accounts: 2,
+    },
+    traffic: {},
+    attention: [{ id: "health:sandboxes", severity: "error", title: "Sandbox backend is unavailable", detail: "Docker is not reachable." }],
+    generatedAt: "2026-10-24T06:00:00Z",
+  };
+  const SESSIONS: OperatorSessionSummary[] = [
+    { id: "37f2a0c9-041b-4b59-91bc-585def383d54", owner: { id: 42, login: "octo" }, environment: "chat", type: "shared", placement: "shared", state: "idle", generation: 0, createdAt: "2026-10-24T05:00:00Z", updatedAt: "2026-10-24T05:55:00Z", live: true, attached: 2 },
+  ];
+
+  function operatorHarness(options: { forbid?: boolean; missing?: boolean; interactive?: boolean; openFails?: boolean } = {}) {
+    let stdout = "";
+    let stderr = "";
+    const opened: string[] = [];
+    const requests: string[] = [];
+    const fail = () => {
+      if (options.missing) throw new ManagedCopilotError("not_found", "No route for /v1/operator/me");
+      if (options.forbid) throw new ManagedCopilotError("forbidden", "@octo is not an operator of this deployment (operators: @admin).");
+    };
+    const deployment: Deployment = {
+      url: "http://localhost:7400",
+      http: {
+        get: async (path: string) => {
+          requests.push(`GET ${path}`);
+          fail();
+          if (path === OPERATOR_ROUTES.me) return { account: { id: 42, login: "octo" }, grant: "local", via: "token" };
+          if (path === OPERATOR_ROUTES.overview) return OVERVIEW;
+          if (path.startsWith(OPERATOR_ROUTES.sessions)) return SESSIONS;
+          throw new ManagedCopilotError("not_found", `No route for ${path}`);
+        },
+        post: async (path: string) => {
+          requests.push(`POST ${path}`);
+          fail();
+          return { ticket: "mcct_abc+/=", expiresAt: "2026-10-24T06:01:00Z", url: "http://ignored/console/signin#ticket=x" };
+        },
+        delete: async () => undefined,
+      } as unknown as Deployment["http"],
+      managed: async () => Promise.reject(new Error("not used")),
+      attach: async () => ({ exitCode: 0 }),
+    };
+    const io: CliIo = {
+      stdout: { write: (text: string) => (stdout += text), isTTY: options.interactive ?? false },
+      stderr: { write: (text: string) => (stderr += text), isTTY: false },
+      stdin: { isTTY: options.interactive ?? false },
+      env: {},
+      now: () => NOW,
+      connect: async () => deployment,
+      openUrl: async (url) => {
+        if (options.openFails) throw new Error("no browser");
+        opened.push(url);
+      },
+    };
+    return { io, opened, requests, out: () => stdout, err: () => stderr };
+  }
+
+  it("opens the console with a one-time sign-in link whose ticket stays in the fragment", async () => {
+    const { io, opened, out, requests } = operatorHarness({ interactive: true });
+    expect(await run(["console"], io)).toBe(0);
+    expect(requests).toEqual([`GET ${OPERATOR_ROUTES.me}`, `POST ${OPERATOR_ROUTES.consoleTickets}`]);
+    expect(opened).toEqual([`http://localhost:7400/console/signin#ticket=${encodeURIComponent("mcct_abc+/=")}`]);
+    expect(out().replace(/\u001b\[[0-9;]*m/g, "")).toContain("Opened the operator console for @octo (local operator)");
+    expect(out()).not.toContain("mcct_abc");
+  });
+
+  it("prints the link when it should not or cannot open a browser", async () => {
+    const quiet = operatorHarness({ interactive: true });
+    expect(await run(["console", "--no-open"], quiet.io)).toBe(0);
+    expect(quiet.opened).toEqual([]);
+    expect(quiet.out()).toContain("http://localhost:7400/console/signin#ticket=");
+    const broken = operatorHarness({ interactive: true, openFails: true });
+    expect(await run(["console"], broken.io)).toBe(0);
+    expect(broken.out()).toContain("Open this link to sign in");
+    const scripted = operatorHarness();
+    expect(await run(["console", "--json"], scripted.io)).toBe(0);
+    expect(JSON.parse(scripted.out())).toMatchObject({ console: "http://localhost:7400/console/", grant: "local", expiresAt: "2026-10-24T06:01:00Z" });
+  });
+
+  it("explains who may operate, and deployments without a console", async () => {
+    const forbidden = operatorHarness({ forbid: true });
+    expect(await run(["console"], forbidden.io)).toBe(1);
+    expect(forbidden.err()).toContain("@octo is not an operator of this deployment (operators: @admin). (forbidden)");
+    expect(forbidden.err()).toContain("operators: { githubUsers:");
+    const older = operatorHarness({ missing: true });
+    expect(await run(["operator"], older.io)).toBe(1);
+    expect(older.err()).toContain("This deployment has no operator console yet. (capability_unavailable)");
+  });
+
+  it("shows the operator overview and every owner's sessions", async () => {
+    const { io, out, requests } = operatorHarness();
+    expect(await run(["operator"], io)).toBe(0);
+    expect(out()).toMatch(/Gateway\s+healthy/);
+    expect(out()).toMatch(/Sandbox backend\s+unavailable/);
+    expect(out()).toContain("Sandbox backend is unavailable");
+    expect(out()).toContain("2 open · 1 need reconciliation");
+    expect(out()).toContain("Open the console: npx managed-copilot console");
+    expect(await run(["operator", "sessions", "--owner", "octo", "--state", "idle"], io)).toBe(0);
+    expect(requests.at(-1)).toBe(`GET ${OPERATOR_ROUTES.sessions}?state=idle&owner=octo`);
+    expect(out()).toMatch(/37f2a0c9\s+@octo\s+chat\s+shared\s+idle\s+live · 2 attached\s+5 minutes ago/);
+    expect(await run(["operator", "sessions", "--json"], io)).toBe(0);
+    expect(await run(["operator", "nope"], io)).toBe(2);
   });
 });

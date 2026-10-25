@@ -7,6 +7,7 @@ import { GitHubAuthenticator } from "./auth.js";
 import { Environments } from "./environments.js";
 import { PlatformEvents } from "./events.js";
 import { SessionLedger } from "./ledger.js";
+import { CoreOperator } from "./operator.js";
 import { PlatformTools, RuntimeRequests } from "./registries.js";
 import { registerConnectRoute } from "./router.js";
 import { registerRoutes } from "./routes.js";
@@ -24,7 +25,7 @@ export const coreModule: GatewayModule = {
       log.warn("No access rules configured: any GitHub account can use this deployment. Set access.githubOrgs or access.githubUsers in the AppHost.");
     }
     const ledger = new SessionLedger(app.db);
-    const events = new PlatformEvents(ledger, log.child("events"));
+    const events = new PlatformEvents(ledger, log.child("events"), () => app.metrics.increment("events.published"));
     const environments = new Environments({ deployment: app.config.deployment, baseDir: app.config.appHostDir, pinDir: join(app.config.dataDir, "customizations"), log });
     const platformTools = new PlatformTools();
     const runtimeRequests = new RuntimeRequests();
@@ -48,6 +49,10 @@ export const coreModule: GatewayModule = {
       : undefined;
     manager = new SessionManager({ app, log: log.child("sessions"), ledger, environments, events, platformTools, runtimeRequests, auth, sharedRuntime: runtime });
     const sessions = manager;
+    // Counted from the platform event every create publishes, whichever path created the session.
+    events.subscribe((event) => {
+      if (event.type === "session.created") app.metrics.increment("sessions.created");
+    });
 
     // Per-session user credentials for shared sessions: the runtime asks the gateway, never a shared service token.
     runtimeRequests.register("gitHubToken.getToken", ({ params }) => sessions.answerTokenRequest(params), { upstream: "shared" });
@@ -60,7 +65,9 @@ export const coreModule: GatewayModule = {
     app.provide("environments", environments);
 
     registerRoutes(app, { manager: sessions, environments, events, runtime });
-    const closeClients = registerConnectRoute({ app, log: log.child("router"), manager: sessions, environments, runtime }, ROUTES.connect);
+    const connectRoute = registerConnectRoute({ app, log: log.child("router"), manager: sessions, environments, runtime }, ROUTES.connect);
+    const operator = new CoreOperator({ app, ledger, manager: sessions, runtime, environments, platformTools, connections: () => connectRoute.connections() });
+    app.provide("coreOperator", operator);
 
     app.onStart(async () => {
       if (!runtime) {
@@ -76,7 +83,8 @@ export const coreModule: GatewayModule = {
       void sessions.recover().catch((error: unknown) => log.warn("Session recovery failed", { error: (error as Error).message }));
     });
     app.onStop(async () => {
-      closeClients();
+      connectRoute.close();
+      operator.close();
       sessions.close();
       await runtime?.stop();
     });

@@ -18,7 +18,9 @@ import {
 import type { Logger } from "../../log.js";
 import type { CustomizationBundle, EnvironmentResolver, ResolvedEnvironment, SessionRecord } from "./contracts.js";
 
-interface BundleState {
+export interface BundleState {
+  /** The folder the AppHost declared (resolved against the AppHost directory). */
+  readonly source: string;
   readonly bundle?: CustomizationBundle;
   /** Why the bundle cannot be used (sessions in this environment fail with `policy_violation`). */
   readonly problem?: string;
@@ -174,17 +176,22 @@ export class Environments implements EnvironmentResolver {
         const problem = problems.length > 0 ? `Customizations for "${name}" ${problems.join(", and ")}` : undefined;
         if (problem) options.log.error("Environment customizations rejected", { environment: name, problem });
         else options.log.info("Pinned environment customizations", { environment: name, digest: bundle.digest, agents: bundle.agents.map((agent) => agent.name) });
-        this.#bundles.set(name, problem ? { bundle, problem } : { bundle });
+        this.#bundles.set(name, problem ? { source, bundle, problem } : { source, bundle });
       } catch (error) {
         const problem = `Customizations for "${name}" could not be loaded: ${(error as Error).message}`;
         options.log.error("Environment customizations unavailable", { environment: name, problem });
-        this.#bundles.set(name, { problem });
+        this.#bundles.set(name, { source, problem });
       }
     }
   }
 
   get deployment(): ManagedCopilotConfig {
     return this.#deployment;
+  }
+
+  /** A declared environment's customizations as pinned at startup (operator console). */
+  customizations(name: string): BundleState | undefined {
+    return this.#bundles.get(name);
   }
 
   /** The policy ceiling of a declared environment (deployment default, then the environment's own setting). */

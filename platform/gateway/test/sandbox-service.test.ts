@@ -200,6 +200,40 @@ describe("SandboxService lifecycle", () => {
     expect(provider.removed).toEqual(["sbx_ffffffffffffffffffffffff"]);
   });
 
+  it("shows operators sandboxes and the backend without keys, tokens, placeholders, or variables", async () => {
+    const running = sandbox("running", { running: true });
+    store.update(running.sessionId, { image: "managed-copilot-sandbox:abc", imageId: "sha256:abc" });
+    sandbox("stopped");
+    const sandboxes = createService();
+    await sandboxes.probe();
+    const status = await sandboxes.operatorStatus();
+    expect(status).toMatchObject({ provider: "fake", available: true, checkedAt: expect.any(String), defaultIdleSeconds: 1, facts: [], counts: { running: 1, stopped: 1 } });
+    const listed = sandboxes.operatorSandboxes();
+    expect(listed).toHaveLength(2);
+    expect(sandboxes.operatorSandboxes({ state: "running" })).toEqual([
+      expect.objectContaining({ id: running.id, sessionId: running.sessionId, ownerId: 1, environment: "coder", state: "running", image: "managed-copilot-sandbox:abc", setup: SUCCEEDED }),
+    ]);
+    const text = JSON.stringify(listed);
+    for (const secret of ["mcrt_placeholder", '"key"', '"token"', "workloadEnv", "runtimeToken"]) expect(text, secret).not.toContain(secret);
+    provider.reachable = false;
+    expect(await sandboxes.probe()).toBe(false);
+    expect(await sandboxes.operatorStatus()).toMatchObject({ available: false, lastError: "The fake backend is down." });
+  });
+
+  it("stops an idle sandbox for an operator, and refuses while it works", async () => {
+    const row = sandbox("running", { running: true });
+    let busy = true;
+    services["actions"] = { hasOpenActions: () => busy };
+    const sandboxes = createService();
+    await expect(sandboxes.operatorStop(row.sessionId, "operator @alice")).rejects.toMatchObject({ code: "session_busy" });
+    expect(provider.stopped).toEqual([]);
+    busy = false;
+    expect(await sandboxes.operatorStop(row.sessionId, "operator @alice")).toEqual({ sandboxId: row.id, stopped: true });
+    expect(provider.stopped).toEqual([row.id]);
+    await expect(sandboxes.operatorStop(row.sessionId, "operator @alice")).rejects.toMatchObject({ code: "conflict" });
+    await expect(sandboxes.operatorStop("00000000-0000-0000-0000-999999999999", "operator @alice")).rejects.toMatchObject({ code: "not_found" });
+  });
+
   it("finishes a stop that a gateway restart interrupted", async () => {
     const row = sandbox("stopping", { running: true });
     await createService().reconcile();

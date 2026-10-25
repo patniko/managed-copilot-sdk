@@ -2,7 +2,7 @@
 // egress registration, the runtime, idle stop, reconciliation, artifacts); a provider owns compute, persistent
 // storage, networking, images, and how the gateway reaches each sandbox's sandboxd. Providers: `docker` (local, this
 // directory's docker/) and `azure` (azure/, owned by the azure workstream).
-import type { EnvironmentConfig, SandboxSize } from "@managed-copilot/protocol";
+import type { EnvironmentConfig, InfraFact, SandboxSize } from "@managed-copilot/protocol";
 import type { Logger } from "../../../log.js";
 
 /** Everything a provider needs to create one sandbox. */
@@ -108,6 +108,11 @@ export interface SandboxProvider {
   reattach?(sandboxId: string): Promise<void>;
   /** IDs of sandboxes with resources for this gateway instance (orphan sweep at start). */
   inventory(): Promise<Set<string>>;
+  /**
+   * Non-secret facts about the backend for the operator console (engine version, region, images, relay). Never keys,
+   * tokens, or anything sandboxes hold.
+   */
+  describe?(): readonly InfraFact[] | Promise<readonly InfraFact[]>;
   /**
    * Releases shared resources at gateway shutdown (running sandboxes are stopped by the service first). Only resources
    * this process started: a probe alone must not tear down what another gateway on the same instance uses.

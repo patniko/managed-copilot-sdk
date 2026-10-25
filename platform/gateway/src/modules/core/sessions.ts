@@ -92,6 +92,52 @@ interface Attachment {
 /** Handler flags the runtime registers per connection; the gateway sends the union across attached clients. */
 const WIRE_FLAGS = ["requestPermission", "requestUserInput", "requestElicitation", "requestExitPlanMode", "requestAutoModeSwitch", "hooks", "hasSkillProvider"] as const;
 
+/** An attached client as the operator console shows it (never its credential). */
+export interface LiveAttachmentSnapshot {
+  readonly connectionId: string;
+  readonly kind: "sdk" | "cli";
+  readonly account: { readonly id: number; readonly login: string; readonly name?: string; readonly avatarUrl?: string };
+  readonly clientName?: string;
+  readonly attachedAt: string;
+  readonly tools: readonly string[];
+  readonly callbacks: readonly string[];
+}
+
+/** A session's in-memory state as the operator console shows it. */
+export interface LiveSessionSnapshot {
+  readonly id: string;
+  readonly ownerId: number;
+  readonly environment: string;
+  readonly placement: Placement;
+  /** Open on a connected runtime now. */
+  readonly resident: boolean;
+  readonly ready: boolean;
+  readonly upstream?: string;
+  readonly upstreamVersion?: string;
+  readonly restoring: boolean;
+  readonly cutover: boolean;
+  readonly deleting: boolean;
+  readonly waits: number;
+  readonly presences: number;
+  readonly attachments: readonly LiveAttachmentSnapshot[];
+}
+
+/** The callback kinds an attached client registered. */
+function attachmentCallbacks(attachment: Attachment): string[] {
+  const kinds: [boolean, string][] = [
+    [attachment.requestPermission, "requestPermission"],
+    [attachment.requestUserInput, "requestUserInput"],
+    [attachment.requestElicitation, "requestElicitation"],
+    [attachment.requestExitPlanMode, "requestExitPlanMode"],
+    [attachment.requestAutoModeSwitch, "requestAutoModeSwitch"],
+    [attachment.hooks, "hooks"],
+    [attachment.skillProvider, "skillProvider"],
+    [attachment.transforms, "systemMessageTransforms"],
+    [attachment.canvases, "canvases"],
+  ];
+  return kinds.filter(([on]) => on).map(([, name]) => name);
+}
+
 /** A client's `session.tools.set` in progress: its registration before the call, and what the call set. */
 interface ToolsRegistration {
   live?: LiveSession;
@@ -1559,6 +1605,51 @@ export class SessionManager implements SessionsService {
         live.sandbox?.close?.();
       }
     }
+  }
+
+  // ------------------------------------------------------------------------------------------------------------
+  // Operator views: read-only snapshots for the operator console (no credentials, no conversation). Reading them
+  // never makes a session resident.
+
+  /** Ledger records of every owner, newest first (interrupted creates left out, as everywhere else). */
+  operatorRecords(query: Parameters<SessionLedger["listAll"]>[0] = {}): SessionRecord[] {
+    return this.#ledger.listAll(query).filter((record) => !this.#interrupted(record));
+  }
+
+  /** The session's stored admitted configuration (credential-free by construction). */
+  operatorAdmitted(sessionId: string): AdmittedConfig | undefined {
+    return this.#ledger.admitted(sessionId);
+  }
+
+  /** What the gateway holds in memory for sessions it has touched since it started (all, or one). */
+  operatorLive(sessionId?: string): LiveSessionSnapshot[] {
+    const lives = sessionId === undefined ? [...this.#live.values()] : [this.#live.get(sessionId)].filter((live): live is LiveSession => live !== undefined);
+    return lives.map((live) => {
+      const upstream = live.upstream && !live.upstream.closed ? live.upstream : undefined;
+      return {
+        id: live.id,
+        ownerId: live.ownerId,
+        environment: live.environment.name,
+        placement: live.placement,
+        resident: Boolean(upstream && live.ready),
+        ready: live.ready,
+        ...(upstream ? { upstream: upstream.info.id, upstreamVersion: upstream.version } : {}),
+        restoring: live.residency !== undefined,
+        cutover: live.cutover !== undefined && !live.cutover.flushed,
+        deleting: live.deleting,
+        waits: live.waits.size,
+        presences: live.presences.size,
+        attachments: [...live.attachments.values()].map((attachment) => ({
+          connectionId: attachment.peer.id,
+          kind: attachment.peer.kind,
+          account: accountInfo(attachment.peer.principal),
+          ...(attachment.peer.clientName ? { clientName: attachment.peer.clientName } : {}),
+          attachedAt: new Date(attachment.attachedAt).toISOString(),
+          tools: [...attachment.tools].sort(),
+          callbacks: attachmentCallbacks(attachment),
+        })),
+      };
+    });
   }
 
   // ------------------------------------------------------------------------------------------------------------

@@ -9,7 +9,7 @@
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
-import { ManagedCopilotError, SANDBOX_PATHS, SANDBOX_SIZES, SANDBOXD_PORT, type EnvironmentConfig } from "@managed-copilot/protocol";
+import { ManagedCopilotError, SANDBOX_PATHS, SANDBOX_SIZES, SANDBOXD_PORT, type EnvironmentConfig, type InfraFact } from "@managed-copilot/protocol";
 import type { Logger } from "../../../../log.js";
 import type {
   SandboxEndpoint,
@@ -153,6 +153,26 @@ export class AzureSandboxProvider implements SandboxProvider {
       this.#log.warn("Sandbox ports accept any source address; only sandboxd's per-sandbox key protects them. Set MANAGED_COPILOT_AZURE_INGRESS_CIDRS to the gateway's outbound addresses.");
     }
     this.#readyUntil = Date.now() + READY_TRUST_MS;
+  }
+
+  describe(): InfraFact[] {
+    const config = this.#config;
+    if (!config) return [{ label: "Configuration", value: this.#problems.join(" ") || "Not configured" }];
+    return [
+      { label: "Subscription", value: config.subscriptionId, mono: true },
+      { label: "Resource group", value: config.resourceGroup, mono: true },
+      { label: "Sandbox group", value: config.sandboxGroup, mono: true },
+      { label: "Region", value: config.region, mono: true },
+      { label: "Data plane", value: config.endpoint, mono: true },
+      { label: "API version", value: config.apiVersion, mono: true },
+      { label: "Credential", value: config.credential === "managed-identity" ? `Managed identity${config.clientId ? ` (client ${config.clientId})` : ""}` : "Azure CLI (local qualification)" },
+      { label: "Images", value: Object.entries(config.images).map(([environment, image]) => `${environment}: ${image}`).join(", ") || "None deployed", mono: true },
+      ...(config.vnetConnection ? [{ label: "VNet connection", value: config.vnetConnection, mono: true }] : []),
+      ...(config.egressProxy ? [{ label: "Egress proxy", value: `${config.egressProxy.host}:${config.egressProxy.port}`, mono: true }] : []),
+      config.ingressCidrs.length > 0
+        ? { label: "Sandbox ingress", value: config.ingressCidrs.join(", "), mono: true }
+        : { label: "Sandbox ingress", value: "Any source address (sandboxd's per-sandbox key only); set MANAGED_COPILOT_AZURE_INGRESS_CIDRS" },
+    ];
   }
 
   /** Converts every deployed sandbox image into a disk image ahead of the first session. */

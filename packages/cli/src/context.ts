@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { ROUTES, type AccountInfo, type ScheduleInfo, type SessionInfo } from "@managed-copilot/protocol";
 import { ManagedCopilot } from "@managed-copilot/sdk";
 import { HttpClient, launchAttachedCli, resolveToken, resolveUrl, validateDeploymentUrl, type AttachedCliResult } from "@managed-copilot/sdk/internal";
@@ -35,6 +36,8 @@ export interface Context {
   out(line?: string): void;
   err(line?: string): void;
   confirm(question: string): Promise<boolean>;
+  /** Opens a URL in the default browser (rejects when no browser could be started). */
+  openUrl(url: string): Promise<void>;
   deployment(): Promise<Deployment>;
 }
 
@@ -95,4 +98,21 @@ export function background(http: Deployment["http"]) {
     enable: () => http.post<{ account: AccountInfo; active: boolean; createdAt?: string }>(ROUTES.backgroundCredential, {}),
     disable: () => http.delete<{ account: AccountInfo; active: boolean; reason?: string }>(ROUTES.backgroundCredential),
   };
+}
+
+/**
+ * Opens a URL in the default browser without a shell (the URL is one argument, never parsed by a shell). Resolves
+ * once the launcher started; rejects when none could.
+ */
+export function openInBrowser(url: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  const [command, args] =
+    platform === "win32" ? ["rundll32.exe", ["url.dll,FileProtocolHandler", url]] : platform === "darwin" ? ["open", [url]] : ["xdg-open", [url]];
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { stdio: "ignore", detached: true, windowsHide: true });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }

@@ -4,9 +4,10 @@ import { parseArgs } from "node:util";
 import { TOKEN_ENVS, URL_ENV } from "@managed-copilot/protocol";
 import { artifacts } from "./commands/artifacts.js";
 import { login, logout, status } from "./commands/account.js";
+import { consoleCommand, OPERATOR_VIEWS, operatorCommand } from "./commands/operator.js";
 import { schedules, SCHEDULE_ACTIONS } from "./commands/schedules.js";
 import { attach, promote, sessions } from "./commands/sessions.js";
-import { connectDeployment, type Context, type Deployment, type Writer } from "./context.js";
+import { connectDeployment, openInBrowser, type Context, type Deployment, type Writer } from "./context.js";
 import { describeError, UsageError } from "./errors.js";
 import { createStyle, type Style } from "./output.js";
 
@@ -33,6 +34,13 @@ const COMMANDS: Readonly<Record<string, Command>> = {
     options: ["yes"],
     run: schedules,
   },
+  console: { usage: "console [--no-open]", summary: "Open the operator console in your browser, signed in as you", options: ["no-open"], run: consoleCommand },
+  operator: {
+    usage: `operator [${OPERATOR_VIEWS.join("|")}] [--environment <name>] [--state <state>] [--owner <login>] [--limit <n>]`,
+    summary: "Show the deployment as operators see it: health, environments, every owner's sessions",
+    options: ["environment", "state", "owner", "limit"],
+    run: operatorCommand,
+  },
 };
 
 const GLOBAL_OPTIONS = ["url", "json", "no-color", "help", "version"];
@@ -46,9 +54,11 @@ const OPTIONS = {
   yes: { type: "boolean", short: "y" },
   environment: { type: "string", short: "e" },
   state: { type: "string" },
+  owner: { type: "string" },
   limit: { type: "string" },
   download: { type: "string" },
   all: { type: "boolean" },
+  "no-open": { type: "boolean" },
 } as const;
 
 function version(): string {
@@ -83,7 +93,7 @@ function help(style: Style): string {
     "  -v, --version   Show the version",
     "",
     style.dim(`You are your GitHub sign-in: ${TOKEN_ENVS.join(", ")}, or \`gh auth login\`.`),
-    style.dim("Examples: npx managed-copilot sessions · npx managed-copilot attach 7f3a2c1 · npx managed-copilot schedules runs weekday-triage"),
+    style.dim("Examples: npx managed-copilot sessions · npx managed-copilot attach 7f3a2c1 · npx managed-copilot console"),
   ].join("\n");
 }
 
@@ -98,6 +108,7 @@ export interface CliIo {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly connect?: (options: { readonly url?: string }) => Promise<Deployment>;
   readonly confirm?: (question: string) => Promise<boolean>;
+  readonly openUrl?: (url: string) => Promise<void>;
   readonly now?: () => number;
 }
 
@@ -160,6 +171,7 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     out: (line = "") => void io.stdout.write(`${line}\n`),
     err: (line = "") => void io.stderr.write(`${line}\n`),
     confirm: io.confirm ?? confirmOnTerminal,
+    openUrl: io.openUrl ?? ((url) => openInBrowser(url)),
     deployment: () => (deployment ??= (io.connect ?? connectDeployment)({ ...(typeof values.url === "string" ? { url: values.url } : {}) })),
   };
   try {

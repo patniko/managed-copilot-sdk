@@ -3,6 +3,7 @@ import type { GatewayConfig } from "./config.js";
 import type { Database } from "./db.js";
 import { Router, UpgradeRouter, type Authenticator } from "./http.js";
 import type { Logger } from "./log.js";
+import { Metrics } from "./metrics.js";
 
 /**
  * Services shared across modules. Each module adds its own entries with declaration merging, e.g.
@@ -33,6 +34,11 @@ export class GatewayApp {
   readonly services: Partial<GatewayServices> = {};
   /** Capability strings modules add to `/v1/info` (e.g. "promotion", "attach.cli"). */
   readonly capabilities = new Set<string>();
+  /** Traffic counters the operator console charts (`http.requests`, `rpc.requests`, ...). */
+  readonly metrics = new Metrics();
+  readonly startedAt = new Date();
+  /** Names of the modules that registered, in order. */
+  readonly modules: string[] = [];
   readonly #startHooks: Hook[] = [];
   readonly #stopHooks: Hook[] = [];
 

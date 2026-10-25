@@ -1,7 +1,7 @@
 // Local Docker backend for isolated placement: one container per session on its own internal network, per-session
 // volumes for /workspace, HOME, and runtime state, and a relay container the host gateway reaches each sandboxd through.
 import { createHash } from "node:crypto";
-import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, ManagedCopilotError, type EnvironmentConfig } from "@managed-copilot/protocol";
+import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, ManagedCopilotError, type EnvironmentConfig, type InfraFact } from "@managed-copilot/protocol";
 import type { Logger } from "../../../../log.js";
 import type { SandboxEndpoint, SandboxImageRef, SandboxProvider, SandboxProviderDeps, SandboxSpec, SandboxStartResult } from "../types.js";
 import { DockerClient, DockerError, resolveDockerEndpoints } from "./docker.js";
@@ -85,6 +85,10 @@ export class DockerSandboxProvider implements SandboxProvider {
   /** When the cached ping succeeded; 0 while one is in flight. */
   #readyAt = 0;
   #reachable: boolean | undefined;
+  /** The engine the last successful ping reached (operator console). */
+  #engine: { readonly version: string; readonly os: string; readonly arch: string } | undefined;
+  /** The relay this process last started or adopted. */
+  #relayTarget: RelayTarget | undefined;
 
   constructor(options: ProviderOptions) {
     this.#options = options;
@@ -99,6 +103,7 @@ export class DockerSandboxProvider implements SandboxProvider {
         if (this.#ready === attempt) this.#readyAt = Date.now();
         if (this.#reachable !== true) log.info("Docker is available for sandboxes", { version: info.version, platform: `${info.os}/${info.arch}`, endpoint: docker.endpoint.label });
         this.#reachable = true;
+        this.#engine = info;
       },
       (error: unknown) => {
         if (this.#ready === attempt) this.#ready = undefined;
@@ -132,6 +137,27 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   reportUnreachable(): void {
     this.#relay = undefined;
+    this.#relayTarget = undefined;
+  }
+
+  describe(): InfraFact[] {
+    const { docker, images, instance, subnetPool } = this.#options;
+    const engine = this.#engine;
+    const base = images.base;
+    return [
+      { label: "Docker endpoint", value: docker.endpoint.label, mono: true },
+      engine
+        ? { label: "Docker engine", value: `${engine.version} (${engine.os}/${engine.arch})`, mono: true }
+        : { label: "Docker engine", value: this.#reachable === false ? "Not reachable" : "Not checked yet" },
+      { label: "Resource prefix", value: instance, mono: true },
+      base
+        ? { label: "Base image", value: `${base.tag} (${base.id.replace(/^sha256:/, "").slice(0, 12)})`, mono: true }
+        : { label: "Base image", value: "Not built yet: built with the first sandbox, or at start with MANAGED_COPILOT_SANDBOX_PREPARE=1" },
+      this.#relayTarget
+        ? { label: "Relay", value: `${this.relayName} at ${new URL(this.#relayTarget.baseUrl).host}`, mono: true }
+        : { label: "Relay", value: "Not started: starts with the first sandbox" },
+      { label: "Subnet pool", value: `${subnetPool ?? "10.213.0.0"}/16, one /28 network per sandbox`, mono: true },
+    ];
   }
 
   async reattach(sandboxId: string): Promise<void> {
@@ -142,6 +168,7 @@ export class DockerSandboxProvider implements SandboxProvider {
     if (!this.#relayStarted) return;
     this.#relayStarted = false;
     this.#relay = undefined;
+    this.#relayTarget = undefined;
     await this.#options.docker.removeContainer(this.relayName);
   }
 
@@ -188,10 +215,16 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   /** The relay's address, (re)creating it when missing, stale, or started with another platform key. */
   relay(): Promise<RelayTarget> {
-    this.#relay ??= this.#startRelay().catch((error: unknown) => {
-      this.#relay = undefined;
-      throw error;
-    });
+    this.#relay ??= this.#startRelay().then(
+      (target) => {
+        this.#relayTarget = target;
+        return target;
+      },
+      (error: unknown) => {
+        this.#relay = undefined;
+        throw error;
+      },
+    );
     return this.#relay;
   }
 

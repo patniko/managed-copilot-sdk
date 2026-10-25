@@ -310,6 +310,77 @@ export class SessionLedger {
   pruneEvents(keep = 10_000): void {
     this.#db.prepare("DELETE FROM core_events WHERE seq <= (SELECT MAX(seq) FROM core_events) - ?").run(keep);
   }
+
+  // --- Operator views (every owner; the operator module decides who may read them) ---------------------------
+
+  /** Sessions of every owner, newest first. Deleted sessions are left out. */
+  listAll(query: { ownerId?: number; environment?: string; state?: SessionState; placement?: Placement; idPrefix?: string; limit?: number } = {}): SessionRecord[] {
+    const clauses = ["s.state NOT IN ('deleted')"];
+    const args: (string | number)[] = [];
+    if (query.ownerId !== undefined) {
+      clauses.push("s.owner_id = ?");
+      args.push(query.ownerId);
+    }
+    if (query.environment) {
+      clauses.push("s.environment = ?");
+      args.push(query.environment);
+    }
+    if (query.state) {
+      clauses.push("s.state = ?");
+      args.push(query.state);
+    }
+    if (query.placement) {
+      clauses.push("s.placement = ?");
+      args.push(query.placement);
+    }
+    if (query.idPrefix) {
+      clauses.push("substr(s.id, 1, ?) = ?");
+      args.push(query.idPrefix.length, query.idPrefix);
+    }
+    const limit = Math.min(Math.max(query.limit ?? 200, 1), 1000);
+    const rows = this.#db.prepare(`${SELECT} WHERE ${clauses.join(" AND ")} ORDER BY s.updated_at DESC LIMIT ${limit}`).all(...args) as unknown as SessionRow[];
+    return rows.map(toRecord);
+  }
+
+  /** Session counts by state, placement, environment, and owner (deleted sessions left out). */
+  sessionCounts(): { byState: Record<string, number>; byPlacement: Record<string, number>; byEnvironment: Record<string, number>; byOwner: Record<number, number>; total: number } {
+    const rows = this.#db
+      .prepare("SELECT state, placement, environment, owner_id, COUNT(*) AS n FROM core_sessions WHERE state <> 'deleted' GROUP BY state, placement, environment, owner_id")
+      .all() as { state: string; placement: string; environment: string; owner_id: number; n: number }[];
+    const counts = { byState: {} as Record<string, number>, byPlacement: {} as Record<string, number>, byEnvironment: {} as Record<string, number>, byOwner: {} as Record<number, number>, total: 0 };
+    for (const row of rows) {
+      const n = Number(row.n);
+      counts.byState[row.state] = (counts.byState[row.state] ?? 0) + n;
+      counts.byPlacement[row.placement] = (counts.byPlacement[row.placement] ?? 0) + n;
+      counts.byEnvironment[row.environment] = (counts.byEnvironment[row.environment] ?? 0) + n;
+      counts.byOwner[row.owner_id] = (counts.byOwner[row.owner_id] ?? 0) + n;
+      counts.total += n;
+    }
+    return counts;
+  }
+
+  /** Every GitHub account the gateway has seen, most recently seen first. */
+  accounts(): (AccountInfo & { readonly lastSeenAt: string })[] {
+    const rows = this.#db.prepare("SELECT * FROM core_accounts ORDER BY last_seen_at DESC").all() as { id: number; login: string; name: string | null; avatar_url: string | null; last_seen_at: string }[];
+    return rows.map((row) => ({
+      id: Number(row.id),
+      login: row.login,
+      ...(row.name ? { name: row.name } : {}),
+      ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
+      lastSeenAt: row.last_seen_at,
+    }));
+  }
+
+  /** Recent platform events of every owner, newest first. */
+  recentEvents(query: { limit?: number; type?: string } = {}): { seq: number; ownerId: number; event: PlatformEvent }[] {
+    const limit = Math.min(Math.max(query.limit ?? 100, 1), 1000);
+    const rows = (
+      query.type
+        ? this.#db.prepare("SELECT seq, owner_id, body FROM core_events WHERE type = ? ORDER BY seq DESC LIMIT ?").all(query.type, limit)
+        : this.#db.prepare("SELECT seq, owner_id, body FROM core_events ORDER BY seq DESC LIMIT ?").all(limit)
+    ) as { seq: number; owner_id: number; body: string }[];
+    return rows.map((row) => ({ seq: Number(row.seq), ownerId: Number(row.owner_id), event: JSON.parse(row.body) as PlatformEvent }));
+  }
 }
 
 function toRecord(row: SessionRow): SessionRecord {

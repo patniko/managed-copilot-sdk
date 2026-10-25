@@ -532,6 +532,33 @@ export class ActionStore {
       .prepare("SELECT * FROM durable_actions WHERE state = 'pending' AND notified_at IS NULL AND created_at <= ? ORDER BY created_at, rowid LIMIT 500")
       .all(createdBefore) as unknown as ActionRow[];
   }
+
+  /** Actions of every owner, newest first (operator console). */
+  listForOperator(query: { readonly states?: readonly ActionState[]; readonly sessionId?: string; readonly incarnation?: string; readonly limit?: number }): ActionRow[] {
+    const clauses: string[] = [];
+    const args: Bindable[] = [];
+    if (query.states && query.states.length > 0) {
+      clauses.push(`state IN (${placeholders(query.states)})`);
+      args.push(...query.states);
+    }
+    if (query.sessionId) {
+      clauses.push("session_id = ?");
+      args.push(query.sessionId);
+    }
+    if (query.incarnation) {
+      clauses.push("incarnation = ?");
+      args.push(query.incarnation);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limit = Math.min(Math.max(query.limit ?? 200, 1), 1000);
+    return this.#db.prepare(`SELECT * FROM durable_actions ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(...args, limit) as unknown as ActionRow[];
+  }
+
+  /** Action counts by state. */
+  countByState(): Partial<Record<ActionState, number>> {
+    const rows = this.#db.prepare("SELECT state, COUNT(*) AS n FROM durable_actions GROUP BY state").all() as { state: ActionState; n: number }[];
+    return Object.fromEntries(rows.map((row) => [row.state, Number(row.n)]));
+  }
 }
 
 /** The request ID the runtime waits on now (a restarted runtime may have rebuilt the request under a new one). */
@@ -570,4 +597,48 @@ function actionPayload(row: ActionRow): unknown {
   if (row.kind === "permission") return parseJson<{ data?: Record<string, unknown> }>(row.event)?.data?.permissionRequest;
   if (row.kind === "elicitation") return parseJson(row.arguments);
   return undefined;
+}
+
+/**
+ * An action as the operator console shows it: metadata only. Never its arguments, payload, event, result, error text,
+ * or claim token.
+ */
+export interface ActionOperatorRecord {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly ownerId: number;
+  readonly environment: string;
+  readonly kind: ActionKind;
+  readonly state: ActionState;
+  readonly tool?: string;
+  readonly responder?: string;
+  readonly claimedBy?: string;
+  readonly generation: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly deadlineAt: string;
+  readonly leaseExpiresAt?: string;
+  readonly completedAt?: string;
+  readonly reason?: string;
+}
+
+export function toOperatorRecord(row: ActionRow): ActionOperatorRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    ownerId: row.owner_id,
+    environment: row.environment,
+    kind: row.kind,
+    state: row.state,
+    ...(row.tool ? { tool: row.tool } : {}),
+    ...(row.responder_type ? { responder: row.responder_type } : {}),
+    ...(row.claimed_by ? { claimedBy: row.claimed_by } : {}),
+    generation: row.generation,
+    createdAt: toIso(row.created_at)!,
+    updatedAt: toIso(row.updated_at)!,
+    deadlineAt: toIso(row.deadline_at)!,
+    ...(row.lease_expires_at !== null ? { leaseExpiresAt: toIso(row.lease_expires_at)! } : {}),
+    ...(row.completed_at !== null ? { completedAt: toIso(row.completed_at)! } : {}),
+    ...(row.reason ? { reason: row.reason } : {}),
+  };
 }

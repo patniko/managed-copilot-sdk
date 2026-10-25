@@ -15,9 +15,12 @@ import {
   type EnvironmentConfig,
   type ErrorCode,
   type FileEntry,
+  type InfraFact,
+  type OperatorSandbox,
   type SandboxInfo,
   type SandboxSetupPlan,
   type SandboxSetupRecord,
+  type SandboxState,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
 import type { Logger } from "../../log.js";
@@ -109,6 +112,9 @@ function base64Size(value: string): number | undefined {
 
 const IMPORT_LIMITS = { files: 10_000, bytes: 1024 * 1024 * 1024 } as const;
 
+/** A sandbox as the operator console shows it, with its owner's account ID (the operator module adds the account). */
+export type SandboxOperatorRecord = Omit<OperatorSandbox, "owner"> & { readonly ownerId: number };
+
 /** Regular files of a runtime-state export (relative POSIX paths), skipping lock files; anything else is refused. */
 async function collectRuntimeState(directory: string): Promise<{ relative: string; absolute: string; size: number }[]> {
   let root: Stats;
@@ -151,6 +157,9 @@ export class SandboxService implements SandboxesService {
   #artifacts: ArtifactService | undefined;
   /** Result of the latest backend readiness check; `/v1/info` advertises isolated placement only while true. */
   #available = false;
+  /** When the backend was last checked, and why it failed (operator console). */
+  #checkedAt: string | undefined;
+  #lastProbeError: string | undefined;
   /** The availability last logged (undefined until the first check finishes). */
   #reported: boolean | undefined;
   #probing: Promise<boolean> | undefined;
@@ -211,12 +220,117 @@ export class SandboxService implements SandboxesService {
   async #ready(): Promise<void> {
     try {
       await this.#options.provider.ready();
+      this.#checkedAt = new Date().toISOString();
+      this.#lastProbeError = undefined;
       this.#setAvailable(true);
     } catch (error) {
       const managed = toManaged(error, "capability_unavailable");
+      this.#checkedAt = new Date().toISOString();
+      this.#lastProbeError = managed.message;
       this.#setAvailable(false, managed.message);
       throw managed;
     }
+  }
+
+  // Operator views -----------------------------------------------------------------------------------------------
+
+  /** The backend's readiness, its non-secret facts, and sandbox counts (operator console). */
+  async operatorStatus(): Promise<{
+    provider: string;
+    available: boolean;
+    checkedAt?: string;
+    lastError?: string;
+    defaultIdleSeconds: number;
+    facts: readonly InfraFact[];
+    counts: Partial<Record<SandboxState, number>>;
+  }> {
+    const counts: Partial<Record<SandboxState, number>> = {};
+    for (const row of this.#options.store.all()) counts[row.state] = (counts[row.state] ?? 0) + 1;
+    let facts: readonly InfraFact[] = [];
+    try {
+      facts = (await this.#options.provider.describe?.()) ?? [];
+    } catch (error) {
+      facts = [{ label: "Details", value: `Unavailable: ${(error as Error).message}` }];
+    }
+    return {
+      provider: this.#options.provider.kind,
+      available: this.#available,
+      ...(this.#checkedAt ? { checkedAt: this.#checkedAt } : {}),
+      ...(this.#lastProbeError ? { lastError: this.#lastProbeError } : {}),
+      defaultIdleSeconds: this.#options.defaultIdleSeconds,
+      facts,
+      counts,
+    };
+  }
+
+  /** Sandboxes of every owner, most recently updated first (never their keys, tokens, placeholders, or variables). */
+  operatorSandboxes(query: { readonly state?: SandboxState; readonly ownerId?: number; readonly sessionId?: string; readonly limit?: number } = {}): SandboxOperatorRecord[] {
+    const limit = Math.min(Math.max(query.limit ?? 200, 1), 1000);
+    return this.#options.store
+      .all()
+      .filter((row) => (query.state ? row.state === query.state : row.state !== "deleted"))
+      .filter((row) => query.ownerId === undefined || row.ownerId === query.ownerId)
+      .filter((row) => query.sessionId === undefined || row.sessionId === query.sessionId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit)
+      .map((row) => this.#operatorRecord(row));
+  }
+
+  #operatorRecord(row: SandboxRow): SandboxOperatorRecord {
+    const live = this.#live.get(row.sessionId);
+    return {
+      id: row.id,
+      sessionId: row.sessionId,
+      ownerId: row.ownerId,
+      environment: row.environment,
+      size: row.size,
+      state: row.state,
+      ...(row.image ? { image: row.image } : {}),
+      ...(row.imageId ? { imageId: row.imageId } : {}),
+      network: row.network,
+      vaults: row.vaults,
+      ...(row.subnet ? { subnet: row.subnet } : {}),
+      idleTimeoutSeconds: row.idleTimeoutSeconds,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      ...(row.startedAt ? { startedAt: row.startedAt } : {}),
+      ...(row.stoppedAt ? { stoppedAt: row.stoppedAt } : {}),
+      ...(row.error ? { error: { ...(row.errorCode ? { code: row.errorCode } : {}), message: row.error } } : {}),
+      ...(row.setup ? { setup: row.setup } : {}),
+      ...(live
+        ? {
+            activity: {
+              runtimes: live.runtimes.size,
+              busy: live.busy,
+              turnRunning: live.turnRunning,
+              lastActivityAt: new Date(live.lastActivity).toISOString(),
+              pending: live.pending.size,
+            },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * An operator's stop: like an idle stop, but without waiting out the idle timeout. Refused with `session_busy` while
+   * the sandbox has work (a running turn, pending tool calls, or open durable actions), so it never cuts a turn.
+   * State volumes are kept; the session restarts the sandbox on next use.
+   */
+  operatorStop(sessionId: string, reason: string): Promise<{ readonly sandboxId: string; readonly stopped: boolean }> {
+    return this.#withLock(sessionId, async () => {
+      const row = this.#options.store.bySession(sessionId);
+      if (!row || row.state === "deleted" || row.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} has no sandbox`, { sessionId });
+      if (row.state !== "running") throw new ManagedCopilotError("conflict", `Sandbox ${row.id} is ${row.state}, not running.`, { sandboxId: row.id, state: row.state });
+      const live = this.#live.get(sessionId);
+      if (live && (live.turnRunning || live.pending.size > 0 || live.busy > 0)) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id} is working (a turn or a tool call is in progress). Stop it once the session is idle.`, { sandboxId: row.id });
+      }
+      if (live ? this.#durablyBusy(sessionId, live) : this.#hasOpenActions(sessionId)) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is waiting on actions (tool calls or prompts), or on a turn that was running when the gateway restarted. Stop it once the session is idle.`, { sandboxId: row.id });
+      }
+      await this.#stop(sessionId, reason);
+      return { sandboxId: row.id, stopped: this.#options.store.bySession(sessionId)?.state === "stopped" };
+    });
   }
 
   #agent(row: SandboxRow): SandboxAgentClient {
@@ -578,11 +692,21 @@ export class SandboxService implements SandboxesService {
       log: this.#log,
     });
     const deferredAgents = new Map<string, string>();
+    // Counted for the operator console's traffic view: model calls the gateway brokers for sandboxes.
+    const handlers = new Map(broker.handlers);
+    const start = handlers.get("llmInference.httpRequestStart");
+    if (start) {
+      handlers.set("llmInference.httpRequestStart", (params) => {
+        // Optional: test apps built without the gateway's metrics still broker.
+        this.#options.app.metrics?.increment("inference.requests");
+        return start(params);
+      });
+    }
     const runtime: SandboxRuntime = {
       sandboxId: row.id,
       stream,
       connectionToken: row.runtimeToken,
-      handlers: broker.handlers,
+      handlers,
       initialize: async (send) => {
         try {
           await broker.initialize(send);

@@ -28,6 +28,7 @@ import type { ClientPeer, SessionManager } from "./sessions.js";
 export class ClientConnection implements ClientPeer {
   readonly id = `conn_${randomUUID()}`;
   readonly kind = "sdk" as const;
+  readonly connectedAt = new Date().toISOString();
   readonly principal: Principal;
   readonly environment: ResolvedEnvironment;
   readonly clientName: string | undefined;
@@ -38,6 +39,9 @@ export class ClientConnection implements ClientPeer {
   readonly #log: Logger;
   readonly #ws: WebSocket;
   #verifiedAt = Date.now();
+  #requests = 0;
+  #notifications = 0;
+  #lastActivity = Date.now();
 
   constructor(ws: WebSocket, options: { principal: Principal; environment: ResolvedEnvironment; clientName: string | undefined; manager: SessionManager; runtime: SharedRuntime | undefined; app: GatewayApp; log: Logger }) {
     this.#ws = ws;
@@ -65,7 +69,15 @@ export class ClientConnection implements ClientPeer {
     return this.#endpoint.closed;
   }
 
+  /** Traffic on this connection, for the operator console. */
+  get stats(): { readonly requests: number; readonly notifications: number; readonly lastActivityAt: string } {
+    return { requests: this.#requests, notifications: this.#notifications, lastActivityAt: new Date(this.#lastActivity).toISOString() };
+  }
+
   notify(method: string, params: unknown): void {
+    this.#notifications++;
+    this.#lastActivity = Date.now();
+    this.#app.metrics.increment("rpc.notifications");
     this.#endpoint.notify(method, params);
   }
 
@@ -80,6 +92,9 @@ export class ClientConnection implements ClientPeer {
 
   async #dispatch(method: string, params: unknown, context: IncomingRequestContext): Promise<unknown> {
     const body = (params && typeof params === "object" ? params : {}) as Record<string, unknown>;
+    this.#requests++;
+    this.#lastActivity = Date.now();
+    this.#app.metrics.increment("rpc.requests");
     // Every call re-checks the credential (cached, bounded): revocation stops reads, writes, and answers alike.
     await this.#reverify();
     switch (method) {
@@ -211,8 +226,14 @@ function closeReason(error: ManagedCopilotError): string {
   return reason;
 }
 
-/** Registers `WSS /v1/connect` and returns a function that closes every client connection. */
-export function registerConnectRoute(options: ConnectRouterOptions, path: string): () => void {
+/** `WSS /v1/connect`: closes every client connection at shutdown and lists the connected ones (operator console). */
+export interface ConnectRoute {
+  close(): void;
+  connections(): readonly ClientConnection[];
+}
+
+/** Registers `WSS /v1/connect`. */
+export function registerConnectRoute(options: ConnectRouterOptions, path: string): ConnectRoute {
   const { app, log, manager, environments, runtime } = options;
   const connections = new Set<ClientConnection>();
   const wss = new WebSocketServer({
@@ -235,6 +256,7 @@ export function registerConnectRoute(options: ConnectRouterOptions, path: string
     const clientName = typeof hello.clientName === "string" ? hello.clientName.slice(0, 200) : undefined;
     const connection = new ClientConnection(ws, { principal, environment, clientName, manager, runtime, app, log });
     connections.add(connection);
+    app.metrics.increment("connections.opened");
     ws.on("close", () => connections.delete(connection));
     const reply: BridgeWelcome = { type: BRIDGE_WELCOME, connectionId: connection.id, environment: environment.name };
     ws.send(JSON.stringify(reply));
@@ -260,9 +282,12 @@ export function registerConnectRoute(options: ConnectRouterOptions, path: string
       });
     });
   });
-  return () => {
-    for (const connection of connections) connection.close(1001, "gateway shutting down");
-    connections.clear();
-    wss.close();
+  return {
+    close: () => {
+      for (const connection of connections) connection.close(1001, "gateway shutting down");
+      connections.clear();
+      wss.close();
+    },
+    connections: () => [...connections].filter((connection) => !connection.closed),
   };
 }

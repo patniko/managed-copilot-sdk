@@ -13,15 +13,18 @@ export class PlatformEvents implements EventsService {
   readonly #ledger: SessionLedger;
   readonly #log: Logger;
   readonly #listeners = new Set<Listener>();
+  readonly #onPublish: (() => void) | undefined;
   #published = 0;
 
-  constructor(ledger: SessionLedger, log: Logger) {
+  constructor(ledger: SessionLedger, log: Logger, onPublish?: () => void) {
     this.#ledger = ledger;
     this.#log = log;
+    this.#onPublish = onPublish;
   }
 
   /** Returns whether the event is stored for `Last-Event-ID` replay; listeners are notified either way. */
   publish(event: PlatformEvent, meta: PlatformEventMeta): boolean {
+    this.#onPublish?.();
     let stored = false;
     try {
       this.#ledger.appendEvent(event, meta.ownerId);

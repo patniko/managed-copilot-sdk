@@ -149,9 +149,15 @@ export class SandboxImages {
   readonly #options: ImageOptions;
   readonly #inflight = new Map<string, Promise<ImageRef>>();
   #registry: Promise<ImageRegistries> | undefined;
+  #base: ImageRef | undefined;
 
   constructor(options: ImageOptions) {
     this.#options = options;
+  }
+
+  /** The base image once this process resolved it (operator console). */
+  get base(): ImageRef | undefined {
+    return this.#base;
   }
 
   /**
@@ -196,6 +202,7 @@ export class SandboxImages {
         if (!image) throw new ManagedCopilotError("capability_unavailable", `MANAGED_COPILOT_SANDBOX_IMAGE "${prebuilt}" is not available locally; build or pull it first.`);
         if (!image.Config?.Labels?.[BASE_LABEL]) throw new ManagedCopilotError("capability_unavailable", `"${prebuilt}" is not a Managed Copilot sandbox base image.`);
         await this.#tagCanonical(image.Id);
+        this.#base = { tag: prebuilt, id: image.Id };
         return { tag: prebuilt, id: image.Id };
       }
       const context = resolve(this.#options.contextDir ?? defaultContextDir());
@@ -219,6 +226,7 @@ export class SandboxImages {
         log.info("Built the sandbox base image", { tag });
       }
       await this.#tagCanonical(image.Id);
+      this.#base = { tag, id: image.Id };
       return { tag, id: image.Id };
     });
   }

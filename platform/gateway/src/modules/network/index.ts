@@ -1,16 +1,16 @@
 // Owner: network workstream. Effective network policy, vaults (AppHost and per-user), the egress proxy's internal
 // API and container, the shared-placement `web_fetch` platform tool, and the shared-placement MCP adapter.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NETWORK_BLOCKED_EVENT, PLATFORM_EVENT_TYPES, type EgressReport, type NetworkPolicy, type Placement, type PlatformEventType, type VaultInfo } from "@managed-copilot/protocol";
+import { NETWORK_BLOCKED_EVENT, PLATFORM_EVENT_TYPES, type EgressReport, type EgressStatus, type NetworkPolicy, type Placement, type PlatformEventType, type VaultInfo } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
 import type { Database } from "../../db.js";
 import { optionalService, type EventsService, type PlatformToolRegistry } from "../core/contracts.js";
 import { EgressHub } from "./egress-api.js";
 import { destinationOptions, egressSettings, GatewayEgress } from "./fetcher.js";
 import { McpAdapter } from "./mcp-adapter.js";
-import { PolicyService, type SandboxEgress, type SandboxRegistrationInput, type SessionBindingInput, type SessionNetwork } from "./policy.js";
+import { PolicyService, type BlockedEvent, type SandboxEgress, type SandboxRegistrationInput, type SessionBindingInput, type SessionNetwork } from "./policy.js";
 import { registerNetworkRoutes } from "./routes.js";
 import { Sealer } from "./sealing.js";
 import { getState, migrateNetwork, setState } from "./store.js";
@@ -38,6 +38,10 @@ export interface NetworkPolicyApi {
   /** PEM of the platform egress CA ("" until the egress proxy has connected once). */
   caCertificate(): string;
   egressStatus(): { readonly mode: string; readonly connected: boolean; readonly instanceId?: string; readonly version?: string; readonly since?: string };
+  /** Egress diagnostics for the operator console: the CA's fingerprint (never its key), registrations, recent blocks. */
+  operatorEgress(): EgressStatus;
+  /** Recent blocked attempts of every session, newest first (operator console). */
+  operatorBlocks(limit?: number): readonly BlockedEvent[];
 }
 
 /** The `vaults` service: vaults created in code, and vault headers for remote MCP servers. */
@@ -57,6 +61,14 @@ declare module "../../app.js" {
 }
 
 type EgressMode = "auto" | "docker" | "external" | "off";
+
+/** SHA-256 fingerprint of a PEM certificate's DER bytes, as `AB:CD:…` (what certificate viewers show). */
+export function certificateFingerprint(pem: string): string | undefined {
+  const body = /-----BEGIN CERTIFICATE-----([\s\S]+?)-----END CERTIFICATE-----/.exec(pem)?.[1]?.replace(/\s+/g, "");
+  if (!body) return undefined;
+  const digest = createHash("sha256").update(Buffer.from(body, "base64")).digest("hex").toUpperCase();
+  return digest.match(/../g)!.join(":");
+}
 
 function sealedKey(db: Database, sealer: Sealer, name: string, override: string | undefined): string {
   if (override) return override;
@@ -174,6 +186,17 @@ export const networkModule: GatewayModule = {
       blocked: (sessionId, limit) => service.blocked(sessionId, limit),
       caCertificate: () => hub.caCertificate() ?? "",
       egressStatus: () => ({ mode, ...hub.status }),
+      operatorEgress: () => {
+        const ca = hub.caCertificate();
+        return {
+          mode,
+          ...hub.status,
+          ...(ca ? { caFingerprint: certificateFingerprint(ca) } : {}),
+          registrations: service.registrationCount(),
+          blockedLastDay: service.blockedSince(new Date(Date.now() - 24 * 60 * 60_000).toISOString()),
+        };
+      },
+      operatorBlocks: (limit) => service.recentBlocked(limit),
     };
     const vaultsApi: VaultsApi = {
       list: (ownerId) => vaults.list(ownerId),

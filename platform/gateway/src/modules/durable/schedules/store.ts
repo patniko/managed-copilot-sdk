@@ -133,6 +133,11 @@ export class ScheduleStore {
     return this.#db.prepare("SELECT * FROM durable_schedules WHERE owner_id = ? AND deleted_at IS NULL ORDER BY created_at, rowid").all(ownerId) as unknown as ScheduleRow[];
   }
 
+  /** Every schedule that was not deleted, of every owner (operator console). */
+  listAll(): ScheduleRow[] {
+    return this.#db.prepare("SELECT * FROM durable_schedules WHERE deleted_at IS NULL ORDER BY created_at, rowid").all() as unknown as ScheduleRow[];
+  }
+
   listByTarget(sessionId: string): ScheduleRow[] {
     return this.#db
       .prepare("SELECT * FROM durable_schedules WHERE target_session_id = ? AND deleted_at IS NULL ORDER BY created_at, rowid")

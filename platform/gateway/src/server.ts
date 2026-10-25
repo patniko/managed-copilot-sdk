@@ -17,6 +17,7 @@ export async function createGateway(config: GatewayConfig): Promise<GatewayApp> 
   try {
     for (const module of modules) {
       await module.register(app);
+      app.modules.push(module.name);
       log.debug("Registered module", { module: module.name });
     }
   } catch (error) {

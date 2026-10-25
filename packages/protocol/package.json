@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./operator": {
+      "types": "./dist/operator.d.ts",
+      "default": "./dist/operator.js"
     }
   },
   "files": [

@@ -31,6 +31,9 @@ import {
   type SessionConfig,
 } from "./store.js";
 
+/** A schedule as the operator console shows it, with its owner (the prompt only for AppHost schedules). */
+export type ScheduleOperatorRecord = Omit<ScheduleInfo, "prompt"> & { readonly prompt?: string; readonly ownerId: number; readonly ownerLogin: string };
+
 export interface SchedulesOptions {
   readonly tickIntervalMs: number;
   /** An occurrence later than this is skipped with a recorded outcome (no backfill). */
@@ -194,6 +197,9 @@ export class DurableSchedules implements SchedulesService {
   #ticking: Promise<void> | undefined;
   #lastLedgerCheck = 0;
   #targetsRepaired = false;
+  /** The latest scheduler pass and its failure, if it failed (operator console). */
+  #lastTickAt: number | undefined;
+  #lastTickError: string | undefined;
 
   constructor(deps: SchedulesDeps) {
     this.#deps = deps;
@@ -237,9 +243,21 @@ export class DurableSchedules implements SchedulesService {
   /** One scheduler pass: materialize due occurrences, enforce run lifetimes, and dispatch queued runs. */
   tick(): Promise<void> {
     if (!this.#ticking) {
-      this.#ticking = this.#tickOnce().finally(() => {
-        this.#ticking = undefined;
-      });
+      this.#ticking = this.#tickOnce()
+        .then(
+          () => {
+            this.#lastTickAt = this.#now();
+            this.#lastTickError = undefined;
+          },
+          (error: unknown) => {
+            this.#lastTickAt = this.#now();
+            this.#lastTickError = describeError(error);
+            throw error;
+          },
+        )
+        .finally(() => {
+          this.#ticking = undefined;
+        });
     }
     return this.#ticking;
   }
@@ -397,6 +415,73 @@ export class DurableSchedules implements SchedulesService {
 
   list(ownerId: number): ScheduleInfo[] {
     return this.#store.listByOwner(ownerId).map((row) => this.#info(row));
+  }
+
+  // ---------------------------------------------------------------------------------------------------------
+  // Operator views and actions (the operator module authorizes callers)
+  // ---------------------------------------------------------------------------------------------------------
+
+  /** Schedules of every owner (deleted ones left out). A person's or an agent's prompt is never included. */
+  operatorSchedules(query: { readonly ownerId?: number; readonly state?: ScheduleInfo["state"]; readonly targetSessionId?: string } = {}): ScheduleOperatorRecord[] {
+    return this.#store
+      .listAll()
+      .filter((row) => query.ownerId === undefined || row.owner_id === query.ownerId)
+      .filter((row) => query.state === undefined || row.state === query.state)
+      .filter((row) => query.targetSessionId === undefined || row.target_session_id === query.targetSessionId)
+      .map((row) => this.#operatorRecord(row));
+  }
+
+  operatorRuns(scheduleId: string): { readonly schedule: ScheduleOperatorRecord; readonly runs: ScheduleRun[] } {
+    const row = this.#store.schedule(scheduleId);
+    if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
+    return { schedule: this.#operatorRecord(row), runs: this.#store.runsBySchedule(scheduleId).map(toScheduleRun) };
+  }
+
+  /**
+   * An operator's pause, with a reason its owner sees. Like a platform pause, it blocks every run (manual ones too)
+   * until the schedule is resumed.
+   */
+  operatorPause(scheduleId: string, operator: string, reason?: string): ScheduleOperatorRecord {
+    const row = this.#store.schedule(scheduleId);
+    if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
+    if (row.state === "paused") throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is already paused${row.paused_reason ? ` (${row.paused_reason.replace(/^Paused: /, "")})` : ""}.`);
+    const detail = reason?.trim() ? ` (${reason.trim().slice(0, 200)})` : "";
+    this.pause(row.owner_id, scheduleId, `Paused: an operator (@${operator}) paused this schedule${detail}.`);
+    return this.#operatorRecord(this.#store.schedule(scheduleId)!);
+  }
+
+  /** An operator's resume: the same checks as the owner's (background sign-in, target session, policy). */
+  operatorResume(scheduleId: string): ScheduleOperatorRecord {
+    const row = this.#store.schedule(scheduleId);
+    if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
+    if (row.state === "active") throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is not paused.`);
+    try {
+      this.resume(row.owner_id, scheduleId);
+    } catch (error) {
+      if (isManagedCopilotError(error, "authentication_required")) {
+        throw new ManagedCopilotError("conflict", `@${row.owner_login} has no active background sign-in, so this schedule cannot run. They need to run \`npx managed-copilot login\` first.`);
+      }
+      throw error;
+    }
+    return this.#operatorRecord(this.#store.schedule(scheduleId)!);
+  }
+
+  schedulerStatus(): { running: boolean; tickIntervalMs: number; lastTickAt?: string; lastTickError?: string; nextDueAt?: string; queuedRuns: number; activeRuns: number } {
+    const next = this.#store.nextDueAt();
+    return {
+      running: this.#timer !== undefined,
+      tickIntervalMs: this.#options.tickIntervalMs,
+      ...(this.#lastTickAt !== undefined ? { lastTickAt: new Date(this.#lastTickAt).toISOString() } : {}),
+      ...(this.#lastTickError ? { lastTickError: this.#lastTickError } : {}),
+      ...(next !== undefined ? { nextDueAt: new Date(next).toISOString() } : {}),
+      queuedRuns: this.#store.runsByStatus(["queued"]).length,
+      activeRuns: this.#store.runsByStatus(ACTIVE_RUN_STATUSES).length,
+    };
+  }
+
+  #operatorRecord(row: ScheduleRow): ScheduleOperatorRecord {
+    const { prompt, ...info } = this.#info(row);
+    return { ...info, ...(row.created_by === "apphost" ? { prompt } : {}), ownerId: row.owner_id, ownerLogin: row.owner_login };
   }
 
   listForSession(ownerId: number, sessionId: string): ScheduleInfo[] {

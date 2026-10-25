@@ -6,6 +6,7 @@ export * from "./discovery.js";
 export * from "./errors.js";
 export * from "./events.js";
 export * from "./network.js";
+export * from "./operator.js";
 export * from "./paths.js";
 export * from "./promotion.js";
 export * from "./sandbox.js";
