@@ -66,3 +66,6 @@ Prerequisites: Windows (the narration uses the built-in Microsoft Mark voice), M
    The results are in `docs/tutorial/source/out/build/`: `managed-copilot-tour.mp4`, `.srt`, and
    `managed-copilot-tour-slides.pdf`. `node docs/tutorial/source/compose.mjs <shot id>` encodes a single shot for
    a quick preview. Copy the results here to update the published tour.
+
+The root README's architecture diagram and video thumbnail come from the same slides:
+`node docs/tutorial/source/readme-images.mjs` writes them to `docs/images/`.
