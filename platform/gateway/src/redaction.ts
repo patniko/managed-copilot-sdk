@@ -33,6 +33,9 @@ export function looksSecret(value: string): boolean {
   return text.length >= 32 && /^[A-Za-z0-9_-]+={0,2}$/.test(text) && /[0-9]/.test(text) && /[A-Za-z]/.test(text);
 }
 
+/** Hosts whose webhook URLs carry their credential in the path after the first segment (Slack: /services/T…/B…/<secret>). */
+const WEBHOOK_PATH_HOSTS = /^hooks\.slack(-gov)?\.com$/i;
+
 /** A URL with its query values, user information, and secret-looking path segments masked; non-URLs pass through unless they look secret. */
 export function redactUrl(value: string): string {
   let url: URL;
@@ -46,7 +49,12 @@ export function redactUrl(value: string): string {
     url.password = "";
   }
   // Webhook URLs (Slack, Discord, ...) carry their credential in the path.
-  const path = maskSegments(url.pathname);
+  const path = WEBHOOK_PATH_HOSTS.test(url.hostname)
+    ? url.pathname
+        .split("/")
+        .map((segment, index) => (index >= 2 && segment ? REDACTED : segment))
+        .join("/")
+    : maskSegments(url.pathname);
   if (path !== url.pathname) url.pathname = path;
   if (url.search) {
     const masked = new URLSearchParams();
@@ -72,9 +80,19 @@ function maskSegments(path: string): string {
     .map((segment) => {
       const decoded = decodeSegment(segment);
       // `bot<id>:<token>` and `<user>:<token>` segments hide the credential behind a colon.
-      return looksSecret(decoded) || decoded.split(":").some(looksSecret) ? REDACTED : segment;
+      return secretSegment(decoded) || decoded.split(":").some(secretSegment) ? REDACTED : segment;
     })
     .join("/");
+}
+
+/**
+ * Whether a URL path segment is a credential. Keys in paths are often shorter than the 32 characters `looksSecret`
+ * asks of free text, so a 20+ character opaque mix of upper case, lower case, and digits counts too (UUIDs and hex
+ * digests, which have no upper case, do not).
+ */
+function secretSegment(text: string): boolean {
+  if (looksSecret(text)) return true;
+  return text.length >= 20 && /^[A-Za-z0-9_-]+$/.test(text) && /[A-Z]/.test(text) && /[a-z]/.test(text) && /[0-9]/.test(text);
 }
 
 function decodeSegment(segment: string): string {
@@ -103,7 +121,11 @@ export function redactText(text: string): string {
       const trailing = /[).,;:!?\]]+$/.exec(match)?.[0] ?? "";
       return `${redactUrl(match.slice(0, match.length - trailing.length))}${trailing}`;
     })
-    .replace(WORD_IN_TEXT, (word) => (looksSecret(word) ? REDACTED : word));
+    .replace(WORD_IN_TEXT, (word) => {
+      // Punctuation around a token (a sentence's final period, a leading dash) is not part of it.
+      const [, lead = "", core = "", trail = ""] = /^([.~+-]*)(.*?)([.~+-]*)$/s.exec(word) ?? [];
+      return looksSecret(word) || looksSecret(core) ? `${lead}${REDACTED}${trail}` : word;
+    });
 }
 
 /** A log entry as operators see it: its message and every text field passed through `redactText`. */
@@ -144,14 +166,15 @@ export function scrubArgs(args: readonly unknown[]): string[] {
 }
 
 /**
- * A free-form value with token-shaped strings masked anywhere and, unless `keys` is false, values under
- * credential-like keys masked too (the logger's rules). Pass `keys: false` for JSON schemas, whose keys are property
- * names rather than secrets.
+ * A free-form value with token-shaped strings masked anywhere, credentials inside strings (URLs with user info or
+ * query values, `DATABASE_URL=postgres://user:pass@…`) masked as by `redactText`, and, unless `keys` is false, values
+ * under credential-like keys masked too (the logger's rules). Pass `keys: false` for JSON schemas, whose keys are
+ * property names rather than secrets.
  */
 export function redactValue(value: unknown, options: { readonly keys?: boolean } = {}): unknown {
   const masked = options.keys === false ? value : redact(value);
   const walk = (item: unknown, depth: number): unknown => {
-    if (typeof item === "string") return looksSecret(item) ? REDACTED : item;
+    if (typeof item === "string") return looksSecret(item) ? REDACTED : redactText(item);
     if (depth > 12 || item === null || typeof item !== "object") return item;
     if (Array.isArray(item)) return item.map((entry) => walk(entry, depth + 1));
     return Object.fromEntries(Object.entries(item as Record<string, unknown>).map(([key, entry]) => [key, walk(entry, depth + 1)]));

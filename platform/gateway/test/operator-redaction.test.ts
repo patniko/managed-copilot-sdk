@@ -29,9 +29,19 @@ describe("operator redaction", () => {
     );
     expect(text).toBe("Could not reach the webhook (TypeError: Request cannot be constructed from a URL that includes credentials: http://***@hooks.example.com/x?sig=***).");
     expect(redactText("token ghp_0123456789abcdefghijABCDEFGHIJ expired")).toBe("token [redacted] expired");
+    expect(redactText("Rejected ghp_0123456789abcdefghijABCDEFGHIJ.")).toBe("Rejected [redacted].");
+    expect(redactText("flag -ghp_0123456789abcdefghijABCDEFGHIJ...")).toBe("flag -[redacted]...");
     expect(redactText("Delivery evt_8fb3ff8f-4abf-4a32-aa31-59624a012dc6 of session 614fdd39-ad63-46aa-b08b-480cf209eaaa")).toBe("Delivery evt_8fb3ff8f-4abf-4a32-aa31-59624a012dc6 of session 614fdd39-ad63-46aa-b08b-480cf209eaaa");
     expect(redactText("pip install pandas failed with exit code 1.\nLast output:\nPRIVATE-LINE")).toBe("pip install pandas failed with exit code 1.\n(Command output is not shown to operators.)");
     expect(redactUrl("https://discord.com/api/webhooks/123/abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGH")).toBe("https://discord.com/api/webhooks/123/[redacted]");
+    expect(redactUrl("https://hooks.slack.com/services/T0AAAAAAA/B0BBBBBBB/abcdefghijklmnopqrstuvwx")).toBe("https://hooks.slack.com/services/[redacted]/[redacted]/[redacted]");
+    expect(redactUrl("https://api.example.com/v1/keys/Ab3dEf6hIj9kLm2nOp5qRs8t/info")).toBe("https://api.example.com/v1/keys/[redacted]/info");
+    expect(redactUrl("https://api.github.com/repos/octo/hello-world/commits/0123456789abcdef0123456789abcdef01234567")).toContain("/repos/octo/hello-world/commits/");
+    expect(redactValue({ DATABASE_URL: "postgres://app:DB-PASS@db.example.com/orders", PIP_INDEX_URL: "https://pypi.example.com/simple?token=PIP-TOKEN", REGION: "westus" })).toEqual({
+      DATABASE_URL: "postgres://***@db.example.com/orders",
+      PIP_INDEX_URL: "https://pypi.example.com/simple?token=***",
+      REGION: "westus",
+    });
     expect(redactLogRecord({ seq: 1, at: "t", level: "warn", logger: "x", message: "Failed: http://a:b@h.example/", fields: { reason: "see https://h.example/?key=SECRET", nested: ["ghp_0123456789abcdefghijABCDEFGHIJ"] } })).toEqual({
       seq: 1,
       at: "t",

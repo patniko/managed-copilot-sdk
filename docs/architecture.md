@@ -746,9 +746,11 @@ export). The CLI's `console` and `operator` commands use the same API.
   `content`, `arguments`, `result`, `payload`, `text`, `body`, `output`, …) and credential-like keys are dropped,
   strings are cut at 500 characters and secret-looking ones redacted, and action and artifact lists keep only IDs,
   states, tool names, paths, and sizes. Action views show tool names and states, not arguments. Harness, environment,
-  and webhook views pass through `redaction.ts` (`redactValue`; `redactUrl`: query values, user info, and
-  secret-looking path segments become `***` or `[redacted]`; environment `env` values under credential-like names are
-  masked). Free text an operator can read (error messages, reasons, setup commands, package specs, system prompts,
+  and webhook views pass through `redaction.ts` (`redactValue`, which also redacts URLs inside values such as a
+  `DATABASE_URL`; `redactUrl`: query values, user info, and secret-looking path segments become `***` or
+  `[redacted]`, including 20+ character mixed-case keys and every Slack webhook path segment; environment `env`
+  values under credential-like names are masked). Free text an operator can read (error messages, reasons, run
+  reasons, setup commands, package specs, system prompts,
   egress block messages, audit details, and log lines) goes through `redactText`: URLs as `redactUrl`, token-shaped
   words masked, and command output a message carries (sandbox setup failures append it after
   `OUTPUT_TAIL_MARKER`) left out. Sandbox setup records lose their steps' `output`. MCP servers show their original
@@ -763,12 +765,14 @@ export). The CLI's `console` and `operator` commands use the same API.
     core's `sessions.runtimeActivity(id)` names work (a call written to the runtime and not yet settled, counted in
     `#onOwner`; a restore; a cutover; a deletion; an attached Copilot CLI); or within 5 s of the last activity, since
     a turn the runtime just accepted may not have emitted `user.message` yet. The checks and the runtime's close run
-    in one synchronous step under the sandbox lock.
+    in one synchronous step under the sandbox lock, and a call that reaches `#onOwner` after the stream was destroyed
+    (before its transport reports the close) closes the connection itself and waits for the restore.
   - Pause or resume a schedule: the pause reason (`Paused: an operator (@login) …`) blocks run-now and takes over the
-    owner's own pause (noted in the reason, and restored when the operator's pause is lifted); a platform pause is kept
-    (`conflict`). Resume lifts operator pauses only: an owner's pause or a platform pause (revoked sign-in, AppHost
-    consent, changed definition) is refused with `conflict`, since lifting it would run work as the owner without
-    their approval. Otherwise resume makes the owner's checks.
+    owner's own pause, whether it came first or later (noted in the reason, and restored when the operator's pause is
+    lifted). A platform pause is kept (`conflict`), and a platform pause made later (`#pauseFor`, `pauseAllForOwner`)
+    replaces the operator's. Resume lifts operator pauses only: an owner's pause or a platform pause (revoked sign-in,
+    AppHost consent, changed definition) is refused with `conflict`, since lifting it would run work as the owner
+    without their approval. Otherwise resume makes the owner's checks. The owner's own resume lifts any pause.
   - Retry a failed webhook delivery: one more attempt; refused for webhooks the AppHost no longer declares, or for an
     `action_required` delivery none of whose announced actions is still pending in the session's current incarnation.
 - **Live feed.** `GET /v1/operator/stream` (SSE) sends `platform` events (sanitized, every owner) and `log` lines

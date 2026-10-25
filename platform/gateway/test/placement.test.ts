@@ -92,6 +92,17 @@ describe("isolated placement through the sandboxes port", () => {
     expect(agentSelections(sessionId)).toEqual(["builder", "reviewer", "reviewer"]);
   });
 
+  it("restores instead of writing to a runtime stream a sandbox stop just destroyed", async () => {
+    const client = await connect("coder");
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId });
+    const sessions = gateway.gateway.app.service("sessions") as unknown as { request(id: string, method: string, params?: Record<string, unknown>): Promise<unknown> };
+    // A stop destroys the stream; the call starts before its transport reports the close.
+    sandboxes.streams.get(sessionId)!.destroy();
+    expect(await sessions.request(sessionId, "session.agent.getCurrent")).toBeDefined();
+    expect(sandboxes.ops(sessionId).slice(-5)).toEqual(["ensureRunning", "openRuntime", "initialize", "prepare session.resume", "sessionOpened"]);
+  });
+
   it("gives sandbox MCP servers their vault placeholder headers on every open, never storing them", async () => {
     const services = gateway.gateway.app.services as Record<string, unknown>;
     const original = services["vaults"];

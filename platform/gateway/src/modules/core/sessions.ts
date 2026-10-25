@@ -675,6 +675,9 @@ export class SessionManager implements SessionsService {
     for (;;) {
       const upstream = await this.#resident(live);
       if (live.placement !== placement) throw MOVED;
+      // A sandbox stop destroys the runtime's stream before its transport reports the close: close the connection now,
+      // so this call waits for the stop and the restore instead of writing to a stream that is gone.
+      if (live.upstream === upstream && live.placement === "sandbox" && live.sandbox?.stream.destroyed && !upstream.closed) upstream.close();
       if (live.upstream === upstream && live.ready && !live.cutover?.fenced && !upstream.closed) return this.#counted(live, () => send(upstream));
       if (live.deleting) throw new ManagedCopilotError("not_found", `Session ${live.id} was not found`, { sessionId: live.id });
       await Promise.resolve(live.residency).catch(() => undefined);

@@ -512,7 +512,15 @@ export class DurableSchedules implements SchedulesService {
 
   #operatorRecord(row: ScheduleRow): ScheduleOperatorRecord {
     const { prompt, ...info } = this.#info(row);
-    return { ...info, ...(row.created_by === "apphost" ? { prompt } : {}), ownerId: row.owner_id, ownerLogin: row.owner_login };
+    // Reasons can carry what a failed run printed (sandbox setup output): operators see them redacted.
+    return {
+      ...info,
+      ...(info.pausedReason ? { pausedReason: redactText(info.pausedReason) } : {}),
+      ...(info.lastRun?.reason ? { lastRun: { ...info.lastRun, reason: redactText(info.lastRun.reason) } } : {}),
+      ...(row.created_by === "apphost" && typeof prompt === "string" ? { prompt: redactText(prompt) } : {}),
+      ownerId: row.owner_id,
+      ownerLogin: row.owner_login,
+    };
   }
 
   listForSession(ownerId: number, sessionId: string): ScheduleInfo[] {
@@ -537,6 +545,10 @@ export class DurableSchedules implements SchedulesService {
     const row = this.#owned(ownerId, scheduleId);
     // Pausing again never clears a platform pause's reason: that reason blocks every run until the owner resumes.
     if (row.state !== "paused") this.#store.updateSchedule(row.id, { state: "paused", paused_reason: reason ?? null }, this.#now());
+    // Under an operator's pause the owner's own pause is remembered, so lifting the operator's pause leaves it in place.
+    else if (row.paused_reason?.startsWith(OPERATOR_PAUSE) && !row.paused_reason.endsWith(OWNER_PAUSED_TOO)) {
+      this.#store.updateSchedule(row.id, { paused_reason: reason ?? `${row.paused_reason}${OWNER_PAUSED_TOO}` }, this.#now());
+    }
     this.#log.info("Schedule paused", { scheduleId, reason });
     return this.#info(this.#store.schedule(row.id)!);
   }
@@ -593,13 +605,16 @@ export class DurableSchedules implements SchedulesService {
     return toScheduleRun(this.#store.runByOccurrence(occurrenceId)!);
   }
 
-  /** Platform pauses also take over a person's pause (its null reason would let manual runs through). */
+  /**
+   * Platform pauses also take over a person's pause (its null reason would let manual runs through) and an operator's
+   * (which an operator could otherwise lift): only the owner can lift them.
+   */
   pauseAllForOwner(ownerId: number, reason: string): number {
     const result = this.#deps.db
       .prepare(
-        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL",
+        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND (state = 'active' OR paused_reason IS NULL OR instr(paused_reason, ?) = 1) AND deleted_at IS NULL",
       )
-      .run(reason, this.#now(), ownerId);
+      .run(reason, this.#now(), ownerId, OPERATOR_PAUSE);
     return Number(result.changes);
   }
 
@@ -1349,12 +1364,15 @@ export class DurableSchedules implements SchedulesService {
 
   /**
    * A platform pause (safety, revoked sign-in, policy) blocks every run, so it also takes over a person's pause, whose
-   * null reason would still let manual runs through. An existing platform reason is kept.
+   * null reason would still let manual runs through, and an operator's, which an operator could lift without the
+   * owner. An existing platform reason is kept.
    */
   #pauseFor(schedule: ScheduleRow, reason: string): void {
     this.#deps.db
-      .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL")
-      .run(reason, this.#now(), schedule.id);
+      .prepare(
+        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND (state = 'active' OR paused_reason IS NULL OR instr(paused_reason, ?) = 1) AND deleted_at IS NULL",
+      )
+      .run(reason, this.#now(), schedule.id, OPERATOR_PAUSE);
   }
 
   #owned(ownerId: number, scheduleId: string): ScheduleRow {
