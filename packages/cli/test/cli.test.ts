@@ -456,6 +456,8 @@ describe("managed-copilot console and operator", () => {
     expect(out()).toContain("Sandbox backend is unavailable");
     expect(out()).toContain("2 open · 1 need reconciliation");
     expect(out()).toContain("Open the console: npx managed-copilot console");
+    expect(await run(["operator", "--url", "https://copilot.contoso.com"], io)).toBe(0);
+    expect(out()).toContain("Open the console: npx managed-copilot console --url https://copilot.contoso.com");
     expect(await run(["operator", "sessions", "--owner", "octo", "--state", "idle"], io)).toBe(0);
     expect(requests.at(-1)).toBe(`GET ${OPERATOR_ROUTES.sessions}?state=idle&owner=octo`);
     expect(out()).toMatch(/37f2a0c9\s+@octo\s+chat\s+shared\s+idle\s+live · 2 attached\s+5 minutes ago/);

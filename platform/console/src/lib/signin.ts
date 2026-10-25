@@ -30,14 +30,17 @@ export function isLoopbackHost(hostname: string): boolean {
   return host === "localhost" || host === "127.0.0.1" || host === "::1";
 }
 
+/** The port `aspire run` gives the platform; only that gateway advertises itself for zero-config discovery. */
+const LOCAL_GATEWAY_PORT = "7400";
+
 /**
- * The command that opens the console signed in. Local gateways are found automatically; any other origin is passed
- * with `--url`.
+ * The command that opens the console signed in. The default local gateway is found automatically; any other origin
+ * (another port, such as a second copy, or a deployment) is passed with `--url`.
  */
 export function consoleCommand(origin: string): string {
   try {
     const url = new URL(origin);
-    return isLoopbackHost(url.hostname) ? "npx managed-copilot console" : `npx managed-copilot console --url ${url.origin}`;
+    return isLoopbackHost(url.hostname) && url.port === LOCAL_GATEWAY_PORT ? "npx managed-copilot console" : `npx managed-copilot console --url ${url.origin}`;
   } catch {
     return "npx managed-copilot console";
   }

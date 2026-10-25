@@ -18,7 +18,7 @@ describe("readTicket", () => {
 });
 
 describe("consoleCommand", () => {
-  it("omits --url for loopback gateways", () => {
+  it("omits --url for the default local gateway, which tools discover", () => {
     expect(consoleCommand("http://localhost:7400")).toBe("npx managed-copilot console");
     expect(consoleCommand("http://127.0.0.1:7400")).toBe("npx managed-copilot console");
     expect(consoleCommand("http://[::1]:7400")).toBe("npx managed-copilot console");
@@ -26,6 +26,7 @@ describe("consoleCommand", () => {
   });
 
   it("passes other origins with --url", () => {
+    expect(consoleCommand("http://localhost:7700")).toBe("npx managed-copilot console --url http://localhost:7700");
     expect(consoleCommand("https://copilot.contoso.com")).toBe("npx managed-copilot console --url https://copilot.contoso.com");
     expect(consoleCommand("https://gw.example.azurecontainerapps.io:8443")).toBe(
       "npx managed-copilot console --url https://gw.example.azurecontainerapps.io:8443",

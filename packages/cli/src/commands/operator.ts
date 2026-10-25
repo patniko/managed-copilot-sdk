@@ -164,7 +164,9 @@ function overview(ctx: Context, data: OperatorOverview): void {
   const labelWidth = Math.max(...rows.map(([label]) => label.length));
   for (const [label, value] of rows) ctx.out(`${style.dim(label.padEnd(labelWidth))}  ${value}`);
   ctx.out();
-  ctx.out(style.dim("  Open the console: npx managed-copilot console"));
+  // The console is opened the same way this command reached the deployment.
+  const url = typeof ctx.options["url"] === "string" ? ` --url ${ctx.options["url"]}` : "";
+  ctx.out(style.dim(`  Open the console: npx managed-copilot console${url}`));
 }
 
 function infrastructure(ctx: Context, data: OperatorInfrastructure): void {
