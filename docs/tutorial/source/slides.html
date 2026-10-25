@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Managed Copilot tutorial slides</title>
+<style>
+  :root {
+    --bg: #09090b; --panel: #121216; --panel2: #17171c; --line: #27272f; --text: #f4f4f5; --muted: #a1a1aa; --dim: #71717a;
+    --violet: #a78bfa; --violet2: #7c3aed; --amber: #f59e0b; --green: #34d399; --blue: #60a5fa; --rose: #fb7185;
+    --mono: "Cascadia Code", "Cascadia Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: transparent; }
+  body { font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif; color: var(--text); }
+  section { display: none; position: relative; width: 1920px; height: 1080px; overflow: hidden;
+    background: radial-gradient(1200px 700px at 85% -10%, rgba(124,58,237,.22), transparent 60%),
+                radial-gradient(900px 600px at -10% 110%, rgba(245,158,11,.12), transparent 60%), var(--bg); }
+  section.on { display: block; }
+  section.caption-layer { background: transparent; }
+  .pad { position: absolute; inset: 96px 120px 230px 120px; }
+  .kicker { font-size: 26px; letter-spacing: .12em; text-transform: uppercase; color: var(--violet); font-weight: 600; }
+  h1 { font-size: 64px; line-height: 1.08; margin: 14px 0 0; font-weight: 700; letter-spacing: -.01em; }
+  h2 { font-size: 56px; line-height: 1.1; margin: 12px 0 0; font-weight: 700; letter-spacing: -.01em; }
+  .sub { font-size: 30px; color: var(--muted); margin-top: 18px; line-height: 1.4; }
+  .grad { background: linear-gradient(90deg, #c4b5fd, #a78bfa 35%, #fbbf24); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .card { background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); border-radius: 24px; }
+  code, .mono { font-family: var(--mono); }
+  .pill { display: inline-flex; align-items: center; gap: 10px; padding: 8px 18px; border-radius: 999px; border: 1px solid var(--line); background: rgba(255,255,255,.04); font-size: 22px; color: var(--muted); }
+
+  /* Title */
+  #title .center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+  #title h1 { font-size: 132px; margin-top: 26px; }
+  #title .sub { font-size: 36px; max-width: 1300px; margin: 28px auto 0; }
+  #title .foot { position: absolute; left: 0; right: 0; bottom: 250px; text-align: center; font-size: 22px; color: var(--dim); }
+  .logo { width: 108px; height: 108px; border-radius: 28px; display: grid; place-items: center; margin: 0 auto;
+    background: linear-gradient(135deg, #7c3aed, #a78bfa 55%, #f59e0b); box-shadow: 0 30px 80px rgba(124,58,237,.35); }
+
+  /* Code */
+  .code { font-family: var(--mono); font-size: 25px; line-height: 1.62; padding: 34px 40px; white-space: pre; color: #d4d4d8; }
+  .code .k { color: #c4b5fd; } .code .s { color: #86efac; } .code .c { color: #71717a; } .code .f { color: #93c5fd; }
+  .code .hl { display: inline-block; margin: 0 -14px; padding: 0 14px; border-radius: 8px; }
+  section.setup .code .hl { background: rgba(245,158,11,.16); box-shadow: inset 3px 0 0 var(--amber); }
+  .bullets { list-style: none; padding: 0; margin: 0; display: grid; gap: 22px; }
+  .bullets li { font-size: 30px; line-height: 1.35; padding-left: 46px; position: relative; color: #e4e4e7; }
+  .bullets li::before { content: ""; position: absolute; left: 0; top: 10px; width: 22px; height: 22px; border-radius: 7px; background: linear-gradient(135deg, var(--violet2), var(--violet)); }
+
+  /* Environments */
+  .envs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 34px; margin-top: 38px; }
+  .env { padding: 28px 32px 30px; transition: none; }
+  .env .icon { width: 60px; height: 60px; border-radius: 16px; display: grid; place-items: center; margin-bottom: 16px; }
+  .env h3 { font-size: 36px; margin: 0 0 10px; }
+  .env p { font-size: 25px; line-height: 1.4; color: var(--muted); margin: 0; }
+  .env .tag { margin-top: 16px; font-family: var(--mono); font-size: 21px; color: var(--dim); }
+  section.env-1 .env:nth-child(n+2), section.env-2 .env:not(:nth-child(2)), section.env-3 .env:not(:nth-child(3)) { opacity: .28; }
+  section.env-1 .env:nth-child(1), section.env-2 .env:nth-child(2), section.env-3 .env:nth-child(3) { border-color: rgba(167,139,250,.7); box-shadow: 0 0 0 1px rgba(167,139,250,.35), 0 30px 80px rgba(124,58,237,.25); }
+  .apphost { margin-top: 26px; padding: 20px 32px; font-size: 21px; line-height: 1.5; }
+
+  /* Architecture */
+  .stage { position: absolute; inset: 0; }
+  .box { position: absolute; padding: 24px 28px; }
+  .box h4 { margin: 0 0 8px; font-size: 32px; font-weight: 700; display: flex; align-items: center; gap: 14px; }
+  .box p { margin: 0; font-size: 23px; line-height: 1.45; color: var(--muted); }
+  .box ul { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .box li { font-size: 23px; color: #d4d4d8; padding-left: 26px; position: relative; }
+  .box li::before { content: ""; position: absolute; left: 0; top: 11px; width: 10px; height: 10px; border-radius: 3px; background: var(--violet); }
+  .dot { width: 14px; height: 14px; border-radius: 99px; flex: none; }
+  svg.wires { position: absolute; inset: 0; pointer-events: none; }
+  svg.wires path { fill: none; stroke: #3f3f46; stroke-width: 4; }
+  svg.wires path.on { stroke: var(--violet); }
+  svg.wires text { font: 600 20px "Segoe UI", sans-serif; fill: var(--muted); }
+  .dimmable { transition: none; }
+  section.arch .dimmable { opacity: .26; }
+  section.arch-1 .a1, section.arch-2 .a2, section.arch-3 .a3, section.arch-4 .a4 { opacity: 1; }
+  section.arch-1 .a1.box, section.arch-2 .a2.box, section.arch-3 .a3.box, section.arch-4 .a4.box { border-color: rgba(167,139,250,.65); box-shadow: 0 0 0 1px rgba(167,139,250,.3), 0 24px 70px rgba(124,58,237,.22); }
+  .badge { position: absolute; display: flex; align-items: center; gap: 12px; padding: 12px 20px; border-radius: 14px; font-size: 23px; font-weight: 600;
+    background: rgba(52,211,153,.12); border: 1px solid rgba(52,211,153,.5); color: #a7f3d0; }
+
+  /* Terminal */
+  .term { position: absolute; overflow: hidden; }
+  .term .bar { height: 54px; display: flex; align-items: center; gap: 10px; padding: 0 22px; border-bottom: 1px solid var(--line); background: #0f0f13; }
+  .term .bar i { width: 14px; height: 14px; border-radius: 99px; display: block; }
+  .term .bar span { margin-left: 14px; font-size: 19px; color: var(--dim); font-family: var(--mono); }
+  .term .body { padding: 26px 34px; font-family: var(--mono); font-size: 23px; line-height: 1.58; white-space: pre; color: #d4d4d8; }
+  .ok { color: var(--green); } .muted { color: var(--dim); } .violet { color: var(--violet); } .amber { color: var(--amber); }
+  table.res { border-collapse: collapse; width: 100%; font-size: 24px; }
+  table.res th { text-align: left; color: var(--dim); font-weight: 600; padding: 14px 18px; border-bottom: 1px solid var(--line); font-size: 20px; text-transform: uppercase; letter-spacing: .08em; }
+  table.res td { padding: 18px; border-bottom: 1px solid #1f1f25; }
+  .state { display: inline-flex; align-items: center; gap: 10px; color: #a7f3d0; }
+  .state::before { content: ""; width: 12px; height: 12px; border-radius: 99px; background: var(--green); box-shadow: 0 0 12px rgba(52,211,153,.7); }
+
+  /* Chapter */
+  .chapter { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+  .chapter .num { font-size: 30px; letter-spacing: .2em; text-transform: uppercase; color: var(--amber); font-weight: 700; }
+  .chapter h1 { font-size: 104px; margin-top: 18px; }
+  .chapter .sub { font-size: 34px; }
+
+  /* Timeline */
+  .timeline { position: relative; margin-top: 56px; display: grid; gap: 26px; }
+  .step { display: grid; grid-template-columns: 170px 1fr; gap: 30px; align-items: center; padding: 26px 34px; }
+  .step .t { font-family: var(--mono); font-size: 26px; color: var(--amber); }
+  .step .w { font-size: 30px; line-height: 1.35; }
+  .step .w small { display: block; font-size: 23px; color: var(--muted); margin-top: 6px; }
+
+  /* Recap */
+  .checks { list-style: none; padding: 0; margin: 46px 0 0; display: grid; grid-template-columns: 1fr 1fr; gap: 24px 46px; }
+  .checks li { font-size: 30px; line-height: 1.35; display: grid; grid-template-columns: 46px 1fr; gap: 8px; align-items: start; }
+  .checks svg { margin-top: 4px; }
+
+  /* Captions */
+  .cap { position: absolute; left: 50%; bottom: 34px; transform: translateX(-50%); max-width: 1560px; width: max-content;
+    padding: 18px 34px 20px; border-radius: 18px; background: rgba(8,8,11,.84); border: 1px solid rgba(255,255,255,.08);
+    font-size: 38px; line-height: 1.34; font-weight: 600; text-align: center; color: #fafafa; box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+</style>
+</head>
+<body>
+
+<!-- Title -->
+<section id="title">
+  <div class="center"><div>
+    <div class="logo"><svg width="58" height="58" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg></div>
+    <h1><span class="grad">Managed Copilot</span></h1>
+    <div class="sub">Run GitHub Copilot agents in environments you own: on your laptop, or in your Azure subscription.</div>
+  </div></div>
+  <div class="foot">A tour of what we built · stock GitHub Copilot SDK 1.0.26 and runtime 1.0.103 · Aspire · Azure Container Apps</div>
+</section>
+
+<!-- Idea -->
+<section id="idea" data-also="idea-setup">
+  <div class="pad">
+    <div class="kicker">The idea</div>
+    <h2>Same Copilot SDK. Your environment.</h2>
+    <div style="display:grid;grid-template-columns:1fr;gap:34px;margin-top:40px;justify-items:start">
+      <div class="card code" style="font-size:24px;padding:28px 40px"><span class="k">import</span> { approveAll } <span class="k">from</span> <span class="s">"@github/copilot-sdk"</span>;
+<span class="hl"><span class="k">import</span> { ManagedCopilot } <span class="k">from</span> <span class="s">"@managed-copilot/sdk"</span>;</span>
+
+<span class="hl"><span class="k">const</span> managed = <span class="k">await</span> ManagedCopilot.<span class="f">connect</span>();   <span class="c">// your platform</span></span>
+<span class="k">const</span> client = <span class="k">await</span> managed.<span class="f">client</span>(<span class="s">"chat"</span>);  <span class="c">// a stock CopilotClient</span>
+
+<span class="k">const</span> session = <span class="k">await</span> client.<span class="f">createSession</span>({
+  model: <span class="s">"claude-sonnet-5"</span>, onPermissionRequest: approveAll,
+});
+<span class="k">const</span> reply = <span class="k">await</span> session.<span class="f">sendAndWait</span>({ prompt: <span class="s">"Summarize what changed"</span> });</div>
+      <ul class="bullets" style="grid-template-columns:1fr 1fr;column-gap:60px;row-gap:18px;width:100%">
+        <li>Genuine <span class="mono">CopilotClient</span> and <span class="mono">CopilotSession</span> objects</li>
+        <li>The published SDK and runtime, unmodified</li>
+        <li>Two setup lines point it at your platform</li>
+        <li>The platform decides where agents run and what they reach</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Environments -->
+<section id="env" data-also="env-0 env-1 env-2 env-3">
+  <div class="pad">
+    <div class="kicker">Environments</div>
+    <h2>Three kinds of environments</h2>
+    <div class="envs">
+      <div class="card env">
+        <div class="icon" style="background:rgba(96,165,250,.14)"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#93c5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
+        <h3>Shared</h3>
+        <p>A lightweight chat agent on a shared runtime. Its tools run inside your app.</p>
+        <div class="tag">type: "shared"</div>
+      </div>
+      <div class="card env">
+        <div class="icon" style="background:rgba(167,139,250,.16)"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#c4b5fd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7L12 12l8.7-5M12 22V12"/></svg></div>
+        <h3>Isolated</h3>
+        <p>Every session gets its own sandbox: a workspace, a shell, your packages, and network rules you control.</p>
+        <div class="tag">type: "isolated"</div>
+      </div>
+      <div class="card env">
+        <div class="icon" style="background:rgba(245,158,11,.14)"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg></div>
+        <h3>Promotable</h3>
+        <p>Starts cheap on the shared runtime, then moves into its own sandbox when it needs one.</p>
+        <div class="tag">type: "promotable"</div>
+      </div>
+    </div>
+    <div class="card code apphost"><span class="c">// apphost.mts: declared once, picked by name</span>
+<span class="k">await</span> <span class="f">addManagedCopilot</span>(builder, <span class="s">"copilot"</span>, { environments: {
+  chat:   { type: <span class="s">"shared"</span>, network: [<span class="s">"learn.microsoft.com"</span>] },
+  coder:  { type: <span class="s">"isolated"</span>, size: <span class="s">"medium"</span> },
+  helper: { type: <span class="s">"promotable"</span>, promoteTo: <span class="s">"coder"</span> },
+} });</div>
+  </div>
+</section>
+
+<!-- Architecture -->
+<section id="arch" class="arch" data-also="arch-1 arch-2 arch-3 arch-4">
+  <div class="pad" style="inset:80px 120px auto 120px">
+    <div class="kicker">How it works</div>
+    <h2>How the pieces fit together</h2>
+  </div>
+  <div class="stage">
+    <svg class="wires" width="1920" height="1080" viewBox="0 0 1920 1080">
+      <path class="dimmable a1 on" d="M 470 490 L 640 490"/>
+      <text class="dimmable a1" x="478" y="470" style="font-size:17px">secure connection</text>
+      <path class="dimmable a4 on" d="M 1060 330 C 1150 330, 1160 290, 1260 290"/>
+      <path class="dimmable a2 on" d="M 1060 435 L 1260 435"/>
+      <path class="dimmable a2 on" d="M 1060 560 C 1160 560, 1160 582, 1260 582"/>
+      <path class="dimmable a3 on" d="M 1530 670 L 1530 700"/>
+      <path class="dimmable a3 on" d="M 1260 760 L 1100 760"/>
+    </svg>
+    <div class="card box dimmable a1" style="left:120px;top:380px;width:350px;height:220px">
+      <h4><span class="dot" style="background:var(--blue)"></span>Your app</h4>
+      <p>Stock <span class="mono">CopilotClient</span> and <span class="mono">CopilotSession</span>; your tools run here</p>
+    </div>
+    <div class="card box dimmable a1 a2 a4" style="left:640px;top:250px;width:420px;height:450px">
+      <h4><span class="dot" style="background:var(--violet)"></span>Gateway</h4>
+      <p style="margin-bottom:12px">You run it: locally or on Azure</p>
+      <ul>
+        <li>Signs you in with GitHub</li>
+        <li>Routes each session</li>
+        <li>Durable record of tool calls and approvals</li>
+        <li>Network and secrets policy</li>
+        <li>Brokers model calls</li>
+      </ul>
+    </div>
+    <div class="card box dimmable a4" style="left:1260px;top:230px;width:540px;height:120px;padding-top:20px">
+      <h4><span class="dot" style="background:var(--amber)"></span>Models</h4>
+      <p>Through your own GitHub Copilot plan</p>
+    </div>
+    <div class="card box dimmable a2" style="left:1260px;top:375px;width:540px;height:120px;padding-top:20px">
+      <h4><span class="dot" style="background:var(--blue)"></span>Shared runtime</h4>
+      <p>Lightweight chat sessions</p>
+    </div>
+    <div class="card box dimmable a2 a3" style="left:1260px;top:520px;width:540px;height:150px;padding-top:20px">
+      <h4><span class="dot" style="background:var(--violet)"></span>Sandboxes</h4>
+      <p>One per isolated session: workspace, shell, packages</p>
+    </div>
+    <div class="card box dimmable a3" style="left:1260px;top:700px;width:540px;height:120px;padding-top:20px">
+      <h4><span class="dot" style="background:var(--green)"></span>Egress proxy</h4>
+      <p>Allowlists · secrets added at the edge</p>
+    </div>
+    <div class="card box dimmable a3" style="left:690px;top:705px;width:410px;height:110px;padding-top:18px">
+      <h4><span class="dot" style="background:var(--dim)"></span>Internet and APIs</h4>
+      <p>Only what you allow</p>
+    </div>
+    <div class="badge dimmable a4" style="left:120px;top:640px">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#6ee7b7" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      Your GitHub token never enters a sandbox
+    </div>
+  </div>
+</section>
+
+<!-- Run -->
+<section id="run">
+  <div class="pad">
+    <div class="kicker">Run it</div>
+    <h2>One command: <span class="mono violet">aspire run</span></h2>
+    <div class="card term" style="left:0;right:0;top:190px;height:500px">
+      <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span>aspire run · resources</span></div>
+      <div style="padding:10px 34px 0">
+        <table class="res">
+          <tr><th>Resource</th><th>What it is</th><th>State</th><th>URL</th></tr>
+          <tr><td class="mono">copilot</td><td>Gateway, shared runtime, sandboxes, egress proxy</td><td><span class="state">Running</span></td><td class="mono muted">localhost:7400</td></tr>
+          <tr><td class="mono">software-factory</td><td>Demo 1: AI software factory</td><td><span class="state">Running</span></td><td class="mono muted">localhost:7480</td></tr>
+          <tr><td class="mono">assistant</td><td>Demo 2: personal assistant</td><td><span class="state">Running</span></td><td class="mono muted">localhost:7490</td></tr>
+          <tr><td class="mono">quickstart</td><td>Every spec example as a check</td><td><span class="muted">Start from the dashboard</span></td><td class="mono muted">-</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Quickstart -->
+<section id="quickstart">
+  <div class="pad">
+    <div class="kicker">Verified</div>
+    <h2>Every spec example is an automated check</h2>
+    <div class="card term" style="left:0;right:0;top:170px;height:470px">
+      <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span>quickstart · real platform, real models</span></div>
+      <div class="body" style="display:grid;grid-template-columns:1fr 1fr;column-gap:60px;white-space:normal"><div><span class="ok">✓</span> 01 The idea in one snippet<br><span class="ok">✓</span> 02 Shared: a chat agent with your tools<br><span class="ok">✓</span> 03 Isolated: a coding agent in a sandbox<br><span class="ok">✓</span> 04 Set up the sandbox<br><span class="ok">✓</span> 05 Get results out<br><span class="ok">✓</span> 06 Control network access<br><span class="ok">✓</span> 07 Keep secrets out of the sandbox</div><div><span class="ok">✓</span> 08 Promotable: start cheap, move later<br><span class="ok">✓</span> 09 Come back later<br><span class="ok">✓</span> 10 Offline work: webhook<br><span class="ok">✓</span> 11 Offline work: polling<br><span class="ok">✓</span> 12 Run on a schedule<br><span class="ok">✓</span> 13 Open a session in Copilot CLI<br><br><span class="ok" style="font-size:30px;font-weight:700">13 passed</span></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Chapters -->
+<section id="chapter-factory"><div class="chapter"><div>
+  <div class="num">Demo 1</div><h1><span class="grad">AI software factory</span></h1>
+  <div class="sub">Describe the software. A team of Copilot agents plans, builds, reviews, and releases it.</div>
+</div></div></section>
+<section id="chapter-assistant"><div class="chapter"><div>
+  <div class="num">Demo 2</div><h1><span class="grad">Personal assistant</span></h1>
+  <div class="sub">A bot you chat with, connected to mail and calendar, that keeps working while you're away.</div>
+</div></div></section>
+
+<!-- Tab closed -->
+<section id="tab-closed">
+  <div class="pad">
+    <div class="kicker">While you're away</div>
+    <h2>The tab is closed. The work continues.</h2>
+    <div class="timeline">
+      <div class="card step"><div class="t">+0:00</div><div class="w">You ask for a check-in in two minutes, then close the tab<small>The platform keeps the schedule; it runs as you after a one-time sign-in</small></div></div>
+      <div class="card step"><div class="t">+2:00</div><div class="w">The platform runs the request with no browser open<small>The agent needs your calendar, so the platform calls the assistant's server through its webhook</small></div></div>
+      <div class="card step"><div class="t">Later</div><div class="w">You come back to the answer<small>The calendar lookup is marked "Handled while you were away"</small></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- Azure -->
+<section id="azure">
+  <div class="pad">
+    <div class="kicker">On Azure</div>
+    <h2>Same AppHost: <span class="mono violet">aspire deploy</span></h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:30px;margin-top:50px">
+      <div class="card box" style="position:relative">
+        <h4><span class="dot" style="background:var(--blue)"></span>Azure Container Apps</h4>
+        <ul><li>Gateway</li><li>Software factory</li><li>Assistant</li><li>Egress proxy</li></ul>
+      </div>
+      <div class="card box" style="position:relative">
+        <h4><span class="dot" style="background:var(--violet)"></span>Container Apps Sandboxes</h4>
+        <p>One sandbox per isolated session, with data disks that survive compute replacement</p>
+      </div>
+      <div class="card box" style="position:relative">
+        <h4><span class="dot" style="background:var(--green)"></span>Azure Files</h4>
+        <p>The platform's state, with a single-writer lease</p>
+      </div>
+    </div>
+    <div class="card" style="margin-top:30px;padding:26px 34px;font-size:26px;color:var(--muted)">
+      Apps are restricted to your allowed IP ranges, and the gateway accepts only the GitHub users or orgs you name.
+    </div>
+  </div>
+</section>
+
+<!-- Recap -->
+<section id="recap">
+  <div class="pad">
+    <div class="kicker">Recap</div>
+    <h2>What we built</h2>
+    <ul class="checks">
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Genuine Copilot SDK clients and sessions, unmodified</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Shared, isolated, and promotable environments</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Sandboxes with setup, files, and artifacts</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Network allowlists and secrets added at the edge</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Offline work and schedules that run as you</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Copilot CLI on the same live session</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Two demos, end to end with real models</li>
+      <li><svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#34d399" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>Runs locally with Aspire and on Azure</li>
+    </ul>
+  </div>
+</section>
+
+<!-- Try it -->
+<section id="try">
+  <div class="pad">
+    <div class="kicker">Try it</div>
+    <h2>Run it yourself</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:46px;margin-top:46px;align-items:start">
+      <div class="card term" style="position:relative">
+        <div class="bar"><i style="background:#f87171"></i><i style="background:#fbbf24"></i><i style="background:#34d399"></i><span>terminal</span></div>
+        <div class="body" style="font-size:28px;line-height:1.75"><span class="muted">&gt;</span> gh auth login
+<span class="muted">&gt;</span> pnpm install
+<span class="muted">&gt;</span> pnpm build
+<span class="muted">&gt;</span> <span class="violet">aspire run</span></div>
+      </div>
+      <ul class="bullets">
+        <li>Software factory: <span class="mono">localhost:7480</span></li>
+        <li>Assistant: <span class="mono">localhost:7490</span></li>
+        <li>Start with <span class="mono">README.md</span> and <span class="mono">demos/quickstart</span></li>
+        <li>Deploy with <span class="mono">docs/deployment.md</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- Background for recorded footage: the video sits in the 1536x864 window at (192, 24). -->
+<section id="frame">
+  <div style="position:absolute;left:191px;top:23px;width:1538px;height:866px;border-radius:6px;border:1px solid rgba(255,255,255,.12);box-shadow:0 30px 90px rgba(0,0,0,.6), 0 0 0 1px rgba(167,139,250,.08)"></div>
+</section>
+
+<!-- Caption layer: filled by the renderer -->
+<section id="caption" class="caption-layer"><div class="cap" id="cap-text"></div></section>
+
+<script>
+  // #name selects a slide; a variant (e.g. env-2) shows its base section with the variant as a class.
+  function show(name) {
+    document.querySelectorAll("section").forEach((s) => { s.classList.remove("on"); s.className = s.className.replace(/\b(env|arch)-\d\b|\bsetup\b/g, "").trim(); });
+    let el = document.getElementById(name);
+    if (!el) el = [...document.querySelectorAll("section[data-also]")].find((s) => s.dataset.also.split(" ").includes(name));
+    if (!el) throw new Error(`no slide ${name}`);
+    el.classList.add("on");
+    if (el.id !== name) el.classList.add(name === "idea-setup" ? "setup" : name);
+  }
+  window.show = show;
+  window.caption = (text) => { show("caption"); document.getElementById("cap-text").textContent = text; };
+</script>
+</body>
+</html>
