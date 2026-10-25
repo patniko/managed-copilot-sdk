@@ -32,7 +32,7 @@ import {
   type StorageStatus,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
-import { looksSecret, redactUrl, REDACTED } from "../../redaction.js";
+import { looksSecret, redactPath, redactUrl, REDACTED } from "../../redaction.js";
 import { isRecord } from "./admission.js";
 import { accountInfo } from "./auth.js";
 import type { CustomizationBundle, SessionRecord } from "./contracts.js";
@@ -587,6 +587,8 @@ export function sanitizeEventData(data: Readonly<Record<string, unknown>> | unde
       out[key] = value.filter(isRecord).map((artifact) => pick(artifact, ["id", "path", "version", "size"]));
     } else if (key === "network" && isRecord(value)) {
       out[key] = pick(value, ["access", "allowedDomains"]);
+    } else if ((key === "path" || key === "url") && typeof value === "string") {
+      out[key] = key === "url" ? redactUrl(value).slice(0, 500) : redactPath(value).slice(0, 500);
     } else {
       const bounded = bound(value, 0);
       if (bounded !== undefined) out[key] = bounded;

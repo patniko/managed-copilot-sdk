@@ -3,7 +3,7 @@ import { LogRing } from "../src/log.js";
 import { Metrics } from "../src/metrics.js";
 import { harnessOf } from "../src/modules/core/harness.js";
 import { sanitizeEventData } from "../src/modules/core/operator.js";
-import { looksSecret, redactUrl, redactValue, scrubArgs } from "../src/redaction.js";
+import { looksSecret, redactPath, redactUrl, redactValue, scrubArgs } from "../src/redaction.js";
 import { certificateFingerprint } from "../src/modules/network/index.js";
 
 describe("operator redaction", () => {
@@ -21,6 +21,13 @@ describe("operator redaction", () => {
     expect(redactUrl("https://user:pass@example.com/path")).toBe("https://***@example.com/path");
     expect(redactUrl("https://example.com/plain")).toBe("https://example.com/plain");
     expect(redactUrl("ghp_0123456789abcdefghijABCDEFGHIJ")).toBe("[redacted]");
+  });
+
+  it("masks secret-looking path segments and query values of request paths", () => {
+    expect(redactPath("/services/T0001/B0002/abcdefghijklmnopqrstuvwxyz123456?token=x&token=y&v=1#frag")).toBe("/services/T0001/B0002/[redacted]?token=***&v=***");
+    expect(redactPath("/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1/sendMessage")).toBe("/[redacted]/sendMessage");
+    expect(redactPath("/repos/octo/hello/issues")).toBe("/repos/octo/hello/issues");
+    expect(redactPath("/v1/ghp_0123456789abcdefghijABCDEFGHIJ/x#only-a-fragment")).toBe("/v1/[redacted]/x");
   });
 
   it("masks credential arguments of local commands", () => {
@@ -113,6 +120,20 @@ describe("harness view", () => {
   it("treats sessions stored before callback inventories as asking for permission decisions", () => {
     expect(harnessOf({ params: {}, optionsPatch: {} }, { placement: "sandbox", platformTools: [], scrub }).callbacks).toEqual({ tools: [], flags: ["requestPermission"] });
   });
+
+  it("shows the effective configuration: option changes override the session's params", () => {
+    const harness = harnessOf(
+      {
+        params: { model: "claude-sonnet-5", reasoningEffort: "low", availableTools: ["builtin:ask_user"], mcpServers: { docs: { type: "http", url: "http://127.0.0.1:7400/v1/mcp/route_1" } } },
+        requested: { mcpServers: { docs: { type: "http", url: "https://docs.example.com/mcp" } } },
+        optionsPatch: { reasoningEffort: "high", excludedTools: ["web_fetch"], mcpServers: { docs: { type: "http", url: "http://127.0.0.1:7400/v1/mcp/route_2" } } },
+        requestedOptions: { mcpServers: { docs: { type: "http", url: "https://docs2.example.com/mcp?key=SECRET" } } },
+      },
+      { placement: "shared", platformTools: [], scrub },
+    );
+    expect(harness).toMatchObject({ model: "claude-sonnet-5", reasoningEffort: "high", availableTools: ["builtin:ask_user"], excludedTools: ["web_fetch"] });
+    expect(harness.mcpServers).toEqual([{ name: "docs", transport: "http", url: "https://docs2.example.com/mcp?key=***", headers: [], env: [], adapter: true }]);
+  });
 });
 
 describe("operator event data", () => {
@@ -128,6 +149,8 @@ describe("operator event data", () => {
         actions: [{ id: "act_1", kind: "tool", state: "pending", tool: "lookup", idempotencyKey: "k", arguments: { secret: 1 } }],
         artifacts: [{ id: "art_1", path: "report.md", version: 2, size: 10, digest: "d" }],
         network: { access: "restricted", allowedDomains: ["example.com"], extra: 1 },
+        path: "/services/T1/B2/abcdefghijklmnopqrstuvwxyz123456?sig=1",
+        url: "https://hooks.example.com/x?code=abc",
         nested: { anything: "dropped" },
         apiToken: "x",
       }),
@@ -138,6 +161,8 @@ describe("operator event data", () => {
       actions: [{ id: "act_1", kind: "tool", state: "pending", tool: "lookup" }],
       artifacts: [{ id: "art_1", path: "report.md", version: 2, size: 10 }],
       network: { access: "restricted", allowedDomains: ["example.com"] },
+      path: "/services/T1/B2/[redacted]?sig=***",
+      url: "https://hooks.example.com/x?code=***",
     });
   });
 });

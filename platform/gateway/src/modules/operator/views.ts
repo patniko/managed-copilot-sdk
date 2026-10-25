@@ -29,6 +29,7 @@ import {
   type WebhookWorkerStatus,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
+import { redactPath } from "../../redaction.js";
 import type { CoreOperator } from "../core/operator.js";
 import type { ScheduleOperatorRecord } from "../durable/schedules/service.js";
 import type { OperatorAccess } from "./access.js";
@@ -409,7 +410,7 @@ export class OperatorViews {
                 ...(block.host ? { host: block.host } : {}),
                 ...(block.port ? { port: block.port } : {}),
                 ...(block.method ? { method: block.method } : {}),
-                ...(block.path ? { path: block.path } : {}),
+                ...(block.path ? { path: redactPath(block.path) } : {}),
                 message: block.message,
               })),
             },

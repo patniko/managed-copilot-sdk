@@ -51,6 +51,31 @@ export function redactUrl(value: string): string {
   return url.toString();
 }
 
+/** A URL path with secret-looking segments and query values masked (paths of blocked requests, for example). */
+export function redactPath(value: string): string {
+  const cut = value.search(/[?#]/);
+  const path = (cut < 0 ? value : value.slice(0, cut))
+    .split("/")
+    .map((segment) => {
+      const decoded = decodeSegment(segment);
+      // `bot<id>:<token>` and `<user>:<token>` segments hide the credential behind a colon.
+      return looksSecret(decoded) || decoded.split(":").some(looksSecret) ? REDACTED : segment;
+    })
+    .join("/");
+  if (cut < 0 || value[cut] !== "?") return path;
+  const query = value.slice(cut + 1).replace(/#.*$/s, "");
+  const keys = [...new Set(new URLSearchParams(query).keys())];
+  return keys.length > 0 ? `${path}?${keys.map((key) => `${encodeURIComponent(key)}=***`).join("&")}` : path;
+}
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
+}
+
 /** Command-line arguments with credential values masked (`--token x`, `--api-key=x`, token-shaped values). */
 export function scrubArgs(args: readonly unknown[]): string[] {
   const out: string[] = [];

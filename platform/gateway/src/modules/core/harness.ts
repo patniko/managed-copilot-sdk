@@ -62,8 +62,10 @@ export interface HarnessContext {
 
 /** A session's admitted configuration as the operator console shows it. */
 export function harnessOf(admitted: AdmittedConfig, context: HarnessContext): OperatorHarness {
-  const params = context.scrub(admitted.params) as Record<string, unknown>;
-  const requested = admitted.requested ? (context.scrub(admitted.requested) as Record<string, unknown>) : undefined;
+  // Restores apply option changes (`session.options.update`) after the session's params: together they are its
+  // effective configuration.
+  const params = context.scrub({ ...admitted.params, ...admitted.optionsPatch }) as Record<string, unknown>;
+  const requested = admitted.requested || admitted.requestedOptions ? (context.scrub({ ...admitted.requested, ...admitted.requestedOptions }) as Record<string, unknown>) : undefined;
   const callbacks = admitted.callbacks ?? { tools: [], flags: { requestPermission: true as const } };
 
   const tools: OperatorHarnessTool[] = [];
