@@ -1,0 +1,114 @@
+/* Mona Sans, GitHub's typeface (SIL Open Font License 1.1), bundled so the apps never fetch fonts at runtime. */
+@import "@fontsource-variable/mona-sans/index.css";
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--borderColor-default);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  body {
+    font-family: var(--fontStack-sansSerif);
+    font-size: var(--text-body-size-medium);
+    line-height: var(--text-body-lineHeight-medium);
+    color: var(--fgColor-default);
+    background-color: var(--bgColor-default);
+    word-wrap: break-word;
+  }
+
+  ::selection {
+    background-color: var(--selection-bgColor);
+  }
+
+  ::placeholder {
+    color: var(--control-fgColor-placeholder);
+    opacity: 1;
+  }
+
+  /* Plain links read like github.com links; styled links (with a class) opt out. */
+  a:not([class]) {
+    color: var(--fgColor-accent);
+    text-decoration: none;
+  }
+  a:not([class]):hover {
+    text-decoration: underline;
+  }
+
+  :focus-visible {
+    outline: var(--focus-outline-width) solid var(--focus-outlineColor);
+    outline-offset: var(--focus-outline-offset);
+  }
+  a:not([class]):focus-visible {
+    outline-offset: 0;
+    border-radius: var(--borderRadius-small);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  select:not(:disabled),
+  label[for] {
+    cursor: pointer;
+  }
+
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--control-checked-bgColor-rest);
+  }
+
+  hr {
+    border-color: var(--borderColor-muted);
+  }
+
+  code,
+  kbd,
+  pre,
+  samp,
+  tt {
+    font-family: var(--fontStack-monospace);
+  }
+
+  kbd {
+    display: inline-block;
+    padding: 0.1875rem 0.3125rem;
+    font: 0.6875rem / 0.625rem var(--fontStack-monospace);
+    color: var(--fgColor-default);
+    vertical-align: middle;
+    background-color: var(--bgColor-muted);
+    border: var(--borderWidth-thin) solid var(--borderColor-neutral-muted);
+    border-bottom-color: var(--borderColor-neutral-muted);
+    border-radius: var(--borderRadius-medium);
+    box-shadow: inset 0 -1px 0 var(--borderColor-neutral-muted);
+  }
+
+  dialog::backdrop {
+    background-color: var(--overlay-backdrop-bgColor);
+  }
+
+  .octicon {
+    display: inline-block;
+    flex-shrink: 0;
+    overflow: visible;
+    vertical-align: text-bottom;
+    fill: currentColor;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

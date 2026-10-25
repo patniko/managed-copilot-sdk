@@ -25,6 +25,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@managed-copilot/github-theme": "workspace:*",
+    "@primer/octicons-react": "19.40.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
