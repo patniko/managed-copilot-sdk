@@ -204,9 +204,29 @@ export class SharedRuntime {
   #waiters: { resolve(upstream: RuntimeUpstream): void; reject(error: Error): void }[] = [];
   #lastError: string | undefined;
   #stderrTail: string[] = [];
+  /** When the current upstream connected. */
+  #connectedAt: string | undefined;
+  /** Connections lost since the gateway started (each one restarts the runtime). */
+  #restarts = 0;
 
   constructor(options: SharedRuntimeOptions) {
     this.#options = options;
+  }
+
+  /** Operator view of the runtime (no tokens, no output). */
+  status(): { state: RuntimeState; external: boolean; version?: string; protocolVersion?: number; pid?: number; generation: number; connectedAt?: string; restarts: number; lastError?: string } {
+    const upstream = this.current();
+    const pid = this.#child?.pid;
+    return {
+      state: this.#state,
+      external: this.external,
+      ...(upstream ? { version: upstream.version, protocolVersion: upstream.protocolVersion } : {}),
+      ...(pid !== undefined ? { pid } : {}),
+      generation: this.#generation,
+      ...(upstream && this.#connectedAt ? { connectedAt: this.#connectedAt } : {}),
+      restarts: this.#restarts,
+      ...(this.#lastError ? { lastError: this.#lastError } : {}),
+    };
   }
 
   get state(): RuntimeState {
@@ -345,6 +365,7 @@ export class SharedRuntime {
     this.#state = "running";
     this.#backoffMs = 1000;
     this.#lastError = undefined;
+    this.#connectedAt = new Date().toISOString();
     log.info("Shared runtime ready", { version: upstream.version, protocolVersion: upstream.protocolVersion, generation });
     this.#options.onConnected?.(upstream, generation);
     for (const waiter of this.#waiters.splice(0)) waiter.resolve(upstream);
@@ -429,6 +450,7 @@ export class SharedRuntime {
     const { log } = this.#options;
     this.#lastError = reason;
     this.#state = "restarting";
+    this.#restarts++;
     this.#upstream?.close();
     this.#upstream = undefined;
     const child = this.#child;

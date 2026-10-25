@@ -100,6 +100,27 @@ export class DurableCredentials implements CredentialsService {
     return row !== undefined && row.state === "active" && row.sealed_token !== null;
   }
 
+  /** Background sign-in health of every account that ever stored one (operator console; never the credential). */
+  operatorStatuses(): { accountId: number; login: string; state: "active" | "revoked" | "invalid"; createdAt: string; lastVerifiedAt?: string; reason?: string }[] {
+    const rows = this.#deps.db.prepare("SELECT account_id, login, state, reason, created_at, last_verified_at, sealed_token IS NOT NULL AS sealed FROM durable_credentials ORDER BY updated_at DESC").all() as {
+      account_id: number;
+      login: string;
+      state: CredentialRow["state"];
+      reason: string | null;
+      created_at: number;
+      last_verified_at: number | null;
+      sealed: number;
+    }[];
+    return rows.map((row) => ({
+      accountId: Number(row.account_id),
+      login: row.login,
+      state: row.state === "active" && !row.sealed ? "invalid" : row.state,
+      createdAt: toIso(row.created_at)!,
+      ...(row.last_verified_at !== null ? { lastVerifiedAt: toIso(row.last_verified_at)! } : {}),
+      ...(row.reason ? { reason: row.reason } : {}),
+    }));
+  }
+
   async principalFor(accountId: number): Promise<Principal> {
     const cached = this.#verified.get(accountId);
     const row = this.#row(accountId);

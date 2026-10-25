@@ -66,6 +66,7 @@ describe("durable webhooks", () => {
         if (pending.length === 0) return undefined;
         return { token: `mcc_${webhook}_${minted.length}`, expiresAt: new Date(now + 60_000).toISOString(), sessionId, actionIds: pending, audience: "http://gateway" };
       },
+      list: () => [...pendingIds].map((id) => ({ id, state: "pending" })),
     } as unknown as ActionsService;
     return new DurableWebhooks({
       db,
@@ -261,5 +262,42 @@ describe("durable webhooks", () => {
       ["session.action_required", "The session was deleted"],
     ]);
     expect(webhooks.deliveries({ state: "pending" }).map((delivery) => delivery.eventType)).toEqual(["session.idle", "session.idle"]);
+  });
+
+  it("lets an operator retry a failed action delivery only while an action it announced still waits", async () => {
+    await webhooks.stop();
+    webhooks = build({}, { ORDERS_SECRET: SECRET });
+    webhooks.start();
+    statuses.push(500, 500, 500);
+    pendingIds = new Set(["act_1"]);
+    webhooks.enqueue(event("session.action_required", "chat", { actions: [{ id: "act_1" }] }), { ownerId: 1 });
+    for (let i = 0; i < 4; i++) {
+      await webhooks.pump();
+      now += 10_000;
+    }
+    const failed = webhooks.deliveries({ state: "failed" }).find((delivery) => delivery.webhook === "orders");
+    expect(failed).toMatchObject({ attempts: 3 });
+    // act_1 was answered since; another call (act_2) waits, but this delivery never announced it.
+    pendingIds = new Set(["act_2"]);
+    expect(() => webhooks.retry(failed!.id)).toThrow(/answered or cancelled/);
+    pendingIds.add("act_1");
+    expect(webhooks.retry(failed!.id)).toMatchObject({ id: failed!.id, state: "pending" });
+  });
+
+  it("never stores or reports the credentials a delivery error quotes", async () => {
+    await webhooks.stop();
+    const deployment = parseConfig({
+      environments: { chat: { type: "shared" } },
+      webhooks: { orders: { url: `http://hook-user:HOOK-PASSWORD@127.0.0.1:${new URL(base).port}/orders?sig=QUERY-SECRET`, environments: ["chat"], events: ["session.idle"], secret: { secretEnv: "ORDERS_SECRET" } } },
+    });
+    webhooks = new DurableWebhooks({ db, log: silent, deployment, mode: "local", env: { ORDERS_SECRET: SECRET }, actions: () => undefined, now: () => now, options: { pollIntervalMs: 0, maxAttempts: 1 } });
+    webhooks.start();
+    webhooks.enqueue(event("session.idle"), { ownerId: 1 });
+    await webhooks.pump();
+    const [failed] = webhooks.deliveries({ state: "failed" });
+    expect(failed?.lastError).toMatch(/^Could not reach the webhook/);
+    for (const view of [JSON.stringify(webhooks.deliveries()), JSON.stringify(webhooks.operatorDeliveries()), JSON.stringify(webhooks.operatorSubscriptions())]) {
+      for (const secret of ["HOOK-PASSWORD", "QUERY-SECRET"]) expect(view, secret).not.toContain(secret);
+    }
   });
 });

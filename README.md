@@ -1,7 +1,29 @@
-# Managed Copilot SDK
+<h1 align="center">Managed Copilot SDK</h1>
 
-Run **stock** Copilot SDK clients and sessions in environments you deploy, locally under Aspire or in your Azure
-subscription. Only the setup lines change:
+<p align="center">
+  Run <strong>stock</strong> GitHub Copilot SDK agents in environments you own:<br>
+  on your laptop with Aspire, or in your Azure subscription.
+</p>
+
+<p align="center">
+  <a href="docs/tutorial/README.md">Video tour</a> ·
+  <a href="#run-it-locally">Run it locally</a> ·
+  <a href="#the-demos">Demos</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="docs/deployment.md">Deploy to Azure</a> ·
+  <a href="docs/spec/developer-experience.md">Spec</a>
+</p>
+
+<p align="center">
+  <a href="docs/tutorial/README.md"><img src="docs/images/tour.png" alt="Watch the six-minute video tour of Managed Copilot" width="820"></a>
+</p>
+
+## Overview
+
+Apps can already build Copilot agents in with the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
+Managed Copilot keeps that SDK exactly as published and changes only **where the agents run**. A platform you deploy
+decides whether a session runs on a shared runtime or in its own sandbox, what it may reach on the network, which
+secrets it can use, and what happens to its work while your app is offline. Only the setup lines change:
 
 ```ts
 import { approveAll } from "@github/copilot-sdk";
@@ -15,9 +37,10 @@ const reply = await session.sendAndWait({ prompt: "Summarize what changed in Asp
 console.log(reply?.data.content);
 ```
 
-You declare environments once in an [Aspire AppHost](packages/aspire/README.md) and `aspire run` brings up the
-platform. Your code keeps using genuine `CopilotClient` and `CopilotSession` objects, standard session events, and
-`defineTool` tools. What works today, end to end with real models:
+You declare environments once in an [Aspire AppHost](packages/aspire/README.md). `aspire run` brings the platform up
+on your machine, and `aspire deploy` puts the same AppHost on Azure Container Apps. Your code keeps using genuine
+`CopilotClient` and `CopilotSession` objects, standard session events, and `defineTool` tools. What works today, end
+to end with real models:
 
 - **Shared, isolated, and promotable environments.** Chat on a shared runtime, coding agents in their own sandboxes
   with setup, files, and artifacts, and sessions that start cheap and move into a sandbox when they need one.
@@ -27,32 +50,83 @@ platform. Your code keeps using genuine `CopilotClient` and `CopilotSession` obj
   schedules and agent reminders run as you after `npx managed-copilot login`.
 - **Copilot CLI on a live session.** `npx managed-copilot attach <id>` opens the stock Copilot CLI on the same
   conversation your app uses, and it follows the session when it moves into a sandbox.
+- **Your identity, your plan.** Callers sign in with GitHub, sessions use the caller's own Copilot entitlement, and
+  no GitHub token ever enters a sandbox.
+- **An operator console.** `npx managed-copilot console` shows the platform as it runs: component health, every
+  owner's sessions with their sandboxes and harness configuration, environments, schedules, webhooks, and a live feed,
+  with secrets redacted and conversations private.
 
-| Start here | |
-| --- | --- |
-| [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
-| [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
-| [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
-| [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail and Google Calendar |
-| [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, and schedules |
-| [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
-| [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
-| [Architecture](docs/architecture.md) | Topology, protocol facts, and how the pieces fit |
+## How it works
 
-## Repository layout
+<p align="center">
+  <img src="docs/images/architecture.png" alt="Your app connects to a gateway you run. The gateway routes sessions to a shared runtime or to per-session sandboxes, brokers model calls through your Copilot plan, and sandboxes reach the Internet only through an egress proxy." width="900">
+</p>
 
-| Path | Contents |
-| --- | --- |
-| `packages/protocol` | Shared contracts: AppHost config schema, REST DTOs, errors, events, network policy |
-| `packages/sdk` | `@managed-copilot/sdk`: `ManagedCopilot.connect()`, stock clients over a secure bridge |
-| `packages/aspire` | `@managed-copilot/aspire`: `addManagedCopilot(builder, name, options)` for Aspire TypeScript AppHosts |
-| `packages/cli` | `npx managed-copilot`: background sign-in, sessions, Copilot CLI attach, artifacts, schedules |
-| `platform/gateway` | Authenticated gateway: admission, routing, session ledger, platform services |
-| `platform/sandbox`, `platform/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
-| `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
-| `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
-| `demos/software-factory`, `demos/assistant` | The AI software factory and the long-running assistant |
-| `docs/` | Spec, architecture, and deployment |
+- **Your app** uses the stock SDK. `ManagedCopilot.connect()` hands it a client whose connection runs through a
+  secure bridge to the gateway.
+- **The gateway**, which you run, signs callers in with GitHub and places each session. It keeps a durable record of
+  the tool calls and approvals your app must answer, enforces network and secrets policy, and brokers model calls on
+  the caller's Copilot plan. It also serves the operator console, where the people who run the platform see its
+  health and every session's configuration.
+- **The shared runtime** hosts lightweight chat sessions whose tools run in your app. **Sandboxes** give each
+  isolated session its own workspace, shell, and packages: Docker locally, Azure Container Apps Sandboxes on Azure.
+- **The egress proxy** is a sandbox's only way out. It enforces each environment's allowlist and adds vault
+  credentials at the edge, so code in a sandbox only ever sees placeholders.
+
+More in [docs/architecture.md](docs/architecture.md): topology, protocol facts, and each module.
+
+## Environments
+
+| Type | What a session gets | Good for |
+| --- | --- | --- |
+| `shared` | A lightweight session on the shared runtime; its tools run inside your app | Chat agents and assistants |
+| `isolated` | Its own sandbox: a workspace, a shell, the packages you set up, and network rules you control | Coding agents, builds, data work |
+| `promotable` | Starts on the shared runtime, then moves into a sandbox as the same session when it needs one | Chats that sometimes need to run code |
+
+```ts
+// apphost.mts: declared once, picked by name with managed.client("coder")
+await addManagedCopilot(builder, "copilot", {
+  environments: {
+    chat:   { type: "shared", network: ["learn.microsoft.com"] },
+    coder:  { type: "isolated", size: "medium" },
+    helper: { type: "promotable", promoteTo: "coder" },
+  },
+});
+```
+
+## The demos
+
+Both demos run under `aspire run` with real models, and both run on Azure from the same AppHost.
+
+### AI software factory
+
+<p align="center">
+  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The factory floor: a plan split into two tasks, each built by its own builder in its own sandbox, with reviews and a release waiting" width="900">
+</p>
+
+Describe the software you want. A planner splits it into tasks, and a builder per task works in **its own sandbox**,
+all in parallel. A reviewer on a different model sends work back with file-and-line findings. A release agent then
+integrates the tasks, adds integration tests and a README, and publishes a tested release you can download.
+
+<p align="center">
+  <img src="demos/software-factory/docs/screenshots/deliverable.png" alt="The deliverable: release ready, 51 of 51 tests passed, release notes, and per-task review results" width="900">
+</p>
+
+→ [demos/software-factory](demos/software-factory/README.md)
+
+### Long-running assistant
+
+<p align="center">
+  <img src="demos/assistant/docs/screenshots/approval.png" alt="The assistant found a free slot and asks before adding the meeting to the calendar" width="49%">
+  <img src="demos/assistant/docs/screenshots/offline.png" alt="A scheduled check-in ran while the tab was closed; the calendar lookup is marked Handled while you were away" width="49%">
+</p>
+
+A bot you chat with that reads your mail and manages your calendar. It uses a clearly labelled demo workspace until
+you connect Google, and it always asks before it sends mail or changes your calendar. Reminders and recurring
+briefings run as you, and it keeps working with the tab closed: the platform runs the turn and calls the assistant's
+webhook for the tool calls it needs.
+
+→ [demos/assistant](demos/assistant/README.md)
 
 ## Run it locally
 
@@ -73,6 +147,7 @@ discovery record the local gateway writes. From another terminal:
 npx managed-copilot status             # the deployment, your account, and its environments
 npx managed-copilot sessions           # your sessions
 npx managed-copilot attach 7f3a2c1     # Copilot CLI on a live session (any unique ID prefix)
+npx managed-copilot console            # the operator console: health, sessions, harness configuration
 ```
 
 To run every snippet from the spec against your platform, start **quickstart** in the Aspire dashboard, or run
@@ -89,6 +164,64 @@ To run every snippet from the spec against your platform, start **quickstart** i
 - **A second copy beside the first** (for example another checkout): set `MANAGED_COPILOT_PORT_OFFSET=300` to move
   its ports to 7700, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at it with
   `MANAGED_COPILOT_URL=http://localhost:7700`.
+
+## Deploy to Azure
+
+The same AppHost deploys with `aspire deploy`. The gateway, your apps, and the egress proxy run as Azure Container
+Apps, each isolated session gets its own Container Apps sandbox, and the platform's state is kept on Azure Files. A
+deployed gateway is on the Internet, so `aspire deploy` refuses to publish one until you say who may use it:
+
+```powershell
+aspire secret set Azure:SubscriptionId <subscription-id>
+aspire secret set Azure:Location westus2
+aspire secret set Azure:ResourceGroup managed-copilot-dev
+aspire secret set Parameters:copilot-github-users your-login   # or Parameters:copilot-github-orgs
+aspire deploy
+```
+
+Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `ManagedCopilot.connect({ url })`.
+[docs/deployment.md](docs/deployment.md) covers prerequisites, the demo apps' access settings, costs, and teardown.
+
+## What's verified
+
+- **Every example in the spec runs as an automated check** against the real platform with real models. All 13 pass
+  locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass.
+- **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
+  sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
+- **Both demos run end to end** locally and on Azure.
+- **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
+  process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
+  list what each gate proved and what it did not.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
+| [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
+| [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
+| [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail and Google Calendar |
+| [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
+| [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
+| [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
+| [Architecture](docs/architecture.md) | Topology, protocol facts, and how the pieces fit |
+
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `packages/protocol` | Shared contracts: AppHost config schema, REST DTOs, errors, events, network policy |
+| `packages/sdk` | `@managed-copilot/sdk`: `ManagedCopilot.connect()`, stock clients over a secure bridge |
+| `packages/aspire` | `@managed-copilot/aspire`: `addManagedCopilot(builder, name, options)` for Aspire TypeScript AppHosts |
+| `packages/cli` | `npx managed-copilot`: background sign-in, sessions, Copilot CLI attach, artifacts, schedules |
+| `platform/gateway` | Authenticated gateway: admission, routing, session ledger, platform services, operator API |
+| `platform/console` | The operator console the gateway serves at `/console` |
+| `platform/sandbox`, `platform/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
+| `deploy/azure` | The Azure integration for `aspire deploy`: hosting, the gateway's lease supervisor, and qualification probes |
+| `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
+| `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
+| `demos/software-factory`, `demos/assistant` | The AI software factory and the long-running assistant |
+| `docs/` | Spec, architecture, deployment, and the video tour |
 
 ## Develop
 

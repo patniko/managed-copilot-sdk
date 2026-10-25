@@ -200,6 +200,73 @@ describe("SandboxService lifecycle", () => {
     expect(provider.removed).toEqual(["sbx_ffffffffffffffffffffffff"]);
   });
 
+  it("shows operators sandboxes and the backend without keys, tokens, placeholders, or variables", async () => {
+    const running = sandbox("running", { running: true });
+    store.update(running.sessionId, { image: "managed-copilot-sandbox:abc", imageId: "sha256:abc" });
+    sandbox("stopped");
+    const sandboxes = createService();
+    await sandboxes.probe();
+    const status = await sandboxes.operatorStatus();
+    expect(status).toMatchObject({ provider: "fake", available: true, checkedAt: expect.any(String), defaultIdleSeconds: 1, facts: [], counts: { running: 1, stopped: 1 } });
+    const listed = sandboxes.operatorSandboxes();
+    expect(listed).toHaveLength(2);
+    expect(sandboxes.operatorSandboxes({ state: "running" })).toEqual([
+      expect.objectContaining({ id: running.id, sessionId: running.sessionId, ownerId: 1, environment: "coder", state: "running", image: "managed-copilot-sandbox:abc", setup: SUCCEEDED }),
+    ]);
+    const text = JSON.stringify(listed);
+    for (const secret of ["mcrt_placeholder", '"key"', '"token"', "workloadEnv", "runtimeToken"]) expect(text, secret).not.toContain(secret);
+    provider.reachable = false;
+    expect(await sandboxes.probe()).toBe(false);
+    expect(await sandboxes.operatorStatus()).toMatchObject({ available: false, lastError: "The fake backend is down." });
+  });
+
+  it("stops an idle sandbox for an operator, and refuses while it works", async () => {
+    const row = sandbox("running", { running: true });
+    let busy = true;
+    services["actions"] = { hasOpenActions: () => busy };
+    const sandboxes = createService();
+    await expect(sandboxes.operatorStop(row.sessionId, "operator @alice")).rejects.toMatchObject({ code: "session_busy" });
+    expect(provider.stopped).toEqual([]);
+    busy = false;
+    expect(await sandboxes.operatorStop(row.sessionId, "operator @alice")).toEqual({ sandboxId: row.id, stopped: true });
+    expect(provider.stopped).toEqual([row.id]);
+    await expect(sandboxes.operatorStop(row.sessionId, "operator @alice")).rejects.toMatchObject({ code: "conflict" });
+    await expect(sandboxes.operatorStop("00000000-0000-0000-0000-999999999999", "operator @alice")).rejects.toMatchObject({ code: "not_found" });
+  });
+
+  it("refuses an operator's stop while core uses the session's runtime, or right after it did", async () => {
+    vi.useFakeTimers();
+    const row = sandbox("running", { running: true });
+    let activity: { busy?: string; lastRequestAt?: number } | undefined = { busy: "a call to its runtime is in progress", lastRequestAt: Date.now() };
+    services["sessions"] = { get: () => ({ id: row.sessionId, ownerId: 1 }), subscribe: () => () => undefined, runtimeActivity: () => activity };
+    const sandboxes = createService();
+    await expect(sandboxes.operatorStop(row.sessionId, "operator @alice")).rejects.toMatchObject({ code: "session_busy", message: expect.stringContaining("a call to its runtime is in progress") });
+    // The call was answered a moment ago: the turn it started may not have reported itself yet.
+    activity = { lastRequestAt: Date.now() };
+    await expect(sandboxes.operatorStop(row.sessionId, "operator @alice")).rejects.toMatchObject({ code: "session_busy", message: expect.stringContaining("moments ago") });
+    expect(provider.stopped).toEqual([]);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await sandboxes.operatorStop(row.sessionId, "operator @alice")).toEqual({ sandboxId: row.id, stopped: true });
+    expect(provider.stopped).toEqual([row.id]);
+  });
+
+  it("shows operators what setup ran and how it ended, never what it printed", async () => {
+    const row = sandbox("running", { running: true });
+    const failed: SandboxSetupRecord = {
+      state: "failed",
+      steps: [{ kind: "command", name: "curl https://u:PASSWORD-IN-COMMAND@files.example.com/data", state: "failed", exitCode: 1, output: "PRIVATE-FILE-CONTENT" }],
+      resolved: {},
+      files: [{ path: "data.csv", size: 12, sha256: "abc" }],
+      error: "Setup command 1 failed with exit code 1.",
+    };
+    store.update(row.sessionId, { state: "failed", setup: failed, errorCode: "setup_failed", error: "Setup command 1 failed with exit code 1.\nLast output:\nPRIVATE-FILE-CONTENT" });
+    const [view] = createService().operatorSandboxes({ sessionId: row.sessionId });
+    const text = JSON.stringify(view);
+    for (const secret of ["PRIVATE-FILE-CONTENT", "PASSWORD-IN-COMMAND"]) expect(text, secret).not.toContain(secret);
+    expect(view!.setup).toMatchObject({ state: "failed", steps: [{ kind: "command", state: "failed", exitCode: 1, name: "curl https://***@files.example.com/data" }], files: [{ path: "data.csv" }] });
+    expect(view!.error).toEqual({ code: "setup_failed", message: "Setup command 1 failed with exit code 1.\n(Command output is not shown to operators.)" });
+  });
+
   it("finishes a stop that a gateway restart interrupted", async () => {
     const row = sandbox("stopping", { running: true });
     await createService().reconcile();

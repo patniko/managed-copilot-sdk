@@ -14,6 +14,7 @@ import { z } from "zod";
 import { transaction, type Database } from "../../../db.js";
 import type { Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
+import { redactText } from "../../../redaction.js";
 import type { ActionChange } from "../actions/service.js";
 import type { ActionsService, CredentialsService, DurableSessionView, DurableSessionsPort, PlatformEventMeta, RuntimeSessionEvent, SchedulesService } from "../contract.js";
 import { canonicalJson, deterministicUuid, incarnationOf, isGone, newId, parseJson, sameIncarnation } from "../ids.js";
@@ -30,6 +31,14 @@ import {
   type ScheduleRow,
   type SessionConfig,
 } from "./store.js";
+
+/** A schedule as the operator console shows it, with its owner (the prompt only for AppHost schedules). */
+export type ScheduleOperatorRecord = Omit<ScheduleInfo, "prompt"> & { readonly prompt?: string; readonly ownerId: number; readonly ownerLogin: string };
+
+/** How the reason of an operator's pause starts (spec section 16). */
+const OPERATOR_PAUSE = "Paused: an operator (@";
+/** How it ends when it took over the owner's own pause, which lifting the operator's pause restores. */
+const OWNER_PAUSED_TOO = " Its owner had paused it too.";
 
 export interface SchedulesOptions {
   readonly tickIntervalMs: number;
@@ -194,6 +203,9 @@ export class DurableSchedules implements SchedulesService {
   #ticking: Promise<void> | undefined;
   #lastLedgerCheck = 0;
   #targetsRepaired = false;
+  /** The latest scheduler pass and its failure, if it failed (operator console). */
+  #lastTickAt: number | undefined;
+  #lastTickError: string | undefined;
 
   constructor(deps: SchedulesDeps) {
     this.#deps = deps;
@@ -237,9 +249,21 @@ export class DurableSchedules implements SchedulesService {
   /** One scheduler pass: materialize due occurrences, enforce run lifetimes, and dispatch queued runs. */
   tick(): Promise<void> {
     if (!this.#ticking) {
-      this.#ticking = this.#tickOnce().finally(() => {
-        this.#ticking = undefined;
-      });
+      this.#ticking = this.#tickOnce()
+        .then(
+          () => {
+            this.#lastTickAt = this.#now();
+            this.#lastTickError = undefined;
+          },
+          (error: unknown) => {
+            this.#lastTickAt = this.#now();
+            this.#lastTickError = describeError(error);
+            throw error;
+          },
+        )
+        .finally(() => {
+          this.#ticking = undefined;
+        });
     }
     return this.#ticking;
   }
@@ -399,6 +423,106 @@ export class DurableSchedules implements SchedulesService {
     return this.#store.listByOwner(ownerId).map((row) => this.#info(row));
   }
 
+  // ---------------------------------------------------------------------------------------------------------
+  // Operator views and actions (the operator module authorizes callers)
+  // ---------------------------------------------------------------------------------------------------------
+
+  /** Schedules of every owner (deleted ones left out). A person's or an agent's prompt is never included. */
+  operatorSchedules(query: { readonly ownerId?: number; readonly state?: ScheduleInfo["state"]; readonly targetSessionId?: string } = {}): ScheduleOperatorRecord[] {
+    return this.#store
+      .listAll()
+      .filter((row) => query.ownerId === undefined || row.owner_id === query.ownerId)
+      .filter((row) => query.state === undefined || row.state === query.state)
+      .filter((row) => query.targetSessionId === undefined || row.target_session_id === query.targetSessionId)
+      .map((row) => this.#operatorRecord(row));
+  }
+
+  operatorRuns(scheduleId: string): { readonly schedule: ScheduleOperatorRecord; readonly runs: ScheduleRun[] } {
+    const row = this.#store.schedule(scheduleId);
+    if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
+    const runs = this.#store.runsBySchedule(scheduleId).map(toScheduleRun);
+    return { schedule: this.#operatorRecord(row), runs: runs.map((run) => (run.reason ? { ...run, reason: redactText(run.reason) } : run)) };
+  }
+
+  /**
+   * An operator's pause, with a reason its owner sees. Like a platform pause, it blocks every run (manual ones too)
+   * until the schedule is resumed, and it takes over the owner's own pause (whose missing reason lets manual runs
+   * through), remembering it: lifting the operator's pause then leaves the owner's in place. A platform pause is kept.
+   */
+  operatorPause(scheduleId: string, operator: string, reason?: string): ScheduleOperatorRecord {
+    const row = this.#store.schedule(scheduleId);
+    if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
+    if (row.state === "paused" && row.paused_reason) {
+      throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is already paused (${row.paused_reason.replace(/^Paused: /, "")}).`);
+    }
+    const detail = reason?.trim() ? ` (${reason.trim().slice(0, 200)})` : "";
+    const text = `${OPERATOR_PAUSE}${operator}) paused this schedule${detail}.${row.state === "paused" ? OWNER_PAUSED_TOO : ""}`;
+    const updated = this.#deps.db
+      .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND state = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL")
+      .run(text, this.#now(), row.id, row.state);
+    if (Number(updated.changes) !== 1) throw new ManagedCopilotError("conflict", `Schedule "${row.name}" changed while it was being paused; refresh and try again.`);
+    this.#log.info("Schedule paused by an operator", { scheduleId, operator, ownerPaused: row.state === "paused" });
+    return this.#operatorRecord(this.#store.schedule(scheduleId)!);
+  }
+
+  /**
+   * Lifts an operator's pause, and only that: a pause by the owner or by the platform (a revoked sign-in, a definition
+   * the owner has not approved) is the owner's to lift. Resuming makes the owner's checks (background sign-in, target
+   * session, policy); an owner's pause the operator's took over stays.
+   */
+  operatorResume(scheduleId: string): ScheduleOperatorRecord {
+    const row = this.#store.schedule(scheduleId);
+    if (!row) throw new ManagedCopilotError("not_found", `Schedule ${scheduleId} was not found`);
+    if (row.state === "active") throw new ManagedCopilotError("conflict", `Schedule "${row.name}" is not paused.`);
+    if (!row.paused_reason?.startsWith(OPERATOR_PAUSE)) {
+      const by = row.paused_reason ? `the platform (${row.paused_reason.replace(/^Paused: /, "")})` : `its owner, @${row.owner_login}`;
+      throw new ManagedCopilotError("conflict", `Schedule "${row.name}" was paused by ${by}; only its owner can resume it.`);
+    }
+    if (row.paused_reason.endsWith(OWNER_PAUSED_TOO)) {
+      const lifted = this.#deps.db
+        .prepare("UPDATE durable_schedules SET paused_reason = NULL, updated_at = ? WHERE id = ? AND state = 'paused' AND paused_reason = ? AND deleted_at IS NULL")
+        .run(this.#now(), row.id, row.paused_reason);
+      if (Number(lifted.changes) !== 1) throw new ManagedCopilotError("conflict", `Schedule "${row.name}" changed while it was being resumed; refresh and try again.`);
+      this.#log.info("Operator pause lifted; the owner's pause stays", { scheduleId });
+      return this.#operatorRecord(this.#store.schedule(scheduleId)!);
+    }
+    try {
+      this.resume(row.owner_id, scheduleId);
+    } catch (error) {
+      if (isManagedCopilotError(error, "authentication_required")) {
+        throw new ManagedCopilotError("conflict", `@${row.owner_login} has no active background sign-in, so this schedule cannot run. They need to run \`npx managed-copilot login\` first.`);
+      }
+      throw error;
+    }
+    return this.#operatorRecord(this.#store.schedule(scheduleId)!);
+  }
+
+  schedulerStatus(): { running: boolean; tickIntervalMs: number; lastTickAt?: string; lastTickError?: string; nextDueAt?: string; queuedRuns: number; activeRuns: number } {
+    const next = this.#store.nextDueAt();
+    return {
+      running: this.#timer !== undefined,
+      tickIntervalMs: this.#options.tickIntervalMs,
+      ...(this.#lastTickAt !== undefined ? { lastTickAt: new Date(this.#lastTickAt).toISOString() } : {}),
+      ...(this.#lastTickError ? { lastTickError: this.#lastTickError } : {}),
+      ...(next !== undefined ? { nextDueAt: new Date(next).toISOString() } : {}),
+      queuedRuns: this.#store.runsByStatus(["queued"]).length,
+      activeRuns: this.#store.runsByStatus(ACTIVE_RUN_STATUSES).length,
+    };
+  }
+
+  #operatorRecord(row: ScheduleRow): ScheduleOperatorRecord {
+    const { prompt, ...info } = this.#info(row);
+    // Reasons can carry what a failed run printed (sandbox setup output): operators see them redacted.
+    return {
+      ...info,
+      ...(info.pausedReason ? { pausedReason: redactText(info.pausedReason) } : {}),
+      ...(info.lastRun?.reason ? { lastRun: { ...info.lastRun, reason: redactText(info.lastRun.reason) } } : {}),
+      ...(row.created_by === "apphost" && typeof prompt === "string" ? { prompt: redactText(prompt) } : {}),
+      ownerId: row.owner_id,
+      ownerLogin: row.owner_login,
+    };
+  }
+
   listForSession(ownerId: number, sessionId: string): ScheduleInfo[] {
     // Only schedules that continue this session, not an earlier deleted session that had the same ID.
     const view = this.#deps.sessions()?.get(sessionId);
@@ -421,6 +545,10 @@ export class DurableSchedules implements SchedulesService {
     const row = this.#owned(ownerId, scheduleId);
     // Pausing again never clears a platform pause's reason: that reason blocks every run until the owner resumes.
     if (row.state !== "paused") this.#store.updateSchedule(row.id, { state: "paused", paused_reason: reason ?? null }, this.#now());
+    // Under an operator's pause the owner's own pause is remembered, so lifting the operator's pause leaves it in place.
+    else if (row.paused_reason?.startsWith(OPERATOR_PAUSE) && !row.paused_reason.endsWith(OWNER_PAUSED_TOO)) {
+      this.#store.updateSchedule(row.id, { paused_reason: reason ?? `${row.paused_reason}${OWNER_PAUSED_TOO}` }, this.#now());
+    }
     this.#log.info("Schedule paused", { scheduleId, reason });
     return this.#info(this.#store.schedule(row.id)!);
   }
@@ -477,13 +605,16 @@ export class DurableSchedules implements SchedulesService {
     return toScheduleRun(this.#store.runByOccurrence(occurrenceId)!);
   }
 
-  /** Platform pauses also take over a person's pause (its null reason would let manual runs through). */
+  /**
+   * Platform pauses also take over a person's pause (its null reason would let manual runs through) and an operator's
+   * (which an operator could otherwise lift): only the owner can lift them.
+   */
   pauseAllForOwner(ownerId: number, reason: string): number {
     const result = this.#deps.db
       .prepare(
-        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL",
+        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE owner_id = ? AND (state = 'active' OR paused_reason IS NULL OR instr(paused_reason, ?) = 1) AND deleted_at IS NULL",
       )
-      .run(reason, this.#now(), ownerId);
+      .run(reason, this.#now(), ownerId, OPERATOR_PAUSE);
     return Number(result.changes);
   }
 
@@ -1233,12 +1364,15 @@ export class DurableSchedules implements SchedulesService {
 
   /**
    * A platform pause (safety, revoked sign-in, policy) blocks every run, so it also takes over a person's pause, whose
-   * null reason would still let manual runs through. An existing platform reason is kept.
+   * null reason would still let manual runs through, and an operator's, which an operator could lift without the
+   * owner. An existing platform reason is kept.
    */
   #pauseFor(schedule: ScheduleRow, reason: string): void {
     this.#deps.db
-      .prepare("UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND (state = 'active' OR paused_reason IS NULL) AND deleted_at IS NULL")
-      .run(reason, this.#now(), schedule.id);
+      .prepare(
+        "UPDATE durable_schedules SET state = 'paused', paused_reason = ?, updated_at = ? WHERE id = ? AND (state = 'active' OR paused_reason IS NULL OR instr(paused_reason, ?) = 1) AND deleted_at IS NULL",
+      )
+      .run(reason, this.#now(), schedule.id, OPERATOR_PAUSE);
   }
 
   #owned(ownerId: number, scheduleId: string): ScheduleRow {

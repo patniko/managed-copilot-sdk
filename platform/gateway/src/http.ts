@@ -74,6 +74,18 @@ interface Route<T> {
   readonly auth: RouteAuth;
 }
 
+interface PrefixRoute {
+  readonly segments: readonly string[];
+  readonly methods: ReadonlySet<string>;
+  readonly handler: Handler;
+  readonly auth: RouteAuth;
+}
+
+/** Traffic the operator console charts: the platform API, not health checks, the console, or the operator API. */
+function countsAsTraffic(path: string): boolean {
+  return path.startsWith("/v1/") && !path.startsWith("/v1/operator/");
+}
+
 const PLATFORM_KEY_HEADER = "x-managed-copilot-platform-key";
 const MAX_JSON_BYTES = 1024 * 1024;
 
@@ -162,9 +174,18 @@ async function resolvePrincipal(app: GatewayApp, req: IncomingMessage, auth: Rou
 
 export class Router {
   readonly #routes: Route<Handler>[] = [];
+  readonly #prefixes: PrefixRoute[] = [];
 
   add(method: string, path: string, handler: Handler, options: { auth?: RouteAuth } = {}): void {
     this.#routes.push({ method: method.toUpperCase(), segments: splitPath(path), handler, auth: options.auth ?? "user" });
+  }
+
+  /**
+   * Serves `path` and everything under it that no exact route matches (a single-page app). The handler gets the
+   * decoded remainder as `params["*"]` ("" for `path` itself).
+   */
+  prefix(path: string, handler: Handler, options: { auth?: RouteAuth; methods?: readonly string[] } = {}): void {
+    this.#prefixes.push({ segments: splitPath(path), methods: new Set((options.methods ?? ["GET", "HEAD"]).map((method) => method.toUpperCase())), handler, auth: options.auth ?? "user" });
   }
 
   get(path: string, handler: Handler, options?: { auth?: RouteAuth }): void {
@@ -182,8 +203,11 @@ export class Router {
 
   async handle(app: GatewayApp, req: IncomingMessage, res: ServerResponse): Promise<void> {
     let url = new URL("http://gateway.local/");
+    let traffic = false;
     try {
       url = parseUrl(req);
+      traffic = countsAsTraffic(url.pathname);
+      if (traffic) app.metrics.increment("http.requests");
       const segments = splitPath(url.pathname);
       let pathMatched = false;
       let route: Route<Handler> | undefined;
@@ -196,6 +220,22 @@ export class Router {
           route = candidate;
           params = matched;
           break;
+        }
+      }
+      if (!route && !pathMatched) {
+        const prefix = this.#prefixes.find((candidate) => candidate.segments.every((segment, index) => segments[index] === segment));
+        if (prefix) {
+          pathMatched = true;
+          if (prefix.methods.has(req.method ?? "")) {
+            let rest: string;
+            try {
+              rest = segments.slice(prefix.segments.length).map((segment) => decodeURIComponent(segment)).join("/");
+            } catch {
+              throw new ManagedCopilotError("invalid_request", "The request path is not valid URL encoding");
+            }
+            route = { method: req.method ?? "GET", segments: prefix.segments, handler: prefix.handler, auth: prefix.auth };
+            params = { "*": rest };
+          }
         }
       }
       if (!route || !params) {
@@ -227,6 +267,7 @@ export class Router {
       };
       const result = await route.handler(ctx);
       if (res.headersSent || res.writableEnded) return;
+      if (traffic && status >= 500) app.metrics.increment("http.errors");
       if (result === undefined) {
         res.writeHead(status === 200 ? 204 : status);
         res.end();
@@ -236,6 +277,7 @@ export class Router {
     } catch (error) {
       const managed = toManagedError(error);
       if (managed.code === "internal") app.log.error("Unhandled request error", { method: req.method, path: url.pathname, error: (error as Error)?.stack ?? String(error) });
+      if (traffic && managed.status >= 500) app.metrics.increment("http.errors");
       if (!res.headersSent) {
         const retryAfter = retryAfterSeconds(managed);
         if (retryAfter !== undefined) res.setHeader("retry-after", String(retryAfter));

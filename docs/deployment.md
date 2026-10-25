@@ -127,6 +127,13 @@ Connect to it exactly as you would locally:
 const copilot = await ManagedCopilot.connect({ url: "https://copilot.<environment-domain>" }); // or MANAGED_COPILOT_URL
 ```
 
+To watch the deployment, name its operators (`aspire secret set Parameters:copilot-operator-users your-login`, or
+`operators` in `addManagedCopilot`), deploy, and open the operator console:
+
+```powershell
+npx managed-copilot console --url https://copilot.<environment-domain>
+```
+
 Redeploying (`aspire deploy` again) builds a new revision of each app; the gateway's lease hands its data volume to the
 new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again without the cached deployment choices
 (it asks for them again).
@@ -136,6 +143,7 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | Setting | Required | Meaning |
 | --- | --- | --- |
 | `Parameters:<name>-github-users`, `Parameters:<name>-github-orgs` | One of them, unless the AppHost declares `access` | GitHub accounts or organizations allowed to use the platform. |
+| `Parameters:<name>-operator-users`, `Parameters:<name>-operator-orgs` | No | GitHub accounts or organizations that may open the operator console and operator API (spec section 16), added to the AppHost's `operators`. Without any, the deployed console stays off. Operators must also be allowed to use the platform. |
 | `Parameters:app-github-token` | When the AppHost publishes apps | Secret. The GitHub token the published apps use (`MANAGED_COPILOT_GITHUB_TOKEN`). |
 | `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the apps' ingress (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it. The platform subnet is always allowed (webhooks). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |
@@ -408,6 +416,8 @@ identities. Your AppHost's user secrets stay on your machine.
 ## Troubleshooting
 
 - **"has no access rules"**: set `Parameters:<name>-github-users` / `-github-orgs`, or add `access` to the AppHost.
+- **"This deployment names no operators, so its operator console is off"**: set `Parameters:<name>-operator-users` /
+  `-operator-orgs` (or add `operators` to the AppHost) and deploy again.
 - **"acts as your GitHub account, so its public address must be restricted"**: this machine's public address could not
   be detected; set `Parameters:app-allowed-ips`.
 - **An app answers `403 RBAC: access denied`** (some or all requests): its ingress allowlist does not include the

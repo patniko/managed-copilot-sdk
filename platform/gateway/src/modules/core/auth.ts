@@ -85,6 +85,8 @@ export class GitHubAuthenticator implements Authenticator {
   readonly #invalidatedAt = new Map<string, number>();
   readonly #credentials = new Map<number, LiveCredential>();
   readonly #listeners = new Set<(principal: Principal) => void>();
+  /** `satisfies` answers per token and rule set, cached like verifications. */
+  readonly #ruleCache = new Map<string, { readonly allowed: boolean; readonly expiresAt: number }>();
 
   constructor(options: GitHubAuthOptions) {
     this.#options = options;
@@ -180,6 +182,7 @@ export class GitHubAuthenticator implements Authenticator {
     this.#cache.delete(key);
     this.#inflight.delete(key);
     this.#invalidatedAt.set(key, now);
+    for (const ruleKey of this.#ruleCache.keys()) if (ruleKey.startsWith(`${key}|`)) this.#ruleCache.delete(ruleKey);
     if (this.#invalidatedAt.size > 1000) {
       for (const [entry, at] of this.#invalidatedAt) if (now - at > 10 * 60_000) this.#invalidatedAt.delete(entry);
     }
@@ -192,6 +195,53 @@ export class GitHubAuthenticator implements Authenticator {
   #current(key: string, startedAt: number): boolean {
     const at = this.#invalidatedAt.get(key);
     return at === undefined || at < startedAt;
+  }
+
+  /**
+   * Whether a verified principal matches a rule set other than the access rules (the AppHost's `operators`): a named
+   * login, or a member of a named organization. Membership is checked with the principal's own token, like the access
+   * rules, and the answer is cached as long as a verification. Empty rules match nobody. GitHub outages fail with
+   * `upstream_unavailable`, never "not a member"; a token GitHub rejects fails with `authentication_required`.
+   */
+  async satisfies(principal: Principal, rules: AccessRules): Promise<boolean> {
+    const users = rules.githubUsers ?? [];
+    const orgs = rules.githubOrgs ?? [];
+    if (users.some((user) => user.toLowerCase() === principal.login.toLowerCase())) return true;
+    if (orgs.length === 0) return false;
+    const fingerprint = tokenFingerprint(principal.token);
+    const key = `${fingerprint}|${principal.accountId}|${[...new Set(orgs.map((org) => org.toLowerCase()))].sort().join(",")}`;
+    const startedAt = Date.now();
+    const cached = this.#ruleCache.get(key);
+    if (cached && cached.expiresAt > startedAt) return cached.allowed;
+    const deadline = startedAt + (this.#options.deadlineMs ?? GITHUB_DEADLINE_MS);
+    let allowed = false;
+    try {
+      for (const org of orgs) {
+        const response = await this.#get(`/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(principal.login)}`, principal.token, deadline, { json: false });
+        if (response.status === 204) {
+          allowed = true;
+          break;
+        }
+        if (response.status === 401) {
+          this.invalidate(principal.token);
+          throw new ManagedCopilotError("authentication_required", "GitHub rejected this token. Sign in again (for example `gh auth login`) and retry.");
+        }
+        if (response.status >= 500) throw new GitHubUnavailable(`GitHub returned HTTP ${response.status} for an organization membership check`);
+      }
+    } catch (error) {
+      if (!(error instanceof GitHubUnavailable)) throw error;
+      this.#options.log.warn("GitHub is unreachable while checking organization membership", { error: error.message });
+      throw new ManagedCopilotError("upstream_unavailable", "GitHub is unreachable from the gateway right now, so organization membership cannot be checked. Retry shortly.", {
+        upstream: "github",
+        retryAfterSeconds: error.retryAfterSeconds ?? DEFAULT_RETRY_AFTER_SECONDS,
+      });
+    }
+    if (this.#current(fingerprint, startedAt)) {
+      const now = Date.now();
+      this.#ruleCache.set(key, { allowed, expiresAt: now + (this.#options.cacheTtlMs ?? 5 * 60_000) });
+      if (this.#ruleCache.size > 1000) for (const [entry, value] of this.#ruleCache) if (value.expiresAt <= now) this.#ruleCache.delete(entry);
+    }
+    return allowed;
   }
 
   async #verify(token: string, key: string): Promise<Principal> {

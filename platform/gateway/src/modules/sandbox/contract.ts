@@ -216,6 +216,11 @@ export interface SandboxSessionView {
 export interface SandboxSessionsPort {
   get(sessionId: string): SandboxSessionView | undefined;
   subscribe(listener: (sessionId: string, event: SandboxRuntimeEvent) => void): () => void;
+  /**
+   * How core is using the session's runtime (an operator's stop refuses while it is): `busy` names work in progress,
+   * and `lastRequestAt` is when a call to the runtime last started or settled.
+   */
+  runtimeActivity?(sessionId: string): { readonly busy?: string; readonly lastRequestAt?: number } | undefined;
 }
 
 /** From core: `events`. */

@@ -39,7 +39,7 @@ import {
 } from "../contract.js";
 import { canonicalJson, hashSecret, incarnationOf, isGone, newId, parseJson, toIso } from "../ids.js";
 import { mintCapabilityToken, verifyCapabilityToken } from "./capability.js";
-import { ActionStore, ANSWERED_STATES, OPEN_STATES, OWNED_STATES, runtimeRequestId, toPendingAction, type ActionRow, type DeliveryAttempt, type Outcome } from "./store.js";
+import { ActionStore, ANSWERED_STATES, OPEN_STATES, OWNED_STATES, runtimeRequestId, toOperatorRecord, toPendingAction, type ActionOperatorRecord, type ActionRow, type DeliveryAttempt, type Outcome } from "./store.js";
 
 export interface ActionsOptions {
   /** Answer deadline for every action (spec: proposed 24 hours). */
@@ -770,6 +770,27 @@ export class DurableActions implements ActionsService {
     const incarnation = options.incarnation ?? this.#current(sessionId)?.incarnation;
     if (incarnation === undefined) return [];
     return this.#store.listBySession(sessionId, incarnation, options.open ? OPEN_STATES : undefined).map(toPendingAction);
+  }
+
+  /**
+   * Actions of every owner for the operator console, newest first: metadata only (never arguments, payloads,
+   * results, or claim tokens). `state`: `open` (default), `attention` (needs reconciliation), `all`, or one state.
+   */
+  operatorActions(query: { readonly state?: string; readonly sessionId?: string; readonly incarnation?: string; readonly limit?: number } = {}): ActionOperatorRecord[] {
+    const state = query.state ?? "open";
+    const states: readonly ActionState[] | undefined = state === "open" ? OPEN_STATES : state === "attention" ? ["needs_reconciliation"] : state === "all" ? undefined : [state as ActionState];
+    return this.#store
+      .listForOperator({
+        ...(states ? { states } : {}),
+        ...(query.sessionId ? { sessionId: query.sessionId } : {}),
+        ...(query.incarnation ? { incarnation: query.incarnation } : {}),
+        ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      })
+      .map(toOperatorRecord);
+  }
+
+  operatorActionCounts(): Partial<Record<ActionState, number>> {
+    return this.#store.countByState();
   }
 
   /**

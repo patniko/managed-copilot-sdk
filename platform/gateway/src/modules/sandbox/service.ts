@@ -15,12 +15,16 @@ import {
   type EnvironmentConfig,
   type ErrorCode,
   type FileEntry,
+  type InfraFact,
+  type OperatorSandbox,
   type SandboxInfo,
   type SandboxSetupPlan,
   type SandboxSetupRecord,
+  type SandboxState,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
 import type { Logger } from "../../log.js";
+import { OUTPUT_TAIL_MARKER, redactText } from "../../redaction.js";
 import { SandboxAgentClient } from "./agent-client.js";
 import type { ArtifactService } from "./artifacts.js";
 import { InferenceBroker, isProviderTaken } from "./broker.js";
@@ -93,7 +97,20 @@ function toManaged(error: unknown, fallback: ErrorCode = "internal"): ManagedCop
 /** Appends the last lines of a failed step's (already redacted) output; clients may see only the error message. */
 function withOutputTail(message: string, output: string | undefined): string {
   const lines = (output ?? "").trim().split("\n").slice(-8).join("\n").slice(-800).trim();
-  return lines ? `${message}\nLast output:\n${lines}` : message;
+  // The marker lets operator views leave the output out: it is the session owner's to see.
+  return lines ? `${message}${OUTPUT_TAIL_MARKER}${lines}` : message;
+}
+
+/** How long a sandbox must have been quiet before an operator may stop it. */
+const OPERATOR_STOP_QUIET_MS = 5_000;
+
+/** A setup record as operators see it: what ran and how it ended, never what it printed. */
+function operatorSetup(setup: SandboxSetupRecord): SandboxSetupRecord {
+  return {
+    ...setup,
+    steps: setup.steps.map(({ output: _output, ...step }) => ({ ...step, name: redactText(step.name) })),
+    ...(setup.error ? { error: redactText(setup.error) } : {}),
+  };
 }
 
 const SETUP_PATH = /^(?!\/)(?![A-Za-z]:)(?!.*(?:^|\/)\.\.(?:\/|$))[^\u0000-\u001f\u007f\\]+$/;
@@ -108,6 +125,9 @@ function base64Size(value: string): number | undefined {
 }
 
 const IMPORT_LIMITS = { files: 10_000, bytes: 1024 * 1024 * 1024 } as const;
+
+/** A sandbox as the operator console shows it, with its owner's account ID (the operator module adds the account). */
+export type SandboxOperatorRecord = Omit<OperatorSandbox, "owner"> & { readonly ownerId: number };
 
 /** Regular files of a runtime-state export (relative POSIX paths), skipping lock files; anything else is refused. */
 async function collectRuntimeState(directory: string): Promise<{ relative: string; absolute: string; size: number }[]> {
@@ -151,6 +171,9 @@ export class SandboxService implements SandboxesService {
   #artifacts: ArtifactService | undefined;
   /** Result of the latest backend readiness check; `/v1/info` advertises isolated placement only while true. */
   #available = false;
+  /** When the backend was last checked, and why it failed (operator console). */
+  #checkedAt: string | undefined;
+  #lastProbeError: string | undefined;
   /** The availability last logged (undefined until the first check finishes). */
   #reported: boolean | undefined;
   #probing: Promise<boolean> | undefined;
@@ -211,12 +234,126 @@ export class SandboxService implements SandboxesService {
   async #ready(): Promise<void> {
     try {
       await this.#options.provider.ready();
+      this.#checkedAt = new Date().toISOString();
+      this.#lastProbeError = undefined;
       this.#setAvailable(true);
     } catch (error) {
       const managed = toManaged(error, "capability_unavailable");
+      this.#checkedAt = new Date().toISOString();
+      this.#lastProbeError = managed.message;
       this.#setAvailable(false, managed.message);
       throw managed;
     }
+  }
+
+  // Operator views -----------------------------------------------------------------------------------------------
+
+  /** The backend's readiness, its non-secret facts, and sandbox counts (operator console). */
+  async operatorStatus(): Promise<{
+    provider: string;
+    available: boolean;
+    checkedAt?: string;
+    lastError?: string;
+    defaultIdleSeconds: number;
+    facts: readonly InfraFact[];
+    counts: Partial<Record<SandboxState, number>>;
+  }> {
+    const counts: Partial<Record<SandboxState, number>> = {};
+    for (const row of this.#options.store.all()) counts[row.state] = (counts[row.state] ?? 0) + 1;
+    let facts: readonly InfraFact[] = [];
+    try {
+      facts = (await this.#options.provider.describe?.()) ?? [];
+    } catch (error) {
+      facts = [{ label: "Details", value: `Unavailable: ${(error as Error).message}` }];
+    }
+    return {
+      provider: this.#options.provider.kind,
+      available: this.#available,
+      ...(this.#checkedAt ? { checkedAt: this.#checkedAt } : {}),
+      ...(this.#lastProbeError ? { lastError: redactText(this.#lastProbeError) } : {}),
+      defaultIdleSeconds: this.#options.defaultIdleSeconds,
+      facts,
+      counts,
+    };
+  }
+
+  /** Sandboxes of every owner, most recently updated first (never their keys, tokens, placeholders, or variables). */
+  operatorSandboxes(query: { readonly state?: SandboxState; readonly ownerId?: number; readonly sessionId?: string; readonly limit?: number } = {}): SandboxOperatorRecord[] {
+    const limit = Math.min(Math.max(query.limit ?? 200, 1), 1000);
+    return this.#options.store
+      .all()
+      .filter((row) => (query.state ? row.state === query.state : row.state !== "deleted"))
+      .filter((row) => query.ownerId === undefined || row.ownerId === query.ownerId)
+      .filter((row) => query.sessionId === undefined || row.sessionId === query.sessionId)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit)
+      .map((row) => this.#operatorRecord(row));
+  }
+
+  #operatorRecord(row: SandboxRow): SandboxOperatorRecord {
+    const live = this.#live.get(row.sessionId);
+    return {
+      id: row.id,
+      sessionId: row.sessionId,
+      ownerId: row.ownerId,
+      environment: row.environment,
+      size: row.size,
+      state: row.state,
+      ...(row.image ? { image: row.image } : {}),
+      ...(row.imageId ? { imageId: row.imageId } : {}),
+      network: row.network,
+      vaults: row.vaults,
+      ...(row.subnet ? { subnet: row.subnet } : {}),
+      idleTimeoutSeconds: row.idleTimeoutSeconds,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      ...(row.startedAt ? { startedAt: row.startedAt } : {}),
+      ...(row.stoppedAt ? { stoppedAt: row.stoppedAt } : {}),
+      ...(row.error ? { error: { ...(row.errorCode ? { code: row.errorCode } : {}), message: redactText(row.error) } } : {}),
+      ...(row.setup ? { setup: operatorSetup(row.setup) } : {}),
+      ...(live
+        ? {
+            activity: {
+              runtimes: live.runtimes.size,
+              busy: live.busy,
+              turnRunning: live.turnRunning,
+              lastActivityAt: new Date(live.lastActivity).toISOString(),
+              pending: live.pending.size,
+            },
+          }
+        : {}),
+    };
+  }
+
+  /**
+   * An operator's stop: like an idle stop, but without waiting out the idle timeout. Refused with `session_busy` while
+   * the session has work (a running turn, pending tool calls, open durable actions, a call core has in flight to its
+   * runtime, an attached Copilot CLI) or was active moments ago, so it never cuts a turn that is starting. The checks
+   * and the runtime's close run in one synchronous step. State volumes are kept; the session restarts the sandbox on
+   * next use.
+   */
+  operatorStop(sessionId: string, reason: string): Promise<{ readonly sandboxId: string; readonly stopped: boolean }> {
+    return this.#withLock(sessionId, async () => {
+      const row = this.#options.store.bySession(sessionId);
+      if (!row || row.state === "deleted" || row.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} has no sandbox`, { sessionId });
+      if (row.state !== "running") throw new ManagedCopilotError("conflict", `Sandbox ${row.id} is ${row.state}, not running.`, { sandboxId: row.id, state: row.state });
+      const live = this.#live.get(sessionId);
+      if (live && (live.turnRunning || live.pending.size > 0 || live.busy > 0)) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id} is working (a turn or a tool call is in progress). Stop it once the session is idle.`, { sandboxId: row.id });
+      }
+      if (live ? this.#durablyBusy(sessionId, live) : this.#hasOpenActions(sessionId)) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is waiting on actions (tool calls or prompts), or on a turn that was running when the gateway restarted. Stop it once the session is idle.`, { sandboxId: row.id });
+      }
+      const activity = this.#sessions()?.runtimeActivity?.(sessionId);
+      if (activity?.busy) throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is busy: ${activity.busy}. Stop it once the session is idle.`, { sandboxId: row.id });
+      // A turn the runtime accepted a moment ago may not have reported itself yet.
+      const lastActive = Math.max(live?.lastActivity ?? 0, activity?.lastRequestAt ?? 0);
+      if (Date.now() - lastActive < OPERATOR_STOP_QUIET_MS) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id} was in use moments ago. Try again in a few seconds, once the session is idle.`, { sandboxId: row.id });
+      }
+      await this.#stop(sessionId, reason);
+      return { sandboxId: row.id, stopped: this.#options.store.bySession(sessionId)?.state === "stopped" };
+    });
   }
 
   #agent(row: SandboxRow): SandboxAgentClient {
@@ -578,11 +715,21 @@ export class SandboxService implements SandboxesService {
       log: this.#log,
     });
     const deferredAgents = new Map<string, string>();
+    // Counted for the operator console's traffic view: model calls the gateway brokers for sandboxes.
+    const handlers = new Map(broker.handlers);
+    const start = handlers.get("llmInference.httpRequestStart");
+    if (start) {
+      handlers.set("llmInference.httpRequestStart", (params) => {
+        // Optional: test apps built without the gateway's metrics still broker.
+        this.#options.app.metrics?.increment("inference.requests");
+        return start(params);
+      });
+    }
     const runtime: SandboxRuntime = {
       sandboxId: row.id,
       stream,
       connectionToken: row.runtimeToken,
-      handlers: broker.handlers,
+      handlers,
       initialize: async (send) => {
         try {
           await broker.initialize(send);

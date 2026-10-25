@@ -1347,4 +1347,36 @@ describe("durable schedules", () => {
       expect(schedules.list(OWNER.accountId)[0]).toMatchObject({ state: "paused", lastRun: { status: "failed" } });
     });
   });
+
+  describe("operator pauses and views", () => {
+    it("show operators run reasons without the output a failure carried, while the owner sees it all", async () => {
+      const schedule = await schedules.create(OWNER, { name: "once", runAt: new Date(START + 60_000).toISOString(), environment: "chat", prompt: "p" });
+      now += 60_000;
+      await tick();
+      const [run] = schedules.runs(OWNER.accountId, schedule.id);
+      sessions.emit(run!.sessionId!, "session.error", { message: "setup failed\nLast output:\nPRIVATE-LINE", originatingMessageId: "msg-1" });
+      expect(schedules.runs(OWNER.accountId, schedule.id)[0]!.reason).toContain("PRIVATE-LINE");
+      const views = JSON.stringify([schedules.operatorSchedules(), schedules.operatorRuns(schedule.id)]);
+      expect(views).not.toContain("PRIVATE-LINE");
+      expect(schedules.operatorRuns(schedule.id).schedule.lastRun?.reason).toMatch(/setup failed\n\(Command output is not shown to operators\.\)$/);
+    });
+
+    it("never hide the owner's pause or a platform pause behind an operator's", async () => {
+      const schedule = await schedules.create(OWNER, { name: "daily", cron: "0 9 * * *", environment: "chat", prompt: "p" });
+      // The owner pauses during an operator's pause: lifting the operator's leaves the owner's.
+      schedules.operatorPause(schedule.id, "alice", "maintenance");
+      schedules.pause(OWNER.accountId, schedule.id);
+      expect(schedules.get(OWNER.accountId, schedule.id).pausedReason).toMatch(/^Paused: an operator \(@alice\) paused this schedule \(maintenance\)\. Its owner had paused it too\.$/);
+      expect(schedules.operatorResume(schedule.id)).toMatchObject({ state: "paused" });
+      expect(schedules.get(OWNER.accountId, schedule.id).pausedReason).toBeUndefined();
+      await expectCode(() => schedules.operatorResume(schedule.id), "conflict", /paused by its owner/);
+
+      // A platform pause takes over an operator's: only the owner lifts it, even once their sign-in works again.
+      schedules.operatorPause(schedule.id, "alice");
+      expect(schedules.pauseAllForOwner(OWNER.accountId, "Paused: Signed out with `managed-copilot logout`.")).toBe(1);
+      expect(schedules.get(OWNER.accountId, schedule.id).pausedReason).toBe("Paused: Signed out with `managed-copilot logout`.");
+      await expectCode(() => schedules.operatorResume(schedule.id), "conflict", /only its owner can resume it/);
+      expect(schedules.resume(OWNER.accountId, schedule.id)).toMatchObject({ state: "active" });
+    });
+  });
 });

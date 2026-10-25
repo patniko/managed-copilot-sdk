@@ -688,30 +688,55 @@ export class PolicyService {
   blocked(sessionId: string, limit = 50): BlockedEvent[] {
     const rows = this.#db
       .prepare("SELECT * FROM network_events WHERE session_id = ? ORDER BY id DESC LIMIT ?")
-      .all(sessionId, Math.max(1, Math.min(limit, EVENTS_PER_SESSION))) as {
-      id: number;
-      sandbox_id: string | null;
-      at: string;
-      reason: EgressBlockReason;
-      host: string | null;
-      port: number | null;
-      method: string | null;
-      path: string | null;
-      message: string;
-    }[];
-    return rows.map((row) => ({
-      id: row.id,
-      sandboxId: row.sandbox_id ?? "",
-      sessionId,
-      at: row.at,
-      reason: row.reason,
-      message: row.message,
-      ...(row.host ? { host: row.host } : {}),
-      ...(row.port ? { port: row.port } : {}),
-      ...(row.method ? { method: row.method } : {}),
-      ...(row.path ? { path: row.path } : {}),
-    }));
+      .all(sessionId, Math.max(1, Math.min(limit, EVENTS_PER_SESSION))) as unknown as BlockedRow[];
+    return rows.map(toBlockedEvent);
   }
+
+  /** Recent blocked attempts of every session, newest first (operator console). */
+  recentBlocked(limit = 100): BlockedEvent[] {
+    const rows = this.#db.prepare("SELECT * FROM network_events ORDER BY id DESC LIMIT ?").all(Math.max(1, Math.min(limit, 1000))) as unknown as BlockedRow[];
+    return rows.map(toBlockedEvent);
+  }
+
+  /** How many blocked attempts were recorded at or after `since` (an ISO timestamp). */
+  blockedSince(since: string): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS n FROM network_events WHERE at >= ?").get(since) as { n: number };
+    return Number(row.n);
+  }
+
+  /** Sandboxes registered with the egress proxy. */
+  registrationCount(): number {
+    const row = this.#db.prepare("SELECT COUNT(*) AS n FROM network_sandboxes").get() as { n: number };
+    return Number(row.n);
+  }
+}
+
+interface BlockedRow {
+  id: number;
+  session_id: string | null;
+  sandbox_id: string | null;
+  at: string;
+  reason: EgressBlockReason;
+  host: string | null;
+  port: number | null;
+  method: string | null;
+  path: string | null;
+  message: string;
+}
+
+function toBlockedEvent(row: BlockedRow): BlockedEvent {
+  return {
+    id: row.id,
+    sandboxId: row.sandbox_id ?? "",
+    sessionId: row.session_id ?? "",
+    at: row.at,
+    reason: row.reason,
+    message: row.message,
+    ...(row.host ? { host: row.host } : {}),
+    ...(row.port ? { port: row.port } : {}),
+    ...(row.method ? { method: row.method } : {}),
+    ...(row.path ? { path: row.path } : {}),
+  };
 }
 
 function canonicalIp(value: string): string {

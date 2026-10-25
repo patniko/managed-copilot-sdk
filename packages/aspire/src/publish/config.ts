@@ -104,6 +104,18 @@ export function applyAccessRules(config: ManagedCopilotConfig, deploy: DeployAcc
   );
 }
 
+/**
+ * Who may operate a deployment (spec section 16): deploy-time settings (`Parameters:<name>-operator-users` /
+ * `-operator-orgs`) add to the AppHost's `operators`. A deployment that names none keeps its operator console off.
+ */
+export function applyOperators(config: ManagedCopilotConfig, deploy: DeployAccess): ManagedCopilotConfig {
+  const githubUsers = merge(config.operators?.githubUsers, deploy.githubUsers);
+  const githubOrgs = merge(config.operators?.githubOrgs, deploy.githubOrgs);
+  const { operators: _named, ...rest } = config;
+  if (!githubUsers && !githubOrgs) return rest;
+  return { ...rest, operators: { ...(githubUsers ? { githubUsers } : {}), ...(githubOrgs ? { githubOrgs } : {}) } };
+}
+
 function isLoopback(url: URL): boolean {
   const host = url.hostname.toLowerCase();
   return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1" || host.endsWith(".localhost");

@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
-import { APPHOST_DIR_IN_IMAGE, AzurePublishError, applyAccessRules, listSetting, prepareAzureConfig, rewriteWebhooks } from "../src/publish/config.js";
+import { APPHOST_DIR_IN_IMAGE, AzurePublishError, applyAccessRules, applyOperators, listSetting, prepareAzureConfig, rewriteWebhooks } from "../src/publish/config.js";
 import { expr } from "../src/publish/expressions.js";
 import { writeGatewayBuildFiles } from "../src/publish/gateway-image.js";
 import { EGRESS_BICEP } from "../src/publish/egress.js";
@@ -95,6 +95,17 @@ describe("applyAccessRules", () => {
     const merged = applyAccessRules(config({ access: { githubUsers: ["octocat"] } }), { githubUsers: listSetting(" octocat, hubot\nmona "), githubOrgs: listSetting("contoso") });
     expect(merged.access).toEqual({ githubUsers: ["octocat", "hubot", "mona"], githubOrgs: ["contoso"] });
     expect(applyAccessRules(config({ access: undefined }), { githubUsers: ["patniko"] }).access).toEqual({ githubUsers: ["patniko"] });
+  });
+});
+
+describe("applyOperators", () => {
+  it("adds deploy-time operators to the AppHost's and leaves the console off when none are named", () => {
+    const merged = applyOperators(config({ operators: { githubUsers: ["octocat"] } }), { githubUsers: listSetting("octocat, hubot"), githubOrgs: listSetting("contoso") });
+    expect(merged.operators).toEqual({ githubUsers: ["octocat", "hubot"], githubOrgs: ["contoso"] });
+    expect(applyOperators(config({ operators: undefined }), { githubOrgs: ["contoso"] }).operators).toEqual({ githubOrgs: ["contoso"] });
+    const none = applyOperators(config({ operators: { githubUsers: [] } }), {});
+    expect(none).not.toHaveProperty("operators");
+    expect(none.access).toEqual(config({}).access);
   });
 });
 

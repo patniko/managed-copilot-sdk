@@ -8,6 +8,18 @@ export class UsageError extends Error {
   }
 }
 
+/** A failed command with its own hint (exit code 1, unlike usage errors). */
+export class CommandError extends Error {
+  readonly code: ErrorCode | undefined;
+  readonly hint: string | undefined;
+  constructor(message: string, options: { readonly code?: ErrorCode; readonly hint?: string } = {}) {
+    super(message);
+    this.name = "CommandError";
+    this.code = options.code;
+    this.hint = options.hint;
+  }
+}
+
 export interface DescribedError {
   readonly message: string;
   readonly hint?: string;
@@ -30,6 +42,7 @@ const HINTS: Partial<Record<ErrorCode, string>> = {
 /** Turns any thrown value into a one-line message plus an actionable hint, never a stack trace. */
 export function describeError(error: unknown): DescribedError {
   if (error instanceof UsageError) return { message: error.message, ...(error.hint ? { hint: error.hint } : {}) };
+  if (error instanceof CommandError) return { message: error.message, ...(error.code ? { code: error.code } : {}), ...(error.hint ? { hint: error.hint } : {}) };
   if (isManagedCopilotError(error)) {
     if (error.code === "not_found" && /^No route for /.test(error.message)) {
       return {

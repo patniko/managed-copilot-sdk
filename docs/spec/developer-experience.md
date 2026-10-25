@@ -909,6 +909,65 @@ Foundry identity (`az login` locally, managed identity in Azure). That Azure cre
 sandboxes too. A missing route or unsupported model fails explicitly; switching billing/provider is not recovery
 from an authentication failure.
 
+## 16. Operate your deployment
+
+Name the people who run the platform in the AppHost:
+
+```ts
+await addManagedCopilot(builder, "copilot", {
+  access: { githubOrgs: ["contoso"] },
+  operators: { githubUsers: ["octocat"], githubOrgs: ["contoso-platform"] }, // who may operate this deployment
+  environments: { /* ... */ },
+});
+```
+
+Then open the operator console from any terminal, locally or for your Azure deployment:
+
+```powershell
+npx managed-copilot console                            # signs you in to the console in your browser
+npx managed-copilot operator                           # the same overview in the terminal
+npx managed-copilot operator sessions --owner octocat  # every owner's sessions, not just yours
+```
+
+The console shows the platform as it runs: the health of the gateway, shared runtime, sandbox backend, egress proxy,
+scheduler, webhook delivery, and storage, with what needs attention first; traffic; every owner's sessions with
+their placement, state, connections, sandbox, and effective harness (model, tools, MCP servers, custom agents,
+skills, network rules, and vault references); the deployed environments and their customization files; durable
+actions, webhook deliveries, schedules, and accounts; and a live feed of platform events and gateway logs.
+
+Operators see configuration, never content:
+
+- **Secrets are redacted** everywhere: vault values, webhook secrets, tokens, header values, URL query values, user
+  info, and secret-looking path segments, environment variables under credential-like names, and anything that looks
+  like a credential, including inside error messages and log lines. Vault references show names and destinations only.
+- **Conversations stay private.** Prompts, messages, tool arguments and results, file contents, and the output of
+  sandbox setup commands stay with the session owner; an operator sees an event's type, time, and size, not its
+  content.
+
+Operators can take a few guarded actions. Each is recorded in an audit log, and none deletes anything:
+
+| Action | Guard |
+| --- | --- |
+| Re-check the sandbox backend | None |
+| Stop an idle sandbox | Refused with `session_busy` while its session has a turn, a call to its runtime, a pending request, an open action, or an attached Copilot CLI, or was active in the last few seconds |
+| Pause or resume a schedule | The pause shows the operator and reason on the schedule and blocks manual runs too. Operators resume only their own pauses; an owner's pause, or one the platform made (a revoked sign-in, a definition awaiting approval), is the owner's to lift |
+| Retry a failed webhook delivery | Failed deliveries of webhooks the AppHost still declares; for `session.action_required`, only while an action it announced still waits |
+
+Who may operate:
+
+- **`operators`** names GitHub users and organizations; membership is checked with the caller's own token, as for
+  `access`. Operators must also be allowed to use the deployment.
+- **A local gateway** that listens only on loopback and names no operators treats every account that can use it as
+  an operator.
+- **Any other deployment that names none keeps its console off**, and the operator API answers `forbidden` with how
+  to turn it on. On Azure, `Parameters:<name>-operator-users` and `-operator-orgs` add to the AppHost's list at deploy
+  time.
+
+`console` signs you in with your CLI GitHub sign-in: it mints a one-time ticket that expires in 60 seconds and opens
+the console with the ticket in the URL fragment, which never reaches server logs. The gateway redeems it for an
+HttpOnly, `SameSite=Strict` session cookie that lasts 8 hours (1 hour idle) and re-verifies the operator's GitHub
+credential on every request. Scripts call the same operator API (`/v1/operator/*`) with a GitHub bearer token.
+
 ## What runs where
 
 This is the intended trust topology, not a deployed system. The bridge is transport code on the customer's
@@ -962,8 +1021,9 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 | --- | --- | --- |
 | `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
 | `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `packages/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
-| `managed-copilot` CLI | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, and `schedules` | Built: `packages/cli`, plus `status` |
+| `managed-copilot` CLI | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `platform/gateway`, `platform/sandbox`, `platform/egress` |
+| Operator console | Web console and operator API for health, deployed state, sessions, harness configuration, and guarded actions (section 16) | Built: `platform/console`, served by the gateway at `/console` |
 | Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment | Built: `demos/quickstart` (13 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` |
 
 ## Comparison with OpenAI's Agents API
@@ -1078,6 +1138,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 33 | Native transport/defaults | Public adapter and supported SDK APIs only; required upstream extensions block the affected capability | Validated | Stock SDK and runtime only; [upstream gaps](#upstream-gaps) have platform mitigations or fail explicitly |
 | 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | Validated | Container Apps Sandboxes with retained data disks; gateway state on Azure Files NFS; one gateway replica (G3) |
 | 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate | Not built |
+| 36 | Operator control plane | A gateway-served web console, operator API, and CLI; operators named in the AppHost (every account on a loopback local gateway that names none); configuration with secrets redacted but no conversation content; a few guarded, audited actions and no deletes | Decided | Built (section 16) |
 
 ## Platform contracts
 

@@ -31,6 +31,8 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   discovery: offset === 0,
   // A deployed gateway is on the Internet: `aspire deploy` refuses to publish it until Parameters:copilot-github-users
   // (or Parameters:copilot-github-orgs) names who may use it, for example `aspire secret set Parameters:copilot-github-users <your-login>`.
+  // The operator console (`npx managed-copilot console`, spec section 16) is open to every account on this machine; a
+  // deployment turns it on for the accounts in Parameters:copilot-operator-users (or -operator-orgs).
   environments: {
     chat: {
       type: "shared",

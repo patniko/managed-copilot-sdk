@@ -187,6 +187,11 @@ export const ManagedCopilotConfigSchema = z
   .object({
     name: z.string().regex(RESOURCE_NAME).default("copilot"),
     access: AccessSchema.optional(),
+    /**
+     * GitHub accounts that may use the operator API and console (spec section 16). A loopback gateway with none named
+     * treats every account that can use it as an operator; elsewhere the console stays off until operators are named.
+     */
+    operators: AccessSchema.optional(),
     /** Operator default for every environment that does not set `network` itself. */
     network: NetworkSettingSchema.optional(),
     environments: z.record(z.string().regex(RESOURCE_NAME), EnvironmentConfigSchema),
