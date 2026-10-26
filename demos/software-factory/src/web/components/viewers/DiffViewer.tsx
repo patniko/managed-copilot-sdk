@@ -1,10 +1,11 @@
-import { ChevronDown, ChevronRight, FileDiff } from "lucide-react";
+import { ChevronDownIcon, FileDiffIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { cx } from "../../lib/cx.js";
 import { pluralize } from "../../lib/format.js";
+import { languageForPath, PLAIN, tokenizeLines, type Token } from "../../lib/highlight.js";
+import type { Tone } from "../../lib/tone.js";
 import { Chip } from "../ui/Chip.js";
-import { CodeViewer } from "./CodeViewer.js";
-
+import { CodeViewer, TokenLine } from "./CodeViewer.js";
 type LineKind = "add" | "del" | "ctx" | "meta";
 
 interface DiffLine {
@@ -131,11 +132,11 @@ export function parseUnifiedDiff(text: string): DiffFile[] {
   return files.filter((candidate) => candidate.hunks.length > 0 || candidate.binary || candidate.status !== "modified");
 }
 
-const STATUS_CHIP: Readonly<Record<DiffFile["status"], { readonly label: string; readonly tone: "success" | "danger" | "active" } | undefined>> = {
+const STATUS_CHIP: Readonly<Record<DiffFile["status"], { readonly label: string; readonly tone: Tone } | undefined>> = {
   modified: undefined,
   added: { label: "Added", tone: "success" },
   deleted: { label: "Deleted", tone: "danger" },
-  renamed: { label: "Renamed", tone: "active" },
+  renamed: { label: "Renamed", tone: "accent" },
 };
 
 function displayPath(file: DiffFile): string {
@@ -144,6 +145,68 @@ function displayPath(file: DiffFile): string {
   return file.newPath || file.oldPath;
 }
 
+const MAX_HIGHLIGHT_CHARS = 120_000;
+
+/** Syntax tokens per diff line: each side of a hunk is highlighted as one block, then matched back to its lines. */
+function highlightFile(file: DiffFile): (readonly Token[] | undefined)[][] | undefined {
+  const language = languageForPath(file.newPath && file.newPath !== "/dev/null" ? file.newPath : file.oldPath);
+  if (language === PLAIN || language === "diff" || file.binary) return undefined;
+  const size = file.hunks.reduce((sum, hunk) => sum + hunk.lines.reduce((lineSum, line) => lineSum + line.text.length + 1, 0), 0);
+  if (size > MAX_HIGHLIGHT_CHARS) return undefined;
+  return file.hunks.map((hunk) => {
+    const oldLines = hunk.lines.filter((line) => line.kind === "del" || line.kind === "ctx");
+    const newLines = hunk.lines.filter((line) => line.kind === "add" || line.kind === "ctx");
+    // Prism splits on bare carriage returns too; when its lines don't match the diff's, show that side plain.
+    const side = (lines: readonly DiffLine[]): Token[][] | undefined => {
+      const tokens = tokenizeLines(lines.map((line) => line.text).join("\n"), language);
+      return tokens && tokens.length === lines.length ? tokens : undefined;
+    };
+    const oldSide = side(oldLines);
+    const newSide = side(newLines);
+    let oldIndex = 0;
+    let newIndex = 0;
+    return hunk.lines.map((line) => {
+      if (line.kind === "del") return oldSide?.[oldIndex++];
+      if (line.kind === "add") return newSide?.[newIndex++];
+      if (line.kind === "ctx") {
+        oldIndex += 1;
+        return newSide?.[newIndex++];
+      }
+      return undefined;
+    });
+  });
+}
+
+/** GitHub's diffstat: five blocks split between additions and deletions. */
+function DiffstatBlocks({ additions, deletions }: { readonly additions: number; readonly deletions: number }) {
+  const total = additions + deletions;
+  const colored = Math.min(5, total);
+  const added = total === 0 ? 0 : Math.round((additions / total) * colored);
+  const blocks = Array.from({ length: 5 }, (_, index) =>
+    index < added ? "bg-success-emphasis" : index < colored ? "bg-danger-emphasis" : "bg-neutral-muted",
+  );
+  return (
+    <span className="inline-flex shrink-0 gap-px" aria-hidden>
+      {blocks.map((color, index) => (
+        <span key={index} className={cx("size-2 rounded-xs", color)} />
+      ))}
+    </span>
+  );
+}
+
+function DiffCounts({ additions, deletions }: { readonly additions: number; readonly deletions: number }) {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 font-sans text-xs font-semibold tabular-nums">
+      <span className="text-fg-success">+{additions}</span>
+      <span className="text-fg-danger">−{deletions}</span>
+      <span className="sr-only">
+        {pluralize(additions, "addition")} and {pluralize(deletions, "deletion")}
+      </span>
+    </span>
+  );
+}
+
+/** A unified diff like github.com's "Files changed": one box per file with a sticky header, line numbers, and hunks. */
 export function DiffViewer({ text }: { readonly text: string }) {
   const files = useMemo(() => parseUnifiedDiff(text), [text]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<number>>(new Set());
@@ -165,93 +228,98 @@ export function DiffViewer({ text }: { readonly text: string }) {
     });
 
   return (
-    <div className="space-y-3 p-3 sm:p-4">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
-        <span className="inline-flex items-center gap-1.5">
-          <FileDiff className="size-3.5 text-zinc-500" aria-hidden />
-          {pluralize(files.length, "file")} changed
+    <div className="space-y-4 p-4">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <FileDiffIcon size={16} className="text-fg-muted" />
+        <span>
+          <span className="font-semibold">{pluralize(files.length, "file")}</span> changed
         </span>
-        <span className="font-mono text-emerald-300">+{totals.additions}</span>
-        <span className="font-mono text-rose-300">−{totals.deletions}</span>
+        <DiffCounts additions={totals.additions} deletions={totals.deletions} />
       </div>
-      {files.map((file, index) => {
-        const open = !collapsed.has(index);
-        const chip = STATUS_CHIP[file.status];
-        return (
-          <section key={index} className="overflow-clip rounded-lg border border-zinc-800 bg-zinc-950/60">
-            <button
-              type="button"
-              onClick={() => toggle(index)}
-              aria-expanded={open}
-              className="sticky top-0 z-[1] flex w-full items-center gap-2 border-b border-zinc-800 bg-zinc-900/95 px-3 py-2 text-left backdrop-blur hover:bg-zinc-800/80"
-            >
-              {open ? (
-                <ChevronDown className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
-              ) : (
-                <ChevronRight className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
-              )}
-              <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-200">{displayPath(file)}</span>
-              {chip ? <Chip tone={chip.tone}>{chip.label}</Chip> : null}
-              <span className="shrink-0 font-mono text-[11px] text-emerald-300">+{file.additions}</span>
-              <span className="shrink-0 font-mono text-[11px] text-rose-300">−{file.deletions}</span>
-            </button>
-            {open ? (
-              file.binary ? (
-                <p className="px-4 py-3 text-xs text-zinc-500">Binary file — no preview.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full border-collapse font-mono text-[12px] leading-[1.6]">
-                    <tbody>
-                      {file.hunks.map((hunk, hunkIndex) => (
-                        <HunkRows key={hunkIndex} hunk={hunk} />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )
-            ) : null}
-          </section>
-        );
-      })}
+      {files.map((file, index) => (
+        <DiffFileBox key={index} file={file} open={!collapsed.has(index)} onToggle={() => toggle(index)} />
+      ))}
     </div>
   );
 }
 
-const ROW_CLASSES: Readonly<Record<LineKind, string>> = {
-  add: "bg-emerald-400/[0.09] text-zinc-100",
-  del: "bg-rose-400/[0.09] text-zinc-100",
-  ctx: "text-zinc-300",
-  meta: "text-zinc-500 italic",
+function DiffFileBox({ file, open, onToggle }: { readonly file: DiffFile; readonly open: boolean; readonly onToggle: () => void }) {
+  const chip = STATUS_CHIP[file.status];
+  const tokens = useMemo(() => (open ? highlightFile(file) : undefined), [file, open]);
+  return (
+    <section className="Box overflow-clip">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className={cx("file-header sticky top-0 z-[1] w-full text-left", !open && "rounded-b-md border-b-0")}
+      >
+        <ChevronDownIcon size={16} className={cx("shrink-0 text-fg-muted transition-transform duration-100", !open && "-rotate-90")} />
+        <DiffCounts additions={file.additions} deletions={file.deletions} />
+        <DiffstatBlocks additions={file.additions} deletions={file.deletions} />
+        <span className="min-w-0 flex-1 truncate">{displayPath(file)}</span>
+        {chip ? (
+          <Chip tone={chip.tone} className="font-sans">
+            {chip.label}
+          </Chip>
+        ) : null}
+      </button>
+      {open ? (
+        file.binary ? (
+          <p className="px-4 py-3 text-xs text-fg-muted">Binary file not shown.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full border-collapse">
+              <tbody>
+                {file.hunks.map((hunk, hunkIndex) => (
+                  <HunkRows key={hunkIndex} hunk={hunk} tokens={tokens?.[hunkIndex]} />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : null}
+    </section>
+  );
+}
+
+const NUM_CLASS: Readonly<Record<LineKind, string>> = {
+  add: "blob-num blob-num-addition",
+  del: "blob-num blob-num-deletion",
+  ctx: "blob-num",
+  meta: "blob-num",
 };
 
-const SIGNS: Readonly<Record<LineKind, string>> = { add: "+", del: "−", ctx: " ", meta: " " };
+const CODE_CLASS: Readonly<Record<LineKind, string>> = {
+  add: "blob-code blob-code-marker blob-code-addition",
+  del: "blob-code blob-code-marker blob-code-deletion",
+  ctx: "blob-code blob-code-marker",
+  meta: "blob-code text-fg-muted",
+};
 
-function HunkRows({ hunk }: { readonly hunk: DiffHunk }) {
-  const numberCell = "w-px select-none border-r border-zinc-800/80 px-2 text-right align-top text-zinc-600 tabular";
+const MARKERS: Readonly<Record<LineKind, string>> = { add: "+", del: "-", ctx: " ", meta: "" };
+
+function HunkRows({ hunk, tokens }: { readonly hunk: DiffHunk; readonly tokens?: readonly (readonly Token[] | undefined)[] }) {
   return (
     <>
-      <tr className="bg-sky-400/[0.06]">
-        <td colSpan={4} className="px-3 py-1 text-[11.5px] whitespace-pre text-sky-300/80">
-          {hunk.header}
-        </td>
+      <tr>
+        <td className="blob-num blob-num-hunk" aria-hidden />
+        <td className="blob-num blob-num-hunk" aria-hidden />
+        <td className="blob-code blob-code-hunk">{hunk.header}</td>
       </tr>
-      {hunk.lines.map((line, index) => (
-        <tr key={index} className={ROW_CLASSES[line.kind]}>
-          <td className={numberCell}>{line.oldNo ?? ""}</td>
-          <td className={numberCell}>{line.newNo ?? ""}</td>
-          <td
-            className={cx(
-              "w-px select-none pr-1 pl-2 align-top",
-              line.kind === "add" && "text-emerald-400",
-              line.kind === "del" && "text-rose-400",
-            )}
-            aria-hidden
-          >
-            {SIGNS[line.kind]}
-          </td>
-          <td className="whitespace-pre pr-6">{line.text || " "}</td>
-        </tr>
-      ))}
+      {hunk.lines.map((line, index) => {
+        const lineTokens = tokens?.[index];
+        return (
+          <tr key={index}>
+            <td className={NUM_CLASS[line.kind]}>{line.oldNo ?? ""}</td>
+            <td className={NUM_CLASS[line.kind]}>{line.newNo ?? ""}</td>
+            <td className={CODE_CLASS[line.kind]} data-code-marker={MARKERS[line.kind]}>
+              {line.kind === "add" ? <span className="sr-only">Added: </span> : line.kind === "del" ? <span className="sr-only">Removed: </span> : null}
+              {lineTokens && line.text ? <TokenLine tokens={lineTokens} /> : line.text || "\n"}
+            </td>
+          </tr>
+        );
+      })}
     </>
   );
 }

@@ -1,6 +1,6 @@
+import { CodeIcon, EyeIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { viewerKind } from "../../lib/artifacts.js";
-import { cx } from "../../lib/cx.js";
 import { languageForPath } from "../../lib/highlight.js";
 import { Callout } from "../ui/Feedback.js";
 import { CodeViewer } from "./CodeViewer.js";
@@ -11,7 +11,7 @@ import { TestReportViewer } from "./TestReportViewer.js";
 /** Picks the right viewer for a text artifact by its path. */
 export function FileViewer({ path, text }: { readonly path: string; readonly text: string }) {
   if (text.length === 0) {
-    return <p className="px-4 py-10 text-center text-sm text-zinc-500">This file is empty.</p>;
+    return <p className="px-4 py-10 text-center text-fg-muted">This file is empty.</p>;
   }
   switch (viewerKind({ path, viewable: true })) {
     case "diff":
@@ -23,36 +23,39 @@ export function FileViewer({ path, text }: { readonly path: string; readonly tex
     case "json":
       return <JsonFile text={text} />;
     default:
-      return <CodeViewer code={text} language={languageForPath(path)} />;
+      return <CodeViewer code={text} language={languageForPath(path)} className="py-2" />;
   }
 }
 
+/** Rendered Markdown with a Preview / Code switch, like github.com's file view. */
 function MarkdownFile({ text }: { readonly text: string }) {
-  const [mode, setMode] = useState<"preview" | "source">("preview");
+  const [mode, setMode] = useState<"preview" | "code">("preview");
+  const options = [
+    { id: "preview", label: "Preview", icon: EyeIcon },
+    { id: "code", label: "Code", icon: CodeIcon },
+  ] as const;
   return (
     <div>
-      <div className="flex justify-end border-b border-zinc-800/70 px-3 py-2">
-        <div className="flex rounded-lg bg-zinc-950/70 p-0.5 ring-1 ring-inset ring-white/5" role="group" aria-label="Markdown view">
-          {(["preview", "source"] as const).map((option) => (
+      <div className="flex border-b border-line-muted px-4 py-2">
+        <div className="SegmentedControl SegmentedControl--sm" role="group" aria-label="Markdown view">
+          {options.map((option) => (
             <button
-              key={option}
+              key={option.id}
               type="button"
-              aria-pressed={mode === option}
-              onClick={() => setMode(option)}
-              className={cx(
-                "rounded-md px-2.5 py-0.5 text-[11px] font-medium capitalize transition-colors",
-                mode === option ? "bg-zinc-800 text-zinc-100" : "text-zinc-400 hover:text-zinc-200",
-              )}
+              aria-pressed={mode === option.id}
+              onClick={() => setMode(option.id)}
+              className="SegmentedControl-item"
             >
-              {option}
+              <option.icon size={16} />
+              {option.label}
             </button>
           ))}
         </div>
       </div>
       {mode === "preview" ? (
-        <MarkdownView source={text} className="max-w-3xl px-5 py-4" />
+        <MarkdownView source={text} size="md" className="max-w-[1012px] p-6 md:p-8" />
       ) : (
-        <CodeViewer code={text} language="markdown" />
+        <CodeViewer code={text} language="markdown" className="py-2" />
       )}
     </div>
   );
@@ -69,11 +72,11 @@ function JsonFile({ text }: { readonly text: string }) {
   return (
     <div>
       {pretty.ok ? null : (
-        <Callout tone="warning" className="m-3">
+        <Callout tone="warning" compact className="m-4">
           This file isn't valid JSON, so it's shown as is.
         </Callout>
       )}
-      <CodeViewer code={pretty.text} language="json" />
+      <CodeViewer code={pretty.text} language="json" className="py-2" />
     </div>
   );
 }

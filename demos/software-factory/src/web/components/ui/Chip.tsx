@@ -1,78 +1,74 @@
-import type { LucideIcon } from "lucide-react";
+import { DotFillIcon, type Icon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
 import { cx } from "../../lib/cx.js";
 import type { StatusMeta } from "../../lib/stations.js";
-import { TONE_BADGE, TONE_DOT, TONE_TEXT, type Tone } from "../../lib/tone.js";
+import { TONE_LABEL, TONE_TEXT, type Tone } from "../../lib/tone.js";
+import { Spinner } from "./Spinner.js";
 
 export interface ChipProps {
   readonly children: ReactNode;
   readonly tone?: Tone | "plain";
   readonly mono?: boolean;
-  readonly icon?: LucideIcon;
+  readonly icon?: Icon;
   readonly title?: string;
   readonly className?: string;
 }
 
-/** Small, muted metadata label. */
-export function Chip({ children, tone = "plain", mono = false, icon: Icon, title, className }: ChipProps) {
+/** Small metadata label (Primer `Label`). */
+export function Chip({ children, tone = "plain", mono = false, icon: Glyph, title, className }: ChipProps) {
   return (
-    <span
-      title={title}
-      className={cx(
-        "inline-flex min-w-0 max-w-full items-center gap-1 rounded-md px-1.5 py-px text-[11px] leading-[18px] ring-1 ring-inset",
-        tone === "plain" ? "bg-zinc-800/60 text-zinc-400 ring-white/[0.06]" : TONE_BADGE[tone],
-        mono && "font-mono text-[10.5px]",
-        className,
-      )}
-    >
-      {Icon ? <Icon className="size-3 shrink-0 opacity-80" aria-hidden /> : null}
+    <span title={title} className={cx("Label min-w-0", tone === "plain" ? "Label--secondary" : TONE_LABEL[tone], mono && "font-mono", className)}>
+      {Glyph ? <Glyph size={12} /> : null}
       <span className="truncate">{children}</span>
     </span>
   );
 }
 
+/** A status Octicon in its color, or the Primer spinner for work in progress. `label` names it for assistive technology. */
+export function StatusIcon({
+  meta,
+  size = 16,
+  label = false,
+  className,
+}: {
+  readonly meta: StatusMeta;
+  readonly size?: number;
+  readonly label?: boolean;
+  readonly className?: string;
+}) {
+  const color = cx(TONE_TEXT[meta.tone], className);
+  if (meta.spin) return <Spinner size={size} className={color} label={label ? meta.label : undefined} />;
+  const Glyph = meta.icon;
+  return <Glyph size={size} className={color} aria-label={label ? meta.label : undefined} />;
+}
+
 export interface StatusBadgeProps {
   readonly meta: StatusMeta;
-  readonly size?: "xs" | "sm" | "md";
+  readonly size?: "sm" | "md";
   readonly className?: string;
 }
 
-/** Status pill: icon + label (color is never the only signal). */
+/** Status pill: icon and label (color is never the only signal). */
 export function StatusBadge({ meta, size = "sm", className }: StatusBadgeProps) {
-  const Icon = meta.icon;
   return (
-    <span
-      className={cx(
-        "inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full font-medium ring-1 ring-inset",
-        TONE_BADGE[meta.tone],
-        size === "xs" && "px-1.5 py-px text-[10.5px] leading-4",
-        size === "sm" && "px-2 py-0.5 text-[11px] leading-4",
-        size === "md" && "px-2.5 py-1 text-xs",
-        className,
-      )}
-    >
-      <Icon className={cx("shrink-0", size === "md" ? "size-3.5" : "size-3", meta.spin && "animate-spin")} aria-hidden />
+    <span className={cx("Label shrink-0", TONE_LABEL[meta.tone], size === "md" && "Label--large", className)}>
+      <StatusIcon meta={meta} size={12} />
       {meta.label}
     </span>
   );
 }
 
-/** Inline status: icon + colored label, without a pill. */
+/** Inline status: colored icon and label, without a pill. */
 export function StatusText({ meta, className }: { readonly meta: StatusMeta; readonly className?: string }) {
-  const Icon = meta.icon;
   return (
-    <span className={cx("inline-flex min-w-0 items-center gap-1.5 font-medium", TONE_TEXT[meta.tone], className)}>
-      <Icon className={cx("size-3.5 shrink-0", meta.spin && "animate-spin")} aria-hidden />
+    <span className={cx("inline-flex min-w-0 items-center gap-1", className)}>
+      <StatusIcon meta={meta} />
       <span className="truncate">{meta.label}</span>
     </span>
   );
 }
 
+/** Status dot; a spinner while something is in progress. */
 export function Dot({ tone, pulse = false, className }: { readonly tone: Tone; readonly pulse?: boolean; readonly className?: string }) {
-  return (
-    <span className={cx("relative inline-flex size-2 shrink-0", className)} aria-hidden>
-      {pulse ? <span className={cx("absolute inline-flex size-full animate-ping rounded-full opacity-60", TONE_DOT[tone])} /> : null}
-      <span className={cx("relative inline-flex size-2 rounded-full", TONE_DOT[tone])} />
-    </span>
-  );
+  return pulse ? <Spinner size={12} className={cx(TONE_TEXT[tone], className)} /> : <DotFillIcon size={16} className={cx(TONE_TEXT[tone], className)} />;
 }

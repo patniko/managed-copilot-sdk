@@ -1,58 +1,41 @@
-import type { LucideIcon } from "lucide-react";
-import { LoaderCircle } from "lucide-react";
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { Icon } from "@primer/octicons-react";
+import type { ButtonHTMLAttributes, ComponentPropsWithRef, ReactNode } from "react";
 import { cx } from "../../lib/cx.js";
+import { Spinner } from "./Spinner.js";
+import { Tooltip } from "./Tooltip.js";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "danger-solid";
-export type ButtonSize = "xs" | "sm" | "md" | "lg";
+export type ButtonVariant = "default" | "primary" | "danger" | "outline" | "invisible";
+export type ButtonSize = "sm" | "md" | "lg";
 
-const VARIANTS: Readonly<Record<ButtonVariant, string>> = {
-  primary:
-    "bg-amber-500 font-semibold text-zinc-950 shadow-sm shadow-amber-500/20 hover:bg-amber-400 active:bg-amber-500 disabled:bg-amber-500/40 disabled:text-zinc-950/70 disabled:shadow-none",
-  secondary:
-    "bg-zinc-800/80 font-medium text-zinc-100 ring-1 ring-inset ring-white/10 hover:bg-zinc-700/80 hover:ring-white/15 disabled:hover:bg-zinc-800/80",
-  ghost: "font-medium text-zinc-300 hover:bg-zinc-800/70 hover:text-zinc-100 disabled:hover:bg-transparent",
-  danger:
-    "bg-rose-500/10 font-medium text-rose-300 ring-1 ring-inset ring-rose-400/30 hover:bg-rose-500/20 hover:text-rose-200 disabled:hover:bg-rose-500/10",
-  "danger-solid": "bg-rose-600 font-semibold text-white shadow-sm shadow-rose-900/30 hover:bg-rose-500 disabled:hover:bg-rose-600",
+const VARIANTS: Readonly<Record<ButtonVariant, string | undefined>> = {
+  default: undefined,
+  primary: "btn-primary",
+  danger: "btn-danger",
+  outline: "btn-outline",
+  invisible: "btn-invisible",
 };
 
-const SIZES: Readonly<Record<ButtonSize, string>> = {
-  xs: "h-6 gap-1 rounded-md px-2 text-[11px]",
-  sm: "h-7 gap-1.5 rounded-md px-2.5 text-xs",
-  md: "h-8 gap-2 rounded-lg px-3 text-[13px]",
-  lg: "h-10 gap-2 rounded-lg px-4 text-sm",
+const SIZES: Readonly<Record<ButtonSize, string | undefined>> = {
+  sm: "btn-sm",
+  md: undefined,
+  lg: "btn-lg",
 };
 
-const ICON_SIZES: Readonly<Record<ButtonSize, string>> = {
-  xs: "size-3",
-  sm: "size-3.5",
-  md: "size-4",
-  lg: "size-4",
-};
-
-export function buttonClass(variant: ButtonVariant = "secondary", size: ButtonSize = "md", extra?: string): string {
-  return cx(
-    "inline-flex shrink-0 select-none items-center justify-center whitespace-nowrap transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-60",
-    VARIANTS[variant],
-    SIZES[size],
-    extra,
-  );
+/** Primer button classes, for links and other elements that look like buttons. */
+export function buttonClass(variant: ButtonVariant = "default", size: ButtonSize = "md", extra?: string): string {
+  return cx("btn", VARIANTS[variant], SIZES[size], extra);
 }
 
-export function buttonIconClass(size: ButtonSize = "md"): string {
-  return cx("shrink-0", ICON_SIZES[size]);
-}
-
-export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface ButtonProps extends ComponentPropsWithRef<"button"> {
   readonly variant?: ButtonVariant;
   readonly size?: ButtonSize;
-  readonly icon?: LucideIcon;
+  /** Leading Octicon; replaced by a spinner while `loading`. */
+  readonly icon?: Icon;
   readonly loading?: boolean;
   readonly children?: ReactNode;
 }
 
-export function Button({ variant, size = "md", icon: Icon, loading = false, className, children, disabled, type, ...rest }: ButtonProps) {
+export function Button({ variant, size = "md", icon: Leading, loading = false, className, children, disabled, type, ...rest }: ButtonProps) {
   return (
     <button
       type={type ?? "button"}
@@ -61,36 +44,27 @@ export function Button({ variant, size = "md", icon: Icon, loading = false, clas
       aria-busy={loading || undefined}
       {...rest}
     >
-      {loading ? (
-        <LoaderCircle className={cx(buttonIconClass(size), "animate-spin")} aria-hidden />
-      ) : Icon ? (
-        <Icon className={buttonIconClass(size)} aria-hidden />
-      ) : null}
+      {loading ? <Spinner size={16} /> : Leading ? <Leading size={16} /> : null}
       {children}
     </button>
   );
 }
 
 export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  readonly icon: LucideIcon;
+  readonly icon: Icon;
+  /** Accessible name, also shown as a tooltip. */
   readonly label: string;
   readonly size?: "sm" | "md";
+  readonly variant?: "default" | "invisible";
 }
 
-export function IconButton({ icon: Icon, label, size = "md", className, type, ...rest }: IconButtonProps) {
+/** Square, icon-only button (Primer IconButton) with a tooltip. */
+export function IconButton({ icon: Glyph, label, size = "md", variant = "invisible", className, type, ...rest }: IconButtonProps) {
   return (
-    <button
-      type={type ?? "button"}
-      aria-label={label}
-      title={label}
-      className={cx(
-        "inline-flex shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-50",
-        size === "sm" ? "size-6" : "size-8",
-        className,
-      )}
-      {...rest}
-    >
-      <Icon className={size === "sm" ? "size-3.5" : "size-4"} aria-hidden />
-    </button>
+    <Tooltip content={label}>
+      <button type={type ?? "button"} aria-label={label} className={buttonClass(variant, size, cx("btn-icon", className))} {...rest}>
+        <Glyph size={16} />
+      </button>
+    </Tooltip>
   );
 }

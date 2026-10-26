@@ -621,14 +621,15 @@ function showBanner(variant: string): void {
     "align-items:center",
     "justify-content:center",
     "gap:12px",
-    "font:600 12px/1 ui-sans-serif,system-ui,sans-serif",
-    "color:#18181b",
-    "background:repeating-linear-gradient(-45deg,#f59e0b 0 14px,#fbbf24 14px 28px)",
-    "box-shadow:0 -4px 16px rgb(0 0 0 / 0.45)",
+    "padding:0 16px",
+    "font:12px/1.5 var(--fontStack-sansSerif)",
+    "color:var(--fgColor-default)",
+    "background:var(--bgColor-attention-muted)",
+    "border-top:1px solid var(--borderColor-attention-muted)",
   ].join(";");
   const label = document.createElement("span");
   label.textContent = `UI preview · fixture data, not a live run${variant ? ` · ${variant}` : ""}`;
-  label.style.cssText = "background:#18181b;color:#fbbf24;padding:5px 10px;border-radius:6px;letter-spacing:0.02em";
+  label.style.cssText = "font-weight:600;white-space:nowrap";
   banner.appendChild(label);
   if (window.innerWidth < 720) {
     document.body.appendChild(banner);
@@ -636,12 +637,13 @@ function showBanner(variant: string): void {
     return;
   }
   const links = document.createElement("span");
-  links.style.cssText = "display:flex;gap:6px;background:#18181bcc;color:#e4e4e7;padding:5px 8px;border-radius:6px;font-weight:500";
+  links.style.cssText = "display:flex;gap:12px";
   for (const name of VARIANTS) {
     const link = document.createElement("a");
     link.href = `?preview${name ? `=${name}` : ""}${location.hash}`;
     link.textContent = name || "default";
-    link.style.cssText = `color:${name === variant ? "#fbbf24" : "#d4d4d8"};text-decoration:none`;
+    link.style.cssText =
+      name === variant ? "color:var(--fgColor-default);font-weight:600;text-decoration:none" : "color:var(--fgColor-accent);text-decoration:none";
     links.appendChild(link);
   }
   banner.appendChild(links);

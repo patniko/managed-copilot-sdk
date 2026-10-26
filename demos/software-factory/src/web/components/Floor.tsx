@@ -1,4 +1,4 @@
-import { ChevronRight, Inbox, Link2, PackageCheck, PackageOpen, PackageX } from "lucide-react";
+import { CheckCircleFillIcon, ChevronRightIcon, ClockIcon, InboxIcon, LinkIcon, PackageIcon, XCircleFillIcon } from "@primer/octicons-react";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS } from "../../shared/environments.js";
 import type { EnvironmentView, Station, WorkOrder } from "../../shared/types.js";
@@ -15,14 +15,14 @@ import {
   type TaskRow,
 } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
-import { StationCard } from "./StationCard.js";
+import { stationCardClass, StationCard } from "./StationCard.js";
 
 // Column widths for the horizontal layout; HORIZONTAL_MIN is the width they need.
-const W_TERMINAL = 120;
-const W_PLAN = 176;
-const W_BUILD = 184;
-const W_REVIEW = 176;
-const W_RELEASE = 176;
+const W_TERMINAL = 148;
+const W_PLAN = 196;
+const W_BUILD = 212;
+const W_REVIEW = 204;
+const W_RELEASE = 196;
 const GAP = 28;
 const ROW_GAP = 24;
 const CANVAS_PADDING = 20;
@@ -84,7 +84,8 @@ interface DrawnEdge {
   readonly id: string;
   readonly d: string;
   readonly state: EdgeState;
-  readonly end?: { readonly x: number; readonly y: number };
+  /** Where the connector meets a card, drawn as a port like the Actions workflow graph. */
+  readonly ports: readonly { readonly x: number; readonly y: number }[];
 }
 
 interface Box {
@@ -114,29 +115,50 @@ function drawEdge(spec: EdgeSpec, box: (id: string) => Box | undefined): DrawnEd
   const radius = 10;
   switch (spec.kind) {
     case "h":
-      return { id: spec.id, state: spec.state, d: curveH(a.right, a.cy, b.left, b.cy), end: { x: b.left, y: b.cy } };
+      return {
+        id: spec.id,
+        state: spec.state,
+        d: curveH(a.right, a.cy, b.left, b.cy),
+        ports: [
+          { x: a.right, y: a.cy },
+          { x: b.left, y: b.cy },
+        ],
+      };
     case "v": {
       const x1 = a.left + SPINE;
       const x2 = b.left + SPINE;
-      return { id: spec.id, state: spec.state, d: curveV(x1, a.bottom, x2, b.top), end: { x: x2, y: b.top } };
+      return {
+        id: spec.id,
+        state: spec.state,
+        d: curveV(x1, a.bottom, x2, b.top),
+        ports: [
+          { x: x1, y: a.bottom },
+          { x: x2, y: b.top },
+        ],
+      };
     }
     case "branch": {
       const x = a.left + SPINE;
       if (b.left - x < 8) return undefined;
       const r = Math.min(radius, (b.left - x) / 2);
-      return { id: spec.id, state: spec.state, d: `M ${x} ${b.cy - r} Q ${x} ${b.cy} ${x + r} ${b.cy} L ${b.left} ${b.cy}`, end: { x: b.left, y: b.cy } };
+      return {
+        id: spec.id,
+        state: spec.state,
+        d: `M ${x} ${b.cy - r} Q ${x} ${b.cy} ${x + r} ${b.cy} L ${b.left} ${b.cy}`,
+        ports: [{ x: b.left, y: b.cy }],
+      };
     }
     case "spine": {
       const x = a.left + SPINE;
-      return { id: spec.id, state: spec.state, d: `M ${x} ${a.bottom} L ${x} ${b.top}` };
+      return { id: spec.id, state: spec.state, d: `M ${x} ${a.bottom} L ${x} ${b.top}`, ports: [{ x, y: a.bottom }, { x, y: b.top }] };
     }
     case "spine-to-row": {
       const x = a.left + SPINE;
-      return { id: spec.id, state: spec.state, d: `M ${x} ${a.bottom} L ${x} ${b.cy - radius}` };
+      return { id: spec.id, state: spec.state, d: `M ${x} ${a.bottom} L ${x} ${b.cy - radius}`, ports: [{ x, y: a.bottom }] };
     }
     case "spine-from-row": {
       const x = b.left + SPINE;
-      return { id: spec.id, state: spec.state, d: `M ${x} ${a.cy - radius} L ${x} ${b.top}` };
+      return { id: spec.id, state: spec.state, d: `M ${x} ${a.cy - radius} L ${x} ${b.top}`, ports: [{ x, y: b.top }] };
     }
   }
 }
@@ -314,7 +336,7 @@ export function Pipeline({ workOrder, selectedId, onSelect }: PipelineProps) {
     const ghostReview = !review && row ? taskStation(row, "review", environments) : undefined;
     return (
       <div key={lane.id} className="min-w-0">
-        {row ? <LaneLabel row={row} workOrder={workOrder} /> : <div className="mb-2 h-4 w-28 rounded bg-zinc-800/50" aria-hidden />}
+        {row ? <LaneLabel row={row} workOrder={workOrder} /> : <div className="SkeletonText mb-2 w-28" aria-hidden />}
         <div
           className={cx(
             layout === "columns" && "grid",
@@ -337,13 +359,20 @@ export function Pipeline({ workOrder, selectedId, onSelect }: PipelineProps) {
   const intake = <IntakeCard workOrder={workOrder} selected={selectedId === "intake"} onSelect={() => onSelect("intake")} />;
   const deliverable = <DeliverableCard workOrder={workOrder} release={release} />;
 
+  // One port per point where connectors meet a card; it's idle only when every connector there is.
+  const ports = new Map<string, { readonly x: number; readonly y: number; idle: boolean }>();
+  for (const edge of edges) {
+    for (const port of edge.ports) {
+      const key = `${port.x.toFixed(1)},${port.y.toFixed(1)}`;
+      const existing = ports.get(key);
+      if (existing) existing.idle &&= edge.state === "idle";
+      else ports.set(key, { ...port, idle: edge.state === "idle" });
+    }
+  }
+
   return (
-    <section
-      ref={frame}
-      aria-label="Factory floor"
-      className="relative min-w-0 overflow-clip rounded-2xl border border-zinc-800/80 bg-zinc-950/60 xl:h-full"
-    >
-      <div ref={scroller} className="bg-floor-grid h-full overflow-auto">
+    <section ref={frame} aria-label="Factory floor" className="Box relative min-w-0 overflow-clip xl:h-full xl:min-h-0">
+      <div ref={scroller} className="bg-dot-grid h-full overflow-auto rounded-md">
         <div
           ref={canvas}
           className={cx("relative", mode === "horizontal" ? "flex min-w-max items-stretch" : "flex flex-col gap-6")}
@@ -353,17 +382,11 @@ export function Pipeline({ workOrder, selectedId, onSelect }: PipelineProps) {
             {edges.map((edge) => (
               <path key={edge.id} d={edge.d} className={cx("edge", `edge-${edge.state}`)} />
             ))}
-            {edges.map((edge) =>
-              edge.end && (edge.state === "active" || edge.state === "done") ? (
-                <circle
-                  key={`${edge.id}:dot`}
-                  cx={edge.end.x}
-                  cy={edge.end.y}
-                  r={2.5}
-                  className={edge.state === "active" ? "edge-dot-active" : "edge-dot-done"}
-                />
-              ) : null,
-            )}
+          </svg>
+          <svg className="pointer-events-none absolute inset-0 z-20 h-full w-full overflow-visible" aria-hidden>
+            {[...ports].map(([key, port]) => (
+              <circle key={key} cx={port.x} cy={port.y} r={3} className={cx("edge-port", port.idle && "edge-port-idle")} />
+            ))}
           </svg>
 
           {mode === "horizontal" ? (
@@ -385,7 +408,7 @@ export function Pipeline({ workOrder, selectedId, onSelect }: PipelineProps) {
                 </div>
                 <div className="flex flex-1 flex-col justify-center gap-5">
                   {lanes.map((lane) => laneContent(lane, "columns"))}
-                  {waitingNote ? <p className="text-center text-xs text-zinc-500">{waitingNote}</p> : null}
+                  {waitingNote ? <p className="text-center text-xs text-fg-muted">{waitingNote}</p> : null}
                 </div>
               </div>
               <Column label="Release" width={W_RELEASE}>
@@ -409,7 +432,7 @@ export function Pipeline({ workOrder, selectedId, onSelect }: PipelineProps) {
               </div>
               <div className="flex max-w-3xl flex-col gap-5 pl-12">
                 {lanes.map((lane) => laneContent(lane, stacked ? "stacked" : "split"))}
-                {waitingNote ? <p className="text-xs text-zinc-500">{waitingNote}</p> : null}
+                {waitingNote ? <p className="text-xs text-fg-muted">{waitingNote}</p> : null}
               </div>
               <div ref={refFor(release.id)} className="relative z-10 w-full max-w-lg">
                 {card(release)}
@@ -445,7 +468,7 @@ function taskStation(row: TaskRow, kind: "build" | "review", environments: reado
 }
 
 function ColumnLabel({ children }: { readonly children: ReactNode }) {
-  return <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-500">{children}</div>;
+  return <div className="text-xs font-semibold text-fg-muted">{children}</div>;
 }
 
 function Column({ label, width, children }: { readonly label: string; readonly width: number; readonly children: ReactNode }) {
@@ -463,15 +486,10 @@ function LaneLabel({ row, workOrder }: { readonly row: TaskRow; readonly workOrd
   const waiting = row.build === undefined || row.build.status === "waiting";
   return (
     <div className="mb-2 flex min-w-0 items-center gap-2" title={row.task?.description}>
-      <span className="truncate text-xs font-medium text-zinc-300">{row.title}</span>
+      <span className="truncate font-semibold">{row.title}</span>
       {row.dependsOn.length > 0 ? (
-        <span
-          className={cx(
-            "inline-flex min-w-0 shrink items-center gap-1 truncate text-[11px]",
-            waiting ? "text-amber-300/80" : "text-zinc-500",
-          )}
-        >
-          <Link2 className="size-3 shrink-0" aria-hidden />
+        <span className={cx("inline-flex min-w-0 shrink items-center gap-1 text-xs", waiting ? "text-fg-attention" : "text-fg-muted")}>
+          <LinkIcon size={12} />
           <span className="truncate">
             {waiting ? "waits for" : "after"} {row.dependsOn.map((id) => taskTitle(workOrder, id)).join(", ")}
           </span>
@@ -483,18 +501,12 @@ function LaneLabel({ row, workOrder }: { readonly row: TaskRow; readonly workOrd
 
 function GhostCard({ label }: { readonly label: string }) {
   return (
-    <div className="flex h-[92px] flex-col justify-between rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-3" aria-hidden>
-      <div className="flex items-center gap-2.5">
-        <span className="size-8 rounded-lg bg-zinc-800/50" />
-        <div className="space-y-1.5">
-          <div className="text-[13px] font-medium text-zinc-600">{label}</div>
-          <div className="h-2 w-16 rounded bg-zinc-800/60" />
-        </div>
+    <div className="flex h-[76px] flex-col justify-center gap-2 rounded-md border border-dashed border-line bg-canvas px-3" aria-hidden>
+      <div className="flex items-center gap-2 text-fg-muted">
+        <ClockIcon size={16} />
+        <span className="font-semibold">{label}</span>
       </div>
-      <div className="flex gap-1">
-        <div className="h-3.5 w-12 rounded bg-zinc-800/50" />
-        <div className="h-3.5 w-16 rounded bg-zinc-800/50" />
-      </div>
+      <div className="SkeletonText my-0 ml-6 w-24" />
     </div>
   );
 }
@@ -514,27 +526,15 @@ function IntakeCard({ workOrder, selected, onSelect }: { readonly workOrder: Wor
   );
   const source = workOrder.source.kind === "template" ? (template?.title ?? "Template") : "Custom brief";
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      aria-pressed={selected}
-      className={cx(
-        "flex w-full flex-col rounded-xl border border-zinc-700/80 bg-zinc-900/90 p-3 text-left shadow-lg shadow-black/20 transition-colors",
-        selected ? "bg-zinc-800/80 outline-2 outline-offset-2 outline-zinc-300/60" : "hover:border-zinc-600 hover:bg-zinc-900",
-      )}
-    >
-      <div className="flex items-center gap-2.5">
-        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-emerald-400/10 text-emerald-300 ring-1 ring-inset ring-emerald-400/20">
-          <Inbox className="size-4" aria-hidden />
-        </span>
-        <div className="min-w-0">
-          <div className="text-[13px] font-semibold text-zinc-50">Intake</div>
-          <div className="truncate text-xs text-zinc-400">{source}</div>
-        </div>
+    <button type="button" onClick={onSelect} aria-pressed={selected} className={stationCardClass(selected)}>
+      <div className="flex w-full flex-wrap items-center gap-x-2">
+        <InboxIcon size={16} className="shrink-0 text-fg-muted" />
+        <span className="font-semibold">Intake</span>
+        <span className="max-w-full truncate text-xs text-fg-muted">{source}</span>
       </div>
-      <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-zinc-400">{plainText(workOrder.brief)}</p>
-      <span className="mt-2 inline-flex items-center gap-0.5 text-[11px] font-medium text-amber-300/90">
-        Read brief <ChevronRight className="size-3" aria-hidden />
+      <span className="mt-1 line-clamp-3 pl-6 text-xs text-fg-muted">{plainText(workOrder.brief)}</span>
+      <span className="mt-1.5 inline-flex items-center gap-0.5 pl-6 text-xs font-semibold whitespace-nowrap text-fg-accent">
+        Read brief <ChevronRightIcon size={12} />
       </span>
     </button>
   );
@@ -544,44 +544,36 @@ function DeliverableCard({ workOrder, release }: { readonly workOrder: WorkOrder
   const summary = workOrder.release;
   if (summary && release.status === "done") {
     return (
-      <a
-        href={workOrderHref(workOrder.id, "deliverable")}
-        className="group flex w-full flex-col rounded-xl border border-emerald-400/45 bg-emerald-400/[0.07] p-3 shadow-[0_0_0_1px_rgb(52_211_153/0.12),0_0_32px_-8px_rgb(52_211_153/0.35)] transition-colors hover:bg-emerald-400/[0.11]"
-      >
-        <span className="grid size-8 place-items-center rounded-lg bg-emerald-400/15 text-emerald-300 ring-1 ring-inset ring-emerald-400/30">
-          <PackageCheck className="size-4" aria-hidden />
+      <a href={workOrderHref(workOrder.id, "deliverable")} className={cx(stationCardClass(false), "group no-underline")}>
+        <span className="flex w-full items-center gap-2">
+          <CheckCircleFillIcon size={16} className="shrink-0 text-fg-success" />
+          <span className="font-semibold text-fg group-hover:text-fg-accent group-hover:underline">Release ready</span>
         </span>
-        <span className="mt-2 text-[13px] font-semibold text-emerald-100">Release ready</span>
-        <span className="mt-0.5 text-xs text-emerald-200/70">
+        <span className="mt-1 pl-6 text-xs text-fg-muted">
           {pluralize(summary.files, "file")} · {formatBytes(summary.bytes)}
-        </span>
-        {summary.tests ? (
-          <span className="mt-0.5 text-xs text-emerald-200/70">{summary.tests.passed} tests passed</span>
-        ) : null}
-        <span className="mt-2 inline-flex items-center gap-0.5 text-[11px] font-medium text-emerald-300">
-          Open <ChevronRight className="size-3 transition-transform group-hover:translate-x-0.5" aria-hidden />
+          {summary.tests ? ` · ${summary.tests.passed} tests passed` : ""}
         </span>
       </a>
     );
   }
   if (release.status === "failed") {
     return (
-      <div className="flex w-full flex-col rounded-xl border border-rose-400/35 bg-rose-400/[0.05] p-3">
-        <span className="grid size-8 place-items-center rounded-lg bg-rose-400/10 text-rose-300 ring-1 ring-inset ring-rose-400/25">
-          <PackageX className="size-4" aria-hidden />
+      <div className="flex w-full flex-col rounded-md border border-line bg-canvas p-3">
+        <span className="flex items-center gap-2">
+          <XCircleFillIcon size={16} className="shrink-0 text-fg-danger" />
+          <span className="font-semibold">Release failed</span>
         </span>
-        <span className="mt-2 text-[13px] font-semibold text-rose-100">Release failed</span>
-        <span className="mt-0.5 text-xs text-rose-200/70">See the release station for details.</span>
+        <span className="mt-1 pl-6 text-xs text-fg-muted">See the release station for details.</span>
       </div>
     );
   }
   return (
-    <div className="flex w-full flex-col rounded-xl border border-dashed border-zinc-800 bg-zinc-900/30 p-3">
-      <span className="grid size-8 place-items-center rounded-lg bg-zinc-800/60 text-zinc-500 ring-1 ring-inset ring-white/5">
-        <PackageOpen className="size-4" aria-hidden />
+    <div className="flex w-full flex-col rounded-md border border-dashed border-line bg-canvas p-3">
+      <span className="flex items-center gap-2 text-fg-muted">
+        <PackageIcon size={16} className="shrink-0" />
+        <span className="font-semibold">Deliverable</span>
       </span>
-      <span className="mt-2 text-[13px] font-semibold text-zinc-400">Deliverable</span>
-      <span className="mt-0.5 text-xs leading-relaxed text-zinc-500">Lights up when the release is packaged.</span>
+      <span className="mt-1 pl-6 text-xs text-fg-muted">Lights up when the release is packaged.</span>
     </div>
   );
 }

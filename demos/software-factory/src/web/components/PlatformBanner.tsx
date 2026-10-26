@@ -1,7 +1,8 @@
-import { CircleAlert, LoaderCircle, TriangleAlert } from "lucide-react";
+import { AlertIcon, StopIcon } from "@primer/octicons-react";
 import { cx } from "../lib/cx.js";
 import { useStore } from "../lib/store.js";
 import { InlineCode } from "./ui/Feedback.js";
+import { Spinner } from "./ui/Spinner.js";
 
 const DEFAULTS = {
   connecting: "Connecting to Managed Copilot…",
@@ -10,56 +11,47 @@ const DEFAULTS = {
   misconfigured: "The platform is reachable but isn't set up for the factory.",
 } as const;
 
-/** Explains a non-connected platform right under the top bar. */
+const VARIANTS = {
+  connecting: undefined,
+  reconnecting: "flash-warn",
+  unavailable: "flash-error",
+  misconfigured: "flash-warn",
+} as const;
+
+/** Explains a non-connected platform in a full-width banner under the header. */
 export function PlatformBanner() {
   const platform = useStore((state) => state.platform);
   if (!platform || platform.state === "connected") return null;
   const state = platform.state;
   const pending = state === "connecting" || state === "reconnecting";
-  const Icon = pending ? LoaderCircle : state === "misconfigured" ? TriangleAlert : CircleAlert;
   return (
-    <div
-      role="status"
-      className={cx(
-        "shrink-0 border-b px-4 py-2.5 sm:px-6",
-        pending && "border-sky-400/15 bg-sky-400/[0.05]",
-        state === "misconfigured" && "border-amber-400/20 bg-amber-400/[0.06]",
-        state === "unavailable" && "border-rose-400/20 bg-rose-400/[0.07]",
+    <div role="status" className={cx("flash flash-full shrink-0 py-3", VARIANTS[state])}>
+      {pending ? (
+        <Spinner size={16} className={cx("mt-0.5", state === "reconnecting" ? "text-fg-attention" : "text-fg-accent")} />
+      ) : state === "misconfigured" ? (
+        <AlertIcon size={16} />
+      ) : (
+        <StopIcon size={16} />
       )}
-    >
-      <div className="flex items-start gap-3 text-[13px] leading-relaxed">
-        <Icon
-          className={cx(
-            "mt-0.5 size-4 shrink-0",
-            pending && "animate-spin text-sky-300",
-            state === "misconfigured" && "text-amber-300",
-            state === "unavailable" && "text-rose-300",
-          )}
-          aria-hidden
-        />
-        <div className="min-w-0 flex-1">
-          <p className="text-zinc-100">
-            <InlineCode text={platform.message ?? DEFAULTS[state]} />
+      <div className="flash-content">
+        <p>
+          <InlineCode text={platform.message ?? DEFAULTS[state]} />
+        </p>
+        {platform.hint ? (
+          <p className="text-fg-muted">
+            <InlineCode text={platform.hint} />
           </p>
-          {platform.hint ? (
-            <p className="text-zinc-400">
-              <InlineCode text={platform.hint} />
-            </p>
-          ) : null}
-          {state === "misconfigured" && platform.missingEnvironments.length > 0 ? (
-            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              <span className="text-xs text-zinc-400">Missing environments:</span>
-              {platform.missingEnvironments.map((name) => (
-                <code
-                  key={name}
-                  className="rounded-md bg-black/30 px-1.5 py-px font-mono text-[11.5px] text-amber-100 ring-1 ring-inset ring-amber-400/20"
-                >
-                  {name}
-                </code>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        ) : null}
+        {state === "misconfigured" && platform.missingEnvironments.length > 0 ? (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1">
+            <span className="text-xs text-fg-muted">Missing environments:</span>
+            {platform.missingEnvironments.map((name) => (
+              <code key={name} className="inline-code">
+                {name}
+              </code>
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );

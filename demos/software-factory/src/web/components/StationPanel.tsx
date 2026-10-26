@@ -1,4 +1,13 @@
-import { ArrowDown, ChevronDown, CircleCheck, Inbox, SquareTerminal, X } from "lucide-react";
+import {
+  ArrowDownIcon,
+  CheckCircleFillIcon,
+  CheckCircleIcon,
+  ChevronDownIcon,
+  FileDiffIcon,
+  InboxIcon,
+  TerminalIcon,
+  XIcon,
+} from "@primer/octicons-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { AttachResponse, ReviewFinding, ReviewRecord, Station, WorkOrder } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
@@ -15,18 +24,17 @@ import {
   shortImage,
   summarizeNetwork,
 } from "../lib/format.js";
-import { isStationActive, KIND_ICONS, stationElapsed, stationStatusMeta } from "../lib/stations.js";
+import { isStationActive, stationElapsed, stationStatusMeta } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
-import { TONE_TILE } from "../lib/tone.js";
+import type { Tone } from "../lib/tone.js";
 import { ActivityStream } from "./ActivityStream.js";
 import { NetworkChip, useEnvironment } from "./StationCard.js";
 import { Button, IconButton } from "./ui/Button.js";
-import { Chip, StatusBadge } from "./ui/Chip.js";
+import { Chip, StatusIcon } from "./ui/Chip.js";
 import { CopyButton } from "./ui/CopyButton.js";
-import { Callout, SectionLabel } from "./ui/Feedback.js";
+import { Callout } from "./ui/Feedback.js";
 import { MarkdownView } from "./viewers/MarkdownView.js";
-
 /** Keeps a scroll container pinned to the bottom while new content arrives, unless the user scrolls up. */
 function useStickToBottom(
   scrollRef: RefObject<HTMLDivElement | null>,
@@ -99,10 +107,10 @@ function useStickToBottom(
   return { showJump: away || (hasNew && !pinned.current), hasNew, jump, pin };
 }
 
-const PANEL_CLASS =
-  "relative flex min-w-0 flex-col overflow-clip rounded-2xl border border-zinc-800/80 bg-zinc-900/40 shadow-xl shadow-black/20 xl:h-full";
+const PANEL_CLASS = "Box relative flex min-w-0 flex-col overflow-clip xl:h-full";
 const SCROLL_CLASS = "min-h-0 flex-1 overflow-y-auto overscroll-contain max-xl:max-h-[80vh]";
 
+/** The selected station, like a GitHub Actions job: header, details, review rounds, and the live activity log. */
 export function StationPanel({ workOrder, station }: { readonly workOrder: WorkOrder; readonly station: Station }) {
   // Follow live output for stations that are running (or about to); start the others at the top (details, reviews).
   const live = isStationActive(station.status) || station.status === "waiting";
@@ -124,19 +132,18 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
           <Details workOrder={workOrder} station={station} />
           {station.kind === "review" ? <ReviewHistory station={station} /> : null}
           {station.acceptedWithFindings ? (
-            <Callout tone="warning" title="Accepted with open findings">
+            <Callout tone="warning" compact title="Accepted with open findings">
               The reviewer still had findings after the last allowed round, so the factory accepted the work and moved on.
             </Callout>
           ) : null}
           {station.error ? (
-            <Callout tone="danger" role="alert" title="This station failed">
-              <span>{station.error.message}</span>{" "}
-              <code className="ml-1 rounded bg-black/30 px-1.5 py-px font-mono text-[11px] text-rose-200">{station.error.code}</code>
+            <Callout tone="danger" compact role="alert" title="This station failed">
+              <span>{station.error.message}</span> <code className="inline-code">{station.error.code}</code>
             </Callout>
           ) : null}
           <section aria-label="Activity">
-            <SectionLabel>Activity</SectionLabel>
-            <div className="mt-3">
+            <h3 className="text-sm font-semibold">Activity</h3>
+            <div className="mt-2">
               <ActivityStream workOrder={workOrder} station={station} />
             </div>
           </section>
@@ -146,10 +153,10 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
         <button
           type="button"
           onClick={jump}
-          className="absolute bottom-4 left-1/2 z-10 inline-flex -translate-x-1/2 animate-rise-in items-center gap-1.5 rounded-full bg-zinc-100 px-3 py-1.5 text-xs font-semibold text-zinc-900 shadow-lg shadow-black/40 hover:bg-white"
+          className="btn btn-sm absolute bottom-4 left-1/2 z-10 -translate-x-1/2 animate-slide-up shadow-lg"
         >
-          {hasNew && isStationActive(station.status) ? <span className="size-1.5 rounded-full bg-sky-500" aria-hidden /> : null}
-          <ArrowDown className="size-3.5" aria-hidden />
+          {hasNew && isStationActive(station.status) ? <span className="size-2 rounded-full bg-accent-emphasis" aria-hidden /> : null}
+          <ArrowDownIcon size={16} />
           Jump to latest
         </button>
       ) : null}
@@ -166,7 +173,6 @@ function PanelHeader({ station }: { readonly station: Station }) {
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
   const elapsed = stationElapsed(station, now);
-  const KindIcon = KIND_ICONS[station.kind];
   const attachAllowed = useStore((state) => state.platform?.features.attach ?? false);
   const attachTemplate = useStore((state) => state.attachCommand);
   const [attachState, setAttach] = useState<AttachState>();
@@ -193,32 +199,30 @@ function PanelHeader({ station }: { readonly station: Station }) {
   };
 
   return (
-    <header className="border-b border-zinc-800/80 bg-zinc-900/70 p-4">
-      <div className="flex items-start gap-3">
-        <span className={cx("grid size-10 shrink-0 place-items-center rounded-xl ring-1 ring-inset", TONE_TILE[meta.tone])}>
-          <KindIcon className="size-5" aria-hidden />
-        </span>
+    <header className="border-b border-line bg-canvas-muted px-4 py-3">
+      <div className="flex items-start gap-2">
+        <StatusIcon meta={meta} className="mt-1" />
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-base font-semibold text-zinc-50" title={station.title}>
+          <h2 className="truncate text-base font-semibold" title={station.title}>
             {station.title}
           </h2>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <StatusBadge meta={meta} />
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
+            <span>{meta.label}</span>
             {station.round > 1 ? <Chip tone="warning">Round {station.round}</Chip> : null}
             {elapsed !== undefined ? (
-              <span className="font-mono text-xs text-zinc-500 tabular" title={active ? "Elapsed" : "Duration"}>
+              <span className="font-mono tabular-nums" title={active ? "Elapsed" : "Duration"}>
                 {active ? formatClock(elapsed) : formatDuration(elapsed)}
               </span>
             ) : null}
-          </div>
+          </p>
         </div>
       </div>
-      {station.detail ? <p className="mt-2.5 text-[13px] leading-relaxed text-zinc-400">{station.detail}</p> : null}
+      {station.detail ? <p className="mt-2 text-fg-muted">{station.detail}</p> : null}
       {sessionId && attachAllowed ? (
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button
             size="sm"
-            icon={SquareTerminal}
+            icon={TerminalIcon}
             loading={attach?.status === "pending"}
             disabled={sessionDeleted}
             aria-describedby={sessionDeleted ? "attach-unavailable" : undefined}
@@ -227,7 +231,7 @@ function PanelHeader({ station }: { readonly station: Station }) {
             Open in Copilot CLI
           </Button>
           {sessionDeleted ? (
-            <span id="attach-unavailable" className="text-xs text-zinc-500">
+            <span id="attach-unavailable" className="text-xs text-fg-muted">
               This session was deleted on the platform.
             </span>
           ) : null}
@@ -248,38 +252,28 @@ function AttachResult({
   const { result } = state;
   const launched = result.launched;
   return (
-    <div
-      role="status"
-      className={cx(
-        "mt-3 animate-rise-in rounded-xl border p-3",
-        launched ? "border-emerald-400/25 bg-emerald-400/[0.06]" : "border-amber-400/25 bg-amber-400/[0.05]",
-      )}
-    >
-      <div className="flex items-start gap-2">
-        {launched ? (
-          <CircleCheck className="mt-0.5 size-4 shrink-0 text-emerald-300" aria-hidden />
-        ) : (
-          <SquareTerminal className="mt-0.5 size-4 shrink-0 text-amber-300" aria-hidden />
-        )}
-        <p className="min-w-0 flex-1 text-[13px] leading-relaxed text-zinc-200">
-          {result.message || (launched ? "Opened Copilot CLI in a new terminal window." : "Run this command in a terminal to attach:")}
-        </p>
-        <IconButton icon={X} label="Dismiss" size="sm" onClick={onDismiss} />
+    <div role="status" className={cx("flash flash-sm mt-3 animate-fade-in", launched ? "flash-success" : "flash-warn")}>
+      {launched ? <CheckCircleIcon size={16} /> : <TerminalIcon size={16} />}
+      <div className="flash-content">
+        <p>{result.message || (launched ? "Opened Copilot CLI in a new terminal window." : "Run this command in a terminal to attach:")}</p>
+        {result.command ? (
+          <div className="mt-2 flex items-center gap-1 rounded-md border border-line bg-canvas py-1 pr-1 pl-2">
+            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={result.command}>
+              {result.command}
+            </code>
+            {launched ? (
+              <CopyButton text={result.command} label="Copy attach command" />
+            ) : (
+              <CopyButton text={result.command} label="Copy attach command" variant="primary" size="sm">
+                Copy
+              </CopyButton>
+            )}
+          </div>
+        ) : null}
       </div>
-      {result.command ? (
-        <div className="mt-2.5 flex items-center gap-2 rounded-lg bg-black/40 py-1.5 pr-1.5 pl-3 ring-1 ring-inset ring-white/10">
-          <code className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-100" title={result.command}>
-            {result.command}
-          </code>
-          {launched ? (
-            <CopyButton text={result.command} label="Copy attach command" size="sm" />
-          ) : (
-            <CopyButton text={result.command} label="Copy attach command" variant="primary" size="sm">
-              Copy
-            </CopyButton>
-          )}
-        </div>
-      ) : null}
+      <div className="-my-1 -mr-1">
+        <IconButton icon={XIcon} label="Dismiss" size="sm" onClick={onDismiss} />
+      </div>
     </div>
   );
 }
@@ -287,8 +281,8 @@ function AttachResult({
 function Row({ label, children }: { readonly label: string; readonly children: ReactNode }) {
   return (
     <>
-      <dt className="pt-px text-zinc-500">{label}</dt>
-      <dd className="min-w-0 text-zinc-200">{children}</dd>
+      <dt className="text-fg-muted">{label}</dt>
+      <dd className="min-w-0">{children}</dd>
     </>
   );
 }
@@ -302,15 +296,15 @@ const TURN_LABELS: Readonly<Record<NonNullable<Station["turn"]>["kind"], string>
   continue: "Continue after restart",
 };
 
-function sessionStateTone(state: string): "active" | "danger" | "plain" {
+function sessionStateTone(state: string): Tone | "plain" {
   if (state === "deleted" || state === "failed" || state === "error") return "danger";
-  if (state === "running" || state === "busy" || state === "active") return "active";
+  if (state === "running" || state === "busy" || state === "active") return "accent";
   return "plain";
 }
 
 function Mono({ children, title }: { readonly children: ReactNode; readonly title?: string }) {
   return (
-    <code className="truncate font-mono text-[12px] text-zinc-200" title={title}>
+    <code className="truncate font-mono text-xs" title={title}>
       {children}
     </code>
   );
@@ -333,13 +327,13 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
-        className="flex w-full items-center justify-between rounded-md text-left"
+        className="-mx-1 flex items-center gap-1 rounded-md px-1 text-left text-sm font-semibold hover:bg-control-transparent-hover"
       >
-        <SectionLabel>Details</SectionLabel>
-        <ChevronDown className={cx("size-4 text-zinc-500 transition-transform", !open && "-rotate-90")} aria-hidden />
+        <ChevronDownIcon size={16} className={cx("text-fg-muted transition-transform duration-100", !open && "-rotate-90")} />
+        Details
       </button>
       {open ? (
-        <dl className="mt-3 grid grid-cols-[6.5rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2.5 text-[13px]">
+        <dl className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2">
           <Row label="Session">
             {station.sessionId ? (
               <span className="flex min-w-0 flex-wrap items-center gap-1">
@@ -352,14 +346,14 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
                 ) : null}
               </span>
             ) : (
-              <span className="text-zinc-500">Not started</span>
+              <span className="text-fg-muted">Not started</span>
             )}
           </Row>
           {station.turn ? (
             <Row label="Turn">
               <span>
                 {TURN_LABELS[station.turn.kind] ?? station.turn.kind}
-                <span className="text-zinc-500">
+                <span className="text-fg-muted">
                   {" "}
                   · round {station.turn.round} ·{" "}
                   {station.turn.completedAt
@@ -378,7 +372,7 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
           <Row label="Placement">{station.placement === "sandbox" ? "Fresh isolated sandbox" : "Shared environment (no sandbox)"}</Row>
           <Row label="Agent">
             <span>
-              @{station.agent} <span className="text-zinc-500">· {station.role}</span>
+              @{station.agent} <span className="text-fg-muted">· {station.role}</span>
             </span>
           </Row>
           {model ? (
@@ -396,7 +390,7 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
               </Row>
               <Row label="Size">{formatSandboxSize(sandbox.size)}</Row>
               <Row label="Sandbox state">
-                <Chip tone={sandbox.state === "running" || sandbox.state === "ready" ? "active" : "plain"}>{sandbox.state}</Chip>
+                <Chip tone={sandbox.state === "running" || sandbox.state === "ready" ? "accent" : "plain"}>{sandbox.state}</Chip>
               </Row>
               {sandbox.image ? (
                 <Row label="Image">
@@ -428,7 +422,7 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
           {station.startedAt ? (
             <Row label="Started">
               <span title={formatFullDateTime(station.startedAt)}>
-                {formatDateTime(station.startedAt)} <span className="text-zinc-500">· {formatRelative(station.startedAt, now)}</span>
+                {formatDateTime(station.startedAt)} <span className="text-fg-muted">· {formatRelative(station.startedAt, now)}</span>
               </span>
             </Row>
           ) : null}
@@ -436,28 +430,28 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
             <Row label="Finished">
               <span title={formatFullDateTime(station.finishedAt)}>
                 {formatDateTime(station.finishedAt)}
-                {elapsed !== undefined ? <span className="text-zinc-500"> · took {formatDuration(elapsed)}</span> : null}
+                {elapsed !== undefined ? <span className="text-fg-muted"> · took {formatDuration(elapsed)}</span> : null}
               </span>
             </Row>
           ) : active && elapsed !== undefined ? (
             <Row label="Elapsed">
-              <span className="font-mono text-[12px] tabular">{formatClock(elapsed)}</span>
+              <span className="font-mono text-xs tabular-nums">{formatClock(elapsed)}</span>
             </Row>
           ) : null}
           {station.kind === "build" || station.kind === "review" ? (
             <Row label="Round">
-              {Math.max(station.round, 1)} <span className="text-zinc-500">of up to {workOrder.maxReviewRounds}</span>
+              {Math.max(station.round, 1)} <span className="text-fg-muted">of up to {workOrder.maxReviewRounds}</span>
             </Row>
           ) : null}
           {station.tests ? (
             <Row label="Tests">
               <span>
-                <span className="text-emerald-300">{station.tests.passed} passed</span>
-                <span className="text-zinc-500"> · </span>
-                <span className={station.tests.failed > 0 ? "text-rose-300" : "text-zinc-400"}>{station.tests.failed} failed</span>
-                {station.tests.skipped > 0 ? <span className="text-zinc-500"> · {station.tests.skipped} skipped</span> : null}
+                <span className="text-fg-success">{station.tests.passed} passed</span>
+                <span className="text-fg-muted"> · </span>
+                <span className={station.tests.failed > 0 ? "text-fg-danger" : "text-fg-muted"}>{station.tests.failed} failed</span>
+                {station.tests.skipped > 0 ? <span className="text-fg-muted"> · {station.tests.skipped} skipped</span> : null}
                 {station.tests.durationMs !== undefined ? (
-                  <span className="text-zinc-500"> · {formatDuration(station.tests.durationMs)}</span>
+                  <span className="text-fg-muted"> · {formatDuration(station.tests.durationMs)}</span>
                 ) : null}
               </span>
             </Row>
@@ -465,11 +459,9 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
           {usage ? (
             <Row label="Tokens">
               <span>
-                {formatCount(usage.inputTokens)} in <span className="text-zinc-500">·</span> {formatCount(usage.outputTokens)} out
-                {usage.cacheReadTokens > 0 ? (
-                  <span className="text-zinc-500"> · {formatCount(usage.cacheReadTokens)} cached</span>
-                ) : null}
-                <span className="text-zinc-500"> · </span>
+                {formatCount(usage.inputTokens)} in <span className="text-fg-muted">·</span> {formatCount(usage.outputTokens)} out
+                {usage.cacheReadTokens > 0 ? <span className="text-fg-muted"> · {formatCount(usage.cacheReadTokens)} cached</span> : null}
+                <span className="text-fg-muted"> · </span>
                 {usage.requests} {usage.requests === 1 ? "request" : "requests"}
               </span>
             </Row>
@@ -492,63 +484,69 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
   );
 }
 
-const SEVERITY: Readonly<Record<ReviewFinding["severity"], { readonly label: string; readonly className: string }>> = {
-  blocker: { label: "Blocker", className: "bg-rose-400/10 text-rose-300 ring-rose-400/30" },
-  major: { label: "Major", className: "bg-amber-400/10 text-amber-300 ring-amber-400/25" },
-  minor: { label: "Minor", className: "bg-zinc-400/10 text-zinc-300 ring-zinc-400/20" },
+const SEVERITY: Readonly<Record<ReviewFinding["severity"], { readonly label: string; readonly tone: Tone }>> = {
+  blocker: { label: "Blocker", tone: "danger" },
+  major: { label: "Major", tone: "warning" },
+  minor: { label: "Minor", tone: "neutral" },
 };
 
 export function VerdictBadge({ verdict }: { readonly verdict: ReviewRecord["verdict"] }) {
   return verdict === "approve" ? <Chip tone="success">Approved</Chip> : <Chip tone="warning">Changes requested</Chip>;
 }
 
+/** Review rounds as pull request reviews: verdict, summary, and findings with file and line. */
 function ReviewHistory({ station }: { readonly station: Station }) {
   const reviews = [...(station.reviews ?? [])].sort((a, b) => a.round - b.round);
   return (
     <section aria-label="Review history">
-      <SectionLabel>Review history</SectionLabel>
+      <h3 className="text-sm font-semibold">Review history</h3>
       {reviews.length === 0 ? (
-        <p className="mt-2 text-[13px] text-zinc-500">No reviews yet. The reviewer starts when the build is ready.</p>
+        <p className="mt-1 text-fg-muted">No reviews yet. The reviewer starts when the build is ready.</p>
       ) : (
-        <ol className="mt-3 space-y-3">
-          {reviews.map((review) => (
-            <li key={review.round} className="rounded-xl border border-zinc-800 bg-zinc-950/40 p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs font-semibold text-zinc-200">Round {review.round}</span>
-                <VerdictBadge verdict={review.verdict} />
-                <span className="ml-auto text-[11px] text-zinc-500" title={formatFullDateTime(review.at)}>
-                  {formatDateTime(review.at)}
-                </span>
-              </div>
-              {review.summary ? <MarkdownView source={review.summary} className="mt-2 text-[13px]" /> : null}
-              {review.findings.length > 0 ? (
-                <ul className="mt-3 space-y-2 border-t border-zinc-800/80 pt-3">
-                  {review.findings.map((finding, index) => {
-                    const severity = SEVERITY[finding.severity] ?? SEVERITY.minor;
-                    const location = finding.file ? `${finding.file}${finding.line !== undefined ? `:${finding.line}` : ""}` : undefined;
-                    return (
-                      <li key={index} className="flex items-start gap-2">
-                        <span
-                          className={cx(
-                            "mt-px inline-flex w-[3.75rem] shrink-0 justify-center rounded-md px-1.5 py-px text-[10.5px] leading-4 font-semibold ring-1 ring-inset",
-                            severity.className,
-                          )}
-                        >
-                          {severity.label}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          {location ? <code className="block truncate font-mono text-[11.5px] text-zinc-400">{location}</code> : null}
-                          <p className="text-[13px] leading-relaxed text-zinc-300">{finding.message}</p>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ul>
-              ) : (
-                <p className="mt-2 text-xs text-zinc-500">No findings.</p>
-              )}
-            </li>
-          ))}
+        <ol className="mt-2 space-y-3">
+          {reviews.map((review) => {
+            const approved = review.verdict === "approve";
+            return (
+              <li key={review.round} className="timeline-comment">
+                <div className="timeline-comment-header flex-wrap">
+                  {approved ? (
+                    <CheckCircleFillIcon size={16} className="text-fg-success" />
+                  ) : (
+                    <FileDiffIcon size={16} className="text-fg-attention" />
+                  )}
+                  <span className="font-semibold text-fg">Round {review.round}</span>
+                  <VerdictBadge verdict={review.verdict} />
+                  <span className="ml-auto text-xs" title={formatFullDateTime(review.at)}>
+                    {formatDateTime(review.at)}
+                  </span>
+                </div>
+                <div className="px-4 py-3">
+                  {review.summary ? <MarkdownView source={review.summary} /> : null}
+                  {review.findings.length > 0 ? (
+                    <ul className={cx("space-y-2", review.summary && "mt-3 border-t border-line-muted pt-3")}>
+                      {review.findings.map((finding, index) => {
+                        const severity = SEVERITY[finding.severity] ?? SEVERITY.minor;
+                        const location = finding.file ? `${finding.file}${finding.line !== undefined ? `:${finding.line}` : ""}` : undefined;
+                        return (
+                          <li key={index} className="flex items-start gap-2">
+                            <Chip tone={severity.tone} className="mt-0.5 w-16 shrink-0 justify-center">
+                              {severity.label}
+                            </Chip>
+                            <div className="min-w-0 flex-1">
+                              {location ? <code className="block truncate font-mono text-xs text-fg-muted">{location}</code> : null}
+                              <p>{finding.message}</p>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : (
+                    <p className={cx("text-xs text-fg-muted", review.summary && "mt-2")}>No findings.</p>
+                  )}
+                </div>
+              </li>
+            );
+          })}
         </ol>
       )}
     </section>
@@ -561,20 +559,18 @@ export function IntakePanel({ workOrder }: { readonly workOrder: WorkOrder }) {
   );
   return (
     <section aria-label="Work order brief" className={PANEL_CLASS}>
-      <header className="border-b border-zinc-800/80 bg-zinc-900/70 p-4">
-        <div className="flex items-start gap-3">
-          <span className="grid size-10 shrink-0 place-items-center rounded-xl bg-emerald-400/10 text-emerald-300 ring-1 ring-inset ring-emerald-400/20">
-            <Inbox className="size-5" aria-hidden />
-          </span>
+      <header className="border-b border-line bg-canvas-muted px-4 py-3">
+        <div className="flex items-start gap-2">
+          <InboxIcon size={16} className="mt-1 text-fg-muted" />
           <div className="min-w-0">
-            <h2 className="text-base font-semibold text-zinc-50">Intake</h2>
-            <p className="mt-0.5 text-[13px] text-zinc-400">The brief the factory is working from.</p>
+            <h2 className="text-base font-semibold">Intake</h2>
+            <p className="text-xs text-fg-muted">The brief the factory is working from.</p>
           </div>
         </div>
       </header>
       <div className={SCROLL_CLASS}>
-        <div className="space-y-5 p-4">
-          <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-2.5 text-[13px]">
+        <div className="space-y-4 p-4">
+          <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-2">
             <Row label="Source">
               {workOrder.source.kind === "template" ? `Template · ${template?.title ?? workOrder.source.templateId ?? "unknown"}` : "Custom brief"}
             </Row>
@@ -584,8 +580,13 @@ export function IntakePanel({ workOrder }: { readonly workOrder: WorkOrder }) {
             </Row>
             {workOrder.owner ? <Row label="Requested by">@{workOrder.owner.login}</Row> : null}
           </dl>
-          <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-4">
-            <MarkdownView source={workOrder.brief} />
+          <div className="timeline-comment">
+            <div className="timeline-comment-header">
+              <span className="font-semibold text-fg">Brief</span>
+            </div>
+            <div className="comment-body">
+              <MarkdownView source={workOrder.brief} />
+            </div>
           </div>
         </div>
       </div>

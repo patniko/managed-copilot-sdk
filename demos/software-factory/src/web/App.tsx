@@ -28,14 +28,14 @@ export function App() {
   if (phase === "error") return <ErrorScreen />;
 
   return (
-    <div className="flex h-dvh flex-col" style={{ paddingBottom: "var(--preview-offset, 0px)" }}>
+    <div className="flex h-dvh flex-col bg-canvas" style={{ paddingBottom: "var(--preview-offset, 0px)" }}>
       <a
         href="#main"
         onClick={(event) => {
           event.preventDefault();
           document.getElementById("main")?.focus();
         }}
-        className="sr-only z-[90] rounded-lg bg-amber-400 px-3 py-2 text-sm font-semibold text-zinc-950 focus:not-sr-only focus:fixed focus:top-2 focus:left-2"
+        className="btn fixed top-3 left-3 z-[90] -translate-y-24 focus:translate-y-0"
       >
         Skip to content
       </a>
