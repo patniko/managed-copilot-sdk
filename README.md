@@ -109,7 +109,7 @@ all in parallel. A reviewer on a different model sends work back with file-and-l
 integrates the tasks, adds integration tests and a README, and publishes a tested release you can download.
 
 <p align="center">
-  <img src="demos/software-factory/docs/screenshots/deliverable.png" alt="The deliverable: release ready, 51 of 51 tests passed, release notes, and per-task review results" width="900">
+  <img src="demos/software-factory/docs/screenshots/deliverable.png" alt="The deliverable: release ready, 38 of 38 tests passed, release notes, and per-task review results" width="900">
 </p>
 
 → [demos/software-factory](demos/software-factory/README.md)
