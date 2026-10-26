@@ -55,6 +55,8 @@ export function describeError(error: unknown): DescribedError {
     if (/No Managed Copilot deployment found/.test(error.message)) hint = "Start the platform from the repository root with `aspire run`, or pass --url.";
     else if (/Cannot reach the Managed Copilot deployment/.test(error.message)) hint = "Is `aspire run` still running? Check the gateway in the Aspire dashboard.";
     else if (/not available in this build|is not available on this gateway/.test(error.message)) hint = "That feature has not landed on this deployment yet.";
+    // About Copilot CLI on this machine, not the deployment; those messages say what to do.
+    else if (error.code === "capability_unavailable" && /Copilot CLI/.test(error.message)) hint = undefined;
     return { message: error.message, code: error.code, ...(hint ? { hint } : {}) };
   }
   if (error instanceof Error) return { message: error.message };

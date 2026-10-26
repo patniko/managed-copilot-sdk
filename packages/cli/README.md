@@ -7,6 +7,7 @@ npx managed-copilot status                          # deployment, account, envir
 npx managed-copilot login                           # let scheduled and unattended work run as you
 npx managed-copilot logout                          # turn that off; dependent schedules pause
 npx managed-copilot sessions [--environment chat]   # your sessions
+npx managed-copilot new chat [--model <id>]         # a new session in that environment, opened in Copilot CLI
 npx managed-copilot attach 7f3a2c1                  # Copilot CLI on a live session
 npx managed-copilot promote 7f3a2c1                 # move a promotable session into its own sandbox
 npx managed-copilot artifacts 7f3a2c1 --download .\out
@@ -30,6 +31,14 @@ the same conversation. No credential goes on the CLI's command line: a loopback 
 only when its own GitHub sign-in is the session's owner, and connects to the deployment with a single-use ticket.
 Copilot CLI asks once to trust its empty working folder (`~/.managed-copilot/attach`). Exiting the CLI leaves the
 session running.
+
+`new <environment>` starts a session and attaches to it in one step. The session goes through the platform's normal
+admission, exactly like `managed.createSession({ environment })` from code (an attached Copilot CLI cannot create
+sessions itself), then this process leaves it and Copilot CLI attaches, so the CLI is the one that asks you to approve
+tool calls. `--model` picks one of the environment's allowed models (the default is its first, as for any session;
+Copilot CLI's model picker is empty in attached sessions). Isolated environments set up the session's sandbox first.
+It checks that Copilot CLI is installed and the deployment offers attach before creating anything; the session keeps
+running after you exit, so `attach` brings you back to it.
 
 ## Operate
 

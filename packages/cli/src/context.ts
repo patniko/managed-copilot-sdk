@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
 import { ROUTES, type AccountInfo, type ScheduleInfo, type SessionInfo } from "@managed-copilot/protocol";
 import { ManagedCopilot } from "@managed-copilot/sdk";
-import { HttpClient, launchAttachedCli, resolveToken, resolveUrl, validateDeploymentUrl, type AttachedCliResult } from "@managed-copilot/sdk/internal";
+import { HttpClient, findCopilot, launchAttachedCli, resolveToken, resolveUrl, validateDeploymentUrl, type AttachedCliResult } from "@managed-copilot/sdk/internal";
 import { UsageError } from "./errors.js";
 import { shortId, type Style } from "./output.js";
 
 /** The SDK surface the CLI uses. */
-export type ManagedApi = Pick<ManagedCopilot, "url" | "info" | "account" | "sessions" | "schedules" | "artifacts" | "promote">;
+export type ManagedApi = Pick<ManagedCopilot, "url" | "info" | "account" | "sessions" | "schedules" | "artifacts" | "promote" | "createSession" | "close">;
 
 /** A connected deployment. Commands connect lazily so `--help` never needs the network. */
 export interface Deployment {
@@ -14,6 +14,8 @@ export interface Deployment {
   /** REST with the caller's GitHub token, for routes the SDK does not wrap (background sign-in). */
   readonly http: Pick<HttpClient, "get" | "post" | "delete">;
   managed(): Promise<ManagedApi>;
+  /** Throws when Copilot CLI is not installed; checked before creating anything to open in it. */
+  requireCopilot(): void;
   attach(sessionId: string): Promise<AttachedCliResult>;
 }
 
@@ -51,6 +53,7 @@ export async function connectDeployment(options: { readonly url?: string }): Pro
     url,
     http,
     managed: () => (managed ??= ManagedCopilot.connect({ url, gitHubToken: token, clientName: "managed-copilot-cli" })),
+    requireCopilot: () => void findCopilot(),
     attach: (sessionId) => launchAttachedCli({ url, httpFor: () => http }, sessionId),
   };
 }

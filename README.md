@@ -49,7 +49,8 @@ to end with real models:
 - **Work that continues without you.** Tool calls wait durably and are answered later by your webhook or a poller;
   schedules and agent reminders run as you after `npx managed-copilot login`.
 - **Copilot CLI on a live session.** `npx managed-copilot attach <id>` opens the stock Copilot CLI on the same
-  conversation your app uses, and it follows the session when it moves into a sandbox.
+  conversation your app uses, and it follows the session when it moves into a sandbox. `npx managed-copilot new chat`
+  starts a new session in an environment and opens it in Copilot CLI straight away.
 - **Your identity, your plan.** Callers sign in with GitHub, sessions use the caller's own Copilot entitlement, and
   no GitHub token ever enters a sandbox.
 - **An operator console.** `npx managed-copilot console` shows the platform as it runs: component health, every
@@ -145,6 +146,7 @@ discovery record the local gateway writes. From another terminal:
 
 ```powershell
 npx managed-copilot status             # the deployment, your account, and its environments
+npx managed-copilot new chat           # a new session in the chat environment, opened in Copilot CLI
 npx managed-copilot sessions           # your sessions
 npx managed-copilot attach 7f3a2c1     # Copilot CLI on a live session (any unique ID prefix)
 npx managed-copilot console            # the operator console: health, sessions, harness configuration

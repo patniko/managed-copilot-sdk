@@ -866,7 +866,12 @@ From any terminal:
 ```powershell
 npx managed-copilot sessions        # your sessions, locally or in Azure
 npx managed-copilot attach 7f3a2c1  # Copilot CLI attached to that session over a secure WebSocket (AHP)
+npx managed-copilot new chat        # a new session in the chat environment, opened in Copilot CLI
 ```
+
+`new` creates the session through normal admission, exactly as `managed.createSession({ environment })` does, then
+attaches Copilot CLI to it; an attached CLI never creates sessions itself. The creating process leaves before the CLI
+attaches, so the CLI answers the session's permission prompts.
 
 The intended direct attach path authenticates the session owner, returns short-lived session-scoped connection
 material, and publishes the same resident session. It must not expose an entire runtime's session catalog or allow
@@ -1021,7 +1026,7 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 | --- | --- | --- |
 | `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
 | `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `packages/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
-| `managed-copilot` CLI | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
+| `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `platform/gateway`, `platform/sandbox`, `platform/egress` |
 | Operator console | Web console and operator API for health, deployed state, sessions, harness configuration, and guarded actions (section 16) | Built: `platform/console`, served by the gateway at `/console` |
 | Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment | Built: `demos/quickstart` (13 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` |

@@ -38,8 +38,12 @@ const SCHEDULE: ScheduleInfo = {
   createdAt: "2026-10-20T00:00:00Z",
 };
 
+const NEW_SESSION_ID = "9c1d2e3f-0000-4000-8000-000000000000";
+
 class FakeManaged {
   readonly calls: string[] = [];
+  readonly created: Record<string, unknown>[] = [];
+  createFails: Error | undefined;
   sessionsList: SessionInfo[] = [session("37f2a0c9-041b-4b59-91bc-585def383d54"), session("8a11b2c3-0000-4000-8000-000000000000", { state: "running", environment: "coder", placement: "sandbox" })];
   artifactList: ArtifactInfo[] = [];
   readonly url = "http://localhost:7400";
@@ -47,8 +51,11 @@ class FakeManaged {
     name: "copilot",
     version: "0.1.0",
     mode: "local" as const,
-    capabilities: ["shared", "attach.cli"],
-    environments: [{ name: "chat", type: "shared" as const, network: { access: "enabled" as const, allowedDomains: [] }, scheduling: false, agents: [] }],
+    capabilities: ["shared", "isolated", "attach.cli"],
+    environments: [
+      { name: "chat", type: "shared" as const, models: ["claude-sonnet-5", "claude-haiku-5.5"], network: { access: "enabled" as const, allowedDomains: [] }, scheduling: false, agents: [] },
+      { name: "coder", type: "isolated" as const, size: "medium" as const, network: { access: "enabled" as const, allowedDomains: [] }, scheduling: false, agents: [] },
+    ],
     sdk: { copilotSdk: "1.0.26", copilotRuntime: "1.0.103" },
   };
   readonly account = { id: 42, login: "octo" };
@@ -95,6 +102,15 @@ class FakeManaged {
     this.calls.push(`promote ${sessionId}`);
     return { sessionId, placement: "sandbox" as const, sandboxId: "sbx_7f3a", generation: 2 };
   }
+  async createSession(config: Record<string, unknown>) {
+    this.calls.push(`create ${String(config.environment)}`);
+    if (this.createFails) throw this.createFails;
+    this.created.push(config);
+    return { sessionId: NEW_SESSION_ID };
+  }
+  async close() {
+    this.calls.push("close");
+  }
 }
 
 function harness(managed = new FakeManaged(), extra: Partial<CliIo> = {}) {
@@ -108,7 +124,11 @@ function harness(managed = new FakeManaged(), extra: Partial<CliIo> = {}) {
       delete: async () => ({ account: managed.account, active: false, reason: "Signed out" }),
     } as unknown as Deployment["http"],
     managed: async () => managed as unknown as ManagedApi,
-    attach: async () => ({ exitCode: 0 }),
+    requireCopilot: () => undefined,
+    attach: async (sessionId) => {
+      managed.calls.push(`attach ${sessionId}`);
+      return { exitCode: 0 };
+    },
   };
   const io: CliIo = {
     stdout: { write: (text: string) => (stdout += text), isTTY: false },
@@ -131,6 +151,7 @@ describe("managed-copilot", () => {
     const { io, out } = harness(undefined, { connect: async () => Promise.reject(new Error("should not connect")) });
     expect(await run(["--help"], io)).toBe(0);
     expect(out()).toContain("attach <session>");
+    expect(out()).toContain("new <environment>");
     expect(out()).toContain("schedules");
     expect(await run(["sessions", "--help"], io)).toBe(0);
     expect(out()).toContain("npx managed-copilot sessions [--environment <name>]");
@@ -226,6 +247,107 @@ describe("managed-copilot", () => {
     refused.io = { ...refused.io, connect: async () => refusedDeployment } as CliIo;
     expect(await run(["attach", "37f2"], refused.io)).toBe(1);
     expect(refused.err()).toContain("signed in as @other");
+  });
+
+  const TTY = { stdin: { isTTY: true }, stdout: { write: () => true, isTTY: true } };
+
+  it("starts a new session and opens it in Copilot CLI", async () => {
+    const managed = new FakeManaged();
+    const { io, err } = harness(managed, TTY);
+    expect(await run(["new", "chat", "--model", "claude-haiku-5.5"], io)).toBe(0);
+    // The creating client leaves before Copilot CLI attaches, so the CLI answers the session's prompts.
+    expect(managed.calls).toEqual(["create chat", "close", `attach ${NEW_SESSION_ID}`]);
+    const config = managed.created[0]!;
+    expect(config).toMatchObject({ environment: "chat", model: "claude-haiku-5.5" });
+    expect(await (config.onPermissionRequest as () => unknown)()).toEqual({ kind: "no-result" });
+    expect(err()).toContain("Starting a new chat session · shared · claude-haiku-5.5");
+    expect(err()).toMatch(/Session 9c1d2e3f is ready\. Opening Copilot CLI/);
+    expect(err()).toContain("Detached from 9c1d2e3f. The session keeps running.");
+    expect(err()).toContain("Attach again: npx managed-copilot attach 9c1d2e3f");
+  });
+
+  it("uses the environment's first model by default and says when a sandbox is being set up", async () => {
+    const shared = new FakeManaged();
+    const chat = harness(shared, TTY);
+    expect(await run(["new", "chat"], chat.io)).toBe(0);
+    expect(shared.created[0]).not.toHaveProperty("model");
+    expect(chat.err()).toContain("Starting a new chat session · shared · claude-sonnet-5");
+    expect(chat.err()).not.toContain("sandbox");
+
+    const isolated = new FakeManaged();
+    const coder = harness(isolated, TTY);
+    expect(await run(["new", "coder"], coder.io)).toBe(0);
+    expect(isolated.created[0]).toMatchObject({ environment: "coder" });
+    expect(coder.err()).toContain("Starting a new coder session · its own sandbox");
+    expect(coder.err()).toContain("Setting up its sandbox");
+  });
+
+  it("checks the terminal, environment, and model before creating anything", async () => {
+    const managed = new FakeManaged();
+    const plain = harness(managed);
+    expect(await run(["new", "chat"], plain.io)).toBe(2);
+    expect(plain.err()).toContain("Copilot CLI needs an interactive terminal");
+
+    const { io, err } = harness(managed, TTY);
+    expect(await run(["new"], io)).toBe(2);
+    expect(err()).toContain("Name the environment for the new session.");
+    expect(err()).toContain("This deployment offers: chat (shared), coder (isolated). For example: npx managed-copilot new chat");
+    expect(await run(["new", "chatt"], io)).toBe(2);
+    expect(err()).toContain('No environment is named "chatt".');
+    expect(await run(["new", "chat", "--model", "gpt-4"], io)).toBe(2);
+    expect(err()).toContain('chat does not allow the model "gpt-4".');
+    expect(err()).toContain("Use one of: claude-sonnet-5, claude-haiku-5.5.");
+    expect(await run(["new", "chat", "--model", " "], io)).toBe(2);
+    expect(err()).toContain("--model needs a model ID.");
+    expect(await run(["new", "chat", "coder"], io)).toBe(2);
+    expect(err()).toContain('Name one environment ("coder" is extra).');
+    expect(await run(["sessions", "--model", "x"], io)).toBe(2);
+    expect(err()).toContain("sessions does not take --model");
+    expect(managed.calls).toEqual([]);
+  });
+
+  it("fails before creating a session when Copilot CLI or attach is unavailable", async () => {
+    const managed = new FakeManaged();
+    const missing = harness(managed, TTY);
+    const deployment = await missing.io.connect!({});
+    (deployment as { requireCopilot: Deployment["requireCopilot"] }).requireCopilot = () => {
+      throw new ManagedCopilotError("capability_unavailable", "Copilot CLI is not installed.");
+    };
+    expect(await run(["new", "chat"], missing.io)).toBe(1);
+    expect(missing.err()).toContain("Copilot CLI is not installed. (capability_unavailable)");
+    expect(missing.err()).toContain("Install it with `winget install GitHub.Copilot` or `npm install -g @github/copilot`, then run `npx managed-copilot new chat` again.");
+    expect(await run(["attach", "37f2"], missing.io)).toBe(1);
+    expect(missing.err()).toContain("then run `npx managed-copilot attach` again.");
+    expect(missing.err()).not.toContain("does not offer that yet");
+
+    const older = new FakeManaged();
+    older.info.capabilities = ["shared"];
+    const noAttach = harness(older, TTY);
+    expect(await run(["new", "chat"], noAttach.io)).toBe(1);
+    expect(noAttach.err()).toContain("This deployment does not offer Copilot CLI attach, so a new session could not be opened in it.");
+    expect([...managed.calls, ...older.calls]).toEqual([]);
+  });
+
+  it("closes its client and reports the error when the session can't be created", async () => {
+    const managed = new FakeManaged();
+    managed.createFails = new ManagedCopilotError("setup_failed", "Setup command exited with 1.");
+    const { io, err } = harness(managed, TTY);
+    expect(await run(["new", "coder"], io)).toBe(1);
+    expect(managed.calls).toEqual(["create coder", "close"]);
+    expect(err()).toContain("Setup command exited with 1. (setup_failed)");
+  });
+
+  it("says where the new session is when Copilot CLI cannot start on it", async () => {
+    const managed = new FakeManaged();
+    const failing = harness(managed, TTY);
+    const deployment = await failing.io.connect!({});
+    (deployment as { attach: Deployment["attach"] }).attach = async () => {
+      throw new ManagedCopilotError("capability_unavailable", "Could not start Copilot CLI: spawn EPERM");
+    };
+    expect(await run(["new", "chat"], failing.io)).toBe(1);
+    expect(failing.err()).toContain("Could not start Copilot CLI: spawn EPERM (capability_unavailable)");
+    expect(failing.err()).toContain("Session 9c1d2e3f was created and keeps running: npx managed-copilot attach 9c1d2e3f");
+    expect(failing.err()).not.toContain("does not offer that yet");
   });
 
   it("downloads the newest published version of each artifact, inside the target folder", async () => {
@@ -401,6 +523,7 @@ describe("managed-copilot console and operator", () => {
         delete: async () => undefined,
       } as unknown as Deployment["http"],
       managed: async () => Promise.reject(new Error("not used")),
+      requireCopilot: () => undefined,
       attach: async () => ({ exitCode: 0 }),
     };
     const io: CliIo = {

@@ -81,7 +81,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | Protocol | `packages/protocol` | library | AppHost config schema, REST DTOs, errors, events, bridge constants, network policy math |
 | SDK | `packages/sdk` | library | `ManagedCopilot` API; stock `CopilotClient` over the bridge; REST features |
 | Aspire integration | `packages/aspire` | library | `addManagedCopilot(builder, name, options)` for TypeScript AppHosts |
-| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator` |
+| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator` |
 | Gateway | `platform/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
 | Console | `platform/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
 | GitHub theme | `packages/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
@@ -1252,11 +1252,16 @@ sequenceDiagram
 ### CLI and quickstart
 
 - `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
-  `attach`, `promote`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the sign-in link;
+  `new`, `attach`, `promote`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the sign-in link;
   `--no-open` prints it), and `operator [overview|infra|environments|sessions|sandboxes|schedules|webhooks]`. It uses
   the SDK and `@managed-copilot/sdk/internal` (first-party only:
-  `HttpClient`, URL/token resolution, `launchAttachedCli`). Tokens never come from argv. Errors print the stable code
-  and a hint; usage errors exit 2.
+  `HttpClient`, URL/token resolution, `findCopilot`, `launchAttachedCli`). Tokens never come from argv. Errors print the
+  stable code and a hint; usage errors exit 2.
+- `new <environment> [--model <id>]` is `managed.createSession` plus `attach`: it checks `attach.cli` in `/v1/info` and
+  that Copilot CLI is installed, creates the session through normal admission with a permission handler that answers
+  nothing (`{ kind: "no-result" }`, so the inventory records `requestPermission` and prompts reach the `cli`
+  responder), stops its SDK client (the session is detached, not deleted), then launches Copilot CLI on it. The model
+  defaults to the environment's first allowed model, as admission does for any create.
 - `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
   `/v1/info`, or `capability_unavailable`), or skipped (a local prerequisite such as background sign-in).
 

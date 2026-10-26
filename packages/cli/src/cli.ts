@@ -6,7 +6,7 @@ import { artifacts } from "./commands/artifacts.js";
 import { login, logout, status } from "./commands/account.js";
 import { consoleCommand, OPERATOR_VIEWS, operatorCommand } from "./commands/operator.js";
 import { schedules, SCHEDULE_ACTIONS } from "./commands/schedules.js";
-import { attach, promote, sessions } from "./commands/sessions.js";
+import { attach, newSession, promote, sessions } from "./commands/sessions.js";
 import { connectDeployment, openInBrowser, type Context, type Deployment, type Writer } from "./context.js";
 import { describeError, UsageError } from "./errors.js";
 import { createStyle, type Style } from "./output.js";
@@ -25,6 +25,7 @@ const COMMANDS: Readonly<Record<string, Command>> = {
   login: { usage: "login", summary: "Let scheduled and unattended work run as you", options: [], run: login },
   logout: { usage: "logout", summary: "Turn off background sign-in and pause dependent schedules", options: [], run: logout },
   sessions: { usage: "sessions [--environment <name>] [--state <state>] [--limit <n>]", summary: "List your sessions", options: ["environment", "state", "limit"], run: sessions },
+  new: { usage: "new <environment> [--model <id>]", summary: "Start a new session and open it in Copilot CLI", options: ["model"], run: newSession },
   attach: { usage: "attach <session>", summary: "Open Copilot CLI on a live session", options: [], run: attach },
   promote: { usage: "promote <session>", summary: "Move a promotable session into its own sandbox", options: [], run: promote },
   artifacts: { usage: "artifacts <session> [--download <dir>] [--all]", summary: "List or download a session's published files", options: ["download", "all"], run: artifacts },
@@ -53,6 +54,7 @@ const OPTIONS = {
   version: { type: "boolean", short: "v" },
   yes: { type: "boolean", short: "y" },
   environment: { type: "string", short: "e" },
+  model: { type: "string" },
   state: { type: "string" },
   owner: { type: "string" },
   limit: { type: "string" },
@@ -93,7 +95,7 @@ function help(style: Style): string {
     "  -v, --version   Show the version",
     "",
     style.dim(`You are your GitHub sign-in: ${TOKEN_ENVS.join(", ")}, or \`gh auth login\`.`),
-    style.dim("Examples: npx managed-copilot sessions · npx managed-copilot attach 7f3a2c1 · npx managed-copilot console"),
+    style.dim("Examples: npx managed-copilot new chat · npx managed-copilot sessions · npx managed-copilot attach 7f3a2c1 · npx managed-copilot console"),
   ].join("\n");
 }
 
