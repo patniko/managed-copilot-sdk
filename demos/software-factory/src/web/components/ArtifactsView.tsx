@@ -1,19 +1,13 @@
-import type { LucideIcon } from "lucide-react";
 import {
-  Braces,
-  ChevronRight,
-  Download,
-  ExternalLink,
-  File,
-  FileArchive,
-  FileCode,
-  FileDiff,
-  FileText,
-  FlaskConical,
-  Folder,
-  FolderOpen,
-  FolderSearch,
-} from "lucide-react";
+  ChevronRightIcon,
+  DownloadIcon,
+  FileDirectoryFillIcon,
+  FileDirectoryIcon,
+  FileDirectoryOpenFillIcon,
+  FileIcon,
+  FileZipIcon,
+  LinkExternalIcon,
+} from "@primer/octicons-react";
 import { useMemo, useState, type ReactNode } from "react";
 import type { ArtifactFileView, ArtifactIndex, ArtifactVersionView, WorkOrder } from "../../shared/types.js";
 import { artifactContentUrl } from "../lib/api.js";
@@ -26,7 +20,6 @@ import {
   pickReleaseArtifact,
   stationDefaultArtifact,
   useArtifactContent,
-  viewerKind,
   type ArtifactGroup,
   type ArtifactPick,
   type TreeFolder,
@@ -38,7 +31,8 @@ import { KIND_ICONS } from "../lib/stations.js";
 import { ensureArtifacts, useArtifactIndex } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
 import { Button, buttonClass } from "./ui/Button.js";
-import { Callout, EmptyState, Skeleton } from "./ui/Feedback.js";
+import { Callout, EmptyState } from "./ui/Feedback.js";
+import { Tooltip } from "./ui/Tooltip.js";
 import { FileViewer } from "./viewers/FileViewer.js";
 
 const PICKS: readonly ArtifactPick[] = ["readme", "test-report", "patch", "notes"];
@@ -60,22 +54,8 @@ function resolveFile(index: ArtifactIndex, workOrder: WorkOrder, query: Query): 
   return defaultArtifact(index, workOrder);
 }
 
-function fileIcon(file: Pick<ArtifactFileView, "path" | "viewable">): LucideIcon {
-  switch (viewerKind(file)) {
-    case "diff":
-      return FileDiff;
-    case "test-report":
-      return FlaskConical;
-    case "markdown":
-      return FileText;
-    case "json":
-      return Braces;
-    case "code":
-      return FileCode;
-    default:
-      return /\.(zip|tgz|tar|gz)$/i.test(file.path) ? FileArchive : File;
-  }
-}
+/** Folder icons use the tree view's own color, as on github.com. */
+const FOLDER_ICON = "shrink-0 text-[color:var(--treeViewItem-leadingVisual-iconColor-rest)]";
 
 export function ArtifactsView({ workOrder, query }: { readonly workOrder: WorkOrder; readonly query: Query }) {
   const resource = useArtifactIndex(workOrder.id);
@@ -102,8 +82,8 @@ export function ArtifactsView({ workOrder, query }: { readonly workOrder: WorkOr
 
   if (index.files.length === 0) {
     return (
-      <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/30">
-        <EmptyState icon={FolderSearch} title="No artifacts yet">
+      <div className="Box">
+        <EmptyState icon={FileDirectoryIcon} title="No artifacts yet" size="lg">
           Stations publish their code, patches, and test reports here as they finish.
         </EmptyState>
       </div>
@@ -127,15 +107,12 @@ function ArtifactsBrowser({ workOrder, index, query }: { readonly workOrder: Wor
 
   return (
     <div className="grid gap-4 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(15rem,19rem)_minmax(0,1fr)]">
-      <nav
-        aria-label="Artifact files"
-        className="max-h-80 min-w-0 overflow-y-auto rounded-2xl border border-zinc-800/80 bg-zinc-900/40 py-1 lg:max-h-none lg:min-h-0"
-      >
+      <nav aria-label="Artifact files" className="Box max-h-80 min-w-0 overflow-y-auto pb-2 lg:max-h-none lg:min-h-0">
         {groups.map((group) => (
           <GroupTree key={group.stationId} group={group} selectedKey={selectedKey} onSelect={(file) => select(file)} />
         ))}
       </nav>
-      <section className="flex min-h-[28rem] min-w-0 flex-col overflow-clip rounded-2xl border border-zinc-800/80 bg-zinc-900/40 lg:min-h-0">
+      <section className="Box flex min-h-[28rem] min-w-0 flex-col overflow-clip lg:min-h-0">
         {selected && version ? (
           <Viewer
             workOrder={workOrder}
@@ -145,7 +122,7 @@ function ArtifactsBrowser({ workOrder, index, query }: { readonly workOrder: Wor
             onVersion={(next) => select(selected, next === selected.versions[0]?.version ? undefined : next)}
           />
         ) : (
-          <EmptyState icon={FileText} title="Pick a file">
+          <EmptyState icon={FileIcon} title="Pick a file">
             Choose a file on the left to preview it.
           </EmptyState>
         )}
@@ -157,20 +134,20 @@ function ArtifactsBrowser({ workOrder, index, query }: { readonly workOrder: Wor
 function ArtifactsSkeleton() {
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(15rem,19rem)_minmax(0,1fr)]" role="status" aria-label="Loading artifacts">
-      <div className="space-y-2.5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+      <div className="Box space-y-3 p-4">
         {[60, 80, 70, 50, 75, 65].map((width, index) => (
-          <div key={index} style={{ width: `${width}%` }}>
-            <Skeleton className="h-3.5 w-full" />
-          </div>
+          <div key={index} className="SkeletonText" style={{ width: `${width}%` }} />
         ))}
       </div>
-      <div className="space-y-2 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
-        <Skeleton className="h-5 w-1/3" />
-        {[90, 70, 85, 60, 95, 40, 75].map((width, index) => (
-          <div key={index} style={{ width: `${width}%` }}>
-            <Skeleton className="h-3 w-full" />
-          </div>
-        ))}
+      <div className="Box overflow-hidden">
+        <div className="file-header">
+          <div className="SkeletonText w-1/3" />
+        </div>
+        <div className="space-y-2 p-4">
+          {[90, 70, 85, 60, 95, 40, 75].map((width, index) => (
+            <div key={index} className="SkeletonText" style={{ width: `${width}%` }} />
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -186,15 +163,17 @@ function GroupTree({
   readonly onSelect: (file: ArtifactFileView) => void;
 }) {
   const tree = useMemo(() => buildTree(group.files), [group.files]);
-  const Icon = group.station ? KIND_ICONS[group.station.kind] : Folder;
+  const Glyph = group.station ? KIND_ICONS[group.station.kind] : FileDirectoryIcon;
   return (
-    <div className="py-1.5">
-      <div className="sticky top-0 z-[1] flex items-center gap-2 bg-zinc-900/95 px-3 py-1.5 backdrop-blur">
-        <Icon className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
-        <span className="truncate text-xs font-semibold text-zinc-300">{group.title}</span>
-        <span className="ml-auto shrink-0 text-[11px] text-zinc-600 tabular">{group.files.length}</span>
+    <div>
+      <div className="sticky top-0 z-[1] flex items-center gap-2 border-b border-line-muted bg-canvas px-3 py-2">
+        <Glyph size={16} className="shrink-0 text-fg-muted" />
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-fg-muted">{group.title}</span>
+        <span className="Counter">{group.files.length}</span>
       </div>
-      <FolderChildren folder={tree} depth={0} selectedKey={selectedKey} onSelect={onSelect} />
+      <div className="px-2 py-1">
+        <FolderChildren folder={tree} depth={0} selectedKey={selectedKey} onSelect={onSelect} />
+      </div>
     </div>
   );
 }
@@ -222,6 +201,8 @@ function FolderChildren({
   );
 }
 
+const ROW = "relative flex w-full items-center gap-2 rounded-md py-1 pr-2 text-left hover:bg-control-transparent-hover";
+
 function FolderItem({
   folder,
   depth,
@@ -234,29 +215,20 @@ function FolderItem({
   readonly onSelect: (file: ArtifactFileView) => void;
 }) {
   const [open, setOpen] = useState(true);
-  // Compact single-child chains like VS Code: "files/src".
+  // Compact single-child chains like github.com's file tree: "files/src".
   let target = folder;
   let label = folder.name;
   while (target.files.length === 0 && target.folders.length === 1 && target.folders[0]) {
     target = target.folders[0];
     label = `${label}/${target.name}`;
   }
+  const Glyph = open ? FileDirectoryOpenFillIcon : FileDirectoryFillIcon;
   return (
     <li>
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        style={{ paddingLeft: 10 + depth * 14 }}
-        className="flex w-full items-center gap-1.5 py-1 pr-3 text-left text-[12.5px] text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200"
-      >
-        <ChevronRight className={cx("size-3 shrink-0 text-zinc-600 transition-transform", open && "rotate-90")} aria-hidden />
-        {open ? (
-          <FolderOpen className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
-        ) : (
-          <Folder className="size-3.5 shrink-0 text-zinc-500" aria-hidden />
-        )}
-        <span className="truncate font-mono text-[12px]">{label}</span>
+      <button type="button" onClick={() => setOpen((value) => !value)} aria-expanded={open} style={{ paddingLeft: 4 + depth * 16 }} className={ROW}>
+        <ChevronRightIcon size={16} className={cx("shrink-0 text-fg-muted transition-transform duration-100", open && "rotate-90")} />
+        <Glyph size={16} className={FOLDER_ICON} />
+        <span className="truncate">{label}</span>
       </button>
       {open ? <FolderChildren folder={target} depth={depth + 1} selectedKey={selectedKey} onSelect={onSelect} /> : null}
     </li>
@@ -274,8 +246,8 @@ function FileItem({
   readonly selected: boolean;
   readonly onSelect: (file: ArtifactFileView) => void;
 }) {
-  const Icon = fileIcon(file);
   const versions = file.versions.length;
+  const Glyph = file.viewable ? FileIcon : FileZipIcon;
   return (
     <li>
       <button
@@ -283,22 +255,16 @@ function FileItem({
         onClick={() => onSelect(file)}
         aria-current={selected ? "true" : undefined}
         title={file.path}
-        style={{ paddingLeft: 10 + depth * 14 + 16 }}
-        className={cx(
-          "relative flex w-full items-center gap-1.5 py-1 pr-3 text-left text-[12.5px] transition-colors",
-          selected ? "bg-amber-400/10 text-zinc-50" : "text-zinc-300 hover:bg-zinc-800/50",
-        )}
+        style={{ paddingLeft: 4 + depth * 16 + 24 }}
+        className={cx(ROW, selected && "bg-control-transparent-selected font-semibold")}
       >
-        {selected ? <span className="absolute inset-y-1 left-0 w-0.5 rounded-full bg-amber-400" aria-hidden /> : null}
-        <Icon className={cx("size-3.5 shrink-0", selected ? "text-amber-300" : "text-zinc-500")} aria-hidden />
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{basename(file.path)}</span>
+        {selected ? <span className="absolute top-1/2 left-0 h-5 w-1 -translate-y-1/2 rounded-md bg-line-accent" aria-hidden /> : null}
+        <Glyph size={16} className="shrink-0 text-fg-muted" />
+        <span className="min-w-0 flex-1 truncate">{basename(file.path)}</span>
         {versions > 1 ? (
-          <span
-            className="shrink-0 rounded-full bg-zinc-800 px-1.5 text-[10px] leading-4 font-medium text-zinc-400 ring-1 ring-inset ring-white/5"
-            title={pluralize(versions, "version")}
-          >
-            {versions}
-          </span>
+          <Tooltip content={pluralize(versions, "version")}>
+            <span className="Counter font-normal">{versions}</span>
+          </Tooltip>
         ) : null}
       </button>
     </li>
@@ -325,15 +291,14 @@ function Viewer({
   const now = useNow(30_000);
   const { content, retry } = useArtifactContent(workOrder.id, file, version);
   const url = artifactContentUrl(workOrder.id, file.stationId, file.path, version.version);
-  const Icon = fileIcon(file);
 
   let body: ReactNode;
   if (!version.viewable) {
     // The factory keeps text files up to 1 MB; it has no bytes to serve for anything else.
     body = (
-      <EmptyState icon={FileArchive} title="This file can't be previewed">
-        {formatBytes(version.size)} · {file.contentType}. The factory keeps text files up to 1 MB, so binary and larger
-        outputs aren't stored here.
+      <EmptyState icon={FileZipIcon} title="This file can't be previewed" size="lg">
+        {formatBytes(version.size)} · {file.contentType}. The factory keeps text files up to 1 MB, so binary and larger outputs
+        aren't stored here.
       </EmptyState>
     );
   } else if (content.status === "ready") {
@@ -342,6 +307,7 @@ function Viewer({
     body = (
       <Callout
         tone="danger"
+        compact
         className="m-4"
         title="Couldn't load this file"
         actions={
@@ -357,9 +323,7 @@ function Viewer({
     body = (
       <div className="space-y-2 p-4" role="status" aria-label="Loading file">
         {[85, 60, 92, 45, 70, 80, 55, 88].map((width, index) => (
-          <div key={index} style={{ width: `${width}%` }}>
-            <Skeleton className="h-3 w-full" />
-          </div>
+          <div key={index} className="SkeletonText" style={{ width: `${width}%` }} />
         ))}
       </div>
     );
@@ -367,24 +331,21 @@ function Viewer({
 
   return (
     <>
-      <header className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-zinc-800/80 bg-zinc-900/70 px-4 py-2.5">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <Icon className="size-4 shrink-0 text-zinc-500" aria-hidden />
-          <div className="min-w-0">
-            <h2 className="truncate font-mono text-[13px] font-medium text-zinc-100" title={file.path}>
-              {file.path}
-            </h2>
-            {stationTitle ? <p className="truncate text-[11px] text-zinc-500">{stationTitle}</p> : null}
-          </div>
+      <header className="file-header flex-wrap gap-y-1.5 rounded-t-md">
+        <div className="min-w-0 flex-1 basis-60">
+          <h2 className="truncate font-semibold" title={file.path}>
+            {file.path}
+          </h2>
+          {stationTitle ? <p className="truncate font-sans text-xs text-fg-muted">{stationTitle}</p> : null}
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-2 font-sans">
           {file.versions.length > 1 ? (
-            <label className="relative">
+            <label className="min-w-0">
               <span className="sr-only">Version</span>
               <select
                 value={version.version}
                 onChange={(event) => onVersion(Number(event.target.value))}
-                className="h-7 max-w-[17rem] appearance-none truncate rounded-md bg-zinc-800/80 pr-7 pl-2.5 text-xs text-zinc-200 ring-1 ring-inset ring-white/10 hover:bg-zinc-700/80 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+                className="form-select input-sm max-w-[17rem] truncate"
               >
                 {file.versions.map((candidate) => (
                   <option key={candidate.version} value={candidate.version}>
@@ -392,28 +353,23 @@ function Viewer({
                   </option>
                 ))}
               </select>
-              <ChevronRight className="pointer-events-none absolute top-1/2 right-2 size-3 -translate-y-1/2 rotate-90 text-zinc-500" aria-hidden />
             </label>
           ) : (
-            <span className="text-xs text-zinc-500" title={formatFullDateTime(version.publishedAt)}>
+            <span className="text-xs text-fg-muted" title={formatFullDateTime(version.publishedAt)}>
               {versionLabel(version, now)}
             </span>
           )}
           {version.viewable ? (
             <>
-              <a href={url} target="_blank" rel="noreferrer" className={buttonClass("ghost", "sm")}>
-                <ExternalLink className="size-3.5" aria-hidden />
+              <a href={url} target="_blank" rel="noreferrer" className={buttonClass("default", "sm")}>
+                <LinkExternalIcon size={16} />
                 Raw
               </a>
-              <a
-                href={url}
-                download={basename(file.path)}
-                className={buttonClass("ghost", "sm", "w-7 px-0")}
-                aria-label={`Download ${basename(file.path)}`}
-                title="Download"
-              >
-                <Download className="size-3.5" aria-hidden />
-              </a>
+              <Tooltip content="Download">
+                <a href={url} download={basename(file.path)} className={buttonClass("default", "sm", "btn-icon")} aria-label={`Download ${basename(file.path)}`}>
+                  <DownloadIcon size={16} />
+                </a>
+              </Tooltip>
             </>
           ) : null}
         </div>

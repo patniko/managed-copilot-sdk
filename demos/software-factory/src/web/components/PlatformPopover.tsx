@@ -1,4 +1,4 @@
-import { Box, Globe, GlobeLock, Server, WifiOff } from "lucide-react";
+import { CloudOfflineIcon, ContainerIcon, GlobeIcon, ServerIcon, ShieldLockIcon } from "@primer/octicons-react";
 import type { EnvironmentView, PlatformStatus } from "../../shared/types.js";
 import { formatRelative, formatSandboxSize, summarizeNetwork } from "../lib/format.js";
 import { platformPill } from "../lib/platform.js";
@@ -17,6 +17,7 @@ const STATE_TITLES: Readonly<Record<PlatformStatus["state"], string>> = {
   misconfigured: "Platform misconfigured",
 };
 
+/** Deployment details, in a Primer overlay anchored under the platform button. */
 export function PlatformPopover({ platform }: { readonly platform: PlatformStatus }) {
   const now = useNow(15_000);
   const pill = platformPill(platform);
@@ -25,59 +26,59 @@ export function PlatformPopover({ platform }: { readonly platform: PlatformStatu
     <div
       role="dialog"
       aria-label="Platform details"
-      className="z-40 max-h-[calc(100dvh-5rem)] origin-top-right animate-rise-in overflow-y-auto rounded-2xl border border-zinc-700/70 bg-zinc-900/95 text-left shadow-2xl shadow-black/60 backdrop-blur max-sm:fixed max-sm:inset-x-3 max-sm:top-16 sm:absolute sm:top-full sm:right-0 sm:mt-2 sm:w-[420px]"
+      className="Overlay z-40 max-h-[calc(100dvh-5rem)] origin-top-right animate-scale-in overflow-y-auto text-left max-sm:fixed max-sm:inset-x-3 max-sm:top-16 sm:absolute sm:top-full sm:right-0 sm:mt-1 sm:w-[26rem]"
     >
-      <div className="border-b border-zinc-800 p-4">
+      <div className="border-b border-line px-4 py-3">
         <div className="flex items-center gap-2">
           <Dot tone={pill.tone} pulse={pill.pulse} />
-          <span className="text-sm font-semibold text-zinc-100">{STATE_TITLES[platform.state]}</span>
+          <h2 className="text-sm font-semibold">{STATE_TITLES[platform.state]}</h2>
           {deployment ? <Chip mono>{deployment.mode}</Chip> : null}
         </div>
-        <p className="mt-1 text-xs text-zinc-500">
-          Managed Copilot deployment{deployment ? <span className="text-zinc-400"> · {deployment.name}</span> : null}
+        <p className="mt-0.5 text-xs text-fg-muted">
+          Managed Copilot deployment{deployment ? <span> · {deployment.name}</span> : null}
         </p>
         {platform.state !== "connected" && platform.message ? (
-          <p className="mt-2.5 text-[13px] leading-relaxed text-zinc-300">
+          <p className="mt-2">
             <InlineCode text={platform.message} />
           </p>
         ) : null}
         {platform.state !== "connected" && platform.hint ? (
-          <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
+          <p className="mt-1 text-fg-muted">
             <InlineCode text={platform.hint} />
           </p>
         ) : null}
       </div>
 
-      <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-2 px-4 py-3 text-[13px]">
-        <dt className="text-zinc-500">Gateway</dt>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-1.5 px-4 py-3">
+        <dt className="text-fg-muted">Gateway</dt>
         <dd className="flex min-w-0 items-center gap-1">
           {platform.url ? (
             <>
-              <span className="truncate font-mono text-xs text-zinc-200" title={platform.url}>
+              <span className="truncate font-mono text-xs" title={platform.url}>
                 {platform.url}
               </span>
               <CopyButton text={platform.url} label="Copy gateway URL" />
             </>
           ) : (
-            <span className="text-zinc-500">Not known yet</span>
+            <span className="text-fg-muted">Not known yet</span>
           )}
         </dd>
         {deployment ? (
           <>
-            <dt className="text-zinc-500">Version</dt>
-            <dd className="font-mono text-xs text-zinc-200">{deployment.version}</dd>
-            <dt className="text-zinc-500">Copilot SDK</dt>
-            <dd className="font-mono text-xs text-zinc-200">{deployment.copilotSdk}</dd>
-            <dt className="text-zinc-500">Runtime</dt>
-            <dd className="font-mono text-xs text-zinc-200">{deployment.copilotRuntime}</dd>
+            <dt className="text-fg-muted">Version</dt>
+            <dd className="font-mono text-xs">{deployment.version}</dd>
+            <dt className="text-fg-muted">Copilot SDK</dt>
+            <dd className="font-mono text-xs">{deployment.copilotSdk}</dd>
+            <dt className="text-fg-muted">Runtime</dt>
+            <dd className="font-mono text-xs">{deployment.copilotRuntime}</dd>
           </>
         ) : null}
       </dl>
 
       {deployment && deployment.capabilities.length > 0 ? (
-        <div className="border-t border-zinc-800 px-4 py-3">
+        <div className="border-t border-line-muted px-4 py-3">
           <SectionLabel>Capabilities</SectionLabel>
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-2 flex flex-wrap gap-1">
             {deployment.capabilities.map((capability) => (
               <Chip key={capability} mono>
                 {capability}
@@ -87,29 +88,32 @@ export function PlatformPopover({ platform }: { readonly platform: PlatformStatu
         </div>
       ) : null}
 
-      <div className="border-t border-zinc-800 px-4 py-3">
+      <div className="border-t border-line-muted px-4 py-3">
         <SectionLabel>Factory environments</SectionLabel>
         {platform.environments.length === 0 ? (
-          <p className="mt-2 text-xs text-zinc-500">No environments reported yet.</p>
+          <p className="mt-2 text-xs text-fg-muted">No environments reported yet.</p>
         ) : (
-          <ul className="mt-2 space-y-2">
+          <ul className="Box Box--condensed mt-2">
             {platform.environments.map((environment) => (
               <EnvironmentItem key={environment.name} environment={environment} />
             ))}
           </ul>
         )}
         {platform.missingEnvironments.length > 0 ? (
-          <div className="mt-3 rounded-lg border border-rose-400/25 bg-rose-400/[0.06] px-3 py-2 text-xs text-rose-200">
-            Missing: {platform.missingEnvironments.map((name) => (
-              <code key={name} className="mr-1 font-mono">
-                {name}
-              </code>
-            ))}
+          <div className="flash flash-error flash-sm mt-3 text-xs">
+            <div className="flash-content">
+              Missing:{" "}
+              {platform.missingEnvironments.map((name) => (
+                <code key={name} className="inline-code mr-1">
+                  {name}
+                </code>
+              ))}
+            </div>
           </div>
         ) : null}
       </div>
 
-      <p className="border-t border-zinc-800 px-4 py-2.5 text-[11px] text-zinc-500">Checked {formatRelative(platform.checkedAt, now)}</p>
+      <p className="border-t border-line-muted px-4 py-2 text-xs text-fg-muted">Checked {formatRelative(platform.checkedAt, now)}</p>
     </div>
   );
 }
@@ -122,17 +126,17 @@ const TYPE_LABELS: Readonly<Record<EnvironmentView["type"], string>> = {
 
 function EnvironmentItem({ environment }: { readonly environment: EnvironmentView }) {
   const network = summarizeNetwork(environment.network);
-  const NetworkIcon = network?.kind === "off" ? WifiOff : network?.kind === "restricted" ? GlobeLock : Globe;
-  const TypeIcon = environment.type === "shared" ? Server : Box;
+  const NetworkIcon = network?.kind === "off" ? CloudOfflineIcon : network?.kind === "restricted" ? ShieldLockIcon : GlobeIcon;
+  const TypeIcon = environment.type === "shared" ? ServerIcon : ContainerIcon;
   return (
-    <li className="rounded-xl bg-zinc-950/60 p-3 ring-1 ring-inset ring-white/5">
+    <li className="Box-row">
       <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-zinc-100">{environment.name}</span>
-        <Chip icon={TypeIcon} tone={environment.type === "shared" ? "plain" : "active"}>
+        <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold">{environment.name}</span>
+        <Chip icon={TypeIcon} tone={environment.type === "shared" ? "plain" : "accent"}>
           {TYPE_LABELS[environment.type] ?? environment.type}
         </Chip>
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+      <div className="mt-1.5 flex flex-wrap items-center gap-1">
         <Chip>{ROLE_LABELS[environment.role] ?? environment.role}</Chip>
         {environment.agents.map((agent) => (
           <Chip key={agent}>@{agent}</Chip>
@@ -145,9 +149,9 @@ function EnvironmentItem({ environment }: { readonly environment: EnvironmentVie
           <Tooltip
             content={
               network.hosts.length > 0 ? (
-                <div>
-                  <p className="mb-1 text-zinc-400">{network.description}</p>
-                  <ul className="font-mono text-[11px]">
+                <div className="text-left">
+                  <p className="mb-1">{network.description}</p>
+                  <ul className="font-mono">
                     {network.hosts.map((host) => (
                       <li key={host}>{host}</li>
                     ))}
@@ -162,7 +166,7 @@ function EnvironmentItem({ environment }: { readonly environment: EnvironmentVie
           </Tooltip>
         ) : null}
       </div>
-      {environment.description ? <p className="mt-1.5 text-xs leading-relaxed text-zinc-500">{environment.description}</p> : null}
+      {environment.description ? <p className="mt-1.5 text-xs text-fg-muted">{environment.description}</p> : null}
     </li>
   );
 }

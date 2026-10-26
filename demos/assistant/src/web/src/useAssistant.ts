@@ -208,6 +208,7 @@ export function useAssistant() {
         }
       },
       discard: (localId: string) => dispatch({ type: "pending.remove", localId }),
+      dismissToast: (id: number) => dispatch({ type: "toast.remove", id }),
       abort: () => run(() => api.abort()),
       decide: (id: string, decision: "approve" | "deny", feedback?: string) => run(() => api.decide(id, decision, feedback)),
       markRead: (at: string) => void api.markRead(at).catch(() => undefined),

@@ -44,9 +44,10 @@ export function createStyle(options: StyleOptions): Style {
     green: paint(32, 39),
     yellow: paint(33, 39),
     cyan: paint(36, 39),
-    ok: unicode ? "✔" : "√",
-    fail: unicode ? "✖" : "×",
-    warn: unicode ? "⚠" : "!",
+    // The GitHub CLI's glyphs: ✓ success, X failure, ! warning.
+    ok: unicode ? "✓" : "√",
+    fail: "X",
+    warn: "!",
     dot: unicode ? "●" : "*",
     arrow: unicode ? "→" : "->",
     ellipsis: unicode ? "…" : "...",

@@ -27,6 +27,9 @@ for an HttpOnly session cookie.
   Reconnecting, or Paused, and pausing stops both the stream and auto-refresh.
 - **Routing** (`src/lib/routes.ts`, `src/lib/router.ts`): History API under `/console/`; filters and tabs live in the
   query string so every view is linkable.
+- **Look and feel**: GitHub's, from `@managed-copilot/github-theme` (Primer tokens and component classes, Mona Sans)
+  and Octicons (`@primer/octicons-react`). `data-color-mode="auto"` follows the OS between GitHub's light and dark
+  themes. Status maps (`src/lib/status.ts`, `src/lib/tone.ts`) pair every state with an Octicon and a Primer role.
 
 ## Security constraints
 

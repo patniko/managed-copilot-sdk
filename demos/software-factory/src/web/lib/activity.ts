@@ -1,15 +1,14 @@
-import type { LucideIcon } from "lucide-react";
-import { FilePen, FileText, Search, Terminal, Wrench } from "lucide-react";
+import { FileIcon, PencilIcon, SearchIcon, TerminalIcon, ToolsIcon, type Icon } from "@primer/octicons-react";
 import { TEST_SUMMARY_MARKER } from "../../shared/types.js";
 
-export function toolIcon(name: string): LucideIcon {
+export function toolIcon(name: string): Icon {
   const tokens = name.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const has = (...words: string[]): boolean => tokens.some((token) => words.includes(token));
-  if (has("shell", "bash", "sh", "powershell", "pwsh", "terminal", "exec", "command", "run")) return Terminal;
-  if (has("create", "edit", "write", "replace", "patch", "insert", "apply", "editor")) return FilePen;
-  if (has("grep", "glob", "search", "find", "rg", "ls", "list")) return Search;
-  if (has("view", "read", "cat", "open", "fetch", "get")) return FileText;
-  return Wrench;
+  if (has("shell", "bash", "sh", "powershell", "pwsh", "terminal", "exec", "command", "run")) return TerminalIcon;
+  if (has("create", "edit", "write", "replace", "patch", "insert", "apply", "editor")) return PencilIcon;
+  if (has("grep", "glob", "search", "find", "rg", "ls", "list")) return SearchIcon;
+  if (has("view", "read", "cat", "open", "fetch", "get")) return FileIcon;
+  return ToolsIcon;
 }
 
 export interface MarkerSummary {

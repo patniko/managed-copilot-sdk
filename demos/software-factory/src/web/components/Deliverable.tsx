@@ -1,21 +1,21 @@
-import type { LucideIcon } from "lucide-react";
-import { CircleCheck, CircleX, Clock, Download, FileDiff, Files, FlaskConical, HardDrive, PackageOpen, ScrollText } from "lucide-react";
+import { BeakerIcon, CopilotIcon, DownloadIcon, FileDiffIcon, PackageIcon, type Icon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
 import type { WorkOrder } from "../../shared/types.js";
 import { bundleUrl } from "../lib/api.js";
-import { pickReleaseArtifact } from "../lib/artifacts.js";
-import { cx } from "../lib/cx.js";
-import { elapsedBetween, formatBytes, formatDuration, pluralize } from "../lib/format.js";
+import { basename, pickReleaseArtifact } from "../lib/artifacts.js";
+import { elapsedBetween, formatBytes, formatDuration, formatFullDateTime, formatRelative, pluralize } from "../lib/format.js";
 import { navigate, workOrderHref } from "../lib/router.js";
 import { isWorkOrderActive, stationStatusMeta, taskRows, type TaskRow } from "../lib/stations.js";
 import { useArtifactIndex } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
-import { TestBar } from "./TestBar.js";
+import type { Tone } from "../lib/tone.js";
+import { ChecksSummary } from "./TestBar.js";
 import { Button, buttonClass } from "./ui/Button.js";
-import { Chip } from "./ui/Chip.js";
-import { EmptyState, SectionLabel } from "./ui/Feedback.js";
+import { Chip, StatusIcon } from "./ui/Chip.js";
+import { Callout, EmptyState } from "./ui/Feedback.js";
 import { MarkdownView } from "./viewers/MarkdownView.js";
 
+/** The release like a GitHub Release: title and marker, notes, assets, and a sidebar with checks and tasks. */
 export function DeliverableView({ workOrder }: { readonly workOrder: WorkOrder }) {
   const release = workOrder.release;
   const releaseStation = workOrder.stations.find((station) => station.kind === "release");
@@ -24,8 +24,8 @@ export function DeliverableView({ workOrder }: { readonly workOrder: WorkOrder }
 
   if (!release) {
     return (
-      <div className="rounded-2xl border border-zinc-800/80 bg-zinc-900/30">
-        <EmptyState icon={PackageOpen} title="No deliverable yet">
+      <div className="Box">
+        <EmptyState icon={PackageIcon} title="No deliverable yet" size="lg">
           The release station packages the deliverable once every task is approved: the bundle, a patch, a test report, and
           release notes.
         </EmptyState>
@@ -40,155 +40,174 @@ export function DeliverableView({ workOrder }: { readonly workOrder: WorkOrder }
   const patch = index ? pickReleaseArtifact(index, workOrder, "patch") : undefined;
   const report = index ? pickReleaseArtifact(index, workOrder, "test-report") : undefined;
   const failure = releaseStation?.error ?? workOrder.error;
+  const project = workOrder.plan?.projectName ?? workOrder.title;
+  const releasedAt = releaseStation?.finishedAt ?? workOrder.completedAt;
 
   const open = (file: { readonly stationId: string; readonly path: string } | undefined): void => {
     if (file) navigate(workOrderHref(workOrder.id, "artifacts", { station: file.stationId, path: file.path }));
   };
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6">
-      <section
-        className={cx(
-          "relative overflow-hidden rounded-2xl border p-6 sm:p-7",
-          failed ? "border-rose-400/30 bg-rose-400/[0.05]" : "border-emerald-400/30 bg-emerald-400/[0.05]",
-        )}
-      >
-        <div
-          className={cx(
-            "pointer-events-none absolute -top-24 -right-16 size-72 rounded-full blur-3xl",
-            failed ? "bg-rose-500/10" : "bg-emerald-500/10",
-          )}
-          aria-hidden
-        />
-        <div className="relative flex flex-col gap-5 sm:flex-row sm:items-center">
-          <span
-            className={cx(
-              "grid size-14 shrink-0 place-items-center rounded-2xl ring-1 ring-inset",
-              failed ? "bg-rose-400/15 text-rose-300 ring-rose-400/30" : "bg-emerald-400/15 text-emerald-300 ring-emerald-400/30",
-            )}
-          >
-            {failed ? <CircleX className="size-7" aria-hidden /> : <CircleCheck className="size-7" aria-hidden />}
-          </span>
-          <div className="min-w-0 flex-1">
-            <h2 className={cx("text-xl font-semibold", failed ? "text-rose-50" : "text-emerald-50")}>
-              {failed ? "Release failed" : "Release ready"}
+    <div className="mx-auto grid max-w-[1280px] gap-6 lg:grid-cols-[minmax(0,1fr)_18rem]">
+      <section aria-labelledby="release-title" className="Box min-w-0">
+        <div className="p-4 md:p-6">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <h2 id="release-title" className="text-xl font-semibold break-words">
+              {project}
             </h2>
-            <p className="mt-1 text-[13px] leading-relaxed text-zinc-400">
-              {failed
-                ? (failure?.message ?? "The release station couldn't finish. Its activity has the details.")
-                : `${workOrder.plan?.projectName ?? workOrder.title} is integrated, tested, and packaged.`}
-            </p>
+            {failed ? (
+              <span className="Label Label--danger Label--large">Release failed</span>
+            ) : (
+              <span className="Label Label--success Label--large">Release ready</span>
+            )}
+          </div>
+          <p className="mt-2 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-fg-muted">
+            <span className="avatar avatar--square grid size-5 place-items-center text-fg" aria-hidden>
+              <CopilotIcon size={12} />
+            </span>
+            <span className="font-semibold text-fg">@{releaseStation?.agent ?? "release"}</span>
+            {failed ? "couldn't finish this release" : "released this"}
+            {releasedAt ? (
+              <span title={formatFullDateTime(releasedAt)}>{formatRelative(releasedAt, now)}</span>
+            ) : null}
+            {duration !== undefined ? <span>· took {formatDuration(duration)}</span> : null}
+          </p>
+          {failed ? (
+            <Callout tone="danger" compact className="mt-4">
+              {failure?.message ?? "The release station couldn't finish. Its activity has the details."}
+            </Callout>
+          ) : (
+            <p className="mt-3">{project} is integrated, tested, and packaged.</p>
+          )}
+          <div className="mt-4 flex flex-wrap gap-2">
+            {downloadable ? (
+              <a href={bundleUrl(workOrder.id)} download className={buttonClass("primary")}>
+                <DownloadIcon size={16} />
+                Download release (.zip)
+              </a>
+            ) : (
+              <Button variant="primary" icon={DownloadIcon} disabled title="Available when the work order completes">
+                Download release (.zip)
+              </Button>
+            )}
           </div>
         </div>
-        <div className="relative mt-6 flex flex-wrap gap-2">
-          {downloadable ? (
-            <a href={bundleUrl(workOrder.id)} download className={buttonClass("primary", "lg")}>
-              <Download className="size-4" aria-hidden />
-              Download release (.zip)
-            </a>
+
+        <div className="border-t border-line-muted p-4 md:p-6">
+          <h3 className="sr-only">Release notes</h3>
+          {release.notes ? (
+            <MarkdownView source={release.notes} size="md" />
           ) : (
-            <Button variant="primary" size="lg" icon={Download} disabled title="Available when the work order completes">
-              Download release (.zip)
-            </Button>
+            <p className="text-fg-muted">The release station didn't write release notes.</p>
           )}
-          <Button size="lg" icon={FileDiff} disabled={!patch} onClick={() => open(patch)} title={patch ? undefined : "No patch was published"}>
-            View patch
-          </Button>
-          <Button
-            size="lg"
-            icon={FlaskConical}
-            disabled={!report}
-            onClick={() => open(report)}
-            title={report ? undefined : "No test report was published"}
-          >
-            View test report
-          </Button>
+        </div>
+
+        <div className="border-t border-line-muted">
+          <h3 className="flex items-center gap-2 px-4 pt-4 pb-2 text-base font-semibold md:px-6">
+            Assets <span className="Counter">3</span>
+          </h3>
+          <ul className="mx-4 mb-4 rounded-md border border-line md:mx-6 md:mb-6">
+            <Asset icon={PackageIcon} name={`${project}.zip`} size={formatBytes(release.bytes)} detail={pluralize(release.files, "file")}>
+              {downloadable ? (
+                <a href={bundleUrl(workOrder.id)} download className={buttonClass("default", "sm")}>
+                  <DownloadIcon size={16} />
+                  Download
+                </a>
+              ) : (
+                <Button size="sm" icon={DownloadIcon} disabled title="Available when the work order completes">
+                  Download
+                </Button>
+              )}
+            </Asset>
+            <Asset
+              icon={FileDiffIcon}
+              name={patch ? basename(patch.path) : "Patch"}
+              size={release.patchBytes !== undefined ? formatBytes(release.patchBytes) : undefined}
+              detail={patch ? undefined : "No patch was published"}
+            >
+              <Button size="sm" disabled={!patch} onClick={() => open(patch)} title={patch ? undefined : "No patch was published"}>
+                View patch
+              </Button>
+            </Asset>
+            <Asset
+              icon={BeakerIcon}
+              name={report ? basename(report.path) : "Test report"}
+              detail={report ? undefined : "No test report was published"}
+            >
+              <Button size="sm" disabled={!report} onClick={() => open(report)} title={report ? undefined : "No test report was published"}>
+                View test report
+              </Button>
+            </Asset>
+          </ul>
         </div>
       </section>
 
-      <dl className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
-        <Tile icon={FlaskConical} label="Tests" tone={tests && tests.failed > 0 ? "danger" : "success"}>
-          {tests ? (
-            <>
-              <span>
-                {tests.passed}
-                <span className="text-zinc-500">/{tests.total}</span>
-              </span>
-              <TestBar counts={tests} className="mt-2" />
-              {tests.failed > 0 || tests.skipped > 0 ? (
-                <span className="mt-1.5 block text-[11px] font-normal text-zinc-500">
-                  {[tests.failed > 0 ? `${tests.failed} failed` : "", tests.skipped > 0 ? `${tests.skipped} skipped` : ""]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </span>
-              ) : null}
-            </>
-          ) : (
-            <span className="text-zinc-500">—</span>
-          )}
-        </Tile>
-        <Tile icon={Files} label="Files">
-          {release.files}
-        </Tile>
-        <Tile icon={HardDrive} label="Bundle size">
-          {formatBytes(release.bytes)}
-        </Tile>
-        <Tile icon={FileDiff} label="Patch size">
-          {release.patchBytes !== undefined ? formatBytes(release.patchBytes) : <span className="text-zinc-500">—</span>}
-        </Tile>
-        <Tile icon={Clock} label="Total time">
-          {duration !== undefined ? formatDuration(duration) : <span className="text-zinc-500">—</span>}
-        </Tile>
-      </dl>
-
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <section className="min-w-0 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5">
-          <div className="flex items-center gap-2">
-            <ScrollText className="size-4 text-zinc-500" aria-hidden />
-            <SectionLabel>Release notes</SectionLabel>
+      <aside className="min-w-0 space-y-4" aria-label="Release summary">
+        <section className="Box">
+          <div className="Box-header px-4 py-2">
+            <h3 className="Box-title">Checks</h3>
           </div>
-          {release.notes ? (
-            <MarkdownView source={release.notes} className="mt-4" />
-          ) : (
-            <p className="mt-3 text-[13px] text-zinc-500">The release station didn't write release notes.</p>
-          )}
+          <div className="p-4">
+            {tests ? (
+              <ChecksSummary counts={tests} meta={tests.durationMs !== undefined ? formatDuration(tests.durationMs) : undefined} />
+            ) : (
+              <p className="text-fg-muted">No test results were reported.</p>
+            )}
+          </div>
+        </section>
+        <section className="Box">
+          <div className="Box-header px-4 py-2">
+            <h3 className="Box-title">Summary</h3>
+          </div>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 p-4">
+            <Fact label="Files">{release.files}</Fact>
+            <Fact label="Bundle size">{formatBytes(release.bytes)}</Fact>
+            <Fact label="Patch size">{release.patchBytes !== undefined ? formatBytes(release.patchBytes) : <span className="text-fg-muted">—</span>}</Fact>
+            <Fact label="Total time">{duration !== undefined ? formatDuration(duration) : <span className="text-fg-muted">—</span>}</Fact>
+          </dl>
         </section>
         <TaskOutcomes workOrder={workOrder} />
-      </div>
+      </aside>
     </div>
   );
 }
 
-function Tile({
-  icon: Icon,
-  label,
-  tone,
+function Asset({
+  icon: Glyph,
+  name,
+  size,
+  detail,
   children,
 }: {
-  readonly icon: LucideIcon;
-  readonly label: string;
-  readonly tone?: "success" | "danger";
+  readonly icon: Icon;
+  readonly name: string;
+  readonly size?: string;
+  readonly detail?: string;
   readonly children: ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-4">
-      <dt className="flex items-center gap-1.5 text-xs text-zinc-500">
-        <Icon className="size-3.5" aria-hidden />
-        {label}
-      </dt>
-      <dd
-        className={cx(
-          "mt-1.5 text-xl font-semibold tabular",
-          tone === "success" ? "text-emerald-200" : tone === "danger" ? "text-rose-200" : "text-zinc-50",
-        )}
-      >
-        {children}
-      </dd>
-    </div>
+    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-line-muted px-3 py-2 first:border-t-0">
+      <Glyph size={16} className="shrink-0 text-fg-muted" />
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-semibold">{name}</span>
+        {detail ? <span className="block text-xs text-fg-muted">{detail}</span> : null}
+      </span>
+      {size ? <span className="text-xs text-fg-muted tabular-nums">{size}</span> : null}
+      {children}
+    </li>
   );
 }
 
-function outcome(row: TaskRow): { readonly label: string; readonly tone: "success" | "warning" | "danger" | "plain" } {
+function Fact({ label, children }: { readonly label: string; readonly children: ReactNode }) {
+  return (
+    <>
+      <dt className="text-fg-muted">{label}</dt>
+      <dd className="text-right font-semibold tabular-nums">{children}</dd>
+    </>
+  );
+}
+
+function outcome(row: TaskRow): { readonly label: string; readonly tone: Tone | "plain" } {
   const review = row.review;
   if (!review) return { label: "Not reviewed", tone: "plain" };
   if (review.status === "done") return review.acceptedWithFindings ? { label: "Accepted with findings", tone: "warning" } : { label: "Approved", tone: "success" };
@@ -199,34 +218,45 @@ function outcome(row: TaskRow): { readonly label: string; readonly tone: "succes
 function TaskOutcomes({ workOrder }: { readonly workOrder: WorkOrder }) {
   const rows = taskRows(workOrder);
   return (
-    <section className="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-5">
-      <SectionLabel>Tasks</SectionLabel>
+    <section className="Box">
+      <div className="Box-header px-4 py-2">
+        <h3 className="Box-title">Tasks</h3>
+        <span className="Counter">{rows.length}</span>
+      </div>
       {rows.length === 0 ? (
-        <p className="mt-3 text-[13px] text-zinc-500">No tasks.</p>
+        <p className="p-4 text-fg-muted">No tasks.</p>
       ) : (
-        <ul className="mt-3 space-y-3">
+        <ul>
           {rows.map((row) => {
             const result = outcome(row);
             const rounds = row.review?.reviews?.length ?? row.review?.round ?? 0;
             const openFindings = row.review?.acceptedWithFindings
               ? (row.review.reviews?.[row.review.reviews.length - 1]?.findings.length ?? 0)
               : 0;
+            const station = row.review ?? row.build;
             return (
-              <li key={row.id} className="rounded-xl bg-zinc-950/50 p-3 ring-1 ring-inset ring-white/5">
-                <div className="flex items-start justify-between gap-2">
-                  <a
-                    href={workOrderHref(workOrder.id, "floor", { station: row.review?.id ?? row.build?.id })}
-                    className="min-w-0 truncate text-[13px] font-medium text-zinc-100 hover:text-amber-200"
-                  >
-                    {row.title}
-                  </a>
-                  <Chip tone={result.tone}>{result.label}</Chip>
+              <li key={row.id} className="Box-row px-4 py-3">
+                <div className="flex items-start gap-2">
+                  {station ? <StatusIcon meta={stationStatusMeta(station)} className="mt-0.5 shrink-0" /> : null}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <a
+                        href={workOrderHref(workOrder.id, "floor", { station: row.review?.id ?? row.build?.id })}
+                        className="Link--primary min-w-0 truncate font-semibold"
+                      >
+                        {row.title}
+                      </a>
+                      <Chip tone={result.tone} className="shrink-0">
+                        {result.label}
+                      </Chip>
+                    </div>
+                    <p className="mt-0.5 text-xs text-fg-muted">
+                      {rounds > 0 ? `${pluralize(rounds, "review round")} of ${workOrder.maxReviewRounds}` : "No review rounds"}
+                      {row.build?.tests ? ` · ${row.build.tests.passed} tests passed` : ""}
+                      {openFindings > 0 ? ` · ${pluralize(openFindings, "open finding")}` : ""}
+                    </p>
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-zinc-500">
-                  {rounds > 0 ? `${pluralize(rounds, "review round")} of ${workOrder.maxReviewRounds}` : "No review rounds"}
-                  {row.build?.tests ? ` · ${row.build.tests.passed} tests passed` : ""}
-                  {openFindings > 0 ? ` · ${pluralize(openFindings, "open finding")}` : ""}
-                </p>
               </li>
             );
           })}

@@ -84,9 +84,22 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator` |
 | Gateway | `platform/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
 | Console | `platform/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
+| GitHub theme | `packages/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `platform/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `platform/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
 | Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant |
+
+### Web UI look and feel
+
+Every web UI (the console, the software factory, and the assistant) looks like part of github.com. The shared
+`@managed-copilot/github-theme` package (`packages/github-theme`) is the single source: GitHub's Primer design tokens
+from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
+Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
+`font-src 'self'` holds), Tailwind v4 names for the tokens with the default palette removed, and Primer component
+classes under github.com's own names (`btn`, `Label`, `State`, `Box`, `UnderlineNav`, `AppHeader`, `markdown-body`,
+...). Icons are Octicons (`@primer/octicons-react`). Each app's `styles.css` starts with
+`@import "tailwindcss"; @import "@managed-copilot/github-theme";`. The package is CSS only (no build step); the
+gateway and demo images copy it into their build stage and install it with the app.
 
 ### Data plane
 
@@ -1361,3 +1374,4 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `platform/console/**`, `packages/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
+| **design** | `packages/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |

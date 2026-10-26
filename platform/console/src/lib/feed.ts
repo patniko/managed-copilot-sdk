@@ -29,6 +29,28 @@ function timeOf(iso: string): number {
   return Number.isNaN(time) ? 0 : time;
 }
 
+/**
+ * Spots live-stream reconnects for a view that loads its history once. The stream doesn't replay what was published
+ * while it was down, so that history has to be reloaded after every reconnect. The stream's `connectedAt` changes with
+ * each new connection and stays set while the stream is down. The first connection a view sees is not a reconnect: the
+ * view's own first load covers it.
+ */
+export class ReconnectTracker {
+  #last: number | undefined;
+
+  constructor(connectedAt: number | undefined) {
+    this.#last = connectedAt;
+  }
+
+  /** Records the stream's current connection time; true when it is a new connection after one already seen. */
+  reconnected(connectedAt: number | undefined): boolean {
+    if (connectedAt === undefined) return false;
+    const last = this.#last;
+    this.#last = connectedAt;
+    return last !== undefined && connectedAt !== last;
+  }
+}
+
 export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const satisfies readonly OperatorLogLevel[];
 
 const LEVEL_RANK: Readonly<Record<OperatorLogLevel, number>> = { debug: 0, info: 1, warn: 2, error: 3 };

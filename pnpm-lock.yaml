@@ -42,6 +42,12 @@ importers:
         specifier: ^4.3.6
         version: 4.6.7
     devDependencies:
+      '@managed-copilot/github-theme':
+        specifier: workspace:*
+        version: link:../../packages/github-theme
+      '@primer/octicons-react':
+        specifier: 19.40.0
+        version: 19.40.0(react@19.3.1)
       '@tailwindcss/vite':
         specifier: ^4.3.3
         version: 4.3.3(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -57,9 +63,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.1.2
         version: 6.1.2(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
-      lucide-react:
-        specifier: ^1.58.0
-        version: 1.58.0(@types/react@19.3.0)(react@19.3.1)
       playwright-core:
         specifier: ^1.64.1
         version: 1.64.1
@@ -137,6 +140,12 @@ importers:
         specifier: ^4.3.6
         version: 4.6.7
     devDependencies:
+      '@managed-copilot/github-theme':
+        specifier: workspace:*
+        version: link:../../packages/github-theme
+      '@primer/octicons-react':
+        specifier: 19.40.0
+        version: 19.40.0(react@19.3.1)
       '@tailwindcss/vite':
         specifier: ^4.3.3
         version: 4.3.3(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -152,9 +161,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.1.2
         version: 6.1.2(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
-      lucide-react:
-        specifier: ^1.58.0
-        version: 1.58.0(@types/react@19.3.0)(react@19.3.1)
       prism-react-renderer:
         specifier: ^2.4.1
         version: 2.4.1(react@19.3.1)
@@ -245,6 +251,28 @@ importers:
         specifier: ^4.0.0
         version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
+  packages/github-theme:
+    dependencies:
+      '@fontsource-variable/mona-sans':
+        specifier: 5.3.0
+        version: 5.3.0
+      '@primer/primitives':
+        specifier: 11.10.0
+        version: 11.10.0
+    devDependencies:
+      '@tailwindcss/node':
+        specifier: ^4.3.3
+        version: 4.3.3
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      tailwindcss:
+        specifier: ^4.3.3
+        version: 4.3.3
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   packages/protocol:
     dependencies:
       zod:
@@ -288,9 +316,15 @@ importers:
 
   platform/console:
     devDependencies:
+      '@managed-copilot/github-theme':
+        specifier: workspace:*
+        version: link:../../packages/github-theme
       '@managed-copilot/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@primer/octicons-react':
+        specifier: 19.40.0
+        version: 19.40.0(react@19.3.1)
       '@tailwindcss/vite':
         specifier: ^4.3.3
         version: 4.3.3(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
@@ -306,9 +340,6 @@ importers:
       '@vitejs/plugin-react':
         specifier: ^6.1.2
         version: 6.1.2(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
-      lucide-react:
-        specifier: ^1.58.0
-        version: 1.58.0(@types/react@19.3.0)(react@19.3.1)
       react:
         specifier: ^19.3.1
         version: 19.3.1
@@ -579,6 +610,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@fontsource-variable/mona-sans@5.3.0':
+    resolution: {integrity: sha1-dImofefacrtbeoDIRZ6KhKECvYg=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@fontsource-variable/mona-sans/-/mona-sans-5.3.0.tgz}
+
   '@github/copilot-darwin-arm64@1.0.103':
     resolution: {integrity: sha512-5upfa7UdJJQbRRfyrYqaZ81xy0SSXba8HNRNwJYVw1NuONFFt3u7FzPBQJ/XpB/1m/YGPmmK4XRgITAF4oAu+A==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@github/copilot-darwin-arm64/-/copilot-darwin-arm64-1.0.103.tgz}
     cpu: [arm64]
@@ -791,6 +825,14 @@ packages:
 
   '@oxc-project/types@0.154.0':
     resolution: {integrity: sha512-KYOUGQFlLWR+s4QMV2Q9ko38TZm7EdO87Qm7rvZLqk/webse/cDjtyxKhg/47l0byCbs/k46LT8qc4PKjAikzA==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@oxc-project/types/-/types-0.154.0.tgz}
+
+  '@primer/octicons-react@19.40.0':
+    resolution: {integrity: sha512-z1yyW2WaZxf9t+295e1Ajqj0KXWAg3ZaNk5Q7jMYYsz2e1Pzbya4bkpip+pd1ndmlaYh4kInlmCOAgyDFU+ncw==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@primer/octicons-react/-/octicons-react-19.40.0.tgz}
+    peerDependencies:
+      react: '>=16.3'
+
+  '@primer/primitives@11.10.0':
+    resolution: {integrity: sha1-r/yDrgIingXbxZnZkDZD87CNw70=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@primer/primitives/-/primitives-11.10.0.tgz}
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     resolution: {integrity: sha512-aWR+XKH9+rW7m5fWq/5360J3mHycrx/o6xZM2DQFdJnTMdyP7/WzxPjhtLbVWdKo2y612/4U1bWqb3HQhiF7vg==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.14.tgz}
@@ -1377,15 +1419,6 @@ packages:
   longest-streak@3.1.0:
     resolution: {integrity: sha1-YvpnzZWHQqFXSvnzmGY2QQLZDNQ=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/longest-streak/-/longest-streak-3.1.0.tgz}
 
-  lucide-react@1.58.0:
-    resolution: {integrity: sha512-hXaFNm6mk6QVtBnDGBn1YAs8j2tGUk0A4s/CpclIcczfxeXiW1rdOLVo6zCsoIih9XXsGvDODQerl749a2n7bA==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lucide-react/-/lucide-react-1.58.0.tgz}
-    peerDependencies:
-      '@types/react': '*'
-      react: ^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0
-    peerDependenciesMeta:
-      '@types/react':
-        optional: true
-
   magic-string@0.30.21:
     resolution: {integrity: sha1-VnY+wJoPqAkd8nh5/ZTRkHjADZE=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/magic-string/-/magic-string-0.30.21.tgz}
 
@@ -1885,6 +1918,8 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
+  '@fontsource-variable/mona-sans@5.3.0': {}
+
   '@github/copilot-darwin-arm64@1.0.103':
     optional: true
 
@@ -2035,6 +2070,12 @@ snapshots:
     optional: true
 
   '@oxc-project/types@0.154.0': {}
+
+  '@primer/octicons-react@19.40.0(react@19.3.1)':
+    dependencies:
+      react: 19.3.1
+
+  '@primer/primitives@11.10.0': {}
 
   '@rolldown/binding-android-arm-eabi@1.2.14':
     optional: true
@@ -2510,12 +2551,6 @@ snapshots:
       lightningcss-win32-x64-msvc: 1.33.0
 
   longest-streak@3.1.0: {}
-
-  lucide-react@1.58.0(@types/react@19.3.0)(react@19.3.1):
-    dependencies:
-      react: 19.3.1
-    optionalDependencies:
-      '@types/react': 19.3.0
 
   magic-string@0.30.21:
     dependencies:

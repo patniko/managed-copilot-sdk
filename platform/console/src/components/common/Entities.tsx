@@ -1,15 +1,15 @@
 import type { EnvironmentType, NetworkPolicy, Placement } from "@managed-copilot/protocol";
-import { ArrowUpRight, Box, Globe, GlobeLock, Server, WifiOff, type LucideIcon } from "lucide-react";
+import { ArrowUpRightIcon, CheckIcon, CloudOfflineIcon, GlobeIcon, SandboxIcon, ServerIcon, ShieldLockIcon, XIcon, type Icon } from "@primer/octicons-react";
 import { summarizeNetwork } from "../../lib/format.js";
 import type { Tone } from "../../lib/tone.js";
 import { Chip } from "../ui/Chip.js";
 import { None } from "../ui/Feedback.js";
 import { Tooltip } from "../ui/Tooltip.js";
 
-export const ENVIRONMENT_TYPES: Readonly<Record<EnvironmentType, { readonly label: string; readonly icon: LucideIcon; readonly tone: Tone; readonly description: string }>> = {
-  shared: { label: "Shared", icon: Server, tone: "neutral", description: "Sessions run on the shared runtime." },
-  isolated: { label: "Isolated", icon: Box, tone: "active", description: "Every session gets its own sandbox." },
-  promotable: { label: "Promotable", icon: ArrowUpRight, tone: "warning", description: "Sessions start shared and can be promoted into a sandbox." },
+export const ENVIRONMENT_TYPES: Readonly<Record<EnvironmentType, { readonly label: string; readonly icon: Icon; readonly tone: Tone; readonly description: string }>> = {
+  shared: { label: "Shared", icon: ServerIcon, tone: "neutral", description: "Sessions run on the shared runtime." },
+  isolated: { label: "Isolated", icon: SandboxIcon, tone: "accent", description: "Every session gets its own sandbox." },
+  promotable: { label: "Promotable", icon: ArrowUpRightIcon, tone: "done", description: "Sessions start shared and can be promoted into a sandbox." },
 };
 
 export function EnvironmentTypeChip({ type }: { readonly type: EnvironmentType | string | undefined }) {
@@ -23,9 +23,9 @@ export function EnvironmentTypeChip({ type }: { readonly type: EnvironmentType |
   );
 }
 
-const PLACEMENTS: Readonly<Record<Placement, { readonly label: string; readonly icon: LucideIcon; readonly description: string }>> = {
-  shared: { label: "Shared runtime", icon: Server, description: "Runs on the gateway's shared runtime." },
-  sandbox: { label: "Sandbox", icon: Box, description: "Runs in its own sandbox." },
+const PLACEMENTS: Readonly<Record<Placement, { readonly label: string; readonly icon: Icon; readonly description: string }>> = {
+  shared: { label: "Shared runtime", icon: ServerIcon, description: "Runs on the gateway's shared runtime." },
+  sandbox: { label: "Sandbox", icon: SandboxIcon, description: "Runs in its own sandbox." },
 };
 
 export function PlacementChip({ placement }: { readonly placement: Placement | string | undefined }) {
@@ -39,25 +39,20 @@ export function PlacementChip({ placement }: { readonly placement: Placement | s
   );
 }
 
-const NETWORK_ICONS = { enabled: Globe, restricted: GlobeLock, disabled: WifiOff } as const;
-const NETWORK_TONES = { enabled: "plain", restricted: "active", disabled: "warning" } as const;
+const NETWORK_ICONS: Readonly<Record<"enabled" | "restricted" | "disabled", Icon>> = { enabled: GlobeIcon, restricted: ShieldLockIcon, disabled: CloudOfflineIcon };
+const NETWORK_TONES = { enabled: "plain", restricted: "accent", disabled: "attention" } as const;
 
 /** "Enabled" / "Restricted to N hosts" / "Disabled" with the host list in a tooltip. */
 export function NetworkChip({ policy }: { readonly policy: NetworkPolicy | undefined }) {
   const summary = summarizeNetwork(policy);
   if (!summary) return <None />;
-  const chip = (
-    <Chip icon={NETWORK_ICONS[summary.kind]} tone={NETWORK_TONES[summary.kind]}>
-      {summary.label}
-    </Chip>
-  );
   return (
     <Tooltip
       content={
         <div>
-          <p className={summary.hosts.length > 0 ? "mb-1 text-zinc-400" : undefined}>{summary.description}</p>
+          <p className={summary.hosts.length > 0 ? "mb-1" : undefined}>{summary.description}</p>
           {summary.hosts.length > 0 ? (
-            <ul className="font-mono text-[11px]">
+            <ul className="font-mono">
               {summary.hosts.map((host) => (
                 <li key={host}>{host}</li>
               ))}
@@ -66,8 +61,10 @@ export function NetworkChip({ policy }: { readonly policy: NetworkPolicy | undef
         </div>
       }
     >
-      <span tabIndex={0} className="inline-flex rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60">
-        {chip}
+      <span tabIndex={0} className="inline-flex rounded-full">
+        <Chip icon={NETWORK_ICONS[summary.kind]} tone={NETWORK_TONES[summary.kind]}>
+          {summary.label}
+        </Chip>
       </span>
     </Tooltip>
   );
@@ -77,15 +74,15 @@ export function NetworkChip({ policy }: { readonly policy: NetworkPolicy | undef
 export function NetworkPolicyView({ policy }: { readonly policy: NetworkPolicy | undefined }) {
   const summary = summarizeNetwork(policy);
   if (!summary) return <None />;
-  const Icon = NETWORK_ICONS[summary.kind];
+  const PolicyIcon = NETWORK_ICONS[summary.kind];
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 font-medium text-zinc-100">
-          <Icon className="size-3.5 text-zinc-400" aria-hidden />
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="inline-flex items-center gap-1.5 font-semibold">
+          <PolicyIcon size={16} className="text-fg-muted" />
           {summary.label}
         </span>
-        <span className="text-[12.5px] text-zinc-500">{summary.description}</span>
+        <span className="text-fg-muted">{summary.description}</span>
       </div>
       {summary.hosts.length > 0 ? (
         <ul className="flex flex-wrap gap-1.5" aria-label="Allowed hosts">
@@ -102,7 +99,7 @@ export function NetworkPolicyView({ policy }: { readonly policy: NetworkPolicy |
 
 /** A wrapping list of chips, or a dash when empty. */
 export function ChipList({ items, mono = false, empty, label }: { readonly items: readonly string[] | undefined; readonly mono?: boolean; readonly empty?: string; readonly label?: string }) {
-  if (!items || items.length === 0) return empty ? <span className="text-zinc-500">{empty}</span> : <None />;
+  if (!items || items.length === 0) return empty ? <span className="text-fg-muted">{empty}</span> : <None />;
   return (
     <ul className="flex flex-wrap gap-1.5" aria-label={label}>
       {items.map((item) => (
@@ -114,8 +111,18 @@ export function ChipList({ items, mono = false, empty, label }: { readonly items
   );
 }
 
-/** Yes/no with an icon so it reads without color. */
+/** Yes/no with an Octicon so it reads without color. */
 export function YesNo({ value, yes = "Yes", no = "No" }: { readonly value: boolean | undefined; readonly yes?: string; readonly no?: string }) {
   if (value === undefined) return <None />;
-  return value ? <span className="text-emerald-300">✓ {yes}</span> : <span className="text-zinc-400">✗ {no}</span>;
+  return value ? (
+    <span className="inline-flex items-center gap-1">
+      <CheckIcon size={16} className="text-fg-success" />
+      {yes}
+    </span>
+  ) : (
+    <span className="inline-flex items-center gap-1 text-fg-muted">
+      <XIcon size={16} />
+      {no}
+    </span>
+  );
 }

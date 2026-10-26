@@ -1,5 +1,4 @@
-import type { LucideIcon } from "lucide-react";
-import { Search, X } from "lucide-react";
+import { SearchIcon, XIcon, type Icon } from "@primer/octicons-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { cx } from "../../lib/cx.js";
 import type { Tone } from "../../lib/tone.js";
@@ -11,33 +10,28 @@ export interface TabItem {
   readonly label: string;
   readonly count?: number;
   readonly countTone?: Tone;
-  readonly icon?: LucideIcon;
+  readonly icon?: Icon;
 }
 
-/** Page tabs. Each tab is a link, so tabs are bookmarkable and work with back/forward. */
+/** Page tabs as a Primer `UnderlineNav`. Each tab is a link, so tabs are bookmarkable and work with back/forward. */
 export function Tabs({ items, active, hrefFor, label }: { readonly items: readonly TabItem[]; readonly active: string; readonly hrefFor: (id: string) => string; readonly label: string }) {
   return (
-    <nav aria-label={label} className="-mb-px flex gap-1 overflow-x-auto">
-      {items.map((item) => {
-        const selected = item.id === active;
-        const Icon = item.icon;
-        return (
-          <Link
-            key={item.id}
-            href={hrefFor(item.id)}
-            replace
-            aria-current={selected ? "page" : undefined}
-            className={cx(
-              "inline-flex shrink-0 items-center gap-2 border-b-2 px-3 py-2.5 text-[13px] font-medium whitespace-nowrap transition-colors",
-              selected ? "border-amber-400 text-zinc-50" : "border-transparent text-zinc-400 hover:border-zinc-600 hover:text-zinc-200",
-            )}
-          >
-            {Icon ? <Icon className="size-3.5" aria-hidden /> : null}
-            {item.label}
-            {item.count !== undefined && item.count > 0 ? <CountBadge value={item.count} tone={item.countTone} /> : null}
-          </Link>
-        );
-      })}
+    <nav aria-label={label} className="UnderlineNav">
+      <ul className="UnderlineNav-body">
+        {items.map((item) => {
+          const selected = item.id === active;
+          const TabIcon = item.icon;
+          return (
+            <li key={item.id}>
+              <Link href={hrefFor(item.id)} replace aria-current={selected ? "page" : undefined} className="UnderlineNav-item">
+                {TabIcon ? <TabIcon size={16} /> : null}
+                {item.label}
+                {item.count !== undefined && item.count > 0 ? <CountBadge value={item.count} tone={item.countTone} /> : null}
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
     </nav>
   );
 }
@@ -46,42 +40,35 @@ export interface SegmentOption<T extends string> {
   readonly value: T;
   readonly label: string;
   readonly count?: number;
-  readonly icon?: LucideIcon;
+  readonly icon?: Icon;
 }
 
-/** A single-choice filter shown as a row of toggle buttons. */
+/** A single-choice filter as a Primer `SegmentedControl`. */
 export function Segmented<T extends string>({
   label,
   options,
   value,
   onChange,
+  size = "md",
   className,
 }: {
   readonly label: string;
   readonly options: readonly SegmentOption<T>[];
   readonly value: T;
   readonly onChange: (value: T) => void;
+  readonly size?: "sm" | "md";
   readonly className?: string;
 }) {
   return (
-    <div role="group" aria-label={label} className={cx("inline-flex max-w-full flex-wrap gap-0.5 rounded-lg bg-zinc-900 p-0.5 ring-1 ring-inset ring-white/10", className)}>
+    <div role="group" aria-label={label} className={cx("SegmentedControl relative max-w-full overflow-x-auto", size === "sm" && "SegmentedControl--sm", className)}>
       {options.map((option) => {
         const selected = option.value === value;
-        const Icon = option.icon;
+        const OptionIcon = option.icon;
         return (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={selected}
-            onClick={() => onChange(option.value)}
-            className={cx(
-              "inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium whitespace-nowrap transition-colors",
-              selected ? "bg-zinc-700/80 text-zinc-50 shadow-sm ring-1 ring-inset ring-white/10" : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200",
-            )}
-          >
-            {Icon ? <Icon className="size-3.5" aria-hidden /> : null}
+          <button key={option.value} type="button" aria-pressed={selected} onClick={() => onChange(option.value)} className="SegmentedControl-item shrink-0">
+            {OptionIcon ? <OptionIcon size={16} /> : null}
             {option.label}
-            {option.count !== undefined ? <span className={cx("tabular", selected ? "text-zinc-300" : "text-zinc-500")}>{option.count}</span> : null}
+            {option.count !== undefined ? <span className={cx("tabular-nums", selected ? "text-fg" : "text-fg-muted")}>{option.count}</span> : null}
           </button>
         );
       })}
@@ -94,12 +81,14 @@ export interface SelectOption {
   readonly label: string;
 }
 
+/** A filter select (Primer `form-select`). The label is visually hidden unless `showLabel`: the first option names the filter. */
 export function SelectField({
   label,
   value,
   onChange,
   options,
   allLabel,
+  showLabel = false,
   className,
 }: {
   readonly label: string;
@@ -108,20 +97,16 @@ export function SelectField({
   readonly options: readonly SelectOption[];
   /** The empty choice ("All environments"). */
   readonly allLabel?: string;
+  readonly showLabel?: boolean;
   readonly className?: string;
 }) {
   const id = useId();
   return (
-    <div className={cx("flex min-w-0 flex-col gap-1", className)}>
-      <label htmlFor={id} className="text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500">
+    <div className={cx("FormControl min-w-0", className)}>
+      <label htmlFor={id} className={cx("FormControl-label", !showLabel && "sr-only")}>
         {label}
       </label>
-      <select
-        id={id}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="h-8 min-w-0 rounded-lg bg-zinc-900 px-2.5 text-[13px] text-zinc-200 ring-1 ring-inset ring-white/10 hover:ring-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
-      >
+      <select id={id} value={value} onChange={(event) => onChange(event.target.value)} className="form-select input-block">
         {allLabel !== undefined ? <option value="">{allLabel}</option> : null}
         {options.map((option) => (
           <option key={option.value} value={option.value}>
@@ -140,15 +125,16 @@ export interface TextFieldProps {
   readonly placeholder?: string;
   /** Wait this long after typing stops before reporting the value. */
   readonly debounceMs?: number;
-  readonly icon?: LucideIcon;
+  readonly icon?: Icon;
   readonly className?: string;
   readonly list?: string;
-  readonly hideLabel?: boolean;
+  /** Show the label above the field (it is visually hidden otherwise; the placeholder names the filter). */
+  readonly showLabel?: boolean;
   readonly mono?: boolean;
 }
 
-/** A text filter with a clear button; reports changes after a short pause. */
-export function TextField({ label, value, onChange, placeholder, debounceMs = 250, icon: Icon = Search, className, list, hideLabel = false, mono = false }: TextFieldProps) {
+/** A filter input (Primer `form-control` with a leading Octicon and a clear button); reports changes after a short pause. */
+export function TextField({ label, value, onChange, placeholder, debounceMs = 250, icon: LeadingIcon = SearchIcon, className, list, showLabel = false, mono = false }: TextFieldProps) {
   const id = useId();
   const [draft, setDraft] = useState(value);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -170,12 +156,12 @@ export function TextField({ label, value, onChange, placeholder, debounceMs = 25
   };
 
   return (
-    <div className={cx("flex min-w-0 flex-col gap-1", className)}>
-      <label htmlFor={id} className={cx("text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500", hideLabel && "sr-only")}>
+    <div className={cx("FormControl min-w-0", className)}>
+      <label htmlFor={id} className={cx("FormControl-label", !showLabel && "sr-only")}>
         {label}
       </label>
       <div className="relative">
-        <Icon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-zinc-500" aria-hidden />
+        <LeadingIcon size={16} className="pointer-events-none absolute top-1/2 left-2 -translate-y-1/2 text-fg-muted" />
         <input
           id={id}
           type="text"
@@ -192,19 +178,11 @@ export function TextField({ label, value, onChange, placeholder, debounceMs = 25
               update("", true);
             }
           }}
-          className={cx(
-            "h-8 w-full min-w-0 rounded-lg bg-zinc-900 pr-8 pl-8 text-[13px] text-zinc-200 ring-1 ring-inset ring-white/10 placeholder:text-zinc-600 hover:ring-white/20 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70",
-            mono && "font-mono text-[12px]",
-          )}
+          className={cx("form-control input-block pr-8 pl-8", mono && "input-monospace")}
         />
         {draft ? (
-          <button
-            type="button"
-            onClick={() => update("", true)}
-            aria-label={`Clear ${label.toLowerCase()}`}
-            className="absolute top-1/2 right-1.5 grid size-5 -translate-y-1/2 place-items-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-          >
-            <X className="size-3" aria-hidden />
+          <button type="button" onClick={() => update("", true)} aria-label={`Clear ${label.toLowerCase()}`} className="btn-octicon absolute top-1/2 right-0.5 -translate-y-1/2">
+            <XIcon size={16} />
           </button>
         ) : null}
       </div>
@@ -212,7 +190,7 @@ export function TextField({ label, value, onChange, placeholder, debounceMs = 25
   );
 }
 
-/** A row of filters above a table. */
+/** A row of filters above a list. */
 export function FilterBar({ children, className }: { readonly children: ReactNode; readonly className?: string }) {
-  return <div className={cx("flex flex-wrap items-end gap-3", className)}>{children}</div>;
+  return <div className={cx("flex flex-wrap items-center gap-2", className)}>{children}</div>;
 }

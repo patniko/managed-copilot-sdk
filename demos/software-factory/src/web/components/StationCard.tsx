@@ -1,37 +1,32 @@
-import { Box, Globe, GlobeLock, Server, WifiOff } from "lucide-react";
+import { CloudOfflineIcon, ContainerIcon, CopilotIcon, CpuIcon, GlobeIcon, ServerIcon, ShieldLockIcon, type Icon } from "@primer/octicons-react";
+import type { ReactNode } from "react";
 import type { EnvironmentView, Station } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { formatClock, formatSandboxSize, shortId, summarizeNetwork, type NetworkSummary } from "../lib/format.js";
-import { isStationActive, KIND_ICONS, stationElapsed, stationStatusMeta } from "../lib/stations.js";
+import { formatClock, formatDuration, formatSandboxSize, shortId, summarizeNetwork, type NetworkSummary } from "../lib/format.js";
+import { isStationActive, stationElapsed, stationStatusMeta } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
-import { TONE_TILE, type Tone } from "../lib/tone.js";
 import { testChipLabel } from "./TestBar.js";
-import { Chip, StatusText } from "./ui/Chip.js";
+import { Chip, StatusIcon } from "./ui/Chip.js";
 import { Tooltip } from "./ui/Tooltip.js";
-
-const CARD_BORDERS: Readonly<Record<Tone, string>> = {
-  active: "border-sky-400/40",
-  success: "border-zinc-700/80",
-  warning: "border-amber-400/40",
-  danger: "border-rose-400/45",
-  neutral: "border-zinc-800",
-};
 
 export function useEnvironment(name: string | undefined): EnvironmentView | undefined {
   const environments = useStore((state) => state.platform?.environments);
   return name ? environments?.find((environment) => environment.name === name) : undefined;
 }
 
-export function NetworkChip({ network }: { readonly network: NetworkSummary }) {
-  const Icon = network.kind === "off" ? WifiOff : network.kind === "restricted" ? GlobeLock : Globe;
+export function networkIcon(network: NetworkSummary): Icon {
+  return network.kind === "off" ? CloudOfflineIcon : network.kind === "restricted" ? ShieldLockIcon : GlobeIcon;
+}
+
+function NetworkTooltip({ network, children }: { readonly network: NetworkSummary; readonly children: ReactNode }) {
   return (
     <Tooltip
       content={
         network.hosts.length > 0 ? (
-          <div>
-            <p className="mb-1 text-zinc-400">{network.description}</p>
-            <ul className="space-y-0.5 font-mono text-[11px] text-zinc-200">
+          <div className="text-left">
+            <p className="mb-1">{network.description}</p>
+            <ul className="font-mono">
               {network.hosts.map((host) => (
                 <li key={host}>{host}</li>
               ))}
@@ -42,8 +37,26 @@ export function NetworkChip({ network }: { readonly network: NetworkSummary }) {
         )
       }
     >
-      <Chip icon={Icon}>{network.label}</Chip>
+      {children}
     </Tooltip>
+  );
+}
+
+/** Network policy as a Label, with the allowed hosts in a tooltip. */
+export function NetworkChip({ network }: { readonly network: NetworkSummary }) {
+  return (
+    <NetworkTooltip network={network}>
+      <Chip icon={networkIcon(network)}>{network.label}</Chip>
+    </NetworkTooltip>
+  );
+}
+
+/** Card chrome shared by the floor's stations, like a job in the GitHub Actions workflow graph. */
+export function stationCardClass(selected: boolean, dashed = false): string {
+  return cx(
+    "flex w-full flex-col rounded-md border bg-canvas p-3 text-left transition-colors duration-100",
+    selected ? "border-line-accent ring-1 ring-line-accent" : "border-line hover:bg-canvas-muted",
+    dashed && !selected && "border-dashed",
   );
 }
 
@@ -57,18 +70,28 @@ export interface StationCardProps {
   readonly ghost?: boolean;
 }
 
+function Meta({ icon: Glyph, children, title }: { readonly icon?: Icon; readonly children: ReactNode; readonly title?: string }) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-1" title={title}>
+      {Glyph ? <Glyph size={12} className="shrink-0" /> : null}
+      <span className="truncate">{children}</span>
+    </span>
+  );
+}
+
 export function StationCard({ station, selected, onSelect, heading, ghost = false }: StationCardProps) {
   const meta = stationStatusMeta(station);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
   const elapsed = stationElapsed(station, now);
   const environment = useEnvironment(station.environment);
-  const KindIcon = KIND_ICONS[station.kind];
   const network = summarizeNetwork(station.sandbox?.network ?? environment?.network);
   const size = station.sandbox?.size ?? (station.placement === "sandbox" ? environment?.size : undefined);
   const muted = station.status === "waiting" || station.status === "skipped" || station.status === "cancelled";
   const tests = station.tests ? testChipLabel(station.tests) : undefined;
   const model = station.model ?? environment?.model;
+  // The server's detail often repeats the status ("Working"); show it only when it adds something.
+  const detail = station.detail && !ghost && station.detail !== meta.label ? station.detail : undefined;
 
   return (
     <button
@@ -76,60 +99,41 @@ export function StationCard({ station, selected, onSelect, heading, ghost = fals
       onClick={onSelect}
       aria-pressed={selected}
       title={heading && heading !== station.title ? station.title : undefined}
-      className={cx(
-        "group relative flex w-full flex-col rounded-xl border p-3 text-left transition-[border-color,background-color,opacity] duration-200",
-        CARD_BORDERS[meta.tone],
-        muted ? "border-dashed bg-zinc-900/45" : "bg-zinc-900/90 shadow-lg shadow-black/20",
-        active && "animate-glow",
-        selected ? "bg-zinc-800/80 outline-2 outline-offset-2 outline-zinc-300/60" : "hover:border-zinc-600 hover:bg-zinc-900",
-      )}
+      className={stationCardClass(selected, muted)}
     >
-      <div className="flex items-start gap-2.5">
-        <span
-          className={cx(
-            "grid size-8 shrink-0 place-items-center rounded-lg ring-1 ring-inset transition-colors",
-            TONE_TILE[meta.tone],
-            muted && "opacity-70",
-          )}
-        >
-          <KindIcon className="size-4" aria-hidden />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline gap-2">
-            <span className={cx("truncate text-[13px] font-semibold", muted ? "text-zinc-300" : "text-zinc-50")}>
-              {heading ?? station.title}
-            </span>
-            {elapsed !== undefined ? (
-              <span className="ml-auto shrink-0 font-mono text-[11px] text-zinc-500 tabular" aria-label="Elapsed">
-                {formatClock(elapsed)}
-              </span>
-            ) : null}
-          </div>
-          <StatusText meta={meta} className="mt-0.5 text-xs" />
-        </div>
-      </div>
-
-      {station.detail && !ghost ? (
-        <p className="mt-2 truncate text-xs text-zinc-400" title={station.detail}>
-          {station.detail}
-        </p>
-      ) : null}
-
-      <div className={cx("mt-2.5 flex flex-wrap gap-1", muted && "opacity-75")}>
-        <Chip>@{station.agent}</Chip>
-        {model ? (
-          <Chip mono title={model}>
-            {model}
-          </Chip>
+      <div className="flex w-full items-center gap-2">
+        <StatusIcon meta={meta} />
+        <span className={cx("min-w-0 flex-1 truncate font-semibold", muted && "text-fg-muted")}>{heading ?? station.title}</span>
+        {elapsed !== undefined ? (
+          <span className="shrink-0 text-xs text-fg-muted tabular-nums" title={active ? "Elapsed" : "Duration"}>
+            {active ? formatClock(elapsed) : formatDuration(elapsed)}
+          </span>
         ) : null}
-        <Chip icon={station.placement === "sandbox" ? Box : Server} title={station.sandbox ? `Isolated sandbox ${station.sandbox.id}` : undefined}>
+      </div>
+      <span className="mt-0.5 block w-full truncate pl-6 text-xs text-fg-muted" title={detail}>
+        {meta.label}
+        {detail ? ` · ${detail}` : ""}
+      </span>
+
+      <div className="mt-2 flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-xs text-fg-muted">
+        <Meta icon={CopilotIcon}>@{station.agent}</Meta>
+        {model ? <Meta title={model}>{model}</Meta> : null}
+        <Meta icon={station.placement === "sandbox" ? ContainerIcon : ServerIcon} title={station.sandbox ? `Isolated sandbox ${station.sandbox.id}` : undefined}>
           {station.placement === "sandbox" ? "Sandbox" : "Shared"}
-          {station.sandbox ? <span className="ml-1 font-mono text-[10.5px] text-zinc-300">{shortId(station.sandbox.id, 6)}</span> : null}
-        </Chip>
-        {size ? <Chip>{formatSandboxSize(size)}</Chip> : null}
-        {network ? <NetworkChip network={network} /> : null}
-        {tests ? <Chip tone={tests.tone === "neutral" ? "plain" : tests.tone}>{tests.label}</Chip> : null}
-        {station.round > 1 ? <Chip tone="warning">Round {station.round}</Chip> : null}
+          {station.sandbox ? <span className="ml-1 font-mono">{shortId(station.sandbox.id, 6)}</span> : null}
+        </Meta>
+        {size ? <Meta icon={CpuIcon}>{formatSandboxSize(size)}</Meta> : null}
+        {network ? (
+          <NetworkTooltip network={network}>
+            <Meta icon={networkIcon(network)}>{network.label}</Meta>
+          </NetworkTooltip>
+        ) : null}
+        {tests || station.round > 1 ? (
+          <span className="inline-flex flex-wrap gap-1">
+            {tests ? <Chip tone={tests.tone === "neutral" ? "plain" : tests.tone}>{tests.label}</Chip> : null}
+            {station.round > 1 ? <Chip tone="warning">Round {station.round}</Chip> : null}
+          </span>
+        ) : null}
       </div>
     </button>
   );

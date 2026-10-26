@@ -57,12 +57,12 @@ function Bubble({
     const element = ref.current;
     if (!element) return;
     const { width, height } = element.getBoundingClientRect();
-    const gap = 8;
+    const gap = 6;
     const above = anchor.top - height - gap >= 4;
     const top = above ? anchor.top - height - gap : anchor.bottom + gap;
     const left = Math.min(Math.max(6, anchor.left + anchor.width / 2 - width / 2), window.innerWidth - width - 6);
-    setPosition({ left, top });
-  }, [anchor]);
+    setPosition((current) => (current && current.left === left && current.top === top ? current : { left, top }));
+  }, [anchor, children]);
 
   useEffect(() => {
     window.addEventListener("scroll", onDismiss, true);
@@ -79,7 +79,7 @@ function Bubble({
       id={id}
       role="tooltip"
       style={{ position: "fixed", left: position?.left ?? -9999, top: position?.top ?? -9999 }}
-      className="pointer-events-none z-[70] max-w-xs animate-fade-in rounded-lg border border-zinc-700/80 bg-zinc-900/95 px-2.5 py-1.5 text-xs leading-relaxed text-zinc-200 shadow-xl shadow-black/50 backdrop-blur"
+      className="Tooltip animate-fade-in"
     >
       {children}
     </div>

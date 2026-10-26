@@ -1,4 +1,4 @@
-import { Check, Copy } from "lucide-react";
+import { CheckIcon, CopyIcon } from "@primer/octicons-react";
 import { useEffect, useRef, useState } from "react";
 import { copyText } from "../../lib/clipboard.js";
 import { cx } from "../../lib/cx.js";
@@ -16,7 +16,8 @@ export interface CopyButtonProps {
   readonly className?: string;
 }
 
-export function CopyButton({ text, label, children, variant = "ghost", size = "xs", className }: CopyButtonProps) {
+/** GitHub's clipboard button: a CopyIcon that turns into a green check once copied. */
+export function CopyButton({ text, label, children, variant = "default", size = "sm", className }: CopyButtonProps) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -32,8 +33,8 @@ export function CopyButton({ text, label, children, variant = "ghost", size = "x
     timer.current = setTimeout(() => setCopied(false), 1600);
   };
 
-  const Icon = copied ? Check : Copy;
   const iconOnly = !children;
+  const StateIcon = copied ? CheckIcon : CopyIcon;
   return (
     <button
       type="button"
@@ -43,16 +44,10 @@ export function CopyButton({ text, label, children, variant = "ghost", size = "x
       }}
       aria-label={iconOnly ? label : undefined}
       title={label}
-      className={cx(
-        buttonClass(variant, size),
-        iconOnly && (size === "xs" ? "w-6 px-0" : "w-7 px-0"),
-        "text-zinc-500 hover:text-zinc-200",
-        copied && "text-emerald-300 hover:text-emerald-300",
-        className,
-      )}
+      className={iconOnly ? cx("btn-octicon", className) : buttonClass(variant, size, className)}
     >
-      <Icon className={size === "xs" ? "size-3" : "size-3.5"} aria-hidden />
-      {children ? <span>{copied ? "Copied" : children}</span> : null}
+      <StateIcon size={16} className={copied ? "text-fg-success" : undefined} />
+      {children ? <span>{copied ? "Copied!" : children}</span> : null}
       <span className="sr-only" aria-live="polite">
         {copied ? "Copied" : ""}
       </span>

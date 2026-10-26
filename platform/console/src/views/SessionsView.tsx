@@ -1,6 +1,6 @@
 import type { OperatorSessionQuery, OperatorSessionSummary } from "@managed-copilot/protocol/operator";
 import type { Placement, SessionState } from "@managed-copilot/protocol";
-import { FunnelX, MessagesSquare, Plug, SearchX } from "lucide-react";
+import { CommentDiscussionIcon, FilterRemoveIcon, PersonIcon, PlugIcon, SearchIcon } from "@primer/octicons-react";
 import { useId, useMemo, type ReactNode } from "react";
 import { listSessions } from "../lib/api.js";
 import { formatNumber } from "../lib/format.js";
@@ -55,13 +55,7 @@ export function SessionsView({ query }: { readonly query: Query }) {
   const limit = filters.limit ?? DEFAULT_LIMIT;
 
   return (
-    <Page
-      title="Sessions"
-      documentTitle="Sessions"
-      icon={MessagesSquare}
-      description="Every session of every owner: metadata and harness, never conversation content."
-      poll={poll}
-    >
+    <Page wide title="Sessions" documentTitle="Sessions" description="Every session of every owner: metadata and harness, never conversation content." poll={poll}>
       <SessionFilters filters={filters} onChange={(changes) => setQuery({ ...changes, limit: undefined })} />
       <Card padded={false} className="mt-4">
         <PollContent poll={poll} skeleton={<TableSkeleton columns={7} />} errorTitle="Couldn't load sessions">
@@ -73,10 +67,10 @@ export function SessionsView({ query }: { readonly query: Query }) {
                 empty={
                   filtered ? (
                     <EmptyState
-                      icon={SearchX}
+                      icon={SearchIcon}
                       title="No sessions match these filters"
                       action={
-                        <Button icon={FunnelX} onClick={() => setQuery({ owner: undefined, environment: undefined, state: undefined, placement: undefined, q: undefined, limit: undefined })}>
+                        <Button icon={FilterRemoveIcon} onClick={() => setQuery({ owner: undefined, environment: undefined, state: undefined, placement: undefined, q: undefined, limit: undefined })}>
                           Clear filters
                         </Button>
                       }
@@ -84,19 +78,19 @@ export function SessionsView({ query }: { readonly query: Query }) {
                       Try a different owner, state, or ID prefix.
                     </EmptyState>
                   ) : (
-                    <EmptyState icon={MessagesSquare} title="No sessions yet">
+                    <EmptyState icon={CommentDiscussionIcon} title="No sessions yet" spacious>
                       Sessions appear here as soon as an SDK client or the Copilot CLI creates one.
                     </EmptyState>
                   )
                 }
               />
               {sessions.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-3 border-t border-zinc-800/70 px-4 py-2.5 text-[12.5px] text-zinc-500">
-                  <span className="tabular">
+                <div className="flex flex-wrap items-center gap-3 border-t border-line bg-canvas-muted px-4 py-2 text-xs text-fg-muted">
+                  <span className="tabular-nums">
                     {sessions.length >= limit ? `Showing the first ${formatNumber(sessions.length)} sessions.` : `${formatNumber(sessions.length)} ${sessions.length === 1 ? "session" : "sessions"}.`}
                   </span>
                   {sessions.length >= limit && limit < MAX_LIMIT ? (
-                    <Button size="xs" onClick={() => setQuery({ limit: Math.min(MAX_LIMIT, limit * 2) })}>
+                    <Button size="sm" onClick={() => setQuery({ limit: Math.min(MAX_LIMIT, limit * 2) })}>
                       Show more
                     </Button>
                   ) : null}
@@ -123,20 +117,28 @@ function SessionFilters({ filters, onChange }: { readonly filters: OperatorSessi
   const anyFilter = Boolean(filters.owner || filters.environment || filters.state || filters.placement || filters.q);
   return (
     <FilterBar>
-      <TextField label="Owner" value={filters.owner ?? ""} placeholder="Login or account ID" list={ownersId} onChange={(value) => onChange({ owner: value || undefined })} className="w-44" />
+      <TextField
+        label="Owner"
+        icon={PersonIcon}
+        value={filters.owner ?? ""}
+        placeholder="Owner login or ID"
+        list={ownersId}
+        onChange={(value) => onChange({ owner: value || undefined })}
+        className="w-full sm:w-52"
+      />
       <datalist id={ownersId}>
         {(accounts ?? []).map((account) => (
           <option key={account.account.id} value={account.account.login} />
         ))}
       </datalist>
-      <SelectField label="Environment" value={filters.environment ?? ""} allLabel="All environments" options={environmentOptions} onChange={(value) => onChange({ environment: value || undefined })} className="w-44" />
+      <SelectField label="Environment" value={filters.environment ?? ""} allLabel="All environments" options={environmentOptions} onChange={(value) => onChange({ environment: value || undefined })} className="w-[calc(50%-0.25rem)] sm:w-44" />
       <SelectField
         label="State"
         value={filters.state ?? ""}
         allLabel="All states"
         options={FILTER_STATES.map((state) => ({ value: state, label: sessionStateMeta(state).label }))}
         onChange={(value) => onChange({ state: value || undefined })}
-        className="w-36"
+        className="w-[calc(50%-0.25rem)] sm:w-36"
       />
       <SelectField
         label="Placement"
@@ -147,12 +149,12 @@ function SessionFilters({ filters, onChange }: { readonly filters: OperatorSessi
           { value: "sandbox", label: "Sandbox" },
         ]}
         onChange={(value) => onChange({ placement: value || undefined })}
-        className="w-36"
+        className="w-[calc(50%-0.25rem)] sm:w-40"
       />
-      <TextField label="Session ID" value={filters.q ?? ""} placeholder="ID prefix" mono onChange={(value) => onChange({ q: value || undefined })} className="w-44" />
+      <TextField label="Session ID" value={filters.q ?? ""} placeholder="Session ID prefix" mono onChange={(value) => onChange({ q: value || undefined })} className="w-[calc(50%-0.25rem)] sm:w-56" />
       {anyFilter ? (
-        <Button variant="ghost" icon={FunnelX} onClick={() => onChange({ owner: undefined, environment: undefined, state: undefined, placement: undefined, q: undefined })}>
-          Clear
+        <Button variant="invisible" icon={FilterRemoveIcon} onClick={() => onChange({ owner: undefined, environment: undefined, state: undefined, placement: undefined, q: undefined })}>
+          Clear filters
         </Button>
       ) : null}
     </FilterBar>
@@ -165,33 +167,34 @@ const COLUMNS: readonly Column<OperatorSessionSummary>[] = [
   { id: "environment", header: "Environment", cell: (session) => <EnvironmentLink name={session.environment} />, className: "whitespace-nowrap" },
   { id: "type", header: "Type", cell: (session) => <EnvironmentTypeChip type={session.type} />, hideBelow: "2xl" },
   { id: "placement", header: "Placement", cell: (session) => <PlacementChip placement={session.placement} />, hideBelow: "xl", className: "whitespace-nowrap" },
-  { id: "state", header: "State", cell: (session) => <StatusBadge meta={sessionStateMeta(session.state)} size="xs" /> },
+  { id: "state", header: "State", cell: (session) => <StatusBadge meta={sessionStateMeta(session.state)} /> },
   {
     id: "model",
     header: "Model",
-    cell: (session) => (session.model ? <span className="font-mono text-[12px] whitespace-nowrap text-zinc-300">{session.model}</span> : <None />),
-    hideBelow: "xl",
+    cell: (session) => (session.model ? <span className="font-mono text-xs whitespace-nowrap">{session.model}</span> : <None />),
+    hideBelow: "2xl",
   },
-  { id: "agent", header: "Agent", cell: (session) => (session.agent ? <span className="text-zinc-300">{session.agent}</span> : <None />), hideBelow: "2xl" },
+  { id: "agent", header: "Agent", cell: (session) => (session.agent ? <span>{session.agent}</span> : <None />), hideBelow: "2xl" },
   {
     id: "attached",
     header: "Clients",
     align: "right",
     cell: (session) => (
-      <span className={session.attached > 0 ? "inline-flex items-center gap-1 text-zinc-200" : "text-zinc-500"} title={`${session.attached} attached now`}>
-        {session.attached > 0 ? <Plug className="size-3 text-zinc-500" aria-hidden /> : null}
+      <span className={session.attached > 0 ? "inline-flex items-center gap-1" : "text-fg-muted"} title={`${session.attached} attached now`}>
+        {session.attached > 0 ? <PlugIcon size={16} className="text-fg-muted" /> : null}
         {session.attached}
       </span>
     ),
-    hideBelow: "xl",
+    hideBelow: "2xl",
   },
   {
     id: "live",
     header: "Live",
     className: "whitespace-nowrap",
+    hideBelow: "lg",
     cell: (session) =>
       session.live ? (
-        <span className="inline-flex items-center gap-1.5 text-[12px] text-emerald-300" title="Open on a runtime connection now">
+        <span className="inline-flex items-center gap-1" title="Open on a runtime connection now">
           <Dot tone="success" />
           Live
         </span>
@@ -205,28 +208,18 @@ const COLUMNS: readonly Column<OperatorSessionSummary>[] = [
     className: "whitespace-nowrap",
     cell: (session) =>
       session.lastTurn ? (
-        <span className="inline-flex items-center gap-2 text-[12px]">
+        <span className="inline-flex items-center gap-2">
           <StatusText meta={turnStatusMeta(session.lastTurn.status)} />
-          {session.lastTurn.completedAt ? <RelativeTime value={session.lastTurn.completedAt} className="text-zinc-500" /> : null}
+          {session.lastTurn.completedAt ? <RelativeTime value={session.lastTurn.completedAt} className="text-xs text-fg-muted" /> : null}
         </span>
       ) : (
         <None />
       ),
-    hideBelow: "xl",
+    hideBelow: "2xl",
   },
-  { id: "updated", header: "Updated", cell: (session) => <RelativeTime value={session.updatedAt} className="text-zinc-400" /> },
+  { id: "updated", header: "Updated", cell: (session) => <RelativeTime value={session.updatedAt} className="text-fg-muted" /> },
 ];
 
 export function SessionsTable({ sessions, dim = false, empty }: { readonly sessions: readonly OperatorSessionSummary[]; readonly dim?: boolean; readonly empty?: ReactNode }) {
-  return (
-    <DataTable
-      label="Sessions"
-      rows={sessions}
-      columns={COLUMNS}
-      rowKey={(session) => session.id}
-      rowHref={(session) => hrefs.session(session.id)}
-      dim={dim}
-      empty={empty}
-    />
-  );
+  return <DataTable label="Sessions" rows={sessions} columns={COLUMNS} rowKey={(session) => session.id} rowHref={(session) => hrefs.session(session.id)} dim={dim} empty={empty} />;
 }

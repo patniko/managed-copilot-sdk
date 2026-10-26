@@ -22,8 +22,9 @@ await page.evaluate(() => {
   const logo = document.querySelector("#title .logo");
   logo.innerHTML = '<svg width="58" height="58" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" fill="white"/></svg>';
   logo.style.borderRadius = "999px";
-  document.querySelector("#title .foot").textContent = "Watch the 6-minute tour: the idea, how it works, and both demos running for real";
-  document.querySelector("#title .foot").style.cssText += "font-size:28px;color:#c4b5fd;bottom:230px";
+  const foot = document.querySelector("#title .foot");
+  foot.querySelector("span").textContent = "Watch the 6-minute tour: the idea, how it works, and both demos running for real";
+  foot.style.cssText += "font-size:28px;color:#4493f8;bottom:230px";
 });
 await page.screenshot({ path: join(images, "tour.png") });
 await browser.close();

@@ -1,16 +1,20 @@
 import type { OperatorHarness, OperatorHarnessTool, OperatorMcpServer } from "@managed-copilot/protocol/operator";
-import { Bot, Braces, Plug, ScrollText, ShieldCheck, Sparkles, Wrench } from "lucide-react";
+import { AgentIcon, AiModelIcon, CommentIcon, McpIcon, PlugIcon, ShieldCheckIcon, SlidersIcon, SparkleFillIcon, ToolsIcon } from "@primer/octicons-react";
 import { Card, Field, FieldGrid, KeyValueTable } from "../ui/Card.js";
 import { Chip } from "../ui/Chip.js";
 import { CodeBlock, Disclosure, JsonBlock } from "../ui/CodeBlock.js";
-import { Callout, EmptyState, None } from "../ui/Feedback.js";
+import { Callout, EmptyState, None, SectionLabel } from "../ui/Feedback.js";
 import { ChipList, YesNo } from "./Entities.js";
 
-const SOURCES: Readonly<Record<OperatorHarnessTool["source"], { readonly label: string; readonly tone: "active" | "plain" | "warning"; readonly description: string }>> = {
-  client: { label: "Client", tone: "active", description: "Defined by a connected app (defineTool)" },
+const SOURCES: Readonly<Record<OperatorHarnessTool["source"], { readonly label: string; readonly tone: "accent" | "plain" | "attention"; readonly description: string }>> = {
+  client: { label: "Client", tone: "accent", description: "Defined by a connected app (defineTool)" },
   server: { label: "Server", tone: "plain", description: "A declaration stored for schedules" },
-  platform: { label: "Platform", tone: "warning", description: "Injected by the gateway" },
+  platform: { label: "Platform", tone: "attention", description: "Injected by the gateway" },
 };
+
+function Muted({ children }: { readonly children: string }) {
+  return <p className="text-fg-muted">{children}</p>;
+}
 
 /** A session's admitted harness: what the runtime was told to run with (secrets redacted by the gateway). */
 export function HarnessPanel({ harness, problem }: { readonly harness: OperatorHarness | undefined; readonly problem: string | undefined }) {
@@ -20,22 +24,22 @@ export function HarnessPanel({ harness, problem }: { readonly harness: OperatorH
         {problem}
       </Callout>
     ) : (
-      <Card>
-        <EmptyState icon={Wrench} title="No harness recorded">
+      <div className="Box">
+        <EmptyState icon={ToolsIcon} title="No harness recorded">
           The gateway has no admitted configuration for this session yet.
         </EmptyState>
-      </Card>
+      </div>
     );
   }
   const options = Object.entries(harness.options);
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       {problem ? (
-        <Callout tone="warning" title="Part of the harness can't be shown">
+        <Callout tone="attention" title="Part of the harness can't be shown">
           {problem}
         </Callout>
       ) : null}
-      <Card title="Model and agent" icon={Bot}>
+      <Card title="Model and agent" icon={AiModelIcon}>
         <FieldGrid columns={4}>
           <Field label="Model" mono>
             {harness.model}
@@ -46,28 +50,28 @@ export function HarnessPanel({ harness, problem }: { readonly harness: OperatorH
             {harness.workingDirectory}
           </Field>
           <Field label="Allowed models" wide>
-            {harness.allowedModels ? <ChipList items={harness.allowedModels} mono empty="None" /> : <span className="text-zinc-500">Any the environment allows</span>}
+            {harness.allowedModels ? <ChipList items={harness.allowedModels} mono empty="None" /> : <span className="text-fg-muted">Any the environment allows</span>}
           </Field>
         </FieldGrid>
       </Card>
 
       <SystemMessage harness={harness} />
 
-      <Card title="Tools" icon={Wrench} description="Tools the session's runtime was given." padded={false}>
-        <div className="grid gap-5 border-b border-zinc-800/70 p-4 lg:grid-cols-2">
+      <Card title="Tools" icon={ToolsIcon} description="Tools the session's runtime was given." padded={false}>
+        <div className="grid gap-5 border-b border-line p-4 lg:grid-cols-2">
           <div className="min-w-0">
-            <h3 className="mb-2 text-[12px] font-semibold text-zinc-300">Available tools (allowlist)</h3>
-            {harness.availableTools ? <ChipList items={harness.availableTools} mono empty="None" /> : <span className="text-[13px] text-zinc-500">Not restricted</span>}
+            <SectionLabel className="mb-2">Available tools (allowlist)</SectionLabel>
+            {harness.availableTools ? <ChipList items={harness.availableTools} mono empty="None" /> : <Muted>Not restricted</Muted>}
           </div>
           <div className="min-w-0">
-            <h3 className="mb-2 text-[12px] font-semibold text-zinc-300">Excluded tools</h3>
+            <SectionLabel className="mb-2">Excluded tools</SectionLabel>
             <ChipList items={harness.excludedTools} mono empty="None" />
           </div>
         </div>
         {harness.tools.length === 0 ? (
-          <p className="p-4 text-[13px] text-zinc-500">No custom tools.</p>
+          <p className="p-4 text-fg-muted">No custom tools.</p>
         ) : (
-          <ul className="divide-y divide-zinc-800/70">
+          <ul>
             {harness.tools.map((tool) => (
               <ToolRow key={`${tool.source}:${tool.name}`} tool={tool} />
             ))}
@@ -77,30 +81,30 @@ export function HarnessPanel({ harness, problem }: { readonly harness: OperatorH
 
       <McpServers servers={harness.mcpServers} />
 
-      <Card title="Custom agents" icon={Bot} padded={harness.customAgents.length === 0}>
+      <Card title="Custom agents" icon={AgentIcon} padded={harness.customAgents.length === 0}>
         {harness.customAgents.length === 0 ? (
-          <p className="text-[13px] text-zinc-500">None.</p>
+          <Muted>None.</Muted>
         ) : (
-          <ul className="divide-y divide-zinc-800/70">
+          <ul>
             {harness.customAgents.map((agent) => (
-              <li key={agent.name} className="px-4 py-3.5">
-                <div className="flex flex-wrap items-baseline gap-2">
-                  <span className="text-[13.5px] font-semibold text-zinc-100">{agent.displayName ?? agent.name}</span>
-                  {agent.displayName ? <span className="font-mono text-[12px] text-zinc-500">{agent.name}</span> : null}
+              <li key={agent.name} className="Box-row">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold">{agent.displayName ?? agent.name}</span>
+                  {agent.displayName ? <span className="font-mono text-xs text-fg-muted">{agent.name}</span> : null}
                   {agent.model ? (
                     <Chip mono title="Model">
                       {agent.model}
                     </Chip>
                   ) : null}
                 </div>
-                {agent.description ? <p className="mt-1 text-[13px] leading-relaxed text-zinc-400">{agent.description}</p> : null}
-                <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                {agent.description ? <p className="mt-1 text-fg-muted">{agent.description}</p> : null}
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <div className="min-w-0">
-                    <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500">Tools</p>
-                    {agent.tools ? <ChipList items={agent.tools} mono empty="None" /> : <span className="text-[12.5px] text-zinc-500">All available tools</span>}
+                    <SectionLabel className="mb-1.5">Tools</SectionLabel>
+                    {agent.tools ? <ChipList items={agent.tools} mono empty="None" /> : <Muted>All available tools</Muted>}
                   </div>
                   <div className="min-w-0">
-                    <p className="mb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500">MCP servers</p>
+                    <SectionLabel className="mb-1.5">MCP servers</SectionLabel>
                     <ChipList items={agent.mcpServers} mono empty="None" />
                   </div>
                 </div>
@@ -115,8 +119,8 @@ export function HarnessPanel({ harness, problem }: { readonly harness: OperatorH
         )}
       </Card>
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <Card title="Customizations and skills" icon={Sparkles}>
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card title="Customizations and skills" icon={SparkleFillIcon}>
           <FieldGrid columns={3}>
             <Field label="Deployed agents">
               <YesNo value={harness.customizations.agents} yes="Read" no="Not read" />
@@ -135,7 +139,7 @@ export function HarnessPanel({ harness, problem }: { readonly harness: OperatorH
             </Field>
           </FieldGrid>
         </Card>
-        <Card title="Client callbacks" icon={Plug} description="Handlers connected clients registered.">
+        <Card title="Client callbacks" icon={PlugIcon} description="Handlers connected clients registered.">
           <FieldGrid columns={2}>
             <Field label="Tools">
               <ChipList items={harness.callbacks.tools} mono empty="None" />
@@ -147,26 +151,21 @@ export function HarnessPanel({ harness, problem }: { readonly harness: OperatorH
         </Card>
       </div>
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <Card title="Options" icon={Braces} description="Other caller settings with simple values.">
-          {options.length > 0 ? (
-            <KeyValueTable label="Session options" keyHeader="Option" rows={options.map(([key, value]) => [key, String(value)] as const)} />
-          ) : (
-            <p className="text-[13px] text-zinc-500">None.</p>
-          )}
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card title="Options" icon={SlidersIcon} description="Other caller settings with simple values.">
+          {options.length > 0 ? <KeyValueTable label="Session options" keyHeader="Option" rows={options.map(([key, value]) => [key, String(value)] as const)} /> : <Muted>None.</Muted>}
         </Card>
-        <Card title="Enforced by the platform" icon={ShieldCheck}>
+        <Card title="Enforced by the platform" icon={ShieldCheckIcon}>
           {harness.enforced.length > 0 ? (
-            <ul className="space-y-1.5 text-[13px] text-zinc-300">
+            <ul className="list-disc space-y-1 pl-5 marker:text-fg-muted">
               {harness.enforced.map((setting) => (
-                <li key={setting} className="flex gap-2">
-                  <span className="mt-2 size-1 shrink-0 rounded-full bg-zinc-500" aria-hidden />
-                  <span className="min-w-0 break-words">{setting}</span>
+                <li key={setting} className="break-words">
+                  {setting}
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="text-[13px] text-zinc-500">None.</p>
+            <Muted>None.</Muted>
           )}
         </Card>
       </div>
@@ -178,26 +177,32 @@ function SystemMessage({ harness }: { readonly harness: OperatorHarness }) {
   const message = harness.systemMessage;
   const sections = Object.entries(message?.sections ?? {});
   return (
-    <Card title="System message" icon={ScrollText} actions={message ? <Chip mono>mode: {message.mode}</Chip> : undefined}>
+    <Card title="System message" icon={CommentIcon} actions={message ? <Chip mono>mode: {message.mode}</Chip> : undefined}>
       {!message ? (
-        <p className="text-[13px] text-zinc-500">The runtime&apos;s default system message.</p>
+        <Muted>The runtime&apos;s default system message.</Muted>
       ) : (
-        <div className="space-y-4">
-          {message.content ? <CodeBlock text={message.content} label="System message" copyLabel="Copy system message" maxHeight="lg" /> : null}
-          {sections.length > 0 ? (
-            <div className="space-y-3">
-              {sections.map(([name, section]) => (
-                <div key={name} className="rounded-xl border border-zinc-800/80 p-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-[12.5px] text-zinc-100">{name}</span>
-                    <Chip>{section.action}</Chip>
-                  </div>
-                  {section.content ? <CodeBlock className="mt-2" text={section.content} label={`Section ${name}`} copyLabel="Copy section" maxHeight="sm" /> : null}
-                </div>
-              ))}
-            </div>
-          ) : null}
-          {!message.content && sections.length === 0 ? <p className="text-[13px] text-zinc-500">No content.</p> : null}
+        <div className="space-y-3">
+          {message.content ? <CodeBlock text={message.content} label="System message" title="Content" copyLabel="Copy system message" maxHeight="lg" /> : null}
+          {sections.map(([name, section]) =>
+            section.content ? (
+              <CodeBlock
+                key={name}
+                text={section.content}
+                label={`Section ${name}`}
+                title={name}
+                path
+                headerExtra={<Chip>{section.action}</Chip>}
+                copyLabel="Copy section"
+                maxHeight="sm"
+              />
+            ) : (
+              <div key={name} className="Box flex items-center gap-2 bg-canvas-muted py-2 pr-2 pl-4">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs font-semibold">{name}</span>
+                <Chip>{section.action}</Chip>
+              </div>
+            ),
+          )}
+          {!message.content && sections.length === 0 ? <Muted>No content.</Muted> : null}
         </div>
       )}
     </Card>
@@ -207,16 +212,16 @@ function SystemMessage({ harness }: { readonly harness: OperatorHarness }) {
 function ToolRow({ tool }: { readonly tool: OperatorHarnessTool }) {
   const source = SOURCES[tool.source] ?? { label: tool.source, tone: "plain" as const, description: "" };
   return (
-    <li className="px-4 py-3">
+    <li className="Box-row">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="font-mono text-[12.5px] font-semibold text-zinc-100">{tool.name}</span>
+        <span className="font-mono text-xs font-semibold">{tool.name}</span>
         <Chip tone={source.tone} title={source.description}>
           {source.label}
         </Chip>
-        {tool.skipPermission ? <Chip tone="warning">Skips permission</Chip> : null}
-        {tool.overridesBuiltInTool ? <Chip tone="warning">Overrides built-in</Chip> : null}
+        {tool.skipPermission ? <Chip tone="attention">Skips permission</Chip> : null}
+        {tool.overridesBuiltInTool ? <Chip tone="attention">Overrides built-in</Chip> : null}
       </div>
-      {tool.description ? <p className="mt-1 text-[12.5px] leading-relaxed text-zinc-400">{tool.description}</p> : null}
+      {tool.description ? <p className="mt-1 text-fg-muted">{tool.description}</p> : null}
       {tool.parameters && Object.keys(tool.parameters).length > 0 ? (
         <Disclosure className="mt-2" summary="Parameters (JSON schema)">
           <JsonBlock value={tool.parameters} label={`Parameters of ${tool.name}`} maxHeight="md" />
@@ -228,62 +233,48 @@ function ToolRow({ tool }: { readonly tool: OperatorHarnessTool }) {
 
 function McpServers({ servers }: { readonly servers: readonly OperatorMcpServer[] }) {
   return (
-    <Card title="MCP servers" icon={Plug} padded={servers.length === 0}>
+    <Card title="MCP servers" icon={McpIcon} padded={servers.length === 0}>
       {servers.length === 0 ? (
-        <p className="text-[13px] text-zinc-500">None.</p>
+        <Muted>None.</Muted>
       ) : (
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-[12.5px]" aria-label="MCP servers">
-            <thead className="border-b border-zinc-800 text-[11px] uppercase tracking-[0.06em] text-zinc-500">
+        <div className="relative overflow-x-auto">
+          <table className="Table" aria-label="MCP servers">
+            <thead>
               <tr>
-                <th scope="col" className="px-4 py-2 font-medium">
-                  Server
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Transport
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Target
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Header names
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Env names
-                </th>
-                <th scope="col" className="px-3 py-2 font-medium">
-                  Tools
-                </th>
-                <th scope="col" className="px-4 py-2 font-medium">
-                  Agent
-                </th>
+                <th scope="col">Server</th>
+                <th scope="col">Transport</th>
+                <th scope="col">Target</th>
+                <th scope="col">Header names</th>
+                <th scope="col">Env names</th>
+                <th scope="col">Tools</th>
+                <th scope="col">Agent</th>
               </tr>
             </thead>
             <tbody>
               {servers.map((server) => (
-                <tr key={`${server.agent ?? ""}:${server.name}`} className="border-b border-zinc-800/60 align-top last:border-b-0">
-                  <td className="px-4 py-2.5">
-                    <span className="font-mono text-zinc-100">{server.name}</span>
-                    {server.adapter ? (
-                      <Chip className="ml-1.5" tone="active" title="Reached through the gateway's MCP adapter, which applies network policy and vault credentials">
-                        via gateway
-                      </Chip>
-                    ) : null}
+                <tr key={`${server.agent ?? ""}:${server.name}`} className="align-top">
+                  <td>
+                    <span className="inline-flex flex-wrap items-center gap-1.5">
+                      <span className="font-mono text-xs font-semibold">{server.name}</span>
+                      {server.adapter ? (
+                        <Chip tone="accent" title="Reached through the gateway's MCP adapter, which applies network policy and vault credentials">
+                          via gateway
+                        </Chip>
+                      ) : null}
+                    </span>
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td>
                     <Chip mono>{server.transport}</Chip>
                   </td>
-                  <td className="max-w-80 px-3 py-2.5 font-mono break-all text-zinc-300">
-                    {server.url ? server.url : server.command ? [server.command, ...(server.args ?? [])].join(" ") : <None />}
-                  </td>
-                  <td className="px-3 py-2.5">
+                  <td className="max-w-80 font-mono text-xs break-all">{server.url ? server.url : server.command ? [server.command, ...(server.args ?? [])].join(" ") : <None />}</td>
+                  <td>
                     <ChipList items={server.headers} mono />
                   </td>
-                  <td className="px-3 py-2.5">
+                  <td>
                     <ChipList items={server.env} mono />
                   </td>
-                  <td className="px-3 py-2.5">{server.tools ? <ChipList items={server.tools} mono empty="None" /> : <span className="text-zinc-500">All</span>}</td>
-                  <td className="px-4 py-2.5 text-zinc-300">{server.agent ?? <span className="text-zinc-500">Session</span>}</td>
+                  <td>{server.tools ? <ChipList items={server.tools} mono empty="None" /> : <span className="text-fg-muted">All</span>}</td>
+                  <td>{server.agent ?? <span className="text-fg-muted">Session</span>}</td>
                 </tr>
               ))}
             </tbody>

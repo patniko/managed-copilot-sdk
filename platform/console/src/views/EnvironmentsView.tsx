@@ -1,5 +1,5 @@
 import type { OperatorEnvironment, OperatorEnvironments } from "@managed-copilot/protocol/operator";
-import { ArrowRight, CalendarClock, Cpu, Layers, TriangleAlert } from "lucide-react";
+import { AlertFillIcon, CalendarIcon, CommentDiscussionIcon, CpuIcon, DotFillIcon, GlobeIcon, ArrowUpRightIcon, StackIcon, AiModelIcon } from "@primer/octicons-react";
 import { cx } from "../lib/cx.js";
 import { formatNumber, formatSize, summarizeNetwork } from "../lib/format.js";
 import { useEnvironments } from "../lib/resources.js";
@@ -8,20 +8,14 @@ import { ENVIRONMENT_TYPES, EnvironmentTypeChip, NetworkPolicyView } from "../co
 import { Page, PollContent } from "../components/layout/Page.js";
 import { Card } from "../components/ui/Card.js";
 import { Chip } from "../components/ui/Chip.js";
-import { EmptyState, Skeleton } from "../components/ui/Feedback.js";
+import { Code, EmptyState, Skeleton, SkeletonLines } from "../components/ui/Feedback.js";
 import { Link } from "../components/ui/Link.js";
 
 export function EnvironmentsView() {
   const poll = useEnvironments();
   return (
-    <Page
-      title="Environments"
-      documentTitle="Environments"
-      icon={Layers}
-      description="Declared environments and the policy ceilings sessions run under."
-      poll={poll}
-    >
-      <PollContent poll={poll} skeleton={<EnvironmentsSkeleton />} errorTitle="Couldn't load environments">
+    <Page title="Environments" documentTitle="Environments" description="Declared environments and the policy ceilings sessions run under." poll={poll}>
+      <PollContent poll={poll} skeleton={<EnvironmentsSkeleton />} errorTitle="Couldn't load environments" boxed>
         {(data) => <EnvironmentsBody data={data} />}
       </PollContent>
     </Page>
@@ -34,120 +28,129 @@ function EnvironmentsBody({ data }: { readonly data: OperatorEnvironments }) {
       <div className="grid gap-4 lg:grid-cols-2">
         <Card title="Inline environments" description="What code may request without naming an environment (inline in the AppHost).">
           {data.inline ? (
-            <div className="space-y-3 text-[13px]">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="w-14 text-zinc-500">Types</span>
+            <dl className="grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2">
+              <dt className="text-xs font-semibold text-fg-muted">Types</dt>
+              <dd className="flex flex-wrap gap-1.5">
                 {data.inline.types.map((type) => (
                   <EnvironmentTypeChip key={type} type={type} />
                 ))}
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="w-14 text-zinc-500">Sizes</span>
-                {data.inline.sizes && data.inline.sizes.length > 0 ? (
-                  data.inline.sizes.map((size) => <Chip key={size}>{formatSize(size)}</Chip>)
-                ) : (
-                  <span className="text-zinc-400">Any size</span>
-                )}
-              </div>
-            </div>
+              </dd>
+              <dt className="text-xs font-semibold text-fg-muted">Sizes</dt>
+              <dd className="flex flex-wrap gap-1.5">
+                {data.inline.sizes && data.inline.sizes.length > 0 ? data.inline.sizes.map((size) => <Chip key={size}>{formatSize(size)}</Chip>) : <span className="text-fg-muted">Any size</span>}
+              </dd>
+            </dl>
           ) : (
-            <p className="text-[13px] text-zinc-400">Not allowed: code must name a declared environment.</p>
+            <p className="text-fg-muted">Not allowed: code must name a declared environment.</p>
           )}
         </Card>
         <Card title="Default network" description="The deployment-wide default (network at the top level of the AppHost).">
           <NetworkPolicyView policy={data.defaultNetwork} />
         </Card>
       </div>
-      {data.environments.length === 0 ? (
-        <Card>
-          <EmptyState icon={Layers} title="No environments are declared">
-            Declare environments under <code className="font-mono text-zinc-300">environments</code> in the AppHost&apos;s addManagedCopilot options.
-          </EmptyState>
-        </Card>
-      ) : (
-        <ul className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
-          {data.environments.map((environment) => (
-            <li key={environment.name} className="min-w-0">
-              <EnvironmentCard environment={environment} />
-            </li>
-          ))}
-        </ul>
-      )}
+      <section aria-labelledby="declared-heading">
+        <h2 id="declared-heading" className="mb-3 text-base font-semibold">
+          Declared environments <span className="Counter ml-1 align-middle">{data.environments.length}</span>
+        </h2>
+        {data.environments.length === 0 ? (
+          <div className="Box">
+            <EmptyState icon={StackIcon} title="No environments are declared">
+              Declare environments under <Code>environments</Code> in the AppHost&apos;s addManagedCopilot options.
+            </EmptyState>
+          </div>
+        ) : (
+          <ul className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
+            {data.environments.map((environment) => (
+              <li key={environment.name} className="min-w-0">
+                <EnvironmentCard environment={environment} />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }
 
+/** A pinned-repository style card: name, type label, description, facts, and session counts. */
 function EnvironmentCard({ environment }: { readonly environment: OperatorEnvironment }) {
   const type = ENVIRONMENT_TYPES[environment.type];
-  const TypeIcon = type?.icon ?? Layers;
+  const TypeIcon = type?.icon ?? StackIcon;
   const network = summarizeNetwork(environment.network);
   const problem = environment.customizations?.problem;
   const size = formatSize(environment.size, environment.resources);
   return (
     <Link
       href={hrefs.environment(environment.name)}
-      className={cx(
-        "group flex h-full flex-col rounded-2xl border bg-zinc-900/40 p-4 transition-colors hover:bg-zinc-900/70",
-        problem ? "border-rose-400/30 hover:border-rose-400/50" : "border-zinc-800/80 hover:border-zinc-700",
-      )}
+      className={cx("Box group flex h-full flex-col p-4 transition-colors duration-150 hover:bg-canvas-muted", problem && "border-line-danger")}
     >
-      <div className="flex items-start gap-3">
-        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-zinc-800/80 text-zinc-300 ring-1 ring-inset ring-white/10" title={type?.description}>
-          <TypeIcon className="size-4" aria-hidden />
+      <span className="flex min-w-0 items-center gap-2">
+        <TypeIcon size={16} className="text-fg-muted" />
+        <span className="min-w-0 truncate font-mono font-semibold text-fg-accent group-hover:underline">{environment.name}</span>
+        <span className="Label Label--secondary ml-auto" title={type?.description}>
+          {type?.label ?? environment.type}
         </span>
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate font-mono text-[14px] font-semibold text-zinc-50">{environment.name}</h2>
-          <p className="text-[12px] text-zinc-500">{type?.label ?? environment.type}</p>
-        </div>
-        <ArrowRight className="mt-1 size-4 shrink-0 text-zinc-600 transition-colors group-hover:text-zinc-300" aria-hidden />
-      </div>
-      {environment.description ? <p className="mt-3 line-clamp-2 text-[13px] leading-relaxed text-zinc-400">{environment.description}</p> : null}
+      </span>
+      {environment.description ? <span className="mt-2 line-clamp-2 text-xs text-fg-muted">{environment.description}</span> : null}
       {problem ? (
-        <p className="mt-3 flex gap-2 rounded-lg border border-rose-400/30 bg-rose-400/[0.07] px-2.5 py-2 text-[12.5px] leading-relaxed text-rose-100">
-          <TriangleAlert className="mt-0.5 size-3.5 shrink-0 text-rose-300" aria-hidden />
-          <span className="min-w-0">
-            <span className="font-medium">Sessions fail: </span>
+        <span className="flash flash-error flash-sm mt-3 text-xs">
+          <AlertFillIcon size={16} />
+          <span className="flash-content">
+            <span className="font-semibold">Sessions fail: </span>
             {problem}
           </span>
-        </p>
+        </span>
       ) : null}
-      <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-[12.5px]">
-        <dt className="text-zinc-500">Models</dt>
-        <dd className="min-w-0 truncate text-zinc-200" title={environment.models?.join(", ")}>
+      <span className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
+        <span className="inline-flex items-center gap-1.5 text-fg-muted">
+          <AiModelIcon size={16} />
+          Models
+        </span>
+        <span className="min-w-0 truncate" title={environment.models?.join(", ")}>
           {environment.models && environment.models.length > 0 ? environment.models.join(", ") : "Every model the caller can use"}
-        </dd>
-        <dt className="text-zinc-500">Network</dt>
-        <dd className="min-w-0 truncate text-zinc-200" title={network?.hosts.join(", ") || network?.description}>
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-fg-muted">
+          <GlobeIcon size={16} />
+          Network
+        </span>
+        <span className="min-w-0 truncate" title={network?.hosts.join(", ") || network?.description}>
           {network?.label}
-        </dd>
+        </span>
         {size ? (
           <>
-            <dt className="text-zinc-500">Size</dt>
-            <dd className="flex min-w-0 items-center gap-1.5 text-zinc-200">
-              <Cpu className="size-3.5 text-zinc-500" aria-hidden />
-              {size}
-            </dd>
+            <span className="inline-flex items-center gap-1.5 text-fg-muted">
+              <CpuIcon size={16} />
+              Size
+            </span>
+            <span className="min-w-0 truncate">{size}</span>
           </>
         ) : null}
         {environment.promoteTo ? (
           <>
-            <dt className="text-zinc-500">Promotes to</dt>
-            <dd className="font-mono text-zinc-200">{environment.promoteTo}</dd>
+            <span className="inline-flex items-center gap-1.5 text-fg-muted">
+              <ArrowUpRightIcon size={16} />
+              Promotes to
+            </span>
+            <span className="min-w-0 truncate font-mono">{environment.promoteTo}</span>
           </>
         ) : null}
-      </dl>
-      <div className="mt-auto flex flex-wrap items-center gap-2 pt-4 text-[12px]">
-        <span className="text-zinc-300 tabular">
+      </span>
+      <span className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-1 pt-4 text-xs text-fg-muted">
+        <span className="inline-flex items-center gap-1 tabular-nums">
+          <CommentDiscussionIcon size={16} />
           {formatNumber(environment.sessions.total)} {environment.sessions.total === 1 ? "session" : "sessions"}
         </span>
-        <span className="text-zinc-500">·</span>
-        <span className={cx("tabular", environment.sessions.live > 0 ? "text-emerald-300" : "text-zinc-500")}>{formatNumber(environment.sessions.live)} live</span>
+        <span className="inline-flex items-center gap-1 tabular-nums">
+          <DotFillIcon size={16} className={environment.sessions.live > 0 ? "text-fg-success" : undefined} />
+          {formatNumber(environment.sessions.live)} live
+        </span>
         {environment.scheduling ? (
-          <Chip icon={CalendarClock} className="ml-auto" title="Agents may schedule follow-up work (scheduling: true)">
+          <span className="inline-flex items-center gap-1" title="Agents may schedule follow-up work (scheduling: true)">
+            <CalendarIcon size={16} />
             Scheduling
-          </Chip>
+          </span>
         ) : null}
-      </div>
+      </span>
     </Link>
   );
 }
@@ -156,12 +159,22 @@ function EnvironmentsSkeleton() {
   return (
     <div className="space-y-6" role="status" aria-label="Loading environments">
       <div className="grid gap-4 lg:grid-cols-2">
-        <Skeleton className="h-28 rounded-2xl" />
-        <Skeleton className="h-28 rounded-2xl" />
+        {Array.from({ length: 2 }, (_, index) => (
+          <div key={index} className="Box">
+            <div className="Box-header">
+              <Skeleton className="h-4 w-40" />
+            </div>
+            <div className="p-4">
+              <SkeletonLines lines={2} />
+            </div>
+          </div>
+        ))}
       </div>
       <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-3">
         {Array.from({ length: 6 }, (_, index) => (
-          <Skeleton key={index} className="h-56 rounded-2xl" />
+          <div key={index} className="Box h-48 p-4">
+            <SkeletonLines lines={5} />
+          </div>
         ))}
       </div>
     </div>

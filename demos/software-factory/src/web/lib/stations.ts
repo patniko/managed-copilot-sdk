@@ -1,18 +1,21 @@
-import type { LucideIcon } from "lucide-react";
 import {
-  CircleCheck,
-  CircleDashed,
-  CircleMinus,
-  CircleSlash,
-  CircleX,
-  ClipboardList,
-  Hammer,
-  Hourglass,
-  LoaderCircle,
-  PackageCheck,
-  RotateCcw,
-  ScanSearch,
-} from "lucide-react";
+  CheckCircleFillIcon,
+  ClockIcon,
+  CodeReviewIcon,
+  DotFillIcon,
+  FileDiffIcon,
+  GitMergeIcon,
+  GitPullRequestClosedIcon,
+  GitPullRequestDraftIcon,
+  GitPullRequestIcon,
+  PackageIcon,
+  SkipIcon,
+  StopIcon,
+  TasklistIcon,
+  ToolsIcon,
+  XCircleFillIcon,
+  type Icon,
+} from "@primer/octicons-react";
 import { ACTIVE_WORK_ORDER_STATUSES } from "../../shared/types.js";
 import type {
   PlanTask,
@@ -27,11 +30,23 @@ import type {
 import { parseTime } from "./format.js";
 import type { Tone } from "./tone.js";
 
+/** A status shown the GitHub way: an Octicon (or the Primer spinner when `spin`), its color, and a label. */
 export interface StatusMeta {
   readonly label: string;
   readonly tone: Tone;
-  readonly icon: LucideIcon;
+  readonly icon: Icon;
   readonly spin: boolean;
+}
+
+/** Work order lifecycle as a pull request state: open while it runs, merged once released, closed when it failed. */
+export type WorkOrderState = "open" | "merged" | "closed" | "draft";
+
+export interface WorkOrderStatusMeta {
+  readonly label: string;
+  readonly state: WorkOrderState;
+  readonly icon: Icon;
+  /** Color for the state Octicon in lists. */
+  readonly iconClass: string;
 }
 
 const ACTIVE_STATION_STATUSES: readonly StationStatus[] = ["starting", "working", "collecting"];
@@ -48,61 +63,68 @@ export function isWorkOrderTerminal(status: WorkOrderStatus): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
-const WORK_ORDER_STATUS: Readonly<Record<WorkOrderStatus, StatusMeta>> = {
-  queued: { label: "Queued", tone: "active", icon: Hourglass, spin: false },
-  planning: { label: "Planning", tone: "active", icon: LoaderCircle, spin: true },
-  building: { label: "Building", tone: "active", icon: LoaderCircle, spin: true },
-  releasing: { label: "Releasing", tone: "active", icon: LoaderCircle, spin: true },
-  completed: { label: "Completed", tone: "success", icon: CircleCheck, spin: false },
-  failed: { label: "Failed", tone: "danger", icon: CircleX, spin: false },
-  cancelled: { label: "Cancelled", tone: "neutral", icon: CircleSlash, spin: false },
+const OPEN = { state: "open", icon: GitPullRequestIcon, iconClass: "text-fg-open" } as const;
+
+const WORK_ORDER_STATUS: Readonly<Record<WorkOrderStatus, WorkOrderStatusMeta>> = {
+  queued: { label: "Queued", state: "draft", icon: GitPullRequestDraftIcon, iconClass: "text-fg-draft" },
+  planning: { label: "Planning", ...OPEN },
+  building: { label: "Building", ...OPEN },
+  releasing: { label: "Releasing", ...OPEN },
+  completed: { label: "Completed", state: "merged", icon: GitMergeIcon, iconClass: "text-fg-done" },
+  failed: { label: "Failed", state: "closed", icon: GitPullRequestClosedIcon, iconClass: "text-fg-closed" },
+  cancelled: { label: "Cancelled", state: "draft", icon: SkipIcon, iconClass: "text-fg-muted" },
 };
 
-export function workOrderStatusMeta(status: WorkOrderStatus): StatusMeta {
-  return WORK_ORDER_STATUS[status] ?? { label: status, tone: "neutral", icon: CircleDashed, spin: false };
+export function workOrderStatusMeta(status: WorkOrderStatus): WorkOrderStatusMeta {
+  return WORK_ORDER_STATUS[status] ?? { label: status, state: "draft", icon: GitPullRequestDraftIcon, iconClass: "text-fg-muted" };
 }
+
+/** Primer `State` modifier for a work order state. */
+export const STATE_CLASS: Readonly<Record<WorkOrderState, string>> = {
+  open: "State--open",
+  merged: "State--merged",
+  closed: "State--closed",
+  draft: "State--draft",
+};
+
+const RUNNING = { tone: "active", icon: DotFillIcon, spin: true } as const;
 
 export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "placement" | "acceptedWithFindings">): StatusMeta {
   switch (station.status) {
     case "waiting":
-      return { label: "Waiting", tone: "neutral", icon: CircleDashed, spin: false };
+      return { label: "Waiting", tone: "neutral", icon: ClockIcon, spin: false };
     case "starting":
-      return {
-        label: station.placement === "sandbox" ? "Starting sandbox" : "Starting",
-        tone: "active",
-        icon: LoaderCircle,
-        spin: true,
-      };
+      return { label: station.placement === "sandbox" ? "Starting sandbox" : "Starting", ...RUNNING };
     case "working":
-      return { label: "Working", tone: "active", icon: LoaderCircle, spin: true };
+      return { label: "Working", ...RUNNING };
     case "collecting":
-      return { label: "Collecting results", tone: "active", icon: LoaderCircle, spin: true };
+      return { label: "Collecting results", ...RUNNING };
     case "changes_requested":
-      return { label: "Changes requested", tone: "warning", icon: RotateCcw, spin: false };
+      return { label: "Changes requested", tone: "warning", icon: FileDiffIcon, spin: false };
     case "done":
       if (station.kind === "review") {
         return station.acceptedWithFindings
-          ? { label: "Accepted with findings", tone: "warning", icon: CircleCheck, spin: false }
-          : { label: "Approved", tone: "success", icon: CircleCheck, spin: false };
+          ? { label: "Accepted with findings", tone: "warning", icon: CheckCircleFillIcon, spin: false }
+          : { label: "Approved", tone: "success", icon: CheckCircleFillIcon, spin: false };
       }
-      if (station.kind === "release") return { label: "Released", tone: "success", icon: CircleCheck, spin: false };
-      return { label: "Done", tone: "success", icon: CircleCheck, spin: false };
+      if (station.kind === "release") return { label: "Released", tone: "success", icon: CheckCircleFillIcon, spin: false };
+      return { label: "Done", tone: "success", icon: CheckCircleFillIcon, spin: false };
     case "failed":
-      return { label: "Failed", tone: "danger", icon: CircleX, spin: false };
+      return { label: "Failed", tone: "danger", icon: XCircleFillIcon, spin: false };
     case "cancelled":
-      return { label: "Cancelled", tone: "neutral", icon: CircleSlash, spin: false };
+      return { label: "Cancelled", tone: "neutral", icon: StopIcon, spin: false };
     case "skipped":
-      return { label: "Skipped", tone: "neutral", icon: CircleMinus, spin: false };
+      return { label: "Skipped", tone: "neutral", icon: SkipIcon, spin: false };
     default:
-      return { label: String(station.status), tone: "neutral", icon: CircleDashed, spin: false };
+      return { label: String(station.status), tone: "neutral", icon: ClockIcon, spin: false };
   }
 }
 
-export const KIND_ICONS: Readonly<Record<StationKind, LucideIcon>> = {
-  plan: ClipboardList,
-  build: Hammer,
-  review: ScanSearch,
-  release: PackageCheck,
+export const KIND_ICONS: Readonly<Record<StationKind, Icon>> = {
+  plan: TasklistIcon,
+  build: ToolsIcon,
+  review: CodeReviewIcon,
+  release: PackageIcon,
 };
 
 export const KIND_LABELS: Readonly<Record<StationKind, string>> = {

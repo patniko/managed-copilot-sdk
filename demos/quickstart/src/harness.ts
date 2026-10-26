@@ -65,9 +65,11 @@ const color = env.NO_COLOR === undefined && (Boolean(env.FORCE_COLOR && env.FORC
 const unicode = process.platform !== "win32" || Boolean(env.WT_SESSION || env.TERM_PROGRAM === "vscode" || env.ConEmuTask || env.TERM === "xterm-256color");
 const paint = (code: number) => (text: string) => (color ? `\u001b[${code}m${text}\u001b[0m` : text);
 export const style = { bold: paint(1), dim: paint(2), red: paint(31), green: paint(32), yellow: paint(33), cyan: paint(36) };
+// The GitHub CLI's check glyphs (`gh pr checks`): ✓ pass, X fail, ! unavailable, - skipped; ▶ starts a step, like an
+// Actions log group.
 export const symbols = unicode
-  ? { pass: "✔", fail: "✖", unavailable: "◌", skipped: "↷", run: "▶", bar: "│" }
-  : { pass: "√", fail: "×", unavailable: "o", skipped: "~", run: ">", bar: "|" };
+  ? { pass: "✓", fail: "X", unavailable: "!", skipped: "-", run: "▶", bar: "│" }
+  : { pass: "√", fail: "X", unavailable: "!", skipped: "-", run: ">", bar: "|" };
 
 const OUTCOME_STYLE: Record<Outcome, (text: string) => string> = { pass: style.green, fail: style.red, unavailable: style.yellow, skipped: style.dim };
 const OUTCOME_LABEL: Record<Outcome, string> = { pass: "PASS", fail: "FAIL", unavailable: "UNAVAILABLE", skipped: "SKIPPED" };

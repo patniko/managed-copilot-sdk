@@ -1,0 +1,285 @@
+/*
+ * Primer design tokens: the CSS variables github.com uses, with GitHub's light and dark themes.
+ *
+ * Color mode follows github.com. Put these attributes on <html> (or any subtree):
+ *   data-color-mode="auto" | "light" | "dark"   data-light-theme="light"   data-dark-theme="dark"
+ * "auto" follows the operating system. Every color below resolves per element, so a subtree can switch mode.
+ */
+@import "@primer/primitives/dist/css/primitives.css";
+@import "@primer/primitives/dist/css/functional/themes/light.css";
+@import "@primer/primitives/dist/css/functional/themes/dark.css";
+
+/* Primer's stacks lead with "Mona Sans VF" (github.com's self-hosted cut); the bundled copy is "Mona Sans Variable". */
+:root {
+  --fontStack-sansSerif:
+    "Mona Sans VF", "Mona Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial,
+    sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  --fontStack-sansSerifDisplay: var(--fontStack-sansSerif);
+  --fontStack-system: var(--fontStack-sansSerif);
+}
+
+[data-color-mode="light"],
+[data-color-mode="auto"] {
+  color-scheme: light;
+}
+
+[data-color-mode="dark"] {
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-color-mode="auto"] {
+    color-scheme: dark;
+  }
+}
+
+/* `dark:` matches GitHub's dark theme, whether chosen explicitly or followed from the operating system. */
+@custom-variant dark {
+  &:where([data-color-mode="dark"], [data-color-mode="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where([data-color-mode="auto"], [data-color-mode="auto"] *) {
+      @slot;
+    }
+  }
+}
+
+/*
+ * Tailwind names for Primer's functional tokens. Utilities reference the Primer variables directly, so they follow
+ * the active theme. Only these colors exist: the default Tailwind palette (zinc, sky, ...) is intentionally removed.
+ *
+ *   text-fg, text-fg-muted, text-fg-accent, ...        fgColor-*
+ *   bg-canvas, bg-canvas-muted, bg-canvas-inset, ...   bgColor-default / -muted / -inset / -emphasis, overlay
+ *   bg-accent-muted, bg-success-emphasis, ...          bgColor-<role>-muted / -emphasis
+ *   border-line, border-line-muted, border-line-accent borderColor-*
+ */
+@theme inline {
+  --color-*: initial;
+  --color-white: #ffffff;
+  --color-black: #000000;
+
+  /* Text and icons (fgColor) */
+  --color-fg: var(--fgColor-default);
+  --color-fg-muted: var(--fgColor-muted);
+  --color-fg-disabled: var(--fgColor-disabled);
+  --color-fg-link: var(--fgColor-link);
+  --color-fg-neutral: var(--fgColor-neutral);
+  --color-fg-accent: var(--fgColor-accent);
+  --color-fg-success: var(--fgColor-success);
+  --color-fg-attention: var(--fgColor-attention);
+  --color-fg-severe: var(--fgColor-severe);
+  --color-fg-danger: var(--fgColor-danger);
+  --color-fg-done: var(--fgColor-done);
+  --color-fg-sponsors: var(--fgColor-sponsors);
+  --color-fg-open: var(--fgColor-open);
+  --color-fg-closed: var(--fgColor-closed);
+  --color-fg-draft: var(--fgColor-draft);
+  --color-fg-on-emphasis: var(--fgColor-onEmphasis);
+
+  /* Surfaces (bgColor) */
+  --color-canvas: var(--bgColor-default);
+  --color-canvas-muted: var(--bgColor-muted);
+  --color-canvas-inset: var(--bgColor-inset);
+  --color-canvas-emphasis: var(--bgColor-emphasis);
+  --color-canvas-overlay: var(--overlay-bgColor);
+  --color-canvas-disabled: var(--bgColor-disabled);
+  --color-neutral-muted: var(--bgColor-neutral-muted);
+  --color-neutral-emphasis: var(--bgColor-neutral-emphasis);
+  --color-accent-muted: var(--bgColor-accent-muted);
+  --color-accent-emphasis: var(--bgColor-accent-emphasis);
+  --color-success-muted: var(--bgColor-success-muted);
+  --color-success-emphasis: var(--bgColor-success-emphasis);
+  --color-attention-muted: var(--bgColor-attention-muted);
+  --color-attention-emphasis: var(--bgColor-attention-emphasis);
+  --color-severe-muted: var(--bgColor-severe-muted);
+  --color-severe-emphasis: var(--bgColor-severe-emphasis);
+  --color-danger-muted: var(--bgColor-danger-muted);
+  --color-danger-emphasis: var(--bgColor-danger-emphasis);
+  --color-done-muted: var(--bgColor-done-muted);
+  --color-done-emphasis: var(--bgColor-done-emphasis);
+  --color-sponsors-muted: var(--bgColor-sponsors-muted);
+  --color-sponsors-emphasis: var(--bgColor-sponsors-emphasis);
+  --color-open-muted: var(--bgColor-open-muted);
+  --color-open-emphasis: var(--bgColor-open-emphasis);
+  --color-closed-muted: var(--bgColor-closed-muted);
+  --color-closed-emphasis: var(--bgColor-closed-emphasis);
+  --color-draft-muted: var(--bgColor-draft-muted);
+  --color-draft-emphasis: var(--bgColor-draft-emphasis);
+
+  /* Interactive surfaces (control) */
+  --color-control: var(--control-bgColor-rest);
+  --color-control-hover: var(--control-bgColor-hover);
+  --color-control-active: var(--control-bgColor-active);
+  --color-control-transparent-hover: var(--control-transparent-bgColor-hover);
+  --color-control-transparent-active: var(--control-transparent-bgColor-active);
+  --color-control-transparent-selected: var(--control-transparent-bgColor-selected);
+  --color-backdrop: var(--overlay-backdrop-bgColor);
+  --color-selection: var(--selection-bgColor);
+
+  /* Borders (borderColor) */
+  --color-line: var(--borderColor-default);
+  --color-line-muted: var(--borderColor-muted);
+  --color-line-emphasis: var(--borderColor-emphasis);
+  --color-line-translucent: var(--borderColor-translucent);
+  --color-line-disabled: var(--borderColor-disabled);
+  --color-line-neutral: var(--borderColor-neutral-emphasis);
+  --color-line-accent: var(--borderColor-accent-emphasis);
+  --color-line-accent-muted: var(--borderColor-accent-muted);
+  --color-line-success: var(--borderColor-success-emphasis);
+  --color-line-success-muted: var(--borderColor-success-muted);
+  --color-line-attention: var(--borderColor-attention-emphasis);
+  --color-line-attention-muted: var(--borderColor-attention-muted);
+  --color-line-severe: var(--borderColor-severe-emphasis);
+  --color-line-severe-muted: var(--borderColor-severe-muted);
+  --color-line-danger: var(--borderColor-danger-emphasis);
+  --color-line-danger-muted: var(--borderColor-danger-muted);
+  --color-line-done: var(--borderColor-done-emphasis);
+  --color-line-done-muted: var(--borderColor-done-muted);
+  --color-line-sponsors: var(--borderColor-sponsors-emphasis);
+  --color-line-sponsors-muted: var(--borderColor-sponsors-muted);
+  --color-focus: var(--focus-outlineColor);
+
+  /* Data visualization and identity colors (Primer display colors): text-display-blue, bg-display-blue-muted, ... */
+  --color-display-blue: var(--display-blue-fgColor);
+  --color-display-blue-muted: var(--display-blue-bgColor-muted);
+  --color-display-blue-emphasis: var(--display-blue-bgColor-emphasis);
+  --color-display-green: var(--display-green-fgColor);
+  --color-display-green-muted: var(--display-green-bgColor-muted);
+  --color-display-green-emphasis: var(--display-green-bgColor-emphasis);
+  --color-display-orange: var(--display-orange-fgColor);
+  --color-display-orange-muted: var(--display-orange-bgColor-muted);
+  --color-display-orange-emphasis: var(--display-orange-bgColor-emphasis);
+  --color-display-purple: var(--display-purple-fgColor);
+  --color-display-purple-muted: var(--display-purple-bgColor-muted);
+  --color-display-purple-emphasis: var(--display-purple-bgColor-emphasis);
+  --color-display-pink: var(--display-pink-fgColor);
+  --color-display-pink-muted: var(--display-pink-bgColor-muted);
+  --color-display-pink-emphasis: var(--display-pink-bgColor-emphasis);
+  --color-display-red: var(--display-red-fgColor);
+  --color-display-red-muted: var(--display-red-bgColor-muted);
+  --color-display-red-emphasis: var(--display-red-bgColor-emphasis);
+  --color-display-yellow: var(--display-yellow-fgColor);
+  --color-display-yellow-muted: var(--display-yellow-bgColor-muted);
+  --color-display-yellow-emphasis: var(--display-yellow-bgColor-emphasis);
+  --color-display-teal: var(--display-teal-fgColor);
+  --color-display-teal-muted: var(--display-teal-bgColor-muted);
+  --color-display-teal-emphasis: var(--display-teal-bgColor-emphasis);
+  --color-display-indigo: var(--display-indigo-fgColor);
+  --color-display-indigo-muted: var(--display-indigo-bgColor-muted);
+  --color-display-indigo-emphasis: var(--display-indigo-bgColor-emphasis);
+  --color-display-gray: var(--display-gray-fgColor);
+  --color-display-gray-muted: var(--display-gray-bgColor-muted);
+  --color-display-gray-emphasis: var(--display-gray-bgColor-emphasis);
+
+  /* Elevation (Primer shadows): shadow-xs/sm/md rest on the page, shadow-lg/xl/2xl float above it. */
+  --shadow-*: initial;
+  --shadow-xs: var(--shadow-resting-xsmall);
+  --shadow-sm: var(--shadow-resting-small);
+  --shadow-md: var(--shadow-resting-medium);
+  --shadow-lg: var(--shadow-floating-small);
+  --shadow-xl: var(--shadow-floating-medium);
+  --shadow-2xl: var(--shadow-floating-large);
+}
+
+/*
+ * Type, radius, and motion on Primer's scale.
+ * Text: xs 12, sm 14 (body), base 16, lg 20, xl 24, 2xl 32, 3xl 40, 4xl 48. Body line height is 1.5, as on github.com.
+ * Radius: sm 3px, md 6px (default for controls and boxes), lg 12px (overlays, dialogs, cards), full for pills.
+ */
+@theme {
+  --font-sans: var(--fontStack-sansSerif);
+  --font-display: var(--fontStack-sansSerifDisplay);
+  --font-mono: var(--fontStack-monospace);
+
+  --text-*: initial;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.5;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.5;
+  --text-base: 1rem;
+  --text-base--line-height: 1.5;
+  --text-lg: 1.25rem;
+  --text-lg--line-height: 1.5;
+  --text-xl: 1.5rem;
+  --text-xl--line-height: 1.25;
+  --text-2xl: 2rem;
+  --text-2xl--line-height: 1.25;
+  --text-3xl: 2.5rem;
+  --text-3xl--line-height: 1.25;
+  --text-4xl: 3rem;
+  --text-4xl--line-height: 1.25;
+
+  --font-weight-bold: 600;
+
+  --radius-*: initial;
+  --radius-xs: 0.125rem;
+  --radius-sm: 0.1875rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 0.75rem;
+  --radius-3xl: 0.75rem;
+
+  --ease-github: cubic-bezier(0.33, 1, 0.68, 1);
+  --animate-fade-in: gh-fade-in 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-scale-in: gh-scale-in 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-slide-up: gh-slide-up 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-slide-in-left: gh-slide-in-left 0.25s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-slide-in-right: gh-slide-in-right 0.25s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-shimmer: gh-shimmer 1s linear infinite;
+
+  @keyframes gh-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes gh-scale-in {
+    from {
+      opacity: 0;
+      transform: scale(0.96);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @keyframes gh-slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  /* Primer's side sheets (drawers) slide in from their edge. */
+  @keyframes gh-slide-in-left {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes gh-slide-in-right {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes gh-shimmer {
+    from {
+      mask-position: 200%;
+    }
+    to {
+      mask-position: 0%;
+    }
+  }
+}

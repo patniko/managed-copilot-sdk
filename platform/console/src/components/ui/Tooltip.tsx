@@ -9,7 +9,7 @@ export interface TooltipProps {
   readonly disabled?: boolean;
 }
 
-/** Hover/focus tooltip rendered in a portal so scroll containers never clip it. */
+/** A Primer tooltip on hover and focus, rendered in a portal so scroll containers never clip it. */
 export function Tooltip({ content, children, className, disabled = false }: TooltipProps) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const id = useId();
@@ -47,7 +47,7 @@ function Bubble({ id, anchor, onDismiss, children }: { readonly id: string; read
     const element = ref.current;
     if (!element) return;
     const { width, height } = element.getBoundingClientRect();
-    const gap = 8;
+    const gap = 6;
     const above = anchor.top - height - gap >= 4;
     const top = above ? anchor.top - height - gap : anchor.bottom + gap;
     const left = Math.min(Math.max(6, anchor.left + anchor.width / 2 - width / 2), window.innerWidth - width - 6);
@@ -74,7 +74,7 @@ function Bubble({ id, anchor, onDismiss, children }: { readonly id: string; read
       id={id}
       role="tooltip"
       style={{ position: "fixed", left: position?.left ?? -9999, top: position?.top ?? -9999 }}
-      className="pointer-events-none z-[70] max-w-sm animate-fade-in rounded-lg border border-zinc-700/80 bg-zinc-900/95 px-2.5 py-1.5 text-xs leading-relaxed text-zinc-200 shadow-xl shadow-black/50 backdrop-blur"
+      className="Tooltip animate-fade-in text-left"
     >
       {children}
     </div>

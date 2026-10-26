@@ -6,21 +6,53 @@ import { bucketStart, seriesStats, sparklinePaths } from "../../lib/overview.js"
 import { TONE_FILL, TONE_STROKE, type Tone } from "../../lib/tone.js";
 
 const WIDTH = 240;
-const HEIGHT = 48;
+const HEIGHT = 40;
+
+/** Primer display colors for charts. */
+export type ChartColor = "blue" | "green" | "orange" | "purple" | "pink" | "red" | "yellow" | "teal" | "indigo" | "gray";
+
+const CHART_STROKE: Readonly<Record<ChartColor, string>> = {
+  blue: "stroke-display-blue",
+  green: "stroke-display-green",
+  orange: "stroke-display-orange",
+  purple: "stroke-display-purple",
+  pink: "stroke-display-pink",
+  red: "stroke-display-red",
+  yellow: "stroke-display-yellow",
+  teal: "stroke-display-teal",
+  indigo: "stroke-display-indigo",
+  gray: "stroke-display-gray",
+};
+
+const CHART_FILL: Readonly<Record<ChartColor, string>> = {
+  blue: "fill-display-blue-muted",
+  green: "fill-display-green-muted",
+  orange: "fill-display-orange-muted",
+  purple: "fill-display-purple-muted",
+  pink: "fill-display-pink-muted",
+  red: "fill-display-red-muted",
+  yellow: "fill-display-yellow-muted",
+  teal: "fill-display-teal-muted",
+  indigo: "fill-display-indigo-muted",
+  gray: "fill-display-gray-muted",
+};
 
 export interface SparklineProps {
   readonly label: string;
   readonly unit: string;
   readonly series: TrafficSeries;
   readonly generatedAt: string;
+  /** A Primer role (accent, danger, …). */
   readonly tone?: Tone;
+  /** A Primer display color; wins over `tone`. */
+  readonly color?: ChartColor;
 }
 
 /**
- * Per-minute counts for the last hour as an inline SVG. Hover or focus it and use the arrow keys to read single
- * minutes; the reading is announced to screen readers.
+ * Per-minute counts for the last hour as an inline SVG in Primer colors. Hover or focus it and use the arrow keys to
+ * read single minutes; the reading is announced to screen readers.
  */
-export function Sparkline({ label, unit, series, generatedAt, tone = "active" }: SparklineProps) {
+export function Sparkline({ label, unit, series, generatedAt, tone = "accent", color }: SparklineProps) {
   const values = series.perMinute;
   const [active, setActive] = useState<number | undefined>(undefined);
   const id = useId();
@@ -73,20 +105,27 @@ export function Sparkline({ label, unit, series, generatedAt, tone = "active" }:
         onFocus={() => setActive((value) => value ?? (count > 0 ? count - 1 : undefined))}
         onBlur={() => setActive(undefined)}
         onKeyDown={onKeyDown}
-        className="relative h-12 w-full rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+        className="relative h-10 w-full rounded-sm"
       >
         <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} preserveAspectRatio="none" className="size-full overflow-visible" aria-hidden>
-          <line x1="0" x2={WIDTH} y1={HEIGHT - 0.5} y2={HEIGHT - 0.5} className="stroke-zinc-800" strokeWidth="1" vectorEffect="non-scaling-stroke" />
-          {paths.area ? <path d={paths.area} className={cx(TONE_FILL[tone], "stroke-none")} /> : null}
+          <line x1="0" x2={WIDTH} y1={HEIGHT - 0.5} y2={HEIGHT - 0.5} className="stroke-line-muted" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+          {paths.area ? <path d={paths.area} className={cx(color ? CHART_FILL[color] : TONE_FILL[tone], "stroke-none")} /> : null}
           {paths.line ? (
-            <path d={paths.line} className={cx(TONE_STROKE[tone], "fill-none")} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+            <path
+              d={paths.line}
+              className={cx(color ? CHART_STROKE[color] : TONE_STROKE[tone], "fill-none")}
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
           ) : null}
         </svg>
         {markerX !== undefined && active !== undefined ? (
           <>
-            <span className="pointer-events-none absolute inset-y-0 w-px bg-zinc-400/60" style={{ left: `${markerX}%` }} aria-hidden />
+            <span className="pointer-events-none absolute inset-y-0 w-px bg-line-emphasis" style={{ left: `${markerX}%` }} aria-hidden />
             <span
-              className="pointer-events-none absolute -top-8 z-10 rounded-md border border-zinc-700/80 bg-zinc-900/95 px-2 py-1 text-[11px] whitespace-nowrap text-zinc-200 shadow-lg shadow-black/40"
+              className="Tooltip pointer-events-none absolute -top-9 z-10 max-w-none whitespace-nowrap"
               style={{ left: `${markerX}%`, transform: `translateX(${markerX > 70 ? "-100%" : markerX < 30 ? "0" : "-50%"})` }}
               aria-hidden
             >

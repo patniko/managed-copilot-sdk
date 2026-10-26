@@ -8,12 +8,14 @@
 !packages/sdk/package.json
 !platform/gateway/**
 !platform/console/**
+!packages/github-theme/**
 !deploy/azure/**
 **/node_modules
 **/dist
 **/*.tsbuildinfo
 platform/gateway/test
 platform/console/test
+packages/github-theme/test
 deploy/azure/test
 deploy/azure/hosting
 deploy/azure/sandbox

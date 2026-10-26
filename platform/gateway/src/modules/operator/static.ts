@@ -49,7 +49,7 @@ const CONTENT_TYPES: Readonly<Record<string, string>> = {
 };
 
 const NOT_BUILT = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Operator console not built</title></head>
+<html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Operator console not built · Managed Copilot</title></head>
 <body><h1>The operator console is not built</h1>
 <p>Build it with <code>pnpm build</code> at the repository root (or point <code>MANAGED_COPILOT_CONSOLE_DIR</code> at a built console), then reload this page.</p>
 <p>The operator API at <code>/v1/operator</code> works without it.</p></body></html>`;

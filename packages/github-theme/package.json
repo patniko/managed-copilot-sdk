@@ -1,0 +1,35 @@
+{
+  "name": "@managed-copilot/github-theme",
+  "version": "0.1.0",
+  "private": true,
+  "description": "GitHub look and feel for Managed Copilot web apps: Primer design tokens, light and dark themes, Mona Sans, and Primer-compatible component classes for Tailwind CSS v4.",
+  "type": "module",
+  "style": "./theme.css",
+  "exports": {
+    ".": {
+      "style": "./theme.css",
+      "default": "./theme.css"
+    },
+    "./theme.css": "./theme.css",
+    "./favicon.svg": "./assets/favicon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "theme.css",
+    "src",
+    "assets"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@fontsource-variable/mona-sans": "5.3.0",
+    "@primer/primitives": "11.10.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/node": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "tailwindcss": "^4.3.3",
+    "vitest": "^4.0.0"
+  }
+}

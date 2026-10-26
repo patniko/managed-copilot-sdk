@@ -1,4 +1,4 @@
-import { ListChecks, TriangleAlert } from "lucide-react";
+import { AlertIcon, ChecklistIcon } from "@primer/octicons-react";
 import { listActions } from "../lib/api.js";
 import { formatNumber } from "../lib/format.js";
 import { usePoll } from "../lib/poll.js";
@@ -31,13 +31,7 @@ export function ActionsView({ query }: { readonly query: Query }) {
   const counts = useOverview().data?.counts.actions;
 
   return (
-    <Page
-      title="Actions"
-      documentTitle="Actions"
-      icon={ListChecks}
-      description="Durable tool calls, permission requests, and input requests of every session (metadata only)."
-      poll={poll}
-    >
+    <Page wide title="Actions" documentTitle="Actions" description="Durable tool calls, permission requests, and input requests of every session (metadata only)." poll={poll}>
       <div className="mb-4 flex flex-wrap items-center gap-3">
         <Segmented<Filter>
           label="Which actions"
@@ -45,7 +39,7 @@ export function ActionsView({ query }: { readonly query: Query }) {
           onChange={(value) => setQuery({ state: value === "open" ? undefined : value })}
           options={[
             { value: "open", label: "Open", count: counts?.open },
-            { value: "attention", label: "Needs attention", icon: TriangleAlert, count: counts?.needsReconciliation },
+            { value: "attention", label: "Needs attention", icon: AlertIcon, count: counts?.needsReconciliation },
             { value: "all", label: "All" },
           ]}
         />
@@ -58,12 +52,12 @@ export function ActionsView({ query }: { readonly query: Query }) {
                 actions={actions}
                 dim={poll.stale}
                 empty={
-                  <EmptyState icon={ListChecks} title={EMPTY[filter].title} compact>
+                  <EmptyState icon={ChecklistIcon} title={EMPTY[filter].title} spacious>
                     {EMPTY[filter].body}
                   </EmptyState>
                 }
               />
-              {actions.length >= LIMIT ? <p className="border-t border-zinc-800/70 px-4 py-2.5 text-[12.5px] text-zinc-500">Showing the newest {formatNumber(actions.length)} actions.</p> : null}
+              {actions.length >= LIMIT ? <p className="border-t border-line bg-canvas-muted px-4 py-2 text-xs text-fg-muted">Showing the newest {formatNumber(actions.length)} actions.</p> : null}
             </>
           )}
         </PollContent>

@@ -1,0 +1,12 @@
+/*
+ * @managed-copilot/github-theme: GitHub's look and feel for Tailwind CSS v4 apps.
+ *
+ *   @import "tailwindcss";
+ *   @import "@managed-copilot/github-theme";
+ *
+ * and on <html>: data-color-mode="auto" data-light-theme="light" data-dark-theme="dark"
+ */
+@import "./src/tokens.css";
+@import "./src/base.css";
+@import "./src/components.css";
+@import "./src/markdown.css";

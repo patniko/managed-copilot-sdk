@@ -1,4 +1,5 @@
-import { Prism, type PrismTheme } from "prism-react-renderer";
+import type { CSSProperties } from "react";
+import { normalizeTokens, Prism, type PrismTheme, type Token } from "prism-react-renderer";
 
 type Grammar = Parameters<typeof Prism.highlight>[1];
 
@@ -44,29 +45,57 @@ register();
 
 export { Prism };
 
-/** Muted palette tuned for the zinc surfaces; backgrounds come from the containers. */
+const syntax = (name: string): string => `var(--color-prettylights-syntax-${name})`;
+
+/** GitHub's "pretty lights" syntax colors; they follow the light and dark themes. Backgrounds come from the containers. */
 export const codeTheme: PrismTheme = {
-  plain: { color: "#e4e4e7", backgroundColor: "transparent" },
+  plain: { color: "var(--fgColor-default)", backgroundColor: "transparent" },
   styles: [
-    { types: ["comment", "prolog", "doctype", "cdata"], style: { color: "#71717a", fontStyle: "italic" } },
-    { types: ["punctuation"], style: { color: "#a1a1aa" } },
-    { types: ["namespace"], style: { opacity: 0.8 } },
-    { types: ["property", "tag", "constant", "symbol", "deleted"], style: { color: "#fda4af" } },
-    { types: ["boolean", "number"], style: { color: "#fcd34d" } },
-    { types: ["selector", "attr-name", "char", "builtin", "inserted"], style: { color: "#86efac" } },
-    { types: ["string", "template-string", "attr-value"], style: { color: "#86efac" } },
-    { types: ["operator", "entity", "url"], style: { color: "#d4d4d8" } },
-    { types: ["atrule", "keyword", "important"], style: { color: "#7dd3fc" } },
-    { types: ["function", "method"], style: { color: "#c4b5fd" } },
-    { types: ["class-name", "maybe-class-name", "known-class-name"], style: { color: "#fde68a" } },
-    { types: ["regex", "variable"], style: { color: "#fdba74" } },
-    { types: ["parameter"], style: { color: "#fde68a" } },
-    { types: ["coord"], style: { color: "#7dd3fc" } },
-    { types: ["title"], style: { color: "#fde68a", fontWeight: "bold" } },
-    { types: ["bold"], style: { fontWeight: "bold" } },
+    { types: ["comment", "prolog", "doctype", "cdata"], style: { color: syntax("comment") } },
+    { types: ["punctuation"], style: { color: "var(--fgColor-default)" } },
+    { types: ["keyword", "atrule", "operator"], style: { color: syntax("keyword") } },
+    { types: ["string", "template-string", "char", "attr-value", "url"], style: { color: syntax("string") } },
+    { types: ["regex"], style: { color: syntax("string-regexp") } },
+    { types: ["number", "boolean", "constant", "symbol", "property", "parameter", "builtin"], style: { color: syntax("constant") } },
+    { types: ["function", "method", "attr-name"], style: { color: syntax("entity") } },
+    { types: ["class-name", "maybe-class-name", "known-class-name", "variable"], style: { color: syntax("variable") } },
+    { types: ["tag", "selector"], style: { color: syntax("entity-tag") } },
+    { types: ["inserted"], style: { color: syntax("markup-inserted-text") } },
+    { types: ["deleted"], style: { color: syntax("markup-deleted-text") } },
+    { types: ["coord"], style: { color: syntax("meta-diff-range"), fontWeight: "600" } },
+    { types: ["title"], style: { color: syntax("markup-heading"), fontWeight: "600" } },
+    { types: ["bold"], style: { fontWeight: "600" } },
     { types: ["italic"], style: { fontStyle: "italic" } },
   ],
 };
+
+const STYLES: ReadonlyMap<string, CSSProperties> = (() => {
+  const styles = new Map<string, CSSProperties>();
+  for (const entry of codeTheme.styles) {
+    for (const type of entry.types) styles.set(type, { ...styles.get(type), ...(entry.style as CSSProperties) });
+  }
+  return styles;
+})();
+
+/** Inline style for a token's Prism types (later types win, like prism-react-renderer). */
+export function tokenStyle(types: readonly string[]): CSSProperties | undefined {
+  let style: CSSProperties | undefined;
+  for (const type of types) {
+    const entry = STYLES.get(type);
+    if (entry) style = { ...style, ...entry };
+  }
+  return style;
+}
+
+export type { Token };
+
+/** Splits highlighted code into lines of tokens, or undefined for plain text and unknown languages. */
+export function tokenizeLines(code: string, language: string): Token[][] | undefined {
+  if (language === PLAIN) return undefined;
+  const grammar = (Prism.languages as unknown as Record<string, Grammar | undefined>)[language];
+  if (!grammar) return undefined;
+  return normalizeTokens(Prism.tokenize(code, grammar));
+}
 
 // Maps, not object literals: names come from untrusted artifacts and markdown (`__proto__`, `constructor`, ...).
 const EXTENSION_LANGUAGES: ReadonlyMap<string, string> = new Map(Object.entries({

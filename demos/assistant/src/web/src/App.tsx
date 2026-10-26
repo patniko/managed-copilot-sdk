@@ -1,12 +1,13 @@
-import { CloudOff, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { CloudOfflineIcon, XIcon } from "@primer/octicons-react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Banner, Header, statusOf } from "./components/Header";
 import { EmptyState, LoadingState } from "./components/EmptyState";
 import { Composer } from "./components/Composer";
-import { Rail } from "./components/Rail";
+import { Rail, RailSkeleton } from "./components/Rail";
 import { SettingsDialog } from "./components/Settings";
 import { Timeline } from "./components/Timeline";
 import { Toasts } from "./components/Toasts";
+import { useModal } from "./components/ui";
 import { isUnread, useAssistant } from "./useAssistant";
 
 const GOOGLE_RESULTS: Record<string, { tone: "success" | "error" | "info"; text: string }> = {
@@ -18,7 +19,9 @@ const GOOGLE_RESULTS: Record<string, { tone: "success" | "error" | "info"; text:
   failed: { tone: "error", text: "Google sign-in didn't complete. Check the server log and try again." },
 };
 
-const WIDE = "(min-width: 1280px)";
+/** The side panel sits beside the chat from this width; below it, it opens as a drawer from the header's menu button. */
+const WIDE = "(min-width: 1024px)";
+const TITLE = "Assistant · Managed Copilot";
 
 /** Whether a media query matches, kept current as the window changes. */
 function useMediaQuery(query: string): boolean {
@@ -33,7 +36,35 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-export function App() {
+/** The side panel on narrow screens: a drawer from the left with a scrim, like github.com's mobile navigation. */
+function Drawer({ onClose, children }: { onClose(): void; children: ReactNode }) {
+  const panel = useModal<HTMLDivElement>(true, onClose);
+  return (
+    <div className="fixed inset-0 z-40 lg:hidden">
+      <div className="absolute inset-0 animate-fade-in bg-backdrop" onMouseDown={onClose} aria-hidden />
+      <div
+        ref={panel}
+        id="side-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="side-panel-title"
+        className="absolute inset-y-0 left-0 flex w-[min(20rem,calc(100vw-3rem))] animate-slide-in-left flex-col rounded-r-lg bg-canvas-inset shadow-xl"
+      >
+        <div className="flex shrink-0 items-center gap-2 border-b border-line py-2 pr-2 pl-4">
+          <h2 id="side-panel-title" className="flex-1 font-semibold">
+            Your day
+          </h2>
+          <button type="button" className="btn btn-invisible btn-icon" onClick={onClose} aria-label="Close panel">
+            <XIcon />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+export function App({ preview }: { preview?: ReactNode }) {
   const { state, actions } = useAssistant();
   const { snapshot, items, pending, stream } = state;
   const timeZone = snapshot?.settings.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -50,7 +81,9 @@ export function App() {
     if (!result) return;
     const message = GOOGLE_RESULTS[result] ?? GOOGLE_RESULTS.failed!;
     actions.toast(message.tone, message.text);
-    window.history.replaceState(null, "", "/");
+    params.delete("google");
+    const rest = params.toString();
+    window.history.replaceState(null, "", rest ? `/?${rest}` : "/");
   }, [actions]);
 
   const lastReadAt = snapshot?.lastReadAt;
@@ -70,7 +103,7 @@ export function App() {
   const conversationLive = snapshot?.conversation.attach === "live";
 
   useEffect(() => {
-    document.title = unread > 0 ? `(${unread}) Assistant` : "Assistant";
+    document.title = unread > 0 ? `(${unread}) ${TITLE}` : TITLE;
   }, [unread]);
 
   useEffect(() => {
@@ -110,7 +143,9 @@ export function App() {
   const disabledReason = platformDown ? "Managed Copilot isn't reachable" : conversation?.attach === "error" ? "Couldn't open the conversation" : "Connecting to your assistant…";
   const demo = snapshot?.connections.provider !== "google";
 
-  const rail = (
+  const rail = !snapshot ? (
+    <RailSkeleton />
+  ) : (
     <Rail
       agenda={snapshot?.agenda}
       schedules={snapshot?.schedules ?? []}
@@ -127,87 +162,78 @@ export function App() {
   );
 
   return (
-    <div className="flex h-full">
-      <main className="flex min-w-0 flex-1 flex-col">
-        <Header
-          status={status}
-          account={snapshot?.account}
-          unread={unread}
-          panelAttention={backgroundOff ? "Background work is off" : undefined}
-          onOpenPanel={() => (backgroundOff ? openBackground() : setPanelOpen(true))}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
-        <Banner
-          stream={stream}
-          platform={platform}
-          conversation={conversation}
-          googleNeedsReconnect={snapshot?.connections.google.status === "needs_reconnect"}
-          onRetry={() => void actions.retry()}
-          onReconnectGoogle={() => void actions.connectGoogle()}
-        />
-        {platformDown && items.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center px-6 text-center text-zinc-500 dark:text-zinc-400">
-            <CloudOff className="size-10 text-zinc-300 dark:text-zinc-700" aria-hidden />
-            <p className="mt-3 max-w-sm text-sm">Your conversation lives on Managed Copilot. It will appear here as soon as the platform is reachable again.</p>
-          </div>
-        ) : loading ? (
-          <div className="flex-1">
-            <LoadingState />
-          </div>
-        ) : (
-          <Timeline
-            items={items}
-            pending={pending}
-            timeZone={timeZone}
-            busy={conversation?.busy ?? false}
-            unreadAnchor={state.unreadAnchor}
-            empty={
-              <EmptyState
-                name={snapshot?.account?.name}
-                login={snapshot?.account?.login}
-                timeZone={timeZone}
-                demo={demo}
-                background={snapshot?.background}
-                onPick={(text) => void actions.send(text)}
-                onNeedBackground={() => {
-                  openBackground();
-                  actions.toast("info", "Turn on background work first, so reminders can run while you're away.");
-                }}
-              />
-            }
-            onDecide={(id, decision, feedback) => actions.decide(id, decision, feedback)}
-            onRetry={(message) => void actions.retrySend(message)}
-            onDiscard={actions.discard}
-            onOpenSchedule={openSchedule}
-            onOpenBackground={backgroundOff ? openBackground : undefined}
-            onAtBottomChange={setAtBottom}
-          />
-        )}
-        <Composer disabled={!live} disabledReason={disabledReason} busy={conversation?.busy ?? false} onSend={(text) => void actions.send(text)} onStop={() => void actions.abort()} />
-      </main>
-
-      {wide && (
-        <aside className="hidden w-[360px] shrink-0 overflow-y-auto border-l border-zinc-200/80 bg-zinc-50/60 p-4 scrollbar-thin xl:block dark:border-zinc-800 dark:bg-zinc-950">{rail}</aside>
-      )}
-
-      {panelOpen && !wide && (
-        <div className="fixed inset-0 z-40 flex justify-end bg-zinc-950/40 backdrop-blur-sm xl:hidden" onMouseDown={() => setPanelOpen(false)} role="presentation">
-          <div
-            className="h-full w-[min(380px,92vw)] animate-rise overflow-y-auto bg-zinc-50 p-4 shadow-xl scrollbar-thin dark:bg-zinc-950"
-            onMouseDown={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-label="Today, automations, and connections"
-          >
-            <div className="mb-3 flex items-center">
-              <h2 className="font-display text-base font-semibold">Your day</h2>
-              <button type="button" className="btn-ghost ml-auto px-2" onClick={() => setPanelOpen(false)} aria-label="Close panel">
-                <X className="size-4.5" aria-hidden />
-              </button>
-            </div>
+    <div className="flex h-full flex-col">
+      <Header
+        status={status}
+        account={snapshot?.account}
+        unread={unread}
+        panelAttention={backgroundOff ? "Background work is off" : undefined}
+        panelOpen={panelOpen && !wide}
+        preview={preview}
+        onOpenPanel={() => (backgroundOff ? openBackground() : setPanelOpen(true))}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
+      <div className="flex min-h-0 flex-1">
+        {wide && (
+          <aside className="w-80 shrink-0 overflow-y-auto border-r border-line bg-canvas-inset p-4" aria-label="Today, automations, and connections">
             {rail}
-          </div>
-        </div>
-      )}
+          </aside>
+        )}
+        <main className="flex min-w-0 flex-1 flex-col">
+          <Banner
+            stream={stream}
+            platform={platform}
+            conversation={conversation}
+            googleNeedsReconnect={snapshot?.connections.google.status === "needs_reconnect"}
+            onRetry={() => void actions.retry()}
+            onReconnectGoogle={() => void actions.connectGoogle()}
+          />
+          {platformDown && items.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center px-4">
+              <div className="blankslate blankslate--narrow">
+                <CloudOfflineIcon size={24} className="blankslate-icon" />
+                <h2 className="blankslate-heading">Waiting for Managed Copilot</h2>
+                <p className="blankslate-description">Your conversation lives on Managed Copilot. It will appear here as soon as the platform is reachable again.</p>
+              </div>
+            </div>
+          ) : loading ? (
+            <div className="flex-1">
+              <LoadingState />
+            </div>
+          ) : (
+            <Timeline
+              items={items}
+              pending={pending}
+              timeZone={timeZone}
+              busy={conversation?.busy ?? false}
+              unreadAnchor={state.unreadAnchor}
+              empty={
+                <EmptyState
+                  name={snapshot?.account?.name}
+                  login={snapshot?.account?.login}
+                  timeZone={timeZone}
+                  demo={demo}
+                  background={snapshot?.background}
+                  onPick={(text) => void actions.send(text)}
+                  onNeedBackground={() => {
+                    openBackground();
+                    actions.toast("info", "Turn on background work first, so reminders can run while you're away.");
+                  }}
+                />
+              }
+              onDecide={(id, decision, feedback) => actions.decide(id, decision, feedback)}
+              onRetry={(message) => void actions.retrySend(message)}
+              onDiscard={actions.discard}
+              onOpenSchedule={openSchedule}
+              onOpenBackground={backgroundOff ? openBackground : undefined}
+              onAtBottomChange={setAtBottom}
+            />
+          )}
+          <Composer disabled={!live} disabledReason={disabledReason} busy={conversation?.busy ?? false} onSend={(text) => void actions.send(text)} onStop={() => void actions.abort()} />
+        </main>
+      </div>
+
+      {panelOpen && !wide && <Drawer onClose={() => setPanelOpen(false)}>{rail}</Drawer>}
 
       {settingsOpen && (
         <SettingsDialog
@@ -220,7 +246,7 @@ export function App() {
           actions={actions}
         />
       )}
-      <Toasts toasts={state.toasts} />
+      <Toasts toasts={state.toasts} onDismiss={actions.dismissToast} />
     </div>
   );
 }

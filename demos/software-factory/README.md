@@ -5,7 +5,7 @@ specialized Copilot agents on **Managed Copilot**. Each station is an environmen
 its own custom agent, skills, isolation, and network policy. The app itself is ordinary Node code built on the stock
 `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-![The factory floor mid-run: one builder streaming its work in a sandbox while the other task goes to review on a second model](docs/screenshots/floor-building.png)
+![The factory floor mid-run: two builders working in their own sandboxes, with reviews on a second model and the release waiting](docs/screenshots/floor-building.png)
 
 *A live run of the featured work order: the planner split it into two tasks; one builder is still working in its
 sandbox while the other's finished work goes to review on a different model. The panel streams the selected
@@ -50,7 +50,7 @@ Managed Copilot features in play (see the [developer experience spec](../../docs
 
 | | |
 | --- | --- |
-| ![Review station sending work back with a blocker finding](docs/screenshots/review.png) | ![Deliverable: release notes, tests, and the bundle](docs/screenshots/deliverable.png) |
+| ![Review station sending work back to the builder with a finding](docs/screenshots/review.png) | ![Deliverable: release notes, tests, and the bundle](docs/screenshots/deliverable.png) |
 | **Review sends work back.** The reviewer runs on another model family and returns findings with file and line; the builder fixes them in the same sandbox, and the next round is approved. | **The deliverable.** The release station integrates the tasks, adds integration tests and a README, and publishes the bundle, a patch, a test report, and release notes. |
 | ![Artifacts: the release patch in the diff viewer](docs/screenshots/artifacts-patch.png) | ![Home: templates and the new work order form](docs/screenshots/home.png) |
 | **Every artifact, every version.** Each station's published files, per round, with code, diff, Markdown, and test report viewers. | **Start from a template** or describe your own work order; history survives restarts. |
@@ -157,6 +157,6 @@ chosen from what your Copilot entitlement offers (`client.listModels()`).
 | `customizations/office` | `planner` and `reviewer` agents, `task-decomposition` and `review-rubric` skills |
 | `customizations/workshop` | `builder` and `release` agents, `factory-check` (harness), `node-project`, and `release-checklist` skills |
 | `src/server` | Pipeline orchestrator, platform connection, REST and server-sent events, SQLite store |
-| `src/web` | The factory floor (React, Tailwind) |
+| `src/web` | The factory floor (React, Tailwind, and GitHub's Primer look from [`packages/github-theme`](../../packages/github-theme); light and dark follow the OS) |
 | `src/scripts` | `happy-path` and `smoke-office` |
 | `test` | Unit tests, including the orchestrator against an in-memory platform and the harness end to end |

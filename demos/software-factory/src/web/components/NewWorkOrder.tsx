@@ -1,18 +1,18 @@
-import type { LucideIcon } from "lucide-react";
 import {
-  ArrowRight,
-  Braces,
-  ClipboardList,
-  Clock,
-  FileCode,
-  Hammer,
-  Info,
-  PackageCheck,
-  Play,
-  ScanSearch,
-  SquareTerminal,
-  Table,
-} from "lucide-react";
+  ArrowRightIcon,
+  CheckCircleFillIcon,
+  ClockIcon,
+  CodeIcon,
+  CodeReviewIcon,
+  FileCodeIcon,
+  InfoIcon,
+  PackageIcon,
+  TableIcon,
+  TasklistIcon,
+  TerminalIcon,
+  ToolsIcon,
+  type Icon,
+} from "@primer/octicons-react";
 import { useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { formatWorkOrderNumber, type WorkOrderTemplate } from "../../shared/types.js";
 import { toErrorInfo, type ErrorInfo } from "../lib/api.js";
@@ -100,18 +100,18 @@ export function NewWorkOrder() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:py-12">
-      <Hero />
+    <div className="mx-auto w-full max-w-[1012px] px-4 py-6 md:px-6 lg:px-8 lg:py-8">
+      <Intro />
 
       {templates.length > 0 ? (
-        <section aria-labelledby="templates-heading" className="mt-10">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 id="templates-heading" className="text-sm font-semibold text-zinc-200">
+        <section aria-labelledby="templates-heading" className="mt-8">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <h2 id="templates-heading" className="text-base font-semibold">
               Start from a template
             </h2>
-            <p className="text-xs text-zinc-500">Pick one to fill in the form below.</p>
+            <p className="text-xs text-fg-muted">Pick one to fill in the form below.</p>
           </div>
-          <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="mt-3 grid gap-4 md:grid-cols-2">
             {templates.map((template) => (
               <TemplateCard
                 key={template.id}
@@ -129,23 +129,22 @@ export function NewWorkOrder() {
         onSubmit={(event) => void submit(event)}
         noValidate
         aria-labelledby="new-work-order-heading"
-        className="mt-8 scroll-mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5 shadow-xl shadow-black/20 sm:p-6"
+        className="mt-10 scroll-mt-6"
       >
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 id="new-work-order-heading" className="text-base font-semibold text-zinc-100">
+        <div className="flex flex-wrap items-center gap-2 border-b border-line-muted pb-2">
+          <h2 id="new-work-order-heading" className="text-base font-semibold">
             New work order
           </h2>
-          {matchingTemplate ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-400/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-300 ring-1 ring-inset ring-amber-400/25">
-              Template · {matchingTemplate.title}
-            </span>
-          ) : null}
+          {matchingTemplate ? <span className="Label Label--accent">Template · {matchingTemplate.title}</span> : null}
         </div>
 
-        <div className="mt-5 space-y-5">
-          <div>
-            <label htmlFor="wo-title" className="text-[13px] font-medium text-zinc-200">
+        <div className="mt-4 space-y-5">
+          <div className="FormControl">
+            <label htmlFor="wo-title" className="FormControl-label">
               Title
+              <span className="FormControl-required" aria-hidden>
+                *
+              </span>
             </label>
             <input
               id="wo-title"
@@ -153,96 +152,96 @@ export function NewWorkOrder() {
               value={draft.title}
               maxLength={MAX_TITLE}
               autoComplete="off"
+              aria-required="true"
               placeholder="e.g. CSV ⇄ JSON toolkit"
               onChange={(event) => setDraft({ ...draft, title: event.target.value })}
-              className="mt-1.5 h-10 w-full rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 text-sm text-zinc-100 transition-colors placeholder:text-zinc-600 hover:border-zinc-700 focus:border-amber-400/60 focus:ring-2 focus:ring-amber-400/15 focus:outline-none"
+              className="form-control input-block"
             />
           </div>
 
-          <div>
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <label htmlFor="wo-brief" className="text-[13px] font-medium text-zinc-200">
-                Brief
-              </label>
-              <span id="wo-brief-help" className="text-xs text-zinc-500">
-                Markdown welcome. Be specific about inputs, outputs, and tests.
+          <div className="FormControl">
+            <label htmlFor="wo-brief" className="FormControl-label">
+              Brief
+              <span className="FormControl-required" aria-hidden>
+                *
               </span>
-            </div>
+            </label>
             <BriefInput value={draft.brief} onChange={(brief) => setDraft({ ...draft, brief })} />
+            <span id="wo-brief-help" className="FormControl-caption">
+              Markdown welcome. Be specific about inputs, outputs, and tests.
+            </span>
           </div>
 
-          <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-            <ReviewRounds value={draft.rounds} onChange={(rounds) => setDraft({ ...draft, rounds })} />
-            <div className="flex flex-col items-stretch gap-2 sm:items-end">
-              <Button
-                type="submit"
-                variant="primary"
-                size="lg"
-                icon={Play}
-                loading={submitting}
-                disabled={!canSubmit}
-                aria-describedby={blocked || missingFields ? "wo-submit-help" : undefined}
-              >
-                {submitting ? "Starting…" : "Start work order"}
-              </Button>
-            </div>
-          </div>
+          <ReviewRounds value={draft.rounds} onChange={(rounds) => setDraft({ ...draft, rounds })} />
+        </div>
 
+        <div className="mt-6 flex flex-col gap-3 border-t border-line-muted pt-4 sm:flex-row sm:items-center sm:justify-end">
           {blocked || missingFields ? (
-            <p id="wo-submit-help" className="flex items-start gap-1.5 text-xs text-zinc-500 sm:justify-end">
-              <Info className="mt-px size-3.5 shrink-0" aria-hidden />
+            <p id="wo-submit-help" className="flex items-start gap-1.5 text-xs text-fg-muted sm:mr-auto">
+              <InfoIcon size={16} className="shrink-0" />
               {blocked ?? "Add a title and a brief to start."}
             </p>
           ) : null}
-
-          {error ? (
-            <Callout tone="danger" role="alert" title="The factory couldn't start this work order">
-              {error.message}
-            </Callout>
-          ) : null}
+          <Button
+            type="submit"
+            variant="primary"
+            loading={submitting}
+            disabled={!canSubmit}
+            aria-describedby={blocked || missingFields ? "wo-submit-help" : undefined}
+          >
+            {submitting ? "Starting…" : "Start work order"}
+          </Button>
         </div>
+
+        {error ? (
+          <Callout tone="danger" role="alert" title="The factory couldn't start this work order" className="mt-4">
+            {error.message}
+          </Callout>
+        ) : null}
       </form>
     </div>
   );
 }
 
-function Hero() {
-  const steps: readonly { readonly icon: LucideIcon; readonly label: string }[] = [
-    { icon: ClipboardList, label: "Plan" },
-    { icon: Hammer, label: "Build in parallel sandboxes" },
-    { icon: ScanSearch, label: "Review" },
-    { icon: PackageCheck, label: "Release" },
+function Intro() {
+  const steps: readonly { readonly icon: Icon; readonly label: string }[] = [
+    { icon: TasklistIcon, label: "Plan" },
+    { icon: ToolsIcon, label: "Build in parallel sandboxes" },
+    { icon: CodeReviewIcon, label: "Review" },
+    { icon: PackageIcon, label: "Release" },
   ];
   return (
-    <header>
-      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-300/90">Software Factory</p>
-      <h1 className="mt-2 text-2xl font-semibold tracking-tight text-zinc-50 sm:text-3xl">What should the factory build?</h1>
-      <p className="mt-3 max-w-2xl text-[15px] leading-relaxed text-zinc-400">
-        Describe the software you need. Copilot agents plan it, build each task in its own sandbox, review the work with a
-        second model, and ship a tested release.
-      </p>
-      <ol className="mt-5 flex flex-wrap items-center gap-2" aria-label="Pipeline">
-        {steps.map((step, index) => (
-          <li key={step.label} className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-900 px-3 py-1 text-xs font-medium text-zinc-300 ring-1 ring-inset ring-white/10">
-              <step.icon className="size-3.5 text-amber-300/90" aria-hidden />
-              {step.label}
-            </span>
-            {index < steps.length - 1 ? <ArrowRight className="size-3.5 text-zinc-600" aria-hidden /> : null}
-          </li>
-        ))}
-      </ol>
+    <header className="Subhead mb-0">
+      <h1 className="Subhead-heading">What should the factory build?</h1>
+      <div className="Subhead-description">
+        <p className="max-w-2xl">
+          Describe the software you need. Copilot agents plan it, build each task in its own sandbox, review the work with a
+          second model, and ship a tested release.
+        </p>
+        <ol className="mt-3 mb-1 flex flex-wrap items-center gap-x-2 gap-y-1.5" aria-label="Pipeline">
+          {steps.map((step, index) => (
+            <li key={step.label} className="flex items-center gap-2">
+              <span className="Label Label--large">
+                <step.icon size={12} className="text-fg-muted" />
+                {step.label}
+              </span>
+              {index < steps.length - 1 ? <ArrowRightIcon size={12} className="text-fg-muted" /> : null}
+            </li>
+          ))}
+        </ol>
+      </div>
     </header>
   );
 }
 
-function templateIcon(template: WorkOrderTemplate): LucideIcon {
-  if (template.tags.includes("Library")) return Braces;
-  if (template.tags.includes("Text")) return Table;
-  if (template.tags.includes("CLI")) return SquareTerminal;
-  return FileCode;
+function templateIcon(template: WorkOrderTemplate): Icon {
+  if (template.tags.includes("Library")) return CodeIcon;
+  if (template.tags.includes("Text")) return TableIcon;
+  if (template.tags.includes("CLI")) return TerminalIcon;
+  return FileCodeIcon;
 }
 
+/** A selectable template card, like GitHub's template choosers. */
 function TemplateCard({
   template,
   selected,
@@ -252,46 +251,36 @@ function TemplateCard({
   readonly selected: boolean;
   readonly onSelect: () => void;
 }) {
-  const Icon = templateIcon(template);
+  const Glyph = templateIcon(template);
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-pressed={selected}
       className={cx(
-        "group relative flex h-full flex-col overflow-hidden rounded-xl border p-4 text-left transition-all duration-150",
-        selected
-          ? "border-amber-400/50 bg-amber-400/[0.05] shadow-[0_0_0_1px_rgb(251_191_36/0.15),0_8px_30px_-12px_rgb(251_191_36/0.25)]"
-          : "border-zinc-800 bg-zinc-900/50 hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-900",
+        "Box flex h-full flex-col p-4 text-left transition-colors duration-100",
+        selected ? "border-line-accent ring-1 ring-line-accent" : "hover:bg-canvas-muted",
       )}
     >
-      {template.featured ? (
-        <span className="pointer-events-none absolute top-[32px] right-[-38px] w-[168px] rotate-45 bg-amber-400 py-[3px] text-center text-[10px] leading-3 font-bold tracking-[0.08em] text-zinc-950 uppercase shadow-md shadow-black/40">
-          Scripted demo
-        </span>
-      ) : null}
-      <div className={cx("flex items-start gap-3", template.featured ? "pr-14" : "pr-2")}>
-        <span
-          className={cx(
-            "grid size-9 shrink-0 place-items-center rounded-lg ring-1 ring-inset",
-            template.featured ? "bg-amber-400/10 text-amber-300 ring-amber-400/25" : "bg-zinc-800/80 text-zinc-300 ring-white/10",
-          )}
-        >
-          <Icon className="size-4" aria-hidden />
-        </span>
-        <div className="min-w-0">
-          <h3 className="font-semibold text-zinc-100">{template.title}</h3>
-          <p className="mt-1 text-[13px] leading-relaxed text-zinc-400">{template.tagline}</p>
+      <div className="flex w-full items-start gap-2">
+        <Glyph size={16} className="mt-0.5 shrink-0 text-fg-muted" />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <h3 className="font-semibold">{template.title}</h3>
+            {template.featured ? <span className="Label Label--accent">Scripted demo</span> : null}
+          </div>
+          <p className="mt-1 text-fg-muted">{template.tagline}</p>
         </div>
+        {selected ? <CheckCircleFillIcon size={16} className="mt-0.5 shrink-0 text-fg-accent" /> : null}
       </div>
-      <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-4">
+      <div className="mt-auto flex w-full flex-wrap items-center gap-1 pt-4 pl-6">
         {template.tags.map((tag) => (
-          <span key={tag} className="rounded-md bg-zinc-800/70 px-1.5 py-px text-[11px] leading-[18px] text-zinc-400 ring-1 ring-inset ring-white/5">
+          <span key={tag} className="topic-tag">
             {tag}
           </span>
         ))}
-        <span className="ml-auto inline-flex items-center gap-1 text-xs text-zinc-500">
-          <Clock className="size-3.5" aria-hidden />
+        <span className="ml-auto inline-flex items-center gap-1 text-xs text-fg-muted">
+          <ClockIcon size={12} />
           {template.estimate}
         </span>
       </div>
@@ -311,13 +300,14 @@ function BriefInput({ value, onChange }: { readonly value: string; readonly onCh
     <textarea
       id="wo-brief"
       ref={ref}
-      rows={12}
+      rows={10}
       value={value}
       spellCheck
+      aria-required="true"
       aria-describedby="wo-brief-help"
       placeholder={"Build a zero-dependency Node.js CLI that…\n\n- Inputs and outputs\n- Edge cases to handle\n- How it should be tested"}
       onChange={(event) => onChange(event.target.value)}
-      className="mt-1.5 block w-full resize-y rounded-lg border border-zinc-800 bg-zinc-950/70 px-3 py-2.5 font-mono text-[13px] leading-relaxed text-zinc-100 transition-colors placeholder:text-zinc-600 hover:border-zinc-700 focus:border-amber-400/60 focus:ring-2 focus:ring-amber-400/15 focus:outline-none"
+      className="form-control input-block resize-y"
     />
   );
 }
@@ -325,28 +315,24 @@ function BriefInput({ value, onChange }: { readonly value: string; readonly onCh
 function ReviewRounds({ value, onChange }: { readonly value: number; readonly onChange: (value: number) => void }) {
   return (
     <fieldset>
-      <legend className="text-[13px] font-medium text-zinc-200">Review rounds</legend>
-      <div className="mt-1.5 flex flex-wrap items-center gap-3">
-        <div className="inline-flex rounded-lg bg-zinc-950/70 p-1 ring-1 ring-inset ring-white/10">
+      <legend className="FormControl-label">Review rounds</legend>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div className="SegmentedControl">
           {[1, 2, 3].map((rounds) => (
-            <label key={rounds} className="relative">
+            <label key={rounds} className="SegmentedControl-item w-11">
               <input
                 type="radio"
                 name="review-rounds"
                 value={rounds}
                 checked={value === rounds}
                 onChange={() => onChange(rounds)}
-                className="peer sr-only"
+                className="sr-only"
               />
-              <span className="grid h-8 w-11 cursor-pointer place-items-center rounded-md text-sm font-medium text-zinc-400 transition-colors peer-checked:bg-zinc-800 peer-checked:text-zinc-50 peer-checked:shadow-sm peer-focus-visible:outline-2 peer-focus-visible:outline-amber-400 hover:text-zinc-200">
-                {rounds}
-              </span>
+              {rounds}
             </label>
           ))}
         </div>
-        <p className="max-w-xs text-xs leading-relaxed text-zinc-500">
-          How many times the reviewer can send a task back before it's accepted.
-        </p>
+        <p className="FormControl-caption">How many times the reviewer can send a task back before it's accepted.</p>
       </div>
     </fieldset>
   );
