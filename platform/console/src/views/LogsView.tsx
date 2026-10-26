@@ -1,15 +1,16 @@
 import type { OperatorLogEntry, OperatorLogLevel } from "@managed-copilot/protocol/operator";
 import { ChevronRightIcon, LogIcon } from "@primer/octicons-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { listLogs } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
 import { atLeastLevel, isLogLevel, LOG_LEVELS, logMatches, mergeLogs } from "../lib/feed.js";
 import { formatIso, formatValue, parseTime, prettyJson } from "../lib/format.js";
 import { usePoll } from "../lib/poll.js";
+import { useReloadAfterReconnect } from "../lib/resources.js";
 import { useQueryUpdater } from "../lib/router.js";
 import type { Query } from "../lib/routes.js";
 import { logLevelMeta } from "../lib/status.js";
-import { MAX_LIVE_LOGS, useStreamData, useStreamStatus } from "../lib/stream.js";
+import { MAX_LIVE_LOGS, useStreamData } from "../lib/stream.js";
 import { TONE_TEXT } from "../lib/tone.js";
 import { FeedToolbar, FeedViewport, HistoryBanner, useAutoScroll, useFeed } from "../components/common/LiveFeed.js";
 import { Page } from "../components/layout/Page.js";
@@ -39,18 +40,8 @@ export function LogsView({ query }: { readonly query: Query }) {
   const search = query["q"] ?? "";
   const setQuery = useQueryUpdater();
   const history = usePoll(`logs?level=${level}&limit=${HISTORY_LIMIT}`, (signal) => listLogs({ level, limit: HISTORY_LIMIT }, signal), { intervalMs: 0 });
+  useReloadAfterReconnect(history.refresh);
   const live = useStreamData().logs;
-  const connectedAt = useStreamStatus().connectedAt;
-
-  // After a reconnect (not the first connection), reload recent lines so anything logged while disconnected shows up.
-  const seenConnection = useRef(connectedAt);
-  const { refresh } = history;
-  useEffect(() => {
-    const previous = seenConnection.current;
-    seenConnection.current = connectedAt;
-    if (connectedAt === undefined || previous === undefined || connectedAt === previous) return;
-    void refresh();
-  }, [connectedAt, refresh]);
 
   const merged = useMemo(() => mergeLogs([history.data ?? [], live], MAX_LIVE_LOGS), [history.data, live]);
   const loggers = useMemo(() => {

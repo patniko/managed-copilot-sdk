@@ -1,14 +1,14 @@
 import type { OperatorEvent } from "@managed-copilot/protocol/operator";
 import type { PlatformEventType } from "@managed-copilot/protocol";
 import { BroadcastIcon } from "@primer/octicons-react";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { mergeEvents } from "../lib/feed.js";
 import { formatClockTime, formatIso, formatValue, prettyJson } from "../lib/format.js";
 import { useEventHistory } from "../lib/resources.js";
 import { useQueryUpdater } from "../lib/router.js";
 import type { Query } from "../lib/routes.js";
 import { eventTypeMeta, PLATFORM_EVENT_TYPES } from "../lib/status.js";
-import { MAX_LIVE_EVENTS, useStreamData, useStreamStatus } from "../lib/stream.js";
+import { MAX_LIVE_EVENTS, useStreamData } from "../lib/stream.js";
 import { AccountLabel, EnvironmentLink, SessionLink } from "../components/common/Identity.js";
 import { FeedToolbar, FeedViewport, HistoryBanner, useAutoScroll, useFeed } from "../components/common/LiveFeed.js";
 import { Page } from "../components/layout/Page.js";
@@ -29,17 +29,6 @@ export function EventsView({ query }: { readonly query: Query }) {
   const setQuery = useQueryUpdater();
   const history = useEventHistory(type);
   const live = useStreamData().events;
-  const connectedAt = useStreamStatus().connectedAt;
-
-  // After a reconnect (not the first connection), reload the history so events missed while disconnected show up.
-  const seenConnection = useRef(connectedAt);
-  const { refresh } = history;
-  useEffect(() => {
-    const previous = seenConnection.current;
-    seenConnection.current = connectedAt;
-    if (connectedAt === undefined || previous === undefined || connectedAt === previous) return;
-    void refresh();
-  }, [connectedAt, refresh]);
 
   const items = useMemo(() => mergeEvents([history.data ?? [], type ? live.filter((event) => event.type === type) : live], MAX_LIVE_EVENTS), [history.data, live, type]);
   const feed = useFeed(items, idOf);

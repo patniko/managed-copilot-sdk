@@ -1,7 +1,7 @@
 import type { AttentionItem, CustomizationFileInfo, OperatorEvent, OperatorLogEntry } from "@managed-copilot/protocol/operator";
 import { describe, expect, it } from "vitest";
 import { unwrapList } from "../src/lib/api.js";
-import { atLeastLevel, isOperatorEvent, isOperatorLogEntry, logMatches, mergeEvents, mergeLogs } from "../src/lib/feed.js";
+import { atLeastLevel, isOperatorEvent, isOperatorLogEntry, logMatches, mergeEvents, mergeLogs, ReconnectTracker } from "../src/lib/feed.js";
 import { isMarkdownPath, parseFrontmatter } from "../src/lib/frontmatter.js";
 import { bucketStart, seriesStats, sortAttention, sparklinePaths } from "../src/lib/overview.js";
 import { ancestorFolders, buildFileTree } from "../src/lib/tree.js";
@@ -135,6 +135,44 @@ describe("live feed merging", () => {
     expect(isOperatorEvent({ id: 1 })).toBe(false);
     expect(isOperatorLogEntry(log(1))).toBe(true);
     expect(isOperatorLogEntry({ seq: "1", level: "info", message: "x" })).toBe(false);
+  });
+});
+
+describe("reloading history after the live stream reconnects", () => {
+  /**
+   * Feeds the stream's `connectedAt` as a view sees it render by render (what `useReloadAfterReconnect` does) and
+   * returns the renders that reloaded the history.
+   */
+  function reloads(atMount: number | undefined, renders: readonly (number | undefined)[]): number[] {
+    const tracker = new ReconnectTracker(atMount);
+    const reloaded: number[] = [];
+    renders.forEach((connectedAt, render) => {
+      if (tracker.reconnected(connectedAt)) reloaded.push(render);
+    });
+    return reloaded;
+  }
+
+  it("doesn't reload for the first connection a view sees", () => {
+    // Mounted before the stream opened: the view's own first load covers the first connection.
+    expect(reloads(undefined, [undefined, 1_000, 1_000])).toEqual([]);
+    // Mounted while connected: re-renders with the same connection change nothing.
+    expect(reloads(1_000, [1_000, 1_000])).toEqual([]);
+  });
+
+  it("reloads once after every reconnect", () => {
+    // The stream drops (connectedAt stays set while it is down) and comes back twice.
+    expect(reloads(1_000, [1_000, 1_000, 6_000, 6_000, 6_000, 31_000])).toEqual([2, 5]);
+    // A view that saw the first connection open reloads on the second.
+    expect(reloads(undefined, [1_000, 6_000])).toEqual([1]);
+  });
+
+  it("reloads when a view mounted mid-outage sees the stream come back", () => {
+    // Mounted while reconnecting: connectedAt still names the dropped connection until the new one opens.
+    expect(reloads(1_000, [1_000, 6_000])).toEqual([1]);
+  });
+
+  it("still reloads if the connection time is cleared while the stream is down", () => {
+    expect(reloads(1_000, [undefined, undefined, 6_000])).toEqual([2]);
   });
 });
 

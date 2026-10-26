@@ -29,12 +29,13 @@ import { eventTypeMeta, healthMeta, sandboxStateMeta, sessionStateMeta, severity
 import { MAX_LIVE_EVENTS, useStreamData } from "../lib/stream.js";
 import { TONE_BORDER, TONE_TEXT, type Tone } from "../lib/tone.js";
 import { AccountLabel, EnvironmentLink, RelativeTime, SessionLink } from "../components/common/Identity.js";
+import { HistoryBanner } from "../components/common/LiveFeed.js";
 import { Page, PollContent } from "../components/layout/Page.js";
 import { buttonClass } from "../components/ui/Button.js";
 import { Card, Field, FieldGrid } from "../components/ui/Card.js";
 import { Chip, StatusBadge } from "../components/ui/Chip.js";
 import { CopyButton } from "../components/ui/CopyButton.js";
-import { Callout, EmptyState, Skeleton, SkeletonLines } from "../components/ui/Feedback.js";
+import { Callout, EmptyState, ErrorState, Skeleton, SkeletonLines } from "../components/ui/Feedback.js";
 import { Link } from "../components/ui/Link.js";
 import { Sparkline, type ChartColor } from "../components/ui/Sparkline.js";
 
@@ -202,7 +203,20 @@ function RecentEvents() {
   const history = useEventHistory(undefined);
   const live = useStreamData().events;
   const events = useMemo(() => mergeEvents([history.data ?? [], live], MAX_LIVE_EVENTS).slice(-RECENT_EVENTS).reverse(), [history.data, live]);
+  const retry = (): void => void history.refresh();
   if (events.length === 0) {
+    if (history.error) {
+      return (
+        <ErrorState
+          boxed
+          className="blankslate--sm"
+          title="Couldn't load recent events"
+          message={`${history.error.message} New events still appear here live.`}
+          onRetry={retry}
+          retrying={history.loading}
+        />
+      );
+    }
     if (history.data === undefined && history.loading) {
       return (
         <div className="Box p-4" role="status" aria-label="Loading recent events">
@@ -212,35 +226,32 @@ function RecentEvents() {
     }
     return (
       <div className="Box">
-        {history.error ? (
-          <EmptyState icon={BroadcastIcon} title="Couldn't load recent events" compact>
-            {history.error.message} New events still appear here live.
-          </EmptyState>
-        ) : (
-          <EmptyState icon={BroadcastIcon} title="No events yet" compact>
-            Platform events of every owner appear here as they happen.
-          </EmptyState>
-        )}
+        <EmptyState icon={BroadcastIcon} title="No events yet" compact>
+          Platform events of every owner appear here as they happen.
+        </EmptyState>
       </div>
     );
   }
   return (
-    <ul className="Box" aria-label="Recent events, newest first">
-      {events.map((event) => {
-        const meta = eventTypeMeta(event.type);
-        const EventIcon = meta.icon;
-        return (
-          <li key={event.id} className="Box-row Box-row--hover-gray flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5">
-            <EventIcon size={16} className={TONE_TEXT[meta.tone]} />
-            <span className="font-semibold">{meta.label}</span>
-            <AccountLabel account={event.owner} size="xs" />
-            {event.sessionId ? <SessionLink id={event.sessionId} /> : null}
-            {event.environment ? <EnvironmentLink name={event.environment} /> : null}
-            <RelativeTime value={event.createdAt} className="ml-auto text-xs text-fg-muted" />
-          </li>
-        );
-      })}
-    </ul>
+    <div className="Box">
+      <HistoryBanner error={history.error} loading={history.loading} onRetry={retry} noun="events" />
+      <ul aria-label="Recent events, newest first">
+        {events.map((event) => {
+          const meta = eventTypeMeta(event.type);
+          const EventIcon = meta.icon;
+          return (
+            <li key={event.id} className="Box-row Box-row--hover-gray flex flex-wrap items-center gap-x-3 gap-y-1 py-2.5">
+              <EventIcon size={16} className={TONE_TEXT[meta.tone]} />
+              <span className="font-semibold">{meta.label}</span>
+              <AccountLabel account={event.owner} size="xs" />
+              {event.sessionId ? <SessionLink id={event.sessionId} /> : null}
+              {event.environment ? <EnvironmentLink name={event.environment} /> : null}
+              <RelativeTime value={event.createdAt} className="ml-auto text-xs text-fg-muted" />
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

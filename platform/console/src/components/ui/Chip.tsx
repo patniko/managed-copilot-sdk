@@ -77,10 +77,9 @@ const LIFECYCLE_CLASS: Readonly<Record<Lifecycle, string>> = {
 
 /** An entity's lifecycle as a Primer `State` pill (filled, like "Open" on a pull request), with its Octicon and label. */
 export function StateLabel({ meta, lifecycle, small = false, className }: { readonly meta: StatusMeta; readonly lifecycle: Lifecycle; readonly small?: boolean; readonly className?: string }) {
-  const MetaIcon = meta.icon;
   return (
     <span className={cx("State", LIFECYCLE_CLASS[lifecycle], small && "State--small", className)} title={meta.description}>
-      <MetaIcon size={16} />
+      <StatusIcon meta={meta} size={16} />
       {meta.label}
     </span>
   );
