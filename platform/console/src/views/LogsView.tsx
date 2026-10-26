@@ -1,5 +1,5 @@
 import type { OperatorLogEntry, OperatorLogLevel } from "@managed-copilot/protocol/operator";
-import { ChevronRight, Logs } from "lucide-react";
+import { ChevronRightIcon, LogIcon } from "@primer/octicons-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listLogs } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
@@ -13,7 +13,6 @@ import { MAX_LIVE_LOGS, useStreamData, useStreamStatus } from "../lib/stream.js"
 import { TONE_TEXT } from "../lib/tone.js";
 import { FeedToolbar, FeedViewport, HistoryBanner, useAutoScroll, useFeed } from "../components/common/LiveFeed.js";
 import { Page } from "../components/layout/Page.js";
-import { Card } from "../components/ui/Card.js";
 import { CodeBlock } from "../components/ui/CodeBlock.js";
 import { FilterBar, Segmented, SelectField, TextField } from "../components/ui/Controls.js";
 import { TableSkeleton } from "../components/ui/DataTable.js";
@@ -33,6 +32,7 @@ function logTime(iso: string): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
+/** The gateway's own log lines, streaming like a GitHub Actions log. */
 export function LogsView({ query }: { readonly query: Query }) {
   const level = isLogLevel(query["level"]) ? query["level"] : DEFAULT_LEVEL;
   const logger = query["logger"] ?? "";
@@ -58,10 +58,7 @@ export function LogsView({ query }: { readonly query: Query }) {
     if (logger) names.add(logger);
     return [...names].sort();
   }, [merged, logger]);
-  const items = useMemo(
-    () => merged.filter((entry) => atLeastLevel(entry.level, level) && (!logger || entry.logger === logger) && logMatches(entry, search)),
-    [merged, level, logger, search],
-  );
+  const items = useMemo(() => merged.filter((entry) => atLeastLevel(entry.level, level) && (!logger || entry.logger === logger) && logMatches(entry, search)), [merged, level, logger, search]);
   const feed = useFeed(items, seqOf);
   const scroller = useRef<HTMLDivElement>(null);
   const { following, onScroll, jumpToLatest } = useAutoScroll(scroller, feed.shown, !feed.paused);
@@ -76,10 +73,10 @@ export function LogsView({ query }: { readonly query: Query }) {
     });
 
   return (
-    <Page title="Logs" documentTitle="Logs" icon={Logs} description="The gateway's own log lines, live (credential-like values are masked)." fill>
+    <Page title="Logs" documentTitle="Logs" description="The gateway's own log lines, live (credential-like values are masked)." fill wide>
       <FilterBar className="mb-4">
-        <div className="flex flex-col gap-1">
-          <span className="text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500" aria-hidden>
+        <div className="flex max-w-full items-center gap-2">
+          <span className="text-sm text-fg-muted" aria-hidden>
             Minimum level
           </span>
           <Segmented<OperatorLogLevel>
@@ -95,11 +92,11 @@ export function LogsView({ query }: { readonly query: Query }) {
           allLabel="All loggers"
           options={loggers.map((name) => ({ value: name, label: name }))}
           onChange={(value) => setQuery({ logger: value || undefined })}
-          className="w-52"
+          className="w-full sm:w-48"
         />
-        <TextField label="Search" value={search} placeholder="Message, logger, or field" onChange={(value) => setQuery({ q: value || undefined })} className="w-72" />
+        <TextField label="Search" value={search} placeholder="Search message, logger, or field" onChange={(value) => setQuery({ q: value || undefined })} className="w-full sm:w-64" />
       </FilterBar>
-      <Card padded={false} className="flex min-h-[20rem] flex-1 flex-col" bodyClassName="flex min-h-0 flex-1 flex-col">
+      <div className="Box flex min-h-[20rem] flex-1 flex-col overflow-hidden">
         <FeedToolbar feed={feed} following={following} onJump={jump} noun="lines" count={feed.shown.length} />
         {history.data === undefined && history.error && live.length === 0 ? (
           <ErrorState title="Couldn't load recent logs" message={history.error.message} onRetry={() => void history.refresh()} retrying={history.loading} />
@@ -108,46 +105,49 @@ export function LogsView({ query }: { readonly query: Query }) {
         ) : feed.shown.length === 0 ? (
           <>
             <HistoryBanner error={history.error} loading={history.loading} onRetry={() => void history.refresh()} noun="log lines" />
-            <EmptyState icon={Logs} title={search || logger ? "No lines match" : "No log lines yet"} compact>
+            <EmptyState icon={LogIcon} title={search || logger ? "No lines match" : "No log lines yet"} compact>
               {search || logger ? "Change the filters, or wait for new lines." : `Nothing at ${logLevelMeta(level).label.toLowerCase()} level or above yet.`}
             </EmptyState>
           </>
         ) : (
-          <FeedViewport scrollRef={scroller} onScroll={onScroll} label="Log lines" className="bg-zinc-950/60">
+          <FeedViewport scrollRef={scroller} onScroll={onScroll} label="Log lines" className="bg-canvas-inset">
             <HistoryBanner error={history.error} loading={history.loading} onRetry={() => void history.refresh()} noun="log lines" />
-            <ol className="py-1 font-mono text-[12px] leading-5" aria-label="Log lines, oldest first">
+            <ol className="py-2 font-mono text-xs leading-5" aria-label="Log lines, oldest first">
               {feed.shown.map((entry) => (
                 <LogLine key={entry.seq} entry={entry} open={expanded.has(entry.seq)} onToggle={() => toggle(entry.seq)} />
               ))}
             </ol>
           </FeedViewport>
         )}
-      </Card>
+      </div>
     </Page>
   );
 }
 
 function LogLine({ entry, open, onToggle }: { readonly entry: OperatorLogEntry; readonly open: boolean; readonly onToggle: () => void }) {
   const meta = logLevelMeta(entry.level);
-  const Icon = meta.icon;
+  const LevelIcon = meta.icon;
   const fields = entry.fields && Object.keys(entry.fields).length > 0 ? entry.fields : undefined;
   return (
-    <li className={cx("px-4 hover:bg-zinc-800/25", entry.level === "error" && "bg-rose-400/[0.04]", entry.level === "warn" && "bg-amber-400/[0.03]")}>
-      <div className="flex min-w-0 items-start gap-3 py-0.5">
-        <time dateTime={formatIso(entry.at)} title={formatIso(entry.at)} className="shrink-0 text-zinc-500 tabular">
+    <li className={cx("LogLine pr-2", entry.level === "error" && "LogLine--error")}>
+      <div className="flex min-w-0 items-start gap-3">
+        <span className="LogLine-number tabular-nums" aria-hidden>
+          {entry.seq}
+        </span>
+        <time dateTime={formatIso(entry.at)} title={formatIso(entry.at)} className="shrink-0 text-fg-muted tabular-nums">
           {logTime(entry.at)}
         </time>
-        <span className={cx("inline-flex w-14 shrink-0 items-center gap-1 text-[11px] font-semibold uppercase", TONE_TEXT[meta.tone])}>
-          <Icon className="size-3" aria-hidden />
+        <span className={cx("inline-flex w-14 shrink-0 items-center gap-1 font-semibold", TONE_TEXT[meta.tone])}>
+          <LevelIcon size={12} />
           {meta.label}
         </span>
-        <span className="w-40 shrink-0 truncate text-zinc-500" title={entry.logger}>
+        <span className="hidden w-40 shrink-0 truncate text-fg-muted sm:inline" title={entry.logger}>
           {entry.logger}
         </span>
-        <span className="min-w-0 flex-1 break-words whitespace-pre-wrap text-zinc-200">
+        <span className="min-w-0 flex-1 break-words whitespace-pre-wrap">
           {entry.message}
           {fields && !open ? (
-            <span className="ml-2 text-zinc-500">
+            <span className="ml-2 text-fg-muted">
               {Object.entries(fields)
                 .slice(0, 4)
                 .map(([key, value]) => `${key}=${formatValue(value, 48)}`)
@@ -157,20 +157,18 @@ function LogLine({ entry, open, onToggle }: { readonly entry: OperatorLogEntry; 
           ) : null}
         </span>
         {fields ? (
-          <button
-            type="button"
-            onClick={onToggle}
-            aria-expanded={open}
-            aria-label={open ? "Hide fields" : "Show fields"}
-            className="mt-0.5 grid size-5 shrink-0 place-items-center rounded text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-          >
-            <ChevronRight className={cx("size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
+          <button type="button" onClick={onToggle} aria-expanded={open} aria-label={open ? "Hide fields" : "Show fields"} className="btn-octicon size-5 shrink-0">
+            <ChevronRightIcon size={16} className={cx("transition-transform duration-150", open && "rotate-90")} />
           </button>
         ) : (
           <span className="size-5 shrink-0" aria-hidden />
         )}
       </div>
-      {fields && open ? <CodeBlock className="my-1.5 ml-[12.5rem]" text={prettyJson(fields)} label="Log fields" copyLabel="Copy fields" maxHeight="md" wrap={false} /> : null}
+      {fields && open ? (
+        <div className="my-1.5 ml-14 font-sans sm:ml-[17.5rem]">
+          <CodeBlock text={prettyJson(fields)} label="Log fields" copyLabel="Copy fields" maxHeight="md" wrap={false} />
+        </div>
+      ) : null}
     </li>
   );
 }

@@ -28,14 +28,16 @@ export interface DataTableProps<T> {
   readonly className?: string;
 }
 
+/** Columns hide by the width the table actually has (a container query), not the viewport: the sidebar takes 256px. */
 const HIDE: Readonly<Record<NonNullable<Column<unknown>["hideBelow"]>, string>> = {
-  lg: "hidden lg:table-cell",
-  xl: "hidden xl:table-cell",
-  "2xl": "hidden 2xl:table-cell",
+  lg: "hidden @3xl:table-cell",
+  xl: "hidden @4xl:table-cell",
+  "2xl": "hidden @7xl:table-cell",
 };
 
 const INTERACTIVE = "a, button, input, select, textarea, summary, label, [role='button'], [data-row-ignore]";
 
+/** A Primer data table (`Table`): muted 12px semibold headers, row hover, tabular numbers. Put it in a `Box`. */
 export function DataTable<T>({ label, rows, columns, rowKey, rowHref, rowClassName, dim = false, empty, className }: DataTableProps<T>) {
   if (rows.length === 0 && empty) return <>{empty}</>;
 
@@ -51,21 +53,12 @@ export function DataTable<T>({ label, rows, columns, rowKey, rowHref, rowClassNa
   };
 
   return (
-    <div className={cx("min-w-0 overflow-x-auto", className)}>
-      <table className={cx("w-full border-collapse text-left text-[13px] transition-opacity", dim && "opacity-55")} aria-label={label} aria-busy={dim || undefined}>
+    <div className={cx("@container relative min-w-0 overflow-x-auto", className)}>
+      <table className={cx("Table transition-opacity duration-200", dim && "opacity-60")} aria-label={label} aria-busy={dim || undefined}>
         <thead>
-          <tr className="border-b border-zinc-800 text-[11px] uppercase tracking-[0.06em] text-zinc-500">
+          <tr>
             {columns.map((column) => (
-              <th
-                key={column.id}
-                scope="col"
-                className={cx(
-                  "px-3 py-2 font-medium whitespace-nowrap first:pl-4 last:pr-4",
-                  column.align === "right" && "text-right",
-                  column.hideBelow && HIDE[column.hideBelow],
-                  column.headerClassName,
-                )}
-              >
+              <th key={column.id} scope="col" className={cx(column.align === "right" && "text-right", column.hideBelow && HIDE[column.hideBelow], column.headerClassName)}>
                 {column.header}
               </th>
             ))}
@@ -75,25 +68,9 @@ export function DataTable<T>({ label, rows, columns, rowKey, rowHref, rowClassNa
           {rows.map((row) => {
             const href = rowHref?.(row);
             return (
-              <tr
-                key={rowKey(row)}
-                onClick={href ? (event) => onRowClick(event, href) : undefined}
-                className={cx(
-                  "border-b border-zinc-800/60 last:border-b-0",
-                  href ? "cursor-pointer hover:bg-zinc-800/35" : "hover:bg-zinc-800/20",
-                  rowClassName?.(row),
-                )}
-              >
+              <tr key={rowKey(row)} onClick={href ? (event) => onRowClick(event, href) : undefined} className={cx(href && "cursor-pointer", rowClassName?.(row))}>
                 {columns.map((column) => (
-                  <td
-                    key={column.id}
-                    className={cx(
-                      "px-3 py-2.5 align-middle first:pl-4 last:pr-4",
-                      column.align === "right" && "text-right tabular",
-                      column.hideBelow && HIDE[column.hideBelow],
-                      column.className,
-                    )}
-                  >
+                  <td key={column.id} className={cx(column.align === "right" && "text-right tabular-nums", column.hideBelow && HIDE[column.hideBelow], column.className)}>
                     {column.cell(row)}
                   </td>
                 ))}
@@ -109,21 +86,19 @@ export function DataTable<T>({ label, rows, columns, rowKey, rowHref, rowClassNa
 /** Placeholder rows while a table loads. */
 export function TableSkeleton({ rows = 6, columns = 6 }: { readonly rows?: number; readonly columns?: number }) {
   return (
-    <div className="p-4" role="status" aria-label="Loading">
-      <div className="mb-4 flex gap-6">
+    <div role="status" aria-label="Loading">
+      <div className="flex gap-6 border-b border-line bg-canvas-muted px-4 py-2.5">
         {Array.from({ length: columns }, (_, index) => (
-          <div key={index} className="skeleton h-2.5 flex-1 rounded" aria-hidden />
+          <span key={index} className="SkeletonText my-0 h-3 flex-1" aria-hidden />
         ))}
       </div>
-      <div className="space-y-3.5">
-        {Array.from({ length: rows }, (_, row) => (
-          <div key={row} className="flex items-center gap-6">
-            {Array.from({ length: columns }, (_, index) => (
-              <div key={index} className={cx("skeleton h-3.5 flex-1 rounded", index === 0 && "max-w-28")} aria-hidden />
-            ))}
-          </div>
-        ))}
-      </div>
+      {Array.from({ length: rows }, (_, row) => (
+        <div key={row} className={cx("flex items-center gap-6 px-4 py-3", row > 0 && "border-t border-line-muted")}>
+          {Array.from({ length: columns }, (_, index) => (
+            <span key={index} className={cx("SkeletonText my-0 flex-1", index === 0 && "max-w-28")} aria-hidden />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }

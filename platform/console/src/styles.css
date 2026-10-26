@@ -1,231 +1,32 @@
 @import "tailwindcss";
+@import "@managed-copilot/github-theme";
 
-@theme {
-  --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial,
-    sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
-  --font-mono:
-    ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Code", "Cascadia Mono", Menlo, Consolas, "Liberation Mono",
-    monospace;
-
-  --animate-fade-in: fade-in 0.18s ease-out both;
-  --animate-rise-in: rise-in 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  --animate-slide-in: slide-in-left 0.22s cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  --animate-slide-in-right: slide-in-right 0.24s cubic-bezier(0.2, 0.8, 0.2, 1) both;
-  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
-  --animate-flash: flash 1.4s ease-out both;
-}
-
-@keyframes fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-@keyframes rise-in {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes slide-in-left {
-  from {
-    opacity: 0;
-    transform: translateX(-18px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes slide-in-right {
-  from {
-    opacity: 0;
-    transform: translateX(24px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-  100% {
-    background-position: -200% 0;
-  }
-}
-
-@keyframes flash {
-  from {
-    background-color: rgb(56 189 248 / 0.12);
-  }
-  to {
-    background-color: transparent;
-  }
-}
+/* Console-only pieces with no Primer class. Colors come from Primer variables only. */
 
 @layer base {
-  html {
-    color-scheme: dark;
-    -webkit-text-size-adjust: 100%;
+  /* Disclosures draw their own chevron. */
+  summary {
+    list-style: none;
   }
-
-  body {
-    @apply bg-zinc-950 font-sans text-sm text-zinc-300 antialiased;
-    font-feature-settings: "calt" 1;
-  }
-
-  ::selection {
-    background: rgb(251 191 36 / 0.28);
-  }
-
-  * {
-    scrollbar-width: thin;
-    scrollbar-color: rgb(63 63 70) transparent;
-  }
-
-  button:not(:disabled),
-  [role="button"]:not([aria-disabled="true"]),
-  summary,
-  select:not(:disabled) {
-    cursor: pointer;
-  }
-
-  :focus-visible {
-    outline: 2px solid rgb(251 191 36 / 0.85);
-    outline-offset: 2px;
-  }
-
-  dialog::backdrop {
-    background: rgb(0 0 0 / 0.62);
-    backdrop-filter: blur(2px);
-  }
-
-  code,
-  kbd,
-  pre,
-  samp {
-    font-family: var(--font-mono);
-  }
-
   summary::-webkit-details-marker {
     display: none;
   }
 }
 
-@utility skeleton {
-  background-image: linear-gradient(
-    90deg,
-    rgb(255 255 255 / 0.035) 0%,
-    rgb(255 255 255 / 0.085) 50%,
-    rgb(255 255 255 / 0.035) 100%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.6s ease-in-out infinite;
-}
-
-@utility tabular {
-  font-variant-numeric: tabular-nums;
-}
-
-@utility bg-grid {
-  background-image: radial-gradient(circle at 1px 1px, rgb(255 255 255 / 0.045) 1px, transparent 0);
-  background-size: 22px 22px;
-}
-
 @layer components {
-  /* Rendered markdown (deployed customization files). */
-  .md {
-    @apply text-[13.5px] leading-relaxed text-zinc-300;
-    overflow-wrap: anywhere;
+  /* Streaming log lines, like the Actions log viewer: muted line numbers in a gutter on an inset well. */
+  .LogLine-number {
+    flex-shrink: 0;
+    min-width: 3.5rem;
+    padding-right: 1rem;
+    color: var(--fgColor-muted);
+    text-align: right;
+    user-select: none;
   }
-  .md > :first-child {
-    margin-top: 0;
+  .LogLine:hover {
+    background-color: var(--bgColor-neutral-muted);
   }
-  .md > :last-child {
-    margin-bottom: 0;
-  }
-  .md p {
-    @apply my-2.5;
-  }
-  .md h1 {
-    @apply mt-6 mb-3 text-lg font-semibold text-zinc-100;
-  }
-  .md h2 {
-    @apply mt-5 mb-2.5 text-base font-semibold text-zinc-100;
-  }
-  .md h3,
-  .md h4,
-  .md h5,
-  .md h6 {
-    @apply mt-4 mb-2 text-sm font-semibold text-zinc-100;
-  }
-  .md ul {
-    @apply my-2.5 list-disc pl-5;
-  }
-  .md ol {
-    @apply my-2.5 list-decimal pl-5;
-  }
-  .md li {
-    @apply my-1;
-  }
-  .md li::marker {
-    color: rgb(113 113 122);
-  }
-  .md ul.contains-task-list {
-    @apply list-none pl-1;
-  }
-  .md a {
-    @apply text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:decoration-amber-300;
-  }
-  .md strong {
-    @apply font-semibold text-zinc-100;
-  }
-  .md blockquote {
-    @apply my-3 border-l-2 border-zinc-700 pl-3 text-zinc-400;
-  }
-  .md hr {
-    @apply my-5 border-zinc-800;
-  }
-  .md code {
-    @apply rounded-md bg-zinc-800/80 px-1 py-px font-mono text-[0.86em] text-zinc-200 ring-1 ring-white/5 ring-inset;
-  }
-  .md pre {
-    @apply my-3 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 p-3 text-[12.5px] leading-relaxed;
-  }
-  .md pre code {
-    @apply bg-transparent p-0 ring-0;
-  }
-  .md table {
-    @apply my-3 block w-full overflow-x-auto border-collapse text-left text-[13px];
-  }
-  .md th {
-    @apply border-b border-zinc-700 bg-zinc-900/60 px-3 py-1.5 font-medium text-zinc-200;
-  }
-  .md td {
-    @apply border-b border-zinc-800/80 px-3 py-1.5 align-top;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.001ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.001ms !important;
-    scroll-behavior: auto !important;
+  .LogLine--error {
+    background-color: var(--bgColor-danger-muted);
   }
 }

@@ -10,7 +10,7 @@ import type {
   StorageStatus,
   WebhookWorkerStatus,
 } from "@managed-copilot/protocol/operator";
-import { Boxes, CalendarClock, Cpu, Database, GlobeLock, Network, RefreshCw, Server, Webhook } from "lucide-react";
+import { CalendarIcon, CpuIcon, DatabaseIcon, GlobeIcon, OrganizationIcon, SandboxIcon, ShieldLockIcon, SyncIcon, WebhookIcon, type Icon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
 import { getInfrastructure } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
@@ -26,7 +26,7 @@ import { Button } from "../components/ui/Button.js";
 import { Card, Field, FieldGrid } from "../components/ui/Card.js";
 import { Chip, StatusBadge } from "../components/ui/Chip.js";
 import { CopyButton } from "../components/ui/CopyButton.js";
-import { Callout, Skeleton } from "../components/ui/Feedback.js";
+import { Callout, Code, SectionLabel, Skeleton, SkeletonLines } from "../components/ui/Feedback.js";
 import { Link } from "../components/ui/Link.js";
 import { HealthGrid } from "./OverviewView.js";
 
@@ -52,14 +52,8 @@ function scrollToSection(id: OperatorComponentId): void {
 export function InfrastructureView() {
   const poll = usePoll("infrastructure", getInfrastructure);
   return (
-    <Page
-      title="Infrastructure"
-      documentTitle="Infrastructure"
-      icon={Server}
-      description="The gateway, its runtimes, and the services behind them."
-      poll={poll}
-    >
-      <PollContent poll={poll} skeleton={<InfrastructureSkeleton />} errorTitle="Couldn't load the infrastructure">
+    <Page title="Infrastructure" documentTitle="Infrastructure" description="The gateway, its runtimes, and the services behind them." poll={poll}>
+      <PollContent poll={poll} skeleton={<InfrastructureSkeleton />} errorTitle="Couldn't load the infrastructure" boxed>
         {(data) => <InfrastructureBody data={data} />}
       </PollContent>
     </Page>
@@ -94,14 +88,14 @@ function HealthBadge({ meta }: { readonly meta: StatusMeta | undefined }) {
 function Facts({ facts, title = "Facts" }: { readonly facts: readonly InfraFact[]; readonly title?: string }) {
   if (facts.length === 0) return null;
   return (
-    <div className="mt-5 border-t border-zinc-800/70 pt-4">
-      <h3 className="mb-3 text-[12px] font-semibold text-zinc-300">{title}</h3>
+    <div className="mt-5 border-t border-line-muted pt-4">
+      <SectionLabel className="mb-3">{title}</SectionLabel>
       <FieldGrid columns={3}>
         {facts.map((fact) => (
           <Field key={`${fact.label}:${fact.value}`} label={fact.label} mono={fact.mono}>
             <span className="inline-flex max-w-full items-center gap-1">
               <span className="min-w-0 break-all">{fact.value}</span>
-              {fact.mono && fact.value.length > 12 ? <CopyButton text={fact.value} label={`Copy ${fact.label}`} /> : null}
+              {fact.mono && fact.value.length > 12 ? <CopyButton text={fact.value} label={`Copy ${fact.label}`} className="size-6" /> : null}
             </span>
           </Field>
         ))}
@@ -112,12 +106,12 @@ function Facts({ facts, title = "Facts" }: { readonly facts: readonly InfraFact[
 
 function StateCounts({ counts, metaFor, empty }: { readonly counts: Readonly<Partial<Record<string, number>>>; readonly metaFor: (key: string) => StatusMeta; readonly empty: string }) {
   const entries = Object.entries(counts).filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0);
-  if (entries.length === 0) return <span className="text-zinc-500">{empty}</span>;
+  if (entries.length === 0) return <span className="text-fg-muted">{empty}</span>;
   return (
     <ul className="flex flex-wrap gap-1.5">
       {entries.map(([key, count]) => (
         <li key={key}>
-          <StatusBadge meta={metaFor(key)} size="xs">
+          <StatusBadge meta={metaFor(key)}>
             {metaFor(key).label} {formatNumber(count)}
           </StatusBadge>
         </li>
@@ -130,9 +124,9 @@ function StateCounts({ counts, metaFor, empty }: { readonly counts: Readonly<Par
 function MemoryBar({ used, total }: { readonly used: number; readonly total: number }) {
   const ratio = total > 0 ? Math.min(1, used / total) : 0;
   return (
-    <div className="mt-1.5 h-1.5 w-full max-w-48 overflow-hidden rounded-full bg-zinc-800" role="img" aria-label={`${Math.round(ratio * 100)}% of the reserved heap in use`}>
-      <div className="h-full rounded-full bg-sky-400/80" style={{ width: `${ratio * 100}%` }} />
-    </div>
+    <span className="Progress mt-2 max-w-48" role="img" aria-label={`${Math.round(ratio * 100)}% of the reserved heap in use`}>
+      <span className="Progress-item bg-accent-emphasis" style={{ width: `${ratio * 100}%` }} />
+    </span>
   );
 }
 
@@ -145,7 +139,9 @@ function AccountList({ users, orgs }: { readonly users: readonly string[]; reado
         <ul className="flex flex-wrap gap-1.5" aria-label="GitHub organizations">
           {orgs.map((org) => (
             <li key={org}>
-              <Chip title="Every member of this GitHub organization">org: {org}</Chip>
+              <Chip icon={OrganizationIcon} title="Every member of this GitHub organization">
+                {org}
+              </Chip>
             </li>
           ))}
         </ul>
@@ -157,13 +153,13 @@ function AccountList({ users, orgs }: { readonly users: readonly string[]; reado
 function GatewaySection({ gateway, health }: { readonly gateway: GatewayStatus; readonly health: StatusMeta | undefined }) {
   const { memory, eventLoopDelayMs: delay } = gateway;
   return (
-    <Card id="infra-gateway" title="Gateway" icon={Network} description={`${gateway.version} · ${gateway.mode} · pid ${gateway.pid}`} actions={<HealthBadge meta={health} />}>
+    <Card id="infra-gateway" title="Gateway" icon={GlobeIcon} description={`${gateway.version} · ${gateway.mode} · pid ${gateway.pid}`} actions={<HealthBadge meta={health} />}>
       <FieldGrid columns={4}>
         <Field label="Version" mono>
           {gateway.version}
         </Field>
         <Field label="Mode">
-          <Chip mono tone={gateway.mode === "azure" ? "active" : "plain"}>
+          <Chip mono tone={gateway.mode === "azure" ? "accent" : "plain"}>
             {gateway.mode}
           </Chip>
         </Field>
@@ -173,10 +169,10 @@ function GatewaySection({ gateway, health }: { readonly gateway: GatewayStatus; 
         <Field label="Uptime">{formatDuration(gateway.uptimeSeconds)}</Field>
         <Field label="Public URL" wide>
           <span className="inline-flex max-w-full items-center gap-1">
-            <span className="min-w-0 truncate font-mono text-[12px]" title={gateway.publicUrl}>
+            <span className="min-w-0 truncate font-mono text-xs" title={gateway.publicUrl}>
               {gateway.publicUrl}
             </span>
-            <CopyButton text={gateway.publicUrl} label="Copy public URL" />
+            <CopyButton text={gateway.publicUrl} label="Copy public URL" className="size-6" />
           </span>
         </Field>
         <Field label="Listening on" mono>
@@ -197,44 +193,45 @@ function GatewaySection({ gateway, health }: { readonly gateway: GatewayStatus; 
           <MemoryBar used={memory.heapUsedBytes} total={memory.heapTotalBytes} />
         </Field>
         <Field label="Event-loop delay" hint="Over the last minute">
-          <span className="tabular">
-            p50 {formatMilliseconds(delay.p50)} · p99 <span className={delay.p99 > 200 ? "text-amber-300" : undefined}>{formatMilliseconds(delay.p99)}</span> · max {formatMilliseconds(delay.max)}
+          <span className="tabular-nums">
+            p50 {formatMilliseconds(delay.p50)} · p99 <span className={delay.p99 > 200 ? "font-semibold text-fg-attention" : undefined}>{formatMilliseconds(delay.p99)}</span> · max{" "}
+            {formatMilliseconds(delay.max)}
           </span>
         </Field>
       </FieldGrid>
 
-      <div className="mt-5 grid gap-x-6 gap-y-4 border-t border-zinc-800/70 pt-4 lg:grid-cols-2">
+      <div className="mt-5 grid gap-x-6 gap-y-5 border-t border-line-muted pt-4 lg:grid-cols-2">
         <div className="min-w-0">
-          <h3 className="text-[12px] font-semibold text-zinc-300">Who may use it</h3>
-          <p className="mt-0.5 mb-2 text-[12px] text-zinc-500">
-            <code className="font-mono">access</code> in the AppHost
+          <SectionLabel>Who may use it</SectionLabel>
+          <p className="mt-0.5 mb-2 text-xs text-fg-muted">
+            <Code>access</Code> in the AppHost
           </p>
           {gateway.access.open ? (
-            <span className="text-[13px] text-zinc-200">Any GitHub account</span>
+            <span>Any GitHub account</span>
           ) : gateway.access.githubUsers.length === 0 && gateway.access.githubOrgs.length === 0 ? (
-            <span className="text-[13px] text-zinc-500">Nobody is listed.</span>
+            <span className="text-fg-muted">Nobody is listed.</span>
           ) : (
             <AccountList users={gateway.access.githubUsers} orgs={gateway.access.githubOrgs} />
           )}
         </div>
         <div className="min-w-0">
-          <h3 className="text-[12px] font-semibold text-zinc-300">Who may operate it</h3>
-          <p className="mt-0.5 mb-2 text-[12px] text-zinc-500">
-            <code className="font-mono">operators</code> in the AppHost
+          <SectionLabel>Who may operate it</SectionLabel>
+          <p className="mt-0.5 mb-2 text-xs text-fg-muted">
+            <Code>operators</Code> in the AppHost
           </p>
           <AccountList users={gateway.operators.githubUsers} orgs={gateway.operators.githubOrgs} />
           {gateway.operators.localDefault ? (
-            <p className="text-[13px] text-zinc-200">Every account that can use this loopback gateway (no operators are named).</p>
+            <p>Every account that can use this loopback gateway (no operators are named).</p>
           ) : gateway.operators.githubUsers.length === 0 && gateway.operators.githubOrgs.length === 0 ? (
-            <p className="text-[13px] text-zinc-500">No operators are named.</p>
+            <p className="text-fg-muted">No operators are named.</p>
           ) : null}
         </div>
         <div className="min-w-0">
-          <h3 className="mb-2 text-[12px] font-semibold text-zinc-300">Modules</h3>
+          <SectionLabel className="mb-2">Modules</SectionLabel>
           <ChipList items={gateway.modules} mono label="Gateway modules" />
         </div>
         <div className="min-w-0">
-          <h3 className="mb-2 text-[12px] font-semibold text-zinc-300">Capabilities</h3>
+          <SectionLabel className="mb-2">Capabilities</SectionLabel>
           <ChipList items={gateway.capabilities} mono label="Capabilities" empty="None qualified yet." />
         </div>
       </div>
@@ -248,7 +245,7 @@ function RuntimeSection({ runtime, health }: { readonly runtime: SharedRuntimeSt
     <Card
       id="infra-runtime"
       title="Shared runtime"
-      icon={Cpu}
+      icon={CpuIcon}
       description="The stock Copilot runtime that shared sessions run on."
       actions={
         <>
@@ -264,7 +261,7 @@ function RuntimeSection({ runtime, health }: { readonly runtime: SharedRuntimeSt
       ) : null}
       <FieldGrid columns={4}>
         <Field label="State">
-          <StatusBadge meta={runtimeStateMeta(runtime.state)} size="xs" />
+          <StatusBadge meta={runtimeStateMeta(runtime.state)} />
         </Field>
         <Field label="Started by" hint={runtime.external ? "Set with MANAGED_COPILOT_RUNTIME_URL" : undefined}>
           {runtime.external ? "External (not started by the gateway)" : "The gateway"}
@@ -279,16 +276,14 @@ function RuntimeSection({ runtime, health }: { readonly runtime: SharedRuntimeSt
           {runtime.pid}
         </Field>
         <Field label="Generation" hint="Increments with every new runtime connection">
-          <span className="tabular">{runtime.generation}</span>
+          <span className="tabular-nums">{runtime.generation}</span>
         </Field>
-        <Field label="Connected">
-          {runtime.connectedAt ? <RelativeTime value={runtime.connectedAt} /> : undefined}
-        </Field>
+        <Field label="Connected">{runtime.connectedAt ? <RelativeTime value={runtime.connectedAt} /> : undefined}</Field>
         <Field label="Restarts">
-          <span className={cx("tabular", runtime.restarts > 0 && "text-amber-300")}>{runtime.restarts}</span>
+          <span className={cx("tabular-nums", runtime.restarts > 0 && "font-semibold text-fg-attention")}>{runtime.restarts}</span>
         </Field>
         <Field label="Open sessions">
-          <Link href={hrefs.view("sessions", { placement: "shared" })} className="tabular text-sky-300 hover:underline hover:underline-offset-2">
+          <Link href={hrefs.view("sessions", { placement: "shared" })} className="Link tabular-nums">
             {pluralize(runtime.sessions, "session")}
           </Link>
         </Field>
@@ -304,13 +299,13 @@ function SandboxSection({ backend, health }: { readonly backend: SandboxBackendS
     <Card
       id="infra-sandboxes"
       title="Sandbox backend"
-      icon={Boxes}
+      icon={SandboxIcon}
       description={provider ? `Isolated sessions run on ${provider === "azure" ? "Azure" : provider === "docker" ? "Docker" : provider}.` : "This gateway has no sandbox module."}
       actions={
         <>
           <HealthBadge meta={health} />
           {provider ? (
-            <Button size="sm" icon={RefreshCw} onClick={check}>
+            <Button size="sm" icon={SyncIcon} onClick={check}>
               Check now
             </Button>
           ) : null}
@@ -327,16 +322,14 @@ function SandboxSection({ backend, health }: { readonly backend: SandboxBackendS
           {provider ?? "None"}
         </Field>
         <Field label="Available">
-          <StatusBadge meta={backend.available ? healthMeta("healthy") : healthMeta("unavailable")} size="xs">
-            {backend.available ? "Available" : "Unavailable"}
-          </StatusBadge>
+          <StatusBadge meta={backend.available ? healthMeta("healthy") : healthMeta("unavailable")}>{backend.available ? "Available" : "Unavailable"}</StatusBadge>
         </Field>
-        <Field label="Last checked">{backend.checkedAt ? <RelativeTime value={backend.checkedAt} /> : <span className="text-zinc-500">Not checked yet</span>}</Field>
+        <Field label="Last checked">{backend.checkedAt ? <RelativeTime value={backend.checkedAt} /> : <span className="text-fg-muted">Not checked yet</span>}</Field>
         <Field label="Default idle timeout">{backend.defaultIdleSeconds !== undefined ? formatDuration(backend.defaultIdleSeconds) : undefined}</Field>
         <Field label="Sandboxes" wide>
           <span className="flex flex-wrap items-center gap-3">
             <StateCounts counts={backend.counts} metaFor={sandboxStateMeta} empty="No sandboxes." />
-            <Link href={hrefs.view("sandboxes")} className="text-[12.5px] text-sky-300 hover:underline hover:underline-offset-2">
+            <Link href={hrefs.view("sandboxes")} className="Link">
               View sandboxes
             </Link>
           </span>
@@ -347,10 +340,10 @@ function SandboxSection({ backend, health }: { readonly backend: SandboxBackendS
   );
 }
 
-function NotConfigured({ id, title, icon, children }: { readonly id: string; readonly title: string; readonly icon: typeof Server; readonly children: ReactNode }) {
+function NotConfigured({ id, title, icon, children }: { readonly id: string; readonly title: string; readonly icon: Icon; readonly children: ReactNode }) {
   return (
-    <Card id={id} title={title} icon={icon} actions={<Chip>Not configured</Chip>}>
-      <p className="text-[13px] text-zinc-500">{children}</p>
+    <Card id={id} title={title} icon={icon} actions={<Chip tone="neutral">Not configured</Chip>}>
+      <p className="text-fg-muted">{children}</p>
     </Card>
   );
 }
@@ -358,8 +351,8 @@ function NotConfigured({ id, title, icon, children }: { readonly id: string; rea
 function EgressSection({ egress, health }: { readonly egress: EgressStatus | undefined; readonly health: StatusMeta | undefined }) {
   if (!egress) {
     return (
-      <NotConfigured id="infra-egress" title="Egress proxy" icon={GlobeLock}>
-        This gateway runs no egress proxy. Sandboxes that need network access or vault credentials can't start until one is connected.
+      <NotConfigured id="infra-egress" title="Egress proxy" icon={ShieldLockIcon}>
+        This gateway runs no egress proxy. Sandboxes that need network access or vault credentials can&apos;t start until one is connected.
       </NotConfigured>
     );
   }
@@ -367,7 +360,7 @@ function EgressSection({ egress, health }: { readonly egress: EgressStatus | und
     <Card
       id="infra-egress"
       title="Egress proxy"
-      icon={GlobeLock}
+      icon={ShieldLockIcon}
       description="Enforces sandbox network policy and substitutes vault credentials."
       actions={
         <>
@@ -388,16 +381,16 @@ function EgressSection({ egress, health }: { readonly egress: EgressStatus | und
         </Field>
         <Field label="Connected since">{egress.since ? <RelativeTime value={egress.since} /> : undefined}</Field>
         <Field label="Registered sandboxes">
-          <span className="tabular">{formatNumber(egress.registrations)}</span>
+          <span className="tabular-nums">{formatNumber(egress.registrations)}</span>
         </Field>
         <Field label="Blocked (24 h)">
-          <span className={cx("tabular", egress.blockedLastDay > 0 && "text-amber-300")}>{formatNumber(egress.blockedLastDay)}</span>
+          <span className={cx("tabular-nums", egress.blockedLastDay > 0 && "font-semibold text-fg-attention")}>{formatNumber(egress.blockedLastDay)}</span>
         </Field>
         <Field label="CA certificate (SHA-256)" wide>
           {egress.caFingerprint ? (
             <span className="inline-flex max-w-full items-center gap-1">
-              <span className="min-w-0 font-mono text-[12px] break-all">{egress.caFingerprint}</span>
-              <CopyButton text={egress.caFingerprint} label="Copy CA fingerprint" />
+              <span className="min-w-0 font-mono text-xs break-all">{egress.caFingerprint}</span>
+              <CopyButton text={egress.caFingerprint} label="Copy CA fingerprint" className="size-6" />
             </span>
           ) : undefined}
         </Field>
@@ -409,7 +402,7 @@ function EgressSection({ egress, health }: { readonly egress: EgressStatus | und
 function SchedulerSection({ scheduler, health }: { readonly scheduler: SchedulerStatus | undefined; readonly health: StatusMeta | undefined }) {
   if (!scheduler) {
     return (
-      <NotConfigured id="infra-scheduler" title="Scheduler" icon={CalendarClock}>
+      <NotConfigured id="infra-scheduler" title="Scheduler" icon={CalendarIcon}>
         This gateway runs no scheduler module.
       </NotConfigured>
     );
@@ -418,7 +411,7 @@ function SchedulerSection({ scheduler, health }: { readonly scheduler: Scheduler
     <Card
       id="infra-scheduler"
       title="Scheduler"
-      icon={CalendarClock}
+      icon={CalendarIcon}
       actions={
         <>
           <StatusBadge meta={scheduler.running ? runtimeStateMeta("running") : runtimeStateMeta("stopped")} />
@@ -434,9 +427,9 @@ function SchedulerSection({ scheduler, health }: { readonly scheduler: Scheduler
       <FieldGrid columns={2}>
         <Field label="Tick interval">{formatMilliseconds(scheduler.tickIntervalMs)}</Field>
         <Field label="Last tick">{scheduler.lastTickAt ? <RelativeTime value={scheduler.lastTickAt} /> : undefined}</Field>
-        <Field label="Next run due">{scheduler.nextDueAt ? <RelativeTime value={scheduler.nextDueAt} /> : <span className="text-zinc-500">Nothing scheduled</span>}</Field>
+        <Field label="Next run due">{scheduler.nextDueAt ? <RelativeTime value={scheduler.nextDueAt} /> : <span className="text-fg-muted">Nothing scheduled</span>}</Field>
         <Field label="Runs">
-          <span className="tabular">
+          <span className="tabular-nums">
             {formatNumber(scheduler.activeRuns)} active · {formatNumber(scheduler.queuedRuns)} queued
           </span>
         </Field>
@@ -448,7 +441,7 @@ function SchedulerSection({ scheduler, health }: { readonly scheduler: Scheduler
 function WebhookSection({ worker, health }: { readonly worker: WebhookWorkerStatus | undefined; readonly health: StatusMeta | undefined }) {
   if (!worker) {
     return (
-      <NotConfigured id="infra-webhooks" title="Webhook worker" icon={Webhook}>
+      <NotConfigured id="infra-webhooks" title="Webhook worker" icon={WebhookIcon}>
         This gateway runs no webhook worker.
       </NotConfigured>
     );
@@ -457,7 +450,7 @@ function WebhookSection({ worker, health }: { readonly worker: WebhookWorkerStat
     <Card
       id="infra-webhooks"
       title="Webhook worker"
-      icon={Webhook}
+      icon={WebhookIcon}
       actions={
         <>
           <StatusBadge meta={worker.running ? runtimeStateMeta("running") : runtimeStateMeta("stopped")} />
@@ -467,13 +460,13 @@ function WebhookSection({ worker, health }: { readonly worker: WebhookWorkerStat
     >
       <FieldGrid columns={2}>
         <Field label="Subscriptions">
-          <span className="tabular">{formatNumber(worker.subscriptions)}</span>
+          <span className="tabular-nums">{formatNumber(worker.subscriptions)}</span>
         </Field>
         <Field label="Deliveries">
           <StateCounts counts={worker.counts} metaFor={deliveryStateMeta} empty="No deliveries." />
         </Field>
       </FieldGrid>
-      <Link href={hrefs.view("webhooks")} className="mt-4 inline-block text-[12.5px] text-sky-300 hover:underline hover:underline-offset-2">
+      <Link href={hrefs.view("webhooks")} className="Link mt-4 inline-block">
         View webhooks and deliveries
       </Link>
     </Card>
@@ -482,12 +475,12 @@ function WebhookSection({ worker, health }: { readonly worker: WebhookWorkerStat
 
 function StorageSection({ storage, health }: { readonly storage: StorageStatus; readonly health: StatusMeta | undefined }) {
   return (
-    <Card id="infra-storage" title="Storage" icon={Database} description="The gateway's SQLite database." actions={<HealthBadge meta={health} />}>
+    <Card id="infra-storage" title="Storage" icon={DatabaseIcon} description="The gateway's SQLite database." actions={<HealthBadge meta={health} />}>
       <FieldGrid columns={3}>
         <Field label="Data directory">
           <span className="inline-flex max-w-full items-center gap-1">
-            <span className="min-w-0 font-mono text-[12px] break-all">{storage.dataDir}</span>
-            <CopyButton text={storage.dataDir} label="Copy data directory" />
+            <span className="min-w-0 font-mono text-xs break-all">{storage.dataDir}</span>
+            <CopyButton text={storage.dataDir} label="Copy data directory" className="size-6" />
           </span>
         </Field>
         <Field label="Database">{formatBytes(storage.databaseBytes)}</Field>
@@ -500,13 +493,22 @@ function StorageSection({ storage, health }: { readonly storage: StorageStatus; 
 function InfrastructureSkeleton() {
   return (
     <div className="space-y-6" role="status" aria-label="Loading the infrastructure">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {Array.from({ length: 8 }, (_, index) => (
-          <Skeleton key={index} className="h-24 rounded-xl" />
+          <div key={index} className="Box h-28 p-4">
+            <SkeletonLines lines={2} />
+          </div>
         ))}
       </div>
       {Array.from({ length: 3 }, (_, index) => (
-        <Skeleton key={index} className="h-56 rounded-2xl" />
+        <div key={index} className="Box">
+          <div className="Box-header">
+            <Skeleton className="h-4 w-40" />
+          </div>
+          <div className="p-4">
+            <SkeletonLines lines={4} />
+          </div>
+        </div>
       ))}
     </div>
   );

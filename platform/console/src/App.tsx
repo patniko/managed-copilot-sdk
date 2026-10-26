@@ -95,14 +95,14 @@ function Shell({ identity }: { readonly identity: OperatorIdentity }) {
   }, [location.pathname]);
 
   return (
-    <div className="flex h-dvh flex-col">
+    <div className="flex h-dvh flex-col bg-canvas">
       <a
         href="#main"
         onClick={(event) => {
           event.preventDefault();
           main.current?.focus();
         }}
-        className="sr-only z-[90] rounded-lg bg-amber-400 px-3 py-2 font-medium text-zinc-950 focus:not-sr-only focus:fixed focus:top-2 focus:left-2"
+        className="sr-only z-50 rounded-md bg-accent-emphasis px-3 py-2 font-semibold text-fg-on-emphasis focus:not-sr-only focus:fixed focus:top-2 focus:left-2"
       >
         Skip to content
       </a>

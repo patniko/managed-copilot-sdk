@@ -1,4 +1,4 @@
-import { ArrowDown, LoaderCircle, Pause, Play, RotateCcw } from "lucide-react";
+import { ArrowDownIcon, PauseIcon, PlayIcon, SyncIcon } from "@primer/octicons-react";
 import { useCallback, useLayoutEffect, useMemo, useState, type ReactNode, type RefObject } from "react";
 import { cx } from "../../lib/cx.js";
 import { formatNumber } from "../../lib/format.js";
@@ -6,6 +6,7 @@ import { setLiveUpdatesPaused, useStreamStatus } from "../../lib/stream.js";
 import { Button } from "../ui/Button.js";
 import { Dot } from "../ui/Chip.js";
 import { Callout } from "../ui/Feedback.js";
+import { Spinner } from "../ui/Spinner.js";
 
 export interface Feed<T> {
   /** What to render: the live list, or the list as it was when the operator paused. */
@@ -55,7 +56,7 @@ export function useAutoScroll(container: RefObject<HTMLElement | null>, contentK
   return { following, onScroll, jumpToLatest };
 }
 
-/** Live stream state, pause/resume, and "jump to latest" above a feed. */
+/** Live stream state, pause/resume, and "jump to latest" above a feed (the header of its Box). */
 export function FeedToolbar({
   feed,
   following,
@@ -72,56 +73,56 @@ export function FeedToolbar({
   const stream = useStreamStatus();
   const status = stream.userPaused ? "paused" : stream.status;
   return (
-    <div className="flex flex-wrap items-center gap-3 border-b border-zinc-800/70 px-4 py-2.5 text-[12.5px]">
-      <span className="inline-flex items-center gap-1.5 text-zinc-400" role="status">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line bg-canvas-muted px-4 py-2">
+      <span className="inline-flex min-w-0 items-center gap-1.5" role="status">
         {status === "live" ? (
           <>
-            <Dot tone="success" pulse />
-            <span className="text-emerald-200">Live</span>
+            <Dot tone="success" />
+            <span className="font-semibold">Live</span>
           </>
         ) : status === "connecting" || status === "reconnecting" ? (
           <>
-            <LoaderCircle className="size-3.5 animate-spin text-amber-300" aria-hidden />
+            <Spinner className="text-fg-attention" />
             <span>{status === "connecting" ? "Connecting to the live stream…" : "Reconnecting to the live stream…"}</span>
           </>
         ) : status === "paused" ? (
           <>
-            <Pause className="size-3.5" aria-hidden />
+            <PauseIcon size={16} className="text-fg-muted" />
             <span>Live updates are paused for the whole console.</span>
-            <button type="button" onClick={() => setLiveUpdatesPaused(false)} className="font-medium text-sky-300 hover:underline hover:underline-offset-2">
+            <button type="button" onClick={() => setLiveUpdatesPaused(false)} className="Link font-semibold">
               Resume
             </button>
           </>
         ) : (
-          <span>Not connected to the live stream.</span>
+          <span className="text-fg-muted">Not connected to the live stream.</span>
         )}
       </span>
-      <span className="text-zinc-600" aria-hidden>
+      <span className="text-fg-muted" aria-hidden>
         ·
       </span>
-      <span className="text-zinc-500 tabular">
+      <span className="text-fg-muted tabular-nums">
         {formatNumber(count)} {noun}
       </span>
       <div className="ml-auto flex items-center gap-2">
         {!following && !feed.paused ? (
-          <Button size="xs" variant="ghost" icon={ArrowDown} onClick={onJump}>
+          <Button size="sm" icon={ArrowDownIcon} onClick={onJump}>
             Jump to latest
           </Button>
         ) : null}
         {feed.paused ? (
           <Button
-            size="xs"
+            size="sm"
             variant="primary"
-            icon={Play}
+            icon={PlayIcon}
             onClick={() => {
               feed.resume();
               onJump();
             }}
           >
-            Resume{feed.pending > 0 ? ` (${formatNumber(feed.pending)} new)` : ""}
+            Resume{feed.pending > 0 ? ` · ${formatNumber(feed.pending)} new` : ""}
           </Button>
         ) : (
-          <Button size="xs" icon={Pause} onClick={feed.pause} title={`Stop adding new ${noun} while you read`}>
+          <Button size="sm" icon={PauseIcon} onClick={feed.pause} title={`Stop adding new ${noun} while you read`}>
             Pause
           </Button>
         )}
@@ -138,16 +139,17 @@ export function HistoryBanner({ error, loading, onRetry, noun }: { readonly erro
   if (!error) return null;
   return (
     <Callout
-      tone="warning"
+      tone="attention"
       role="status"
+      small
       className="m-3"
       actions={
-        <Button size="xs" icon={RotateCcw} loading={loading} onClick={onRetry}>
+        <Button size="sm" icon={SyncIcon} loading={loading} onClick={onRetry}>
           Retry
         </Button>
       }
     >
-      Couldn't load recent {noun}: {error.message} New {noun} still appear live; some from before may be missing.
+      Couldn&apos;t load recent {noun}: {error.message} New {noun} still appear live; some from before may be missing.
     </Callout>
   );
 }
@@ -167,7 +169,7 @@ export function FeedViewport({
   readonly className?: string;
 }) {
   return (
-    <div ref={scrollRef} onScroll={onScroll} tabIndex={0} aria-label={label} className={cx("min-h-0 flex-1 overflow-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/50 focus-visible:ring-inset", className)}>
+    <div ref={scrollRef} onScroll={onScroll} tabIndex={0} aria-label={label} className={cx("relative min-h-0 flex-1 overflow-auto focus-visible:-outline-offset-2", className)}>
       {children}
     </div>
   );

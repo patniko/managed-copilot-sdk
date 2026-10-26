@@ -1,6 +1,6 @@
 import type { OperatorSandbox } from "@managed-copilot/protocol/operator";
 import type { SandboxState } from "@managed-copilot/protocol";
-import { Boxes, RefreshCw, Square } from "lucide-react";
+import { SandboxIcon, StopIcon, SyncIcon } from "@primer/octicons-react";
 import { listSandboxes } from "../lib/api.js";
 import { formatDuration, formatNumber, shortId } from "../lib/format.js";
 import { confirmProbeSandboxes, confirmStopSandbox } from "../lib/operatorActions.js";
@@ -16,10 +16,11 @@ import { Page, PollContent } from "../components/layout/Page.js";
 import { Button } from "../components/ui/Button.js";
 import { Card } from "../components/ui/Card.js";
 import { Chip, StatusBadge } from "../components/ui/Chip.js";
-import { SelectField } from "../components/ui/Controls.js";
+import { FilterBar, SelectField } from "../components/ui/Controls.js";
 import { DataTable, TableSkeleton, type Column } from "../components/ui/DataTable.js";
 import { Drawer } from "../components/ui/Drawer.js";
 import { EmptyState, None } from "../components/ui/Feedback.js";
+import { Spinner } from "../components/ui/Spinner.js";
 
 function isSandboxState(value: string | undefined): value is SandboxState {
   return value !== undefined && (SANDBOX_STATES as readonly string[]).includes(value);
@@ -39,29 +40,22 @@ export function SandboxesView({ query }: { readonly query: Query }) {
       id: "id",
       header: "Sandbox",
       cell: (sandbox) => (
-        <span className="inline-flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setQuery({ sandbox: sandbox.id }, { replace: false })}
-            title={`Show details of ${sandbox.id}`}
-            className="font-mono text-[12px] text-sky-300 hover:text-sky-200 hover:underline hover:underline-offset-2"
-          >
-            {shortId(sandbox.id)}
-          </button>
-        </span>
+        <button type="button" onClick={() => setQuery({ sandbox: sandbox.id }, { replace: false })} title={`Show details of ${sandbox.id}`} className="Link font-mono text-xs">
+          {shortId(sandbox.id)}
+        </button>
       ),
     },
     { id: "session", header: "Session", cell: (sandbox) => <SessionLink id={sandbox.sessionId} /> },
     { id: "owner", header: "Owner", cell: (sandbox) => <AccountLabel account={sandbox.owner} />, hideBelow: "lg" },
     { id: "environment", header: "Environment", cell: (sandbox) => <EnvironmentLink name={sandbox.environment} /> },
-    { id: "state", header: "State", cell: (sandbox) => <StatusBadge meta={sandboxStateMeta(sandbox.state)} size="xs" title={sandbox.error?.message} /> },
-    { id: "size", header: "Size", cell: (sandbox) => <Chip>{sandbox.size}</Chip>, hideBelow: "xl" },
+    { id: "state", header: "State", cell: (sandbox) => <StatusBadge meta={sandboxStateMeta(sandbox.state)} title={sandbox.error?.message} /> },
+    { id: "size", header: "Size", cell: (sandbox) => <Chip>{sandbox.size}</Chip>, hideBelow: "xl", className: "whitespace-nowrap" },
     {
       id: "image",
       header: "Image",
       cell: (sandbox) =>
         sandbox.image ? (
-          <span className="block max-w-56 truncate font-mono text-[12px] text-zinc-400" title={sandbox.imageId ? `${sandbox.image}\n${sandbox.imageId}` : sandbox.image}>
+          <span className="block max-w-56 truncate font-mono text-xs text-fg-muted" title={sandbox.imageId ? `${sandbox.image}\n${sandbox.imageId}` : sandbox.image}>
             {sandbox.image}
           </span>
         ) : (
@@ -69,29 +63,39 @@ export function SandboxesView({ query }: { readonly query: Query }) {
         ),
       hideBelow: "2xl",
     },
-    { id: "network", header: "Network", cell: (sandbox) => <NetworkChip policy={sandbox.network} />, hideBelow: "xl" },
+    { id: "network", header: "Network", cell: (sandbox) => <NetworkChip policy={sandbox.network} />, hideBelow: "2xl" },
     {
       id: "activity",
       header: "Activity",
       cell: (sandbox) =>
         sandbox.activity ? (
-          <span className="text-[12px] text-zinc-400" title={`${sandbox.activity.runtimes} runtime connections, ${sandbox.activity.pending} pending`}>
-            {sandbox.activity.turnRunning ? <span className="text-sky-300">Turn running</span> : sandbox.activity.busy > 0 ? `${sandbox.activity.busy} busy` : "Idle"}
+          <span className="text-fg-muted" title={`${sandbox.activity.runtimes} runtime connections, ${sandbox.activity.pending} pending`}>
+            {sandbox.activity.turnRunning ? (
+              <span className="inline-flex items-center gap-1.5 text-fg">
+                <Spinner size={12} className="text-fg-attention" />
+                Turn running
+              </span>
+            ) : sandbox.activity.busy > 0 ? (
+              `${sandbox.activity.busy} busy`
+            ) : (
+              "Idle"
+            )}
           </span>
         ) : (
           <None />
         ),
       hideBelow: "lg",
+      className: "whitespace-nowrap",
     },
-    { id: "idle", header: "Idle timeout", cell: (sandbox) => <span className="text-zinc-400">{formatDuration(sandbox.idleTimeoutSeconds)}</span>, hideBelow: "2xl" },
-    { id: "started", header: "Started", cell: (sandbox) => <RelativeTime value={sandbox.startedAt} className="text-zinc-400" /> },
+    { id: "idle", header: "Idle timeout", cell: (sandbox) => <span className="text-fg-muted">{formatDuration(sandbox.idleTimeoutSeconds)}</span>, hideBelow: "2xl" },
+    { id: "started", header: "Started", cell: (sandbox) => <RelativeTime value={sandbox.startedAt} className="text-fg-muted" /> },
     {
       id: "actions",
       header: <span className="sr-only">Actions</span>,
       align: "right",
       cell: (sandbox) =>
         sandbox.state === "running" ? (
-          <Button size="xs" variant="danger" icon={Square} onClick={() => confirmStopSandbox(sandbox)}>
+          <Button size="sm" variant="danger" icon={StopIcon} onClick={() => confirmStopSandbox(sandbox)}>
             Stop
           </Button>
         ) : null,
@@ -102,18 +106,18 @@ export function SandboxesView({ query }: { readonly query: Query }) {
 
   return (
     <Page
+      wide
       title="Sandboxes"
       documentTitle="Sandboxes"
-      icon={Boxes}
       description="Isolated compute for sandboxed sessions, across every owner."
       poll={poll}
       actions={
-        <Button icon={RefreshCw} onClick={() => confirmProbeSandboxes(undefined)}>
+        <Button icon={SyncIcon} onClick={() => confirmProbeSandboxes(undefined)}>
           Check backend now
         </Button>
       }
     >
-      <div className="mb-4 flex flex-wrap items-end gap-3">
+      <FilterBar className="mb-4">
         <SelectField
           label="State"
           value={state ?? ""}
@@ -123,9 +127,9 @@ export function SandboxesView({ query }: { readonly query: Query }) {
             label: `${sandboxStateMeta(value).label}${counts?.[value] !== undefined ? ` (${formatNumber(counts[value] ?? 0)})` : ""}`,
           }))}
           onChange={(value) => setQuery({ state: value || undefined })}
-          className="w-52"
+          className="w-full sm:w-56"
         />
-      </div>
+      </FilterBar>
       <Card padded={false}>
         <PollContent poll={poll} skeleton={<TableSkeleton columns={8} />} errorTitle="Couldn't load sandboxes">
           {(sandboxes) => (
@@ -136,7 +140,7 @@ export function SandboxesView({ query }: { readonly query: Query }) {
               rowKey={(sandbox) => sandbox.id}
               dim={poll.stale}
               empty={
-                <EmptyState icon={Boxes} title={state ? `No ${sandboxStateMeta(state).label.toLowerCase()} sandboxes` : "No sandboxes"} compact>
+                <EmptyState icon={SandboxIcon} title={state ? `No ${sandboxStateMeta(state).label.toLowerCase()} sandboxes` : "No sandboxes"} spacious={!state} compact={Boolean(state)}>
                   {state ? "Choose another state to see more." : "Sandboxes appear when sessions in isolated or promoted environments start."}
                 </EmptyState>
               }
@@ -156,7 +160,7 @@ export function SandboxesView({ query }: { readonly query: Query }) {
         {selected ? (
           <SandboxPanel sandbox={selected} />
         ) : poll.data ? (
-          <EmptyState icon={Boxes} title="Sandbox not in this list" compact>
+          <EmptyState icon={SandboxIcon} title="Sandbox not in this list" compact>
             It may have been deleted, or it doesn&apos;t match the state filter.
           </EmptyState>
         ) : null}

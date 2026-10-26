@@ -1,46 +1,46 @@
-import type { LucideIcon } from "lucide-react";
+import type { Icon } from "@primer/octicons-react";
 import { useId, type ReactNode } from "react";
 import { cx } from "../../lib/cx.js";
-import { TONE_TILE, type Tone } from "../../lib/tone.js";
+import { TONE_TEXT, type Tone } from "../../lib/tone.js";
 import { None } from "./Feedback.js";
 
 export interface CardProps {
   readonly title?: ReactNode;
   readonly description?: ReactNode;
-  readonly icon?: LucideIcon;
+  /** A leading Octicon in the header. */
+  readonly icon?: Icon;
   readonly iconTone?: Tone;
-  /** Extra header content (status badges, buttons). */
+  /** Extra header content (status labels, buttons). */
   readonly actions?: ReactNode;
   readonly children?: ReactNode;
   readonly className?: string;
   readonly bodyClassName?: string;
   readonly id?: string;
-  /** Pad the body (tables usually render edge to edge). */
+  /** Pad the body (tables and lists render edge to edge). */
   readonly padded?: boolean;
+  /** `danger` draws the red border of a settings "Danger zone". */
+  readonly variant?: "default" | "danger";
 }
 
-export function Card({ title, description, icon: Icon, iconTone = "neutral", actions, children, className, bodyClassName, id, padded = true }: CardProps) {
+/** A Primer `Box` with a `Box-header` title, an optional description and actions, and a body. */
+export function Card({ title, description, icon: HeaderIcon, iconTone = "neutral", actions, children, className, bodyClassName, id, padded = true, variant = "default" }: CardProps) {
   const headingId = useId();
   return (
     <section
       id={id}
       aria-labelledby={title ? headingId : undefined}
-      className={cx("min-w-0 scroll-mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 shadow-sm shadow-black/20", className)}
+      className={cx("Box min-w-0 scroll-mt-4", !padded && "overflow-hidden", variant === "danger" && "Box--danger", className)}
     >
       {title ? (
-        <header className="flex flex-wrap items-start gap-x-3 gap-y-2 border-b border-zinc-800/70 px-4 py-3">
-          {Icon ? (
-            <span className={cx("grid size-8 shrink-0 place-items-center rounded-lg ring-1 ring-inset", TONE_TILE[iconTone])}>
-              <Icon className="size-4" aria-hidden />
-            </span>
-          ) : null}
+        <header className="Box-header flex-wrap">
           <div className="min-w-0 flex-1">
-            <h2 id={headingId} className="text-[14px] font-semibold leading-8 text-zinc-100">
-              {title}
+            <h2 id={headingId} className="Box-title flex min-w-0 items-center gap-2">
+              {HeaderIcon ? <HeaderIcon size={16} className={TONE_TEXT[iconTone]} /> : null}
+              <span className="min-w-0 break-words">{title}</span>
             </h2>
-            {description ? <div className="-mt-0.5 text-[12.5px] leading-relaxed text-zinc-500">{description}</div> : null}
+            {description ? <div className="mt-0.5 text-xs text-fg-muted">{description}</div> : null}
           </div>
-          {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2 self-center">{actions}</div> : null}
+          {actions ? <div className="flex max-w-full min-w-0 flex-wrap items-center gap-2">{actions}</div> : null}
         </header>
       ) : null}
       <div className={cx(padded && "p-4", bodyClassName)}>{children}</div>
@@ -85,12 +85,13 @@ export interface FieldProps {
   readonly className?: string;
 }
 
+/** One fact: a 12px semibold muted label over its value, like the headings in a pull request's sidebar. */
 export function Field({ label, children, wide = false, mono = false, hint, className }: FieldProps) {
   return (
     <div className={cx("min-w-0", wide && "sm:col-span-full", className)}>
-      <dt className="text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500">{label}</dt>
-      <dd className={cx("mt-1 min-w-0 break-words text-[13px] text-zinc-200", mono && "font-mono text-[12px]")}>{isEmpty(children) ? <None /> : children}</dd>
-      {hint ? <p className="mt-1 text-[11.5px] leading-relaxed text-zinc-500">{hint}</p> : null}
+      <dt className="text-xs font-semibold text-fg-muted">{label}</dt>
+      <dd className={cx("mt-1 min-w-0 break-words text-fg", mono && "font-mono text-xs")}>{isEmpty(children) ? <None /> : children}</dd>
+      {hint ? <p className="mt-1 text-xs text-fg-muted">{hint}</p> : null}
     </div>
   );
 }
@@ -110,25 +111,21 @@ export function KeyValueTable({
   readonly monoValues?: boolean;
 }) {
   return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-800/80">
-      <table className="w-full text-left text-[12.5px]" aria-label={label}>
-        <thead className="bg-zinc-900/60 text-[11px] uppercase tracking-[0.06em] text-zinc-500">
+    <div className="Table-container">
+      <table className="Table Table--condensed" aria-label={label}>
+        <thead>
           <tr>
-            <th scope="col" className="px-3 py-2 font-medium">
-              {keyHeader}
-            </th>
-            <th scope="col" className="px-3 py-2 font-medium">
-              {valueHeader}
-            </th>
+            <th scope="col">{keyHeader}</th>
+            <th scope="col">{valueHeader}</th>
           </tr>
         </thead>
         <tbody>
           {rows.map(([key, value]) => (
-            <tr key={key} className="border-t border-zinc-800/60 align-top">
-              <th scope="row" className="px-3 py-2 font-mono font-normal text-zinc-300">
+            <tr key={key} className="align-top">
+              <th scope="row" className="font-mono text-xs">
                 {key}
               </th>
-              <td className={cx("px-3 py-2 break-all text-zinc-200", monoValues && "font-mono")}>{isEmpty(value) ? <None /> : value}</td>
+              <td className={cx("break-all", monoValues && "font-mono text-xs")}>{isEmpty(value) ? <None /> : value}</td>
             </tr>
           ))}
         </tbody>

@@ -1804,7 +1804,9 @@
   }
 
   /* ---------------------------------------------------------------------------------------- Data table */
+  /* Positioned so visually hidden text in an off-screen column stays inside the scroller on phones. */
   .Table-container {
+    position: relative;
     overflow-x: auto;
     background-color: var(--bgColor-default);
     border: var(--borderWidth-thin) solid var(--borderColor-default);
@@ -1840,8 +1842,35 @@
   .Table tbody tr:hover td {
     background-color: var(--bgColor-muted);
   }
+  /* Row headers (th scope="row") read like cells, not column headers. */
+  .Table tbody th {
+    padding: 0.5rem 1rem;
+    font-size: inherit;
+    font-weight: var(--base-text-weight-normal);
+    line-height: 1.25rem;
+    color: var(--fgColor-default);
+    text-align: left;
+    white-space: normal;
+    vertical-align: top;
+    background-color: transparent;
+    border-top: var(--borderWidth-thin) solid var(--borderColor-muted);
+    border-bottom: 0;
+  }
+  .Table tbody tr:first-child th {
+    border-top: 0;
+  }
+  .Table tbody tr:hover th {
+    background-color: var(--bgColor-muted);
+  }
+  /* A header row that stays put while the table scrolls inside its own viewport. */
+  .Table--sticky thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
   .Table--condensed th,
-  .Table--condensed td {
+  .Table--condensed td,
+  .Table--condensed tbody th {
     padding: 0.25rem 0.5rem;
   }
   .Table .Table-cell--number {

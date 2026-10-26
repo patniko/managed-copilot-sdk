@@ -1,5 +1,5 @@
 import type { OperatorAccount } from "@managed-copilot/protocol/operator";
-import { ShieldCheck, Users } from "lucide-react";
+import { DotFillIcon, PeopleIcon, ShieldCheckIcon } from "@primer/octicons-react";
 import { formatNumber } from "../lib/format.js";
 import { useAccounts } from "../lib/resources.js";
 import { hrefs } from "../lib/routes.js";
@@ -19,49 +19,52 @@ const COLUMNS: readonly Column<OperatorAccount>[] = [
     header: "Operator",
     cell: (row) =>
       row.operator ? (
-        <Chip icon={ShieldCheck} tone="success" title="Named in the AppHost's operators (or every account on a local gateway that names none)">
+        <Chip icon={ShieldCheckIcon} tone="success" title="Named in the AppHost's operators (or every account on a local gateway that names none)">
           Operator
         </Chip>
       ) : (
         <None label="Not named as an operator" />
       ),
   },
-  { id: "seen", header: "Last seen", cell: (row) => <RelativeTime value={row.lastSeenAt} className="text-zinc-400" /> },
+  { id: "seen", header: "Last seen", cell: (row) => <RelativeTime value={row.lastSeenAt} className="text-fg-muted" /> },
   {
     id: "sessions",
     header: "Sessions",
     cell: (row) => (
-      <Link href={hrefs.view("sessions", { owner: row.account.login })} className="text-zinc-200 tabular hover:text-sky-200 hover:underline hover:underline-offset-2" title={`Show ${row.account.login}'s sessions`}>
+      <Link href={hrefs.view("sessions", { owner: row.account.login })} className="Link--primary inline-flex items-center gap-1 whitespace-nowrap tabular-nums" title={`Show ${row.account.login}'s sessions`}>
         {formatNumber(row.sessions.total)}
-        <span className={row.sessions.live > 0 ? "text-emerald-300" : "text-zinc-500"}> · {formatNumber(row.sessions.live)} live</span>
+        <span className="inline-flex items-center gap-0.5 text-fg-muted">
+          · <DotFillIcon size={12} className={row.sessions.live > 0 ? "text-fg-success" : undefined} />
+          {formatNumber(row.sessions.live)} live
+        </span>
       </Link>
     ),
   },
-  { id: "connections", header: "Connections", align: "right", cell: (row) => <span className={row.connections > 0 ? "text-zinc-200" : "text-zinc-500"}>{formatNumber(row.connections)}</span>, hideBelow: "lg" },
+  { id: "connections", header: "Connections", align: "right", cell: (row) => <span className={row.connections > 0 ? undefined : "text-fg-muted"}>{formatNumber(row.connections)}</span>, hideBelow: "lg" },
   {
     id: "schedules",
     header: "Schedules",
     cell: (row) => (
-      <span className="text-zinc-300 tabular">
+      <span className="tabular-nums">
         {formatNumber(row.schedules.active)} active
-        {row.schedules.paused > 0 ? <span className="text-amber-300"> · {formatNumber(row.schedules.paused)} paused</span> : null}
+        {row.schedules.paused > 0 ? <span className="text-fg-attention"> · {formatNumber(row.schedules.paused)} paused</span> : null}
       </span>
     ),
-    hideBelow: "xl",
+    hideBelow: "2xl",
   },
   {
     id: "background",
     header: "Background sign-in",
     cell: (row) => (
-      <span className="inline-flex flex-col items-start gap-0.5">
-        <StatusBadge meta={backgroundMeta(row.background.state)} size="xs" title={row.background.reason} />
+      <span className="inline-flex flex-col items-start gap-1">
+        <StatusBadge meta={backgroundMeta(row.background.state)} title={row.background.reason} />
         {row.background.reason ? (
-          <span className="line-clamp-2 max-w-64 text-[11.5px] text-zinc-400" title={row.background.reason}>
+          <span className="line-clamp-2 max-w-64 text-xs text-fg-muted" title={row.background.reason}>
             {row.background.reason}
           </span>
         ) : null}
         {row.background.lastVerifiedAt ? (
-          <span className="text-[11.5px] text-zinc-500">
+          <span className="text-xs text-fg-muted">
             Verified <RelativeTime value={row.background.lastVerifiedAt} />
           </span>
         ) : null}
@@ -74,9 +77,9 @@ export function AccountsView() {
   const poll = useAccounts();
   return (
     <Page
+      wide
       title="Accounts"
       documentTitle="Accounts"
-      icon={Users}
       description="GitHub accounts that have used this deployment. Operators named through an organization show as not named here."
       poll={poll}
     >
@@ -89,7 +92,7 @@ export function AccountsView() {
               columns={COLUMNS}
               rowKey={(row) => String(row.account.id)}
               empty={
-                <EmptyState icon={Users} title="No accounts yet" compact>
+                <EmptyState icon={PeopleIcon} title="No accounts yet" spacious>
                   Accounts appear after they sign in to the deployment.
                 </EmptyState>
               }

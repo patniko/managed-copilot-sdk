@@ -1,106 +1,122 @@
-import type { LucideIcon } from "lucide-react";
-import { CloudOff, Gauge, KeyRound, LinkIcon, LogIn, LogOut, RotateCcw, ShieldX, Unplug } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { CloudOfflineIcon, CopyIcon, KeyIcon, LinkIcon, MarkGithubIcon, PlugIcon, StopIcon, SyncIcon, type Icon } from "@primer/octicons-react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { CONSOLE_TICKET_TTL_SECONDS } from "@managed-copilot/protocol/operator";
 import { retryAuth, signOut, type SignedOutReason } from "../../lib/auth.js";
+import { copyText } from "../../lib/clipboard.js";
 import { cx } from "../../lib/cx.js";
 import type { ApiError } from "../../lib/errors.js";
 import { consoleCommand } from "../../lib/signin.js";
 import { useNow } from "../../lib/time.js";
-import { TONE_TILE, type Tone } from "../../lib/tone.js";
+import { toast } from "../../lib/toast.js";
+import type { Tone } from "../../lib/tone.js";
+import { useDocumentTitle } from "../layout/Page.js";
 import { Button } from "../ui/Button.js";
-import { CopyButton } from "../ui/CopyButton.js";
-import { InlineCode, Skeleton, Spinner } from "../ui/Feedback.js";
+import { CodeBlock } from "../ui/CodeBlock.js";
+import { Callout, InlineCode, Skeleton, SkeletonLines } from "../ui/Feedback.js";
+import { Spinner } from "../ui/Spinner.js";
 
-function useDocumentTitle(title: string): void {
-  useEffect(() => {
-    document.title = `${title} · Managed Copilot console`;
-  }, [title]);
-}
-
-function AuthLayout({ icon: Icon, tone, title, children }: { readonly icon: LucideIcon; readonly tone: Tone; readonly title: string; readonly children: ReactNode }) {
+/** github.com's sign-in page: a centered narrow column with the GitHub mark, a light 24px heading, and a Box. */
+function AuthLayout({ title, flash, children, footer }: { readonly title: string; readonly flash?: ReactNode; readonly children: ReactNode; readonly footer?: ReactNode }) {
   useDocumentTitle(title);
   return (
-    <div className="flex min-h-dvh flex-col bg-zinc-950 bg-grid">
-      <header className="flex h-14 items-center gap-2.5 px-5">
-        <span className="grid size-8 place-items-center rounded-lg bg-amber-400/15 text-amber-300 ring-1 ring-inset ring-amber-400/30">
-          <Gauge className="size-[18px]" aria-hidden />
-        </span>
-        <span className="text-[15px] font-semibold tracking-tight text-zinc-100">Managed Copilot</span>
-        <span className="text-[13px] text-zinc-500">Operator console</span>
-      </header>
-      <main className="grid flex-1 place-items-center px-5 pb-16">
-        <div className="w-full max-w-lg animate-rise-in rounded-2xl border border-zinc-800 bg-zinc-900/80 p-7 shadow-2xl shadow-black/40 backdrop-blur">
-          <div className={cx("grid size-11 place-items-center rounded-2xl ring-1 ring-inset", TONE_TILE[tone])}>
-            <Icon className="size-5" aria-hidden />
-          </div>
-          <h1 className="mt-5 text-xl font-semibold tracking-tight text-zinc-50">{title}</h1>
-          {children}
+    <div className="flex min-h-dvh flex-col bg-canvas">
+      <main className="flex flex-1 flex-col items-center px-4 pt-10 pb-12 sm:pt-16">
+        <MarkGithubIcon size={48} />
+        <h1 className="mt-6 mb-4 max-w-md text-center text-xl font-light text-balance">{title}</h1>
+        <div className="w-full max-w-md animate-fade-in">
+          {flash}
+          <div className="rounded-md border border-line-muted bg-canvas-muted p-4">{children}</div>
+          {footer ? <div className="mt-4 rounded-md border border-line p-4 text-center">{footer}</div> : null}
         </div>
       </main>
+      <footer className="px-4 pb-8 text-center text-xs text-fg-muted">Managed Copilot · Operator console</footer>
     </div>
   );
 }
 
-function Prose({ children }: { readonly children: ReactNode }) {
-  return <p className="mt-2 text-[13.5px] leading-relaxed text-zinc-400">{children}</p>;
+function Prose({ children, className }: { readonly children: ReactNode; readonly className?: string }) {
+  return <p className={cx("text-fg", className)}>{children}</p>;
 }
 
-/** The terminal command that opens the console signed in, with a copy button. */
+/** The terminal command that opens the console signed in, like a clone URL on github.com: a read-only field and a copy button. */
 function SignInCommand() {
   const command = consoleCommand(window.location.origin);
+  const id = useId();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1600);
+    return () => clearTimeout(timer);
+  }, [copied]);
   return (
-    <div className="mt-4 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950 py-2 pr-2 pl-3.5">
-      <span className="font-mono text-[12px] text-zinc-500 select-none" aria-hidden>
-        $
+    <div className="mt-3 space-y-3">
+      <div className="FormControl">
+        <label htmlFor={id} className="FormControl-label">
+          Run in a terminal signed in to GitHub
+        </label>
+        <input id={id} readOnly value={command} onFocus={(event) => event.currentTarget.select()} className="form-control input-block input-monospace" spellCheck={false} />
+      </div>
+      <Button
+        variant="primary"
+        icon={CopyIcon}
+        className="btn-block"
+        onClick={async () => {
+          if (await copyText(command)) setCopied(true);
+          else toast.error("Couldn't copy to the clipboard", "Select the command and copy it manually.");
+        }}
+      >
+        {copied ? "Copied!" : "Copy command"}
+      </Button>
+      <span className="sr-only" aria-live="polite">
+        {copied ? "Copied" : ""}
       </span>
-      <code className="min-w-0 flex-1 overflow-x-auto font-mono text-[13px] whitespace-nowrap text-zinc-100">{command}</code>
-      <CopyButton text={command} label="Copy sign-in command" size="sm" variant="secondary">
-        Copy
-      </CopyButton>
     </div>
   );
 }
 
-function ServerMessage({ message, label = "From the gateway" }: { readonly message: string | undefined; readonly label?: string }) {
+/** A message the gateway sent, as a flash banner. */
+function ServerMessage({ message, label = "From the gateway", tone = "attention", icon }: { readonly message: string | undefined; readonly label?: string; readonly tone?: Tone; readonly icon?: Icon }) {
   if (!message) return null;
   return (
-    <div className="mt-4 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3.5 py-2.5">
-      <p className="text-[11px] font-medium uppercase tracking-[0.06em] text-zinc-500">{label}</p>
-      <p className="mt-1 text-[13px] leading-relaxed break-words text-zinc-300">
-        <InlineCode text={message} />
-      </p>
-    </div>
+    <Callout tone={tone} icon={icon} title={label} className="mb-4">
+      <InlineCode text={message} />
+    </Callout>
   );
 }
 
-/** First paint while the console checks its session. */
+/** First paint while the console checks its session: the shell's outline. */
 export function BootScreen() {
   useDocumentTitle("Loading");
   return (
-    <div className="flex h-dvh flex-col" role="status" aria-label="Loading the operator console">
-      <div className="flex h-14 shrink-0 items-center gap-2.5 border-b border-zinc-800/80 px-4">
-        <span className="grid size-8 place-items-center rounded-lg bg-amber-400/15 text-amber-300 ring-1 ring-inset ring-amber-400/30">
-          <Gauge className="size-[18px]" aria-hidden />
-        </span>
-        <span className="text-[15px] font-semibold tracking-tight text-zinc-100">Operator console</span>
-        <div className="ml-auto flex gap-2">
-          <Skeleton className="h-8 w-20 rounded-full" />
-          <Skeleton className="h-8 w-28 rounded-full" />
+    <div className="flex h-dvh flex-col bg-canvas" role="status" aria-label="Loading the operator console">
+      <div className="AppHeader shrink-0">
+        <div className="AppHeader-globalBar">
+          <span className="AppHeader-logo text-fg">
+            <MarkGithubIcon size={32} />
+          </span>
+          <span className="AppHeader-context">
+            <span className="AppHeader-context-item hidden sm:inline-flex">Managed Copilot</span>
+            <span className="AppHeader-context-divider hidden sm:inline">/</span>
+            <span className="AppHeader-context-item AppHeader-context-item--current">Console</span>
+          </span>
+          <div className="AppHeader-actions">
+            <Skeleton className="h-8 w-20 rounded-md" />
+            <Skeleton className="size-8 rounded-full" />
+          </div>
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
-        <div className="hidden w-60 shrink-0 space-y-2 border-r border-zinc-800/80 px-3 py-5 lg:block">
+        <div className="hidden w-64 shrink-0 space-y-3 border-r border-line px-6 py-5 lg:block">
           {Array.from({ length: 11 }, (_, index) => (
-            <Skeleton key={index} className={cx("h-6", index === 4 ? "mt-6" : undefined)} />
+            <Skeleton key={index} className={cx("h-5", index === 4 ? "mt-8" : undefined, index % 3 === 0 ? "w-3/4" : "w-full")} />
           ))}
         </div>
-        <div className="flex-1 px-8 py-7">
-          <Skeleton className="h-7 w-48" />
-          <Skeleton className="mt-3 h-4 w-96 max-w-full" />
-          <div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="mx-auto w-full max-w-[1280px] flex-1 px-4 py-8 md:px-6 lg:px-8">
+          <Skeleton className="h-8 w-48" />
+          <SkeletonLines lines={1} className="mt-3 w-96 max-w-full" />
+          <div className="mt-8 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {Array.from({ length: 8 }, (_, index) => (
-              <Skeleton key={index} className="h-28 rounded-2xl" />
+              <Skeleton key={index} className="h-28 rounded-md" />
             ))}
           </div>
         </div>
@@ -111,8 +127,8 @@ export function BootScreen() {
 
 export function SigningInScreen() {
   return (
-    <AuthLayout icon={LogIn} tone="active" title="Signing you in…">
-      <div className="mt-3 flex items-center gap-2.5 text-[13.5px] text-zinc-400" role="status">
+    <AuthLayout title="Signing you in…">
+      <div className="flex items-center justify-center gap-2 py-2 text-fg-muted" role="status">
         <Spinner />
         Redeeming your one-time sign-in link.
       </div>
@@ -123,32 +139,32 @@ export function SigningInScreen() {
 export function SignedOutScreen({ reason, message }: { readonly reason: SignedOutReason; readonly message?: string }) {
   if (reason === "signed-out") {
     return (
-      <AuthLayout icon={LogOut} tone="neutral" title="Signed out">
-        <Prose>You signed out of the operator console. To sign in again, run this in a terminal signed in to GitHub:</Prose>
+      <AuthLayout title="Signed out" footer={<p className="text-fg-muted">It opens the console with a one-time sign-in link.</p>}>
+        <Prose>You signed out of the operator console. To sign in again, run the console command.</Prose>
         <SignInCommand />
-        <Prose>It opens the console with a one-time sign-in link.</Prose>
       </AuthLayout>
     );
   }
   return (
-    <AuthLayout icon={KeyRound} tone="warning" title="Sign in to the operator console">
+    <AuthLayout
+      title="Sign in to the operator console"
+      flash={<ServerMessage message={message} icon={KeyIcon} />}
+      footer={<p className="text-fg-muted">It opens this console with a one-time link that expires after {CONSOLE_TICKET_TTL_SECONDS} seconds.</p>}
+    >
       <Prose>
         {reason === "ended" ? "Your console session ended. " : null}
-        The console signs in through your terminal with the GitHub account you use for Managed Copilot. Run:
+        The console signs in through your terminal with the GitHub account you use for Managed Copilot.
       </Prose>
       <SignInCommand />
-      <Prose>It opens this console with a one-time link that expires after {CONSOLE_TICKET_TTL_SECONDS} seconds.</Prose>
-      <ServerMessage message={message} />
     </AuthLayout>
   );
 }
 
 export function TicketFailedScreen({ message }: { readonly message?: string }) {
   return (
-    <AuthLayout icon={LinkIcon} tone="warning" title="This sign-in link has expired or was already used">
-      <Prose>Sign-in links work once and expire after {CONSOLE_TICKET_TTL_SECONDS} seconds. Run the command again for a new one:</Prose>
+    <AuthLayout title="This sign-in link has expired or was already used" flash={<ServerMessage message={message} icon={LinkIcon} />}>
+      <Prose>Sign-in links work once and expire after {CONSOLE_TICKET_TTL_SECONDS} seconds. Run the command again for a new one.</Prose>
       <SignInCommand />
-      <ServerMessage message={message} />
     </AuthLayout>
   );
 }
@@ -157,35 +173,36 @@ export function ForbiddenScreen({ message, login }: { readonly message: string; 
   const [busy, setBusy] = useState(false);
   const snippet = `addManagedCopilot(builder, "copilot", {\n  operators: { githubUsers: ["${login ?? "your-github-login"}"] },\n  // ...\n});`;
   return (
-    <AuthLayout icon={ShieldX} tone="danger" title="You're not an operator of this deployment">
-      <ServerMessage message={message} />
+    <AuthLayout
+      title="You're not an operator of this deployment"
+      flash={<ServerMessage message={message} tone="danger" icon={StopIcon} />}
+      footer={
+        <p className="text-fg-muted">
+          Or{" "}
+          <button
+            type="button"
+            className="Link inline-flex items-center gap-1 align-bottom font-semibold"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await signOut();
+              setBusy(false);
+            }}
+          >
+            {busy ? <Spinner size={12} /> : null}
+            sign out
+          </button>{" "}
+          and sign in with an operator account.
+        </p>
+      }
+    >
       <Prose>
         <InlineCode text="Operators are named in the AppHost. To give an account access, add its GitHub login to `operators` in `addManagedCopilot`, then restart the AppHost:" />
       </Prose>
-      <div className="relative mt-3 rounded-xl border border-zinc-800 bg-zinc-950">
-        <pre className="overflow-x-auto px-3.5 py-3 pr-12 font-mono text-[12.5px] leading-relaxed text-zinc-200">{snippet}</pre>
-        <div className="absolute top-2 right-2">
-          <CopyButton text={snippet} label="Copy AppHost snippet" />
-        </div>
-      </div>
-      <Prose>Or sign out and sign in with an operator account.</Prose>
-      <div className="mt-6 flex flex-wrap gap-2">
-        <Button variant="primary" icon={RotateCcw} onClick={() => retryAuth()}>
-          Try again
-        </Button>
-        <Button
-          variant="ghost"
-          icon={LogOut}
-          loading={busy}
-          onClick={async () => {
-            setBusy(true);
-            await signOut();
-            setBusy(false);
-          }}
-        >
-          Sign out
-        </Button>
-      </div>
+      <CodeBlock className="mt-3" text={snippet} label="AppHost" copyLabel="Copy AppHost snippet" maxHeight="none" wrap={false} />
+      <Button variant="primary" icon={SyncIcon} className="btn-block mt-4" onClick={() => retryAuth()}>
+        Try again
+      </Button>
     </AuthLayout>
   );
 }
@@ -205,15 +222,15 @@ export function GitHubUnavailableScreen({ message, retryAt, retrying = false }: 
   }, [retryAt, attemptedAt]);
 
   return (
-    <AuthLayout icon={CloudOff} tone="warning" title="GitHub is unreachable right now">
+    <AuthLayout
+      title="GitHub is unreachable right now"
+      flash={<ServerMessage message={message} icon={CloudOfflineIcon} />}
+      footer={waitSeconds > 0 && !retrying ? <p className="text-fg-muted">The console retries automatically.</p> : undefined}
+    >
       <Prose>The gateway checks operator access with GitHub and couldn&apos;t reach it. This is usually brief.</Prose>
-      <ServerMessage message={message} />
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button variant="primary" icon={RotateCcw} loading={retrying} disabled={waitSeconds > 0} onClick={() => retryAuth()}>
-          {retrying ? "Checking…" : waitSeconds > 0 ? `Try again in ${waitSeconds}s` : "Try again"}
-        </Button>
-        {waitSeconds > 0 && !retrying ? <span className="text-[12.5px] text-zinc-500">The console retries automatically.</span> : null}
-      </div>
+      <Button variant="primary" icon={SyncIcon} className="btn-block mt-4" loading={retrying} disabled={waitSeconds > 0} onClick={() => retryAuth()}>
+        {retrying ? "Checking…" : waitSeconds > 0 ? `Try again in ${waitSeconds}s` : "Try again"}
+      </Button>
     </AuthLayout>
   );
 }
@@ -221,18 +238,18 @@ export function GitHubUnavailableScreen({ message, retryAt, retrying = false }: 
 export function UnreachableScreen({ error, retrying = false }: { readonly error: ApiError; readonly retrying?: boolean }) {
   const network = error.code === "network_error" || error.code === "timeout";
   return (
-    <AuthLayout icon={Unplug} tone="danger" title={network ? "Can't reach the gateway" : "The console couldn't load"}>
+    <AuthLayout
+      title={network ? "Can't reach the gateway" : "The console couldn't load"}
+      flash={<ServerMessage message={error.message} label={network ? "Details" : "From the gateway"} tone="danger" icon={PlugIcon} />}
+    >
       <Prose>
         {network
           ? `The console needs its gateway at ${window.location.origin}. Check that it's running, then try again.`
           : "The gateway answered with an error. Try again; if it keeps happening, check the gateway's logs."}
       </Prose>
-      <ServerMessage message={error.message} label={network ? "Details" : "From the gateway"} />
-      <div className="mt-6">
-        <Button variant="primary" icon={RotateCcw} loading={retrying} onClick={() => retryAuth()}>
-          {retrying ? "Trying again…" : "Try again"}
-        </Button>
-      </div>
+      <Button variant="primary" icon={SyncIcon} className="btn-block mt-4" loading={retrying} onClick={() => retryAuth()}>
+        {retrying ? "Trying again…" : "Try again"}
+      </Button>
     </AuthLayout>
   );
 }

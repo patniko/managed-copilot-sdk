@@ -1,4 +1,4 @@
-import { CircleAlert, ShieldAlert, TriangleAlert } from "lucide-react";
+import { AlertIcon, XIcon } from "@primer/octicons-react";
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { toApiError } from "../../lib/errors.js";
 import { closeGuardedAction, useGuardedAction } from "../../lib/guarded.js";
@@ -7,8 +7,9 @@ import { toast } from "../../lib/toast.js";
 import { Button } from "./Button.js";
 
 /**
- * Host for guarded operator actions. Confirming runs the action; success closes the dialog with the gateway's message
- * in a toast; a failure shows the gateway's message in a toast and keeps the dialog (and any typed reason) open.
+ * Host for guarded operator actions, as a Primer `Dialog`. Confirming runs the action; success closes the dialog with
+ * the gateway's message in a toast; a failure shows the gateway's message in a toast and keeps the dialog (and any
+ * typed reason) open.
  */
 export function ActionDialog() {
   const request = useGuardedAction();
@@ -20,6 +21,8 @@ export function ActionDialog() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
   const opener = useRef<HTMLElement | null>(null);
+  const reasonField = useRef<HTMLTextAreaElement>(null);
+  const cancelButton = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     setReason("");
@@ -33,6 +36,8 @@ export function ActionDialog() {
     if (request && !element.open) {
       opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       element.showModal();
+      // showModal() focuses the first focusable element (the header's close button); start where the work is instead.
+      (request.reason ? reasonField.current : cancelButton.current)?.focus();
     }
     if (!request && element.open) {
       element.close();
@@ -65,7 +70,7 @@ export function ActionDialog() {
   };
 
   const danger = request?.tone === "danger";
-  const Icon = danger ? TriangleAlert : ShieldAlert;
+  const maxLength = request?.reason?.maxLength ?? 500;
   return (
     <dialog
       ref={dialog}
@@ -78,63 +83,57 @@ export function ActionDialog() {
       onClick={(event) => {
         if (event.target === event.currentTarget) cancel();
       }}
-      className="m-auto w-[min(480px,calc(100vw-2rem))] animate-rise-in rounded-2xl border border-zinc-700/70 bg-zinc-900 p-0 text-zinc-200 shadow-2xl shadow-black/60 backdrop:animate-fade-in"
+      className="Dialog Dialog--medium animate-scale-in"
     >
       {request ? (
         <form
-          className="p-5"
+          className="flex min-h-0 flex-1 flex-col"
           onSubmit={(event) => {
             event.preventDefault();
             void confirm();
           }}
         >
-          <div className="flex gap-3.5">
-            <div
-              className={
-                danger
-                  ? "grid size-9 shrink-0 place-items-center rounded-xl bg-rose-500/10 text-rose-300 ring-1 ring-inset ring-rose-400/25"
-                  : "grid size-9 shrink-0 place-items-center rounded-xl bg-amber-400/10 text-amber-300 ring-1 ring-inset ring-amber-400/25"
-              }
-            >
-              <Icon className="size-4" aria-hidden />
-            </div>
-            <div className="min-w-0 flex-1">
-              <h2 id={titleId} className="text-base font-semibold text-zinc-100">
+          <div className="Dialog-header">
+            <div className="Dialog-headerContent">
+              <h2 id={titleId} className="Dialog-title">
                 {request.title}
               </h2>
-              <div id={descriptionId} className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
-                {request.description}
-              </div>
             </div>
+            <button type="button" onClick={cancel} disabled={busy} aria-label="Close" className="btn-octicon m-0.5">
+              <XIcon size={16} />
+            </button>
           </div>
-          {request.reason ? (
-            <div className="mt-4">
-              <label htmlFor={reasonId} className="text-[12px] font-medium text-zinc-300">
-                {request.reason.label} <span className="font-normal text-zinc-500">(optional)</span>
-              </label>
-              <textarea
-                id={reasonId}
-                value={reason}
-                autoFocus
-                rows={3}
-                maxLength={request.reason.maxLength ?? 500}
-                placeholder={request.reason.placeholder}
-                onChange={(event) => setReason(event.target.value)}
-                className="mt-1.5 block w-full resize-y rounded-lg bg-zinc-950 px-3 py-2 text-[13px] text-zinc-200 ring-1 ring-inset ring-white/10 placeholder:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/70"
-              />
-            </div>
-          ) : null}
-          {error ? (
-            <div role="alert" className="mt-4 flex gap-2 rounded-lg border border-rose-400/30 bg-rose-400/[0.07] px-3 py-2 text-[13px] text-rose-100">
-              <CircleAlert className="mt-0.5 size-4 shrink-0 text-rose-300" aria-hidden />
-              <span className="min-w-0 break-words">{error}</span>
-            </div>
-          ) : null}
-          <div className="mt-6 flex justify-end gap-2">
-            <Button variant="ghost" onClick={cancel} disabled={busy} autoFocus={!request.reason}>
+          <div className="Dialog-body">
+            <p id={descriptionId}>{request.description}</p>
+            {request.reason ? (
+              <div className="FormControl mt-4">
+                <label htmlFor={reasonId} className="FormControl-label">
+                  {request.reason.label} <span className="font-normal text-fg-muted">(optional)</span>
+                </label>
+                <textarea
+                  ref={reasonField}
+                  id={reasonId}
+                  value={reason}
+                  rows={3}
+                  maxLength={maxLength}
+                  placeholder={request.reason.placeholder}
+                  onChange={(event) => setReason(event.target.value)}
+                  className="form-control input-block resize-y"
+                />
+              </div>
+            ) : null}
+            {error ? (
+              <div role="alert" className="flash flash-error mt-4">
+                <AlertIcon size={16} />
+                <div className="flash-content break-words">{error}</div>
+              </div>
+            ) : null}
+          </div>
+          <div className="Dialog-footer">
+            <Button ref={cancelButton} onClick={cancel} disabled={busy}>
               Cancel
             </Button>
-            <Button type="submit" variant={danger ? "danger-solid" : "primary"} loading={busy}>
+            <Button type="submit" variant={danger ? "danger" : "primary"} loading={busy}>
               {error ? "Try again" : request.confirmLabel}
             </Button>
           </div>

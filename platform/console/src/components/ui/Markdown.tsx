@@ -15,7 +15,7 @@ function SafeLink({ href, children, title }: ComponentPropsWithoutRef<"a"> & Ext
     );
   }
   return (
-    <span className="text-zinc-200 underline decoration-zinc-500 decoration-dotted underline-offset-2" title={href}>
+    <span className="underline decoration-dotted underline-offset-2" title={href}>
       {children}
     </span>
   );
@@ -31,7 +31,7 @@ function ImagePlaceholder({ src, alt }: ComponentPropsWithoutRef<"img"> & ExtraP
       [image: {label}]
     </a>
   ) : (
-    <span className="text-zinc-400" title={source}>
+    <span className="text-fg-muted" title={source}>
       [image: {label}]
     </span>
   );
@@ -41,12 +41,13 @@ const COMPONENTS: Components = { a: SafeLink, img: ImagePlaceholder };
 const PLUGINS = [remarkGfm];
 
 /**
- * Markdown from deployed customization files. Raw HTML is never rendered (react-markdown shows it as text without
- * `rehype-raw`), and links/images are restricted as above.
+ * Markdown from deployed customization files. `sm` (default) renders like a GitHub comment (14px); `md` like a README
+ * (16px). Raw HTML is never rendered (react-markdown shows it as text without `rehype-raw`), and links/images are
+ * restricted as above.
  */
-export const MarkdownView = memo(function MarkdownView({ source, className }: { readonly source: string; readonly className?: string }) {
+export const MarkdownView = memo(function MarkdownView({ source, className, size = "sm" }: { readonly source: string; readonly className?: string; readonly size?: "sm" | "md" }) {
   return (
-    <div className={cx("md", className)}>
+    <div className={cx("markdown-body", size === "sm" && "markdown-body--sm", className)}>
       <Markdown remarkPlugins={PLUGINS} components={COMPONENTS}>
         {source}
       </Markdown>

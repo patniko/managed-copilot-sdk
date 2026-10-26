@@ -1,6 +1,6 @@
 import type { OperatorSandbox } from "@managed-copilot/protocol/operator";
 import type { SandboxSetupRecord, SandboxSetupStep } from "@managed-copilot/protocol";
-import { Square } from "lucide-react";
+import { PulseIcon, SandboxIcon, StopIcon, ToolsIcon } from "@primer/octicons-react";
 import { formatBytes, formatDuration, formatMilliseconds, parseTime, shortId } from "../../lib/format.js";
 import { confirmStopSandbox } from "../../lib/operatorActions.js";
 import { sandboxStateMeta, setupStateMeta } from "../../lib/status.js";
@@ -9,7 +9,7 @@ import { Card, Field, FieldGrid } from "../ui/Card.js";
 import { Chip, StatusBadge } from "../ui/Chip.js";
 import { CodeBlock, Disclosure } from "../ui/CodeBlock.js";
 import { CopyButton } from "../ui/CopyButton.js";
-import { Callout, None } from "../ui/Feedback.js";
+import { Callout, None, SectionLabel } from "../ui/Feedback.js";
 import { ChipList, NetworkPolicyView, YesNo } from "./Entities.js";
 import { AccountLabel, EnvironmentLink, IdText, RelativeTime, SessionLink } from "./Identity.js";
 
@@ -17,33 +17,25 @@ function Mono({ value, label }: { readonly value: string | undefined; readonly l
   if (!value) return <None />;
   return (
     <span className="inline-flex max-w-full items-center gap-1">
-      <span className="min-w-0 font-mono text-[12px] break-all">{value}</span>
-      <CopyButton text={value} label={`Copy ${label}`} />
+      <span className="min-w-0 font-mono text-xs break-all">{value}</span>
+      <CopyButton text={value} label={`Copy ${label}`} className="size-6" />
     </span>
   );
 }
 
-/** Every field of an `OperatorSandbox`, its activity, and its setup record. */
+/** Every field of an `OperatorSandbox`, its activity, its setup record, and (while it runs) a danger zone to stop it. */
 export function SandboxPanel({ sandbox, showSession = true }: { readonly sandbox: OperatorSandbox; readonly showSession?: boolean }) {
   const meta = sandboxStateMeta(sandbox.state);
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       <Card
+        icon={SandboxIcon}
         title={
           <span className="inline-flex items-center gap-2">
-            Sandbox <span className="font-mono text-[13px] font-normal text-zinc-400">{shortId(sandbox.id)}</span>
+            Sandbox <span className="font-mono text-xs font-normal text-fg-muted">{shortId(sandbox.id)}</span>
           </span>
         }
-        actions={
-          <>
-            <StatusBadge meta={meta} />
-            {sandbox.state === "running" ? (
-              <Button size="sm" variant="danger" icon={Square} onClick={() => confirmStopSandbox(sandbox)}>
-                Stop sandbox
-              </Button>
-            ) : null}
-          </>
-        }
+        actions={<StatusBadge meta={meta} />}
       >
         {sandbox.error ? (
           <Callout tone="danger" title={sandbox.error.code ? `Failed: ${sandbox.error.code}` : "Failed"} className="mb-4">
@@ -95,31 +87,50 @@ export function SandboxPanel({ sandbox, showSession = true }: { readonly sandbox
         </FieldGrid>
       </Card>
 
-      <Card title="Activity" description="Tracked in memory while the gateway manages the sandbox.">
+      <Card title="Activity" icon={PulseIcon} description="Tracked in memory while the gateway manages the sandbox.">
         {sandbox.activity ? (
           <FieldGrid columns={4}>
             <Field label="Runtime connections">
-              <span className="tabular">{sandbox.activity.runtimes}</span>
+              <span className="tabular-nums">{sandbox.activity.runtimes}</span>
             </Field>
             <Field label="Busy">
-              <span className="tabular">{sandbox.activity.busy}</span>
+              <span className="tabular-nums">{sandbox.activity.busy}</span>
             </Field>
             <Field label="Turn running">
               <YesNo value={sandbox.activity.turnRunning} />
             </Field>
             <Field label="Pending work">
-              <span className="tabular">{sandbox.activity.pending}</span>
+              <span className="tabular-nums">{sandbox.activity.pending}</span>
             </Field>
             <Field label="Last activity">
               <RelativeTime value={sandbox.activity.lastActivityAt} />
             </Field>
           </FieldGrid>
         ) : (
-          <p className="text-[13px] text-zinc-500">No activity tracked right now.</p>
+          <p className="text-fg-muted">No activity tracked right now.</p>
         )}
       </Card>
 
       <SetupCard setup={sandbox.setup} />
+
+      {sandbox.state === "running" ? (
+        <section aria-labelledby={`danger-${sandbox.id}`}>
+          <h2 id={`danger-${sandbox.id}`} className="mb-2 text-base font-semibold">
+            Danger zone
+          </h2>
+          <div className="Box Box--danger">
+            <div className="Box-row flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold">Stop this sandbox</p>
+                <p className="text-fg-muted">Stops compute after its current work drains. Its files and state are kept; the session restarts it on next use.</p>
+              </div>
+              <Button variant="danger" icon={StopIcon} onClick={() => confirmStopSandbox(sandbox)}>
+                Stop sandbox
+              </Button>
+            </div>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -133,8 +144,8 @@ function stepDuration(step: SandboxSetupStep): string {
 function SetupCard({ setup }: { readonly setup: SandboxSetupRecord | undefined }) {
   if (!setup) {
     return (
-      <Card title="Setup">
-        <p className="text-[13px] text-zinc-500">No setup record yet.</p>
+      <Card title="Setup" icon={ToolsIcon}>
+        <p className="text-fg-muted">No setup record yet.</p>
       </Card>
     );
   }
@@ -145,6 +156,7 @@ function SetupCard({ setup }: { readonly setup: SandboxSetupRecord | undefined }
   return (
     <Card
       title="Setup"
+      icon={ToolsIcon}
       description={
         setup.startedAt ? (
           <span>
@@ -167,20 +179,18 @@ function SetupCard({ setup }: { readonly setup: SandboxSetupRecord | undefined }
         </Callout>
       ) : null}
       {setup.steps.length === 0 ? (
-        <p className="p-4 text-[13px] text-zinc-500">No setup steps: the environment needs no packages, files, or commands.</p>
+        <p className="p-4 text-fg-muted">No setup steps: the environment needs no packages, files, or commands.</p>
       ) : (
-        <ol className="divide-y divide-zinc-800/70">
+        <ol>
           {setup.steps.map((step, index) => (
-            <li key={`${step.kind}-${index}`} className="px-4 py-3">
+            <li key={`${step.kind}-${index}`} className="Box-row px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="w-5 text-right text-[11px] text-zinc-600 tabular">{index + 1}</span>
+                <span className="w-5 text-right text-xs text-fg-muted tabular-nums">{index + 1}</span>
                 <Chip>{step.kind}</Chip>
-                <code className="min-w-0 flex-1 font-mono text-[12px] break-all text-zinc-200">{step.name}</code>
-                <StatusBadge meta={setupStateMeta(step.state)} size="xs" />
-                {step.exitCode !== undefined ? (
-                  <span className={step.exitCode === 0 ? "text-[12px] text-zinc-500" : "text-[12px] text-rose-300"}>exit {step.exitCode}</span>
-                ) : null}
-                {stepDuration(step) ? <span className="text-[12px] text-zinc-500 tabular">{stepDuration(step)}</span> : null}
+                <code className="min-w-0 flex-1 font-mono text-xs break-all">{step.name}</code>
+                <StatusBadge meta={setupStateMeta(step.state)} />
+                {step.exitCode !== undefined ? <span className={step.exitCode === 0 ? "text-xs text-fg-muted" : "text-xs font-semibold text-fg-danger"}>exit {step.exitCode}</span> : null}
+                {stepDuration(step) ? <span className="text-xs text-fg-muted tabular-nums">{stepDuration(step)}</span> : null}
               </div>
               {step.output ? (
                 <Disclosure className="mt-2 ml-7" summary="Output (tail)" defaultOpen={step.state === "failed"}>
@@ -192,30 +202,30 @@ function SetupCard({ setup }: { readonly setup: SandboxSetupRecord | undefined }
         </ol>
       )}
       {resolved.length > 0 || setup.files.length > 0 ? (
-        <div className="grid gap-5 border-t border-zinc-800/70 p-4 lg:grid-cols-2">
+        <div className="grid gap-5 border-t border-line p-4 lg:grid-cols-2">
           <div className="min-w-0">
-            <h3 className="mb-2 text-[12px] font-semibold text-zinc-300">Resolved packages</h3>
+            <SectionLabel className="mb-2">Resolved packages</SectionLabel>
             <ChipList items={resolved} mono empty="None" />
           </div>
           <div className="min-w-0">
-            <h3 className="mb-2 text-[12px] font-semibold text-zinc-300">Files written</h3>
+            <SectionLabel className="mb-2">Files written</SectionLabel>
             {setup.files.length > 0 ? (
-              <ul className="space-y-1 text-[12px]">
+              <ul className="space-y-1 text-xs">
                 {setup.files.map((file) => (
                   <li key={file.path} className="flex min-w-0 items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate font-mono text-zinc-200" title={file.path}>
+                    <span className="min-w-0 flex-1 truncate font-mono" title={file.path}>
                       {file.path}
                     </span>
-                    <span className="text-zinc-500 tabular">{formatBytes(file.size)}</span>
-                    <span className="font-mono text-zinc-500" title={`sha256:${file.sha256}`}>
+                    <span className="text-fg-muted tabular-nums">{formatBytes(file.size)}</span>
+                    <span className="font-mono text-fg-muted" title={`sha256:${file.sha256}`}>
                       {file.sha256.slice(0, 12)}
                     </span>
-                    <CopyButton text={file.sha256} label={`Copy SHA-256 of ${file.path}`} />
+                    <CopyButton text={file.sha256} label={`Copy SHA-256 of ${file.path}`} className="size-6" />
                   </li>
                 ))}
               </ul>
             ) : (
-              <span className="text-[13px] text-zinc-500">None</span>
+              <span className="text-fg-muted">None</span>
             )}
           </div>
         </div>
