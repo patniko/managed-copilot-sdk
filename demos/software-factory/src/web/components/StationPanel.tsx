@@ -217,7 +217,7 @@ function PanelHeader({ station }: { readonly station: Station }) {
           </p>
         </div>
       </div>
-      {station.detail ? <p className="mt-2 text-fg-muted">{station.detail}</p> : null}
+      {station.detail && station.detail !== meta.label ? <p className="mt-2 text-fg-muted">{station.detail}</p> : null}
       {sessionId && attachAllowed ? (
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button

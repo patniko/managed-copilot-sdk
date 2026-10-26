@@ -90,7 +90,8 @@ export function StationCard({ station, selected, onSelect, heading, ghost = fals
   const muted = station.status === "waiting" || station.status === "skipped" || station.status === "cancelled";
   const tests = station.tests ? testChipLabel(station.tests) : undefined;
   const model = station.model ?? environment?.model;
-  const detail = station.detail && !ghost ? station.detail : undefined;
+  // The server's detail often repeats the status ("Working"); show it only when it adds something.
+  const detail = station.detail && !ghost && station.detail !== meta.label ? station.detail : undefined;
 
   return (
     <button
