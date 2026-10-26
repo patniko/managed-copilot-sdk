@@ -1830,10 +1830,14 @@
     background-color: var(--bgColor-muted);
     border-bottom: var(--borderWidth-thin) solid var(--borderColor-default);
   }
+  /* Cells take their row's vertical alignment (middle by default), so `align-top` on a row still works. */
+  .Table tbody tr {
+    vertical-align: middle;
+  }
   .Table td {
     padding: 0.5rem 1rem;
     line-height: 1.25rem;
-    vertical-align: middle;
+    vertical-align: inherit;
     border-top: var(--borderWidth-thin) solid var(--borderColor-muted);
   }
   .Table tbody tr:first-child td {

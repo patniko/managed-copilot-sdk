@@ -100,6 +100,11 @@ describe("github theme", () => {
     }
   });
 
+  it("lets table rows set their cells' vertical alignment", () => {
+    expect(rule(css, ".Table td")).toContain("vertical-align: inherit");
+    expect(rule(css, ".Table tbody tr")).toContain("vertical-align: middle");
+  });
+
   it("bundles Mona Sans", async () => {
     expect(css).toContain("Mona Sans Variable");
     const base = await readFile(join(root, "src", "base.css"), "utf8");
