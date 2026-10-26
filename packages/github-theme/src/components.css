@@ -552,6 +552,12 @@
   .Box--danger {
     border-color: var(--borderColor-danger-emphasis);
   }
+  .Box--attention {
+    border-color: var(--borderColor-attention-emphasis);
+  }
+  .Box--accent {
+    border-color: var(--borderColor-accent-emphasis);
+  }
   .Box-header {
     display: flex;
     align-items: center;
@@ -565,6 +571,14 @@
   }
   .Box--danger .Box-header {
     border-color: var(--borderColor-danger-emphasis);
+  }
+  .Box--attention .Box-header {
+    background-color: var(--bgColor-attention-muted);
+    border-color: var(--borderColor-attention-emphasis);
+  }
+  .Box--accent .Box-header {
+    background-color: var(--bgColor-accent-muted);
+    border-color: var(--borderColor-accent-emphasis);
   }
   .Box-title {
     min-width: 0;
@@ -802,6 +816,14 @@
   }
   .UnderlineNav-item .Counter {
     margin-left: 0;
+  }
+  .UnderlineNav-item[aria-disabled="true"] {
+    color: var(--fgColor-disabled);
+    cursor: not-allowed;
+    background-color: transparent;
+  }
+  .UnderlineNav-item[aria-disabled="true"] .octicon {
+    color: var(--fgColor-disabled);
   }
   .UnderlineNav-actions {
     display: flex;
@@ -1150,6 +1172,23 @@
   .SegmentedControl-item[aria-checked="true"] .octicon,
   .SegmentedControl-item[aria-selected="true"] .octicon {
     color: var(--fgColor-default);
+  }
+  /* Items may also be labels wrapping visually hidden radio inputs. */
+  .SegmentedControl-item:has(input:checked) {
+    font-weight: var(--base-text-weight-semibold);
+    background-color: var(--controlKnob-bgColor-rest);
+    border-color: var(--controlKnob-borderColor-rest);
+    box-shadow: var(--shadow-resting-small);
+  }
+  .SegmentedControl-item:has(input:focus-visible) {
+    outline: var(--focus-outline-width) solid var(--focus-outlineColor);
+    outline-offset: var(--focus-outline-offset);
+  }
+  .SegmentedControl-item:disabled,
+  .SegmentedControl-item:has(input:disabled) {
+    color: var(--fgColor-disabled);
+    cursor: not-allowed;
+    background-color: transparent;
   }
   .SegmentedControl--sm {
     height: var(--control-small-size);
@@ -1877,6 +1916,16 @@
   .blob-num-empty,
   .blob-code-empty {
     background-color: var(--diffBlob-emptyLine-bgColor);
+  }
+
+  /* `code` in UI text outside Markdown (error codes, file names), styled the way markdown-body styles it. */
+  .inline-code {
+    padding: 0.2em 0.4em;
+    font-family: var(--fontStack-monospace);
+    font-size: 85%;
+    white-space: break-spaces;
+    background-color: var(--bgColor-neutral-muted);
+    border-radius: var(--borderRadius-medium);
   }
 
   /* File header above a blob or diff (Files changed). */

@@ -3,20 +3,6 @@
 
 /* App-specific styles that have no Primer equivalent. Colors come from Primer variables only. */
 
-@theme {
-  /* Primer's left drawer motion (Overlay slideInLeft). */
-  --animate-drawer-in: assistant-drawer-in 0.25s cubic-bezier(0.33, 1, 0.68, 1) both;
-
-  @keyframes assistant-drawer-in {
-    from {
-      transform: translateX(-100%);
-    }
-    to {
-      transform: none;
-    }
-  }
-}
-
 @layer base {
   html,
   body,
@@ -26,15 +12,6 @@
 }
 
 @layer components {
-  /* Box with an attention edge (a pending approval), like Box--danger. Not in the theme yet. */
-  .Box--attention {
-    border-color: var(--borderColor-attention-emphasis);
-  }
-  .Box--attention .Box-header {
-    background-color: var(--bgColor-attention-muted);
-    border-color: var(--borderColor-attention-emphasis);
-  }
-
   /* Tool calls, schedule runs, and notes read as a connected run of condensed timeline events: the line joins the first and last icons. */
   .timeline-run > .TimelineItem:first-child::before {
     top: 1.25rem;

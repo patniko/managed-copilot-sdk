@@ -225,6 +225,8 @@
   --animate-fade-in: gh-fade-in 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
   --animate-scale-in: gh-scale-in 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
   --animate-slide-up: gh-slide-up 0.2s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-slide-in-left: gh-slide-in-left 0.25s cubic-bezier(0.33, 1, 0.68, 1) both;
+  --animate-slide-in-right: gh-slide-in-right 0.25s cubic-bezier(0.33, 1, 0.68, 1) both;
   --animate-shimmer: gh-shimmer 1s linear infinite;
 
   @keyframes gh-fade-in {
@@ -252,6 +254,23 @@
     }
     to {
       opacity: 1;
+      transform: none;
+    }
+  }
+  /* Primer's side sheets (drawers) slide in from their edge. */
+  @keyframes gh-slide-in-left {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes gh-slide-in-right {
+    from {
+      transform: translateX(100%);
+    }
+    to {
       transform: none;
     }
   }

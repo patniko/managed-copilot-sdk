@@ -48,7 +48,7 @@ function Drawer({ onClose, children }: { onClose(): void; children: ReactNode })
         role="dialog"
         aria-modal="true"
         aria-labelledby="side-panel-title"
-        className="absolute inset-y-0 left-0 flex w-[min(20rem,calc(100vw-3rem))] animate-drawer-in flex-col rounded-r-lg bg-canvas-inset shadow-xl"
+        className="absolute inset-y-0 left-0 flex w-[min(20rem,calc(100vw-3rem))] animate-slide-in-left flex-col rounded-r-lg bg-canvas-inset shadow-xl"
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-line py-2 pr-2 pl-4">
           <h2 id="side-panel-title" className="flex-1 font-semibold">

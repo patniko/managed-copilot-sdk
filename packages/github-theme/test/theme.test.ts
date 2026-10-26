@@ -38,6 +38,7 @@ describe("github theme", () => {
       "text-sm",
       "font-sans",
       "dark:bg-canvas-inset",
+      "animate-slide-in-left",
       "bg-zinc-900",
       "text-sky-300",
     ]);
@@ -60,6 +61,7 @@ describe("github theme", () => {
     expect(css).toMatch(/--radius-md: 0\.375rem;/);
     expect(css).toMatch(/--radius-lg: 0\.75rem;/);
     expect(css).toContain("--fontStack-sansSerif");
+    expect(css).toContain("@keyframes gh-slide-in-left");
   });
 
   it("removes Tailwind's default palette so only GitHub colors exist", () => {
@@ -89,6 +91,10 @@ describe("github theme", () => {
       ".markdown-body",
       ".Toast-icon",
       ".blob-code-addition",
+      ".Box--attention",
+      ".inline-code",
+      ".SegmentedControl-item:has(input:checked)",
+      '.UnderlineNav-item[aria-disabled="true"]',
     ]) {
       expect(css, selector).toContain(selector);
     }
