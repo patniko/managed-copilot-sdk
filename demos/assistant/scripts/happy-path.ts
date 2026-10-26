@@ -77,7 +77,7 @@ async function send(page: Page, text: string): Promise<void> {
 }
 
 async function lastReply(page: Page): Promise<string> {
-  const text = await page.locator('[data-testid="assistant-message"]').last().innerText();
+  const text = await page.locator('[data-testid="assistant-message"]').last().locator(".markdown-body").innerText();
   return text.replace(/\s+/g, " ").slice(0, 160);
 }
 

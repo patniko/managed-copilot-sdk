@@ -1,16 +1,19 @@
-import { ArrowDown } from "lucide-react";
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { TimelineItem, ToolItem } from "../../../shared/protocol";
+import { ArrowDownIcon } from "@primer/octicons-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ApprovalItem, AssistantItem, NoticeItem, TimelineItem, ToolItem, TriggerItem, UserItem } from "../../../shared/protocol";
 import { dayKey, dayLabel } from "../format";
 import type { PendingMessage } from "../useAssistant";
 import { ApprovalCard } from "./ApprovalCard";
-import { AssistantMessage, NoticeLine, ToolRow, TriggerPill, TypingIndicator, UserBubble } from "./Items";
+import { AssistantMessage, NoticeLine, ToolRow, TriggerRow, TypingIndicator, UserBubble } from "./Items";
+
+/** Tool calls, schedule runs, and info notes between turns, shown together as one run of timeline events. */
+type RunItem = ToolItem | TriggerItem | NoticeItem;
 
 type Block =
   | { type: "day"; key: string; label: string }
   | { type: "unread"; key: string }
-  | { type: "item"; key: string; item: TimelineItem; scheduleLabel?: string; outcome?: ToolItem }
-  | { type: "tools"; key: string; items: ToolItem[] };
+  | { type: "item"; key: string; item: UserItem | AssistantItem | ApprovalItem | NoticeItem; scheduleLabel?: string; outcome?: ToolItem }
+  | { type: "run"; key: string; items: RunItem[] };
 
 export interface TimelineProps {
   items: readonly TimelineItem[];
@@ -28,6 +31,10 @@ export interface TimelineProps {
   onAtBottomChange(atBottom: boolean): void;
 }
 
+function isRunItem(item: TimelineItem): item is RunItem {
+  return item.kind === "tool" || item.kind === "trigger" || (item.kind === "notice" && item.level === "info");
+}
+
 function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnchor: string | undefined): Block[] {
   const blocks: Block[] = [];
   // A consequential tool call's progress is shown inside its approval card instead of as a separate row.
@@ -37,11 +44,11 @@ function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnc
     if (item.kind === "tool" && approvalIds.has(`approval:${item.id}`)) outcomes.set(`approval:${item.id}`, item);
   }
   let lastDay: string | undefined;
-  let tools: ToolItem[] | undefined;
+  let run: RunItem[] | undefined;
   let scheduleLabel: string | undefined;
   const flush = () => {
-    if (tools?.length) blocks.push({ type: "tools", key: `tools:${tools[0]!.id}`, items: tools });
-    tools = undefined;
+    if (run?.length) blocks.push({ type: "run", key: `run:${run[0]!.id}`, items: run });
+    run = undefined;
   };
   for (const item of items) {
     if (item.kind === "tool" && outcomes.has(`approval:${item.id}`)) continue;
@@ -55,13 +62,13 @@ function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnc
       flush();
       blocks.push({ type: "unread", key: "unread" });
     }
-    if (item.kind === "tool") {
-      (tools ??= []).push(item);
+    if (item.kind === "trigger") scheduleLabel = item.scheduleName;
+    if (item.kind === "user") scheduleLabel = undefined;
+    if (isRunItem(item)) {
+      (run ??= []).push(item);
       continue;
     }
     flush();
-    if (item.kind === "trigger") scheduleLabel = item.scheduleName;
-    if (item.kind === "user") scheduleLabel = undefined;
     blocks.push({
       type: "item",
       key: item.id,
@@ -72,6 +79,17 @@ function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnc
   }
   flush();
   return blocks;
+}
+
+function Divider({ children, tone = "muted" }: { children: ReactNode; tone?: "muted" | "accent" }) {
+  const line = tone === "accent" ? "bg-line-accent" : "bg-line-muted";
+  return (
+    <div className={`flex items-center gap-3 text-xs font-semibold ${tone === "accent" ? "text-fg-accent" : "text-fg-muted"}`}>
+      <span className={`h-px flex-1 ${line}`} aria-hidden />
+      {children}
+      <span className={`h-px flex-1 ${line}`} aria-hidden />
+    </div>
+  );
 }
 
 export function Timeline(props: TimelineProps) {
@@ -138,50 +156,55 @@ export function Timeline(props: TimelineProps) {
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div ref={scroller} onScroll={measure} className="h-full overflow-y-auto scrollbar-thin" role="log" aria-live="polite" aria-relevant="additions">
+      <div ref={scroller} onScroll={measure} className="h-full overflow-y-auto" role="log" aria-live="polite" aria-relevant="additions">
         {isEmpty ? (
           props.empty
         ) : (
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 pt-6 pb-8 sm:px-6">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-4 pt-6 pb-8 md:px-6">
             {blocks.map((block) => {
               switch (block.type) {
                 case "day":
-                  return (
-                    <div key={block.key} className="flex items-center gap-3 text-[11px] font-medium tracking-wide text-zinc-400 uppercase">
-                      <div className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
-                      {block.label}
-                      <div className="h-px flex-1 bg-zinc-200 dark:bg-zinc-800" />
-                    </div>
-                  );
+                  return <Divider key={block.key}>{block.label}</Divider>;
                 case "unread":
                   return (
-                    <div key={block.key} ref={unreadRef} className="flex items-center gap-3 text-[11px] font-semibold tracking-wide text-violet-600 uppercase dark:text-violet-400">
-                      <div className="h-px flex-1 bg-violet-300 dark:bg-violet-700" />
-                      New since you were away
-                      <div className="h-px flex-1 bg-violet-300 dark:bg-violet-700" />
+                    <div key={block.key} ref={unreadRef}>
+                      <Divider tone="accent">New since you were away</Divider>
                     </div>
                   );
-                case "tools":
+                case "run":
                   return (
-                    <ul key={block.key} className="ml-11 rounded-xl border border-dashed border-zinc-200 bg-white/60 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-900/40">
-                      {block.items.map((tool) => (
-                        <ToolRow key={tool.id} item={tool} onOpenSchedule={props.onOpenSchedule} onOpenBackground={props.onOpenBackground} />
-                      ))}
-                    </ul>
+                    <div key={block.key} className="timeline-run">
+                      {block.items.map((entry) =>
+                        entry.kind === "tool" ? (
+                          <ToolRow key={entry.id} item={entry} onOpenSchedule={props.onOpenSchedule} onOpenBackground={props.onOpenBackground} />
+                        ) : entry.kind === "trigger" ? (
+                          <TriggerRow key={entry.id} item={entry} timeZone={timeZone} />
+                        ) : (
+                          <NoticeLine key={entry.id} item={entry} />
+                        ),
+                      )}
+                    </div>
                   );
                 case "item": {
                   const item = block.item;
-                  return (
-                    <Fragment key={block.key}>
-                      {item.kind === "user" && <UserBubble text={item.text} at={item.at} timeZone={timeZone} />}
-                      {item.kind === "assistant" && <AssistantMessage item={item} timeZone={timeZone} scheduleLabel={block.scheduleLabel} />}
-                      {item.kind === "trigger" && <TriggerPill item={item} timeZone={timeZone} />}
-                      {item.kind === "notice" && <NoticeLine item={item} />}
-                      {item.kind === "approval" && (
-                        <ApprovalCard item={item} outcome={block.outcome} timeZone={timeZone} onDecide={(decision, feedback) => props.onDecide(item.id, decision, feedback)} />
-                      )}
-                    </Fragment>
-                  );
+                  switch (item.kind) {
+                    case "user":
+                      return <UserBubble key={block.key} text={item.text} at={item.at} timeZone={timeZone} />;
+                    case "assistant":
+                      return <AssistantMessage key={block.key} item={item} timeZone={timeZone} scheduleLabel={block.scheduleLabel} />;
+                    case "notice":
+                      return <NoticeLine key={block.key} item={item} />;
+                    case "approval":
+                      return (
+                        <ApprovalCard
+                          key={block.key}
+                          item={item}
+                          outcome={block.outcome}
+                          timeZone={timeZone}
+                          onDecide={(decision, feedback) => props.onDecide(item.id, decision, feedback)}
+                        />
+                      );
+                  }
                 }
               }
             })}
@@ -199,12 +222,8 @@ export function Timeline(props: TimelineProps) {
         )}
       </div>
       {!atBottom && !isEmpty && (
-        <button
-          type="button"
-          onClick={jump}
-          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 shadow-md ring-1 ring-zinc-200 hover:bg-zinc-50 dark:bg-zinc-800 dark:text-zinc-200 dark:ring-zinc-700"
-        >
-          <ArrowDown className="size-3.5" aria-hidden />
+        <button type="button" onClick={jump} className="btn btn-sm absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full shadow-lg">
+          <ArrowDownIcon />
           Jump to latest
         </button>
       )}

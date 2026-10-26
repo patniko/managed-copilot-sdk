@@ -74,6 +74,9 @@ as you.
 
 For UI work, `pnpm --filter @managed-copilot/demo-assistant dev` restarts the server on changes and
 `pnpm --filter @managed-copilot/demo-assistant dev:web` serves the UI with hot reload on http://localhost:7491.
+Open http://localhost:7491/?preview to work on the UI without the platform: a development-only preview replaces the
+API and event stream with sample data (labeled **Preview data** in the header, whose menu switches between every UI
+state), and production builds leave it out.
 
 ### Configuration
 
@@ -159,7 +162,7 @@ explanation describes. Without it, the reminder and offline steps stop with a me
 ```mermaid
 flowchart LR
   subgraph Browser
-    UI["Web UI<br/>React + Tailwind"]
+    UI["Web UI<br/>React + GitHub theme"]
   end
   subgraph Server["Assistant server (this demo)"]
     API["HTTP API + SSE"]
@@ -241,7 +244,7 @@ logs. Google tokens are sealed with AES-256-GCM and bound to their purpose.
 | [`src/server/schedules.ts`](src/server/schedules.ts) | `managed.schedules` for the side panel |
 | [`src/server/background.ts`](src/server/background.ts) | Background work status, one-click turn on and off (`/v1/credentials/background`) |
 | [`src/server/tools/`](src/server/tools) | Tools, Google OAuth and REST clients, the demo workspace, free-time search |
-| [`src/web/`](src/web) | The web UI |
+| [`src/web/`](src/web) | The web UI, styled with [`@managed-copilot/github-theme`](../../packages/github-theme) (Primer tokens, components, and Octicons); `src/web/src/dev/` is the development-only preview |
 | [`scripts/happy-path.ts`](scripts/happy-path.ts) | The automated journey and screenshot capture |
 | [`test/`](test) | Unit tests (`pnpm --filter @managed-copilot/demo-assistant test`) |
 

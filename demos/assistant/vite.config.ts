@@ -13,6 +13,7 @@ export default defineConfig({
     outDir: fileURLToPath(new URL("./dist/web", import.meta.url)),
     emptyOutDir: true,
     sourcemap: true,
+    chunkSizeWarningLimit: 1500,
   },
   server: {
     port: Number(process.env.ASSISTANT_WEB_PORT ?? 7491),

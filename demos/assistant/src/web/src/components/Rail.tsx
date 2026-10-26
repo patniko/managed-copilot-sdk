@@ -1,31 +1,32 @@
 import {
-  Bell,
-  CalendarDays,
-  Check,
-  CircleAlert,
-  Copy,
-  Ellipsis,
-  LoaderCircle,
-  Mail,
-  MapPin,
-  Pause,
-  Play,
-  Plus,
-  Power,
-  Repeat,
-  RotateCcw,
-  Satellite,
-  ShieldAlert,
-  ShieldCheck,
-  Terminal,
-  Trash,
-  Unplug,
-  Zap,
-} from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+  AlertIcon,
+  BellIcon,
+  BroadcastIcon,
+  CheckCircleFillIcon,
+  CheckIcon,
+  CloudOfflineIcon,
+  CopyIcon,
+  InfoIcon,
+  IterationsIcon,
+  KebabHorizontalIcon,
+  LocationIcon,
+  MailIcon,
+  PauseIcon,
+  PlayIcon,
+  PlusIcon,
+  ShieldCheckIcon,
+  ShieldIcon,
+  TerminalIcon,
+  TrashIcon,
+  UndoIcon,
+  XCircleFillIcon,
+  ZapIcon,
+} from "@primer/octicons-react";
+import { useId, useState, type ReactNode } from "react";
 import type { AccountView, AgendaView, BackgroundView, ConnectionsView, OfflineView, PlatformStatus, ScheduleView } from "../../../shared/protocol";
 import { dayLabel, fullDate, relativeTime, timeOf, timeRange, whenLabel } from "../format";
 import type { AssistantActions } from "../useAssistant";
+import { cx, Menu, Spinner } from "./ui";
 
 /** Shown on scheduling controls that need background work. */
 export const NEEDS_BACKGROUND = "Turn on background work first, so this can run while you're away";
@@ -47,21 +48,29 @@ export function schedulingBlockedReason(background?: BackgroundView): string | u
   }
 }
 
-function Card({ title, icon, badge, children }: { title: string; icon: ReactNode; badge?: ReactNode; children: ReactNode }) {
+/** A sidebar section: a small muted heading (like NavList group headings), an optional counter, and its content. */
+function Section({ title, counter, trailing, children }: { title: string; counter?: number; trailing?: ReactNode; children: ReactNode }) {
+  const id = useId();
   return (
-    <section className="card p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <span className="text-zinc-400">{icon}</span>
-        <h2 className="text-[13px] font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{title}</h2>
-        {badge && <div className="ml-auto">{badge}</div>}
+    <section aria-labelledby={id}>
+      <div className="mb-2 flex min-h-5 items-center gap-2 px-1">
+        <h2 id={id} className="text-xs font-semibold text-fg-muted">
+          {title}
+        </h2>
+        {counter !== undefined && <span className="Counter">{counter}</span>}
+        {trailing && <div className="ml-auto flex items-center gap-1">{trailing}</div>}
       </div>
       {children}
     </section>
   );
 }
 
-function DemoBadge() {
-  return <span className="chip bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-300">Demo data</span>;
+function DemoLabel() {
+  return <span className="Label Label--attention">Demo data</span>;
+}
+
+function InlineCode({ children }: { children: ReactNode }) {
+  return <code className="rounded-md bg-neutral-muted px-1 py-0.5 font-mono text-xs">{children}</code>;
 }
 
 export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; timeZone: string; demo: boolean }) {
@@ -77,41 +86,51 @@ export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; tim
     else groups.push({ label, events: [event] });
   }
   return (
-    <Card title="Up next" icon={<CalendarDays className="size-4" />} badge={demo ? <DemoBadge /> : undefined}>
+    <Section title="Up next" trailing={demo ? <DemoLabel /> : undefined}>
       {!agenda ? (
-        <div className="space-y-2">
-          <div className="h-3 w-3/4 animate-pulse rounded-full bg-zinc-200 dark:bg-zinc-800" />
-          <div className="h-3 w-1/2 animate-pulse rounded-full bg-zinc-200 dark:bg-zinc-800" />
+        <div className="Box p-3" aria-busy="true" aria-label="Loading your calendar">
+          <span className="SkeletonText w-3/4" />
+          <span className="SkeletonText w-1/2" />
         </div>
       ) : agenda.error ? (
-        <p className="text-sm text-red-600 dark:text-red-400">{agenda.error}</p>
+        <div className="flash flash-sm flash-error">
+          <XCircleFillIcon />
+          <div className="flash-content">{agenda.error}</div>
+        </div>
       ) : upcoming.length === 0 ? (
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">Nothing on your calendar this week.</p>
+        <div className="Box p-3 text-fg-muted">Nothing on your calendar this week.</div>
       ) : (
-        <div className="space-y-3">
-          {groups.map((group) => (
+        <div className="Box overflow-hidden">
+          {groups.map((group, index) => (
             <div key={group.label}>
-              <div className="mb-1 px-2 text-[11px] font-semibold tracking-wide text-zinc-400 uppercase">{group.label === "Today" ? `Today · ${fullDate(new Date(), timeZone)}` : group.label}</div>
-              <ol className="space-y-0.5">
+              <div className={cx("bg-canvas-muted px-3 py-1.5 text-xs font-semibold text-fg-muted", index > 0 && "border-t border-line-muted")}>
+                {group.label === "Today" ? `Today · ${fullDate(new Date(), timeZone)}` : group.label}
+              </div>
+              <ol>
                 {group.events.map((event) => {
-                  const live = Date.parse(event.start) <= now;
+                  const live = !event.allDay && Date.parse(event.start) <= now;
                   return (
-                    <li key={event.id} className={`flex gap-3 rounded-lg px-2 py-1.5 ${event.id === nextId ? "bg-violet-50 dark:bg-violet-500/10" : ""}`}>
-                      <div className="w-16 shrink-0 text-right text-xs leading-5 text-zinc-500 tabular-nums dark:text-zinc-400">{event.allDay ? "All day" : timeOf(event.start, timeZone)}</div>
+                    <li key={event.id} className="flex gap-3 border-t border-line-muted px-3 py-2">
+                      <div className="w-16 shrink-0 text-xs leading-5 text-fg-muted tabular-nums">{event.allDay ? "All day" : timeOf(event.start, timeZone)}</div>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
-                          {event.title}
-                          {live && !event.allDay && <span className="ml-1.5 chip bg-emerald-100 align-middle text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300">Now</span>}
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate font-semibold" title={event.title}>
+                            {event.title}
+                          </span>
+                          {live && <span className="Label Label--success shrink-0">Now</span>}
+                          {event.id === nextId && <span className="Label Label--accent shrink-0">Next</span>}
                         </div>
-                        <div className="flex items-center gap-1 truncate text-xs text-zinc-500 dark:text-zinc-400">
-                          {!event.allDay && timeRange(event.start, event.end, timeZone)}
-                          {event.location && (
-                            <>
-                              <MapPin className="ml-1 size-3 shrink-0" aria-hidden />
-                              <span className="truncate">{event.location}</span>
-                            </>
-                          )}
-                        </div>
+                        {(!event.allDay || event.location) && (
+                          <div className="flex min-w-0 items-center gap-1 text-xs text-fg-muted">
+                            {!event.allDay && <span className="shrink-0 tabular-nums">{timeRange(event.start, event.end, timeZone)}</span>}
+                            {event.location && (
+                              <>
+                                <LocationIcon size={12} className={cx("shrink-0", !event.allDay && "ml-1")} />
+                                <span className="truncate">{event.location}</span>
+                              </>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </li>
                   );
@@ -121,53 +140,33 @@ export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; tim
           ))}
         </div>
       )}
-    </Card>
+    </Section>
   );
 }
 
 function ScheduleMenu({ schedule, actions, blockedReason }: { schedule: ScheduleView; actions: AssistantActions; blockedReason?: string }) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!ref.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
   return (
-    <div ref={ref} className="relative">
-      <button type="button" className="btn-ghost px-1.5 py-1" onClick={() => setOpen((value) => !value)} aria-label={`More actions for ${schedule.name}`}>
-        <Ellipsis className="size-4" aria-hidden />
-      </button>
-      {open && (
-        <div className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-xl bg-white py-1 text-sm shadow-lg ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-700">
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-zinc-800"
-            disabled={blockedReason !== undefined}
-            title={blockedReason}
-            onClick={() => {
-              setOpen(false);
-              void actions.runSchedule(schedule.id);
-            }}
-          >
-            <Zap className="size-3.5" aria-hidden /> Run now
-          </button>
-          <button
-            type="button"
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
-            onClick={() => {
-              setOpen(false);
-              void actions.deleteSchedule(schedule.id);
-            }}
-          >
-            <Trash className="size-3.5" aria-hidden /> Delete
-          </button>
-        </div>
+    <Menu
+      label={`Actions for ${schedule.name}`}
+      width="w-48"
+      items={[
+        {
+          key: "run",
+          label: "Run now",
+          icon: ZapIcon,
+          disabled: blockedReason !== undefined,
+          title: blockedReason,
+          onSelect: () => void actions.runSchedule(schedule.id),
+        },
+        "divider",
+        { key: "delete", label: "Delete", icon: TrashIcon, danger: true, onSelect: () => void actions.deleteSchedule(schedule.id) },
+      ]}
+      renderTrigger={(trigger) => (
+        <button type="button" className="btn-octicon" aria-label={`More actions for ${schedule.name}`} {...trigger}>
+          <KebabHorizontalIcon />
+        </button>
       )}
-    </div>
+    />
   );
 }
 
@@ -194,41 +193,39 @@ export function BackgroundOffNotice({ background, account, ready, highlight, act
       data-testid="background"
       data-state="off"
       aria-label="Background work"
-      className={`rounded-2xl bg-amber-50 p-4 ring-1 transition-shadow dark:bg-amber-500/10 ${
-        highlight ? "ring-2 ring-violet-400 dark:ring-violet-400" : "ring-amber-200/80 dark:ring-amber-500/25"
-      }`}
+      className={cx("flash flash-warn flex-col items-stretch gap-3 p-4 transition-shadow duration-200", highlight && "ring-2 ring-line-accent")}
     >
-      <div className="flex items-start gap-2.5">
-        <ShieldAlert className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
-        <div className="min-w-0 text-xs text-amber-950 dark:text-amber-100">
-          <div className="text-[13px] font-semibold">{stopped ? "Background work stopped" : "Background work is off"}</div>
-          <p className="mt-0.5 opacity-90">
+      <div className="flex items-start gap-2">
+        <ShieldIcon className="mt-0.5 text-fg-attention" />
+        <div className="min-w-0">
+          <div className="flash-title">{stopped ? "Background work stopped" : "Background work is off"}</div>
+          <p className="mt-0.5">
             {stopped ? `${background.reason} ` : ""}
             Reminders and automations can't run while this tab is closed until you turn it on.
           </p>
         </div>
       </div>
-      <p className="mt-2.5 text-[11px] leading-relaxed text-zinc-600 dark:text-zinc-300" id="background-consent">
+      <p className="text-xs text-fg-muted" id="background-consent">
         Turning it on lets Managed Copilot keep a sealed copy of your GitHub sign-in{login ? ` (@${login})` : ""} on this deployment, so your scheduled work runs
         as you while you're away. It covers all your scheduled work on this deployment, and you can turn it off anytime in Settings.
       </p>
       <button
         type="button"
-        className="btn-primary mt-2.5 w-full"
+        className="btn btn-primary btn-block"
         aria-describedby="background-consent"
         disabled={!ready || busy !== undefined}
         title={ready ? undefined : "Managed Copilot isn't connected"}
         onClick={() => void act("enable", () => actions.enableBackground())}
       >
-        {busy === "enable" ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <Power className="size-4" aria-hidden />}
+        {busy === "enable" ? <Spinner /> : <ShieldCheckIcon />}
         {stopped ? "Turn background work back on" : "Turn on background work"}
       </button>
-      <div className="mt-2.5 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-        <Terminal className="size-3.5 shrink-0" aria-hidden />
+      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-fg-muted">
+        <TerminalIcon size={12} />
         <span>Prefer a terminal? Run</span>
         <button
           type="button"
-          className="inline-flex items-center gap-1 rounded bg-white/80 px-1.5 py-0.5 font-mono text-[11px] text-zinc-700 ring-1 ring-zinc-200 hover:bg-white dark:bg-zinc-900/60 dark:text-zinc-200 dark:ring-zinc-700"
+          className="inline-flex items-center gap-1 rounded-md border border-line bg-canvas px-1.5 py-0.5 font-mono text-xs text-fg hover:bg-canvas-muted"
           title="Copy the command"
           onClick={() => {
             void navigator.clipboard?.writeText(LOGIN_COMMAND).then(() => {
@@ -238,15 +235,10 @@ export function BackgroundOffNotice({ background, account, ready, highlight, act
           }}
         >
           {LOGIN_COMMAND}
-          {copied ? <Check className="size-3 text-emerald-500" aria-label="Copied" /> : <Copy className="size-3" aria-hidden />}
+          {copied ? <CheckIcon size={12} className="text-fg-success" aria-label="Copied" /> : <CopyIcon size={12} className="text-fg-muted" />}
         </button>
         <span>then</span>
-        <button
-          type="button"
-          className="font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
-          disabled={!ready || busy !== undefined}
-          onClick={() => void act("check", () => actions.checkBackground())}
-        >
+        <button type="button" className="Link font-semibold disabled:opacity-50" disabled={!ready || busy !== undefined} onClick={() => void act("check", () => actions.checkBackground())}>
           {busy === "check" ? "checking…" : "check again"}
         </button>
       </div>
@@ -257,10 +249,11 @@ export function BackgroundOffNotice({ background, account, ready, highlight, act
 function BackgroundStatusLine({ background, ready, actions }: { background?: BackgroundView; ready: boolean; actions: AssistantActions }) {
   const [checking, setChecking] = useState(false);
   if (!ready) return null;
+  const footer = "Box-footer flex items-center gap-1.5 px-3 py-2 text-xs text-fg-muted";
   if (background?.state === "on") {
     return (
-      <div data-testid="background" data-state="on" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-        <ShieldCheck className="size-3.5 shrink-0 text-emerald-500" aria-hidden />
+      <div data-testid="background" data-state="on" className={footer}>
+        <ShieldCheckIcon size={12} className="shrink-0 text-fg-success" />
         <span>
           Background work is on{background.login ? ` · runs as @${background.login}` : ""} while you're away
         </span>
@@ -269,30 +262,30 @@ function BackgroundStatusLine({ background, ready, actions }: { background?: Bac
   }
   if (background?.state === "unavailable") {
     return (
-      <div data-testid="background" data-state="unavailable" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-        <CircleAlert className="size-3.5 shrink-0 text-zinc-400" aria-hidden />
+      <div data-testid="background" data-state="unavailable" className={footer}>
+        <InfoIcon size={12} className="shrink-0" />
         <span>This deployment can't run work while you're away, so reminders and automations aren't available.</span>
       </div>
     );
   }
   if (background === undefined || background.state === "unknown") {
     return (
-      <div data-testid="background" data-state="unknown" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-        <LoaderCircle className="size-3.5 shrink-0 animate-spin text-zinc-400" aria-hidden />
+      <div data-testid="background" data-state="unknown" className={footer}>
+        <Spinner size={12} />
         <span>Checking background work…</span>
       </div>
     );
   }
   if (background?.state === "error") {
     return (
-      <div data-testid="background" data-state="error" className="mt-3 flex items-center gap-1.5 border-t border-zinc-100 pt-2.5 text-[11px] text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
-        <CircleAlert className="size-3.5 shrink-0 text-amber-500" aria-hidden />
+      <div data-testid="background" data-state="error" className={footer}>
+        <AlertIcon size={12} className="shrink-0 text-fg-attention" />
         <span className="min-w-0 flex-1 truncate" title={background.error}>
           Couldn't check background work
         </span>
         <button
           type="button"
-          className="font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
+          className="Link font-semibold disabled:opacity-50"
           disabled={checking}
           onClick={async () => {
             setChecking(true);
@@ -309,6 +302,36 @@ function BackgroundStatusLine({ background, ready, actions }: { background?: Bac
     );
   }
   return null;
+}
+
+function ScheduleMeta({ schedule, timeZone }: { schedule: ScheduleView; timeZone: string }) {
+  const paused = schedule.state === "paused";
+  const failed = schedule.lastRun?.status === "failed" && !(paused && schedule.pausedReason);
+  const status = paused ? (schedule.pausedReason ?? "") : schedule.nextRunAt ? `Next: ${whenLabel(schedule.nextRunAt, timeZone)}` : schedule.lastRun ? "Finished" : "Waiting to run";
+  const notes: string[] = [];
+  if (!failed && schedule.lastRun?.completedAt) notes.push(`Last ran ${relativeTime(schedule.lastRun.completedAt)}`);
+  if (schedule.createdBy === "agent") notes.push("Set by your assistant");
+  return (
+    <>
+      <div className="mt-1 flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
+        {paused ? <span className="Label Label--attention shrink-0">Paused</span> : <span className="Label Label--success shrink-0">Active</span>}
+        {status && (
+          <span className="truncate" title={status}>
+            {status}
+          </span>
+        )}
+      </div>
+      {failed && (
+        <div className="mt-1 flex min-w-0 items-center gap-1 text-xs text-fg-danger">
+          <XCircleFillIcon size={12} className="shrink-0" />
+          <span className="truncate" title={schedule.lastRun?.reason}>
+            Last run failed{schedule.lastRun?.reason ? `: ${schedule.lastRun.reason}` : ""}
+          </span>
+        </div>
+      )}
+      {notes.length > 0 && <div className="mt-0.5 truncate text-xs text-fg-muted">{notes.join(" · ")}</div>}
+    </>
+  );
 }
 
 export function AutomationsCard(props: {
@@ -334,126 +357,126 @@ export function AutomationsCard(props: {
   };
   const briefingBlocked = props.error ?? (props.ready ? scheduleBlocked : "Managed Copilot isn't connected");
   return (
-    <Card title="Reminders & automations" icon={<Bell className="size-4" />} badge={schedules.length ? <span className="text-xs text-zinc-400">{schedules.length}</span> : undefined}>
+    <Section title="Reminders & automations" counter={schedules.length > 0 ? schedules.length : undefined}>
       {props.error && (
-        <div className="mb-3 flex items-start gap-2 rounded-lg bg-zinc-50 px-2.5 py-2 text-xs text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300">
-          <CircleAlert className="mt-px size-3.5 shrink-0" aria-hidden />
-          {props.error}
+        <div className="flash flash-sm flash-warn mb-2">
+          <AlertIcon />
+          <div className="flash-content">{props.error}</div>
         </div>
       )}
-      {schedules.length === 0 ? (
-        <div className="text-sm text-zinc-500 dark:text-zinc-400">
-          <p>
-            {backgroundOff
-              ? "Once background work is on, ask me to remind you about something or to do a task on a schedule."
-              : "Ask me to remind you about something, or to do a task on a schedule. They run on Managed Copilot even when this tab is closed."}
-          </p>
-          <button
-            type="button"
-            className="btn-secondary mt-3 w-full"
-            disabled={briefingBlocked !== undefined || busy === "briefing"}
-            title={briefingBlocked}
-            onClick={() => void act("briefing", () => actions.addBriefing())}
-          >
-            {busy === "briefing" ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <Plus className="size-4" aria-hidden />}
-            Weekday morning briefing
-          </button>
-        </div>
-      ) : (
-        <ul className="-mx-1 space-y-1">
-          {schedules.map((schedule) => {
-            const Icon = schedule.oneShot ? Bell : Repeat;
-            const paused = schedule.state === "paused";
-            const failed = schedule.lastRun?.status === "failed";
-            const resumeBlocked = paused ? scheduleBlocked : undefined;
-            return (
-              <li
-                key={schedule.id}
-                id={`schedule-${schedule.id}`}
-                className={`group flex items-start gap-2.5 rounded-xl px-2 py-2 transition-colors ${props.highlight === schedule.id ? "bg-violet-50 ring-1 ring-violet-200 dark:bg-violet-500/10 dark:ring-violet-500/30" : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50"}`}
-              >
-                <span className={`mt-0.5 grid size-7 shrink-0 place-items-center rounded-lg ${paused ? "bg-zinc-100 text-zinc-400 dark:bg-zinc-800" : "bg-violet-100 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300"}`}>
-                  <Icon className="size-3.5" aria-hidden />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-sm font-medium ${paused ? "text-zinc-400 line-through decoration-zinc-300" : "text-zinc-900 dark:text-zinc-100"}`} title={schedule.prompt}>
-                    {schedule.name}
+      <div className="Box">
+        {schedules.length === 0 ? (
+          <div className="p-3 text-fg-muted">
+            <p>
+              {backgroundOff
+                ? "Once background work is on, ask me to remind you about something or to do a task on a schedule."
+                : "Ask me to remind you about something, or to do a task on a schedule. They run on Managed Copilot even when this tab is closed."}
+            </p>
+            <button
+              type="button"
+              className="btn btn-sm btn-block mt-3"
+              disabled={briefingBlocked !== undefined || busy === "briefing"}
+              title={briefingBlocked}
+              onClick={() => void act("briefing", () => actions.addBriefing())}
+            >
+              {busy === "briefing" ? <Spinner /> : <PlusIcon />}
+              Weekday morning briefing
+            </button>
+          </div>
+        ) : (
+          <ul>
+            {schedules.map((schedule) => {
+              const ScheduleIcon = schedule.oneShot ? BellIcon : IterationsIcon;
+              const paused = schedule.state === "paused";
+              const resumeBlocked = paused ? scheduleBlocked : undefined;
+              return (
+                <li
+                  key={schedule.id}
+                  id={`schedule-${schedule.id}`}
+                  className={cx("Box-row flex items-start gap-3 px-3 py-2.5 transition-colors duration-200", props.highlight === schedule.id && "Box-row--selected")}
+                >
+                  <ScheduleIcon className={cx("mt-0.5", paused ? "text-fg-disabled" : "text-fg-muted")} />
+                  <div className="min-w-0 flex-1">
+                    <div className={cx("truncate font-semibold", paused && "text-fg-muted")} title={schedule.prompt}>
+                      {schedule.name}
+                    </div>
+                    <div className="truncate text-xs text-fg-muted">{schedule.cadence}</div>
+                    <ScheduleMeta schedule={schedule} timeZone={props.timeZone} />
                   </div>
-                  <div className="truncate text-xs text-zinc-500 dark:text-zinc-400">{schedule.cadence}</div>
-                  <div className="truncate text-[11px] text-zinc-400" title={paused ? schedule.pausedReason : undefined}>
-                    {paused ? (schedule.pausedReason ? `Paused · ${schedule.pausedReason}` : "Paused") : schedule.nextRunAt ? `Next: ${whenLabel(schedule.nextRunAt, props.timeZone)}` : schedule.lastRun ? "Finished" : "Waiting to run"}
-                    {failed && !(paused && schedule.pausedReason) && <span className="ml-1 text-red-500">· Last run failed{schedule.lastRun?.reason ? `: ${schedule.lastRun.reason}` : ""}</span>}
-                    {!failed && schedule.lastRun?.completedAt && <span> · Last ran {relativeTime(schedule.lastRun.completedAt)}</span>}
-                    {schedule.createdBy === "agent" && <span> · Set by your assistant</span>}
+                  <div className="-mr-1 flex shrink-0 items-center">
+                    {busy === schedule.id ? (
+                      <span className="grid size-7 place-items-center text-fg-muted">
+                        <Spinner />
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn-octicon"
+                        disabled={!props.ready || resumeBlocked !== undefined}
+                        onClick={() => void act(schedule.id, () => (paused ? actions.resumeSchedule(schedule.id) : actions.pauseSchedule(schedule.id)))}
+                        aria-label={paused ? `Resume ${schedule.name}` : `Pause ${schedule.name}`}
+                        title={resumeBlocked ?? (paused ? "Resume" : "Pause")}
+                      >
+                        {paused ? <PlayIcon /> : <PauseIcon />}
+                      </button>
+                    )}
+                    <ScheduleMenu schedule={schedule} actions={actions} blockedReason={scheduleBlocked} />
                   </div>
-                </div>
-                <div className="flex shrink-0 items-center">
-                  {busy === schedule.id ? (
-                    <LoaderCircle className="m-1.5 size-4 animate-spin text-zinc-400" aria-hidden />
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn-ghost px-1.5 py-1"
-                      disabled={!props.ready || resumeBlocked !== undefined}
-                      onClick={() => void act(schedule.id, () => (paused ? actions.resumeSchedule(schedule.id) : actions.pauseSchedule(schedule.id)))}
-                      aria-label={paused ? `Resume ${schedule.name}` : `Pause ${schedule.name}`}
-                      title={resumeBlocked ?? (paused ? "Resume" : "Pause")}
-                    >
-                      {paused ? <Play className="size-4" aria-hidden /> : <Pause className="size-4" aria-hidden />}
-                    </button>
-                  )}
-                  <ScheduleMenu schedule={schedule} actions={actions} blockedReason={scheduleBlocked} />
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <BackgroundStatusLine background={props.background} ready={props.ready} actions={actions} />
-    </Card>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        <BackgroundStatusLine background={props.background} ready={props.ready} actions={actions} />
+      </div>
+    </Section>
+  );
+}
+
+function StatusItem({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <li className="flex items-start gap-2">
+      <span className="mt-0.5 flex shrink-0">{icon}</span>
+      <span>{children}</span>
+    </li>
   );
 }
 
 export function AwayCard({ offline, platform, background }: { offline?: OfflineView; platform?: PlatformStatus; background?: BackgroundView }) {
   const ready = platform?.state === "ready";
   return (
-    <Card title="Works while you're away" icon={<Satellite className="size-4" />}>
-      <p className="text-sm text-zinc-600 dark:text-zinc-400">
-        Close this tab and reminders and briefings keep running on Managed Copilot. When they need your mail or calendar, the platform calls this app's
-        signed webhook, so your Google credentials never leave it.
-      </p>
-      <ul className="mt-3 space-y-1.5 text-xs">
-        {background && (background.state === "on" || background.state === "off") && (
-          <li className="flex items-center gap-2">
-            {background.state === "on" ? <Check className="size-3.5 text-emerald-500" aria-hidden /> : <CircleAlert className="size-3.5 text-amber-500" aria-hidden />}
-            <span className="text-zinc-600 dark:text-zinc-300">{background.state === "on" ? "Background work on" : "Background work off (reminders can't run while you're away)"}</span>
-          </li>
-        )}
-        <li className="flex items-center gap-2">
-          {offline?.webhookConfigured ? <Check className="size-3.5 text-emerald-500" aria-hidden /> : <CircleAlert className="size-3.5 text-amber-500" aria-hidden />}
-          <span className="text-zinc-600 dark:text-zinc-300">{offline?.webhookConfigured ? "Webhook configured" : "Webhook secret not set (falls back to polling)"}</span>
-        </li>
-        <li className="flex items-center gap-2">
-          {ready ? <Check className="size-3.5 text-emerald-500" aria-hidden /> : <Unplug className="size-3.5 text-zinc-400" aria-hidden />}
-          <span className="text-zinc-600 dark:text-zinc-300">{ready ? "Platform connected" : "Platform not connected"}</span>
-        </li>
-        {offline && offline.handledOffline > 0 && (
-          <li className="flex items-center gap-2">
-            <Satellite className="size-3.5 text-sky-500" aria-hidden />
-            <span className="text-zinc-600 dark:text-zinc-300">
+    <Section title="Works while you're away">
+      <div className="Box p-3">
+        <p className="text-fg-muted">
+          Close this tab and reminders and briefings keep running on Managed Copilot. When they need your mail or calendar, the platform calls this app's signed
+          webhook, so your Google credentials never leave it.
+        </p>
+        <ul className="mt-3 space-y-1.5 text-xs">
+          {background && (background.state === "on" || background.state === "off") && (
+            <StatusItem icon={background.state === "on" ? <CheckCircleFillIcon size={12} className="text-fg-success" /> : <AlertIcon size={12} className="text-fg-attention" />}>
+              {background.state === "on" ? "Background work on" : "Background work off (reminders can't run while you're away)"}
+            </StatusItem>
+          )}
+          <StatusItem icon={offline?.webhookConfigured ? <CheckCircleFillIcon size={12} className="text-fg-success" /> : <AlertIcon size={12} className="text-fg-attention" />}>
+            {offline?.webhookConfigured ? "Webhook configured" : "Webhook secret not set (falls back to polling)"}
+          </StatusItem>
+          <StatusItem icon={ready ? <CheckCircleFillIcon size={12} className="text-fg-success" /> : <CloudOfflineIcon size={12} className="text-fg-muted" />}>
+            {ready ? "Platform connected" : "Platform not connected"}
+          </StatusItem>
+          {offline && offline.handledOffline > 0 && (
+            <StatusItem icon={<BroadcastIcon size={12} className="text-fg-accent" />}>
               {offline.handledOffline} tool call{offline.handledOffline === 1 ? "" : "s"} answered while no tab was open
               {offline.lastWebhookAt ? ` · last ${relativeTime(offline.lastWebhookAt)}` : ""}
-            </span>
-          </li>
-        )}
-        {offline && offline.waitingApprovals > 0 && (
-          <li className="flex items-center gap-2">
-            <ShieldCheck className="size-3.5 text-violet-500" aria-hidden />
-            <span className="text-zinc-600 dark:text-zinc-300">{offline.waitingApprovals} approval{offline.waitingApprovals === 1 ? "" : "s"} waiting for you</span>
-          </li>
-        )}
-      </ul>
-    </Card>
+            </StatusItem>
+          )}
+          {offline && offline.waitingApprovals > 0 && (
+            <StatusItem icon={<ShieldIcon size={12} className="text-fg-attention" />}>
+              {offline.waitingApprovals} approval{offline.waitingApprovals === 1 ? "" : "s"} waiting for you
+            </StatusItem>
+          )}
+        </ul>
+      </div>
+    </Section>
   );
 }
 
@@ -469,73 +492,102 @@ export function ConnectionsCard({ connections, ready, actions }: { connections?:
     }
   };
   return (
-    <Card title="Mail & calendar" icon={<Mail className="size-4" />}>
+    <Section title="Mail & calendar">
       {google?.connected ? (
-        <div>
-          <div className="flex items-center gap-2.5">
+        <div className="Box">
+          <div className="flex items-center gap-3 p-3">
             <GoogleMark />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{google.email ?? "Google account"}</div>
-              <div className={`text-xs ${google.status === "needs_reconnect" ? "text-amber-600 dark:text-amber-400" : "text-emerald-600 dark:text-emerald-400"}`}>
-                {google.status === "needs_reconnect" ? "Access expired · reconnect" : "Gmail and Google Calendar connected"}
-              </div>
+              <div className="truncate font-semibold">{google.email ?? "Google account"}</div>
+              {google.status === "needs_reconnect" ? (
+                <div className="flex items-center gap-1 text-xs text-fg-attention">
+                  <AlertIcon size={12} />
+                  Access expired · reconnect
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 text-xs text-fg-muted">
+                  <CheckCircleFillIcon size={12} className="text-fg-success" />
+                  Gmail and Google Calendar connected
+                </div>
+              )}
             </div>
           </div>
-          <div className="mt-3 flex gap-2">
+          <div className="Box-footer flex gap-2 px-3 py-2">
             {google.status === "needs_reconnect" && (
-              <button type="button" className="btn-primary flex-1" onClick={() => void act("connect", () => actions.connectGoogle())}>
+              <button type="button" className="btn btn-sm btn-primary flex-1" onClick={() => void act("connect", () => actions.connectGoogle())}>
                 Reconnect
               </button>
             )}
-            <button type="button" className="btn-secondary flex-1" disabled={busy === "disconnect"} onClick={() => void act("disconnect", () => actions.disconnectGoogle())}>
-              {busy === "disconnect" && <LoaderCircle className="size-4 animate-spin" aria-hidden />}
+            <button type="button" className="btn btn-sm btn-danger flex-1" disabled={busy === "disconnect"} onClick={() => void act("disconnect", () => actions.disconnectGoogle())}>
+              {busy === "disconnect" && <Spinner />}
               Disconnect
             </button>
           </div>
         </div>
       ) : (
-        <div>
-          <div className="flex items-start gap-2.5 rounded-xl bg-amber-50 px-3 py-2.5 ring-1 ring-amber-200/70 dark:bg-amber-500/10 dark:ring-amber-500/20">
-            <span className="mt-0.5 text-amber-600 dark:text-amber-400">
-              <Mail className="size-4" aria-hidden />
+        <div className="Box">
+          <div className="flex items-start gap-3 p-3">
+            <span className="grid size-8 shrink-0 place-items-center rounded-full bg-attention-muted text-fg-attention">
+              <MailIcon />
             </span>
-            <div className="min-w-0 text-xs text-amber-900 dark:text-amber-100">
+            <div className="min-w-0">
               <div className="font-semibold">Using the demo workspace</div>
-              <div className="opacity-80">A sample inbox and calendar for {connections?.demo.address ?? "you"}. Nothing is sent outside this app.</div>
+              <div className="text-xs text-fg-muted">A sample inbox and calendar for {connections?.demo.address ?? "you"}. Nothing is sent outside this app.</div>
             </div>
           </div>
-          {google?.configured ? (
-            <button type="button" className="btn-primary mt-3 w-full" disabled={!ready || busy === "connect"} onClick={() => void act("connect", () => actions.connectGoogle())}>
-              {busy === "connect" ? <LoaderCircle className="size-4 animate-spin" aria-hidden /> : <GoogleMark small />}
-              Connect Google
+          <div className="Box-footer flex flex-col gap-1 px-3 py-2">
+            {google?.configured ? (
+              <button type="button" className="btn btn-sm btn-block" disabled={!ready || busy === "connect"} onClick={() => void act("connect", () => actions.connectGoogle())}>
+                {busy === "connect" ? <Spinner /> : <GoogleMark small />}
+                Connect Google
+              </button>
+            ) : (
+              <p className="text-xs text-fg-muted">
+                To use your own Gmail and Calendar, set <InlineCode>google-client-id</InlineCode> and <InlineCode>google-client-secret</InlineCode> (see the README).
+              </p>
+            )}
+            <button type="button" className="btn btn-sm btn-invisible btn-block" disabled={!ready || busy === "reset"} onClick={() => void act("reset", () => actions.resetDemo())}>
+              {busy === "reset" ? <Spinner /> : <UndoIcon />}
+              Reset demo inbox and calendar
             </button>
-          ) : (
-            <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
-              To use your own Gmail and Calendar, set <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">google-client-id</code> and{" "}
-              <code className="rounded bg-zinc-100 px-1 dark:bg-zinc-800">google-client-secret</code> (see the README).
-            </p>
-          )}
-          <button type="button" className="btn-ghost mt-1 w-full text-xs" disabled={!ready || busy === "reset"} onClick={() => void act("reset", () => actions.resetDemo())}>
-            {busy === "reset" ? <LoaderCircle className="size-3.5 animate-spin" aria-hidden /> : <RotateCcw className="size-3.5" aria-hidden />}
-            Reset demo inbox and calendar
-          </button>
+          </div>
         </div>
       )}
-    </Card>
+    </Section>
   );
 }
 
+/** Google's "G" in its brand colors (an SVG data URI, so the colors stay inside the image). */
+const GOOGLE_G =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Cpath fill='%23EA4335' d='M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.6 13.2l7.9 6.2C12.4 13.6 17.7 9.5 24 9.5z'/%3E%3Cpath fill='%234285F4' d='M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.8c4.3-4 6.9-9.9 6.9-17.2z'/%3E%3Cpath fill='%23FBBC05' d='M10.5 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.2C1 16.4 0 20.1 0 24s1 7.6 2.6 10.8l7.9-6.2z'/%3E%3Cpath fill='%2334A853' d='M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.8c-2.1 1.4-4.8 2.3-8.5 2.3-6.3 0-11.6-4.1-13.5-9.9l-7.9 6.2C6.6 42.6 14.6 48 24 48z'/%3E%3C/svg%3E";
+
 function GoogleMark({ small }: { small?: boolean }) {
-  const size = small ? "size-4" : "size-8";
+  if (small) return <img src={GOOGLE_G} alt="" className="size-4 shrink-0" />;
   return (
-    <span className={`${size} grid shrink-0 place-items-center rounded-full bg-white ring-1 ring-zinc-200 dark:ring-zinc-700`}>
-      <svg viewBox="0 0 48 48" className={small ? "size-3" : "size-4.5"} aria-hidden>
-        <path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.6 13.2l7.9 6.2C12.4 13.6 17.7 9.5 24 9.5z" />
-        <path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.8c4.3-4 6.9-9.9 6.9-17.2z" />
-        <path fill="#FBBC05" d="M10.5 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.2C1 16.4 0 20.1 0 24s1 7.6 2.6 10.8l7.9-6.2z" />
-        <path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.8c-2.1 1.4-4.8 2.3-8.5 2.3-6.3 0-11.6-4.1-13.5-9.9l-7.9 6.2C6.6 42.6 14.6 48 24 48z" />
-      </svg>
+    <span className="avatar grid size-8 shrink-0 place-items-center bg-canvas">
+      <img src={GOOGLE_G} alt="" className="size-4" />
     </span>
+  );
+}
+
+/** The side panel before the first snapshot arrives. */
+export function RailSkeleton() {
+  return (
+    <div className="flex flex-col gap-6" aria-busy="true" aria-label="Loading your day">
+      {[3, 2, 1].map((rows, index) => (
+        <div key={index}>
+          <span className="SkeletonText mb-2 ml-1 w-24" />
+          <div className="Box space-y-3 p-3">
+            {Array.from({ length: rows }, (_, row) => (
+              <div key={row}>
+                <span className="SkeletonText w-3/4" />
+                <span className="SkeletonText w-1/2" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -555,7 +607,7 @@ export function Rail(props: {
   const ready = props.platform?.state === "ready";
   const demo = props.connections?.provider !== "google";
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-6">
       {/* While it's off, background work is the one thing here that needs the person, so it comes first. */}
       {props.background?.state === "off" && (
         <BackgroundOffNotice background={props.background} account={props.account} ready={ready} highlight={props.highlightSchedule === "background"} actions={props.actions} />
