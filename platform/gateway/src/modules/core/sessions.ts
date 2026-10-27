@@ -337,6 +337,14 @@ const INTERRUPTED_TURN =
   "This turn was interrupted because the platform lost the connection to the session's runtime (for example, during an update or restart). Send your message again to continue.";
 
 /**
+ * Whether a turn has not ended yet: it ends with its root `session.idle`. Its status alone does not say so: a root
+ * `session.error` marks it `failed` before it ends (also an error the turn goes on from, and a subagent's).
+ */
+function unfinished(turn: SessionRecord["lastTurn"]): turn is NonNullable<SessionRecord["lastTurn"]> {
+  return turn !== undefined && turn.completedAt === undefined;
+}
+
+/**
  * What a `sendAndWait` the runtime connection was lost under learns. Which turn was its own is not known here (only its
  * answer may have been lost, or another turn was the one cut), so it says what is known; the session's last turn tells
  * the rest, and the turn core ended gets its own `session.error`.
@@ -843,7 +851,7 @@ export class SessionManager implements SessionsService {
     // and a sandbox runtime cannot serve a new gateway's inference): they end, unless durable carries their pending
     // work. A session a client restored meanwhile has its turn checked by that restore instead.
     for (const record of this.#ledger.byState("running")) {
-      const turnId = record.lastTurn?.status === "running" ? record.lastTurn.turnId : undefined;
+      const turnId = unfinished(record.lastTurn) ? record.lastTurn.turnId : undefined;
       if (!turnId) continue;
       let live: LiveSession;
       try {
@@ -1130,7 +1138,7 @@ export class SessionManager implements SessionsService {
     this.#ledger.update(live.id, {
       placement: "sandbox",
       generation,
-      state: record.lastTurn?.status === "running" ? "running" : "idle",
+      state: unfinished(record.lastTurn) ? "running" : "idle",
       admitted: {
         params: storedParams(destination.admitted.params),
         ...(stored?.tools ? { tools: stored.tools } : {}),
@@ -2510,11 +2518,12 @@ export class SessionManager implements SessionsService {
   // Turns a lost runtime connection cut
 
   /**
-   * Ends the session's running turn when the runtime connection it needed was lost and nothing can carry it: work
-   * durable owns (a pending tool call or permission) survives in a resumed runtime (`continuePendingWork`, verified on
-   * 1.0.103), and an external shared runtime keeps running its turns. The ending is what the runtime would send: a
-   * root `session.error` and `session.idle`, so waits settle, observers (`sessions.subscribe`) see the turn end, and
-   * the ledger records it `failed`. A turn the session's restore finds is still running continues (`#settleTurn`).
+   * Ends the session's unfinished turn (one whose root `session.idle` has not arrived, including one that already
+   * reported an error) when the runtime connection it needed was lost and nothing can carry it: work durable owns (a
+   * pending tool call or permission) survives in a resumed runtime (`continuePendingWork`, verified on 1.0.103), and an
+   * external shared runtime keeps running its turns. The ending is what the runtime would send: a root `session.error`
+   * and `session.idle`, so waits settle, observers (`sessions.subscribe`) see the turn end, and the ledger records it
+   * `failed`. A turn the session's restore finds is still running continues (`#settleTurn`).
    */
   #endLostTurn(live: LiveSession, turnId?: string): void {
     void this.#endTurn(live, (record) => (turnId === undefined || record.lastTurn?.turnId === turnId) && this.#lostTurnEnds(live));
@@ -2527,7 +2536,7 @@ export class SessionManager implements SessionsService {
   }
 
   /**
-   * After a restore, a turn the ledger still has running is checked against the runtime that now owns the session:
+   * After a restore, a turn the ledger has not seen end is checked against the runtime that now owns the session:
    * one it still processes, or whose pending work durable owns and the runtime still awaits, continues; any other ended
    * while the connection was lost. Only answers decide: a check the runtime cannot answer leaves the turn as it is, and
    * a connection that is gone or stopped answering fails the restore (the session's next request tries again). The end
@@ -2535,7 +2544,7 @@ export class SessionManager implements SessionsService {
    */
   async #settleTurn(live: LiveSession, upstream: RuntimeUpstream): Promise<void> {
     const turn = this.get(live.id)?.lastTurn;
-    if (turn?.status !== "running") return;
+    if (!unfinished(turn)) return;
     const moves = live.moves;
     const ask = <T,>(method: string): Promise<T | undefined> => this.#check<T>(live, upstream, method);
     if ((await ask<{ processing?: unknown }>("session.metadata.isProcessing"))?.processing !== false) return;
@@ -2604,7 +2613,7 @@ export class SessionManager implements SessionsService {
     const end = async (): Promise<void> => {
       const record = this.get(live.id);
       const turn = record?.lastTurn;
-      if (!record || turn?.status !== "running" || live.deleting || this.#live.get(live.id) !== live || !applies(record)) return;
+      if (!record || !unfinished(turn) || live.deleting || this.#live.get(live.id) !== live || !applies(record)) return;
       const now = new Date().toISOString();
       if (outcome === "interrupted") {
         this.#log.warn("Ending a turn whose runtime connection was lost", { sessionId: live.id, turnId: turn.turnId });

@@ -249,8 +249,10 @@ describe("orchestrator environments", () => {
     await waitUntil(() => sessions().get(workerId)?.lastTurn?.status === "failed");
     expect(worker(sessionId, "vanished").state).toBe("working");
     sandboxes.streams.get(workerId)!.destroy();
+    // Nothing carries the run, so core ends it as interrupted, and the worker fails when it ends.
     await waitUntil(() => worker(sessionId, "vanished").state === "failed");
-    expect(worker(sessionId, "vanished").error).toBe("The model call failed");
+    expect(worker(sessionId, "vanished").error).toMatch(/interrupted because the platform lost the connection to the session's runtime/);
+    expect(sessions().get(workerId)).toMatchObject({ state: "idle", lastTurn: { status: "failed" } });
     // Nothing is left working: messaging it brings its session back in a new runtime.
     expect(await call(client, sessionId, "message_worker", { worker: "vanished", message: "again" })).toContain('Sent to "vanished"');
     await waitUntil(() => worker(sessionId, "vanished").result === "echo: again");
@@ -270,11 +272,11 @@ describe("orchestrator environments", () => {
     runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
     await waitUntil(() => sessions().get(workerId)?.lastTurn?.status === "failed");
     sandboxes.streams.get(workerId)!.destroy();
-    // The run had started, so the message most likely arrived; the run is then settled as ended.
+    // The run had started, so the message most likely arrived; core then ends the run, which nothing carries.
     expect(await sending).toMatch(/may have reached "midsend"/);
     held.release();
     await waitUntil(() => worker(sessionId, "midsend").state === "failed");
-    expect(worker(sessionId, "midsend").error).toBe("The model call failed");
+    expect(worker(sessionId, "midsend").error).toMatch(/interrupted because the platform lost the connection/);
   });
 
   it("keeps a working worker whose runtime went away while its run waits on a prompt, also after an error it went on from", async () => {
@@ -293,6 +295,54 @@ describe("orchestrator environments", () => {
     // Durable carries the prompt: the run continues once it is answered, so the worker stays working.
     await sleep(1_500);
     expect(worker(sessionId, "patient").state).toBe("working");
+  });
+
+  it("keeps a worker whose run carries on after its runtime came back, and records its reply", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "resumer", task: "stall" });
+    await runStarted(sessionId, "resumer");
+    const workerId = worker(sessionId, "resumer").id;
+    // An error the run goes on from, then a prompt only a person may answer; then the connection is lost.
+    runtime.emitEvent(workerId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a1", content: "retrying worked" });
+    runtime.emitEvent(workerId, "permission.requested", { requestId: "perm-resume", permissionRequest: { kind: "shell", fullCommandText: "rm -rf /data", managedApprovalRequired: true } });
+    const actions = app().service("actions");
+    await waitUntil(() => actions.list(workerId, { open: true }).some((action) => action.requestId === "perm-resume"));
+    sandboxes.streams.get(workerId)!.destroy();
+    // A person approves it at once: delivering the answer brings the session back, and its run carries on there.
+    const pending = actions.list(workerId, { open: true }).find((action) => action.requestId === "perm-resume")!;
+    const owner = { type: "user", principal: ALICE_PRINCIPAL } as const;
+    const { claimToken } = await actions.claim(owner, workerId, pending.id);
+    await actions.submit(owner, workerId, pending.id, { claimToken, result: { kind: "approve-once", approvedInteractively: true } });
+    await waitUntil(() => runtime.calls("session.permissions.handlePendingPermissionRequest").some((request) => request.params["requestId"] === "perm-resume"));
+    // Past the check that follows a lost connection, it is still working, and its reply then finishes it.
+    await sleep(1_500);
+    expect(worker(sessionId, "resumer").state).toBe("working");
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a2", content: "done after the approval" });
+    runtime.emitEvent(workerId, "session.idle", {});
+    await waitUntil(() => worker(sessionId, "resumer").state === "idle");
+    expect(worker(sessionId, "resumer").result).toBe("done after the approval");
+  });
+
+  it("fails a worker whose run its restarted runtime no longer has, once the session is back", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "forgotten", task: "stall" });
+    await runStarted(sessionId, "forgotten");
+    const workerId = worker(sessionId, "forgotten").id;
+    runtime.emitEvent(workerId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a1", content: "retrying worked" });
+    runtime.emitEvent(workerId, "permission.requested", { requestId: "perm-gone", permissionRequest: { kind: "shell", fullCommandText: "rm -rf /data", managedApprovalRequired: true } });
+    const actions = app().service("actions");
+    await waitUntil(() => actions.list(workerId, { open: true }).some((action) => action.requestId === "perm-gone"));
+    // The connection is lost with the prompt open, and the runtime that comes back no longer has the run or the prompt.
+    sandboxes.streams.get(workerId)!.destroy();
+    await sleep(1_500);
+    expect(worker(sessionId, "forgotten").state).toBe("working");
+    runtime.forgetTurn(workerId);
+    await sessions().request(workerId, "session.getMessages", {});
+    // The restore finds nothing running or waiting: core ends the run, and the worker fails.
+    await waitUntil(() => worker(sessionId, "forgotten").state === "failed");
+    expect(worker(sessionId, "forgotten").error).toMatch(/interrupted because the platform lost the connection/);
   });
 
   it("takes back a message the runtime refused", async () => {

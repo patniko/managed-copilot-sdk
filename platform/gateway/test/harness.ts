@@ -64,6 +64,11 @@ export class FakeRuntime {
     for (const endpoint of this.#endpoints) endpoint.close();
   }
 
+  /** Forgets one session's running turn, as a runtime that restarted would (test hook). */
+  forgetTurn(sessionId: string): void {
+    this.#processing.delete(sessionId);
+  }
+
   /** Sessions whose turn is running (between its root `user.message` and `session.idle`). */
   readonly #processing = new Set<string>();
 

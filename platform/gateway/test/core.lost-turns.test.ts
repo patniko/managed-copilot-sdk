@@ -100,6 +100,26 @@ describe("turns a lost runtime connection cut", () => {
     }
   });
 
+  it("ends a lost turn that had reported an error it went on from, which the ledger records failed before it ends", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    await client.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+    const turnId = record(sessionId).lastTurn!.turnId;
+    // A root error the turn goes on from (a retry): the ledger marks the turn failed, but it has not ended.
+    runtime.emitEvent(sessionId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
+    runtime.emitEvent(sessionId, "assistant.message", { messageId: "a1", content: "retried" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "failed");
+    expect(record(sessionId)).toMatchObject({ state: "running", lastTurn: { turnId } });
+    expect(record(sessionId).lastTurn?.completedAt).toBeUndefined();
+    runtime.dropConnections();
+    // Nothing carries it: it ends like any lost turn, for observers and the ledger.
+    await waitUntil(() => record(sessionId).lastTurn?.completedAt !== undefined);
+    expect(record(sessionId)).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
+    expect(client.events("session.error").some((event) => (event["data"] as Record<string, unknown>)["errorType"] === "interrupted")).toBe(true);
+  });
+
   it("keeps a turn waiting on a pending tool call, which continues once the call is answered", async () => {
     const client = await connect("coder", (method) => (method === "hooks.invoke" ? { output: {} } : {}));
     const sessionId = crypto.randomUUID();

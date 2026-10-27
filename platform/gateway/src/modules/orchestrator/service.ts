@@ -113,8 +113,6 @@ export class WorkerManager {
   readonly #sending = new Set<string>();
   /** Workers whose runtime connection closed, to settle shortly (`#onStopped`). */
   readonly #stoppedChecks = new Map<string, NodeJS.Timeout>();
-  /** Workers whose runtime connection closed while a send to them (or their start) was under way. */
-  readonly #stoppedDuringSend = new Set<string>();
   readonly #waiters = new Set<Waiter>();
   readonly #approving = new Set<string>();
   /** Prompts left to a person (managed policy requires one, or approving failed repeatedly): not tried again. */
@@ -302,8 +300,9 @@ export class WorkerManager {
       if (restored) this.#changed(restored);
       throw new ManagedCopilotError(isManagedCopilotError(error) ? error.code : "internal", `Couldn't deliver your message to "${worker.name}": ${reason}`);
     } finally {
+      // The send's outcome settles what a close during it left (`#onStopped`).
       this.#sending.delete(worker.id);
-      this.#recheckStopped(worker.id);
+      this.#cancelStoppedCheck(worker.id);
     }
     return `Sent to "${worker.name}". Call wait_for_workers for its reply.`;
   }
@@ -534,7 +533,7 @@ export class WorkerManager {
    * started a run.
    */
   #settleAfterRestart(worker: WorkerRecord, session: SessionRecord): void {
-    if (this.#turnContinues(worker, session)) return;
+    if (this.#turnContinues(session)) return;
     const turn = session.lastTurn;
     const ran = turn !== undefined && (turn.completedAt === undefined || (worker.sentAt !== undefined && turn.completedAt >= worker.sentAt));
     if (!turn || !ran) {
@@ -671,7 +670,6 @@ export class WorkerManager {
       if (this.#closed) return;
       const latest = this.#store.get(worker.id);
       if (latest?.cleanup) void this.#cleanup(latest);
-      this.#recheckStopped(worker.id);
     });
     this.#launches.set(worker.id, run.catch((error: unknown) => this.#log.warn("A worker start ended unexpectedly", { workerId: worker.id, error: (error as Error).message })));
   }
@@ -720,7 +718,9 @@ export class WorkerManager {
         this.#log.warn("A worker did not get its task", { coordinatorId: worker.coordinatorId, workerId: worker.id, error: (error as Error).message });
         return;
       } finally {
+        // The send's outcome settles what a close during it left (`#onStopped`).
         this.#sending.delete(worker.id);
+        this.#cancelStoppedCheck(worker.id);
       }
       this.#log.info("Worker started", { coordinatorId: worker.coordinatorId, workerId: worker.id, environment: worker.environment });
     } catch (error) {
@@ -911,14 +911,15 @@ export class WorkerManager {
   }
 
   /**
-   * A worker's runtime connection closed (its sandbox stopped, or its runtime went away). Core ends a running turn the
-   * connection cut (its root error and idle reach `#onEvent`), and a turn waiting on a prompt continues when its
-   * runtime comes back. A working worker with no turn running is settled once the events core still had queued from
-   * that runtime have landed, unless a send to it is under way then (its outcome decides): its run reported an error
-   * but never ended, or the latest message never started a run.
+   * A worker's runtime connection closed (its sandbox stopped, or its runtime went away). A turn that has not ended is
+   * core's: core ends it when nothing carries it, and its end reaches `#onEvent`. What core cannot see is a message the
+   * runtime accepted that never started a run: a working worker with no unfinished turn is failed once the events core
+   * still had queued from that runtime have landed (measured from the latest close). A send to the worker under way
+   * then decides by its own outcome, and any send's end cancels the check: the close it followed was older than the
+   * connection the send used.
    */
   #onStopped(workerId: string): void {
-    if (this.#stoppedChecks.has(workerId)) return;
+    this.#cancelStoppedCheck(workerId);
     const timer = setTimeout(() => {
       this.#stoppedChecks.delete(workerId);
       if (!this.#closed) this.#settleStopped(workerId);
@@ -927,50 +928,31 @@ export class WorkerManager {
     this.#stoppedChecks.set(workerId, timer);
   }
 
-  #settleStopped(workerId: string): void {
-    const worker = this.#store.get(workerId);
-    if (worker?.state !== "working" || !this.#workers.has(workerId)) return;
-    // A send (or a start) still under way decides first; the check runs again once it is done.
-    if (this.#sending.has(workerId) || this.#launches.has(workerId)) {
-      this.#stoppedDuringSend.add(workerId);
-      return;
-    }
-    const session = this.#app.service("sessions").get(workerId);
-    if (!session || session.incarnation !== worker.incarnation || this.#turnContinues(worker, session)) return;
-    const run = this.#runs.get(workerId);
-    this.#runs.delete(workerId);
-    const reason =
-      run?.error ??
-      (run ? "Its run was cut off when its sandbox stopped. Message it to continue." : "Its sandbox stopped before it started on your last message. Message it again to continue.");
-    this.#fail(worker, reason, ["working"]);
+  #cancelStoppedCheck(workerId: string): void {
+    const timer = this.#stoppedChecks.get(workerId);
+    if (timer) clearTimeout(timer);
+    this.#stoppedChecks.delete(workerId);
   }
 
-  /** Checks again a worker whose runtime connection closed while a send to it (or its start) was under way. */
-  #recheckStopped(workerId: string): void {
-    if (this.#stoppedDuringSend.delete(workerId) && !this.#closed) this.#onStopped(workerId);
+  #settleStopped(workerId: string): void {
+    if (this.#sending.has(workerId) || this.#launches.has(workerId)) return;
+    const worker = this.#store.get(workerId);
+    if (worker?.state !== "working" || !this.#workers.has(workerId)) return;
+    const session = this.#app.service("sessions").get(workerId);
+    if (!session || session.incarnation !== worker.incarnation || this.#turnContinues(session)) return;
+    this.#runs.delete(workerId);
+    this.#fail(worker, "Its sandbox stopped before it started on your last message. Message it again to continue.", ["working"]);
   }
 
   /**
-   * Whether the worker's last turn still goes on although its runtime went away: core still runs it (core ends it
-   * when its runtime is lost and nothing carries it), or it waits on durable work (a prompt or tool call) that
-   * continues once its runtime comes back. Core records a turn failed at a root error before the turn ends, so such a
-   * turn goes on only in the second case.
+   * Whether the worker's last turn has not ended yet (no root `session.idle`), although its runtime went away. Core
+   * owns such a turn: it ends it when its runtime was lost and nothing carries it (also after a restore or restart,
+   * and also when the turn had reported an error), and a turn waiting on durable work continues once its runtime comes
+   * back. Either way its end reaches `#onEvent`.
    */
-  #turnContinues(worker: WorkerRecord, session: SessionRecord): boolean {
+  #turnContinues(session: SessionRecord): boolean {
     const turn = session.lastTurn;
-    if (!turn || turn.completedAt !== undefined) return false;
-    return turn.status === "running" || this.#hasOpenActions(worker);
-  }
-
-  #hasOpenActions(worker: WorkerRecord): boolean {
-    const actions = this.#app.services.actions;
-    if (!actions || !worker.incarnation) return false;
-    try {
-      return actions.hasOpenActions(worker.id, { incarnation: worker.incarnation });
-    } catch {
-      // Leaving a worker working that turns out to be done is recoverable (stop it); failing a live one is not.
-      return true;
-    }
+    return turn !== undefined && turn.completedAt === undefined;
   }
 
   #onDeleted(sessionId: string): void {

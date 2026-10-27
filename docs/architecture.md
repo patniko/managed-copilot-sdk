@@ -763,16 +763,15 @@ and quickstart snippet 14).
   that error, or `idle` with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are
   the signals the stock `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way. A
   worker is never messageable while its run is open, so no message can start a run before the previous run's idle,
-  and only a new run makes a `failed` worker `working` again. A worker's last turn still goes on, although its runtime
-  went away, while core runs it (core ends it if nothing carries it) or while it waits on durable work (`hasOpenActions`:
-  open prompts and tool calls, and answers not yet delivered), which continues when its runtime comes back; core
-  records a turn `failed` at a root error before the turn ends (also for a subagent's error, and for an error the
-  run goes on from), so for such a turn only the second applies. When a worker's runtime connection closes
-  (`sessions.onLifecycle("stopped")`), it is checked a second later, once the events core still had queued from that
-  runtime have landed, and again after a send to it (or its start) that was under way then has settled: if it is still
-  `working` and its last turn no longer goes on, the worker fails, with its run's error when the error came without
-  an idle, as cut off when its run had started, or because its latest message never started a run. A sandbox's idle
-  stop therefore also settles any worker left `working` with an idle runtime.
+  and only a new run makes a `failed` worker `working` again. A worker's last turn that has not ended (no root
+  `session.idle`, whatever its status) is core's to end: core ends a turn whose runtime was lost unless durable work
+  carries it, checks one again when the session is restored, and ends the ones a stopped gateway left at startup, also
+  when the turn had reported an error; its end reaches the worker as the run's error and idle. When a worker's runtime
+  connection closes (`sessions.onLifecycle("stopped")`), it is checked a second after the latest close, once the
+  events core still had queued from that runtime have landed: if it is still `working` and core has no unfinished turn
+  for it, its latest message never started a run, and the worker fails. A send to the worker under way then decides by
+  its own outcome, and the end of any send cancels the check (the close it followed was older than the connection the
+  send used). A sandbox's idle stop therefore also settles any worker left `working` with an idle runtime.
 - **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
   of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
   the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
@@ -834,7 +833,7 @@ and quickstart snippet 14).
 - **Restarts.** At start the module settles what a stopped gateway left: outstanding cleanups run; workers of a
   coordinator that no longer exists are stopped and deleted; a `starting` worker without a session fails and holds no
   slot, and one with its session fails with a note that it never got its task. A `working` worker whose last turn
-  still goes on (the rule under **Runs**) is left to core (which ends a turn the restart cut) or to durable (a turn
+  has not ended (the rule under **Runs**) is left to core (which ends a turn the restart cut) or to durable (a turn
   waiting on a prompt). Otherwise
   its last recorded turn decides only if it ended after the coordinator's latest message was sent (`sent_at`): the
   worker becomes `idle` (its reply was not captured) or `failed`; if not, that message never started a run, and the
@@ -1051,8 +1050,11 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   queued message may have started another), so it never claims the turn was interrupted. The session stays
   resumable; the next turn restores it. A turn waiting on work durable
   owns (`hasOpenActions`) is kept, because `continuePendingWork` keeps the runtime's pending tool call or permission
-  and answering it continues the turn. On every restore, a turn the ledger still has running is checked against the
-  runtime that now owns the session. It ends only on answers: `session.metadata.isProcessing` is `false`, and, while
+  and answering it continues the turn. On every restore, a turn the ledger has not seen end is checked against the
+  runtime that now owns the session. "Not ended" means no root `session.idle` yet (`lastTurn.completedAt` unset), not
+  `status: "running"`: the ledger marks a turn `failed` at a root `session.error` before the turn ends (also an error
+  the turn goes on from, and a subagent's), and such a turn is ended or kept by the same rules (also at startup and
+  when its connection is lost). It ends only on answers: `session.metadata.isProcessing` is `false`, and, while
   durable has open actions, the runtime lists no pending tool or permission requests. A check the runtime answers
   with an error leaves the turn running. A connection that is gone or silent fails the restore, and the next request
   retries it. The end applies only while that runtime still owns the session, so a cutover that commits meanwhile
