@@ -192,6 +192,11 @@ describe("orchestrator environments", () => {
     const workerId = worker(sessionId, "steady").id;
     // A working worker is waited for first: nothing is queued behind its run.
     expect(await call(client, sessionId, "message_worker", { worker: "steady", message: "also this" })).toMatch(/is still working\. Call wait_for_workers/);
+    // Refusals reach the coordinator's model as the stock SDK shows a failed tool (a thrown error would not).
+    expect(app().service("actions").list(sessionId).find((action) => action.tool === "message_worker")).toMatchObject({
+      state: "completed",
+      result: { resultType: "failure", textResultForLlm: expect.stringMatching(/is still working/) },
+    });
     expect(sends(workerId)).toEqual(["stall"]);
     expect(worker(sessionId, "steady").messages).toBe(1);
 

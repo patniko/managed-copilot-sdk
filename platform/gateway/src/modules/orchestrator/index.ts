@@ -1,7 +1,9 @@
 // Owner: orchestrator workstream. Orchestrator environments (spec section 17): the coordinator's worker tools,
 // `GET /v1/sessions/:id/workers`, the `worker.*` platform events, approvals for approved workers' prompts, and the
 // cleanup of workers whose coordinator is gone.
+import { isManagedCopilotError } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
+import type { PlatformToolCallContext, PlatformToolResult } from "../core/contracts.js";
 import { WorkerManager } from "./service.js";
 import { WorkerStore } from "./store.js";
 import { WORKER_TOOLS } from "./tools.js";
@@ -12,6 +14,24 @@ declare module "../../app.js" {
   }
 }
 
+type WorkerToolHandler = (args: unknown, context: PlatformToolCallContext) => Promise<PlatformToolResult>;
+
+/**
+ * Refusals are written for the coordinator's model, so they go back as the stock SDK shows a failed tool to it
+ * (`resultType: "failure"`); a thrown error would reach it only as "Tool execution failed". Unexpected errors still
+ * throw, and the ledger reports them without details.
+ */
+function forModel(handler: WorkerToolHandler): WorkerToolHandler {
+  return async (args, context) => {
+    try {
+      return await handler(args, context);
+    } catch (error) {
+      if (!isManagedCopilotError(error)) throw error;
+      return { textResultForLlm: error.message, resultType: "failure", error: error.message };
+    }
+  };
+}
+
 export const orchestratorModule: GatewayModule = {
   name: "orchestrator",
   register(app) {
@@ -19,7 +39,7 @@ export const orchestratorModule: GatewayModule = {
     const manager = new WorkerManager({ app, log, store: new WorkerStore(app.db) });
     app.provide("orchestrator", manager);
 
-    const handlers: Record<string, WorkerManager["start"]> = {
+    const handlers: Record<string, WorkerToolHandler> = {
       start_worker: (args, context) => manager.start(args, context),
       message_worker: (args, context) => manager.message(args, context),
       wait_for_workers: (args, context) => manager.wait(args, context),
@@ -39,7 +59,7 @@ export const orchestratorModule: GatewayModule = {
         skipPermission: tool.skipPermission,
         // Only coordinators get them: workers (isolated sessions) cannot start workers.
         appliesTo: ({ type, placement }) => type === "orchestrator" && placement === "shared",
-        handler,
+        handler: forModel(handler),
       });
     }
 
