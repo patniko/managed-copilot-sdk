@@ -160,6 +160,39 @@ describe("orchestrator recovery", () => {
     }
   });
 
+  it("fails a worker left working in a session whose deletion failed, once the restart ends the run the deletion cut", async () => {
+    const first = await start();
+    const { client, sessionId } = await coordinator(first.gateway);
+    await tool(client, sessionId, "start_worker", { name: "cut", task: "stall" });
+    const firstSessions = first.gateway.gateway.app.service("sessions");
+    await waitUntil(() => {
+      const worker = workers(first.gateway, sessionId)[0];
+      return worker?.state === "working" && firstSessions.get(worker.id)?.lastTurn?.status === "running";
+    });
+    const workerId = workers(first.gateway, sessionId)[0]!.id;
+    await client.close();
+    await first.gateway.close({ keepData: true });
+    // As a gateway left it that stopped right after the owner's deletion of the worker's session failed: the deletion
+    // closed the session's runtime connection and cut its run, which had reported an error it went on from.
+    const db = new DatabaseSync(join(dataDir, "gateway.db"));
+    try {
+      const row = db.prepare("SELECT last_turn FROM core_sessions WHERE id = ?").get(workerId) as { last_turn: string };
+      const turn = { ...(JSON.parse(row.last_turn) as Record<string, unknown>), status: "failed" };
+      db.prepare("UPDATE core_sessions SET state = 'failed', last_turn = ? WHERE id = ?").run(JSON.stringify(turn), workerId);
+    } finally {
+      db.close();
+    }
+
+    const second = await start();
+    try {
+      await waitUntil(() => workers(second.gateway, sessionId)[0]?.state === "failed");
+      expect(workers(second.gateway, sessionId)[0]!.error).toMatch(/interrupted because the platform lost the connection/);
+      expect(second.gateway.gateway.app.service("sessions").get(workerId)).toMatchObject({ state: "failed", lastTurn: { status: "failed" } });
+    } finally {
+      await second.gateway.close({ keepData: true });
+    }
+  });
+
   it("leaves a message a shutdown cut unanswered: run again after the restart, it says the message may have arrived", async () => {
     const first = await start();
     const { client, sessionId } = await coordinator(first.gateway);

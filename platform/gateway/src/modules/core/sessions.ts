@@ -232,6 +232,11 @@ interface LiveSession {
   /** In-flight create, resume, or restore; concurrent callers wait for it. */
   residency: Promise<RuntimeUpstream> | undefined;
   deleting: boolean;
+  /**
+   * Its runtime connection closed while it was being deleted, which reports and ends nothing then (it ends with
+   * `deleted`). A deletion that fails leaves the session in place and handles that close then (`#deleteOwned`).
+   */
+  closedWhileDeleting: boolean;
   /** An open placement cutover (promotion). */
   cutover: CutoverState | undefined;
   /** Clients' `sendAndWait` calls in flight upstream (a cutover fences and seals them). */
@@ -817,6 +822,16 @@ export class SessionManager implements SessionsService {
         live.deleting = false;
         // The session stays (failed, and deletable again), so steps on its runtime are no longer ended.
         if (!this.#stopped) live.ending = new AbortController();
+        // Its runtime connection, which the deletion closed (or saw close), is lost like any other now that the session
+        // stays: observers learn its runtime stopped, and a turn the connection cut ends unless durable carries it (as
+        // `#onUpstreamClosed` does; also a turn an earlier failed deletion left, whose ending this one preempted). The
+        // session stays failed.
+        const closed = live.closedWhileDeleting;
+        live.closedWhileDeleting = false;
+        if (!live.upstream && !live.residency) {
+          if (closed) this.#emitLifecycle(sessionId, "stopped");
+          if (!live.cutover && !this.#stopped) this.#endLostTurn(live);
+        }
       }
       throw error instanceof ManagedCopilotError ? error : new ManagedCopilotError("internal", `Deleting session ${sessionId} failed; it is marked failed and can be deleted again`);
     }
@@ -849,8 +864,9 @@ export class SessionManager implements SessionsService {
     }
     // Turns the stopped gateway was running were cut with its runtime connections (its shared runtime stopped with it,
     // and a sandbox runtime cannot serve a new gateway's inference): they end, unless durable carries their pending
-    // work. A session a client restored meanwhile has its turn checked by that restore instead.
-    for (const record of this.#ledger.byState("running")) {
+    // work. So does a turn a failed deletion cut (the session stays `failed`), including one just finished above. A
+    // session a client restored meanwhile has its turn checked by that restore instead.
+    for (const record of [...this.#ledger.byState("running"), ...this.#ledger.byState("failed")]) {
       const turnId = unfinished(record.lastTurn) ? record.lastTurn.turnId : undefined;
       if (!turnId) continue;
       let live: LiveSession;
@@ -2024,6 +2040,7 @@ export class SessionManager implements SessionsService {
       ending: new AbortController(),
       residency: undefined,
       deleting: false,
+      closedWhileDeleting: false,
       cutover: undefined,
       waits: new Set(),
       held: [],
@@ -2506,8 +2523,9 @@ export class SessionManager implements SessionsService {
       live.ready = false;
       // Held completions wait for the owner's events; outside a cutover, losing the owner's runtime fails them.
       if (!live.cutover) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, "The session's runtime connection closed before the turn completed", { code: "state_restore_failed" }));
-      // A session being deleted ends with `deleted`, not `stopped`.
-      if (!live.deleting) this.#emitLifecycle(live.id, "stopped");
+      // A session being deleted ends with `deleted`, not `stopped`; if its deletion fails, the close is handled then.
+      if (live.deleting) live.closedWhileDeleting = true;
+      else this.#emitLifecycle(live.id, "stopped");
       // Its running turn cannot finish without this connection (on stock 1.0.103 a sandbox's inference provider goes
       // with it, and a runtime that restarts loses its turns): it ends now, for the clients still waiting on it.
       if (!live.deleting && !live.cutover && !this.#stopped) this.#endLostTurn(live);
@@ -3289,7 +3307,9 @@ export class SessionManager implements SessionsService {
           const record = this.get(live.id);
           const turn = record?.lastTurn;
           const status = data["aborted"] === true ? "cancelled" : turn?.status === "failed" ? "failed" : "completed";
-          this.#ledger.update(live.id, { ...state("idle"), ...(turn ? { lastTurn: { turnId: turn.turnId, status, completedAt: new Date().toISOString() } } : {}) });
+          // A session whose deletion failed stays failed (deletable again) when a turn ends, until it runs another.
+          const next = record?.state === "failed" ? {} : state("idle");
+          this.#ledger.update(live.id, { ...next, ...(turn ? { lastTurn: { turnId: turn.turnId, status, completedAt: new Date().toISOString() } } : {}) });
           if (record) this.#options.events.emit("session.idle", { ownerId: record.ownerId, sessionId: live.id, environment: record.environment, data: { status, incarnation: record.incarnation } });
           break;
         }

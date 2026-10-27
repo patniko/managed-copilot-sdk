@@ -268,7 +268,8 @@ export class FakeRuntime {
       case "session.send": {
         if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
         const messageId = randomUUID();
-        void this.#turn(endpoint, session, String(params["prompt"] ?? ""), messageId);
+        // `queued` is accepted but never started (as if queued behind other work when its runtime went away).
+        if (params["prompt"] !== "queued") void this.#turn(endpoint, session, String(params["prompt"] ?? ""), messageId);
         return { messageId };
       }
       case "session.sendAndWait": {

@@ -298,7 +298,11 @@ export interface SessionsService {
    * created, or the existing session's when `created` is false.
    */
   create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
-  /** Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. */
+  /**
+   * Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. Settles in the same chain of
+   * promise steps as the runtime's answer (no I/O in between), so a caller sees the close of the connection that
+   * answered (`onLifecycle("stopped")`) only after the send settled.
+   */
   send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }, options?: SessionSendOptions): Promise<{ readonly messageId: string }>;
   /** Forwards a session-scoped RPC to the runtime that owns the session. The caller is responsible for authorization. */
   request<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, options?: SessionCallOptions): Promise<T>;

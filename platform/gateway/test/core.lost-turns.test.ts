@@ -2,6 +2,8 @@
 // registration of a closed connection forever, so a turn cannot finish once the gateway's connection is gone (and a
 // restarted runtime loses its turns): core ends such turns visibly, unless durable's pending work carries them, and
 // opens a sandbox runtime again after its sandbox restarted it to free the registration.
+import { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ManagedCopilotError, type PlatformEvent } from "@managed-copilot/protocol";
 import type { SessionManager } from "../src/modules/core/sessions.js";
@@ -120,6 +122,38 @@ describe("turns a lost runtime connection cut", () => {
     expect(client.events("session.error").some((event) => (event["data"] as Record<string, unknown>)["errorType"] === "interrupted")).toBe(true);
   });
 
+  it("ends a turn a failed deletion cut, reports the session's runtime stopped, and keeps the session failed", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    await client.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+    const turnId = record(sessionId).lastTurn!.turnId;
+    const lifecycle: string[] = [];
+    const off = sessions().onLifecycle((event) => {
+      if (event.sessionId === sessionId) lifecycle.push(event.type);
+    });
+    const seen = watch(sessionId);
+    try {
+      // Deleting the session closes its runtime connection, and then deleting its sandbox fails: the session stays.
+      sandboxes.failNextDelete = new ManagedCopilotError("capability_unavailable", "The sandbox backend is unreachable right now");
+      await expect(sessions().delete(1001, sessionId)).rejects.toMatchObject({ code: "capability_unavailable" });
+      // The connection is lost like any other: observers learn the runtime stopped, and the turn it cut ends.
+      await waitUntil(() => record(sessionId).lastTurn?.completedAt !== undefined);
+      expect(lifecycle).toEqual(["stopped"]);
+      expect(record(sessionId)).toMatchObject({ state: "failed", lastTurn: { turnId, status: "failed" } });
+      expect(seen.observed.slice(-2)).toEqual(["session.error", "session.idle"]);
+      await waitUntil(() => client.events("session.error").some((event) => (event["data"] as Record<string, unknown>)["errorType"] === "interrupted"));
+      // Still deletable.
+      await sessions().delete(1001, sessionId);
+      expect(sessions().get(sessionId)).toBeUndefined();
+      expect(lifecycle).toEqual(["stopped", "deleted"]);
+    } finally {
+      off();
+      seen.stop();
+    }
+  });
+
   it("keeps a turn waiting on a pending tool call, which continues once the call is answered", async () => {
     const client = await connect("coder", (method) => (method === "hooks.invoke" ? { output: {} } : {}));
     const sessionId = crypto.randomUUID();
@@ -156,6 +190,29 @@ describe("turns a lost runtime connection cut", () => {
     expect(record(sessionId)).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
     const info = await (await fetch(`${gateway.url}/v1/sessions/${sessionId}`, { headers: { authorization: `Bearer ${ALICE}` } })).json();
     expect(info).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
+  });
+
+  it("ends a turn a failed deletion left when the gateway starts again, and keeps the session failed", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, requestPermission: true });
+    await client.request("session.send", { sessionId, prompt: "stall" });
+    await waitUntil(() => record(sessionId).lastTurn?.status === "running");
+    const turnId = record(sessionId).lastTurn!.turnId;
+    for (const connected of clients.splice(0)) await connected.close();
+    const dataDir = gateway.dataDir;
+    await gateway.close({ keepData: true });
+    // As a gateway left it that stopped right after a deletion of the session failed, before it ended the turn.
+    const db = new DatabaseSync(join(dataDir, "gateway.db"));
+    try {
+      db.prepare("UPDATE core_sessions SET state = 'failed' WHERE id = ?").run(sessionId);
+    } finally {
+      db.close();
+    }
+    gateway = await startTestGateway({ runtime, githubUrl: github.url, dataDir });
+    install();
+    await waitUntil(() => sessions().get(sessionId)?.lastTurn?.completedAt !== undefined);
+    expect(record(sessionId)).toMatchObject({ state: "failed", lastTurn: { turnId, status: "failed" } });
   });
 
   it("settles a turn an external shared runtime finished while the connection was lost, without an error", async () => {

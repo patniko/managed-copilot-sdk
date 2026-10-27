@@ -300,7 +300,9 @@ export class WorkerManager {
       if (restored) this.#changed(restored);
       throw new ManagedCopilotError(isManagedCopilotError(error) ? error.code : "internal", `Couldn't deliver your message to "${worker.name}": ${reason}`);
     } finally {
-      // The send's outcome settles what a close during it left (`#onStopped`).
+      // The send's outcome settles what a close during it left (`#onStopped`). Its answer came from a connection open
+      // then: from that answer to here is one chain of promise steps (`sessions.send`), so a close of that connection
+      // is seen after this step and schedules a new check.
       this.#sending.delete(worker.id);
       this.#cancelStoppedCheck(worker.id);
     }
@@ -718,7 +720,7 @@ export class WorkerManager {
         this.#log.warn("A worker did not get its task", { coordinatorId: worker.coordinatorId, workerId: worker.id, error: (error as Error).message });
         return;
       } finally {
-        // The send's outcome settles what a close during it left (`#onStopped`).
+        // As in `message`: the send's outcome settles what a close during it left.
         this.#sending.delete(worker.id);
         this.#cancelStoppedCheck(worker.id);
       }
@@ -914,9 +916,10 @@ export class WorkerManager {
    * A worker's runtime connection closed (its sandbox stopped, or its runtime went away). A turn that has not ended is
    * core's: core ends it when nothing carries it, and its end reaches `#onEvent`. What core cannot see is a message the
    * runtime accepted that never started a run: a working worker with no unfinished turn is failed once the events core
-   * still had queued from that runtime have landed (measured from the latest close). A send to the worker under way
-   * then decides by its own outcome, and any send's end cancels the check: the close it followed was older than the
-   * connection the send used.
+   * still had queued from that runtime have landed (measured from the latest close). A send to the worker (or its
+   * start) under way then decides by its own outcome, and any send's end cancels the check: a send that failed settled
+   * the worker itself, and one that succeeded was answered by a connection still open then, which closes only after
+   * the send settled (`SessionsService.send`), so its close schedules a new check.
    */
   #onStopped(workerId: string): void {
     this.#cancelStoppedCheck(workerId);

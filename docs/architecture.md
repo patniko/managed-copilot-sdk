@@ -766,12 +766,15 @@ and quickstart snippet 14).
   and only a new run makes a `failed` worker `working` again. A worker's last turn that has not ended (no root
   `session.idle`, whatever its status) is core's to end: core ends a turn whose runtime was lost unless durable work
   carries it, checks one again when the session is restored, and ends the ones a stopped gateway left at startup, also
-  when the turn had reported an error; its end reaches the worker as the run's error and idle. When a worker's runtime
+  when the turn had reported an error (and one a failed deletion of the worker's session cut); its end reaches the
+  worker as the run's error and idle. When a worker's runtime
   connection closes (`sessions.onLifecycle("stopped")`), it is checked a second after the latest close, once the
   events core still had queued from that runtime have landed: if it is still `working` and core has no unfinished turn
   for it, its latest message never started a run, and the worker fails. A send to the worker under way then decides by
-  its own outcome, and the end of any send cancels the check (the close it followed was older than the connection the
-  send used). A sandbox's idle stop therefore also settles any worker left `working` with an idle runtime.
+  its own outcome, and the end of any send cancels the check: a failed send settled the worker itself, and a successful
+  one was answered by a connection open then. `sessions.send` settles in the same chain of promise steps as that
+  answer, so the close of the connection that answered is seen only after the send ended, and schedules a new check.
+  A sandbox's idle stop therefore also settles any worker left `working` with an idle runtime.
 - **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
   of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
   the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
@@ -1039,7 +1042,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   `llmInference` provider registration of a closed connection, so a turn that was mid-inference (or running a
   built-in tool) never finishes, and a restarted runtime neither continues nor ends it on resume. Core ends such a turn
   itself when the connection closes (not for deletes, cutovers, or gateway shutdown) and, at startup, for turns a
-  stopped gateway left running. Attached clients and `sessions.subscribe`/`subscribeSession` listeners get an
+  stopped gateway left running. A deletion that fails (the session stays `failed`, deletable again) handles the runtime
+  connection it closed as lost: `stopped`, and the turn it cut ends by the same rules; startup also ends the unfinished
+  turns of `failed` sessions, and a turn's end leaves a `failed` session `failed` until it runs another. Attached
+  clients and `sessions.subscribe`/`subscribeSession` listeners get an
   ephemeral root `session.error` (`errorType: "interrupted"`, "This turn was interrupted because the platform lost the
   connection to the session's runtime … Send your message again to continue.") and a root `session.idle`. The ledger
   records `lastTurn` `failed` (state `idle`) and emits `session.failed` and `session.idle` (`status: "failed"`), so
@@ -1187,7 +1193,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   to the pinned runtime). `close` detaches the responder. Recovery, deletion, and discarding an interrupted create each
   re-check the row's incarnation and state under a per-ID reservation before touching anything, so they never act on a
   session created or deleted since. A session being deleted emits `deleted` only, never `stopped` for the runtime
-  connection the delete closes.
+  connection the delete closes; if the deletion fails, the session stays and that close is reported (`stopped`) and
+  handled like any lost connection then.
 - **Sends.** Shared sessions accept only inline (`blob`) attachments; file, directory, and selection attachments
   name paths the runtime would read on the platform host. Sandbox attachment paths must stay in `/workspace`.
   Credential and routing model headers and shell agent mode are rejected.

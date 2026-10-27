@@ -345,6 +345,44 @@ describe("orchestrator environments", () => {
     expect(worker(sessionId, "forgotten").error).toMatch(/interrupted because the platform lost the connection/);
   });
 
+  it("fails a worker whose runtime accepted its message and went away before starting it", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "accepted", task: "hello" });
+    await waitUntil(() => worker(sessionId, "accepted").state === "idle");
+    const workerId = worker(sessionId, "accepted").id;
+    // The runtime answers the send (it queued the message behind other work), then goes away before starting it.
+    expect(await call(client, sessionId, "message_worker", { worker: "accepted", message: "queued" })).toContain('Sent to "accepted"');
+    expect(worker(sessionId, "accepted").state).toBe("working");
+    expect(sessions().get(workerId)?.lastTurn?.completedAt).toBeDefined();
+    sandboxes.streams.get(workerId)!.destroy();
+    // Core has no turn of it to end: the worker fails once the close settled, and a new message continues it.
+    await waitUntil(() => worker(sessionId, "accepted").state === "failed");
+    expect(worker(sessionId, "accepted").error).toBe("Its sandbox stopped before it started on your last message. Message it again to continue.");
+    expect(await call(client, sessionId, "message_worker", { worker: "accepted", message: "again" })).toContain('Sent to "accepted"');
+    await waitUntil(() => worker(sessionId, "accepted").result === "echo: again");
+    expect(worker(sessionId, "accepted").state).toBe("idle");
+  });
+
+  it("fails a working worker whose run a failed deletion of its session cut, and stops it once the session is deleted", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "undeleted", task: "stall" });
+    await runStarted(sessionId, "undeleted");
+    const workerId = worker(sessionId, "undeleted").id;
+    // An error the run goes on from (core records the turn failed), then the owner deletes the worker's session: the
+    // deletion closes its runtime connection, and then deleting its sandbox fails.
+    runtime.emitEvent(workerId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a1", content: "retrying worked" });
+    await waitUntil(() => sessions().get(workerId)?.lastTurn?.status === "failed");
+    sandboxes.failNextDelete = new ManagedCopilotError("internal", "The sandbox backend is not responding");
+    await expect(sessions().delete(1001, workerId)).rejects.toMatchObject({ code: "internal" });
+    // Core ends the run the closed connection cut, so the worker fails; the session stays failed, deletable again.
+    await waitUntil(() => worker(sessionId, "undeleted").state === "failed");
+    expect(worker(sessionId, "undeleted").error).toMatch(/interrupted because the platform lost the connection/);
+    expect(sessions().get(workerId)).toMatchObject({ state: "failed", lastTurn: { status: "failed" } });
+    await sessions().delete(1001, workerId);
+    await waitUntil(() => worker(sessionId, "undeleted").state === "stopped");
+  });
+
   it("takes back a message the runtime refused", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "refused", task: "hello" });
