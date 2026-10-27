@@ -39,6 +39,8 @@ const PUBLICATION_WAIT_MS = 45_000;
 const MAX_FINISHES = 20;
 const DEBOUNCE_MS = 250;
 const RETRY_MS = 15_000;
+/** Times a sandbox left unread (its outputs couldn't be listed or an image copied) is read again, backing off. */
+const MAX_RETRIES = 5;
 
 export const SANDBOXES_LEGACY =
   "This conversation started before your assistant could use sandboxes. Start a new conversation (Settings → Start over) to use them.";
@@ -101,12 +103,15 @@ export class Sandboxes {
   readonly #awaited = new Map<string, string>();
   /** Workers whose publication is being awaited right now. */
   readonly #publishing = new Set<string>();
-  /** Recent finishes seen as events, per worker: applied again once their cards' runs are known. */
+  /** Finishes seen as events that ended no run then (their cards weren't known yet), per worker. */
   readonly #finishes = new Map<string, { readonly at: string; readonly state: Settled }[]>();
   #refreshing: Promise<void> | undefined;
   #again = false;
   #timer: NodeJS.Timeout | undefined;
   #poll: NodeJS.Timeout | undefined;
+  #retries = 0;
+  /** Changes when the conversation is replaced, so work begun for the old one writes nothing afterwards. */
+  #generation = 0;
   #listeners: (() => void)[] = [];
   #stopped = false;
 
@@ -159,9 +164,14 @@ export class Sandboxes {
     if (typeof workerId !== "string") return;
     if (typeof state === "string" && SETTLED.has(state)) {
       const finish = { at: iso(event.createdAt), state: state as Settled };
-      this.#finishes.set(workerId, [...(this.#finishes.get(workerId) ?? []), finish].slice(-MAX_FINISHES));
       this.#registerRuns(sessionId, this.#workers);
-      this.#deps.store.finishRuns(workerId, finish.at, finish.state);
+      // Finishes seen before their cards were known end those cards' runs first.
+      this.#replayFinishes(workerId);
+      // A sandbox is sent nothing new while it works, so this ends the work of every card it has so far. (No time
+      // comparison: the platform's clock and the one that timed the cards can differ.)
+      if (this.#deps.store.finishOpenRuns(workerId, finish.at, finish.state) === 0) {
+        this.#finishes.set(workerId, [...(this.#finishes.get(workerId) ?? []), finish].slice(-MAX_FINISHES));
+      }
     }
     if (state === "idle" || state === "failed") this.#awaitPublication(workerId);
     this.#dirty.add(workerId);
@@ -190,17 +200,21 @@ export class Sandboxes {
     const managed = this.#deps.platform.managed;
     const coordinatorId = this.#deps.sessionId();
     if (!managed || !coordinatorId || this.#stopped || this.#publishing.has(workerId)) return;
+    const generation = this.#generation;
+    const current = () => this.#current(coordinatorId, generation);
     this.#publishing.add(workerId);
     void (async () => {
       try {
         const publication = await managed.artifacts(workerId).waitForPublication({ timeoutMs: PUBLICATION_WAIT_MS });
-        if (coordinatorId === this.#deps.sessionId()) await this.#record(managed, coordinatorId, workerId, publication.artifacts);
+        if (current()) await this.#record(managed, coordinatorId, workerId, publication.artifacts, current);
       } catch (error) {
         this.#deps.log.debug("Couldn't wait for a sandbox's outputs", { workerId, error: errorMessage(error) });
       } finally {
         this.#publishing.delete(workerId);
-        this.#dirty.add(workerId);
-        this.schedule();
+        if (current()) {
+          this.#dirty.add(workerId);
+          this.schedule();
+        }
       }
     })();
   }
@@ -257,6 +271,11 @@ export class Sandboxes {
     return type;
   }
 
+  /** Whether work begun for `sessionId` in `generation` is still about the current conversation. */
+  #current(sessionId: string, generation: number): boolean {
+    return !this.#stopped && generation === this.#generation && sessionId === this.#deps.sessionId();
+  }
+
   async #refresh(): Promise<void> {
     clearTimeout(this.#poll);
     this.#poll = undefined;
@@ -268,24 +287,33 @@ export class Sandboxes {
       this.#workers = [];
       return this.#set({ ...base, workers: [], runs: {} });
     }
+    // The conversation may be replaced while this waits on the platform: then the next refresh does its work.
+    const generation = this.#generation;
+    const current = () => this.#current(sessionId, generation);
     try {
-      if ((await this.#sessionType(managed, sessionId)) !== "orchestrator") {
+      const type = await this.#sessionType(managed, sessionId);
+      if (!current()) return;
+      if (type !== "orchestrator") {
         this.#workers = [];
         return this.#set({ ...base, enabled: false, unavailable: { reason: SANDBOXES_LEGACY, startOver: true }, workers: [], runs: {} });
       }
       const workers = await managed.workers(sessionId).list();
-      // The conversation was replaced meanwhile: its refresh is the next one's to do.
-      if (sessionId !== this.#deps.sessionId() || this.#stopped) return;
+      if (!current()) return;
       this.#workers = workers;
-      await Promise.all(workers.map((worker) => this.#inspect(managed, sessionId, worker)));
+      await Promise.all(workers.map((worker) => this.#inspect(managed, sessionId, worker, current)));
+      if (!current()) return;
       this.#track(sessionId, workers);
       this.#set({ ...base, workers: this.#workerViews(sessionId, workers), runs: this.#runs(sessionId) });
       const busy = workers.some((worker) => worker.state === "starting" || worker.state === "working");
-      if (busy && !this.#stopped) {
-        this.#poll = setTimeout(() => void this.refresh(), BUSY_POLL_MS);
+      const unread = workers.some((worker) => worker.state !== "stopped" && this.#dirty.has(worker.id));
+      if (!unread) this.#retries = 0;
+      const delay = busy ? BUSY_POLL_MS : unread && this.#retries < MAX_RETRIES ? RETRY_MS * 2 ** this.#retries++ : undefined;
+      if (delay !== undefined) {
+        this.#poll = setTimeout(() => void this.refresh(), delay);
         this.#poll.unref();
       }
     } catch (error) {
+      if (!current()) return;
       this.#deps.log.debug("Couldn't refresh the sandboxes", { error: errorMessage(error) });
       // Keep showing what was known; try again shortly.
       this.#set({ ...this.#view, ...base, error: `Couldn't check your sandboxes: ${friendly(error)}` });
@@ -294,7 +322,7 @@ export class Sandboxes {
   }
 
   /** Reads a sandbox's own state and published outputs when they may have changed, and copies new images. */
-  async #inspect(managed: ManagedCopilot, coordinatorId: string, worker: WorkerInfo): Promise<void> {
+  async #inspect(managed: ManagedCopilot, coordinatorId: string, worker: WorkerInfo, current: () => boolean): Promise<void> {
     if (worker.state === "stopped") {
       this.#sandboxStates.delete(worker.id);
       return;
@@ -311,6 +339,7 @@ export class Sandboxes {
       managed.sessions.get(worker.id).catch(() => undefined),
       busy ? Promise.resolve(undefined) : managed.artifacts(worker.id).list({ versions: "all" }).catch(() => undefined),
     ]);
+    if (!current()) return;
     if (info?.sandbox) this.#sandboxStates.set(worker.id, info.sandbox.state);
     if (busy) return;
     if (!artifacts) {
@@ -319,12 +348,16 @@ export class Sandboxes {
       return;
     }
     // Images that couldn't be copied are tried again on the next refresh.
-    if (await this.#record(managed, coordinatorId, worker.id, artifacts)) this.#inspected.set(worker.id, worker.updatedAt);
-    else this.#dirty.add(worker.id);
+    if (await this.#record(managed, coordinatorId, worker.id, artifacts, current)) this.#inspected.set(worker.id, worker.updatedAt);
+    else if (current()) this.#dirty.add(worker.id);
   }
 
-  /** Records a sandbox's published outputs and copies the images not copied yet. False if a copy failed. */
-  async #record(managed: ManagedCopilot, coordinatorId: string, workerId: string, artifacts: readonly ArtifactInfo[]): Promise<boolean> {
+  /**
+   * Records a sandbox's published outputs and copies the images not copied yet. False if a copy failed, or the
+   * conversation was replaced meanwhile (`current`), which stops it writing.
+   */
+  async #record(managed: ManagedCopilot, coordinatorId: string, workerId: string, artifacts: readonly ArtifactInfo[], current: () => boolean): Promise<boolean> {
+    if (!current()) return false;
     const published = artifacts.filter((artifact) => artifact.state === "published");
     this.#deps.store.recordOutputs(
       published.map((artifact) => ({
@@ -342,7 +375,9 @@ export class Sandboxes {
     for (const artifact of published) {
       if (!imageType(artifact.path, artifact.contentType) || artifact.size > MAX_IMAGE_BYTES || this.#deps.store.output(artifact.id)?.cached) continue;
       try {
-        this.#deps.store.cacheOutput(artifact.id, await managed.artifacts(workerId).readBytes(artifact.path, { version: artifact.version }));
+        const bytes = await managed.artifacts(workerId).readBytes(artifact.path, { version: artifact.version });
+        if (!current()) return false;
+        this.#deps.store.cacheOutput(artifact.id, bytes);
       } catch (error) {
         copied = false;
         this.#deps.log.debug("Couldn't copy a sandbox image", { workerId, path: artifact.path, error: errorMessage(error) });
@@ -359,12 +394,27 @@ export class Sandboxes {
     }
   }
 
+  /**
+   * Applies remembered finishes to runs registered since, oldest first: each ends its sandbox's open runs that had
+   * started by then. One that ended a run has done its job, so it can't end a later card's run.
+   */
+  #replayFinishes(workerId?: string): void {
+    const entries = workerId === undefined ? [...this.#finishes] : [[workerId, this.#finishes.get(workerId) ?? []] as const];
+    for (const [id, finishes] of entries) {
+      const left: { readonly at: string; readonly state: Settled }[] = [];
+      for (const finish of [...finishes].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))) {
+        if (this.#deps.store.finishRuns(id, finish.at, finish.state) === 0) left.push(finish);
+      }
+      if (left.length > 0) this.#finishes.set(id, left);
+      else this.#finishes.delete(id);
+    }
+  }
+
   /** Times each card's work: from its tool call until its sandbox settled (events end it on time; states catch up). */
   #track(coordinatorId: string, workers: readonly WorkerInfo[]): void {
     const store = this.#deps.store;
     this.#registerRuns(coordinatorId, workers);
-    // Finishes seen before their cards' runs were known (or before a run learned its sandbox) end them in order.
-    for (const [workerId, finishes] of this.#finishes) for (const finish of finishes) store.finishRuns(workerId, finish.at, finish.state);
+    this.#replayFinishes();
     // A follow-up reaches a sandbox only once it finished its earlier work, so an earlier card's work ended by then.
     const runs = store.runs(coordinatorId);
     const byWorker = new Map<string, typeof runs>();
@@ -375,7 +425,15 @@ export class Sandboxes {
         if (!run.finishedAt) store.finishRun(run.cardId, list[index + 1]!.startedAt, "idle");
       }
     }
-    for (const worker of workers) if (SETTLED.has(worker.state)) store.finishRuns(worker.id, iso(worker.updatedAt), worker.state as Settled);
+    // A settled sandbox whose message count covers every card finished their work too. Counting doesn't compare the
+    // platform's clock with the one that timed the cards; a listing from before a card's message counts fewer.
+    for (const worker of workers) {
+      const list = byWorker.get(worker.id);
+      const last = list?.at(-1);
+      if (!list || !last || last.finishedAt || !SETTLED.has(worker.state) || worker.messages < list.length) continue;
+      const updatedAt = iso(worker.updatedAt);
+      store.finishRun(last.cardId, updatedAt > last.startedAt ? updatedAt : last.startedAt, worker.state as Settled);
+    }
   }
 
   /** The sandbox a card is about when its tool result didn't name it: the newest one by that name started by then. */
@@ -453,7 +511,11 @@ export class Sandboxes {
 
   /** The conversation was replaced: its sandboxes went with it on the platform, so forget them here too. */
   reset(previousSessionId: string | undefined): void {
+    this.#generation++;
     if (previousSessionId) this.#deps.store.clearSandboxes(previousSessionId);
+    clearTimeout(this.#poll);
+    this.#poll = undefined;
+    this.#retries = 0;
     this.#workers = [];
     this.#inspected.clear();
     this.#awaited.clear();

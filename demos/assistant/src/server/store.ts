@@ -468,6 +468,14 @@ export class Store {
     return Number(result.changes);
   }
 
+  /** Ends every open run of a sandbox at `at` (never before a run's own start): it finished all it was sent. */
+  finishOpenRuns(workerId: string, at: string, outcome: "idle" | "failed" | "stopped"): number {
+    const result = this.db
+      .prepare("UPDATE sandbox_runs SET finished_at = MAX(started_at, ?), outcome = ? WHERE worker_id = ? AND finished_at IS NULL")
+      .run(at, outcome, workerId);
+    return Number(result.changes);
+  }
+
   /** Ends one card's run if it is still open (and started by `at`). */
   finishRun(cardId: string, at: string, outcome: "idle" | "failed" | "stopped"): void {
     this.db.prepare("UPDATE sandbox_runs SET finished_at = ?, outcome = ? WHERE card_id = ? AND finished_at IS NULL AND started_at <= ?").run(at, outcome, cardId, at);

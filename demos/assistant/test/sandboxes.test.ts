@@ -1,6 +1,6 @@
 import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import { ManagedCopilotError, type ArtifactInfo, type DeploymentInfo, type EnvironmentInfo, type PlatformEvent, type WorkerInfo } from "@managed-copilot/sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SandboxesView, WorkerItem } from "../src/shared/protocol.js";
 import type { AssistantConfig } from "../src/server/config.js";
 import { Conversation } from "../src/server/conversation.js";
@@ -267,7 +267,18 @@ interface FakeOptions {
 function sandboxes(options: FakeOptions = {}) {
   const store = new Store(":memory:");
   const listeners = new Map<string, Set<(event: PlatformEvent) => void>>();
-  const state = { workers: options.workers ?? [], artifacts: options.artifacts ?? {}, reads: 0, lists: 0, waits: 0, failReads: 0 };
+  const state = {
+    workers: options.workers ?? [],
+    artifacts: options.artifacts ?? {},
+    reads: 0,
+    lists: 0,
+    waits: 0,
+    failReads: 0,
+    /** The conversation's session (changes on Start over). */
+    sessionId: options.sessionId ?? COORDINATOR,
+    /** While set, listing outputs waits for it. */
+    listGate: undefined as Promise<void> | undefined,
+  };
   const managed = {
     info: { environments: options.environments ?? ENVIRONMENTS, capabilities: options.capabilities ?? ["orchestrator"] } as unknown as DeploymentInfo,
     on: (type: string, handler: (event: PlatformEvent) => void) => {
@@ -278,7 +289,7 @@ function sandboxes(options: FakeOptions = {}) {
     },
     sessions: {
       get: async (id: string) => {
-        if (id === COORDINATOR) return { id, type: options.type ?? "orchestrator" };
+        if (id === COORDINATOR || id === state.sessionId) return { id, type: options.type ?? "orchestrator" };
         const found = state.workers.find((candidate) => candidate.id === id);
         if (!found || found.state === "stopped") throw new ManagedCopilotError("not_found", `Session ${id} was not found`);
         return { id, type: "isolated", sandbox: { id: `sbx-${id}`, state: "running" } };
@@ -288,6 +299,7 @@ function sandboxes(options: FakeOptions = {}) {
     artifacts: (id: string) => ({
       list: async () => {
         state.lists++;
+        if (state.listGate) await state.listGate;
         return state.artifacts[id] ?? [];
       },
       waitForPublication: async () => {
@@ -311,7 +323,7 @@ function sandboxes(options: FakeOptions = {}) {
     store,
     platform: { managed } as unknown as Platform,
     environment: "assistant",
-    sessionId: () => options.sessionId ?? COORDINATOR,
+    sessionId: () => state.sessionId,
     cards: () => options.cards ?? [],
     onChange: (view) => views.push(view),
   });
@@ -446,6 +458,94 @@ describe("Sandboxes", () => {
     await subject.refresh();
     expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
     subject.stop();
+  });
+
+  it("keeps that finish when the card shows up before the sandbox is stopped", async () => {
+    const cards: WorkerItem[] = [];
+    const research = worker({ id: "w1", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [research], cards });
+    emit("worker.idle", { workerId: "w1", name: "research", state: "idle" }, at(25));
+    cards.push(card({ id: "c1", workerId: "w1", worker: "research", environment: "assistant-web" }));
+    // Stopped before anything listed the sandboxes again.
+    emit("worker.stopped", { workerId: "w1", name: "research", state: "stopped" }, at(600));
+    state.workers = [{ ...research, state: "stopped", updatedAt: at(600) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("ends a card's work when its sandbox finishes, though the platform's clock differs from the card's", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(30) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(28) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    // The platform's clock is behind: by it, the sandbox finished before the card's tool call returned.
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(27));
+    state.workers = [{ ...stats, state: "idle", updatedAt: at(27) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(30), finishedAt: at(30), outcome: "idle" });
+
+    // Its finish was missed: a listing that counts the follow-up's message ends it; one from before it doesn't.
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(60), endedAt: at(61) }));
+    await subject.refresh();
+    expect(subject.view.runs.c2).toMatchObject({ startedAt: at(61), finishedAt: undefined });
+    state.workers = [{ ...stats, state: "idle", messages: 2, updatedAt: at(59) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(61), finishedAt: at(61), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("writes nothing for a conversation replaced while it was being read", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats" })];
+    const { subject, state, store } = sandboxes({ workers: [worker({ id: "w1", name: "stats" })], artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] }, cards });
+    let open!: () => void;
+    state.listGate = new Promise((resolve) => (open = resolve));
+    const reading = subject.refresh();
+    await vi.waitFor(() => expect(state.lists).toBeGreaterThan(0));
+    // Start over: the new conversation has its own card by the time the old read returns.
+    state.sessionId = "coord-2";
+    cards.splice(0, cards.length, card({ id: "c9", workerId: "w9", worker: "fresh" }));
+    subject.reset(COORDINATOR);
+    open();
+    await reading;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(subject.view.workers).toEqual([]);
+    expect(store.runs(COORDINATOR)).toEqual([]);
+    expect(store.outputs(COORDINATOR)).toEqual([]);
+    subject.stop();
+  });
+
+  it("copies an image again by itself after a failed copy, backing off, and gives up after a few tries", async () => {
+    vi.useFakeTimers();
+    try {
+      const { subject, state, store } = sandboxes({ workers: [worker({ id: "w1", name: "stats" })], artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] } });
+      state.failReads = Number.POSITIVE_INFINITY;
+      await subject.refresh();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(store.output("a1")?.cached).toBe(false);
+      // The connection recovers: the next try copies it, with nothing else happening.
+      state.failReads = 0;
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(store.output("a1")?.cached).toBe(true);
+      const reads = state.reads;
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(state.reads).toBe(reads);
+
+      // Failing for good: a handful of tries, then it waits for something to happen.
+      const broken = sandboxes({ workers: [worker({ id: "w1", name: "stats" })], artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] } });
+      broken.state.failReads = Number.POSITIVE_INFINITY;
+      await broken.subject.refresh();
+      await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+      const tries = broken.state.reads;
+      expect(tries).toBeGreaterThanOrEqual(5);
+      expect(tries).toBeLessThanOrEqual(8);
+      await vi.advanceTimersByTimeAsync(2 * 60 * 60_000);
+      expect(broken.state.reads).toBe(tries);
+      subject.stop();
+      broken.subject.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("copies an image again after a failed copy, though the sandbox didn't change", async () => {

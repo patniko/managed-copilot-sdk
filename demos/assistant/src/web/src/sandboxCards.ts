@@ -78,8 +78,10 @@ export function sandboxCardStates(items: readonly TimelineItem[], sandboxes: San
     else if (card.status === "failed") phase = "call-failed";
     else if (run?.finishedAt && run.outcome) phase = run.outcome === "idle" ? "done" : run.outcome;
     else if (worker && latest) {
-      // A state from before this card's work (the sandboxes haven't been listed since) says nothing about it yet.
-      const stale = worker.state !== "starting" && worker.state !== "working" && time(worker.updatedAt) < time(startedAt) - SLACK_MS / 5;
+      // A listing from before this card's message says nothing about its work yet: it counts fewer messages and is
+      // older. Both must agree, since the platform's clock and the one that timed the card can differ.
+      const settled = worker.state !== "starting" && worker.state !== "working";
+      const stale = settled && worker.messages < index + 1 && time(worker.updatedAt) < time(startedAt) - SLACK_MS / 5;
       if (stale) phase = card.action === "start" ? "starting" : "working";
       else {
         phase = worker.state === "idle" ? "done" : worker.state;

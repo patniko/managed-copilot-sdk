@@ -102,6 +102,12 @@ describe("sandboxCardStates", () => {
     const stale = sandboxCardStates([first, followUp], view([sandbox({ state: "idle", updatedAt: at(30) })], { c1: { workerId: "w1", startedAt: at(1), finishedAt: at(30), outcome: "idle" } }));
     expect(stale(followUp)).toMatchObject({ phase: "working", finishedAt: undefined });
     expect(stale(first)).toMatchObject({ phase: "done", finishedAt: at(30) });
+    // A listing that counts the follow-up's message is about it, though the platform's clock puts its end earlier.
+    const skewed = sandboxCardStates(
+      [first, followUp],
+      view([sandbox({ state: "idle", messages: 2, updatedAt: at(39) })], { c1: { workerId: "w1", startedAt: at(1), finishedAt: at(30), outcome: "idle" }, c2: { workerId: "w1", startedAt: at(41) } }),
+    );
+    expect(skewed(followUp)).toMatchObject({ phase: "done", finishedAt: at(39) });
     // Started, but not listed yet.
     const fresh = card("c3", 50);
     expect(sandboxCardStates([fresh], view([]))(fresh)).toMatchObject({ phase: "starting" });
