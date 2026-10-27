@@ -217,7 +217,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 - **Every example in the spec runs as an automated check** against the real platform with real models. The first 13
   pass locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass. The orchestrator
-  example (14) passes locally and has not run on Azure yet.
+  example (14) passes locally and on Azure.
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
 - **Both demos run end to end** locally and on Azure.

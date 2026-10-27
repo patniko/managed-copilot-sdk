@@ -848,8 +848,11 @@ and quickstart snippet 14).
   `orchestrator` while sandboxes work.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
-  turns are started for it); workers share no disk; workers cannot start workers; Azure has not been run yet (the
-  workers use the same Container Apps Sandboxes path as isolated sessions).
+  turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
+  snippet 14, walkthrough 11, and a run of every coordinator tool passed on Container Apps Sandboxes (files read and
+  copied between two workers' sandboxes through the sandbox file API, worker prompts answered as
+  `platform:orchestrator`, a stop, and deletion with the coordinator); a gateway restart during worker runs has been
+  exercised only locally.
 
 ### Operator control plane (spec section 16)
 

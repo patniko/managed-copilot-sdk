@@ -7,7 +7,8 @@ reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public U
 
 > **Status.** The root AppHost deploys and both demo happy paths pass in westus2 (2026-10-24), using stock
 > SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
-> with the deployed assistant's webhook and reminder journeys checked separately. NFS locking, revision recovery,
+> with the deployed assistant's webhook and reminder journeys checked separately. Orchestrator environments (snippet
+> 14 and every coordinator tool) passed on 2026-10-27. NFS locking, revision recovery,
 > and persistent proxy trust have been exercised. This is a single-writer deployment, not a partition-tolerant HA
 > claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for example
 > isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
@@ -338,7 +339,7 @@ Alternatives when an address allowlist does not fit:
 | Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Enabled network returns 200; vault substitution and response redaction pass; CA fingerprint is unchanged across proxy revisions |
 | Files and artifacts in sandboxes | Yes | File injection, upload/read, report output and real PNG artifact pass |
 | Promotion (shared → isolated) | Yes | Explicit promotion and continuation pass; broader interactive CLI continuity is a separate gate |
-| Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every coordinator tool live) | Not run yet. Workers are isolated sessions on the same Container Apps Sandboxes path, and their file tools use the sandbox file API rather than a shared disk, but no deployment has run a coordinator |
+| Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every coordinator tool live) | Yes: snippet 14, walkthrough 11, and every coordinator tool passed (2026-10-27). Workers run in Container Apps Sandboxes, and their files move through the sandbox file API, not a shared disk. A gateway restart during worker runs has been tested only locally |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
 | Demos (software factory, assistant) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; assistant uses labelled demo Google data |
@@ -362,6 +363,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Software factory | Initial happy path: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). A checkpoint retry produced a 37-test release, independently checked offline |
 | Interrupted factory work | The previously stuck native turns became **failed/idle** with their original turn IDs. Explicit checkpoint Retry retained both builder session IDs, verified the current workspace, passed review/fix rounds and produced a downloadable **9-file, 44/44-test** release. No killed-process continuation or unknown-effect replay is claimed |
 | Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
+| Orchestrator (2026-10-27) | Snippet 14 (34 s) and walkthrough 11 (50 s) passed, each worker in its own sandbox. A run of every coordinator tool passed 10/10 checks: a builder's script read with `read_worker_file`, copied to a second worker's sandbox with `copy_worker_files` and run there after `message_worker`, worker prompts answered as `platform:orchestrator`, `stop_worker` deleting the builder's session, and deleting the coordinator deleting the other |
 
 The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real
 email or calendar invitation was sent. GitHub App credential refresh, real two-account access isolation, unsupported
@@ -371,7 +373,7 @@ To rerun the applicable snippets against your deployment:
 
 ```powershell
 $env:MANAGED_COPILOT_URL = "https://copilot.<environment-domain>"
-pnpm --filter @managed-copilot/quickstart acceptance 01 02 03 04 05 06 07 08 09 11 13 --strict
+pnpm --filter @managed-copilot/quickstart acceptance 01 02 03 04 05 06 07 08 09 11 13 14 --strict
 ```
 
 `deploy/azure/qualify/isolated.live.ts` covers idle compute replacement (use an environment with a short idle timeout,
