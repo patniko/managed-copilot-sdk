@@ -61,17 +61,25 @@ export interface WorkerRef {
  * The session's history (`getEvents()`, persisted events only) with the events delivered live while it loaded, in the
  * order they happened. Live events already in the history are dropped; the rest (ephemeral ones such as
  * `session.idle`, which history never contains, and anything persisted after the history was read) are placed by
- * timestamp, before history events with the same timestamp. Appending them instead could let an earlier
- * `session.idle` undo a newer turn that the history already shows.
+ * timestamp. Appending them instead could let an earlier `session.idle` undo a newer turn that the history already
+ * shows. On a tie, a live event goes after the history's other events of that millisecond (an idle ends its own turn,
+ * after its reply) but before a `user.message` (an idle precedes the next turn).
  */
-export function mergeHistory<T extends { readonly id: string; readonly timestamp: string }>(history: readonly T[], live: readonly T[]): T[] {
+export function mergeHistory<T extends { readonly id: string; readonly timestamp: string; readonly type: string }>(history: readonly T[], live: readonly T[]): T[] {
   const known = new Set(history.map((event) => event.id));
   const merged: T[] = [];
   let next = 0;
   for (const event of live) {
     if (known.has(event.id)) continue;
     const at = Date.parse(event.timestamp);
-    while (next < history.length && Date.parse(history[next]!.timestamp) < at) merged.push(history[next++]!);
+    // On a tie, a live event follows the history's events of its own turn but precedes the next turn's message.
+    while (next < history.length) {
+      const candidate = history[next]!;
+      const time = Date.parse(candidate.timestamp);
+      if (time > at || (time === at && candidate.type === "user.message")) break;
+      merged.push(candidate);
+      next += 1;
+    }
     merged.push(event);
   }
   while (next < history.length) merged.push(history[next++]!);
@@ -83,6 +91,8 @@ export class Transcript {
   readonly #decisions = new Map<string, DecisionRecord>();
   /** Assistant messages still streaming, by the runtime's message ID. */
   readonly #streaming = new Map<string, MessageRecord>();
+  /** Every assistant message shown, by the runtime's message ID. */
+  readonly #assistantMessages = new Map<string, MessageRecord>();
   /** Persisted events already applied (history and live delivery overlap after a resume). */
   readonly #seen = new Set<string>();
   /** Each worker name's current worker ID, from `start_worker` answers. */
@@ -171,13 +181,15 @@ export class Transcript {
     // A new turn: anything the previous one left open was cut short (its `session.idle` is never in the history).
     if (!delivery) this.settle(event.timestamp);
     const content = typeof data["content"] === "string" ? data["content"] : "";
+    const messageId = text(data["messageId"]);
     const message: MessageRecord = {
       id: event.id,
       role: "user",
       content,
       at: event.timestamp,
       index: ++this.#users,
-      via: this.isOwn(text(data["messageId"]), content) ? "dispatch" : "other",
+      via: this.isOwn(messageId, content) ? "dispatch" : "other",
+      ...(messageId ? { messageId } : {}),
       ...(delivery ? { delivery } : {}),
       decisionIds: [],
     };
@@ -192,12 +204,15 @@ export class Transcript {
     const id = text(data["messageId"]);
     const delta = typeof data["deltaContent"] === "string" ? data["deltaContent"] : "";
     if (!id || !delta || this.#completed.has(id)) return false;
-    let message = this.#streaming.get(id);
+    // Still being written, or cut off by its turn's end and continuing: either way, the same message.
+    let message = this.#streaming.get(id) ?? this.#assistantMessages.get(id);
     if (!message) {
       message = { id: `assistant:${id}`, role: "assistant", content: "", at: event.timestamp, streaming: true };
-      this.#streaming.set(id, message);
+      this.#assistantMessages.set(id, message);
       this.#messages.push(message);
     }
+    message.streaming = true;
+    this.#streaming.set(id, message);
     message.content += delta;
     return true;
   }
@@ -205,21 +220,25 @@ export class Transcript {
   #assistant(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
     const content = typeof data["content"] === "string" ? data["content"].trim() : "";
     const id = text(data["messageId"]) ?? event.id;
-    const streamed = this.#streaming.get(id);
+    // One message per ID, whatever order its pieces arrived in.
+    const existing = this.#streaming.get(id) ?? this.#assistantMessages.get(id);
     this.#streaming.delete(id);
     this.#completed.add(id);
-    if (streamed) {
+    if (existing) {
       if (!content) {
-        this.#messages.splice(this.#messages.indexOf(streamed), 1);
+        this.#messages.splice(this.#messages.indexOf(existing), 1);
+        this.#assistantMessages.delete(id);
         return true;
       }
-      streamed.content = content;
-      streamed.streaming = false;
+      existing.content = content;
+      existing.streaming = false;
       this.updatedAt = event.timestamp;
       return true;
     }
     if (!content) return false;
-    this.#messages.push({ id: `assistant:${id}`, role: "assistant", content, at: event.timestamp });
+    const message: MessageRecord = { id: `assistant:${id}`, role: "assistant", content, at: event.timestamp };
+    this.#assistantMessages.set(id, message);
+    this.#messages.push(message);
     this.updatedAt = event.timestamp;
     return true;
   }
@@ -368,6 +387,8 @@ export class Transcript {
     this.#streaming.clear();
     for (const decision of this.#decisions.values()) {
       if (decision.status !== "running" && decision.status !== "asking") continue;
+      // A request its turn left unanswered can't be answered anymore: a stale delivery of it isn't asked.
+      if (decision.status === "asking") this.#settled.add(decision.id);
       decision.detail = decision.status === "asking" ? "Cancelled before anyone answered." : "Interrupted: the turn ended before this finished.";
       decision.status = "failed";
       decision.endedAt ??= at;

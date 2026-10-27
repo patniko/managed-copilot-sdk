@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
-import type { ApiErrorBody, ApprovalAnswer, CreateConversationRequest, SendMessageRequest, SettingsRequest } from "../shared/types.js";
+import type { ApiErrorBody, ApprovalAnswer, CreateConversationRequest, SendMessageRequest, SendMessageResponse, SettingsRequest } from "../shared/types.js";
 import { isValidSessionId, launchAttach } from "./attach.js";
 import type { DispatchConfig } from "./config.js";
 import { DispatchError } from "./errors.js";
@@ -163,8 +163,9 @@ function buildRouter(ctx: ApiContext): Router {
   });
   router.add("POST", "/api/conversations/:id/messages", async (req, res, params) => {
     const body = await readJson<Partial<SendMessageRequest>>(req);
-    await conversations.send(params.id!, String(body.prompt ?? ""));
-    res.writeHead(202).end();
+    const messageId = await conversations.send(params.id!, String(body.prompt ?? ""));
+    const answer: SendMessageResponse = messageId ? { messageId } : {};
+    sendJson(res, 202, answer);
   });
   router.add("POST", "/api/conversations/:id/approvals/:approvalId", async (req, res, params) => {
     const body = await readJson<Partial<ApprovalAnswer>>(req);

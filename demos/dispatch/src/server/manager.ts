@@ -6,7 +6,7 @@ import type { ApprovalMode, ConversationSettings, ConversationSummary, Conversat
 import { attachCommandTemplate, canLaunchTerminal } from "./attach.js";
 import type { DispatchConfig } from "./config.js";
 import { Conversation, type ConversationHost } from "./conversation.js";
-import { DispatchError, errorText } from "./errors.js";
+import { DispatchError, errorText, isMissingSession } from "./errors.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
 import type { DispatchPlatform } from "./platform.js";
@@ -96,11 +96,17 @@ export class ConversationManager implements ConversationHost {
     }
     if (sessions) {
       const existing = new Map(sessions.filter((session) => session.state !== "deleting" && session.state !== "deleted").map((session) => [session.id, session]));
-      for (const [id, conversation] of [...this.#conversations]) {
-        if (existing.has(id) || !before.has(conversation)) continue;
-        log.info("A conversation no longer exists on Managed Copilot", { sessionId: id });
-        conversation.dispose();
-        this.gone(conversation);
+      // The list is capped, so absence isn't deletion: look each missing conversation up, and drop only confirmed ones.
+      const missing = [...this.#conversations].filter(([id, conversation]) => !existing.has(id) && before.has(conversation));
+      for (let index = 0; index < missing.length; index += 8) {
+        await Promise.all(
+          missing.slice(index, index + 8).map(async ([id, conversation]) => {
+            if (!(await this.#confirmGone(id)) || this.#conversations.get(id) !== conversation) return;
+            log.info("A conversation no longer exists on Managed Copilot", { sessionId: id });
+            conversation.dispose();
+            this.gone(conversation);
+          }),
+        );
       }
       for (const session of existing.values()) {
         if (this.#conversations.has(session.id) || this.#removed.has(session.id)) continue;
@@ -117,6 +123,16 @@ export class ConversationManager implements ConversationHost {
 
   #sorted(): Conversation[] {
     return [...this.#conversations.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /** Whether a session is definitely gone: not found, or being deleted. An error that says neither keeps it. */
+  async #confirmGone(sessionId: string): Promise<boolean> {
+    try {
+      const info = await this.platform.sessionInfo(sessionId);
+      return info.state === "deleting" || info.state === "deleted";
+    } catch (error) {
+      return isMissingSession(error);
+    }
   }
 
   summaries(): ConversationSummary[] {
@@ -181,9 +197,9 @@ export class ConversationManager implements ConversationHost {
     return conversation.view();
   }
 
-  async send(id: string, prompt: string): Promise<void> {
+  async send(id: string, prompt: string): Promise<string | undefined> {
     this.#requireConnected();
-    await this.#require(id).send(validPrompt(prompt));
+    return this.#require(id).send(validPrompt(prompt));
   }
 
   answer(id: string, approvalId: string, approve: boolean, reason?: string): void {

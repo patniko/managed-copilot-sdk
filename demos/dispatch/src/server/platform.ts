@@ -273,7 +273,15 @@ export class Platform implements DispatchPlatform {
       const old = this.#client;
       this.#client = undefined;
       if (old) await deadline(old.forceStop(), 5_000, "Stopping the old client").catch(() => undefined);
-      const client = await deadline(managed.client(this.#config.environment), 30_000, "Starting the coordinator's client");
+      const starting = managed.client(this.#config.environment);
+      let client: CopilotClient;
+      try {
+        client = await deadline(starting, 30_000, "Starting the coordinator's client");
+      } catch (error) {
+        // A client that finishes starting after the deadline is stopped, not leaked.
+        void starting.then((late) => late.forceStop()).catch(() => undefined);
+        throw error;
+      }
       if (this.#stopped || this.#managed !== managed) {
         await client.forceStop().catch(() => undefined);
         return;

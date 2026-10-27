@@ -175,6 +175,62 @@ describe("ConversationManager", () => {
     expect((await manager.view("answered")).approvals).toEqual([]);
   });
 
+  it("lets go of a request whose turn ended while the history loaded", async () => {
+    const session = new FakeSession("ended", {} as SessionConfig);
+    const t = (second: number) => Date.UTC(2026, 9, 27, 12, 0, second);
+    session.history.push(
+      event("user.message", { content: "go", messageId: "m1" }, { at: t(1) }),
+      event("tool.execution_start", { toolCallId: "c1", toolName: "start_worker", arguments: { name: "py", task: "t" } }, { at: t(2) }),
+      event("permission.requested", { requestId: "r1", permissionRequest: startWorker("c1", "py", "dispatch-python") }, { at: t(2) }),
+    );
+    session.getEvents = async () => {
+      // The turn ends (for example cancelled elsewhere) while the history is being read.
+      session.handlers.onEvent?.(event("session.idle", {}, { ephemeral: true, at: t(4) }));
+      return [...session.history];
+    };
+    platform.sessions.set("ended", session);
+    platform.listed.set("ended", info("ended"));
+    platform.pendingPrompts.set("ended", [startWorker("c1", "py", "dispatch-python")]);
+    begin();
+    await manager.sync();
+    await settle();
+    expect(await manager.view("ended")).toMatchObject({ approvals: [], busy: false, status: "idle" });
+  });
+
+  it("keeps conversations a capped list leaves out, and drops only ones confirmed gone", async () => {
+    for (const id of ["older", "deleted"]) {
+      store.ensure(id, { settings: { approvals: "ask" } });
+      platform.sessions.set(id, new FakeSession(id, {} as SessionConfig));
+    }
+    // "older" still exists but is beyond the list's limit; "deleted" is gone.
+    platform.listed.set("older", info("older"));
+    platform.listSessions = async () => [];
+    begin();
+    await manager.sync();
+    expect(manager.summaries().map((summary) => summary.id)).toEqual(["older"]);
+    expect(store.get("deleted")).toBeUndefined();
+    expect(store.get("older")).toBeDefined();
+  });
+
+  it("doesn't ask for a request whose turn the platform reports finished", async () => {
+    const session = new FakeSession("cut", {} as SessionConfig);
+    session.history.push(
+      user("go", "m1"),
+      start("c1", "start_worker", { name: "py", task: "t" }),
+      event("permission.requested", { requestId: "r1", permissionRequest: startWorker("c1", "py", "dispatch-python") }),
+    );
+    platform.sessions.set("cut", session);
+    // The runtime restarted mid-turn; core ended the turn.
+    platform.listed.set("cut", info("cut", { lastTurn: { turnId: "t1", status: "failed", completedAt: "2026-10-27T10:05:00.000Z" } }));
+    platform.pendingPrompts.set("cut", [startWorker("c1", "py", "dispatch-python")]);
+    begin();
+    await manager.sync();
+    await settle();
+    const view = await manager.view("cut");
+    expect(view).toMatchObject({ approvals: [], busy: false, status: "idle" });
+    expect(view.messages[0]?.decisions?.[0]).toMatchObject({ id: "c1", status: "failed", detail: "Cancelled before anyone answered." });
+  });
+
   it("keeps a conversation started while discovery reads the list, and doesn't revive one deleted meanwhile", async () => {
     begin();
     const doomed = await manager.create("delete me", "ask");
@@ -191,7 +247,7 @@ describe("ConversationManager", () => {
     expect(manager.summaries().map((summary) => summary.id)).toEqual([fresh.id]);
     // The deleted one wasn't brought back, not even briefly (it would be resumed, then found gone).
     expect(platform.resumeAttempts).not.toContain(doomed.id);
-    await expect(manager.send(fresh.id, "still here?")).resolves.toBeUndefined();
+    await expect(manager.send(fresh.id, "still here?")).resolves.toEqual(expect.any(String));
   });
 
   it("keeps a conversation usable when deleting it fails", async () => {
@@ -206,7 +262,7 @@ describe("ConversationManager", () => {
     const resumes = platform.resumed.length;
     await manager.view(view.id);
     expect(platform.resumed.length).toBe(resumes + 1);
-    await expect(manager.send(view.id, "still here?")).resolves.toBeUndefined();
+    await expect(manager.send(view.id, "still here?")).resolves.toEqual(expect.any(String));
   });
 
   it("attaches on the new connection when a reconnect cuts an attach short", async () => {
@@ -272,7 +328,8 @@ describe("ConversationManager", () => {
     session.history.push(
       user("Estimate pi three ways", "sent-earlier"),
       event("permission.requested", { requestId: "r1", permissionRequest: startWorker("c1", "monte-carlo", "dispatch-python") }),
-      user("Use a million samples", "from-cli"),
+      // Typed in Copilot CLI while the turn waited for the answer: queued behind it, not a new turn.
+      event("user.message", { content: "Use a million samples", messageId: "from-cli", delivery: "queued" }),
     );
     platform.sessions.set("earlier", session);
     platform.listed.set("earlier", info("earlier", { title: "Estimate pi three ways" }));

@@ -224,12 +224,12 @@ describe("Transcript", () => {
 });
 
 describe("mergeHistory", () => {
-  const e = (id: string, second: number, ephemeral = false) => ({ id, timestamp: new Date(Date.UTC(2026, 9, 27, 12, 0, second)).toISOString(), ephemeral });
+  const e = (id: string, second: number, ephemeral = false, type = "tool.execution_start") => ({ id, type, timestamp: new Date(Date.UTC(2026, 9, 27, 12, 0, second)).toISOString(), ephemeral });
 
   it("puts events delivered while the history loaded where they happened, without duplicates", () => {
-    const history = [e("u1", 1), e("t1", 2), e("u2", 5)];
+    const history = [e("u1", 1, false, "user.message"), e("t1", 2), e("u2", 5, false, "user.message")];
     // Live: the end of turn 1 (idle, never persisted), then turn 2's message, which the history already has.
-    const live = [e("idle1", 3, true), e("u2", 5)];
+    const live = [e("idle1", 3, true, "session.idle"), e("u2", 5, false, "user.message")];
     expect(mergeHistory(history, live).map((event) => event.id)).toEqual(["u1", "t1", "idle1", "u2"]);
   });
 
@@ -241,9 +241,67 @@ describe("mergeHistory", () => {
     expect(t.busy).toBe(true);
   });
 
-  it("appends what came after the history, in order, and places ties before history events", () => {
-    const history = [e("a", 1), e("b", 2)];
-    expect(mergeHistory(history, [e("delta", 2, true), e("c", 4), e("idle", 5, true)]).map((event) => event.id)).toEqual(["a", "delta", "b", "c", "idle"]);
+  it("appends what came after the history in order; on a tie, follows its own turn's events but precedes a new turn", () => {
+    const history = [e("a", 1), e("b", 2), e("u", 3, false, "user.message")];
+    expect(mergeHistory(history, [e("delta", 2, true, "assistant.message_delta"), e("idle", 3, true, "session.idle"), e("c", 4)]).map((event) => event.id)).toEqual([
+      "a",
+      "b",
+      "delta",
+      "idle",
+      "u",
+      "c",
+    ]);
     expect(mergeHistory([], [e("x", 1)]).map((event) => event.id)).toEqual(["x"]);
+  });
+
+  it("gets same-millisecond ties right: an idle before the next turn, after its own turn's reply", () => {
+    const at = Date.UTC(2026, 9, 27, 12, 0, 5);
+    // The idle ends turn one in the same millisecond the history shows turn two starting.
+    const next = new Transcript(() => true);
+    const one = event("user.message", { content: "one" }, { at: at - 4000 });
+    const two = event("user.message", { content: "two" }, { at });
+    for (const value of mergeHistory([one, two], [event("session.idle", {}, { ephemeral: true, at })])) next.apply(value as unknown as CoordinatorEvent);
+    expect(next.busy).toBe(true);
+    // The reply streamed live and completed in the same millisecond as the idle: one message, finished, turn over.
+    const same = new Transcript(() => true);
+    const history = [
+      event("user.message", { content: "go" }, { at: at - 4000 }),
+      event("tool.execution_start", { toolCallId: "w1", toolName: "wait_for_workers", arguments: {} }, { at: at - 3000 }),
+      event("tool.execution_complete", { toolCallId: "w1", success: true, result: { content: "All done." } }, { at: at - 2000 }),
+      event("assistant.message", { messageId: "a", content: "Here it is." }, { at }),
+    ];
+    const live = [event("assistant.message_delta", { messageId: "a", deltaContent: "Here" }, { ephemeral: true, at: at - 1000 }), event("session.idle", {}, { ephemeral: true, at })];
+    for (const value of mergeHistory(history, live)) same.apply(value as unknown as CoordinatorEvent);
+    expect(same.busy).toBe(false);
+    expect(same.messages().filter((message) => message.role === "assistant")).toEqual([expect.objectContaining({ id: "assistant:a", content: "Here it is.", streaming: false })]);
+    expect(same.messages()[0]?.decisions?.[0]).toMatchObject({ id: "w1", status: "done", detail: "All done." });
+  });
+});
+
+describe("Transcript assistant messages", () => {
+  it("keeps one message per ID, even when the turn's end arrives between its pieces", () => {
+    const t = new Transcript(() => true);
+    t.apply(event("user.message", { content: "go" }) as unknown as CoordinatorEvent);
+    t.apply(event("assistant.message_delta", { messageId: "a", deltaContent: "Part" }, { ephemeral: true }) as unknown as CoordinatorEvent);
+    t.apply(event("session.idle", {}, { ephemeral: true }) as unknown as CoordinatorEvent);
+    t.apply(event("assistant.message_delta", { messageId: "a", deltaContent: "ial" }, { ephemeral: true }) as unknown as CoordinatorEvent);
+    expect(t.messages().filter((message) => message.role === "assistant")).toEqual([expect.objectContaining({ content: "Partial", streaming: true })]);
+    t.apply(event("assistant.message", { messageId: "a", content: "Partial answer." }) as unknown as CoordinatorEvent);
+    expect(t.messages().filter((message) => message.role === "assistant")).toEqual([expect.objectContaining({ id: "assistant:a", content: "Partial answer.", streaming: false })]);
+  });
+
+  it("gives each user message its runtime ID", () => {
+    const t = new Transcript(() => true);
+    t.apply(event("user.message", { content: "go", messageId: "m-1" }) as unknown as CoordinatorEvent);
+    expect(t.messages()[0]).toMatchObject({ role: "user", messageId: "m-1" });
+  });
+
+  it("completes a streamed reply whose final event arrives after the turn's end", () => {
+    const t = new Transcript(() => true);
+    t.apply(event("user.message", { content: "go" }) as unknown as CoordinatorEvent);
+    t.apply(event("assistant.message_delta", { messageId: "a", deltaContent: "Here" }, { ephemeral: true }) as unknown as CoordinatorEvent);
+    t.apply(event("session.idle", {}, { ephemeral: true }) as unknown as CoordinatorEvent);
+    t.apply(event("assistant.message", { messageId: "a", content: "Here it is." }) as unknown as CoordinatorEvent);
+    expect(t.messages().filter((message) => message.role === "assistant")).toEqual([expect.objectContaining({ id: "assistant:a", content: "Here it is.", streaming: false })]);
   });
 });

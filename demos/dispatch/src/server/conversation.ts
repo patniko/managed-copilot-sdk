@@ -264,7 +264,7 @@ export class Conversation {
   }
 
   /** Sends a message. While the coordinator is working, it goes in right away (the coordinator answers between waits). */
-  async send(prompt: string): Promise<void> {
+  async send(prompt: string): Promise<string | undefined> {
     const text = prompt.trim();
     if (!text) throw new DispatchError("invalid_request", "Write a message first.");
     await this.attach();
@@ -276,6 +276,7 @@ export class Conversation {
     try {
       const messageId = await session.send({ prompt: text, ...(busy ? { mode: "immediate" as const } : {}) });
       this.#host.store.addOwn(this.#id, { ...(messageId ? { id: messageId } : {}), digest: key });
+      return messageId || undefined;
     } catch (error) {
       throw new DispatchError("send_failed", `Your message wasn't delivered: ${errorText(error)}`, 502);
     } finally {

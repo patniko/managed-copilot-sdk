@@ -90,6 +90,8 @@ export interface ChatMessage {
   readonly via?: "dispatch" | "other";
   /** User messages sent while the coordinator was busy: steering (same turn) or queued (next turn). */
   readonly delivery?: "steering" | "queued";
+  /** User messages: the runtime's message ID, which `session.send` returns to the sender. */
+  readonly messageId?: string;
   readonly streaming?: boolean;
   /** User messages: what the coordinator did for this message. */
   readonly decisions?: readonly Decision[];
@@ -221,6 +223,11 @@ export interface CreateConversationRequest {
 
 export interface SendMessageRequest {
   readonly prompt: string;
+}
+
+export interface SendMessageResponse {
+  /** The runtime's ID for the message; the conversation's `ChatMessage.messageId` once it arrives. */
+  readonly messageId?: string;
 }
 
 export interface ApprovalAnswer {

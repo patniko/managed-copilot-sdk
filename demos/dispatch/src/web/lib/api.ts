@@ -1,4 +1,4 @@
-import type { ApprovalMode, AttachResponse, ConversationView, DispatchState, FileView } from "../../shared/types.js";
+import type { ApprovalMode, AttachResponse, ConversationView, DispatchState, FileView, SendMessageResponse } from "../../shared/types.js";
 
 /** A failed API call with the server's friendly message (never a stack trace). */
 export class ApiError extends Error {
@@ -54,7 +54,7 @@ async function json<T>(method: string, url: string, body?: unknown): Promise<T> 
     throw new ApiError("Can't reach Dispatch's server. Check that it's running.", "network_error", 0);
   }
   if (!response.ok) throw await toApiError(response);
-  if (response.status === 202 || response.status === 204) return undefined as T;
+  if (response.status === 204) return undefined as T;
   const text = await response.text();
   if (!text) return undefined as T;
   try {
@@ -78,7 +78,7 @@ export const api = {
   state: () => json<DispatchState>("GET", "/api/state"),
   conversation: (id: string) => json<ConversationView>("GET", conversationUrl(id)),
   create: (prompt: string, approvals: ApprovalMode) => json<ConversationView>("POST", "/api/conversations", { prompt, approvals }),
-  send: (id: string, prompt: string) => json<undefined>("POST", `${conversationUrl(id)}/messages`, { prompt }),
+  send: (id: string, prompt: string) => json<SendMessageResponse | undefined>("POST", `${conversationUrl(id)}/messages`, { prompt }),
   answer: (id: string, approvalId: string, approve: boolean, reason?: string) =>
     json<undefined>("POST", `${conversationUrl(id)}/approvals/${enc(approvalId)}`, { approve, ...(reason?.trim() ? { reason: reason.trim() } : {}) }),
   settings: (id: string, approvals: ApprovalMode) => json<ConversationView>("PUT", `${conversationUrl(id)}/settings`, { approvals }),
