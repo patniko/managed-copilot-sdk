@@ -19,8 +19,9 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  O["{ gitHubToken }"] --> E1["MANAGED_COPILOT_<br/>GITHUB_TOKEN"] --> E2["COPILOT_<br/>GITHUB_TOKEN"] --> E3["GH_TOKEN"] --> E4["GITHUB_TOKEN"] --> G["gh auth token"]
-  G -. "nothing found" .-> X["authentication_required"]
+  O["1 · the gitHubToken option"] -- "not set" --> E["2 · the first variable set<br/>MANAGED_COPILOT_GITHUB_TOKEN<br/>COPILOT_GITHUB_TOKEN<br/>GH_TOKEN<br/>GITHUB_TOKEN"]
+  E -- "none set" --> G["3 · gh auth token<br/>(the GitHub CLI's sign-in)"]
+  G -. "not signed in" .-> X["authentication_required"]
 ```
 
 If you're signed in with the GitHub CLI (`gh auth login`), there is nothing to set. The CLI has no token flag, so

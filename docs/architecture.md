@@ -88,6 +88,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | Sandbox | `platform/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `platform/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
 | Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant |
+| Samples | `samples` | scripts (`pnpm sample <nn>`) | The walkthroughs' runnable code, documented in `samples/*/README.md` |
 
 ### Web UI look and feel
 
@@ -1380,3 +1381,4 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `platform/console/**`, `packages/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
 | **design** | `packages/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |
+| **guides** | `docs/README.md`, `docs/concepts/**`, `samples/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |
