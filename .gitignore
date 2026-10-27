@@ -23,5 +23,6 @@ NuGet.config
 
 # Demo outputs
 demos/**/.output/
+samples/.output/
 recordings/
 docs/tutorial/source/out/

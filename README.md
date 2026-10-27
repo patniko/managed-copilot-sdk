@@ -6,8 +6,10 @@
 </p>
 
 <p align="center">
+  <a href="docs/README.md">Start here</a> ·
   <a href="docs/tutorial/README.md">Video tour</a> ·
   <a href="#run-it-locally">Run it locally</a> ·
+  <a href="samples/README.md">Walkthroughs</a> ·
   <a href="#the-demos">Demos</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/deployment.md">Deploy to Azure</a> ·
@@ -95,6 +97,24 @@ await addManagedCopilot(builder, "copilot", {
 });
 ```
 
+An environment is a template; a client only picks one. Every `chat` session shares one runtime, every `coder` session
+gets its own new sandbox, and a `helper` session moves once into a sandbox when it needs one. From a live run:
+
+```mermaid
+flowchart LR
+  subgraph GW["Gateway"]
+    RT["Shared runtime<br/>(one process)"]
+  end
+  C1["chat session A"] --> RT
+  C2["chat session B"] --> RT
+  H["helper session"] -- "until promoted" --> RT
+  H -. "moves once" .-> S3["its own new sandbox<br/>(coder's image, size, setup)"]
+  K1["coder session 1"] --> S1["sandbox sbx_96fd…"]
+  K2["coder session 2"] --> S2["sandbox sbx_1635…"]
+```
+
+More in [environments](docs/concepts/environments.md) and [sandboxes](docs/concepts/sandboxes.md).
+
 ## The demos
 
 Both demos run under `aspire run` with real models, and both run on Azure from the same AppHost.
@@ -153,7 +173,8 @@ npx managed-copilot console            # the operator console: health, sessions,
 ```
 
 To run every snippet from the spec against your platform, start **quickstart** in the Aspire dashboard, or run
-`pnpm --filter @managed-copilot/quickstart acceptance`.
+`pnpm --filter @managed-copilot/quickstart acceptance`. To learn by doing, follow the
+[walkthroughs](samples/README.md): `pnpm sample 01` is your first agent, in about a minute.
 
 - **Stuck at "Trusting certificates…".** The first `aspire run` asks to trust the dashboard's development
   certificate, and the prompt can be hidden. Run `aspire certs trust` once, or use `aspire run --non-interactive`,
@@ -199,6 +220,8 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 | | |
 | --- | --- |
+| [Start here](docs/README.md) | A learning path, ten visual concept pages, an "I want to…" index, and a glossary |
+| [Walkthroughs](samples/README.md) | Ten hands-on walkthroughs with runnable code (`pnpm sample 01`) and real output |
 | [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
@@ -222,8 +245,9 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | `deploy/azure` | The Azure integration for `aspire deploy`: hosting, the gateway's lease supervisor, and qualification probes |
 | `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
 | `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
+| `samples` | The walkthroughs' code: small, commented scripts you run with `pnpm sample <number>` |
 | `demos/software-factory`, `demos/assistant` | The AI software factory and the long-running assistant |
-| `docs/` | Spec, architecture, deployment, and the video tour |
+| `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |
 
 ## Develop
 

@@ -4,6 +4,7 @@ packages:
   - demos/*
   - tests/*
   - deploy/*
+  - samples
 
 # Allow install scripts only for packages that need them.
 onlyBuiltDependencies:
