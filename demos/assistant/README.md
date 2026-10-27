@@ -324,4 +324,5 @@ logs. Google tokens are sealed with AES-256-GCM and bound to their purpose.
 - Sandboxes can't use your mail or calendar; the assistant passes them what they need. The Python sandbox has no network
   and only Python's standard library, so it draws charts as SVG.
 - At most three sandboxes exist at once, idle ones included; the assistant stops the ones it no longer needs.
-- A sandbox's files other than images are available only while it exists.
+- Images are copied the moment a sandbox publishes them, so they stay in the chat after it is deleted; a sandbox
+  stopped in that same moment can still take a chart with it. Other files are available only while the sandbox exists.

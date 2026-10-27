@@ -11,7 +11,7 @@
  *   shows the same timings after a restart).
  */
 import type { ServerResponse } from "node:http";
-import { isManagedCopilotError, type ManagedCopilot, type PlatformEvent, type WorkerInfo } from "@managed-copilot/sdk";
+import { isManagedCopilotError, type ArtifactInfo, type ManagedCopilot, type PlatformEvent, type WorkerInfo } from "@managed-copilot/sdk";
 import type { SandboxEnvironmentView, SandboxesView, SandboxOutputView, SandboxRunView, SandboxWorkerView, WorkerItem } from "../shared/protocol.js";
 import { sandboxEnvironments } from "./environments.js";
 import { HttpError } from "./http.js";
@@ -33,6 +33,8 @@ export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
 /** While a sandbox works, its state is also checked this often (a safety net for missed events). */
 const BUSY_POLL_MS = 10_000;
+/** How long to wait for a finished sandbox's outputs to publish (the platform's own wait is 30 seconds). */
+const PUBLICATION_WAIT_MS = 45_000;
 const DEBOUNCE_MS = 250;
 const RETRY_MS = 15_000;
 
@@ -93,6 +95,10 @@ export class Sandboxes {
   readonly #inspected = new Map<string, string>();
   /** Workers that published or changed since they were last read. */
   readonly #dirty = new Set<string>();
+  /** The worker `updatedAt` whose publication was awaited from a refresh, so each finished run is awaited once. */
+  readonly #awaited = new Map<string, string>();
+  /** Workers whose publication is being awaited right now. */
+  readonly #publishing = new Set<string>();
   #refreshing: Promise<void> | undefined;
   #again = false;
   #timer: NodeJS.Timeout | undefined;
@@ -134,6 +140,9 @@ export class Sandboxes {
   /** Follows worker events on this connection (call again after reconnecting: closing a connection drops them). */
   listen(managed: ManagedCopilot): void {
     for (const off of this.#listeners.splice(0)) off();
+    // Events missed while disconnected (a publication, a finished run) are found by reading every sandbox again.
+    this.#inspected.clear();
+    this.#awaited.clear();
     const onWorker = (event: PlatformEvent) => this.#onWorkerEvent(event);
     for (const type of ["worker.started", "worker.idle", "worker.failed", "worker.stopped"] as const) this.#listeners.push(managed.on(type, onWorker));
     this.#listeners.push(managed.on("artifact.published", (event) => this.#onPublished(event)));
@@ -145,6 +154,7 @@ export class Sandboxes {
     const { workerId, state } = event.data as { workerId?: unknown; state?: unknown };
     if (typeof workerId !== "string") return;
     if (typeof state === "string" && SETTLED.has(state)) this.#deps.store.finishRuns(workerId, iso(event.createdAt), state as Settled);
+    if (state === "idle" || state === "failed") this.#awaitPublication(workerId);
     this.#dirty.add(workerId);
     this.schedule();
   }
@@ -153,6 +163,30 @@ export class Sandboxes {
     if (!event.sessionId || !this.#workers.some((worker) => worker.id === event.sessionId)) return;
     this.#dirty.add(event.sessionId);
     this.schedule();
+  }
+
+  /**
+   * Copies a finished sandbox's images as soon as they publish (publication follows the end of its run). The agent may
+   * stop the sandbox right after reading its report, and stopping deletes its files, so this doesn't wait for the next
+   * refresh. Bounded, and one wait per sandbox at a time.
+   */
+  #awaitPublication(workerId: string): void {
+    const managed = this.#deps.platform.managed;
+    const coordinatorId = this.#deps.sessionId();
+    if (!managed || !coordinatorId || this.#stopped || this.#publishing.has(workerId)) return;
+    this.#publishing.add(workerId);
+    void (async () => {
+      try {
+        const publication = await managed.artifacts(workerId).waitForPublication({ timeoutMs: PUBLICATION_WAIT_MS });
+        if (coordinatorId === this.#deps.sessionId()) await this.#record(managed, coordinatorId, workerId, publication.artifacts);
+      } catch (error) {
+        this.#deps.log.debug("Couldn't wait for a sandbox's outputs", { workerId, error: errorMessage(error) });
+      } finally {
+        this.#publishing.delete(workerId);
+        this.#dirty.add(workerId);
+        this.schedule();
+      }
+    })();
   }
 
   /** Refreshes shortly, once for a burst of events and tool results. */
@@ -250,6 +284,11 @@ export class Sandboxes {
       return;
     }
     const busy = worker.state === "starting" || worker.state === "working";
+    // A finished run's outputs may still be publishing (or published while events were missed): wait for them once.
+    if (!busy && this.#awaited.get(worker.id) !== worker.updatedAt) {
+      this.#awaited.set(worker.id, worker.updatedAt);
+      this.#awaitPublication(worker.id);
+    }
     if (!busy && !this.#dirty.has(worker.id) && this.#inspected.get(worker.id) === worker.updatedAt) return;
     this.#dirty.delete(worker.id);
     const [info, artifacts] = await Promise.all([
@@ -263,12 +302,18 @@ export class Sandboxes {
       this.#dirty.add(worker.id);
       return;
     }
+    await this.#record(managed, coordinatorId, worker.id, artifacts);
+    this.#inspected.set(worker.id, worker.updatedAt);
+  }
+
+  /** Records a sandbox's published outputs and copies the images not copied yet. */
+  async #record(managed: ManagedCopilot, coordinatorId: string, workerId: string, artifacts: readonly ArtifactInfo[]): Promise<void> {
     const published = artifacts.filter((artifact) => artifact.state === "published");
     this.#deps.store.recordOutputs(
       published.map((artifact) => ({
         artifactId: artifact.id,
         coordinatorId,
-        workerId: worker.id,
+        workerId,
         path: artifact.path,
         version: artifact.version,
         size: artifact.size,
@@ -279,12 +324,11 @@ export class Sandboxes {
     for (const artifact of published) {
       if (!imageType(artifact.path, artifact.contentType) || artifact.size > MAX_IMAGE_BYTES || this.#deps.store.output(artifact.id)?.cached) continue;
       try {
-        this.#deps.store.cacheOutput(artifact.id, await managed.artifacts(worker.id).readBytes(artifact.path, { version: artifact.version }));
+        this.#deps.store.cacheOutput(artifact.id, await managed.artifacts(workerId).readBytes(artifact.path, { version: artifact.version }));
       } catch (error) {
-        this.#deps.log.debug("Couldn't copy a sandbox image", { workerId: worker.id, path: artifact.path, error: errorMessage(error) });
+        this.#deps.log.debug("Couldn't copy a sandbox image", { workerId, path: artifact.path, error: errorMessage(error) });
       }
     }
-    this.#inspected.set(worker.id, worker.updatedAt);
   }
 
   /** Times each card's work: from its tool call until its sandbox settled (events end it on time; states catch up). */
@@ -385,6 +429,7 @@ export class Sandboxes {
     if (previousSessionId) this.#deps.store.clearSandboxes(previousSessionId);
     this.#workers = [];
     this.#inspected.clear();
+    this.#awaited.clear();
     this.#dirty.clear();
     this.#sandboxStates.clear();
     this.#set({ ...this.#currentBase(), workers: [], runs: {} });

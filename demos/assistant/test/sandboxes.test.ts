@@ -266,7 +266,7 @@ interface FakeOptions {
 function sandboxes(options: FakeOptions = {}) {
   const store = new Store(":memory:");
   const listeners = new Map<string, Set<(event: PlatformEvent) => void>>();
-  const state = { workers: options.workers ?? [], artifacts: options.artifacts ?? {}, reads: 0 };
+  const state = { workers: options.workers ?? [], artifacts: options.artifacts ?? {}, reads: 0, lists: 0, waits: 0 };
   const managed = {
     info: { environments: options.environments ?? ENVIRONMENTS, capabilities: options.capabilities ?? ["orchestrator"] } as unknown as DeploymentInfo,
     on: (type: string, handler: (event: PlatformEvent) => void) => {
@@ -285,7 +285,14 @@ function sandboxes(options: FakeOptions = {}) {
     },
     workers: () => ({ list: async () => state.workers }),
     artifacts: (id: string) => ({
-      list: async () => state.artifacts[id] ?? [],
+      list: async () => {
+        state.lists++;
+        return state.artifacts[id] ?? [];
+      },
+      waitForPublication: async () => {
+        state.waits++;
+        return { turnId: "turn-1", state: "published", artifacts: state.artifacts[id] ?? [] };
+      },
       readBytes: async (path: string) => {
         state.reads++;
         if (!state.workers.some((candidate) => candidate.id === id && candidate.state !== "stopped")) throw new ManagedCopilotError("not_found", "gone");
@@ -307,7 +314,7 @@ function sandboxes(options: FakeOptions = {}) {
     for (const handler of listeners.get(type) ?? []) handler({ id: `pe-${type}-${createdAt}`, type, createdAt, sessionId, data } as unknown as PlatformEvent);
   };
   subject.listen(managed as never);
-  return { subject, store, state, views, emit };
+  return { subject, store, state, views, emit, reconnect: () => subject.listen(managed as never) };
 }
 
 function card(overrides: Partial<WorkerItem> & Pick<WorkerItem, "id">): WorkerItem {
@@ -386,6 +393,40 @@ describe("Sandboxes", () => {
     const reads = state.reads;
     await subject.refresh();
     expect(state.reads).toBe(reads);
+  });
+
+  it("copies a finished sandbox's images as soon as they publish, before the agent can stop it", async () => {
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const { subject, emit, state, store } = sandboxes({ workers: [stats], artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] } });
+    await subject.refresh();
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(20));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The agent stopped it right away, before the next refresh: the chart was copied already.
+    state.workers = [{ ...stats, state: "stopped", updatedAt: at(21) }];
+    expect(store.output("a1")?.cached).toBe(true);
+    await subject.refresh();
+    expect(subject.view.workers[0]!.outputs.map((output) => output.path)).toEqual(["chart.svg"]);
+    subject.stop();
+  });
+
+  it("finds outputs published while it was disconnected", async () => {
+    const idle = worker({ id: "w1", name: "stats", updatedAt: at(20) });
+    const { subject, state, reconnect } = sandboxes({ workers: [idle] });
+    // Seen idle with nothing published yet; its publication wait finds nothing either, and it is read again.
+    await subject.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await subject.refresh();
+    const lists = state.lists;
+    // Published while the connection was being replaced: no event arrived, and the sandbox's own state didn't change.
+    state.artifacts = { w1: [artifact({ id: "a1", path: "chart.svg" })] };
+    await subject.refresh();
+    expect(state.lists).toBe(lists);
+    expect(subject.view.workers[0]!.outputs).toEqual([]);
+    // Reconnecting reads every sandbox again.
+    reconnect();
+    await subject.refresh();
+    expect(subject.view.workers[0]!.outputs.map((output) => output.path)).toEqual(["chart.svg"]);
+    subject.stop();
   });
 
   it("times work by the platform's events and ignores other conversations' sandboxes", async () => {
