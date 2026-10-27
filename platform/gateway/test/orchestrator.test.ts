@@ -1,7 +1,7 @@
 // Orchestrator environments (spec section 17): a coordinator on shared placement starts workers in their own
 // sandboxes through platform tools; the gateway tracks their turns, approves their prompts within the approval the
 // owner gave at start, and cleans them up with the coordinator. The fake runtime plays every runtime involved.
-import type { PlatformEvent, WorkerInfo } from "@managed-copilot/protocol";
+import { ManagedCopilotError, type PlatformEvent, type WorkerInfo } from "@managed-copilot/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Principal } from "../src/http.js";
 import { WORKER_INSTRUCTIONS } from "../src/modules/orchestrator/tools.js";
@@ -10,6 +10,7 @@ import { FakeRuntime, FakeSandboxes, RawClient, sleep, startGitHubStub, startTes
 const ALICE = "alice-token";
 const BOB = "bob-token";
 const ALICE_PRINCIPAL: Principal = { accountId: 1001, login: "alice", token: ALICE };
+const BOB_PRINCIPAL: Principal = { accountId: 1002, login: "bob", token: BOB };
 
 async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -80,6 +81,7 @@ describe("orchestrator environments", () => {
       },
     });
     sandboxes = new FakeSandboxes(runtime);
+    sandboxes.reportSandboxes = true;
     (app().services as Record<string, unknown>)["sandboxes"] = sandboxes;
     app().service("events").subscribe((event) => void events.push(event));
   });
@@ -183,6 +185,59 @@ describe("orchestrator environments", () => {
     expect(sends(workerId)).toEqual(["stall", "try again"]);
   });
 
+  it("messages a worker only between runs, and keeps a run's report through steering and an earlier run's late idle", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "steady", task: "stall" });
+    await waitUntil(() => worker(sessionId, "steady").state === "working");
+    const workerId = worker(sessionId, "steady").id;
+    // A working worker is waited for first: nothing is queued behind its run.
+    expect(await call(client, sessionId, "message_worker", { worker: "steady", message: "also this" })).toMatch(/is still working\. Call wait_for_workers/);
+    expect(sends(workerId)).toEqual(["stall"]);
+    expect(worker(sessionId, "steady").messages).toBe(1);
+
+    // Steering and skill prompts are messages inside the run: its report is still the run's reply.
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a1", content: "half done" });
+    runtime.emitEvent(workerId, "user.message", { content: "steer", messageId: "s1", delivery: "steering" });
+    runtime.emitEvent(workerId, "user.message", { content: "use the skill", messageId: "k1", source: "skill-pdf" });
+    runtime.emitEvent(workerId, "session.idle", {});
+    await waitUntil(() => worker(sessionId, "steady").state === "idle");
+    expect(worker(sessionId, "steady").result).toBe("half done");
+
+    // A run fails, and the coordinator messages the worker before that run's own idle arrives: that idle ends the
+    // earlier run, not the new one.
+    await call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
+    await waitUntil(() => worker(sessionId, "steady").state === "working");
+    runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
+    await waitUntil(() => worker(sessionId, "steady").state === "failed");
+    const held = runtime.holdNext("session.send", workerId, { before: true });
+    const sending = call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
+    await held.held;
+    expect(worker(sessionId, "steady").state).toBe("working");
+    runtime.emitEvent(workerId, "session.idle", {});
+    await sleep(100);
+    expect(worker(sessionId, "steady").state).toBe("working");
+    held.release();
+    expect(await sending).toContain('Sent to "steady"');
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a2", content: "recovered" });
+    runtime.emitEvent(workerId, "session.idle", {});
+    await waitUntil(() => worker(sessionId, "steady").state === "idle");
+    expect(worker(sessionId, "steady")).toMatchObject({ result: "recovered", messages: 3 });
+  });
+
+  it("takes back a message the runtime refused", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "refused", task: "hello" });
+    await waitUntil(() => worker(sessionId, "refused").state === "idle");
+    const workerId = worker(sessionId, "refused").id;
+    runtime.failNext("session.send", workerId, "The runtime is shutting down");
+    expect(await call(client, sessionId, "message_worker", { worker: "refused", message: "more" })).not.toContain("Sent to");
+    expect(worker(sessionId, "refused")).toMatchObject({ state: "idle", result: "echo: hello", messages: 1 });
+    expect(worker(sessionId, "refused").error).toMatch(/Couldn't deliver your last message/);
+    expect(await call(client, sessionId, "message_worker", { worker: "refused", message: "more" })).toContain('Sent to "refused"');
+    await waitUntil(() => worker(sessionId, "refused").result === "echo: more");
+    expect(worker(sessionId, "refused")).toMatchObject({ state: "idle", messages: 2 });
+  });
+
   it("enforces maxWorkers and unique names, and stop_worker frees a slot and deletes the sandbox", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "one", task: "first" });
@@ -205,6 +260,39 @@ describe("orchestrator environments", () => {
     expect(events.some((event) => event.type === "worker.stopped" && (event.data as { workerId?: string }).workerId === oneId)).toBe(true);
     expect(await call(client, sessionId, "start_worker", { name: "one", task: "a new one" })).toMatch(/Started worker "one"/);
     expect(await call(client, sessionId, "list_workers")).toMatch(/coder \(the default\): Builds things[\s\S]*Workers \(2 of at most 2 at once\)/);
+  });
+
+  it("stops the worker a stop_worker call chose, also when the call runs again after its name was reused", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "dup", task: "hello" });
+    await waitUntil(() => worker(sessionId, "dup").state === "idle");
+    const first = worker(sessionId, "dup").id;
+    const manager = app().service("orchestrator");
+    const context = { sessionId, ownerId: 1001, environment: "team", toolCallId: "call-stop", idempotencyKey: `stop-${sessionId}` };
+    expect(await manager.stop({ worker: "dup" }, context)).toContain('Stopped worker "dup"');
+    await call(client, sessionId, "start_worker", { name: "dup", task: "hello again" });
+    await waitUntil(() => worker(sessionId, "dup").state === "idle");
+    const second = worker(sessionId, "dup").id;
+    expect(second).not.toBe(first);
+    // The first call again (a replay after a restart, before its result was recorded).
+    expect(await manager.stop({ worker: "dup" }, context)).toContain('Stopped worker "dup"');
+    expect(worker(sessionId, second).state).toBe("idle");
+    expect(sessions().get(second)).toBeDefined();
+    expect(worker(sessionId, first).state).toBe("stopped");
+  });
+
+  it("says so when a stopped worker's sandbox could not be deleted, and finishes the cleanup later", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "sticky", task: "hello" });
+    await waitUntil(() => worker(sessionId, "sticky").state === "idle");
+    const workerId = worker(sessionId, "sticky").id;
+    sandboxes.failNextDelete = new ManagedCopilotError("internal", "The sandbox backend is not responding");
+    expect(await call(client, sessionId, "stop_worker", { worker: "sticky" })).toMatch(/couldn't be deleted yet \(The sandbox backend is not responding\)\. The platform keeps trying\./);
+    expect(worker(sessionId, "sticky").state).toBe("stopped");
+    expect(sessions().get(workerId)).toBeDefined();
+    // Asking again finishes it.
+    expect(await call(client, sessionId, "stop_worker", { worker: "sticky" })).toContain("Its sandbox and files are deleted.");
+    expect(sessions().get(workerId)).toBeUndefined();
   });
 
   it("approves a worker's permission prompts once each, and leaves the ones a person must answer", async () => {
@@ -236,6 +324,33 @@ describe("orchestrator environments", () => {
     await expect(actions.claim({ type: "platform", ownerId: 1002, responder: "test" }, workerId, pending.id)).rejects.toMatchObject({ code: "not_found" });
   });
 
+  it("approves a prompt once its full request shows no person is required, read as the ledger reads it", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "prompts", task: "stall" });
+    await waitUntil(() => worker(sessionId, "prompts").state === "working");
+    const workerId = worker(sessionId, "prompts").id;
+    const answered = (requestId: string) =>
+      runtime.calls("session.permissions.handlePendingPermissionRequest").some((request) => request.params["sessionId"] === workerId && request.params["requestId"] === requestId);
+    const actions = app().service("actions");
+
+    // Known only in its derived form, nothing shows yet whether a person must answer: it waits...
+    runtime.emitEvent(workerId, "permission.requested", { requestId: "perm-partial", promptRequest: { kind: "commands", fullCommandText: "ls" } });
+    await waitUntil(() => actions.list(workerId, { open: true }).some((action) => action.requestId === "perm-partial"));
+    await sleep(100);
+    expect(answered("perm-partial")).toBe(false);
+    // ...until the runtime asks again with the full request.
+    runtime.emitEvent(workerId, "permission.requested", { requestId: "perm-partial", permissionRequest: { kind: "shell", fullCommandText: "ls" }, promptRequest: { kind: "commands", fullCommandText: "ls" } });
+    await waitUntil(() => answered("perm-partial"));
+
+    // For standard prompt kinds the derived request decides (stock SDK guidance): this one needs no person.
+    runtime.emitEvent(workerId, "permission.requested", {
+      requestId: "perm-derived",
+      permissionRequest: { kind: "shell", fullCommandText: "npm test", managedApprovalRequired: true },
+      promptRequest: { kind: "commands", fullCommandText: "npm test", managedApprovalRequired: false },
+    });
+    await waitUntil(() => answered("perm-derived"));
+  });
+
   it("serves a worker with its coordinator's connected client, and with nothing once that client is gone", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "creds", task: "hello" });
@@ -254,6 +369,49 @@ describe("orchestrator environments", () => {
           (error: { code?: string }) => error.code === "authentication_required",
         ),
     );
+  });
+
+  it("starts a worker on its coordinator's live credential, never on one borrowed when the start began", async () => {
+    const { client, sessionId } = await coordinator();
+    const held = sandboxes.holdNextOpen();
+    await call(client, sessionId, "start_worker", { name: "borrowed", task: "hello" });
+    await held.held;
+    // The coordinator's only client leaves while the worker's sandbox starts (and there is no background sign-in).
+    await client.close();
+    held.release();
+    await waitUntil(() => worker(sessionId, "borrowed").state === "failed");
+    expect(worker(sessionId, "borrowed").error).toMatch(/^Couldn't start/);
+    expect(sends(worker(sessionId, "borrowed").id)).toEqual([]);
+  });
+
+  it("waits for a finished worker's outputs to be published before reporting them", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "publisher", task: "stall" });
+    await waitUntil(() => worker(sessionId, "publisher").state === "working");
+    const workerId = worker(sessionId, "publisher").id;
+    const services = app().services as Record<string, unknown>;
+    const real = services["artifacts"];
+    let published = false;
+    services["artifacts"] = {
+      list: (id: string) => (id === workerId && published ? [{ id: "art-1", path: "report.md" }] : []),
+      waitForPublication: async (id: string) => {
+        if (id !== workerId) throw new ManagedCopilotError("not_found", "This session has not completed a turn yet.");
+        await sleep(200);
+        published = true;
+        return { turnId: "t1", state: "published", artifacts: [] };
+      },
+    };
+    try {
+      const waiting = call(client, sessionId, "wait_for_workers", { workers: ["publisher"] });
+      await sleep(100);
+      runtime.emitEvent(workerId, "assistant.message", { messageId: "m1", content: "wrote the report" });
+      runtime.emitEvent(workerId, "session.idle", {});
+      const report = await waiting;
+      expect(report).toContain("Published outputs: outputs/report.md");
+      expect(report).toContain("wrote the report");
+    } finally {
+      services["artifacts"] = real;
+    }
   });
 
   it("reads and copies worker files through the sandbox file API", async () => {
@@ -278,6 +436,34 @@ describe("orchestrator environments", () => {
     expect(sandboxes.workspace(checker).get("review/src/main.py")?.toString()).toBe("print('hi')\n");
     expect(sandboxes.workspace(checker).get("review/outputs/report.md")?.toString()).toBe("# Report\n42 files\n");
     expect(await call(client, sessionId, "copy_worker_files", { from: "builder", to: "builder", paths: ["src"] })).toContain("must be different workers");
+  });
+
+  it("never copies into a session that reused a worker's ID, and releases downloads when a copy fails", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "source", task: "build" });
+    await call(client, sessionId, "start_worker", { name: "target", task: "check" });
+    await waitUntil(() => workers(sessionId).every((info) => info.state === "idle"));
+    const source = worker(sessionId, "source").id;
+    const target = worker(sessionId, "target").id;
+    sandboxes.workspace(source).set("outputs/report.md", Buffer.from("# Report\n"));
+
+    // A copy that fails partway closes what it was reading.
+    sandboxes.failNextWrite = new ManagedCopilotError("internal", "The sandbox workspace is out of space.");
+    expect(await call(client, sessionId, "copy_worker_files", { from: "source", to: "target", paths: ["outputs/report.md"] })).toContain("out of space");
+    expect(sandboxes.downloads.at(-1)?.destroyed).toBe(true);
+    expect(await call(client, sessionId, "copy_worker_files", { from: "source", to: "target", paths: ["missing"] })).toContain("does not exist");
+
+    // The target is deleted, and another account's session takes its ID, while a copy is under way.
+    const held = sandboxes.holdNextList();
+    const copying = call(client, sessionId, "copy_worker_files", { from: "source", to: "target", paths: ["outputs"] });
+    await held.held;
+    await sessions().delete(1001, target);
+    await sessions().create(BOB_PRINCIPAL, { sessionId: target, environment: "coder" });
+    held.release();
+    expect(await copying).toMatch(/no longer has the sandbox this call was for/);
+    expect(sandboxes.workspace(target).size).toBe(0);
+    expect(worker(sessionId, "target").state).toBe("stopped");
+    expect(sandboxes.downloads.at(-1)?.destroyed).toBe(true);
   });
 
   it("stops and deletes the workers of a deleted coordinator", async () => {

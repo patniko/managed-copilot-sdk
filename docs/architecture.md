@@ -744,60 +744,83 @@ and quickstart snippet 14).
   tool call's idempotency key returns the worker it already started; at most `maxWorkers` workers holding a slot, and
   unique names among them) and returns at once. In the background it creates the worker with core's
   `sessions.create(principal, { environment: { name, network: <coordinator's requested network> }, systemMessage:
-  { mode: "append", content: WORKER_INSTRUCTIONS }, parentSessionId })` and sends the task with `sessions.send`. The
-  principal is `sessions.ownerPrincipal(coordinatorId)`: whatever credential serves the coordinator right now, used at
-  once and never stored.
+  { mode: "append", content: WORKER_INSTRUCTIONS }, parentSessionId })`, records its incarnation, and sends the task
+  with `sessions.send`. Each principal is `sessions.ownerPrincipal(...)` (the coordinator's for the admission check,
+  the worker's just before the send): whatever credential serves that session right now, used at once and never
+  stored.
 - **Parent sessions (core).** `CreateSessionRequest.parentSessionId` must name the same owner's live session; the
   ledger stores it with that session's incarnation (`core_sessions.parent_session_id`, `parent_incarnation`), and
   `SessionInfo.parentSessionId` reports it. `#ownerToken` for a session with no connected client or presence of its
   own tries its parent's connected clients and presences (one level, only while the parent is still that incarnation
-  and the same owner), then the owner's background sign-in. So a worker's brokered inference runs on the coordinator's
-  connected client while there is one.
-- **Turns.** The module follows workers through `sessions.subscribe`, using root events only: `user.message` marks
-  the worker `working`, the last root `assistant.message` with content becomes its result, a root `session.error`
-  marks it `failed` (a later root reply in the same turn makes it `working` again), and a root `session.idle` marks it
-  `idle` with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are the signals the
-  stock `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way.
+  and the same owner), then the owner's background sign-in. A parent-linked create installs no presence for the
+  creating principal, so this chain serves the worker from its creation on and a credential borrowed from a connection
+  never outlives it. So a worker's brokered inference runs on the coordinator's connected client while there is one.
+- **Runs.** The module follows workers through `sessions.subscribe`, using root events only: a `user.message` that
+  starts a run (not steering, an autopilot continuation, or a skill prompt, as core reads them) marks the worker
+  `working`, the last root `assistant.message` with content becomes its result, a root `session.error` marks it
+  `failed` (a later root reply in the same run makes it `working` again), and a root `session.idle` marks it `idle`
+  with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are the signals the stock
+  `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way. A message sent after a
+  run's error but before that run's own idle marks the idle as the earlier run's, so it does not end the new run.
 - **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
   of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
   the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
-  beyond the pending tool call, so a single `sendAndWait` covers a whole job. Reports go back as text, each inside
-  `<worker_report>` and clipped to share a 48,000-character budget, with the worker's published `outputs/`. At
-  shutdown, waits are dropped unanswered; durable runs the platform tool again after the restart, and it waits again.
+  beyond the pending tool call, so a single `sendAndWait` covers a whole job. Before reporting, it waits up to 30
+  seconds for finished workers' latest outputs to publish (`artifacts.waitForPublication`) and notes publications that
+  failed or are still running. Reports go back as text, each inside `<worker_report>` and clipped to share a
+  48,000-character budget, with the worker's published `outputs/`. At shutdown, waits are dropped unanswered; durable
+  runs the platform tool again after the restart, and it waits again.
 - **Approvals.** The module subscribes to the actions ledger's `onChange` and, for a `pending` permission action of
   one of its workers (one no attached client claimed), claims and answers it with `{ kind: "approve-once" }` through
   the ledger's `platform` caller (`ActionCaller { type: "platform", ownerId, responder: "orchestrator" }`; recorded as
   `platform:orchestrator`). That caller has a poller's authority on permission prompts only: durable refuses it for
   tools and elicitations, never lets it attest a person (`approvedInteractively`, `denied-interactively-by-user`), and
-  checks managed policy as for any poller. Prompts whose raw request carries `managedApprovalRequired`, like those the
-  stock `approveAll` leaves, are left pending for a person; one the ledger refuses is released and not retried. The
-  answer happens after the ledger's own step (`setImmediate`), and a startup sweep answers prompts that waited across
-  a restart.
-- **Messages and files.** `message_worker` records the tool call's key (`orchestrator_messages`) before
-  `sessions.send`, so a replay never sends twice (a replay without a recorded message ID says the outcome is unknown);
-  a refused send is forgotten and the worker's state restored. `read_worker_file` and `copy_worker_files` use the
-  sandbox service's file API (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox): text up to
-  256 KiB read (64,000 characters returned, binary files detected), directories listed, and copies of at most 500
-  files and 64 MiB streamed sandbox to sandbox through the gateway, so they work on Docker and Azure alike. Paths are
-  workspace-relative and may not contain `..`; sandboxd checks them again.
-- **Stopping and cleanup.** `stop_worker` marks the worker `stopped` and deletes its session (core deletes the sandbox
-  and artifacts); a start still in flight deletes what it created when it sees that. `sessions.onLifecycle("deleted")`
-  stops the workers of a deleted coordinator (any incarnation other than the current one) and marks a worker whose
-  own session was deleted. Platform events `worker.started`, `worker.idle`, `worker.failed`, and `worker.stopped`
-  (session ID and environment of the coordinator, `data: WorkerEventData`, errors clipped to 500 characters) go
-  through core's events service, so SSE, webhooks, and the operator feed see them.
-- **Restarts.** At start the module settles what a stopped gateway left: workers of a coordinator that no longer
-  exists are stopped and deleted; a `starting` worker without a session fails and holds no slot, and one with a
-  session fails with a note that its task may not have arrived; a `working` worker whose turn core records as ended
-  becomes `idle` (its reply was not captured) or `failed`.
+  checks managed policy as for any poller, so whether a person is required is the ledger's decision (`needsPerson`:
+  the derived `promptRequest` for standard kinds, the raw request otherwise). A prompt known only in its derived form
+  waits until the runtime asks again with the full request (the ledger offers it again then). One the ledger refuses
+  (`forbidden`) is released for a person and not tried again; other failures are released and retried up to three
+  times. The answer happens after the ledger's own step (`setImmediate`), and a startup sweep answers prompts that
+  waited across a restart.
+- **Messages and files.** `message_worker` takes a worker between runs only (`idle` or `failed`); a `working` one
+  answers `session_busy`, so nothing queues behind a run. It records the tool call's key and worker
+  (`orchestrator_messages`) before `sessions.send`, so a replay never sends twice (a replay without a recorded message
+  ID says the outcome is unknown); the worker's state is read again after the credential check and changed in the
+  same step as the send starts, and a refused send is forgotten, its count taken back, and the earlier state restored
+  unless a run started meanwhile. `read_worker_file` and `copy_worker_files` use the sandbox service's file API
+  (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox), each call pinned with the worker's
+  `sandboxId` (read while the session is still the worker's incarnation; the sandbox service checks it before and after
+  starting the sandbox), so a call never reaches a newer session that reuses the ID. Text up to 256 KiB is read
+  (64,000 characters returned, binary files detected), directories are listed, and copies of at most 500 files and
+  64 MiB stream sandbox to sandbox through the gateway, so they work on Docker and Azure alike; every download is
+  destroyed when its copy ends, and list errors are reported. Paths are workspace-relative and may not contain `..`;
+  sandboxd checks them again.
+- **Stopping and cleanup.** `stop_worker` records the worker it chose under the tool call's key
+  (`orchestrator_stops`), so a replay stops that worker and never a newer one with its name. Stopping marks the worker
+  `stopped` with `cleanup` outstanding and deletes its session (core deletes the sandbox and artifacts) only while the
+  session is the worker's own (its recorded incarnation, or before that the session its start created, by parent and
+  owner); a start still in flight deletes what it created when it ends. A deletion that fails is reported to the
+  coordinator, stays outstanding, and is retried with backoff, again on the next `stop_worker`, and at startup.
+  `sessions.onLifecycle("deleted")` stops the workers of a deleted coordinator (any incarnation other than the current
+  one) and marks a worker whose own session was deleted. Platform events `worker.started`, `worker.idle`,
+  `worker.failed`, and `worker.stopped` (session ID and environment of the coordinator, `data: WorkerEventData`,
+  errors clipped to 500 characters) go through core's events service, so SSE, webhooks, and the operator feed see
+  them.
+- **Restarts.** At start the module settles what a stopped gateway left: outstanding cleanups run; workers of a
+  coordinator that no longer exists are stopped and deleted; a `starting` worker without a session fails and holds no
+  slot, and one with its session fails with a note that it never got its task. A `working` worker whose turn core
+  still runs is left to core (which ends a turn the restart cut) or to durable (a turn waiting on a prompt). Otherwise
+  its last recorded turn decides only if it ended after the coordinator's latest message was sent (`sent_at`): the
+  worker becomes `idle` (its reply was not captured) or `failed`; if not, that message never started a run, and the
+  worker fails with its earlier report kept.
 - **REST and clients.** `GET /v1/sessions/:id/workers` and `.../workers/:workerId` (ID or name) are owner-scoped and
   answer `invalid_request` for sessions that are not orchestrators. The SDK's `managed.workers(session)` lists them and
   binds each worker to the identity that owns the coordinator, so `managed.files(worker.id)` acts as the same user.
   The CLI has `workers <session>`, and `sessions` marks workers with their coordinator. `/v1/info` advertises
   `orchestrator` while sandboxes work.
-- **Limits.** Approval is per worker, not per worker prompt; finished workers' results reach an idle coordinator only
-  when it waits or lists them (no new turns are started for it); workers share no disk; workers cannot start workers;
-  Azure has not been run yet (the workers use the same Container Apps Sandboxes path as isolated sessions).
+- **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
+  (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
+  turns are started for it); workers share no disk; workers cannot start workers; Azure has not been run yet (the
+  workers use the same Container Apps Sandboxes path as isolated sessions).
 
 ### Operator control plane (spec section 16)
 

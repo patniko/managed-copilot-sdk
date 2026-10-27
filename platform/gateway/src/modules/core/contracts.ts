@@ -219,7 +219,7 @@ export interface CreateSessionRequest {
   /**
    * The owner's session that starts this one (an orchestrator's coordinator starting a worker); same owner only. While
    * the new session has no connected client of its own, the parent's connected clients' credentials serve it before
-   * the owner's background sign-in.
+   * the owner's background sign-in, from its creation on: the creating principal only names its owner.
    */
   readonly parentSessionId?: string;
 }

@@ -50,7 +50,7 @@ everything from their environment: image, size, setup, network rules, vaults, an
 | --- | --- |
 | `start_worker` | Starts a worker with a name and a self-contained task; returns while its sandbox starts |
 | `wait_for_workers` | Waits until workers finish, then returns their reports; no polling and no model time |
-| `message_worker` | Sends a worker a follow-up |
+| `message_worker` | Sends a follow-up to a worker that finished its work (a working one is waited for first) |
 | `list_workers` | Shows the worker environments, their agents, and each worker's state |
 | `read_worker_file` | Reads a file a worker wrote, or lists a folder |
 | `copy_worker_files` | Copies files from one worker's `/workspace` to another's, for example from a builder to a reviewer |

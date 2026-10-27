@@ -1,5 +1,6 @@
 // The orchestrator ledger (`orchestrator_*` tables): each orchestrator session's workers, and the coordinator's
-// messages to them keyed by tool call, so a replayed tool call never starts a worker or delivers a message twice.
+// messages to them and stops keyed by tool call, so a replayed tool call never starts a worker, delivers a message
+// twice, or stops a different worker.
 import { ManagedCopilotError, type WorkerInfo, type WorkerState } from "@managed-copilot/protocol";
 import { migrate, transaction, type Database } from "../../db.js";
 
@@ -28,6 +29,16 @@ const MIGRATIONS = [
      key TEXT PRIMARY KEY,
      worker_id TEXT NOT NULL,
      message_id TEXT,
+     created_at TEXT NOT NULL
+   );`,
+  // sent_at: when the coordinator's latest message to the worker was sent (a restart decides from it whether the
+  // worker's last recorded turn ran it). cleanup: the worker is stopped and its session may still exist.
+  `ALTER TABLE orchestrator_workers ADD COLUMN sent_at TEXT;
+   ALTER TABLE orchestrator_workers ADD COLUMN cleanup INTEGER NOT NULL DEFAULT 0;
+   CREATE INDEX orchestrator_workers_cleanup ON orchestrator_workers (cleanup) WHERE cleanup = 1;
+   CREATE TABLE orchestrator_stops (
+     key TEXT PRIMARY KEY,
+     worker_id TEXT NOT NULL,
      created_at TEXT NOT NULL
    );`,
 ];
@@ -60,6 +71,8 @@ interface Row {
   error: string | null;
   messages: number;
   start_key: string;
+  sent_at: string | null;
+  cleanup: number;
   created_at: string;
   updated_at: string;
 }
@@ -82,6 +95,10 @@ export interface WorkerRecord {
   readonly messages: number;
   /** The `start_worker` tool call that started it. */
   readonly startKey: string;
+  /** When the coordinator's latest message (its task, at first) was sent. */
+  readonly sentAt?: string;
+  /** Stopped, and its session may still exist: deleting it is outstanding. */
+  readonly cleanup: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -99,7 +116,7 @@ export interface NewWorker {
   readonly startKey: string;
 }
 
-export type WorkerUpdate = Partial<{ state: WorkerState; incarnation: string; result: string | null; error: string | null; messages: number }>;
+export type WorkerUpdate = Partial<{ state: WorkerState; result: string | null; error: string | null; cleanup: boolean }>;
 
 export class WorkerStore {
   readonly #db: Database;
@@ -169,6 +186,12 @@ export class WorkerStore {
     return rows.map(toRecord);
   }
 
+  /** Stopped workers whose sessions may still exist. */
+  pendingCleanup(): WorkerRecord[] {
+    const rows = this.#db.prepare("SELECT * FROM orchestrator_workers WHERE cleanup = 1 ORDER BY created_at, rowid").all() as unknown as Row[];
+    return rows.map(toRecord);
+  }
+
   /**
    * Applies `fields` when the worker is in one of `from` (any state when omitted). Returns the updated record, or
    * undefined when the worker is gone or in another state.
@@ -179,7 +202,7 @@ export class WorkerStore {
     for (const [key, value] of Object.entries(fields) as [keyof WorkerUpdate, WorkerUpdate[keyof WorkerUpdate]][]) {
       if (value === undefined) continue;
       sets.push(`${COLUMNS[key]} = ?`);
-      args.push(value);
+      args.push(typeof value === "boolean" ? (value ? 1 : 0) : value);
     }
     let where = "id = ?";
     args.push(id);
@@ -191,24 +214,37 @@ export class WorkerStore {
     return Number(result.changes) > 0 ? this.get(id) : undefined;
   }
 
-  /** Counts one more coordinator message and marks the worker working, when it is in one of `from`. */
+  /** Records the worker's session incarnation, once: a session the worker already has is never replaced. */
+  setIncarnation(id: string, incarnation: string): void {
+    this.#db.prepare("UPDATE orchestrator_workers SET incarnation = ?, updated_at = ? WHERE id = ? AND incarnation IS NULL").run(incarnation, new Date().toISOString(), id);
+  }
+
+  /** Counts one more coordinator message, sent now, and marks the worker working, when it is in one of `from`. */
   messaged(id: string, from: readonly WorkerState[]): WorkerRecord | undefined {
+    const now = new Date().toISOString();
     const result = this.#db
-      .prepare(`UPDATE orchestrator_workers SET state = 'working', error = NULL, messages = messages + 1, updated_at = ? WHERE id = ? AND state IN (${from.map(() => "?").join(", ")})`)
-      .run(new Date().toISOString(), id, ...from);
+      .prepare(`UPDATE orchestrator_workers SET state = 'working', error = NULL, messages = messages + 1, sent_at = ?, updated_at = ? WHERE id = ? AND state IN (${from.map(() => "?").join(", ")})`)
+      .run(now, now, id, ...from);
     return Number(result.changes) > 0 ? this.get(id) : undefined;
   }
 
-  /**
-   * Records a coordinator message to a worker before it is sent. `existing` is set when this tool call already
-   * recorded one: its `messageId` when the runtime accepted it, no `messageId` when that is unknown (a restart in
-   * between).
-   */
-  beginMessage(key: string, workerId: string): { readonly existing?: { readonly messageId?: string } } {
-    const row = this.#db.prepare("SELECT message_id FROM orchestrator_messages WHERE key = ?").get(key) as { message_id: string | null } | undefined;
-    if (row) return { existing: row.message_id ? { messageId: row.message_id } : {} };
+  /** Takes back a message the runtime refused: the count, and the worker's state before it, while it is still working. */
+  undelivered(id: string, state: WorkerState, error: string): WorkerRecord | undefined {
+    const result = this.#db
+      .prepare("UPDATE orchestrator_workers SET state = ?, error = ?, messages = MAX(messages - 1, 0), updated_at = ? WHERE id = ? AND state = 'working'")
+      .run(state, error, new Date().toISOString(), id);
+    return Number(result.changes) > 0 ? this.get(id) : undefined;
+  }
+
+  /** The coordinator message a tool call recorded: its worker, and its `messageId` once the runtime accepted it. */
+  messageFor(key: string): { readonly workerId: string; readonly messageId?: string } | undefined {
+    const row = this.#db.prepare("SELECT worker_id, message_id FROM orchestrator_messages WHERE key = ?").get(key) as { worker_id: string; message_id: string | null } | undefined;
+    return row ? { workerId: row.worker_id, ...(row.message_id ? { messageId: row.message_id } : {}) } : undefined;
+  }
+
+  /** Records a coordinator message to a worker before it is sent. */
+  beginMessage(key: string, workerId: string): void {
     this.#db.prepare("INSERT INTO orchestrator_messages (key, worker_id, created_at) VALUES (?, ?, ?)").run(key, workerId, new Date().toISOString());
-    return {};
   }
 
   completeMessage(key: string, messageId: string): void {
@@ -219,14 +255,22 @@ export class WorkerStore {
   abandonMessage(key: string): void {
     this.#db.prepare("DELETE FROM orchestrator_messages WHERE key = ? AND message_id IS NULL").run(key);
   }
+
+  /** The worker a `stop_worker` tool call chose, so its replay stops that one and never a newer one with its name. */
+  stopFor(key: string): string | undefined {
+    return (this.#db.prepare("SELECT worker_id FROM orchestrator_stops WHERE key = ?").get(key) as { worker_id: string } | undefined)?.worker_id;
+  }
+
+  recordStop(key: string, workerId: string): void {
+    this.#db.prepare("INSERT OR IGNORE INTO orchestrator_stops (key, worker_id, created_at) VALUES (?, ?, ?)").run(key, workerId, new Date().toISOString());
+  }
 }
 
 const COLUMNS: Readonly<Record<keyof WorkerUpdate, string>> = {
   state: "state",
-  incarnation: "incarnation",
   result: "result",
   error: "error",
-  messages: "messages",
+  cleanup: "cleanup",
 };
 
 function toRecord(row: Row): WorkerRecord {
@@ -246,6 +290,8 @@ function toRecord(row: Row): WorkerRecord {
     ...(row.error !== null ? { error: row.error } : {}),
     messages: Number(row.messages),
     startKey: row.start_key,
+    ...(row.sent_at ? { sentAt: row.sent_at } : {}),
+    cleanup: Number(row.cleanup) === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

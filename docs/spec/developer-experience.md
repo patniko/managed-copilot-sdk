@@ -1018,7 +1018,7 @@ The coordinator manages its workers with platform tools that only orchestrator s
 | --- | --- |
 | `start_worker` | Starts a worker in a worker environment with a name and a self-contained task, and optionally a custom `agent` and `model`. Returns at once while the sandbox starts. Asks for the session's permission |
 | `wait_for_workers` | Waits until the named workers (by default, every busy one) finish, then returns each one's state and final report. Uses no model time. Returns after at most an hour; the coordinator calls it again to keep waiting |
-| `message_worker` | Sends a worker a follow-up. A busy worker gets it after its current work |
+| `message_worker` | Sends a follow-up to a worker that finished or failed its current work. A working worker is waited for first (`session_busy`) |
 | `list_workers` | The worker environments and their agents, and each worker's state and latest report |
 | `read_worker_file` | Reads a text file from a worker's `/workspace`, or lists a directory |
 | `copy_worker_files` | Copies files or directories from one worker's `/workspace` to another's, through the gateway |
@@ -1034,32 +1034,37 @@ The coordinator manages its workers with platform tools that only orchestrator s
 2. **One approval per worker.** `start_worker` asks the coordinator session's permission: your `onPermissionRequest`,
    or the person in an attached Copilot CLI. Approving it approves the worker's work in its sandbox. The platform then
    answers the worker's own permission prompts once each, as `approveAll` does, and records each answer in the actions
-   ledger as `platform:orchestrator`. Prompts that managed policy reserves for a person wait for one (attach Copilot
-   CLI to the worker), and a client attached to a worker answers that worker's prompts itself. The coordinator's model
-   never approves anything.
+   ledger as `platform:orchestrator`. Whether managed policy reserves a prompt for a person is the ledger's decision
+   (read as the stock SDK documents it); those prompts wait for one (attach Copilot CLI to the worker), and a client
+   attached to a worker answers that worker's prompts itself. The coordinator's model never approves anything.
 3. **No polling.** `wait_for_workers` holds the coordinator's turn open without model calls, so one `sendAndWait`
    covers the whole job. Pass a timeout longer than the work (the stock default is 60 seconds). A gateway restart runs
-   a pending wait again. Worker reports are clipped to a bounded size and reach the coordinator marked as data from
-   another agent, never as instructions.
+   a pending wait again. Before it reports, it waits up to 30 seconds for finished workers' outputs to publish. Worker
+   reports are clipped to a bounded size and reach the coordinator marked as data from another agent, never as
+   instructions.
 4. **Workers run as the owner, within the coordinator's limits.** While a worker has no client of its own, the
    coordinator's connected client serves its model calls, then the owner's background sign-in
-   (`npx managed-copilot login`). Nothing broadens: a worker uses the coordinator's model when its environment allows
-   it (otherwise the environment's own), a client's network narrowing of the coordinator applies to its workers, and
-   workers cannot start workers.
+   (`npx managed-copilot login`), from the worker's creation on: a credential is never borrowed from a connection that
+   has since closed. Nothing broadens: a worker uses the coordinator's model when its environment allows it (otherwise
+   the environment's own), a client's network narrowing of the coordinator applies to its workers, and workers cannot
+   start workers.
 5. **Bounded and cleaned up.** A session has at most `maxWorkers` workers at once. Stopped workers, and starts that
    failed before a session existed, don't count. `stop_worker`, or deleting the coordinator, deletes workers with
-   their sandboxes and files. After a gateway restart, a start the restart interrupted fails and a worker turn it cut
-   ends, so waits finish.
+   their sandboxes and files; a deletion that fails is reported and retried, also after a restart. Tool calls are
+   idempotent: a replayed `stop_worker` stops the worker it chose, never a newer one with the same name. After a
+   gateway restart, a start the restart interrupted fails, a worker turn it cut ends, and a message that never started
+   a run fails the worker with the earlier report kept, so waits finish.
 6. **Files move through the gateway.** Workers don't share a disk, so the same tools work on Docker and on Azure:
    `read_worker_file` returns up to 64,000 characters of text, and `copy_worker_files` copies at most 500 files and
-   64 MiB per call. A worker's `/workspace/outputs` publishes as that worker's artifacts.
+   64 MiB per call. File calls are pinned to the worker's own sandbox, so they never reach a newer session that reuses
+   a deleted worker's ID. A worker's `/workspace/outputs` publishes as that worker's artifacts.
 
 Platform events report workers on the coordinator's session: `worker.started`, `worker.idle`, `worker.failed`, and
 `worker.stopped`, with `data: { workerId, name, environment, state, error? }`.
 
 Not in this delivery: delivering worker results to an idle coordinator as new turns (the coordinator waits instead),
-relaying each worker prompt to your `onPermissionRequest`, a shared volume between workers, nested workers, and
-worker environments written by the model.
+steering a worker in the middle of its work, relaying each worker prompt to your `onPermissionRequest`, a shared
+volume between workers, nested workers, and worker environments written by the model.
 
 ## What runs where
 

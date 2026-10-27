@@ -1802,9 +1802,11 @@ export class SessionManager implements SessionsService {
       const created = this.#register(record, environment, tokenRegistrationId);
       live = created;
       // The creating principal's verified credential serves the session while it is created (without a client, the
-      // runtime asks for one during `session.create`).
+      // runtime asks for one during `session.create`). A session another one starts (an orchestrator's worker) is
+      // served by its parent's connected clients instead, checked at every request, so a credential borrowed from a
+      // connection never outlives it.
       const presence = Symbol(sessionId);
-      if (!input.peer) created.presences.set(presence, principal);
+      if (!input.peer && !input.parent) created.presences.set(presence, principal);
       let result: unknown;
       await this.#serialize(created, async () => {
         let upstream: RuntimeUpstream;

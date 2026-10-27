@@ -40,7 +40,8 @@ export const WORKER_TOOLS: readonly WorkerToolDefinition[] = [
   },
   {
     name: PLATFORM_TOOLS.messageWorker,
-    description: "Sends a follow-up message to a worker, such as a correction or more work. A busy worker gets it after its current work. Call wait_for_workers for its reply.",
+    description:
+      "Sends a follow-up message, such as a correction or more work, to a worker that finished (or failed) its current work; a working worker is waited for first. Call wait_for_workers for its reply.",
     parameters: {
       type: "object",
       properties: { worker: WORKER_REF, message: { type: "string", description: "What to tell the worker." } },

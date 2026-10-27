@@ -8,7 +8,7 @@ import { connect as connectTcp, createServer, type Server, type Socket } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, type EnvironmentRequest } from "@managed-copilot/protocol";
+import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, ManagedCopilotError, type EnvironmentRequest } from "@managed-copilot/protocol";
 import { WebSocket } from "ws";
 import { loadConfig } from "../src/config.js";
 import { RpcEndpoint, RpcError, streamTransport, webSocketTransport } from "../src/modules/core/rpc.js";
@@ -97,8 +97,11 @@ export class FakeRuntime {
     pending.resolve({ requestId, result });
   }
 
-  /** Holds the response to the next request of `method` (optionally for one session) until `release()` (test hook). */
-  holdNext(method: string, sessionId?: string): { readonly held: Promise<void>; release(): void } {
+  /**
+   * Holds the response to the next request of `method` (optionally for one session) until `release()` (test hook).
+   * With `before`, holds the request itself: the runtime handles it only once released.
+   */
+  holdNext(method: string, sessionId?: string, options: { readonly before?: boolean } = {}): { readonly held: Promise<void>; release(): void } {
     let release!: () => void;
     let arrived!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -107,7 +110,7 @@ export class FakeRuntime {
     const held = new Promise<void>((resolve) => {
       arrived = resolve;
     });
-    this.#holds.push({ method, sessionId, gate, arrived });
+    this.#holds.push({ method, sessionId, before: options.before === true, gate, arrived });
     return { held, release };
   }
 
@@ -123,7 +126,7 @@ export class FakeRuntime {
     return endpoint.request(method, params);
   }
 
-  readonly #holds: { method: string; sessionId: string | undefined; gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #holds: { method: string; sessionId: string | undefined; before: boolean; gate: Promise<void>; arrived: () => void }[] = [];
   readonly #failures: { method: string; sessionId: string | undefined; message: string }[] = [];
   readonly #byConnection = new Map<number, RpcEndpoint>();
 
@@ -147,6 +150,13 @@ export class FakeRuntime {
         const failure = failAt >= 0 ? this.#failures.splice(failAt, 1)[0] : undefined;
         const run = () => (failure ? Promise.reject(new RpcError(-32603, failure.message)) : this.#handle(endpoint, method, body, context.signal));
         const hold = this.#holds.findIndex(matches);
+        if (hold >= 0 && this.#holds[hold]!.before) {
+          // Held before the runtime handles it: nothing it would do has happened yet.
+          const [entry] = this.#holds.splice(hold, 1);
+          entry!.arrived();
+          await entry!.gate;
+          return run();
+        }
         if (hold >= 0) {
           const [entry] = this.#holds.splice(hold, 1);
           const settled = await run().then(
@@ -375,12 +385,29 @@ export class FakeSandboxes {
   readonly initializeFailures: Error[] = [];
   /** Fails the next `delete` (test hook). */
   failNextDelete: Error | undefined;
+  /** Fails the next `writeFile` before it reads its body (test hook). */
+  failNextWrite: Error | undefined;
+  /** Every download `readFile` handed out, in order (test hook: were they released?). */
+  readonly downloads: Readable[] = [];
+  /** Each session's current sandbox ID; a session created again under the same ID gets a new one. */
+  readonly #sandboxIds = new Map<string, string>();
+  readonly #generations = new Map<string, number>();
   readonly #openHolds: { gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #listHolds: { gate: Promise<void>; arrived: () => void }[] = [];
 
   constructor(private readonly runtime: FakeRuntime) {}
 
   /** Holds the next `openRuntime` until `release()` (test hook). */
   holdNextOpen(): { readonly held: Promise<void>; release(): void } {
+    return FakeSandboxes.#hold(this.#openHolds);
+  }
+
+  /** Holds the next `listFiles` until `release()`, after it checked its sandbox (test hook). */
+  holdNextList(): { readonly held: Promise<void>; release(): void } {
+    return FakeSandboxes.#hold(this.#listHolds);
+  }
+
+  static #hold(holds: { gate: Promise<void>; arrived: () => void }[]): { readonly held: Promise<void>; release(): void } {
     let release!: () => void;
     let arrived!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -389,7 +416,7 @@ export class FakeSandboxes {
     const held = new Promise<void>((resolve) => {
       arrived = resolve;
     });
-    this.#openHolds.push({ gate, arrived });
+    holds.push({ gate, arrived });
     return { held, release };
   }
 
@@ -404,7 +431,10 @@ export class FakeSandboxes {
   async create(request: { sessionId: string; ownerId: number; environment: string; size: string }): Promise<unknown> {
     this.log.push({ op: "create", sessionId: request.sessionId, detail: { ...request } });
     if (this.failCreate) throw this.failCreate;
-    return { sandboxId: `sbx-${request.sessionId}` };
+    const generation = (this.#generations.get(request.sessionId) ?? 0) + 1;
+    this.#generations.set(request.sessionId, generation);
+    this.#sandboxIds.set(request.sessionId, generation === 1 ? `sbx-${request.sessionId}` : `sbx-${request.sessionId}-${generation}`);
+    return { sandboxId: this.#sandboxIds.get(request.sessionId) };
   }
 
   async ensureRunning(sessionId: string): Promise<unknown> {
@@ -455,17 +485,25 @@ export class FakeSandboxes {
     };
   }
 
-  async delete(sessionId: string): Promise<void> {
+  async delete(sessionId: string, options: { readonly sandboxId?: string } = {}): Promise<void> {
     this.log.push({ op: "delete", sessionId });
     const failure = this.failNextDelete;
     this.failNextDelete = undefined;
     if (failure) throw failure;
+    // Like the real service: a delete for a sandbox that was replaced since does nothing.
+    if (options.sandboxId !== undefined && this.#sandboxIds.get(sessionId) !== options.sandboxId) return;
     this.files.delete(sessionId);
+    this.#sandboxIds.delete(sessionId);
   }
 
-  get(): undefined {
-    return undefined;
+  /** Only what the file API needs to pin a sandbox: its ID while it exists. */
+  async get(sessionId: string): Promise<{ id: string; size: "small"; state: "running"; network: { access: "disabled" } } | undefined> {
+    const id = this.#sandboxIds.get(sessionId);
+    return id && this.reportSandboxes ? { id, size: "small", state: "running", network: { access: "disabled" } } : undefined;
   }
+
+  /** Whether `get` reports sandboxes (the orchestrator pins them; other suites expect none). */
+  reportSandboxes = false;
 
   /** Each sandbox's workspace files, by workspace-relative path (test hook and file API). */
   readonly files = new Map<string, Map<string, Buffer>>();
@@ -479,10 +517,30 @@ export class FakeSandboxes {
     return files;
   }
 
-  async listFiles(sessionId: string, path: string, options: { readonly recursive?: boolean } = {}): Promise<{ path: string; type: "file" | "directory"; size: number; modifiedAt: string }[]> {
+  #expect(sessionId: string, sandboxId: string | undefined): void {
+    if (sandboxId !== undefined && this.#sandboxIds.get(sessionId) !== sandboxId) {
+      throw new ManagedCopilotError("not_found", `Session ${sessionId} no longer has the sandbox this call was for.`, { sessionId, sandboxId });
+    }
+  }
+
+  /** Like sandboxd: a file lists as itself, a missing path is `not_found`. */
+  async listFiles(
+    sessionId: string,
+    path: string,
+    options: { readonly recursive?: boolean; readonly sandboxId?: string } = {},
+  ): Promise<{ path: string; type: "file" | "directory"; size: number; modifiedAt: string }[]> {
+    this.#expect(sessionId, options.sandboxId);
+    const hold = this.#listHolds.shift();
+    if (hold) {
+      hold.arrived();
+      await hold.gate;
+    }
+    const workspace = this.workspace(sessionId);
+    const file = workspace.get(path);
+    if (file) return [{ path, type: "file", size: file.length, modifiedAt: new Date(0).toISOString() }];
     const root = path === "." || path === "" ? "" : `${path.replace(/\/+$/, "")}/`;
-    const files = [...this.workspace(sessionId).entries()].filter(([name]) => name.startsWith(root));
-    if (root && files.length === 0) throw Object.assign(new Error(`${path} is not a directory`), { code: "not_found" });
+    const files = [...workspace.entries()].filter(([name]) => name.startsWith(root));
+    if (root && files.length === 0) throw new ManagedCopilotError("not_found", `"${path}" does not exist.`);
     const entries = new Map<string, { path: string; type: "file" | "directory"; size: number; modifiedAt: string }>();
     for (const [name, content] of files) {
       const rest = name.slice(root.length);
@@ -493,13 +551,26 @@ export class FakeSandboxes {
     return [...entries.values()];
   }
 
-  async readFile(sessionId: string, path: string): Promise<{ entry: { path: string; type: "file"; size: number; modifiedAt: string }; body: Readable }> {
-    const content = this.workspace(sessionId).get(path);
-    if (!content) throw Object.assign(new Error(`${path} was not found`), { code: "not_found" });
-    return { entry: { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() }, body: Readable.from([content]) };
+  /** Like sandboxd: a directory is `invalid_request` (list it instead), a missing path `not_found`. */
+  async readFile(sessionId: string, path: string, options: { readonly sandboxId?: string } = {}): Promise<{ entry: { path: string; type: "file"; size: number; modifiedAt: string }; body: Readable }> {
+    this.#expect(sessionId, options.sandboxId);
+    const workspace = this.workspace(sessionId);
+    const content = workspace.get(path);
+    if (!content) {
+      const prefix = path === "." ? "" : `${path}/`;
+      if ([...workspace.keys()].some((name) => name.startsWith(prefix))) throw new ManagedCopilotError("invalid_request", `"${path}" is a directory; list it instead.`);
+      throw new ManagedCopilotError("not_found", `"${path}" does not exist.`);
+    }
+    const body = Readable.from([content]);
+    this.downloads.push(body);
+    return { entry: { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() }, body };
   }
 
-  async writeFile(sessionId: string, path: string, body: Readable): Promise<{ path: string; type: "file"; size: number; modifiedAt: string }> {
+  async writeFile(sessionId: string, path: string, body: Readable, options: { readonly sandboxId?: string } = {}): Promise<{ path: string; type: "file"; size: number; modifiedAt: string }> {
+    this.#expect(sessionId, options.sandboxId);
+    const failure = this.failNextWrite;
+    this.failNextWrite = undefined;
+    if (failure) throw failure;
     const chunks: Buffer[] = [];
     for await (const chunk of body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
     const content = Buffer.concat(chunks);

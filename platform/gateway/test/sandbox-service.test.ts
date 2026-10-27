@@ -3,6 +3,7 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocketServer } from "ws";
 import { isManagedCopilotError, ManagedCopilotError, NETWORK_DISABLED, type SandboxSetupRecord } from "@managed-copilot/protocol";
@@ -372,6 +373,18 @@ describe("SandboxService lifecycle", () => {
     // Without an expected sandbox, a session without a sandbox still has its artifacts removed (unchanged behavior).
     await sandboxes.delete(sessionId);
     expect(deletedArtifacts).toEqual([sessionId]);
+  });
+
+  it("refuses a file call that names a sandbox the session no longer has, before starting anything", async () => {
+    const row = sandbox("stopped");
+    const sandboxes = createService();
+    const stale = { sandboxId: "sbx_000000000000000000000abc" };
+    await expect(sandboxes.listFiles(row.sessionId, ".", { ...stale, recursive: true })).rejects.toMatchObject({ code: "not_found" });
+    await expect(sandboxes.readFile(row.sessionId, "report.md", stale)).rejects.toMatchObject({ code: "not_found" });
+    await expect(sandboxes.writeFile(row.sessionId, "report.md", Readable.from([Buffer.from("x")]), stale)).rejects.toMatchObject({ code: "not_found" });
+    // The stopped sandbox was not started for calls meant for another one.
+    expect(provider.running.has(row.id)).toBe(false);
+    expect(store.bySession(row.sessionId)?.state).toBe("stopped");
   });
 
   it("finishes an interrupted delete at startup", async () => {
