@@ -99,7 +99,7 @@ export function StationCard({ station, selected, onSelect, heading, ghost = fals
       onClick={onSelect}
       aria-pressed={selected}
       title={heading && heading !== station.title ? station.title : undefined}
-      className={stationCardClass(selected, muted)}
+      className={cx(stationCardClass(selected, muted), station.kind === "coordinate" && "border-l-4 border-l-line-done")}
     >
       <div className="flex w-full items-center gap-2">
         <StatusIcon meta={meta} />
@@ -114,12 +114,19 @@ export function StationCard({ station, selected, onSelect, heading, ghost = fals
         {meta.label}
         {detail ? ` · ${detail}` : ""}
       </span>
+      {station.worker ? (
+        <span className="mt-2 flex w-full flex-wrap gap-1 pl-6">
+          <Chip tone="success">created by coordinator</Chip>
+          {station.round > station.worker.createdRound ? <Chip tone="accent">reused for round {station.round}</Chip> : null}
+          <span className="w-full truncate pt-0.5 text-xs text-fg-muted" title={station.worker.name}>{station.worker.name}</span>
+        </span>
+      ) : null}
 
       <div className="mt-2 flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-xs text-fg-muted">
         <Meta icon={CopilotIcon}>@{station.agent}</Meta>
         {model ? <Meta title={model}>{model}</Meta> : null}
         <Meta icon={station.placement === "sandbox" ? ContainerIcon : ServerIcon} title={station.sandbox ? `Isolated sandbox ${station.sandbox.id}` : undefined}>
-          {station.placement === "sandbox" ? "Sandbox" : "Shared"}
+          {station.worker || station.kind === "coordinate" ? station.environment : station.placement === "sandbox" ? "Sandbox" : "Shared"}
           {station.sandbox ? <span className="ml-1 font-mono">{shortId(station.sandbox.id, 6)}</span> : null}
         </Meta>
         {size ? <Meta icon={CpuIcon}>{formatSandboxSize(size)}</Meta> : null}

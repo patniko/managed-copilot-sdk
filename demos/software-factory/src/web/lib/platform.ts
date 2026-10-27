@@ -1,4 +1,4 @@
-import type { PlatformStatus } from "../../shared/types.js";
+import type { PlatformStatus, WorkOrderMode } from "../../shared/types.js";
 import type { Tone } from "./tone.js";
 
 export interface PlatformPill {
@@ -24,12 +24,13 @@ export function platformPill(platform: PlatformStatus): PlatformPill {
 }
 
 /** Why runs can't start right now, or undefined when they can. */
-export function runsBlockedReason(platform: PlatformStatus | undefined): string | undefined {
+export function runsBlockedReason(platform: PlatformStatus | undefined, mode: WorkOrderMode = "classic"): string | undefined {
   if (!platform) return "Waiting for the factory server…";
   if (platform.state === "connecting") return "The factory is still connecting to Managed Copilot.";
   if (platform.state === "reconnecting") return "The factory is reconnecting to Managed Copilot; new work orders can start once it's back.";
   if (platform.state === "unavailable") return "Managed Copilot is unavailable, so the factory can't start runs.";
   if (platform.state === "misconfigured") return "The platform is missing factory environments, so runs can't start.";
   if (!platform.features.runs) return "This deployment doesn't allow the factory to start runs.";
+  if (mode === "agent" && !platform.features.agentLed) return platform.agentLedHint ?? "Agent-led work orders need the factory-coordinator orchestrator environment. Choose Classic or update the deployment.";
   return undefined;
 }

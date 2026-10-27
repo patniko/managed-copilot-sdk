@@ -80,6 +80,15 @@ export const ENVIRONMENTS: readonly EnvironmentView[] = [
     model: "claude-sonnet-4.5",
   },
   {
+    role: "coordinator",
+    name: "factory-coordinator",
+    type: "orchestrator",
+    description: "Creates and reuses builder and release sandboxes as an accepted plan needs them.",
+    network: OFF,
+    agents: ["coordinator"],
+    model: "claude-sonnet-5",
+  },
+  {
     role: "release",
     name: "factory-release",
     type: "isolated",
@@ -129,7 +138,7 @@ export function platformFixture(state: PlatformStatus["state"], now: number): Pl
     account: connected ? { login: "mona", name: "Mona Octocat" } : undefined,
     environments: state === "misconfigured" ? ENVIRONMENTS.filter((environment) => environment.role !== "release" && environment.role !== "builder") : connected ? ENVIRONMENTS : [],
     missingEnvironments: state === "misconfigured" ? ["factory-builder", "factory-release"] : [],
-    features: { runs: connected, isolated: connected, artifacts: connected, files: connected, attach: connected },
+    features: { runs: connected, agentLed: connected, isolated: connected, artifacts: connected, files: connected, attach: connected },
     checkedAt: new Date(now - 8 * SECOND).toISOString(),
   };
 }

@@ -1,6 +1,6 @@
 import type { ResumeSessionConfig, SessionConfig, SessionEvent, Tool } from "@github/copilot-sdk";
 import { ManagedCopilotError, type ArtifactInfo, type EnvironmentInfo, type PublicationResult, type SessionInfo } from "@managed-copilot/sdk";
-import type { FactoryPlatform, StationArtifacts, StationFiles, StationSession } from "../src/server/platform.js";
+import type { FactoryPlatform, StationArtifacts, StationFiles, StationSession, StationWorkers } from "../src/server/platform.js";
 import type { OutputManifest, StationRole, TestReport } from "../src/shared/types.js";
 
 let counter = 0;
@@ -46,11 +46,16 @@ export class FakeSession implements StationSession {
 
   async callTool(name: string, args: unknown): Promise<unknown> {
     const tool = (this.config.tools as Tool<unknown>[] | undefined)?.find((candidate) => candidate.name === name);
-    if (!tool?.handler) throw new Error(`Tool ${name} is not registered`);
     const toolCallId = id("call");
     this.emit("tool.execution_start", { toolCallId, toolName: name, arguments: args });
-    const result = await tool.handler(args, { sessionId: this.sessionId, toolCallId, toolName: name, arguments: args });
-    this.emit("tool.execution_complete", { toolCallId, success: true, result: { content: String(result) } });
+    const result = tool?.handler
+      ? await tool.handler(args, { sessionId: this.sessionId, toolCallId, toolName: name, arguments: args })
+      : await this.#platform.workerTool(this, name, args);
+    const shaped = typeof result === "object" && result !== null && "textResultForLlm" in result ? result : undefined;
+    this.emit("tool.execution_complete", {
+      toolCallId, success: !(shaped && "resultType" in shaped && shaped.resultType === "failure"),
+      result: { content: shaped ? String(shaped.textResultForLlm) : typeof result === "string" ? result : JSON.stringify(result) },
+    });
     return result;
   }
 
@@ -64,6 +69,7 @@ export class FakeSession implements StationSession {
     this.prompts.push(options.prompt);
     const turn = new AbortController();
     this.#turnAbort = turn;
+    this.#platform.turnStarted(this);
     this.emit("assistant.turn_start", { turnId: id("turn") });
     this.emit("assistant.usage", { model: "fake", inputTokens: 100, outputTokens: 20, duration: 50 });
     const aborted = new Promise<never>((_, reject) => {
@@ -71,6 +77,10 @@ export class FakeSession implements StationSession {
     });
     try {
       await Promise.race([this.#platform.script(this, options.prompt), aborted]);
+      this.#platform.turnEnded(this);
+    } catch (error) {
+      this.#platform.turnEnded(this, error);
+      throw error;
     } finally {
       if (this.#turnAbort === turn) this.#turnAbort = undefined;
     }
@@ -82,6 +92,7 @@ export class FakeSession implements StationSession {
   async abort(): Promise<void> {
     this.aborted = true;
     this.#turnAbort?.abort();
+    this.#platform.turnStopped(this);
   }
 
   async disconnect(): Promise<void> {
@@ -98,7 +109,7 @@ export type Script = (session: FakeSession, prompt: string, platform: FakePlatfo
 
 /** In-memory platform: sessions, sandbox workspaces, and turn-scoped artifact publication. */
 export class FakePlatform implements FactoryPlatform {
-  readonly models: Record<StationRole, string> = { planner: "fake-planner", builder: "fake-builder", reviewer: "fake-reviewer", release: "fake-release" };
+  readonly models: Record<StationRole, string> = { planner: "fake-planner", builder: "fake-builder", reviewer: "fake-reviewer", release: "fake-release", coordinator: "fake-coordinator" };
   readonly sessions = new Map<string, FakeSession>();
   readonly workspaces = new Map<string, Map<string, string>>();
   readonly outputs = new Map<string, Map<string, StoredFile>>();
@@ -127,6 +138,21 @@ export class FakePlatform implements FactoryPlatform {
 
   async script(session: FakeSession, prompt: string): Promise<void> {
     await this.scripts[session.role]?.(session, prompt, this);
+  }
+
+  turnStarted(_session: FakeSession): void {}
+  turnEnded(_session: FakeSession, _error?: unknown): void {}
+  turnStopped(_session: FakeSession): void {}
+
+  async workerTool(_session: FakeSession, name: string, _args: unknown): Promise<unknown> {
+    throw new Error(`Tool ${name} is not registered`);
+  }
+
+  workers(_coordinatorId: string): StationWorkers {
+    return {
+      list: async () => [],
+      get: async () => { throw new ManagedCopilotError("not_found", "No such worker"); },
+    };
   }
 
   sessionsFor(role: StationRole): FakeSession[] {
@@ -167,7 +193,10 @@ export class FakePlatform implements FactoryPlatform {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       pendingActions: [],
-      lastTurn: { turnId: "t", status: this.lastTurnStatus.get(sessionId) ?? "completed" },
+      lastTurn: {
+        turnId: "t", status: this.lastTurnStatus.get(sessionId) ?? "completed",
+        ...(this.lastTurnStatus.get(sessionId) === "running" ? {} : { completedAt: new Date().toISOString() }),
+      },
       ...(session?.role === "builder" || session?.role === "release"
         ? {
             sandbox: {
@@ -193,6 +222,11 @@ export class FakePlatform implements FactoryPlatform {
 
   files(sessionId: string): StationFiles {
     return {
+      read: async (path) => {
+        const content = this.workspaces.get(sessionId)?.get(path);
+        if (content === undefined) throw new ManagedCopilotError("not_found", `No file ${path}`);
+        return content;
+      },
       write: async (path, data) => {
         const failures = this.writeFailures.get(path) ?? 0;
         if (failures > 0) {
