@@ -3,7 +3,9 @@
 Send a prompt, disconnect before the agent needs your tool, then come back and answer the waiting tool call by
 polling. Nothing is lost, and nothing runs twice.
 
-**You need:** the platform running (`aspire run`). **Concepts:** [work while you're away](../../docs/concepts/offline-work.md).
+**You need:** the platform running (`aspire run`), and background sign-in turned on once for this deployment
+(`npx managed-copilot login`), so the work can keep running as you while your app is away. **Concepts:**
+[work while you're away](../../docs/concepts/offline-work.md).
 
 ```mermaid
 sequenceDiagram
@@ -57,16 +59,21 @@ const session = await app.createSession({ environment: "chat", model: "claude-so
 await session.send({ prompt: "Look up order 1234 and tell me when it arrives." });
 await app.close();
 
-// 2. Later, from any process signed in as you:
-const { pendingActions } = await later.sessions.get(session.sessionId);
-await later.sessions.handleActions(session.sessionId, handlers);
+// 2. Later, from any process signed in as you: answer what waits until the turn is over.
+for (;;) {
+  const { pendingActions, lastTurn } = await later.sessions.get(session.sessionId);
+  if (pendingActions.length > 0) await later.sessions.handleActions(session.sessionId, handlers);
+  else if (lastTurn?.status === "completed") break;
+  await sleep(1_000);
+}
 
 // 3. Read the reply.
 const resumed = await later.resumeSession(session.sessionId, handlers);
 const reply = (await resumed.getEvents()).filter((event) => event.type === "assistant.message").at(-1);
 ```
 
-Full script: [`main.ts`](main.ts).
+The full script also stops on a failed turn or after four minutes, and deletes the session at the end:
+[`main.ts`](main.ts).
 
 ## Try next
 

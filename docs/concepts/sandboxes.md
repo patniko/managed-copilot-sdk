@@ -52,8 +52,9 @@ flowchart LR
   sandbox. `await managed.artifacts(session).waitForPublication()` waits for that, not just for the agent to go idle.
 - A file changed in a later turn becomes a new version. `list()` shows the newest; `list({ versions: "all" })` shows
   every version. From a terminal: `npx managed-copilot artifacts <session> --download .\out`.
-- Limits: a publication takes up to 256 files, 100 MiB each, 512 MiB in total. Uploads and downloads stream up to 512
-  MiB. Small files passed when creating a session: up to 64, 1 MiB each.
+- Limits: a publication takes up to 256 files, 100 MiB each, 512 MiB in total. Uploads stream up to 512 MiB;
+  downloads stream files of any size. Small files passed when creating a session: up to 64, 1 MiB each, 8 MiB in
+  total.
 
 ## Local and Azure sandboxes
 

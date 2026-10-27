@@ -79,15 +79,17 @@ const harness = {
   onPermissionRequest: approveAll,
 } satisfies Omit<ManagedSessionConfig, "environment">;
 
+const sessions: CopilotSession[] = [];
 for (const environment of ["chat", "coder", "helper"]) {
   const session = await managed.createSession({ environment, ...harness });
+  sessions.push(session);
   await session.sendAndWait({ prompt: "What's the status of ticket 42?" });
 }
 
-await managed.openCli(session); // --attach: Copilot CLI in this terminal; resolves when you /exit
+await managed.openCli(sessions.at(-1)!); // --attach: Copilot CLI in this terminal; resolves when you /exit
 ```
 
-Full script: [`main.ts`](main.ts).
+The full script also deletes the three sessions at the end, even if something fails: [`main.ts`](main.ts).
 
 ## Try next
 

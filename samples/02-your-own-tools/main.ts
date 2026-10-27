@@ -49,15 +49,17 @@ const session = await client.createSession({
   },
 });
 
-// Stream the reply as it is written.
-session.on("assistant.message_delta", (event) => process.stdout.write(event.data.deltaContent));
+try {
+  // Stream the reply as it is written.
+  session.on("assistant.message_delta", (event) => process.stdout.write(event.data.deltaContent));
 
-console.log("You: Where is order 1234?");
-await session.sendAndWait({ prompt: "Where is order 1234?" });
+  console.log("You: Where is order 1234?");
+  await session.sendAndWait({ prompt: "Where is order 1234?" });
 
-console.log("\n\nYou: Please cancel order 5678.");
-await session.sendAndWait({ prompt: "Please cancel order 5678." });
-console.log();
-
-await client.deleteSession(session.sessionId);
-await managed.close();
+  console.log("\n\nYou: Please cancel order 5678.");
+  await session.sendAndWait({ prompt: "Please cancel order 5678." });
+  console.log();
+} finally {
+  await client.deleteSession(session.sessionId);
+  await managed.close();
+}

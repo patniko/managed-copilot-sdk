@@ -1,8 +1,8 @@
 # Network and secrets
 
 A sandbox has no direct route to the Internet. Every request goes through the egress proxy, which applies the
-session's network rules and, for hosts a vault names, swaps placeholders for real credentials at the edge. Code in the
-sandbox never sees a secret.
+session's network rules and, for hosts a vault names, swaps placeholders for real credentials at the edge. Secrets
+never go into the sandbox's environment, files, or configuration: code there works with placeholders.
 
 ```mermaid
 flowchart LR
@@ -36,8 +36,11 @@ flowchart LR
 
 ```ts
 coder: { type: "isolated", network: ["github.com", "*.githubusercontent.com"] }, // in the AppHost
-const client = await managed.client("coder", { network: ["postman-echo.com"] });   // narrower, in code
+const client = await managed.client("coder", { network: ["github.com"] });         // narrower, in code
 ```
+
+A list in code is intersected with the environment's rules. Asking for a host the environment doesn't allow doesn't
+fail; that host simply stays unreachable.
 
 - The rules cover everything the workload does: setup installs, shell commands, web tools, and MCP calls. There is
   no exception for package downloads; an offline environment needs its packages in the image.
@@ -74,7 +77,7 @@ whole environment, or create one in code for one user:
 // apphost.mts: an environment-wide vault, from an Aspire secret parameter
 const stripeKey = await builder.addParameter("stripe-key", { secret: true });
 vaults: { payments: [{ env: "STRIPE_API_KEY", value: stripeKey, hosts: ["api.stripe.com"] }] },
-environments: { coder: { type: "isolated", vaults: ["payments"], network: ["api.stripe.com"] } },
+environments: { coder: { type: "isolated", vaults: ["payments"], network: ["api.stripe.com", "contoso.atlassian.net"] } },
 
 // your code: a per-user vault, owned by the GitHub account that creates it
 const vault = await managed.vaults.create({
@@ -89,6 +92,8 @@ const client = await managed.client("coder", { vaults: [vault.id] });
   (`authorization` unless you list others). A placeholder anywhere else, such as a URL, another header, another host,
   or another session's request, is refused.
 - Both the network rules and the vault must allow a destination.
+- Give vault credentials only to hosts you trust. The proxy masks the value if a response echoes it, but that's
+  defense in depth: a host that transforms or encodes the secret could still send it back.
 
 ## Shared sessions
 

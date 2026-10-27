@@ -39,8 +39,8 @@ flowchart TD
 
 ## Declare environments once
 
-Environments live in your Aspire AppHost, so the same list runs locally and in Azure. This is the repository's own
-[`apphost.mts`](../../apphost.mts):
+Environments live in your Aspire AppHost, so the same list runs locally and in Azure. Trimmed from the repository's
+own [`apphost.mts`](../../apphost.mts):
 
 ```ts
 await addManagedCopilot(builder, "copilot", {
@@ -70,7 +70,7 @@ flowchart LR
   A["a name plus additions<br/>files · packages · env · vaults · narrower network"] --> R
   T["an inline type and size<br/>{ type: isolated, size: small }"] --> R
   R --> OK["the session's effective environment"]
-  R -. "anything broader" .-> No["refused before anything starts"]
+  R -. "a name, type, or size it doesn't offer" .-> No["refused before anything starts"]
 ```
 
 | You pass | You get | Limits |
@@ -80,8 +80,9 @@ flowchart LR
 | `{ type: "isolated", size: "small" }` | The default sandbox image and settings | Only the types and sizes the AppHost's `inline` lists |
 
 Options on `managed.client(...)` apply to every session that client creates. For one session, use
-`managed.createSession({ environment: {...}, ... })`. A request outside these limits fails at once, for example
-`[environment_not_found] This deployment does not allow inline isolated environments of size large`.
+`managed.createSession({ environment: {...}, ... })`. A name, type, or size the deployment doesn't offer fails at
+once, for example `[environment_not_found] This deployment does not allow inline isolated environments of size large`.
+A network list is different: it's intersected with the environment's rules, so it can only ever narrow them.
 
 Anything else, such as a new image, a bigger size, broader network access, or a new environment, is an AppHost change:
 edit `apphost.mts`, then `aspire run` again locally or `aspire deploy` to Azure. Demo apps can bring their own

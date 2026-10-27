@@ -93,7 +93,8 @@ app running, or give it a [webhook or poller](offline-work.md), while sessions m
 | Network | The gateway's `web_fetch` and remote MCP servers, within the network rules | Anything the network rules allow, through the egress proxy |
 | MCP servers | Remote (`http`, `sse`) only | Remote, or local commands that run in the sandbox |
 | Skills, agents, instructions | From the environment's folder, plus `customAgents` in code | The same, plus directories inside the sandbox |
-| Hooks, plugins, memory | No | Yes |
+| SDK hooks (`onPreToolUse` and the like) | Yes, answered by your connected app | Yes, answered by your connected app |
+| File hooks, plugins, memory | No | Yes |
 | Your `defineTool` tools | Yes, in your app | Yes, in your app |
 | Model providers (BYOK), custom endpoints, extensions | No | No |
 

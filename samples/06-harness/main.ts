@@ -1,6 +1,6 @@
 // Walkthrough 06: bring your own harness. Steps and output: samples/06-harness/README.md
 // Run it with: pnpm sample 06            (add --attach to open the last session in Copilot CLI)
-import { approveAll, defineTool } from "@github/copilot-sdk";
+import { approveAll, defineTool, type CopilotSession } from "@github/copilot-sdk";
 import { ManagedCopilot, type ManagedSessionConfig } from "@managed-copilot/sdk";
 import { z } from "zod";
 
@@ -39,27 +39,29 @@ const harness = {
 } satisfies Omit<ManagedSessionConfig, "environment">;
 
 const managed = await ManagedCopilot.connect();
+const sessions: CopilotSession[] = [];
 
-// The same harness in three placements: the shared runtime, its own sandbox, and promotable.
-const sessions = [];
-for (const environment of ["chat", "coder", "helper"]) {
-  const session = await managed.createSession({ environment, ...harness });
-  const info = await managed.sessions.get(session.sessionId);
-  console.log(`\n${environment}: ${info.placement}${info.sandbox ? ` (${info.sandbox.id})` : ""}, agent ${info.agent ?? "none"}`);
-  const reply = await session.sendAndWait({ prompt: "What's the status of ticket 42?" });
-  console.log(`  Copilot: ${reply?.data.content}`);
-  sessions.push(session);
+try {
+  // The same harness in three placements: the shared runtime, its own sandbox, and promotable.
+  for (const environment of ["chat", "coder", "helper"]) {
+    const session = await managed.createSession({ environment, ...harness });
+    sessions.push(session);
+    const info = await managed.sessions.get(session.sessionId);
+    console.log(`\n${environment}: ${info.placement}${info.sandbox ? ` (${info.sandbox.id})` : ""}, agent ${info.agent ?? "none"}`);
+    const reply = await session.sendAndWait({ prompt: "What's the status of ticket 42?" });
+    console.log(`  Copilot: ${reply?.data.content}`);
+  }
+
+  // --attach: open the last session in Copilot CLI. This process keeps running while you use the CLI,
+  // so the CLI's turns can still call lookup_ticket here.
+  if (process.argv.includes("--attach")) {
+    console.log("\nAsk Copilot CLI about ticket 42, then type /exit to come back.");
+    cliOpen = true;
+    await managed.openCli(sessions.at(-1)!);
+    cliOpen = false;
+    console.log(`\nWhile Copilot CLI was attached, lookup_ticket ran ${callsWhileCliOpen} ${callsWhileCliOpen === 1 ? "time" : "times"} here, in pid ${process.pid}.`);
+  }
+} finally {
+  await Promise.allSettled(sessions.map((session) => managed.sessions.delete(session.sessionId)));
+  await managed.close();
 }
-
-// --attach: open the last session in Copilot CLI. This process keeps running while you use the CLI,
-// so the CLI's turns can still call lookup_ticket here.
-if (process.argv.includes("--attach")) {
-  console.log("\nAsk Copilot CLI about ticket 42, then type /exit to come back.");
-  cliOpen = true;
-  await managed.openCli(sessions.at(-1)!);
-  cliOpen = false;
-  console.log(`\nWhile Copilot CLI was attached, lookup_ticket ran ${callsWhileCliOpen} ${callsWhileCliOpen === 1 ? "time" : "times"} here, in pid ${process.pid}.`);
-}
-
-for (const session of sessions) await managed.sessions.delete(session.sessionId);
-await managed.close();

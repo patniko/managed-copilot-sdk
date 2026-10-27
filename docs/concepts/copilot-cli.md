@@ -29,8 +29,9 @@ flowchart LR
 ```
 
 `managed-copilot` starts a small relay on `127.0.0.1` and launches `copilot --ahp ws://127.0.0.1:<port>/...`. The relay
-holds the only connection to the gateway. In the live run above, `copilot.exe` connected only to `127.0.0.1` and to
-GitHub's own services, never to the gateway, while the `managed-copilot` node process held the gateway connection.
+holds the only connection to the gateway. In the live run above, `copilot.exe` never connected to the gateway: its
+connections went to `127.0.0.1` and to services Copilot CLI uses on its own, such as GitHub. The `managed-copilot`
+node process held the gateway connection.
 
 ```mermaid
 sequenceDiagram
@@ -69,9 +70,11 @@ session running:
 
 ## Who answers approvals
 
-Each approval has exactly one owner. If your app is connected and answering prompts, the CLI's **Approve once** is
-refused with "Your application is answering this request." If no app is connected, the CLI answers it. The CLI can
-approve tools, but it can't run your app's tools: those still need your app, a webhook, or a poller.
+Each approval has exactly one owner. If your app is connected and answering prompts, the gateway refuses the CLI's
+**Approve once** ("Your application is answering this request."). Copilot CLI 1.0.92 doesn't show that reason: its
+dialog closes, the tool doesn't run, and the CLI waits for your app's answer. If no app is connected, the CLI answers
+the prompt. The CLI can approve tools, but it can't run your app's tools: those still need your app, a webhook, or a
+poller.
 
 ## What works
 

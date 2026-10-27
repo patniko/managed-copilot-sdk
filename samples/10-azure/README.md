@@ -110,8 +110,8 @@ Ask it to run ``uname -sm && whoami && pwd``, and approve the shell command:
   <img src="../../docs/images/copilot-cli-azure-sandbox.png" alt="Copilot CLI attached to a coder session in Azure: Linux x86_64, agent, /workspace, and the footer remote /workspace" width="760">
 </p>
 
-The footer reads `remote /workspace`. The CLI runs on your laptop and talks only to a relay on `127.0.0.1`; the
-`managed-copilot` process holds the one connection to the gateway in Azure
+The footer reads `remote /workspace`. The CLI runs on your laptop and reaches the session only through a relay on
+`127.0.0.1`; the `managed-copilot` process holds the one connection to the gateway in Azure
 ([why it looks local](../../docs/concepts/copilot-cli.md#why-it-looks-local)).
 
 ## What happened

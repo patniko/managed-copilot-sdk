@@ -19,6 +19,7 @@ const schedule = await managed.schedules.create({
 console.log(`Created ${schedule.name}: "${schedule.cron}" in ${schedule.timeZone}`);
 console.log(`  state ${schedule.state}, next run ${schedule.nextRunAt}`);
 
+let runSession: string | undefined;
 try {
   // Don't wait for a weekday morning: run it now. Retrying with the same invocationId never starts a second run.
   const run = await managed.schedules.runNow(schedule.id, { invocationId: randomUUID() });
@@ -28,18 +29,20 @@ try {
   for (const deadline = Date.now() + 5 * 60_000; !finished; await sleep(2_000)) {
     if (Date.now() > deadline) throw new Error("The run did not finish within 5 minutes.");
     const latest = (await managed.schedules.runs(schedule.id)).find((candidate) => candidate.id === run.id);
+    runSession = latest?.sessionId ?? runSession;
     if (latest && !["queued", "running", "waiting"].includes(latest.status)) finished = latest;
   }
-  console.log(`Run ${finished.status} in session ${finished.sessionId}${finished.status === "completed" ? "" : `: ${finished.reason}`}`);
+  if (finished.status !== "completed" || !finished.sessionId) {
+    throw new Error(`The run ended as ${finished.status}${finished.reason ? `: ${finished.reason}` : "."}`);
+  }
+  console.log(`Run completed in session ${finished.sessionId}`);
 
   // Each run is an ordinary session you own. Resume it to read what the agent wrote.
-  if (finished.sessionId) {
-    const session = await managed.resumeSession(finished.sessionId, { onPermissionRequest: approveAll });
-    const reply = (await session.getEvents()).filter((event) => event.type === "assistant.message").at(-1);
-    console.log(`\nCopilot (scheduled run):\n${reply?.data.content}`);
-    await managed.sessions.delete(finished.sessionId);
-  }
+  const session = await managed.resumeSession(finished.sessionId, { onPermissionRequest: approveAll });
+  const reply = (await session.getEvents()).filter((event) => event.type === "assistant.message").at(-1);
+  console.log(`\nCopilot (scheduled run):\n${reply?.data.content}`);
 } finally {
-  await managed.schedules.delete(schedule.id);
+  if (runSession) await managed.sessions.delete(runSession).catch(() => undefined);
+  await managed.schedules.delete(schedule.id).catch(() => undefined);
   await managed.close();
 }

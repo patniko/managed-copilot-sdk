@@ -57,8 +57,9 @@ pnpm sample 01
 - **Who you are.** Your GitHub sign-in: `gh auth login`, or `GH_TOKEN`. Model calls use your Copilot plan.
 - **Why here.** `@managed-copilot/sdk` isn't published to npm yet, so the samples live in this workspace. Copy one
   into another workspace package to build on it.
-- **Cleanup.** Every sample deletes the sessions, vaults, and schedules it creates, except 01, which leaves its
-  session running so you can open it in Copilot CLI. `npx managed-copilot sessions` lists what you have.
+- **Cleanup.** Each sample deletes the sessions, vaults, and schedules it creates, even when it stops early, except 01,
+  which leaves its session running so you can open it in Copilot CLI. `npx managed-copilot sessions` lists what you
+  have.
 
 Model replies differ from run to run; IDs and timings will be yours. Everything else should look like the output in
 each walkthrough. To understand the ideas behind them, read the [concept pages](../docs/README.md).

@@ -47,7 +47,7 @@ Each page answers one question, diagram first.
 | Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../samples/04-promotion/README.md) |
 | Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../samples/05-choose-environments/README.md), [06](../samples/06-harness/README.md) |
 | Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../samples/01-first-agent/README.md), [06](../samples/06-harness/README.md) |
-| Give an agent an API key it can't read | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
+| Give an agent an API key without putting it in the sandbox | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
 | Limit which hosts an agent can reach | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
 | Keep working while my app is offline | [Work while you're away](concepts/offline-work.md) | [08](../samples/08-offline/README.md) |
 | Run an agent every weekday morning | [Work while you're away](concepts/offline-work.md#run-on-a-schedule) | [09](../samples/09-schedules/README.md) |
@@ -70,7 +70,7 @@ Each page answers one question, diagram first.
 | **Customizations** | A folder of agents, skills, and instructions shipped read-only with an environment |
 | **Gateway** | The platform's front door: sign-in, admission, placement, routing, and the durable record of work |
 | **Egress proxy** | A sandbox's only way out: it enforces network rules and inserts vault secrets |
-| **Vault** | Sealed credentials a sandbox can use but never read; it sees only placeholders |
+| **Vault** | Sealed credentials a sandbox can use without holding them: it gets placeholders, swapped for real values at the egress proxy for approved hosts only |
 | **Durable action** | A tool call or approval waiting for an answer, with exactly one owner |
 | **Artifact** | A file the agent saved under `/workspace/outputs`, published when its turn completed |
 | **Background sign-in** | Your sealed GitHub credential on a deployment, so schedules and offline work can run as you |

@@ -1,7 +1,8 @@
 # Work that continues while you're away
 
-Accepted work belongs to the platform, not to your connection. Close your app and the agent keeps going. When it needs
-one of your tools or an approval, the request waits on the platform until something you control answers it.
+Accepted work belongs to the platform, not to your connection. Turn on background sign-in once
+(`npx managed-copilot login`), close your app, and the agent keeps going as you. When it needs one of your tools or an
+approval, the request waits on the platform until something you control answers it.
 
 ```mermaid
 flowchart TD
@@ -46,8 +47,12 @@ const { pendingActions } = await managed.sessions.get(sessionId);
 await managed.sessions.handleActions(sessionId, { tools: [lookupOrder], onPermissionRequest: approveAll });
 ```
 
-`handleActions` claims what this caller may answer, runs your handlers, and records the results. Polling again never
-executes the same call twice.
+`handleActions` claims what this caller may answer, runs your handlers, and records the results. Call it until the
+turn is over: a tool that needs approval shows up first as a permission request, then as the tool call. Polling again
+never executes the same call twice.
+
+SDK hooks such as `onPreToolUse` are different: they need your live app. Work that would run without a session's
+required hooks is refused with `background_callback_unsupported` rather than skipping them.
 
 ## Answer with a webhook
 
@@ -69,9 +74,13 @@ sequenceDiagram
 
 ```ts
 const event = await verifyWebhook(request, process.env.COPILOT_WEBHOOK_SECRET!); // rejects a bad signature
-if (event.type === "session.action_required") await event.handleActions({ tools: [lookupOrder] });
+if (event.type === "session.action_required") {
+  await event.handleActions({ tools: [lookupOrder], onPermissionRequest: approveAll });
+}
 ```
 
+Leave out `onPermissionRequest` if approvals should wait for a person: the webhook then leaves them for your app or
+Copilot CLI, and runs a tool once its call is approved.
 Deliveries are at least once, retried with backoff, and signed with HMAC-SHA256. Each one carries a short-lived
 capability for that session's waiting actions only. The [assistant demo](../../demos/assistant/README.md) uses a
 webhook and polling together, so nothing is missed while its tab is closed.

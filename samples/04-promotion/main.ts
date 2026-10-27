@@ -23,20 +23,23 @@ const where = async () => {
   return info.placement === "sandbox" ? `sandbox ${info.sandbox?.id}` : "shared runtime";
 };
 
-// No shell needed, so the session stays on the shared runtime.
-const first = await session.sendAndWait({ prompt: "In one sentence: what does a CSV header row contain?" });
-console.log(`Copilot: ${first?.data.content}`);
-console.log(`Now on: ${await where()}`);
+try {
+  // No shell needed, so the session stays on the shared runtime.
+  const first = await session.sendAndWait({ prompt: "In one sentence: what does a CSV header row contain?" });
+  console.log(`Copilot: ${first?.data.content}`);
+  console.log(`Now on: ${await where()}`);
 
-// This needs a shell. The agent asks for a sandbox, you approve, the platform moves the same session
-// (history included) into a new sandbox, and the turn continues there.
-const second = await session.sendAndWait({ prompt: "Use Python to add 10, 20, and 30, and save the result to outputs/sum.json." }, 15 * 60_000);
-console.log(`\nCopilot: ${second?.data.content}`);
-console.log(`Now on: ${await where()}`);
+  // This needs a shell. The agent asks for a sandbox, you approve, the platform moves the same session
+  // (history included) into a new sandbox, and the turn continues there. Sandbox setup happens inside this
+  // call, so give it more than the SDK's 60-second default.
+  const second = await session.sendAndWait({ prompt: "Use Python to add 10, 20, and 30, and save the result to outputs/sum.json." }, 15 * 60_000);
+  console.log(`\nCopilot: ${second?.data.content}`);
+  console.log(`Now on: ${await where()}`);
 
-// Same session ID, same conversation.
-const third = await session.sendAndWait({ prompt: "What was my first question? Answer in one sentence." });
-console.log(`\nCopilot: ${third?.data.content}`);
-
-await client.deleteSession(session.sessionId);
-await managed.close();
+  // Same session ID, same conversation.
+  const third = await session.sendAndWait({ prompt: "What was my first question? Answer in one sentence." });
+  console.log(`\nCopilot: ${third?.data.content}`);
+} finally {
+  await client.deleteSession(session.sessionId);
+  await managed.close();
+}

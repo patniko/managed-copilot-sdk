@@ -73,8 +73,9 @@ flowchart LR
 ```
 
 The platform re-checks the stored token with GitHub before using it. It can't refresh it: if GitHub revokes it or it
-expires, your schedules pause with a reason, and `npx managed-copilot login` turns them back on.
-`npx managed-copilot status` shows whether background sign-in is on.
+expires, your schedules pause with a reason. Sign in again with `npx managed-copilot login`, then resume each schedule
+with `npx managed-copilot schedules resume <schedule>`. `npx managed-copilot status` shows whether background sign-in
+is on.
 
 ## Let people in
 
