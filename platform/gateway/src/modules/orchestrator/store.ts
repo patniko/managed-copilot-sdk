@@ -4,7 +4,8 @@
 import { ManagedCopilotError, type WorkerInfo, type WorkerState } from "@managed-copilot/protocol";
 import { migrate, transaction, type Database } from "../../db.js";
 
-const MIGRATIONS = [
+/** The `orchestrator` module's migrations, in order (exported for upgrade tests). */
+export const ORCHESTRATOR_MIGRATIONS: readonly string[] = [
   `CREATE TABLE orchestrator_workers (
      id TEXT PRIMARY KEY,
      coordinator_id TEXT NOT NULL,
@@ -33,8 +34,12 @@ const MIGRATIONS = [
    );`,
   // sent_at: when the coordinator's latest message to the worker was sent (a restart decides from it whether the
   // worker's last recorded turn ran it). cleanup: the worker is stopped and its session may still exist.
+  // Existing rows: a stopped worker's session may have outlived it (cleanup decides by incarnation), and a working
+  // worker last became working when its latest message was sent or its run started.
   `ALTER TABLE orchestrator_workers ADD COLUMN sent_at TEXT;
    ALTER TABLE orchestrator_workers ADD COLUMN cleanup INTEGER NOT NULL DEFAULT 0;
+   UPDATE orchestrator_workers SET cleanup = 1 WHERE state = 'stopped';
+   UPDATE orchestrator_workers SET sent_at = updated_at WHERE state = 'working';
    CREATE INDEX orchestrator_workers_cleanup ON orchestrator_workers (cleanup) WHERE cleanup = 1;
    CREATE TABLE orchestrator_stops (
      key TEXT PRIMARY KEY,
@@ -123,7 +128,7 @@ export class WorkerStore {
 
   constructor(db: Database) {
     this.#db = db;
-    migrate(db, "orchestrator", MIGRATIONS);
+    migrate(db, "orchestrator", ORCHESTRATOR_MIGRATIONS);
   }
 
   /**

@@ -394,6 +394,7 @@ export class FakeSandboxes {
   readonly #generations = new Map<string, number>();
   readonly #openHolds: { gate: Promise<void>; arrived: () => void }[] = [];
   readonly #listHolds: { gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #deleteHolds: { gate: Promise<Error | undefined>; arrived: () => void }[] = [];
 
   constructor(private readonly runtime: FakeRuntime) {}
 
@@ -405,6 +406,20 @@ export class FakeSandboxes {
   /** Holds the next `listFiles` until `release()`, after it checked its sandbox (test hook). */
   holdNextList(): { readonly held: Promise<void>; release(): void } {
     return FakeSandboxes.#hold(this.#listHolds);
+  }
+
+  /** Holds the next `delete` until `release(failure?)`, which ends it with `failure` when given (test hook). */
+  holdNextDelete(): { readonly held: Promise<void>; release(failure?: Error): void } {
+    let release!: (failure?: Error) => void;
+    let arrived!: () => void;
+    const gate = new Promise<Error | undefined>((resolve) => {
+      release = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    this.#deleteHolds.push({ gate, arrived });
+    return { held, release };
   }
 
   static #hold(holds: { gate: Promise<void>; arrived: () => void }[]): { readonly held: Promise<void>; release(): void } {
@@ -487,6 +502,12 @@ export class FakeSandboxes {
 
   async delete(sessionId: string, options: { readonly sandboxId?: string } = {}): Promise<void> {
     this.log.push({ op: "delete", sessionId });
+    const hold = this.#deleteHolds.shift();
+    if (hold) {
+      hold.arrived();
+      const failure = await hold.gate;
+      if (failure) throw failure;
+    }
     const failure = this.failNextDelete;
     this.failNextDelete = undefined;
     if (failure) throw failure;

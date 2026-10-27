@@ -19,16 +19,22 @@ type WorkerToolHandler = (args: unknown, context: PlatformToolCallContext) => Pr
 /**
  * Refusals are written for the coordinator's model, so they go back as the stock SDK shows a failed tool to it
  * (`resultType: "failure"`); a thrown error would reach it only as "Tool execution failed". Unexpected errors still
- * throw, and the ledger reports them without details.
+ * throw, and the ledger reports them without details. A call still running when the gateway starts shutting down is
+ * left unanswered: the ledger runs it again after the restart (every worker tool is idempotent by its key), and
+ * nothing is recorded while the database closes.
  */
-function forModel(handler: WorkerToolHandler): WorkerToolHandler {
+function forModel(manager: WorkerManager, handler: WorkerToolHandler): WorkerToolHandler {
+  const unanswered = () => new Promise<never>(() => undefined);
   return async (args, context) => {
+    let result: PlatformToolResult;
     try {
-      return await handler(args, context);
+      result = await handler(args, context);
     } catch (error) {
+      if (manager.closed) return unanswered();
       if (!isManagedCopilotError(error)) throw error;
       return { textResultForLlm: error.message, resultType: "failure", error: error.message };
     }
+    return manager.closed ? unanswered() : result;
   };
 }
 
@@ -59,7 +65,7 @@ export const orchestratorModule: GatewayModule = {
         skipPermission: tool.skipPermission,
         // Only coordinators get them: workers (isolated sessions) cannot start workers.
         appliesTo: ({ type, placement }) => type === "orchestrator" && placement === "shared",
-        handler: forModel(handler),
+        handler: forModel(manager, handler),
       });
     }
 

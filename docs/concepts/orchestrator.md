@@ -71,7 +71,7 @@ flowchart LR
 - **The coordinator's model never approves anything.** The platform answers worker prompts only within the approval
   you gave, and records each answer as `platform:orchestrator`.
 - **A person stays in charge where policy says so.** Prompts that managed policy reserves for a person wait for one:
-  attach Copilot CLI to the worker to answer them.
+  attach Copilot CLI to the worker to answer them. The coordinator's reports say when a worker is waiting for a person.
 
 ## Workers are sessions
 

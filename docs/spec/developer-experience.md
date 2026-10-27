@@ -1035,25 +1035,28 @@ The coordinator manages its workers with platform tools that only orchestrator s
    or the person in an attached Copilot CLI. Approving it approves the worker's work in its sandbox. The platform then
    answers the worker's own permission prompts once each, as `approveAll` does, and records each answer in the actions
    ledger as `platform:orchestrator`. Whether managed policy reserves a prompt for a person is the ledger's decision
-   (read as the stock SDK documents it); those prompts wait for one (attach Copilot CLI to the worker), and a client
-   attached to a worker answers that worker's prompts itself. The coordinator's model never approves anything.
+   (read as the stock SDK documents it); those prompts wait for one (attach Copilot CLI to the worker), the
+   coordinator's reports say a worker is waiting for a person, and a client attached to a worker answers that worker's
+   prompts itself. The coordinator's model never approves anything.
 3. **No polling.** `wait_for_workers` holds the coordinator's turn open without model calls, so one `sendAndWait`
-   covers the whole job. Pass a timeout longer than the work (the stock default is 60 seconds). A gateway restart runs
-   a pending wait again. Before it reports, it waits up to 30 seconds for finished workers' outputs to publish. Worker
-   reports are clipped to a bounded size and reach the coordinator marked as data from another agent, never as
-   instructions.
+   covers the whole job. Pass a timeout longer than the work (the stock default is 60 seconds). A worker run that
+   reports an error fails when it ends, as `sendAndWait` reports it. Before it reports, `wait_for_workers` waits up to
+   30 seconds for finished workers' outputs to publish. Worker reports are clipped to a bounded size and reach the
+   coordinator marked as data from another agent, never as instructions.
 4. **Workers run as the owner, within the coordinator's limits.** While a worker has no client of its own, the
    coordinator's connected client serves its model calls, then the owner's background sign-in
-   (`npx managed-copilot login`), from the worker's creation on: a credential is never borrowed from a connection that
-   has since closed. Nothing broadens: a worker uses the coordinator's model when its environment allows it (otherwise
-   the environment's own), a client's network narrowing of the coordinator applies to its workers, and workers cannot
-   start workers.
+   (`npx managed-copilot login`), from the worker's creation on: a credential taken from a connection never serves a
+   worker after that connection closes, even while a message to the worker is being sent. Nothing broadens: a worker
+   uses the coordinator's model when its environment allows it (otherwise the environment's own), a client's network
+   narrowing of the coordinator applies to its workers, and workers cannot start workers.
 5. **Bounded and cleaned up.** A session has at most `maxWorkers` workers at once. Stopped workers, and starts that
    failed before a session existed, don't count. `stop_worker`, or deleting the coordinator, deletes workers with
-   their sandboxes and files; a deletion that fails is reported and retried, also after a restart. Tool calls are
-   idempotent: a replayed `stop_worker` stops the worker it chose, never a newer one with the same name. After a
-   gateway restart, a start the restart interrupted fails, a worker turn it cut ends, and a message that never started
-   a run fails the worker with the earlier report kept, so waits finish.
+   their sandboxes and files; a deletion that fails, or that another deletion still has under way, is reported and
+   followed up until the session is gone, also after a restart. Tool calls are idempotent, and a call a gateway
+   shutdown interrupts runs again after the restart: a replayed `stop_worker` stops the worker it chose, never a newer
+   one with the same name, and a replayed `message_worker` never sends twice. After a gateway restart, a start the
+   restart interrupted fails, a worker turn it cut ends, and a message that never started a run fails the worker with
+   the earlier report kept, so waits finish.
 6. **Files move through the gateway.** Workers don't share a disk, so the same tools work on Docker and on Azure:
    `read_worker_file` returns up to 64,000 characters of text, and `copy_worker_files` copies at most 500 files and
    64 MiB per call. File calls are pinned to the worker's own sandbox, so they never reach a newer session that reuses
@@ -1370,7 +1373,7 @@ was shown except for the items in the last column, which fail explicitly or are 
 | G3 | Passed with limits | Docker sandbox e2e (idle stop and resume with workspace and tools intact); gateway rollover e2e 3/3 | Container Apps Sandboxes: idle/recreate probe 8/8; a compute replacement kept data disks, workspace, HOME, the declared Python package, and native history. NFS storage 10/10 with cross-host lease exclusion; revision canaries. Interrupted factory work recovered by explicit Retry (9 files, 44/44 tests) | Warm assignment (`warm > 0` is refused); more than one gateway replica; partition-tolerant recovery |
 | G4 | Passed with limits | Egress Docker suite 11/11, 7 cases in sandbox-like client containers and 4 in real sandboxes: `network: false` blocks curl, pip, npm, git, and raw sockets; host lists; metadata, private, direct-IP, port, and peer destinations blocked; vault substitution scoped to session, host, and header. Sandboxes hold no GitHub token. Gated SDK e2e keeps another account's sessions invisible | Network-denied CONNECT returns 403 while inference works; allowed hosts return 200; vault substitution and response redaction pass | A live check with two real GitHub accounts (tests use distinct identities); refresh of expiring user tokens |
 | G5 | Passed for Copilot CLI | Promotion e2e and snippet 08: same session object and ID, ordered outcomes, published artifact. The stock Copilot CLI attached live: one responder per prompt, `ask_user`, no host paths, and promotion of an attached session with the CLI reconnecting by itself | Explicit promotion and continuation; non-interactive AHP probe for shared and isolated sessions | GitHub Copilot app publication (refused with `transport_unsupported`); an interactive terminal check on Azure |
-| G6 | Passed locally (2026-10-26) | Snippet 14: the coordinator started two workers in parallel in Docker sandboxes, approved through `approveAll`, and reported both results in one `sendAndWait`; their Python prompts were answered as `platform:orchestrator`, and deleting the coordinator deleted both sandboxes. A live run of every coordinator tool: a builder's files read and copied to a reviewer, a follow-up message, and a stop. Gateway integration and restart tests cover limits, prompts a person must answer, the credential fallback, and cleanup | Not run yet | Azure; an interactive Copilot CLI attached to a coordinator or a worker |
+| G6 | Passed locally (2026-10-26; again after review fixes, 2026-10-27) | Snippet 14: the coordinator started two workers in parallel in Docker sandboxes, approved through `approveAll`, and reported both results in one `sendAndWait`; their Python prompts were answered as `platform:orchestrator`, and deleting the coordinator deleted both sandboxes. A live run of every coordinator tool: a builder's files read and copied to a reviewer, a follow-up message, and a stop. After the review fixes: snippet 14 and walkthrough 11 again, and a live run in which `message_worker` refused a working worker and the model waited and sent it again, a copy and read went through pinned sandboxes, `wait_for_workers` listed a published output, and two stops deleted their sessions. Gateway integration and restart tests cover limits, prompts a person must answer, the credential fallback, replays, and cleanup | Not run yet | Azure; an interactive Copilot CLI attached to a coordinator or a worker |
 
 The demos run end to end on both targets. The software factory completed work orders locally (most recently the
 two-builder CSV ⇄ JSON toolkit on the final build: reviewed, fixed, and released with 40/40 tests) and on Azure (9

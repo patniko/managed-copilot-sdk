@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ManagedCopilotError, type WorkerInfo } from "@managed-copilot/protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { migrate, openDatabase } from "../src/db.js";
 import type { Principal } from "../src/http.js";
+import { ORCHESTRATOR_MIGRATIONS, WorkerStore } from "../src/modules/orchestrator/store.js";
 import { FakeRuntime, FakeSandboxes, RawClient, sleep, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
 
 const ALICE = "alice-token";
@@ -155,6 +157,120 @@ describe("orchestrator recovery", () => {
       expect(workers(second.gateway, sessionId)[0]).toMatchObject({ state: "stopped" });
     } finally {
       await second.gateway.close({ keepData: true });
+    }
+  });
+
+  it("leaves a message a shutdown cut unanswered: run again after the restart, it says the message may have arrived", async () => {
+    const first = await start();
+    const { client, sessionId } = await coordinator(first.gateway);
+    await tool(client, sessionId, "start_worker", { name: "cut", task: "hello" });
+    await waitUntil(() => workers(first.gateway, sessionId)[0]?.state === "idle");
+    const workerId = workers(first.gateway, sessionId)[0]!.id;
+    // The message to the worker is still being sent when the gateway stops; the send then fails.
+    const sessions = first.gateway.gateway.app.service("sessions");
+    const send = sessions.send.bind(sessions);
+    let reached!: () => void;
+    const sending = new Promise<void>((resolve) => (reached = resolve));
+    let cut!: () => void;
+    const stopped = new Promise<void>((resolve) => (cut = resolve));
+    sessions.send = async (principal, id, input, options) => {
+      if (id !== workerId) return send(principal, id, input, options);
+      reached();
+      await stopped;
+      throw new Error("The runtime connection closed");
+    };
+    const replying = client.request("session.sendAndWait", { sessionId, prompt: `tool:message_worker ${JSON.stringify({ worker: "cut", message: "more" })}` }).catch(() => undefined);
+    await sending;
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => void rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      await client.close();
+      await first.gateway.close({ keepData: true });
+      cut();
+      await replying;
+      await sleep(200);
+      // Nothing was recorded (or attempted) while the database closed.
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    const second = await start();
+    try {
+      // Its message never started a run, so it fails with its earlier report kept; the message still counts.
+      await waitUntil(() => workers(second.gateway, sessionId)[0]?.state === "failed");
+      expect(workers(second.gateway, sessionId)[0]).toMatchObject({ result: "echo: hello", messages: 2 });
+      expect(workers(second.gateway, sessionId)[0]!.error).toMatch(/before it received your last message/);
+      // The tool call ran again and said so, without sending the message a second time.
+      const actions = second.gateway.gateway.app.service("actions");
+      await waitUntil(() => actions.list(sessionId).some((action) => action.tool === "message_worker" && action.state === "completed"));
+      expect(actions.list(sessionId).find((action) => action.tool === "message_worker")!.result).toMatch(/may have reached "cut" before the platform restarted/);
+    } finally {
+      await second.gateway.close({ keepData: true });
+    }
+  });
+
+  it("leaves a wait a shutdown cut unanswered, also while it waits for outputs, and runs it again after the restart", async () => {
+    const first = await start();
+    const { client, sessionId } = await coordinator(first.gateway);
+    await tool(client, sessionId, "start_worker", { name: "publisher", task: "hello" });
+    await waitUntil(() => workers(first.gateway, sessionId)[0]?.state === "idle");
+    const services = first.gateway.gateway.app.services as Record<string, unknown>;
+    let asked!: () => void;
+    const publishing = new Promise<void>((resolve) => (asked = resolve));
+    // Publishing finishes only after the gateway stopped.
+    services["artifacts"] = {
+      list: () => [],
+      waitForPublication: async () => {
+        asked();
+        await sleep(300);
+        return { turnId: "t1", state: "published", artifacts: [] };
+      },
+    };
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => void rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const replying = client.request("session.sendAndWait", { sessionId, prompt: "tool:wait_for_workers {}" }).catch(() => undefined);
+      await publishing;
+      await client.close();
+      await first.gateway.close({ keepData: true });
+      await sleep(500);
+      await replying;
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+
+    const second = await start();
+    try {
+      const actions = second.gateway.gateway.app.service("actions");
+      await waitUntil(() => actions.list(sessionId).some((action) => action.tool === "wait_for_workers" && action.state === "completed"));
+      expect(actions.list(sessionId).find((action) => action.tool === "wait_for_workers")!.result).toMatch(/echo: hello/);
+    } finally {
+      await second.gateway.close({ keepData: true });
+    }
+  });
+
+  it("checks again, after an upgrade, whether stopped workers' sessions outlived them", () => {
+    const db = openDatabase(":memory:");
+    try {
+      // A ledger from before cleanups and send times were recorded.
+      migrate(db, "orchestrator", ORCHESTRATOR_MIGRATIONS.slice(0, 1));
+      const insert = db.prepare(
+        `INSERT INTO orchestrator_workers (id, coordinator_id, coordinator_incarnation, owner_id, incarnation, name, environment, task, state, messages, start_key, created_at, updated_at)
+         VALUES (?, 'coord', 'inc-c', 1001, ?, ?, 'coder', 'task', ?, 1, ?, ?, ?)`,
+      );
+      insert.run("w-stopped", "inc-1", "stopped", "stopped", "k1", "2026-10-26T00:00:00.000Z", "2026-10-26T00:00:00.000Z");
+      insert.run("w-working", "inc-2", "working", "working", "k2", "2026-10-26T00:00:00.000Z", "2026-10-26T01:00:00.000Z");
+      insert.run("w-idle", "inc-3", "idle", "idle", "k3", "2026-10-26T00:00:00.000Z", "2026-10-26T02:00:00.000Z");
+      const store = new WorkerStore(db);
+      expect(store.pendingCleanup().map((worker) => worker.id)).toEqual(["w-stopped"]);
+      expect(store.get("w-working")).toMatchObject({ sentAt: "2026-10-26T01:00:00.000Z", cleanup: false });
+      expect(store.get("w-idle")?.sentAt).toBeUndefined();
+    } finally {
+      db.close();
     }
   });
 });

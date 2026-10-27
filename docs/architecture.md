@@ -745,31 +745,43 @@ and quickstart snippet 14).
   unique names among them) and returns at once. In the background it creates the worker with core's
   `sessions.create(principal, { environment: { name, network: <coordinator's requested network> }, systemMessage:
   { mode: "append", content: WORKER_INSTRUCTIONS }, parentSessionId })`, records its incarnation, and sends the task
-  with `sessions.send`. Each principal is `sessions.ownerPrincipal(...)` (the coordinator's for the admission check,
-  the worker's just before the send): whatever credential serves that session right now, used at once and never
-  stored.
+  with `sessions.send(..., { lendCredential: false })`. Each principal is `sessions.ownerPrincipal(...)` (the
+  coordinator's for the admission check, the worker's just before the send): whatever credential serves that session
+  right now, used at once and never stored, and never lent to the worker.
 - **Parent sessions (core).** `CreateSessionRequest.parentSessionId` must name the same owner's live session; the
   ledger stores it with that session's incarnation (`core_sessions.parent_session_id`, `parent_incarnation`), and
   `SessionInfo.parentSessionId` reports it. `#ownerToken` for a session with no connected client or presence of its
   own tries its parent's connected clients and presences (one level, only while the parent is still that incarnation
   and the same owner), then the owner's background sign-in. A parent-linked create installs no presence for the
-  creating principal, so this chain serves the worker from its creation on and a credential borrowed from a connection
-  never outlives it. So a worker's brokered inference runs on the coordinator's connected client while there is one.
+  creating principal, and `sessions.send` with `lendCredential: false` installs none for the sender, so this chain
+  serves the worker from its creation on and a credential taken from a connection never outlives it. So a worker's
+  brokered inference runs on the coordinator's connected client while there is one.
 - **Runs.** The module follows workers through `sessions.subscribe`, using root events only: a `user.message` that
   starts a run (not steering, an autopilot continuation, or a skill prompt, as core reads them) marks the worker
-  `working`, the last root `assistant.message` with content becomes its result, a root `session.error` marks it
-  `failed` (a later root reply in the same run makes it `working` again), and a root `session.idle` marks it `idle`
-  with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are the signals the stock
-  `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way. A message sent after a
-  run's error but before that run's own idle marks the idle as the earlier run's, so it does not end the new run.
+  `working`, the last root `assistant.message` with content becomes its result, a root `session.error` is remembered
+  for the run (a later root reply means it went on), and the run's root `session.idle` marks the worker `failed` with
+  that error, or `idle` with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are
+  the signals the stock `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way. A
+  worker is never messageable while its run is open, so no message can start a run before the previous run's idle.
+  A root reply for a `failed` worker (its run continued after its runtime came back) makes it `working` again. When a
+  worker's runtime connection closes (`sessions.onLifecycle("stopped")`) while it is `working`, no send to it is under
+  way, and core has no turn running for it, the worker fails: with its run's error when the error came without an
+  idle (core records the turn failed at the error, so it does not end it again), or because its latest message never
+  started a run. A sandbox's idle stop therefore also settles any worker left `working` with an idle runtime.
 - **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
   of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
   the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
   beyond the pending tool call, so a single `sendAndWait` covers a whole job. Before reporting, it waits up to 30
   seconds for finished workers' latest outputs to publish (`artifacts.waitForPublication`) and notes publications that
   failed or are still running. Reports go back as text, each inside `<worker_report>` and clipped to share a
-  48,000-character budget, with the worker's published `outputs/`. At shutdown, waits are dropped unanswered; durable
-  runs the platform tool again after the restart, and it waits again.
+  48,000-character budget, with the worker's published `outputs/`; a working worker whose run waits on a prompt the
+  platform leaves to a person (managed policy, repeated failures, a prompt without its full request, or a question)
+  is reported as waiting for a person, with the attach command.
+- **Shutdown.** Every worker tool call still running when the module stops is left unanswered (the tool wrapper
+  never resolves it, and each handler checks after its awaits), so nothing is recorded while the database closes and
+  durable runs the call again after the restart; each tool is idempotent by its key, so the rerun answers with what
+  the first run did (a message that was being sent says it may have arrived) or does it again (a wait waits again).
+  Waits on worker state and on publication end at once.
 - **Approvals.** The module subscribes to the actions ledger's `onChange` and, for a `pending` permission action of
   one of its workers (one no attached client claimed), claims and answers it with `{ kind: "approve-once" }` through
   the ledger's `platform` caller (`ActionCaller { type: "platform", ownerId, responder: "orchestrator" }`; recorded as
@@ -785,11 +797,14 @@ and quickstart snippet 14).
   answers `session_busy`, so nothing queues behind a run. It records the tool call's key and worker
   (`orchestrator_messages`) before `sessions.send`, so a replay never sends twice (a replay without a recorded message
   ID says the outcome is unknown); the worker's state is read again after the credential check and changed in the
-  same step as the send starts, and a refused send is forgotten, its count taken back, and the earlier state restored
-  unless a run started meanwhile. `read_worker_file` and `copy_worker_files` use the sandbox service's file API
-  (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox), each call pinned with the worker's
-  `sandboxId` (read while the session is still the worker's incarnation; the sandbox service checks it before and after
-  starting the sandbox), so a call never reaches a newer session that reuses the ID. Text up to 256 KiB is read
+  same step as the send starts. When the send fails: if a run started meanwhile, the message most likely arrived, so
+  its record stays and the coordinator is told it may have arrived; if the worker was stopped meanwhile, it is told
+  so; otherwise the send is forgotten, its count taken back, the earlier state restored, and the failure reported
+  (runtime errors without their own wording). Worker tools report refusals as failed tool results
+  (`resultType: "failure"`), so the model reads them. `read_worker_file` and `copy_worker_files` use the sandbox
+  service's file API (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox), each call pinned with the
+  worker's `sandboxId` (read while the session is still the worker's incarnation; the sandbox service checks it before
+  and after starting the sandbox), so a call never reaches a newer session that reuses the ID. Text up to 256 KiB is read
   (64,000 characters returned, binary files detected), directories are listed, and copies of at most 500 files and
   64 MiB stream sandbox to sandbox through the gateway, so they work on Docker and Azure alike; every download is
   destroyed when its copy ends, and list errors are reported. Paths are workspace-relative and may not contain `..`;
@@ -799,7 +814,9 @@ and quickstart snippet 14).
   `stopped` with `cleanup` outstanding and deletes its session (core deletes the sandbox and artifacts) only while the
   session is the worker's own (its recorded incarnation, or before that the session its start created, by parent and
   owner); a start still in flight deletes what it created when it ends. A deletion that fails is reported to the
-  coordinator, stays outstanding, and is retried with backoff, again on the next `stop_worker`, and at startup.
+  coordinator, stays outstanding, and is retried with backoff, again on the next `stop_worker`, and at startup. A
+  deletion of the session already under way elsewhere (`conflict`) is reported as under way and stays outstanding too:
+  the cleanup is recorded done only once the worker's session is gone (`sessions.onLifecycle("deleted")` or a check).
   `sessions.onLifecycle("deleted")` stops the workers of a deleted coordinator (any incarnation other than the current
   one) and marks a worker whose own session was deleted. Platform events `worker.started`, `worker.idle`,
   `worker.failed`, and `worker.stopped` (session ID and environment of the coordinator, `data: WorkerEventData`,

@@ -185,7 +185,7 @@ describe("orchestrator environments", () => {
     expect(sends(workerId)).toEqual(["stall", "try again"]);
   });
 
-  it("messages a worker only between runs, and keeps a run's report through steering and an earlier run's late idle", async () => {
+  it("messages a worker only between runs, keeps a run's report through steering, and fails a run that reported an error when it ends", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "steady", task: "stall" });
     await waitUntil(() => worker(sessionId, "steady").state === "working");
@@ -208,25 +208,44 @@ describe("orchestrator environments", () => {
     await waitUntil(() => worker(sessionId, "steady").state === "idle");
     expect(worker(sessionId, "steady").result).toBe("half done");
 
-    // A run fails, and the coordinator messages the worker before that run's own idle arrives: that idle ends the
-    // earlier run, not the new one.
+    // A run that reports an error fails when it ends (until then it is still working, and takes no message).
     await call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
     await waitUntil(() => worker(sessionId, "steady").state === "working");
     runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
-    await waitUntil(() => worker(sessionId, "steady").state === "failed");
-    const held = runtime.holdNext("session.send", workerId, { before: true });
-    const sending = call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
-    await held.held;
-    expect(worker(sessionId, "steady").state).toBe("working");
-    runtime.emitEvent(workerId, "session.idle", {});
     await sleep(100);
     expect(worker(sessionId, "steady").state).toBe("working");
-    held.release();
-    expect(await sending).toContain('Sent to "steady"');
+    expect(await call(client, sessionId, "message_worker", { worker: "steady", message: "too early" })).toMatch(/is still working/);
+    runtime.emitEvent(workerId, "session.idle", {});
+    await waitUntil(() => worker(sessionId, "steady").state === "failed");
+    expect(worker(sessionId, "steady")).toMatchObject({ error: "The model call failed", result: "half done", messages: 2 });
+
+    // A run that goes on after an error (a retry) finishes with its reply.
+    await call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
+    await waitUntil(() => worker(sessionId, "steady").state === "working");
+    runtime.emitEvent(workerId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
     runtime.emitEvent(workerId, "assistant.message", { messageId: "a2", content: "recovered" });
     runtime.emitEvent(workerId, "session.idle", {});
     await waitUntil(() => worker(sessionId, "steady").state === "idle");
     expect(worker(sessionId, "steady")).toMatchObject({ result: "recovered", messages: 3 });
+    expect(worker(sessionId, "steady").error).toBeUndefined();
+  });
+
+  it("fails a working worker whose runtime went away after its run reported an error, before the run ended", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "vanished", task: "stall" });
+    await waitUntil(() => worker(sessionId, "vanished").state === "working");
+    const workerId = worker(sessionId, "vanished").id;
+    // Core records the turn failed at its error, so it does not end the turn again when the connection closes.
+    runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
+    await waitUntil(() => sessions().get(workerId)?.lastTurn?.status === "failed");
+    expect(worker(sessionId, "vanished").state).toBe("working");
+    sandboxes.streams.get(workerId)!.destroy();
+    await waitUntil(() => worker(sessionId, "vanished").state === "failed");
+    expect(worker(sessionId, "vanished").error).toBe("The model call failed");
+    // Nothing is left working: messaging it brings its session back in a new runtime.
+    expect(await call(client, sessionId, "message_worker", { worker: "vanished", message: "again" })).toContain('Sent to "vanished"');
+    await waitUntil(() => worker(sessionId, "vanished").result === "echo: again");
+    expect(worker(sessionId, "vanished").state).toBe("idle");
   });
 
   it("takes back a message the runtime refused", async () => {
@@ -235,7 +254,8 @@ describe("orchestrator environments", () => {
     await waitUntil(() => worker(sessionId, "refused").state === "idle");
     const workerId = worker(sessionId, "refused").id;
     runtime.failNext("session.send", workerId, "The runtime is shutting down");
-    expect(await call(client, sessionId, "message_worker", { worker: "refused", message: "more" })).not.toContain("Sent to");
+    // Told to the model as a failed tool, without the runtime's own wording.
+    expect(await call(client, sessionId, "message_worker", { worker: "refused", message: "more" })).toBe(`Couldn't deliver your message to "refused": the platform could not complete it`);
     expect(worker(sessionId, "refused")).toMatchObject({ state: "idle", result: "echo: hello", messages: 1 });
     expect(worker(sessionId, "refused").error).toMatch(/Couldn't deliver your last message/);
     expect(await call(client, sessionId, "message_worker", { worker: "refused", message: "more" })).toContain('Sent to "refused"');
@@ -300,6 +320,29 @@ describe("orchestrator environments", () => {
     expect(sessions().get(workerId)).toBeUndefined();
   });
 
+  it("keeps a stopped worker's cleanup outstanding while another deletion of its session is under way, until it is gone", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "contested", task: "hello" });
+    await waitUntil(() => worker(sessionId, "contested").state === "idle");
+    const workerId = worker(sessionId, "contested").id;
+    // The owner deletes the worker's session; deleting its sandbox is slow, and then fails.
+    const held = sandboxes.holdNextDelete();
+    const ownerDelete = sessions()
+      .delete(1001, workerId)
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    await held.held;
+    expect(await call(client, sessionId, "stop_worker", { worker: "contested" })).toContain("Its sandbox and files are being deleted.");
+    held.release(new ManagedCopilotError("internal", "The sandbox backend is not responding"));
+    expect(await ownerDelete).toMatchObject({ code: "internal" });
+    expect(sessions().get(workerId)?.state).toBe("failed");
+    // Nothing recorded the cleanup as done: stopping it again deletes the session.
+    expect(await call(client, sessionId, "stop_worker", { worker: "contested" })).toContain("Its sandbox and files are deleted.");
+    expect(sessions().get(workerId)).toBeUndefined();
+  });
+
   it("approves a worker's permission prompts once each, and leaves the ones a person must answer", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "shell", task: "stall" });
@@ -318,6 +361,10 @@ describe("orchestrator environments", () => {
     await sleep(100);
     expect(answers()).toHaveLength(1);
     expect(actions.list(workerId, { open: true }).find((action) => action.requestId === "perm-2")).toMatchObject({ state: "pending" });
+    // The coordinator learns why the worker is still working.
+    expect(await call(client, sessionId, "wait_for_workers", { workers: ["shell"], timeoutSeconds: 1 })).toContain(
+      `Still working, and waiting for a person to answer a prompt: they can answer it in Copilot CLI with \`npx managed-copilot attach ${workerId}\``,
+    );
 
     // The ledger never lets the platform answer for a person, or answer anything but a permission prompt.
     const caller = { type: "platform", ownerId: 1001, responder: "test" } as const;
@@ -387,6 +434,28 @@ describe("orchestrator environments", () => {
     await waitUntil(() => worker(sessionId, "borrowed").state === "failed");
     expect(worker(sessionId, "borrowed").error).toMatch(/^Couldn't start/);
     expect(sends(worker(sessionId, "borrowed").id)).toEqual([]);
+  });
+
+  it("never lends the coordinator's credential to a worker for longer than the coordinator's connection", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "lender", task: "hello" });
+    await waitUntil(() => worker(sessionId, "lender").state === "idle");
+    const workerId = worker(sessionId, "lender").id;
+    const held = runtime.holdNext("session.send", workerId, { before: true });
+    const sending = call(client, sessionId, "message_worker", { worker: "lender", message: "more" }).catch(() => undefined);
+    await held.held;
+    // While the message is being sent, the coordinator's only client leaves (and there is no background sign-in).
+    await client.close();
+    await waitUntil(async () =>
+      sessions()
+        .ownerPrincipal!(workerId)
+        .then(
+          () => false,
+          (error: { code?: string }) => error.code === "authentication_required",
+        ),
+    );
+    held.release();
+    await sending;
   });
 
   it("waits for a finished worker's outputs to be published before reporting them", async () => {

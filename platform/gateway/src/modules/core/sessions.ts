@@ -45,6 +45,7 @@ import {
   type SessionEventListener,
   type SessionRecord,
   type SessionRuntime,
+  type SessionSendOptions,
   type SessionsService,
   type VaultHeaderSource,
 } from "./contracts.js";
@@ -626,11 +627,12 @@ export class SessionManager implements SessionsService {
     return { sessionId, created: true, ...(created ? { incarnation: created } : {}) };
   }
 
-  async send(principal: Principal, sessionId: string, input: { prompt: string; source?: string; mode?: string }, options: SessionCallOptions = {}): Promise<{ messageId: string }> {
+  async send(principal: Principal, sessionId: string, input: { prompt: string; source?: string; mode?: string }, options: SessionSendOptions = {}): Promise<{ messageId: string }> {
     this.getOwned(principal.accountId, sessionId);
     this.#checkIncarnation(sessionId, options.incarnation);
-    // The caller's verified credential serves the session while this call runs (a restore it triggers, for example).
-    const release = this.presence(sessionId, principal);
+    // The caller's verified credential serves the session while this call runs (a restore it triggers, for example),
+    // unless the caller only borrowed it from another session's connection.
+    const release = options.lendCredential === false ? undefined : this.presence(sessionId, principal);
     try {
       const result = await this.request<{ messageId: string }>(
         sessionId,
@@ -640,11 +642,11 @@ export class SessionManager implements SessionsService {
           mode: input.mode ?? "enqueue",
           ...(input.source ? { source: input.source } : {}),
         },
-        options,
+        { ...(options.incarnation !== undefined ? { incarnation: options.incarnation } : {}) },
       );
       return { messageId: result.messageId };
     } finally {
-      release();
+      release?.();
     }
   }
 

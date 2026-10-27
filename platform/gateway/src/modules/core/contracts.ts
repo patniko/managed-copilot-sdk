@@ -274,6 +274,17 @@ export interface SessionCallOptions {
   readonly incarnation?: string;
 }
 
+/** Options of `sessions.send`. */
+export interface SessionSendOptions extends SessionCallOptions {
+  /**
+   * Default true: the caller's verified credential serves the session while the send runs (a restore it triggers, for
+   * example). False: only the session's own credential sources do (its connected clients, its parent's, the owner's
+   * background sign-in), so a credential taken from a connection never serves the session after that connection
+   * closes.
+   */
+  readonly lendCredential?: boolean;
+}
+
 export interface SessionsService {
   /** The session's ledger record; undefined for unknown and deleted sessions and for creates the gateway never finished. */
   get(sessionId: string): SessionRecord | undefined;
@@ -288,7 +299,7 @@ export interface SessionsService {
    */
   create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
   /** Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. */
-  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }, options?: SessionCallOptions): Promise<{ readonly messageId: string }>;
+  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }, options?: SessionSendOptions): Promise<{ readonly messageId: string }>;
   /** Forwards a session-scoped RPC to the runtime that owns the session. The caller is responsible for authorization. */
   request<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, options?: SessionCallOptions): Promise<T>;
   abort(sessionId: string): Promise<void>;
