@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ApprovalItem, AssistantItem, SandboxesView, SandboxOutputView, SandboxWorkerView, TimelineItem, UserItem, WorkerItem } from "../src/shared/protocol.js";
-import { formatElapsed, sandboxCardStates } from "../src/web/src/sandboxCards.js";
+import { formatElapsed, replyImages, sandboxCardStates } from "../src/web/src/sandboxCards.js";
 import { buildBlocks, type Block } from "../src/web/src/timelineBlocks.js";
 
 const T0 = Date.parse("2027-01-15T22:00:00Z");
@@ -96,14 +96,13 @@ describe("sandboxCardStates", () => {
   });
 });
 
-/** A compact picture of the blocks, like ["user:u1", "worker:c1", "assistant:a1+c1"]. */
+/** A compact picture of the blocks, like ["user:u1", "worker:c1(approved)", "assistant:a1"]. */
 function shape(blocks: readonly Block[]): string[] {
   return blocks
     .filter((block) => block.type === "item" || block.type === "unread")
     .map((block) => {
       if (block.type !== "item") return "unread";
-      const extra = block.item.kind === "assistant" && block.sandboxCards ? `+${block.sandboxCards.map((entry) => entry.id).join(",")}` : block.item.kind === "worker" && block.approval ? `(approved)` : "";
-      return `${block.item.kind}:${block.item.id}${extra}`;
+      return `${block.item.kind}:${block.item.id}${block.item.kind === "worker" && block.approval ? "(approved)" : ""}`;
     });
 }
 
@@ -111,19 +110,47 @@ describe("buildBlocks with sandboxes", () => {
   const build = (items: TimelineItem[], unreadAnchor?: string) => shape(buildBlocks(items, "America/Los_Angeles", unreadAnchor, new Date(T0)));
 
   it("shows an approved sandbox as its card, and one waiting for approval as the approval", () => {
-    expect(build([user("u1", 0), card("c1", 1), approval("c1", 2, "approved"), reply("a1", 30)])).toEqual(["user:u1", "worker:c1(approved)", "assistant:a1+c1"]);
+    expect(build([user("u1", 0), card("c1", 1), approval("c1", 2, "approved"), reply("a1", 30)])).toEqual(["user:u1", "worker:c1(approved)", "assistant:a1"]);
     expect(build([user("u1", 0), card("c1", 1, { status: "running", endedAt: undefined }), approval("c1", 2, "pending")])).toEqual(["user:u1", "approval:approval:c1"]);
     expect(build([user("u1", 0), card("c1", 1, { status: "failed" }), approval("c1", 2, "denied"), reply("a1", 5)])).toEqual(["user:u1", "approval:approval:c1", "assistant:a1"]);
   });
 
-  it("puts a turn's sandbox images under its last reply only", () => {
-    const followUp = card("c2", 41, { action: "message" });
-    expect(
-      build([user("u1", 0), reply("a0", 1), card("c1", 2), approval("c1", 3, "approved"), reply("a1", 30), reply("a2", 31), user("u2", 40), followUp, reply("a3", 60), user("u3", 70), reply("a4", 71)]),
-    ).toEqual(["user:u1", "assistant:a0", "worker:c1(approved)", "assistant:a1", "assistant:a2+c1", "user:u2", "worker:c2", "assistant:a3+c2", "user:u3", "assistant:a4"]);
+  it("keeps the unread divider when its item is shown as a sandbox card", () => {
+    expect(build([user("u1", 0), card("c1", 1), approval("c1", 2, "approved"), reply("a1", 30)], "approval:c1")).toEqual(["user:u1", "worker:c1(approved)", "unread", "assistant:a1"]);
+  });
+});
+
+describe("replyImages", () => {
+  const named = (id: string, seconds: number, text: string): AssistantItem => ({ ...reply(id, seconds), text });
+  const images = (items: TimelineItem[], workers: SandboxWorkerView[]) => {
+    const found = replyImages(items, sandboxCardStates(items, view(workers)));
+    return Object.fromEntries([...found].map(([replyId, list]) => [replyId, list.map((image) => `${image.output.path}@${image.worker}`)]));
+  };
+
+  it("puts a chart under the reply that answers with it", () => {
+    const items = [user("u1", 0), named("a0", 1, "Starting a sandbox for meetings.svg."), card("c1", 2), approval("c1", 3, "approved"), named("a1", 31, "Here it is: meetings.svg")];
+    expect(images(items, [sandbox({ outputs: [output("o1", "outputs/meetings.svg", 29)] })])).toEqual({ a1: ["outputs/meetings.svg@meeting-stats"] });
   });
 
-  it("keeps the unread divider when its item is shown as a sandbox card", () => {
-    expect(build([user("u1", 0), card("c1", 1), approval("c1", 2, "approved"), reply("a1", 30)], "approval:c1")).toEqual(["user:u1", "worker:c1(approved)", "unread", "assistant:a1+c1"]);
+  it("skips replies to questions asked while the sandbox worked", () => {
+    const items = [
+      user("u1", 0),
+      card("c1", 2),
+      approval("c1", 3, "approved"),
+      user("u2", 10),
+      named("a1", 12, "Your first meeting tomorrow is at 9:30."),
+      named("a2", 40, "Done: your first meeting tomorrow is the standup."),
+      named("a3", 41, "The chart is meetings.svg."),
+    ];
+    expect(images(items, [sandbox({ outputs: [output("o1", "meetings.svg", 30)] })])).toEqual({ a3: ["meetings.svg@meeting-stats"] });
+    // Without a reply naming it, the first reply written after it was published.
+    expect(images(items.slice(0, 6), [sandbox({ outputs: [output("o1", "meetings.svg", 30)] })])).toEqual({ a2: ["meetings.svg@meeting-stats"] });
+  });
+
+  it("shows each image once, and an undated image under the reply that names it", () => {
+    const followUp = card("c2", 50, { action: "message" });
+    const items = [user("u1", 0), card("c1", 2), named("a1", 31, "See meetings.svg"), user("u2", 49), followUp, named("a2", 70, "Next to meetings.svg, here is by-type.svg")];
+    const outputs = [output("o1", "meetings.svg", 29), output("o2", "by-type.svg")];
+    expect(images(items, [sandbox({ messages: 2, outputs })])).toEqual({ a1: ["meetings.svg@meeting-stats"], a2: ["by-type.svg@meeting-stats"] });
   });
 });

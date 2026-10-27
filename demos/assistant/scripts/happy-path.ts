@@ -257,7 +257,8 @@ async function main(): Promise<void> {
   const browser = await chromium.launch({ channel: "msedge", headless: !flag("headed") });
   try {
     step(`Opening ${url}`);
-    let { context, page } = await open(browser);
+    // The conversation may still be busy from an earlier run (for example, a sandbox waiting for approval).
+    let { context, page } = await open(browser, { busy: true });
     ok("assistant is online");
 
     if (flag("fresh")) {

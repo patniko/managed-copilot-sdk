@@ -3,7 +3,7 @@
  * the sandbox's live state, timing, and outputs (`SandboxesView`, from the platform). Pure, so it is unit tested on its
  * own (test/sandbox-cards.test.ts).
  */
-import type { SandboxEnvironmentView, SandboxesView, SandboxOutputView, SandboxWorkerView, TimelineItem, WorkerItem } from "../../shared/protocol";
+import type { AssistantItem, SandboxEnvironmentView, SandboxesView, SandboxOutputView, SandboxWorkerView, TimelineItem, WorkerItem } from "../../shared/protocol";
 
 export type CardPhase =
   /** The tool call is still running (for a start: just after it was approved). */
@@ -93,4 +93,42 @@ export function formatElapsed(ms: number): string {
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = String(total % 60).padStart(2, "0");
   return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${seconds}` : `${minutes}:${seconds}`;
+}
+
+/** An image a sandbox published, shown under a reply. */
+export interface ReplyImage {
+  readonly output: SandboxOutputView;
+  /** The sandbox's name. */
+  readonly worker: string;
+}
+
+function fileName(path: string): string {
+  return path.split("/").pop() || path;
+}
+
+/**
+ * Which reply each published image shows under: the first reply written after it was published that names the file
+ * (the assistant is told to mention charts by name), else the first reply written after it was published. Replies
+ * written while the sandbox worked (for example to a question asked meanwhile) come before its outputs, so they never
+ * take them. An image without a publication time goes under the first reply after its card that names it. Each image
+ * shows once.
+ */
+export function replyImages(items: readonly TimelineItem[], stateOf: (card: WorkerItem) => CardState): Map<string, ReplyImage[]> {
+  const images = new Map<string, ReplyImage[]>();
+  const shown = new Set<string>();
+  items.forEach((item, index) => {
+    if (item.kind !== "worker" || item.status !== "succeeded") return;
+    const replies = items.slice(index + 1).filter((entry): entry is AssistantItem => entry.kind === "assistant");
+    for (const output of stateOf(item).outputs) {
+      if (!output.image || shown.has(output.id)) continue;
+      const name = fileName(output.path);
+      const published = output.publishedAt ? time(output.publishedAt) - SLACK_MS / 5 : undefined;
+      const after = published === undefined ? [] : replies.filter((reply) => time(reply.at) >= published);
+      const reply = published === undefined ? replies.find((candidate) => candidate.text.includes(name)) : (after.find((candidate) => candidate.text.includes(name)) ?? after[0]);
+      if (!reply) continue;
+      shown.add(output.id);
+      images.set(reply.id, [...(images.get(reply.id) ?? []), { output, worker: item.worker }]);
+    }
+  });
+  return images;
 }

@@ -15,7 +15,7 @@ import {
 import { useEffect, useId, useState } from "react";
 import type { ApprovalItem, SandboxKind, SandboxOutputView, WorkerItem } from "../../../shared/protocol";
 import { timeOf } from "../format";
-import { formatElapsed, type CardState } from "../sandboxCards";
+import { formatElapsed, type CardState, type ReplyImage } from "../sandboxCards";
 import { cx, Spinner } from "./ui";
 
 export const SANDBOX_ICONS: Record<SandboxKind, Icon> = { python: BeakerIcon, web: GlobeIcon, general: ContainerIcon };
@@ -245,17 +245,8 @@ function SandboxImage({ output, worker }: { output: SandboxOutputView; worker: s
   );
 }
 
-/** The images a turn's sandboxes published, under the reply that answers with them. */
-export function SandboxImages({ cards, stateOf }: { cards: readonly WorkerItem[]; stateOf(card: WorkerItem): CardState }) {
-  const seen = new Set<string>();
-  const images: { output: SandboxOutputView; worker: string }[] = [];
-  for (const card of cards) {
-    for (const output of stateOf(card).outputs) {
-      if (!output.image || seen.has(output.id)) continue;
-      seen.add(output.id);
-      images.push({ output, worker: card.worker });
-    }
-  }
+/** The images sandboxes published, under the reply that answers with them (`replyImages` picks the reply). */
+export function SandboxImages({ images }: { images: readonly ReplyImage[] }) {
   if (images.length === 0) return null;
   return (
     <div className="mt-3 flex flex-col gap-3">

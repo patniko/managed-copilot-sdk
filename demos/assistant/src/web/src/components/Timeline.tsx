@@ -1,7 +1,7 @@
 import { ArrowDownIcon } from "@primer/octicons-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SandboxesView, TimelineItem } from "../../../shared/protocol";
-import { sandboxCardStates } from "../sandboxCards";
+import { replyImages, sandboxCardStates } from "../sandboxCards";
 import { buildBlocks } from "../timelineBlocks";
 import type { PendingMessage } from "../useAssistant";
 import { ApprovalCard } from "./ApprovalCard";
@@ -50,6 +50,7 @@ export function Timeline(props: TimelineProps) {
   const anchoredTo = useRef<string | undefined>(undefined);
   const blocks = useMemo(() => buildBlocks(items, timeZone, unreadAnchor), [items, timeZone, unreadAnchor]);
   const stateOf = useMemo(() => sandboxCardStates(items, props.sandboxes), [items, props.sandboxes]);
+  const images = useMemo(() => replyImages(items, stateOf), [items, stateOf]);
   const lastItem = items[items.length - 1];
   const streamingText = lastItem?.kind === "assistant" ? lastItem.text.length : 0;
   // While a sandbox of this turn works, its card shows the progress (the assistant is only waiting for it).
@@ -161,7 +162,7 @@ export function Timeline(props: TimelineProps) {
                     case "assistant":
                       return (
                         <AssistantMessage key={block.key} item={item} timeZone={timeZone} scheduleLabel={block.scheduleLabel}>
-                          {block.sandboxCards && <SandboxImages cards={block.sandboxCards} stateOf={stateOf} />}
+                          <SandboxImages images={images.get(item.id) ?? []} />
                         </AssistantMessage>
                       );
                     case "notice":
