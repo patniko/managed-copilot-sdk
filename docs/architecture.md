@@ -890,7 +890,9 @@ and quickstart snippet 14).
     under `.factory/incoming/<task>/` and are verified against the accepted artifacts. After a restart the factory
     resumes the same coordinator with its tools, stops only the coordinator's unfinished turn, and reconciles worker
     IDs; cancelling deletes worker sessions through the REST API. Classic mode keeps the app-orchestrated pipeline on
-    the four station environments.
+    the four station environments. On Azure (westus2, 2026-10-27), a factory run against the deployed gateway
+    completed a work order with three Container Apps sandboxes, one builder reused for two fix rounds, and a 47-test
+    release.
   - *Dispatch* (`demos/dispatch`). A conversation is a session of the `dispatch` orchestrator (four worker
     environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
     view is projected from the coordinator's own events (worker tool calls and the permission events above), so a
@@ -899,7 +901,9 @@ and quickstart snippet 14).
     is refused ("Your application is answering this request."), so approvals happen in Dispatch; Esc in the CLI ends
     its turn, and the request's `permission.completed` (`cancelled`) makes Dispatch let go of the held callback.
     Verified live: a message typed in Copilot CLI shown as "from Copilot CLI", a CLI-started turn's request held by
-    Dispatch and cancelled from the CLI, and a declined request whose reason the coordinator followed.
+    Dispatch and cancelled from the CLI, and a declined request whose reason the coordinator followed. On Azure
+    (2026-10-27), the deployed app ran two approved workers in their own sandboxes, an attached Copilot CLI's
+    follow-up reused one, and deleting the conversation deleted all three sessions.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),

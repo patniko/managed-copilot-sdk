@@ -236,9 +236,9 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
   example (14) passes locally and on Azure.
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
-- **The demos run end to end.** The factory's classic pipeline and the assistant run locally and on Azure. The
-  factory's agent-led mode (including a restart mid-build) and Dispatch (including a message from Copilot CLI attached
-  to the same conversation) run locally.
+- **The demos run end to end, locally and on Azure.** The factory runs in both modes: the classic pipeline, and the
+  agent-led mode, whose restart mid-build was tested locally. The assistant runs too. Dispatch runs as well, including
+  a follow-up typed in Copilot CLI attached to the same conversation.
 - **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
   process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
   list what each gate proved and what it did not.

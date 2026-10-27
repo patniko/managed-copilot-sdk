@@ -89,6 +89,11 @@ $env:MANAGED_COPILOT_URL = "https://<your gateway>"
 pnpm dev                                       # server and UI with live reload on :7470
 ```
 
+`aspire deploy` publishes Dispatch with the root AppHost, next to the other demos (see
+[docs/deployment.md](../../docs/deployment.md), including who can open the apps). It has been verified on Azure:
+approved Python and web-research workers ran in their own Container Apps sandboxes, a follow-up from an attached
+Copilot CLI reused one of them, and deleting the conversation deleted all three sessions.
+
 ## How it works
 
 - **The conversation is the coordinator session.** Dispatch creates it with `client.createSession` on a stock
