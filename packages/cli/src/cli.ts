@@ -6,7 +6,7 @@ import { artifacts } from "./commands/artifacts.js";
 import { login, logout, status } from "./commands/account.js";
 import { consoleCommand, OPERATOR_VIEWS, operatorCommand } from "./commands/operator.js";
 import { schedules, SCHEDULE_ACTIONS } from "./commands/schedules.js";
-import { attach, newSession, promote, sessions } from "./commands/sessions.js";
+import { attach, newSession, promote, sessions, workers } from "./commands/sessions.js";
 import { connectDeployment, openInBrowser, type Context, type Deployment, type Writer } from "./context.js";
 import { describeError, UsageError } from "./errors.js";
 import { createStyle, type Style } from "./output.js";
@@ -28,6 +28,7 @@ const COMMANDS: Readonly<Record<string, Command>> = {
   new: { usage: "new <environment> [--model <id>]", summary: "Start a new session and open it in Copilot CLI", options: ["model"], run: newSession },
   attach: { usage: "attach <session>", summary: "Open Copilot CLI on a live session", options: [], run: attach },
   promote: { usage: "promote <session>", summary: "Move a promotable session into its own sandbox", options: [], run: promote },
+  workers: { usage: "workers <session>", summary: "List an orchestrator session's workers and their reports", options: [], run: workers },
   artifacts: { usage: "artifacts <session> [--download <dir>] [--all]", summary: "List or download a session's published files", options: ["download", "all"], run: artifacts },
   schedules: {
     usage: `schedules [${SCHEDULE_ACTIONS.join("|")}] [schedule]`,

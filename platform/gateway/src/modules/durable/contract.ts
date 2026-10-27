@@ -220,10 +220,16 @@ export type PromptVisibility =
   /** Not answerable by this CLI: unknown, already resolved, a tool call, or from another incarnation or placement. */
   | { readonly status: "hidden"; readonly reason: string };
 
-/** Who is asking to list, claim, or answer actions over REST. */
+/** Who is asking to list, claim, or answer actions over REST, or a platform module answering on the owner's behalf. */
 export type ActionCaller =
   | { readonly type: "user"; readonly principal: Principal }
-  | { readonly type: "capability"; readonly capability: VerifiedCapability };
+  | { readonly type: "capability"; readonly capability: VerifiedCapability }
+  /**
+   * A gateway module acting for the session's owner within an approval the owner already gave (an orchestrator answering
+   * the permission prompts of a worker whose start the owner approved). It answers permission prompts only, with a
+   * poller's authority: it approves once or rejects, and never attests that a person decided.
+   */
+  | { readonly type: "platform"; readonly ownerId: number; readonly responder: string };
 
 export interface VerifiedCapability {
   readonly sessionId: string;

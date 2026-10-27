@@ -251,6 +251,10 @@ export const EVENT_TYPES: Readonly<Record<PlatformEventType, StatusMeta>> = {
   "schedule.run_started": meta("Schedule run started", "accent", CalendarIcon),
   "schedule.run_completed": meta("Schedule run completed", "success", CalendarIcon),
   "network.blocked": meta("Network blocked", "attention", ShieldXIcon),
+  "worker.started": meta("Worker started", "accent", PlayIcon),
+  "worker.idle": meta("Worker idle", "success", CheckCircleFillIcon),
+  "worker.failed": meta("Worker failed", "danger", XCircleFillIcon),
+  "worker.stopped": meta("Worker stopped", "neutral", StopIcon),
 };
 
 export const PLATFORM_EVENT_TYPES = Object.keys(EVENT_TYPES) as PlatformEventType[];

@@ -25,6 +25,7 @@ import type {
   SessionInfo,
   SessionListQuery,
   VaultInfo,
+  WorkerInfo,
 } from "@managed-copilot/protocol";
 import type { HttpClient } from "./http.js";
 
@@ -118,6 +119,17 @@ export interface ManagedArtifacts {
   read(path: string, options?: { version?: number }): Promise<string>;
   readBytes(path: string, options?: { version?: number }): Promise<Uint8Array>;
   download(path: string, localPath: string, options?: { version?: number }): Promise<void>;
+}
+
+/**
+ * An orchestrator session's workers. Each is an ordinary session in its own sandbox: pass `worker.id` to
+ * `managed.files`, `managed.artifacts`, `managed.resumeSession`, or `managed-copilot attach`.
+ */
+export interface ManagedWorkers {
+  /** Every worker the session started, oldest first, stopped ones included. */
+  list(): Promise<WorkerInfo[]>;
+  /** One worker, by its ID or its name. */
+  get(worker: string): Promise<WorkerInfo>;
 }
 
 /** Act for a specific GitHub user (for example a backend serving signed-in users); defaults to this connection's account. */

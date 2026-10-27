@@ -1,5 +1,5 @@
 import type { EnvironmentType, NetworkPolicy, Placement } from "@managed-copilot/protocol";
-import { ArrowUpRightIcon, CheckIcon, CloudOfflineIcon, GlobeIcon, SandboxIcon, ServerIcon, ShieldLockIcon, XIcon, type Icon } from "@primer/octicons-react";
+import { ArrowUpRightIcon, CheckIcon, CloudOfflineIcon, GlobeIcon, SandboxIcon, ServerIcon, ShieldLockIcon, WorkflowIcon, XIcon, type Icon } from "@primer/octicons-react";
 import { summarizeNetwork } from "../../lib/format.js";
 import type { Tone } from "../../lib/tone.js";
 import { Chip } from "../ui/Chip.js";
@@ -10,6 +10,7 @@ export const ENVIRONMENT_TYPES: Readonly<Record<EnvironmentType, { readonly labe
   shared: { label: "Shared", icon: ServerIcon, tone: "neutral", description: "Sessions run on the shared runtime." },
   isolated: { label: "Isolated", icon: SandboxIcon, tone: "accent", description: "Every session gets its own sandbox." },
   promotable: { label: "Promotable", icon: ArrowUpRightIcon, tone: "done", description: "Sessions start shared and can be promoted into a sandbox." },
+  orchestrator: { label: "Orchestrator", icon: WorkflowIcon, tone: "attention", description: "A coordinator on the shared runtime starts workers, each in its own sandbox." },
 };
 
 export function EnvironmentTypeChip({ type }: { readonly type: EnvironmentType | string | undefined }) {

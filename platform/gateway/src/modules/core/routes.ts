@@ -21,7 +21,7 @@ const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
 };
 
 /** Module capabilities (`app.capabilities`) that need a working sandbox backend. */
-const SANDBOX_BACKED_CAPABILITIES: ReadonlySet<string> = new Set(["promotion"]);
+const SANDBOX_BACKED_CAPABILITIES: ReadonlySet<string> = new Set(["promotion", "orchestrator"]);
 
 export function deploymentInfo(app: GatewayApp, environments: Environments, runtime: SharedRuntime | undefined): DeploymentInfo {
   const capabilities = new Set<string>(["events"]);

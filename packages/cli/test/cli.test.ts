@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ManagedCopilotError, OPERATOR_ROUTES, type ArtifactInfo, type OperatorOverview, type OperatorSessionSummary, type ScheduleInfo, type SessionInfo } from "@managed-copilot/protocol";
+import { ManagedCopilotError, OPERATOR_ROUTES, type ArtifactInfo, type OperatorOverview, type OperatorSessionSummary, type ScheduleInfo, type SessionInfo, type WorkerInfo } from "@managed-copilot/protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import { assertNoLinks, downloadTarget } from "../src/commands/artifacts.js";
 import { run, type CliIo, type Deployment, type ManagedApi } from "../src/cli.js";
@@ -102,6 +102,11 @@ class FakeManaged {
     this.calls.push(`promote ${sessionId}`);
     return { sessionId, placement: "sandbox" as const, sandboxId: "sbx_7f3a", generation: 2 };
   }
+  workerList: WorkerInfo[] = [];
+  workers(sessionId: string) {
+    this.calls.push(`workers ${sessionId}`);
+    return { list: async () => this.workerList, get: async () => this.workerList[0]! };
+  }
   async createSession(config: Record<string, unknown>) {
     this.calls.push(`create ${String(config.environment)}`);
     if (this.createFails) throw this.createFails;
@@ -172,6 +177,27 @@ describe("managed-copilot", () => {
     const { io, out } = harness();
     expect(await run(["sessions", "--json"], io)).toBe(0);
     expect(JSON.parse(out())).toHaveLength(2);
+  });
+
+  it("lists an orchestrator session's workers, and marks workers in the session list", async () => {
+    const managed = new FakeManaged();
+    const coordinator = session("c0ffee00-0000-4000-8000-000000000000", { environment: "team", type: "orchestrator" });
+    const workerSession = session("b0b0b0b0-0000-4000-8000-000000000000", { environment: "coder", type: "isolated", placement: "sandbox", parentSessionId: coordinator.id });
+    managed.sessionsList = [coordinator, workerSession];
+    managed.workerList = [
+      { id: workerSession.id, name: "counter", coordinatorId: coordinator.id, environment: "coder", state: "idle", task: "Count", result: "42 *.cs files\nacross 7 folders", messages: 1, createdAt: "2026-10-24T05:50:00Z", updatedAt: "2026-10-24T05:58:00Z" },
+      { id: "d0d0d0d0-0000-4000-8000-000000000000", name: "broken", coordinatorId: coordinator.id, environment: "coder", state: "failed", task: "Fail", error: "Couldn't start: setup failed", messages: 0, createdAt: "2026-10-24T05:50:00Z", updatedAt: "2026-10-24T05:59:00Z" },
+    ];
+    const { io, out, err } = harness(managed);
+    expect(await run(["sessions"], io)).toBe(0);
+    expect(out()).toMatch(/b0b0b0b0\s+coder \(worker of c0ffee00\)/);
+    expect(await run(["workers", "c0ffee00"], io)).toBe(0);
+    expect(out()).toMatch(/NAME\s+ID\s+ENVIRONMENT\s+STATE\s+LATEST\s+UPDATED/);
+    expect(out()).toMatch(/counter\s+b0b0b0b0\s+coder\s+idle\s+42 \*\.cs files across 7 folders\s+2 minutes ago/);
+    expect(out()).toMatch(/broken\s+d0d0d0d0\s+coder\s+failed\s+Couldn't start: setup failed/);
+    expect(out()).toContain("2 workers");
+    expect(await run(["workers", "b0b0b0b0"], io)).toBe(2);
+    expect(err()).toContain("only orchestrator sessions have workers");
   });
 
   it("reports usage errors with exit code 2 and a hint", async () => {

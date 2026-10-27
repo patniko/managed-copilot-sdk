@@ -569,6 +569,7 @@ export class SessionManager implements SessionsService {
       pendingActions,
       ...(record.lastTurn ? { lastTurn: record.lastTurn } : {}),
       ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),
+      ...(record.parentSessionId ? { parentSessionId: record.parentSessionId } : {}),
     };
   }
 
@@ -590,6 +591,13 @@ export class SessionManager implements SessionsService {
       }
     }
     const environment = this.#options.environments.resolve(request.environment);
+    // A worker's coordinator: the same owner's live session, pinned to the incarnation that starts it.
+    let parent: { readonly id: string; readonly incarnation: string } | undefined;
+    if (request.parentSessionId !== undefined) {
+      const record = this.getOwned(principal.accountId, request.parentSessionId);
+      if (record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${record.id} was not found`, { sessionId: record.id });
+      parent = { id: record.id, incarnation: record.incarnation };
+    }
     const raw: Record<string, unknown> = {
       sessionId,
       ...(request.model ? { model: request.model } : {}),
@@ -607,7 +615,7 @@ export class SessionManager implements SessionsService {
       ...(request.clientName ? { clientName: request.clientName } : {}),
     };
     try {
-      await this.#create({ principal, environment, raw, peer: undefined, scheduleId: request.scheduleId, webhook: request.webhook, clientName: request.clientName });
+      await this.#create({ principal, environment, raw, peer: undefined, scheduleId: request.scheduleId, webhook: request.webhook, clientName: request.clientName, parent });
     } catch (error) {
       // A concurrent create of the same deterministic ID by the same owner won the race.
       const winner = isManagedCopilotError(error, "conflict") ? this.#ledger.get(sessionId) : undefined;
@@ -1705,6 +1713,7 @@ export class SessionManager implements SessionsService {
     scheduleId?: string | undefined;
     webhook?: string | undefined;
     clientName?: string | undefined;
+    parent?: { readonly id: string; readonly incarnation: string } | undefined;
   }): Promise<unknown> {
     const sessionId = input.raw["sessionId"] as string;
     // Reserve the ID synchronously so concurrent creates of the same ID cannot both proceed.
@@ -1719,7 +1728,16 @@ export class SessionManager implements SessionsService {
   }
 
   async #createReserved(
-    input: { principal: Principal; environment: ResolvedEnvironment; raw: Record<string, unknown>; peer: ClientPeer | undefined; scheduleId?: string | undefined; webhook?: string | undefined; clientName?: string | undefined },
+    input: {
+      principal: Principal;
+      environment: ResolvedEnvironment;
+      raw: Record<string, unknown>;
+      peer: ClientPeer | undefined;
+      scheduleId?: string | undefined;
+      webhook?: string | undefined;
+      clientName?: string | undefined;
+      parent?: { readonly id: string; readonly incarnation: string } | undefined;
+    },
     sessionId: string,
   ): Promise<unknown> {
     const { principal, environment } = input;
@@ -1779,6 +1797,7 @@ export class SessionManager implements SessionsService {
         ...(input.clientName ? { clientName: input.clientName } : {}),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
         ...(input.webhook ? { webhook: input.webhook } : {}),
+        ...(input.parent ? { parentSessionId: input.parent.id, parentIncarnation: input.parent.incarnation } : {}),
       });
       const created = this.#register(record, environment, tokenRegistrationId);
       live = created;
@@ -3030,17 +3049,23 @@ export class SessionManager implements SessionsService {
 
   /**
    * The session owner's credential for its runtime: the token of a connected client of the owner (attached to the
-   * session, or present on it like an attached Copilot CLI), re-verified; otherwise only the owner's current
+   * session, or present on it like an attached Copilot CLI), re-verified; then, for a session another one started (an
+   * orchestrator's worker), its parent's connected clients the same way; otherwise only the owner's current
    * background sign-in, re-verified too, never a token remembered from an earlier connection. Only attached clients'
    * tokens count as the account's live credential (presences may be background work, like a schedule's send).
    */
   async #ownerToken(live: LiveSession): Promise<{ token: string; expiresAt?: number }> {
     const auth = this.#options.auth;
+    const parent = this.#credentialParent(live);
     // Each candidate must still be connected (or present) once its verification finishes.
-    const present: { readonly principal: Principal; readonly current: () => boolean; readonly background: boolean }[] = [
-      ...this.#preferred(live).map((attachment) => ({ principal: attachment.peer.principal, current: () => live.attachments.get(attachment.peer.id) === attachment && !attachment.peer.closed, background: false })),
-      ...[...live.presences.entries()].map(([key, principal]) => ({ principal, current: () => live.presences.get(key) === principal, background: true })),
-    ];
+    const present: { readonly principal: Principal; readonly current: () => boolean; readonly background: boolean }[] = [];
+    for (const source of parent ? [live, parent] : [live]) {
+      const usable = () => !source.deleting && (source === live || this.#credentialParent(live) === source);
+      present.push(
+        ...this.#preferred(source).map((attachment) => ({ principal: attachment.peer.principal, current: () => usable() && source.attachments.get(attachment.peer.id) === attachment && !attachment.peer.closed, background: false })),
+        ...[...source.presences.entries()].map(([key, principal]) => ({ principal, current: () => usable() && source.presences.get(key) === principal, background: true })),
+      );
+    }
     for (const { principal, current, background } of present) {
       if (principal.accountId !== live.ownerId) continue;
       try {
@@ -3068,6 +3093,19 @@ export class SessionManager implements SessionsService {
     throw new ManagedCopilotError("authentication_required", "The session owner has no connected client and no background sign-in; reconnect, or run `managed-copilot login` for work while you are away");
   }
 
+  /**
+   * The live parent whose connected clients may serve this session's credential: the same owner's session that
+   * started it, still the incarnation that did, and not being deleted. One level only.
+   */
+  #credentialParent(live: LiveSession): LiveSession | undefined {
+    const record = this.#ledger.get(live.id);
+    if (!record?.parentSessionId) return undefined;
+    const parent = this.#live.get(record.parentSessionId);
+    if (!parent || parent === live || parent.deleting || parent.ownerId !== live.ownerId) return undefined;
+    if (this.get(record.parentSessionId)?.incarnation !== record.parentIncarnation) return undefined;
+    return parent;
+  }
+
   presence(sessionId: string, principal: Principal): () => void {
     this.getOwned(principal.accountId, sessionId);
     const live = this.#liveFor(sessionId);
@@ -3076,6 +3114,15 @@ export class SessionManager implements SessionsService {
     return () => {
       live.presences.delete(key);
     };
+  }
+
+  async ownerPrincipal(sessionId: string): Promise<Principal> {
+    const live = this.#liveFor(sessionId);
+    const credential = await this.#ownerToken(live);
+    // Background: work the platform does for the owner never becomes the account's live credential.
+    const principal = await this.#options.auth.authenticate(credential.token, { background: true });
+    if (principal.accountId !== live.ownerId) throw new ManagedCopilotError("authentication_required", "The session's credential belongs to another account");
+    return principal;
   }
 
   async attachCli(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment> {

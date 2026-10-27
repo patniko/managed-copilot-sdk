@@ -1,5 +1,5 @@
 import type { PermissionHandler } from "@github/copilot-sdk";
-import type { EnvironmentInfo, SessionInfo, SessionState } from "@managed-copilot/protocol";
+import type { EnvironmentInfo, SessionInfo, SessionState, WorkerState } from "@managed-copilot/protocol";
 import { resolveSession, type Context, type Deployment } from "../context.js";
 import { CommandError, describeError, UsageError } from "../errors.js";
 import { relativeTime, shortId, table, truncate, type Style } from "../output.js";
@@ -48,7 +48,7 @@ export async function sessions(ctx: Context): Promise<void> {
   }
   const rows = list.map((session) => [
     style.bold(shortId(session.id)),
-    session.environment,
+    session.parentSessionId ? `${session.environment} ${style.dim(`(worker of ${shortId(session.parentSessionId)})`)}` : session.environment,
     session.placement === "sandbox" && session.sandbox ? `sandbox ${style.dim(session.sandbox.state)}` : session.placement,
     describeSession(session, style),
     truncate(session.title ?? style.dim("untitled"), 40, style.ellipsis),
@@ -57,6 +57,49 @@ export async function sessions(ctx: Context): Promise<void> {
   ctx.out(table(["ID", "ENVIRONMENT", "PLACEMENT", "STATE", "TITLE", "UPDATED"], rows, style));
   ctx.out();
   ctx.out(style.dim(`  ${list.length} session${list.length === 1 ? "" : "s"} · attach Copilot CLI with: npx managed-copilot attach <ID>`));
+}
+
+function paintWorker(state: WorkerState, style: Style): string {
+  switch (state) {
+    case "starting":
+      return style.yellow(state);
+    case "working":
+      return style.cyan(state);
+    case "idle":
+      return style.green(state);
+    case "failed":
+      return style.red(state);
+    default:
+      return style.dim(state);
+  }
+}
+
+/** `workers <session>`: an orchestrator session's workers, their state, and their latest report. */
+export async function workers(ctx: Context): Promise<void> {
+  const { style } = ctx;
+  const managed = await (await ctx.deployment()).managed();
+  const session = await resolveSession(managed, ctx.args[0]);
+  if (session.type !== "orchestrator") {
+    throw new UsageError(`Session ${shortId(session.id)} is ${session.type}; only orchestrator sessions have workers.`, "List sessions with: npx managed-copilot sessions");
+  }
+  const list = await managed.workers(session.id);
+  const found = await list.list();
+  if (ctx.json) return ctx.out(JSON.stringify(found, null, 2));
+  if (found.length === 0) {
+    ctx.out(`Session ${shortId(session.id)} has not started any workers yet.`);
+    return;
+  }
+  const rows = found.map((worker) => [
+    style.bold(worker.name),
+    shortId(worker.id),
+    worker.environment,
+    paintWorker(worker.state, style),
+    truncate((worker.state === "idle" ? worker.result : worker.error)?.replace(/\s+/g, " ").trim() || style.dim("-"), 60, style.ellipsis),
+    style.dim(relativeTime(worker.updatedAt, ctx.now())),
+  ]);
+  ctx.out(table(["NAME", "ID", "ENVIRONMENT", "STATE", "LATEST", "UPDATED"], rows, style));
+  ctx.out();
+  ctx.out(style.dim(`  ${found.length} worker${found.length === 1 ? "" : "s"} · each is a session with its own sandbox: npx managed-copilot attach <ID>`));
 }
 
 /** Fails before anything is created or resolved when there is no Copilot CLI to open. */
@@ -145,7 +188,14 @@ export async function newSession(ctx: Context): Promise<number> {
   requireCopilotCli(deployment, `npx managed-copilot new ${environment.name}`);
 
   const shownModel = model ?? allowed[0];
-  const placement = environment.type === "isolated" ? "its own sandbox" : environment.type === "promotable" ? "shared, promotable" : "shared";
+  const placement =
+    environment.type === "isolated"
+      ? "its own sandbox"
+      : environment.type === "promotable"
+        ? "shared, promotable"
+        : environment.type === "orchestrator"
+          ? "shared, starts workers in sandboxes"
+          : "shared";
   ctx.err(`${style.cyan(style.dot)} Starting a new ${style.bold(environment.name)} session ${style.dim(`· ${placement}${shownModel ? ` · ${shownModel}` : ""}`)}`);
   if (environment.type === "isolated") ctx.err(style.dim(`  Setting up its sandbox${style.ellipsis}`));
   let sessionId: string;

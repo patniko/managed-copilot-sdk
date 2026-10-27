@@ -18,7 +18,7 @@ export type StationRole = "planner" | "builder" | "reviewer" | "release";
 export interface EnvironmentView {
   readonly role: StationRole;
   readonly name: string;
-  readonly type: "shared" | "isolated" | "promotable";
+  readonly type: "shared" | "isolated" | "promotable" | "orchestrator";
   readonly description?: string;
   readonly network: NetworkView;
   readonly size?: "small" | "medium" | "large";

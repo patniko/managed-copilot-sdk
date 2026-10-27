@@ -14,6 +14,7 @@ export type {
   ManagedSessionConfig,
   ManagedSessions,
   ManagedVaults,
+  ManagedWorkers,
   OpenCliOptions,
   PlatformEventHandler,
   SessionRef,
@@ -40,4 +41,7 @@ export {
   type SessionInfo,
   type VaultInfo,
   type WebhookEnvelope,
+  type WorkerEventData,
+  type WorkerInfo,
+  type WorkerState,
 } from "@managed-copilot/protocol";

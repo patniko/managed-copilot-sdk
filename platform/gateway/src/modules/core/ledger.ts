@@ -54,6 +54,10 @@ const MIGRATIONS = [
   // A session ID can be reused after deletion; the incarnation tells two sessions with the same ID apart.
   `ALTER TABLE core_sessions ADD COLUMN incarnation TEXT;
    UPDATE core_sessions SET incarnation = 'inc_' || lower(hex(randomblob(16))) WHERE incarnation IS NULL;`,
+  // The session that started this one (an orchestrator's coordinator, for a worker), pinned to its incarnation.
+  `ALTER TABLE core_sessions ADD COLUMN parent_session_id TEXT;
+   ALTER TABLE core_sessions ADD COLUMN parent_incarnation TEXT;
+   CREATE INDEX core_sessions_parent ON core_sessions (parent_session_id);`,
 ];
 
 interface SessionRow {
@@ -75,6 +79,8 @@ interface SessionRow {
   admitted: string;
   last_turn: string | null;
   incarnation: string | null;
+  parent_session_id: string | null;
+  parent_incarnation: string | null;
   created_at: string;
   updated_at: string;
   login: string | null;
@@ -131,6 +137,8 @@ export interface NewSession {
   readonly clientName?: string;
   readonly scheduleId?: string;
   readonly webhook?: string;
+  readonly parentSessionId?: string;
+  readonly parentIncarnation?: string;
 }
 
 const SELECT = `SELECT s.*, a.login, a.name, a.avatar_url FROM core_sessions s LEFT JOIN core_accounts a ON a.id = s.owner_id`;
@@ -169,8 +177,8 @@ export class SessionLedger {
     this.upsertAccount(session.owner);
     this.#db
       .prepare(
-        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, parent_session_id, parent_incarnation, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -187,6 +195,8 @@ export class SessionLedger {
         JSON.stringify(session.environmentRequest),
         JSON.stringify(session.admitted),
         `inc_${randomBytes(16).toString("hex")}`,
+        session.parentSessionId ?? null,
+        session.parentIncarnation ?? null,
         now,
         now,
       );
@@ -409,6 +419,8 @@ function toRecord(row: SessionRow): SessionRecord {
     environmentRequest: JSON.parse(row.environment_request) as EnvironmentRequest,
     ...(row.last_turn ? { lastTurn: JSON.parse(row.last_turn) as NonNullable<SessionRecord["lastTurn"]> } : {}),
     incarnation: row.incarnation ?? `inc_legacy_${row.id}_${row.created_at}`,
+    ...(row.parent_session_id ? { parentSessionId: row.parent_session_id } : {}),
+    ...(row.parent_incarnation ? { parentIncarnation: row.parent_incarnation } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

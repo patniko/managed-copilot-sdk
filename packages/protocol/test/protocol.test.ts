@@ -87,6 +87,35 @@ describe("AppHost configuration", () => {
     expect(() => parseConfig({ vaults: { payments: [{ ...stripe, hosts: ["*.stripe.com"] }] }, environments: {} })).toThrow(/exact host name/);
     expect(parseConfig({ vaults: { payments: [stripe] }, environments: { coder: { type: "isolated", vaults: ["payments"] } } }).vaults?.payments).toHaveLength(1);
   });
+
+  it("accepts orchestrator environments whose workers are isolated environments", () => {
+    const config = parseConfig({
+      environments: {
+        coder: { type: "isolated", size: "medium" },
+        reviewer: { type: "isolated", network: false },
+        team: { type: "orchestrator", workers: ["coder", "reviewer"], maxWorkers: 3, models: ["claude-sonnet-5"] },
+      },
+    });
+    expect(config.environments["team"]).toMatchObject({ type: "orchestrator", workers: ["coder", "reviewer"], maxWorkers: 3 });
+  });
+
+  it("rejects orchestrator environments without isolated workers, with sandbox settings, or inline", () => {
+    const coder = { type: "isolated" } as const;
+    expect(() => parseConfig({ environments: { team: { type: "orchestrator" } } })).toThrow(/must name the isolated environments their workers run in/);
+    expect(() => parseConfig({ environments: { team: { type: "orchestrator", workers: [] } } })).toThrow();
+    expect(() => parseConfig({ environments: { team: { type: "orchestrator", workers: ["missing"] } } })).toThrow(/Worker environment \W*missing\W* must be an isolated environment/);
+    expect(() => parseConfig({ environments: { chat: { type: "shared" }, team: { type: "orchestrator", workers: ["chat"] } } })).toThrow(/must be an isolated environment/);
+    expect(() => parseConfig({ environments: { coder, team: { type: "orchestrator", workers: ["coder", "coder"] } } })).toThrow(/listed twice/);
+    expect(() => parseConfig({ environments: { coder, team: { type: "orchestrator", workers: ["coder"], size: "small" } } })).toThrow(/orchestrator environments have no sandbox/);
+    expect(() => parseConfig({ environments: { coder, team: { type: "orchestrator", workers: ["coder"], maxWorkers: 17 } } })).toThrow();
+    expect(() => parseConfig({ environments: { coder: { type: "isolated", workers: ["coder"] } } })).toThrow(/only valid on orchestrator environments/);
+    expect(() => parseConfig({ environments: { coder: { type: "isolated", maxWorkers: 2 } } })).toThrow(/only valid on orchestrator environments/);
+    expect(() => parseConfig({ environments: { coder }, inline: { types: ["orchestrator"] } })).toThrow(/cannot be inline/);
+    const stripe = { env: "STRIPE_API_KEY", value: { secretEnv: "STRIPE" }, hosts: ["api.stripe.com"] };
+    expect(() => parseConfig({ vaults: { payments: [stripe] }, environments: { coder, team: { type: "orchestrator", workers: ["coder"], vaults: ["payments"] } } })).toThrow(
+      /orchestrator environments cannot use/,
+    );
+  });
 });
 
 describe("environment requests", () => {
@@ -94,6 +123,7 @@ describe("environment requests", () => {
     expect(EnvironmentRequestSchema.safeParse({}).success).toBe(false);
     expect(EnvironmentRequestSchema.safeParse({ name: "chat" }).success).toBe(true);
     expect(EnvironmentRequestSchema.safeParse({ type: "shared", files: { "a.txt": "aGk=" } }).success).toBe(false);
+    expect(EnvironmentRequestSchema.safeParse({ type: "orchestrator", size: "small" }).success).toBe(false);
     expect(EnvironmentRequestSchema.safeParse({ type: "isolated", size: "small", files: { "a.txt": "aGk=" } }).success).toBe(true);
   });
 });

@@ -6,7 +6,7 @@ import { UsageError } from "./errors.js";
 import { shortId, type Style } from "./output.js";
 
 /** The SDK surface the CLI uses. */
-export type ManagedApi = Pick<ManagedCopilot, "url" | "info" | "account" | "sessions" | "schedules" | "artifacts" | "promote" | "createSession" | "close">;
+export type ManagedApi = Pick<ManagedCopilot, "url" | "info" | "account" | "sessions" | "schedules" | "artifacts" | "promote" | "workers" | "createSession" | "close">;
 
 /** A connected deployment. Commands connect lazily so `--help` never needs the network. */
 export interface Deployment {

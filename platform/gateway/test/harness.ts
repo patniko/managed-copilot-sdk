@@ -7,6 +7,7 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import { connect as connectTcp, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, type EnvironmentRequest } from "@managed-copilot/protocol";
 import { WebSocket } from "ws";
 import { loadConfig } from "../src/config.js";
@@ -459,10 +460,51 @@ export class FakeSandboxes {
     const failure = this.failNextDelete;
     this.failNextDelete = undefined;
     if (failure) throw failure;
+    this.files.delete(sessionId);
   }
 
   get(): undefined {
     return undefined;
+  }
+
+  /** Each sandbox's workspace files, by workspace-relative path (test hook and file API). */
+  readonly files = new Map<string, Map<string, Buffer>>();
+
+  workspace(sessionId: string): Map<string, Buffer> {
+    let files = this.files.get(sessionId);
+    if (!files) {
+      files = new Map();
+      this.files.set(sessionId, files);
+    }
+    return files;
+  }
+
+  async listFiles(sessionId: string, path: string, options: { readonly recursive?: boolean } = {}): Promise<{ path: string; type: "file" | "directory"; size: number; modifiedAt: string }[]> {
+    const root = path === "." || path === "" ? "" : `${path.replace(/\/+$/, "")}/`;
+    const files = [...this.workspace(sessionId).entries()].filter(([name]) => name.startsWith(root));
+    if (root && files.length === 0) throw Object.assign(new Error(`${path} is not a directory`), { code: "not_found" });
+    const entries = new Map<string, { path: string; type: "file" | "directory"; size: number; modifiedAt: string }>();
+    for (const [name, content] of files) {
+      const rest = name.slice(root.length);
+      const slash = rest.indexOf("/");
+      if (slash >= 0 && !options.recursive) entries.set(root + rest.slice(0, slash), { path: root + rest.slice(0, slash), type: "directory", size: 0, modifiedAt: new Date(0).toISOString() });
+      else entries.set(name, { path: name, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() });
+    }
+    return [...entries.values()];
+  }
+
+  async readFile(sessionId: string, path: string): Promise<{ entry: { path: string; type: "file"; size: number; modifiedAt: string }; body: Readable }> {
+    const content = this.workspace(sessionId).get(path);
+    if (!content) throw Object.assign(new Error(`${path} was not found`), { code: "not_found" });
+    return { entry: { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() }, body: Readable.from([content]) };
+  }
+
+  async writeFile(sessionId: string, path: string, body: Readable): Promise<{ path: string; type: "file"; size: number; modifiedAt: string }> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    const content = Buffer.concat(chunks);
+    this.workspace(sessionId).set(path, content);
+    return { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() };
   }
 }
 

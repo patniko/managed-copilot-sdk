@@ -11,3 +11,4 @@ export * from "./paths.js";
 export * from "./promotion.js";
 export * from "./sandbox.js";
 export * from "./tools.js";
+export * from "./workers.js";

@@ -198,6 +198,13 @@ function OverviewTab({ session }: { readonly session: OperatorSessionDetail }) {
               </Link>
             ) : undefined}
           </Field>
+          <Field label="Coordinator" hint="The orchestrator session that started this worker">
+            {session.parentSessionId ? (
+              <Link href={hrefs.session(session.parentSessionId)} className="Link font-mono text-xs">
+                {shortId(session.parentSessionId)}
+              </Link>
+            ) : undefined}
+          </Field>
           <Field label="Webhook" mono>
             {session.webhook}
           </Field>
@@ -460,7 +467,9 @@ function SandboxTab({ session }: { readonly session: OperatorSessionDetail }) {
         {session.placement === "shared"
           ? session.type === "promotable"
             ? "Shared sessions have no sandbox. This one gets a sandbox if it's promoted."
-            : "Shared sessions have no sandbox."
+            : session.type === "orchestrator"
+              ? "Orchestrator sessions have no sandbox. Each of their workers is a session with its own sandbox."
+              : "Shared sessions have no sandbox."
           : "The sandbox appears here once it's provisioned."}
       </EmptyState>
     </div>

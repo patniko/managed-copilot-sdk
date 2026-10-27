@@ -2,6 +2,7 @@
 // infrastructure, and a session's detail across modules. Accounts are attached here (modules keep owner IDs).
 import {
   ManagedCopilotError,
+  sandboxedType,
   type AccountInfo,
   type ActionState,
   type AttentionItem,
@@ -94,7 +95,7 @@ export class OperatorViews {
   get #needs(): { shared: boolean; sandboxes: boolean } {
     const deployment = this.#app.config.deployment;
     const types = [...Object.values(deployment.environments).map((environment) => environment.type), ...(deployment.inline?.types ?? [])];
-    return { shared: types.some((type) => type !== "isolated"), sandboxes: types.some((type) => type !== "shared") };
+    return { shared: types.some((type) => type !== "isolated"), sandboxes: types.some((type) => sandboxedType(type)) };
   }
 
   // --- Infrastructure and health --------------------------------------------------------------------------------

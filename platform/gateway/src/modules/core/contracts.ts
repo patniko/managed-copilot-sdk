@@ -72,6 +72,12 @@ export interface SessionRecord {
   readonly clientName?: string;
   readonly scheduleId?: string;
   readonly webhook?: string;
+  /**
+   * The owner's session that started this one (an orchestrator's coordinator, for a worker) and the incarnation it had
+   * then. While this session has no connected client of its own, its parent's connected clients serve its credential.
+   */
+  readonly parentSessionId?: string;
+  readonly parentIncarnation?: string;
   readonly network: NetworkPolicy;
   readonly environmentRequest: EnvironmentRequest;
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
@@ -210,6 +216,12 @@ export interface CreateSessionRequest {
   readonly webhook?: string;
   readonly scheduleId?: string;
   readonly clientName?: string;
+  /**
+   * The owner's session that starts this one (an orchestrator's coordinator starting a worker); same owner only. While
+   * the new session has no connected client of its own, the parent's connected clients' credentials serve it before
+   * the owner's background sign-in.
+   */
+  readonly parentSessionId?: string;
 }
 
 export interface CliAttachOptions {
@@ -296,6 +308,13 @@ export interface SessionsService {
    * Returns the release function.
    */
   presence?(sessionId: string, principal: Principal): () => void;
+  /**
+   * The verified owner principal whose credential serves the session right now (its connected client, a presence, its
+   * parent's connected client, or the owner's background sign-in), for work the platform does on the owner's behalf in
+   * that session's context (an orchestrator starting a worker). Use it at once; never keep it. `authentication_required`
+   * when none is available.
+   */
+  ownerPrincipal?(sessionId: string): Promise<Principal>;
   /**
    * Attaches a Copilot CLI (attach module) to one session incarnation as a `cli` responder: no tools or callbacks of
    * its own beyond permission and elicitation prompts. Pins the incarnation, placement, generation, and runtime it
