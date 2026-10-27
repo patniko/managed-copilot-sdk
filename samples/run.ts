@@ -24,5 +24,5 @@ try {
   console.error(`\n${sample} stopped: ${error instanceof Error ? error.message : String(error)}${code}`);
   process.exit(1);
 }
-// Leave nothing running: a sample is done once its code returns.
-process.exit(0);
+// Leave nothing running: a sample is done once its code returns. A sample that couldn't clean up sets exitCode.
+process.exit(process.exitCode ?? 0);

@@ -37,6 +37,11 @@ const cancelOrder = defineTool("cancel_order", {
 
 const managed = await ManagedCopilot.connect();
 const client = await managed.client("chat");
+/** Cleanup that can't finish is reported, never ignored. */
+const couldNotDelete = (what: string) => (error: Error) => {
+  process.exitCode = 1;
+  console.error(`Couldn't delete ${what}: ${error.message}`);
+};
 const session = await client.createSession({
   model: "claude-sonnet-5",
   systemMessage: { content: "You are Contoso's order assistant. Be brief." },
@@ -60,6 +65,6 @@ try {
   await session.sendAndWait({ prompt: "Please cancel order 5678." });
   console.log();
 } finally {
-  await client.deleteSession(session.sessionId);
+  await client.deleteSession(session.sessionId).catch(couldNotDelete(`session ${session.sessionId}`));
   await managed.close();
 }

@@ -7,6 +7,11 @@ import { approveAll } from "@github/copilot-sdk";
 import { ManagedCopilot, type ScheduleRun } from "@managed-copilot/sdk";
 
 const managed = await ManagedCopilot.connect();
+/** Cleanup that can't finish is reported, never ignored. */
+const couldNotDelete = (what: string) => (error: Error) => {
+  process.exitCode = 1;
+  console.error(`Couldn't delete ${what}: ${error.message}`);
+};
 
 // Every weekday at 9:00 Seattle time, start a new "chat" session with this prompt.
 const schedule = await managed.schedules.create({
@@ -19,17 +24,17 @@ const schedule = await managed.schedules.create({
 console.log(`Created ${schedule.name}: "${schedule.cron}" in ${schedule.timeZone}`);
 console.log(`  state ${schedule.state}, next run ${schedule.nextRunAt}`);
 
-let runSession: string | undefined;
+let run: ScheduleRun | undefined;
 try {
   // Don't wait for a weekday morning: run it now. Retrying with the same invocationId never starts a second run.
-  const run = await managed.schedules.runNow(schedule.id, { invocationId: randomUUID() });
+  run = await managed.schedules.runNow(schedule.id, { invocationId: randomUUID() });
   console.log(`Run ${run.id} started...`);
 
   let finished: ScheduleRun | undefined;
   for (const deadline = Date.now() + 5 * 60_000; !finished; await sleep(2_000)) {
     if (Date.now() > deadline) throw new Error("The run did not finish within 5 minutes.");
-    const latest = (await managed.schedules.runs(schedule.id)).find((candidate) => candidate.id === run.id);
-    runSession = latest?.sessionId ?? runSession;
+    const latest = (await managed.schedules.runs(schedule.id)).find((candidate) => candidate.id === run?.id);
+    if (latest) run = latest;
     if (latest && !["queued", "running", "waiting"].includes(latest.status)) finished = latest;
   }
   if (finished.status !== "completed" || !finished.sessionId) {
@@ -42,7 +47,10 @@ try {
   const reply = (await session.getEvents()).filter((event) => event.type === "assistant.message").at(-1);
   console.log(`\nCopilot (scheduled run):\n${reply?.data.content}`);
 } finally {
-  if (runSession) await managed.sessions.delete(runSession).catch(() => undefined);
-  await managed.schedules.delete(schedule.id).catch(() => undefined);
+  // The run started its own session. If no poll saw it yet, look it up once, then delete it and the schedule.
+  let sessionId = run?.sessionId;
+  if (!sessionId && run) sessionId = (await managed.schedules.runs(schedule.id).catch(() => [])).find((r) => r.id === run?.id)?.sessionId;
+  if (sessionId) await managed.sessions.delete(sessionId).catch(couldNotDelete(`session ${sessionId}`));
+  await managed.schedules.delete(schedule.id).catch(couldNotDelete(`schedule ${schedule.id}`));
   await managed.close();
 }

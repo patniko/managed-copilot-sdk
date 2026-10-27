@@ -22,14 +22,16 @@ const describe = (action: PendingAction) =>
 // 1. Your app starts the work, then goes away before the agent needs its tool.
 const app = await ManagedCopilot.connect();
 const session = await app.createSession({ environment: "chat", model: "claude-sonnet-5", ...handlers });
-await session.send({ prompt: "Look up order 1234 and tell me when it arrives." });
-await app.close();
-console.log(`1. Sent a prompt to session ${session.sessionId}, then disconnected.`);
+let later: ManagedCopilot | undefined;
 
-// 2. The agent keeps going. When it needs lookup_order, the request waits on the platform for an answer.
-//    Later, any process signed in as you can answer it. Here: polling, until the turn is over.
-const later = await ManagedCopilot.connect();
 try {
+  await session.send({ prompt: "Look up order 1234 and tell me when it arrives." });
+  await app.close();
+  console.log(`1. Sent a prompt to session ${session.sessionId}, then disconnected.`);
+
+  // 2. The agent keeps going. When it needs lookup_order, the request waits on the platform for an answer.
+  //    Later, any process signed in as you can answer it. Here: polling, until the turn is over.
+  later = await ManagedCopilot.connect();
   console.log("2. Reconnected. Answering whatever waits for this app:");
   for (const deadline = Date.now() + 4 * 60_000; ; await sleep(1_000)) {
     if (Date.now() > deadline) throw new Error("The turn did not finish within 4 minutes.");
@@ -48,6 +50,11 @@ try {
   const reply = (await resumed.getEvents()).filter((event) => event.type === "assistant.message").at(-1);
   console.log(`3. Copilot: ${reply?.data.content}`);
 } finally {
-  await later.sessions.delete(session.sessionId).catch(() => undefined);
-  await later.close();
+  // Either connection can delete the session: closing only detaches a connection's clients.
+  await (later ?? app).sessions.delete(session.sessionId).catch((error: Error) => {
+    process.exitCode = 1;
+    console.error(`Couldn't delete session ${session.sessionId}: ${error.message}`);
+  });
+  await later?.close();
+  await app.close();
 }

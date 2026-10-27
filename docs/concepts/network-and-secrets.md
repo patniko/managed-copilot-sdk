@@ -62,10 +62,10 @@ sequenceDiagram
   participant S as Sandbox (curl)
   participant P as Egress proxy
   participant U as postman-echo.com
-  Note over S: $ECHO_KEY is mcv_placeholder_0f46…
-  S->>P: X-Echo-Key: mcv_placeholder_0f46…
+  Note over S: $ECHO_VALUE is mcv_placeholder_3b44…
+  S->>P: X-Echo-Value: mcv_placeholder_3b44…
   P->>P: this session? this host? this header?
-  P->>U: X-Echo-Key: demo-dbf6… (the real value)
+  P->>U: X-Echo-Value: demo-9cd2… (the real value)
   U-->>P: echoes the request headers back
   P-->>S: the echo, with the real value shown as [redacted]
 ```

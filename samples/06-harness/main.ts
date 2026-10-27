@@ -40,6 +40,11 @@ const harness = {
 
 const managed = await ManagedCopilot.connect();
 const sessions: CopilotSession[] = [];
+/** Cleanup that can't finish is reported, never ignored. */
+const couldNotDelete = (what: string) => (error: Error) => {
+  process.exitCode = 1;
+  console.error(`Couldn't delete ${what}: ${error.message}`);
+};
 
 try {
   // The same harness in three placements: the shared runtime, its own sandbox, and promotable.
@@ -62,6 +67,6 @@ try {
     console.log(`\nWhile Copilot CLI was attached, lookup_ticket ran ${callsWhileCliOpen} ${callsWhileCliOpen === 1 ? "time" : "times"} here, in pid ${process.pid}.`);
   }
 } finally {
-  await Promise.allSettled(sessions.map((session) => managed.sessions.delete(session.sessionId)));
+  for (const session of sessions) await managed.sessions.delete(session.sessionId).catch(couldNotDelete(`session ${session.sessionId}`));
   await managed.close();
 }

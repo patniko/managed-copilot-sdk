@@ -8,6 +8,11 @@ import { ManagedCopilot } from "@managed-copilot/sdk";
 const here = dirname(fileURLToPath(import.meta.url));
 const managed = await ManagedCopilot.connect();
 const created: string[] = []; // sessions to delete at the end, even if something fails
+/** Cleanup that can't finish is reported, never ignored. */
+const couldNotDelete = (what: string) => (error: Error) => {
+  process.exitCode = 1;
+  console.error(`Couldn't delete ${what}: ${error.message}`);
+};
 
 try {
   // "coder" is an isolated environment: every session gets its own new sandbox.
@@ -46,6 +51,6 @@ try {
   console.log(`\nA second session from the same client runs in sandbox ${secondInfo.sandbox?.id}`);
 } finally {
   // Deleting a session deletes its sandbox and files. Published artifacts go with it.
-  await Promise.allSettled(created.map((id) => managed.sessions.delete(id)));
+  for (const id of created) await managed.sessions.delete(id).catch(couldNotDelete(`session ${id}`));
   await managed.close();
 }

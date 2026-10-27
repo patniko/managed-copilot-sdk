@@ -7,6 +7,11 @@ const managed = await ManagedCopilot.connect();
 const describe = (info: SessionInfo) =>
   `environment "${info.environment}", ${info.sandbox ? `sandbox ${info.sandbox.id} (${info.sandbox.size})` : info.placement}`;
 const created: string[] = []; // sessions to delete at the end, even if something fails
+/** Cleanup that can't finish is reported, never ignored. */
+const couldNotDelete = (what: string) => (error: Error) => {
+  process.exitCode = 1;
+  console.error(`Couldn't delete ${what}: ${error.message}`);
+};
 
 try {
   // 1. A name the AppHost declared: exactly that template.
@@ -51,6 +56,6 @@ try {
   });
   console.log(`\nInside session 2's sandbox:\n${check?.data.content}`);
 } finally {
-  await Promise.allSettled(created.map((id) => managed.sessions.delete(id)));
+  for (const id of created) await managed.sessions.delete(id).catch(couldNotDelete(`session ${id}`));
   await managed.close();
 }

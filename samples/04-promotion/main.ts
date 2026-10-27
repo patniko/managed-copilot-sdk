@@ -22,6 +22,11 @@ const where = async () => {
   const info = await managed.sessions.get(session.sessionId);
   return info.placement === "sandbox" ? `sandbox ${info.sandbox?.id}` : "shared runtime";
 };
+/** Cleanup that can't finish is reported, never ignored. */
+const couldNotDelete = (what: string) => (error: Error) => {
+  process.exitCode = 1;
+  console.error(`Couldn't delete ${what}: ${error.message}`);
+};
 
 try {
   // No shell needed, so the session stays on the shared runtime.
@@ -40,6 +45,6 @@ try {
   const third = await session.sendAndWait({ prompt: "What was my first question? Answer in one sentence." });
   console.log(`\nCopilot: ${third?.data.content}`);
 } finally {
-  await client.deleteSession(session.sessionId);
+  await client.deleteSession(session.sessionId).catch(couldNotDelete(`session ${session.sessionId}`));
   await managed.close();
 }
