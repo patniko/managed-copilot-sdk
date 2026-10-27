@@ -17,6 +17,7 @@ const ATTACH_ON_CONNECT = 8;
 const MAX_PROMPT = 20_000;
 const PUBLISH_MS = 120;
 const LIST_MS = 400;
+const REMOVED_LIMIT = 500;
 
 export class ConversationManager implements ConversationHost {
   readonly platform: DispatchPlatform;
@@ -28,6 +29,8 @@ export class ConversationManager implements ConversationHost {
   #listTimer: NodeJS.Timeout | undefined;
   #syncing: Promise<void> | undefined;
   #syncAgain = false;
+  /** Conversations removed by this process (deleted, or found gone): a list read before that must not bring them back. */
+  readonly #removed = new Set<string>();
   readonly #unsubscribe: (() => void)[] = [];
 
   constructor(platform: DispatchPlatform, config: DispatchConfig, store: Store, hub: EventHub) {
@@ -82,6 +85,9 @@ export class ConversationManager implements ConversationHost {
 
   async #sync(): Promise<void> {
     for (const conversation of this.#conversations.values()) conversation.detach();
+    // Only what existed before the list was read can be judged by it: a conversation created or deleted meanwhile
+    // isn't in the snapshot (or still is).
+    const before = new Set(this.#conversations.values());
     let sessions: SessionInfo[] | undefined;
     try {
       sessions = await this.platform.listSessions(this.config.environment);
@@ -91,13 +97,13 @@ export class ConversationManager implements ConversationHost {
     if (sessions) {
       const existing = new Map(sessions.filter((session) => session.state !== "deleting" && session.state !== "deleted").map((session) => [session.id, session]));
       for (const [id, conversation] of [...this.#conversations]) {
-        if (existing.has(id)) continue;
+        if (existing.has(id) || !before.has(conversation)) continue;
         log.info("A conversation no longer exists on Managed Copilot", { sessionId: id });
         conversation.dispose();
         this.gone(conversation);
       }
       for (const session of existing.values()) {
-        if (this.#conversations.has(session.id)) continue;
+        if (this.#conversations.has(session.id) || this.#removed.has(session.id)) continue;
         this.store.ensure(session.id, { settings: { approvals: this.config.approvals }, createdAt: session.createdAt, ...(session.title ? { title: session.title } : {}) });
         this.#conversations.set(session.id, new Conversation(this, session.id));
       }
@@ -233,6 +239,9 @@ export class ConversationManager implements ConversationHost {
     const id = conversation.id;
     if (this.#conversations.get(id) !== conversation) return;
     this.#conversations.delete(id);
+    this.#removed.add(id);
+    // Bounded: only lists read around the time of a removal matter.
+    if (this.#removed.size > REMOVED_LIMIT) this.#removed.delete(this.#removed.values().next().value!);
     const timer = this.#publishing.get(id);
     if (timer) clearTimeout(timer);
     this.#publishing.delete(id);

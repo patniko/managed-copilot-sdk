@@ -162,7 +162,7 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
             {tab === "timeline" ? <Timeline view={view} blueprints={blueprints} selected={worker} /> : <Environments view={view} blueprints={blueprints} selected={worker} />}
             {selected ? (
               <div className="mt-3">
-                <WorkerDetail key={selected.id} view={view} worker={selected} blueprints={blueprints} />
+                <WorkerDetail key={selected.id} view={view} worker={selected} blueprints={blueprints} tab={tab} />
               </div>
             ) : null}
           </div>

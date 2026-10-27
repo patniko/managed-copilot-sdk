@@ -6,7 +6,7 @@ import { api, errorMessage } from "../lib/api.js";
 import { networkSummary, sizeSummary, WORKER_STATE } from "../lib/blueprints.js";
 import { blueprintFor, workGiven } from "../lib/conversation.js";
 import { formatBytes, formatClock, formatRelative } from "../lib/format.js";
-import { conversationHref, navigate } from "../lib/router.js";
+import { conversationHref, navigate, type ConversationTab } from "../lib/router.js";
 import { openInCli, useStore } from "../lib/store.js";
 import { toast } from "../lib/toast.js";
 import { WorkerStateIcon } from "./Environments.js";
@@ -27,7 +27,7 @@ function Fact({ label, children }: { readonly label: string; readonly children: 
   );
 }
 
-export function WorkerDetail({ view, worker, blueprints }: { readonly view: ConversationView; readonly worker: WorkerView; readonly blueprints: readonly Blueprint[] }) {
+export function WorkerDetail({ view, worker, blueprints, tab }: { readonly view: ConversationView; readonly worker: WorkerView; readonly blueprints: readonly Blueprint[]; readonly tab: ConversationTab }) {
   const canLaunch = useStore((state) => state.canLaunchTerminal);
   const [preview, setPreview] = useState<string>();
   const [files, setFiles] = useState<{ files: readonly FileView[]; at: string }>();
@@ -62,7 +62,7 @@ export function WorkerDetail({ view, worker, blueprints }: { readonly view: Conv
           {meta.label} · {meta.sandbox}
         </span>
         <span className="ml-auto" />
-        <IconButton icon={XIcon} label="Close details" size="sm" onClick={() => navigate(conversationHref(view.id), { replace: true })} />
+        <IconButton icon={XIcon} label="Close details" size="sm" onClick={() => navigate(conversationHref(view.id, { tab }), { replace: true })} />
       </header>
       <div className="grid gap-4 p-3 lg:grid-cols-2">
         <div className="min-w-0">

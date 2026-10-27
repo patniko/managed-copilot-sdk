@@ -238,7 +238,16 @@ export class Platform implements DispatchPlatform {
     const previous = this.#status;
     try {
       if (!this.#managed) {
-        const managed = await deadline(ManagedCopilot.connect({ clientName: "dispatch" }), 20_000, "Managed Copilot");
+        const connecting = ManagedCopilot.connect({ clientName: "dispatch" });
+        let managed: ManagedCopilot;
+        try {
+          managed = await deadline(connecting, 20_000, "Managed Copilot");
+        } catch (error) {
+          // A connection that completes after the deadline is closed, not leaked.
+          void connecting.then((late) => late.close()).catch(() => undefined);
+          throw error;
+        }
+        if (this.#stopped) return void (await managed.close().catch(() => undefined));
         this.#managed = managed;
         for (const type of WORKER_EVENTS) managed.on(type, (event) => this.#workerEvent(event));
       }
@@ -264,13 +273,19 @@ export class Platform implements DispatchPlatform {
       const old = this.#client;
       this.#client = undefined;
       if (old) await deadline(old.forceStop(), 5_000, "Stopping the old client").catch(() => undefined);
-      this.#client = await deadline(managed.client(this.#config.environment), 30_000, "Starting the coordinator's client");
+      const client = await deadline(managed.client(this.#config.environment), 30_000, "Starting the coordinator's client");
+      if (this.#stopped || this.#managed !== managed) {
+        await client.forceStop().catch(() => undefined);
+        return;
+      }
+      this.#client = client;
       this.#attempt = 0;
       this.#setStatus({ state: "connected", ...base });
       log.info(previous.state === "connected" ? "Reconnected to Managed Copilot" : "Connected to Managed Copilot", { url: managed.url, environment: this.#config.environment });
       for (const listener of this.#connectedListeners) listener();
       this.#schedule(0);
     } catch (error) {
+      if (this.#stopped) return;
       const message = describeConnectError(error);
       log.warn("Managed Copilot isn't available", { error: message });
       this.#setStatus({ ...this.#status, state: previous.state === "connected" || previous.state === "reconnecting" ? "reconnecting" : "unavailable", message });
@@ -294,8 +309,15 @@ export class Platform implements DispatchPlatform {
       await deadline(client.ping(), 8_000, "Managed Copilot");
       this.#schedule(0);
     } catch (error) {
+      if (this.#stopped) return;
       log.warn("Lost the connection to Managed Copilot; reconnecting", { error: (error as Error).message });
       this.#setStatus({ ...this.#status, state: "reconnecting", message: "Reconnecting to Managed Copilot…" });
+      // Connect afresh: the deployment may be back at another address or with other environments.
+      const stale = this.#managed;
+      this.#managed = undefined;
+      this.#client = undefined;
+      void client.forceStop().catch(() => undefined);
+      void stale?.close().catch(() => undefined);
       void this.#connect();
     }
   }

@@ -55,7 +55,7 @@ function WorkerCard({ conversationId, worker, selected, now }: { readonly conver
     <button
       type="button"
       aria-pressed={selected}
-      onClick={() => navigate(conversationHref(conversationId, { worker: selected ? undefined : worker.id }), { replace: true })}
+      onClick={() => navigate(conversationHref(conversationId, { ...(selected ? {} : { worker: worker.id }) }), { replace: true })}
       className={cx(
         "w-56 rounded-lg border p-2 text-left text-xs transition-shadow",
         worker.state === "stopped" ? "border-line bg-canvas-muted" : "border-line bg-canvas hover:shadow-sm",

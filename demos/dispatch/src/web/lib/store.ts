@@ -21,6 +21,8 @@ export interface Outgoing {
   readonly key: number;
   readonly text: string;
   readonly at: number;
+  /** How many messages with this text the conversation showed when it was sent: one more means it arrived. */
+  readonly baseline: number;
   readonly failed?: string;
 }
 
@@ -118,7 +120,13 @@ export function loadConversation(id: string): Promise<void> {
     pending = api
       .conversation(id)
       .then((view) => {
-        setState((current) => ({ ...current, views: { ...current.views, [id]: view }, viewErrors: without(current.viewErrors, id) }));
+        setState((current) => ({
+          ...current,
+          views: { ...current.views, [id]: view },
+          viewErrors: without(current.viewErrors, id),
+          // A catch-up load (after the event stream reconnects) can carry messages whose events were missed.
+          outgoing: settleOutgoing(current.outgoing, view),
+        }));
       })
       .catch((error: unknown) => {
         setState((current) => ({ ...current, viewErrors: { ...current.viewErrors, [id]: errorMessage(error) } }));
@@ -169,12 +177,32 @@ function handleServerEvent(event: ServerEvent): void {
   }
 }
 
-/** Drops sent messages the conversation now shows. */
-function settleOutgoing(outgoing: StoreState["outgoing"], view: ConversationView): StoreState["outgoing"] {
+function userTextCounts(view: ConversationView | undefined): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const message of view?.messages ?? []) {
+    if (message.role !== "user") continue;
+    const text = message.content.trim();
+    counts.set(text, (counts.get(text) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Drops sent messages the conversation now shows. Counted, not timed: the browser's and the platform's clocks can
+ * differ. Several pending copies of one text settle one per new arrival, oldest first.
+ */
+export function settleOutgoing(outgoing: StoreState["outgoing"], view: ConversationView): StoreState["outgoing"] {
   const pending = outgoing[view.id];
   if (!pending?.length) return outgoing;
-  const shown = view.messages.filter((message) => message.role === "user");
-  const left = pending.filter((item) => item.failed || !shown.some((message) => message.content.trim() === item.text && Date.parse(message.at) >= item.at - 5_000));
+  const shown = userTextCounts(view);
+  const claimed = new Map<string, number>();
+  const left = pending.filter((item) => {
+    if (item.failed) return true;
+    const used = claimed.get(item.text) ?? 0;
+    if ((shown.get(item.text) ?? 0) - item.baseline - used <= 0) return true;
+    claimed.set(item.text, used + 1);
+    return false;
+  });
   if (left.length === pending.length) return outgoing;
   return left.length ? { ...outgoing, [view.id]: left } : without(outgoing, view.id);
 }
@@ -269,7 +297,8 @@ let outgoingKey = 0;
 
 /** Sends a message; it shows in the conversation right away and settles when the coordinator receives it. */
 export async function sendMessage(id: string, prompt: string): Promise<boolean> {
-  const item: Outgoing = { key: ++outgoingKey, text: prompt.trim(), at: Date.now() };
+  const text = prompt.trim();
+  const item: Outgoing = { key: ++outgoingKey, text, at: Date.now(), baseline: userTextCounts(state.views[id]).get(text) ?? 0 };
   setState((current) => ({ ...current, outgoing: { ...current.outgoing, [id]: [...(current.outgoing[id] ?? []), item] } }));
   try {
     await api.send(id, prompt);

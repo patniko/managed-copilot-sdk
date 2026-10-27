@@ -111,6 +111,8 @@ export class FakePlatform implements DispatchPlatform {
   readonly deleted: string[] = [];
   readonly created: SessionConfig[] = [];
   readonly resumed: { sessionId: string; config: ResumeSessionConfig }[] = [];
+  /** Every resume tried, including ones that failed. */
+  readonly resumeAttempts: string[] = [];
   /** Permission prompts the platform delivers again when a session is resumed. */
   readonly pendingPrompts = new Map<string, Prompt[]>();
   readonly #status = new Set<(status: PlatformStatus) => void>();
@@ -157,6 +159,7 @@ export class FakePlatform implements DispatchPlatform {
   }
 
   async resumeSession(sessionId: string, config: ResumeSessionConfig): Promise<FakeSession> {
+    this.resumeAttempts.push(sessionId);
     const session = this.sessions.get(sessionId);
     if (!session || !this.listed.has(sessionId)) throw Object.assign(new Error(`Session ${sessionId} not found`), { code: "not_found" });
     session.config = config;

@@ -10,7 +10,7 @@ import type { DispatchConfig } from "./config.js";
 import { DispatchError, errorText, isMissingSession } from "./errors.js";
 import { log } from "./log.js";
 import type { CoordinatorSession, DispatchPlatform } from "./platform.js";
-import { Transcript, type CoordinatorEvent } from "./projection.js";
+import { mergeHistory, Transcript, type CoordinatorEvent } from "./projection.js";
 import { digest, type Store } from "./store.js";
 
 /** Added to the platform's coordinator instructions: how Dispatch's UI shows the coordinator's work. */
@@ -70,7 +70,8 @@ export class Conversation {
   #session: CoordinatorSession | undefined;
   #transcript: Transcript;
   #generation = 0;
-  #attaching: Promise<void> | undefined;
+  /** The attach in progress, for the generation it was started in (a detach invalidates it). */
+  #attaching: { readonly generation: number; readonly promise: Promise<void> } | undefined;
   #closed = false;
   readonly #approvals = new Map<string, PendingApproval>();
   /** Digests of messages being sent: their `user.message` can arrive before `send` returns its ID. */
@@ -111,7 +112,8 @@ export class Conversation {
       const key = digest(content);
       if (this.#inflight.has(key)) return true;
       const own = this.#host.store.get(this.#id)?.own ?? [];
-      return own.some((entry) => (messageId !== undefined && entry.id === messageId) || entry.digest === key);
+      // Message IDs decide when both are known; the text only stands in when one is missing.
+      return own.some((entry) => (messageId !== undefined && entry.id !== undefined ? entry.id === messageId : entry.digest === key));
     };
     return new Transcript(isOwn, this.#host.platform.blueprints[0]?.name);
   }
@@ -148,8 +150,10 @@ export class Conversation {
     try {
       await this.send(prompt);
     } catch (error) {
-      // An empty conversation isn't worth keeping; the person tries again from the home page.
+      // An empty conversation isn't worth keeping; the person tries again from the home page. If the deletion fails
+      // too, the next discovery finds the session and lists it.
       await this.delete().catch(() => undefined);
+      this.dispose();
       throw error;
     }
   }
@@ -157,14 +161,18 @@ export class Conversation {
   /** Resumes the coordinator session on the current client, rebuilding the transcript from its history. */
   attach(): Promise<void> {
     if (this.#state === "live" || this.#closed) return Promise.resolve();
-    this.#attaching ??= this.#attach().finally(() => {
-      this.#attaching = undefined;
+    const pending = this.#attaching;
+    // An attempt a detach invalidated finishes without attaching: start one on the current client instead.
+    if (pending && pending.generation === this.#generation) return pending.promise;
+    const generation = ++this.#generation;
+    const promise: Promise<void> = this.#attach(generation).finally(() => {
+      if (this.#attaching?.promise === promise) this.#attaching = undefined;
     });
-    return this.#attaching;
+    this.#attaching = { generation, promise };
+    return promise;
   }
 
-  async #attach(): Promise<void> {
-    const generation = ++this.#generation;
+  async #attach(generation: number): Promise<void> {
     this.#releaseApprovals();
     this.#state = "attaching";
     const transcript = this.#newTranscript();
@@ -181,18 +189,17 @@ export class Conversation {
       if (generation !== this.#generation) return void (await session.disconnect().catch(() => undefined));
       const [history, info] = await Promise.all([session.getEvents(), this.#host.platform.sessionInfo(this.#id).catch(() => undefined)]);
       if (generation !== this.#generation) return void (await session.disconnect().catch(() => undefined));
-      for (const event of history) transcript.apply(event as unknown as CoordinatorEvent);
+      // History holds persisted events only; events delivered while it loaded go in at the time they happened.
+      for (const event of mergeHistory(history, buffered)) transcript.apply(event as unknown as CoordinatorEvent);
       loading = false;
-      for (const event of buffered) transcript.apply(event as unknown as CoordinatorEvent);
-      // A turn the platform already ended (for example cut by a runtime restart) has no idle event in the history.
-      if (transcript.busy && info?.lastTurn?.completedAt && !buffered.some((event) => event.type === "user.message")) {
-        transcript.busy = false;
-        transcript.waiting = undefined;
-      }
+      // `session.idle` is never persisted: a turn the platform reports finished has ended, unless a new one started.
+      if (transcript.busy && info?.lastTurn?.completedAt && !buffered.some((event) => event.type === "user.message")) transcript.settle(info.lastTurn.completedAt);
       this.#transcript = transcript;
       this.#session = session;
       this.#state = "live";
       this.#problem = undefined;
+      // Prompts delivered again while the history loaded may have been answered elsewhere meanwhile.
+      this.#reconcileApprovals();
       log.info("Attached to a conversation", { sessionId: this.#id, events: history.length });
     } catch (error) {
       await session?.disconnect().catch(() => undefined);
@@ -218,7 +225,9 @@ export class Conversation {
     ++this.#generation;
     this.#releaseApprovals();
     this.#session = undefined;
-    if (this.#state !== "failed") this.#state = "detached";
+    // A new connection is a new chance: an earlier failure to open it no longer stands.
+    this.#state = "detached";
+    this.#problem = undefined;
     this.#stopPolling();
   }
 
@@ -239,13 +248,18 @@ export class Conversation {
   /** Deletes the coordinator session; the platform deletes its workers and their sandboxes with it. */
   async delete(): Promise<void> {
     const session = this.#session;
-    this.dispose();
+    this.detach();
     await session?.disconnect().catch(() => undefined);
     try {
       await this.#host.platform.deleteSession(this.#id);
     } catch (error) {
-      if (!isMissingSession(error)) throw new DispatchError("delete_failed", `Couldn't delete the conversation: ${errorText(error)}`, 502);
+      if (!isMissingSession(error)) {
+        // The conversation still exists, detached: opening it or sending a message resumes it.
+        this.#changed();
+        throw new DispatchError("delete_failed", `Couldn't delete the conversation: ${errorText(error)}`, 502);
+      }
     }
+    this.dispose();
     log.info("Deleted a conversation", { sessionId: this.#id });
   }
 
@@ -297,6 +311,8 @@ export class Conversation {
     // Only `start_worker` asks (spec section 17); the coordinator's other tools are its own platform tools.
     if (request.kind !== "custom-tool" || request.toolName !== "start_worker") return { kind: "approve-once" };
     if (generation !== this.#generation) return { kind: "no-result" };
+    // Already answered elsewhere (for example in Copilot CLI): nothing to ask.
+    if (this.#transcript.isSettled(request.toolCallId)) return { kind: "no-result" };
     if (this.settings.approvals === "auto") return { kind: "approve-once" };
     const args = (request.args ?? {}) as Record<string, unknown>;
     const id = request.toolCallId ?? `request-${Date.now().toString(36)}`;
@@ -330,8 +346,26 @@ export class Conversation {
     }
   }
 
+  /** Drops requests answered or withdrawn elsewhere (Copilot CLI, a cancelled turn). Returns whether any were. */
+  #reconcileApprovals(): boolean {
+    let changed = false;
+    for (const [id, pending] of [...this.#approvals]) {
+      if (!this.#transcript.isSettled(pending.approval.decisionId)) continue;
+      this.#approvals.delete(id);
+      pending.resolve({ kind: "no-result" });
+      changed = true;
+    }
+    return changed;
+  }
+
   #onEvent(event: SessionEvent): void {
-    const changed = this.#transcript.apply(event as unknown as CoordinatorEvent);
+    let changed = this.#transcript.apply(event as unknown as CoordinatorEvent);
+    if (event.type === "permission.completed" && this.#reconcileApprovals()) changed = true;
+    // The turn ended: no request of it is waiting for an answer anymore.
+    if ((event.type === "session.idle" || event.type === "abort") && this.#approvals.size > 0) {
+      this.#releaseApprovals();
+      changed = true;
+    }
     if (changed && (event.type === "tool.execution_start" || event.type === "tool.execution_complete")) this.#scheduleRefresh(200);
     if (event.type === "session.idle") this.#scheduleRefresh(100);
     if (changed) this.#changed();
@@ -550,10 +584,11 @@ export class Conversation {
       const index = transcript.messageIndexOf(approval.decisionId) ?? approval.messageIndex ?? transcript.currentIndex;
       return { ...approval, ...(decision ? { requestedAt: decision.at } : {}), ...(index !== undefined ? { messageIndex: index } : {}) };
     });
+    const resolved = transcript.resolveWorkers(this.#workers);
     return {
       ...this.summary(),
-      messages: transcript.messages(),
-      workers: this.#workers.map((worker) => this.#workerView(worker)),
+      messages: transcript.messages(resolved),
+      workers: this.#workers.map((worker) => this.#workerView(worker, transcript.attribution(worker.id, resolved))),
       approvals,
       settings: this.settings,
       busy: transcript.busy,
@@ -563,7 +598,7 @@ export class Conversation {
     };
   }
 
-  #workerView(worker: WorkerInfo): WorkerView {
+  #workerView(worker: WorkerInfo, attribution: { createdBy?: number; sentWorkBy: number[] }): WorkerView {
     const stored = this.#host.store.worker(this.#id, worker.id);
     const files = this.#files.get(worker.id);
     return {
@@ -580,7 +615,7 @@ export class Conversation {
       ...(worker.agent ? { agent: worker.agent } : {}),
       ...(worker.model ? { model: worker.model } : {}),
       ...(stored?.sandbox ? { sandbox: { ...stored.sandbox } } : {}),
-      ...this.#transcript.attribution(worker),
+      ...attribution,
       outputs: stored?.outputs ?? [],
       ...(files ? { files: files.files.slice(0, FILES_IN_VIEW), filesAt: files.at } : {}),
       timeline: stored?.timeline.map((entry) => ({ ...entry })) ?? [],

@@ -47,6 +47,37 @@ export function firstLine(value: string | undefined, max = 220): string | undefi
 /** A worker ID in `start_worker`'s answer: `Started worker "name" (ID <uuid>) in environment ...`. */
 const STARTED = /\(ID ([0-9a-fA-F-]{36})\)/;
 
+/** Event timestamps come from the runtime and worker times from the gateway; allow for a little difference. */
+const CLOCK_SKEW_MS = 2_000;
+
+/** What `resolveWorkers` needs to know about a worker. */
+export interface WorkerRef {
+  readonly id: string;
+  readonly name: string;
+  readonly createdAt: string;
+}
+
+/**
+ * The session's history (`getEvents()`, persisted events only) with the events delivered live while it loaded, in the
+ * order they happened. Live events already in the history are dropped; the rest (ephemeral ones such as
+ * `session.idle`, which history never contains, and anything persisted after the history was read) are placed by
+ * timestamp, before history events with the same timestamp. Appending them instead could let an earlier
+ * `session.idle` undo a newer turn that the history already shows.
+ */
+export function mergeHistory<T extends { readonly id: string; readonly timestamp: string }>(history: readonly T[], live: readonly T[]): T[] {
+  const known = new Set(history.map((event) => event.id));
+  const merged: T[] = [];
+  let next = 0;
+  for (const event of live) {
+    if (known.has(event.id)) continue;
+    const at = Date.parse(event.timestamp);
+    while (next < history.length && Date.parse(history[next]!.timestamp) < at) merged.push(history[next++]!);
+    merged.push(event);
+  }
+  while (next < history.length) merged.push(history[next++]!);
+  return merged;
+}
+
 export class Transcript {
   readonly #messages: MessageRecord[] = [];
   readonly #decisions = new Map<string, DecisionRecord>();
@@ -60,6 +91,8 @@ export class Transcript {
   readonly #completed = new Set<string>();
   /** Permission request IDs to the `start_worker` call they gate. */
   readonly #requests = new Map<string, string>();
+  /** `start_worker` calls whose permission prompt was answered or withdrawn (`permission.completed`). */
+  readonly #settled = new Set<string>();
   #users = 0;
   #current: MessageRecord | undefined;
   title: string | undefined;
@@ -112,8 +145,7 @@ export class Transcript {
       case "session.idle":
         return this.#idle(event);
       case "abort":
-        this.busy = false;
-        this.waiting = undefined;
+        this.settle(event.timestamp);
         return true;
       case "session.error": {
         const message = text(data["message"]) ?? "The coordinator reported an error.";
@@ -136,6 +168,8 @@ export class Transcript {
     // Autopilot continuations and skill prompts are part of a run, not something the person said.
     if (data["isAutopilotContinuation"] === true || String(data["source"] ?? "").startsWith("skill-")) return false;
     const delivery = data["delivery"] === "steering" || data["delivery"] === "queued" ? data["delivery"] : undefined;
+    // A new turn: anything the previous one left open was cut short (its `session.idle` is never in the history).
+    if (!delivery) this.settle(event.timestamp);
     const content = typeof data["content"] === "string" ? data["content"] : "";
     const message: MessageRecord = {
       id: event.id,
@@ -296,6 +330,7 @@ export class Transcript {
   #permissionCompleted(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
     const requestId = text(data["requestId"]);
     const id = text(data["toolCallId"]) ?? (requestId ? this.#requests.get(requestId) : undefined);
+    if (id) this.#settled.add(id);
     const decision = id ? this.#decisions.get(id) : undefined;
     if (!decision || decision.kind !== "create") return false;
     const result = record(data["result"]);
@@ -316,12 +351,34 @@ export class Transcript {
   }
 
   #idle(event: CoordinatorEvent): boolean {
+    this.settle(event.timestamp);
+    this.updatedAt = event.timestamp;
+    return true;
+  }
+
+  /**
+   * The turn is over (`session.idle`, `abort`, a new turn, or the platform reporting it finished): it is no longer
+   * busy, and decisions it left open were cut short. Returns whether anything changed.
+   */
+  settle(at: string): boolean {
+    let changed = this.busy || this.waiting !== undefined || this.#streaming.size > 0;
     this.busy = false;
     this.waiting = undefined;
     for (const message of this.#streaming.values()) message.streaming = false;
     this.#streaming.clear();
-    this.updatedAt = event.timestamp;
-    return true;
+    for (const decision of this.#decisions.values()) {
+      if (decision.status !== "running" && decision.status !== "asking") continue;
+      decision.detail = decision.status === "asking" ? "Cancelled before anyone answered." : "Interrupted: the turn ended before this finished.";
+      decision.status = "failed";
+      decision.endedAt ??= at;
+      changed = true;
+    }
+    return changed;
+  }
+
+  /** Whether the permission prompt for `start_worker` call `toolCallId` was answered or withdrawn, here or elsewhere. */
+  isSettled(toolCallId: string | undefined): boolean {
+    return toolCallId !== undefined && this.#settled.has(toolCallId);
   }
 
   /** Marks the `start_worker` call an approval gates (`asking`, then `running` or `denied`). */
@@ -339,16 +396,48 @@ export class Transcript {
     return this.#messages.find((message) => message.decisionIds?.includes(decisionId))?.index;
   }
 
-  /** Which user messages created a worker and sent it work: by its ID, or by its name before its ID is known. */
-  attribution(worker: { readonly id: string; readonly name: string }): { createdBy?: number; sentWorkBy: number[] } {
+  /**
+   * Which worker each decision concerns, by the worker's session ID. `start_worker` answers name the new worker's ID;
+   * otherwise names are matched in time, because a name can be reused after its worker stopped: a creation is the
+   * earliest worker with that name created after it, and other calls concern the latest one created before them.
+   */
+  resolveWorkers(workers: readonly WorkerRef[]): Map<string, string> {
+    const byName = new Map<string, WorkerRef[]>();
+    for (const worker of [...workers].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) {
+      const list = byName.get(worker.name) ?? [];
+      list.push(worker);
+      byName.set(worker.name, list);
+    }
+    const ids = new Set(workers.map((worker) => worker.id));
+    const resolved = new Map<string, string>();
+    for (const decision of this.#decisions.values()) {
+      if (decision.kind !== "create" && decision.kind !== "message" && decision.kind !== "stop" && decision.kind !== "read") continue;
+      if (decision.kind === "create" && (decision.status === "denied" || decision.status === "failed")) continue;
+      if (decision.workerId && ids.has(decision.workerId)) {
+        resolved.set(decision.id, decision.workerId);
+        continue;
+      }
+      const name = decision.worker ?? decision.workerId;
+      const candidates = name ? (byName.get(name) ?? []) : [];
+      const at = Date.parse(decision.at);
+      const match =
+        decision.kind === "create"
+          ? candidates.find((worker) => Date.parse(worker.createdAt) >= at - CLOCK_SKEW_MS)
+          : [...candidates].reverse().find((worker) => Date.parse(worker.createdAt) <= at + CLOCK_SKEW_MS);
+      if (match) resolved.set(decision.id, match.id);
+    }
+    return resolved;
+  }
+
+  /** Which user messages created a worker and sent it work, given `resolveWorkers`'s answer. */
+  attribution(workerId: string, resolved: ReadonlyMap<string, string>): { createdBy?: number; sentWorkBy: number[] } {
     let createdBy: number | undefined;
     const sentWorkBy = new Set<number>();
     for (const message of this.#messages) {
+      if (message.index === undefined) continue;
       for (const decisionId of message.decisionIds ?? []) {
         const decision = this.#decisions.get(decisionId);
-        if (!decision || decision.status === "denied" || decision.status === "failed") continue;
-        const matches = decision.workerId ? decision.workerId === worker.id || decision.workerId === worker.name : decision.worker === worker.name;
-        if (!matches || message.index === undefined) continue;
+        if (!decision || resolved.get(decisionId) !== workerId || decision.status === "denied" || decision.status === "failed") continue;
         if (decision.kind === "create") createdBy = message.index;
         else if (decision.kind === "message") sentWorkBy.add(message.index);
       }
@@ -356,13 +445,19 @@ export class Transcript {
     return { ...(createdBy !== undefined ? { createdBy } : {}), sentWorkBy: [...sentWorkBy].sort((a, b) => a - b) };
   }
 
-  /** The transcript as the UI shows it: each user message carries the decisions made for it. */
-  messages(): ChatMessage[] {
+  /** The transcript as the UI shows it: each user message carries the decisions made for it, with their workers. */
+  messages(resolved: ReadonlyMap<string, string> = new Map()): ChatMessage[] {
     return this.#messages.map((message) => {
       const { decisionIds, ...rest } = message;
       if (message.role !== "user") return { ...rest };
       const decisions = (decisionIds ?? []).map((id) => this.#decisions.get(id)).filter((decision): decision is DecisionRecord => decision !== undefined);
-      return { ...rest, decisions: decisions.map(({ workerId: _workerId, ...decision }) => ({ ...decision })) };
+      return {
+        ...rest,
+        decisions: decisions.map(({ workerId: _workerId, ...decision }) => {
+          const workerId = resolved.get(decision.id);
+          return { ...decision, ...(workerId ? { workerId } : {}) };
+        }),
+      };
     });
   }
 

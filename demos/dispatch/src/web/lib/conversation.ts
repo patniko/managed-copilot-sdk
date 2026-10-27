@@ -37,16 +37,14 @@ export interface WorkItem {
 
 /** The task a worker started with and every follow-up sent to it, with the user message each one served. */
 export function workGiven(view: ConversationView, worker: WorkerView): WorkItem[] {
-  const created = parseTime(worker.createdAt) ?? 0;
   const items: WorkItem[] = [];
   for (const message of view.messages) {
     if (message.role !== "user" || message.index === undefined) continue;
     for (const decision of message.decisions ?? []) {
-      if (decision.worker !== worker.name || decision.status === "denied" || decision.status === "failed") continue;
-      const at = parseTime(decision.at) ?? 0;
-      // Names can be reused after a stop: only this worker's own creation and later follow-ups.
-      if (decision.kind === "create" && at >= created - 120_000 && at <= created + 120_000) items.push({ index: message.index, kind: "create", task: decision.task ?? worker.task, at: decision.at });
-      if (decision.kind === "message" && at >= created) items.push({ index: message.index, kind: "message", task: decision.task ?? "", at: decision.at });
+      // The server resolves each decision to the worker's session ID, so a reused name never mixes two workers up.
+      if (decision.workerId !== worker.id || decision.status === "denied" || decision.status === "failed") continue;
+      if (decision.kind === "create") items.push({ index: message.index, kind: "create", task: decision.task ?? worker.task, at: decision.at });
+      else if (decision.kind === "message") items.push({ index: message.index, kind: "message", task: decision.task ?? "", at: decision.at });
     }
   }
   if (!items.some((item) => item.kind === "create")) items.unshift({ index: worker.createdBy ?? 0, kind: "create", task: worker.task, at: worker.createdAt });

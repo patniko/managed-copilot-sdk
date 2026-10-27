@@ -73,6 +73,13 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
   `session.idle`, and the in-flight `sendAndWait`'s `{ aborted: true }` reply. `sessions.close` sends `session.shutdown`
   before its answer. A later `session.resume` (with `continuePendingWork`, the pending call stays pending and is not
   requested again) is answered before the resumed session's first event (`session.resume`).
+- Ephemeral events never reach history (verified live on 1.0.103 from a coordinator's `events.jsonl`): `session.idle`,
+  `session.title_changed`, `assistant.message_delta`, and `pending_messages.modified` are always ephemeral, so
+  `session.getEvents()` has no turn ends. An app rebuilding a session from history infers them: Dispatch takes the next
+  turn's `user.message` (delivery `idle`) as the end of the previous turn and `SessionInfo.lastTurn.completedAt` for
+  the last one, and places events delivered live while the history loads by timestamp. A permission-gated tool emits
+  `tool.execution_start`, then `permission.requested`, `permission.completed` (with `toolCallId`), and
+  `tool.execution_complete`, all persisted.
 
 ## Components
 
@@ -888,7 +895,11 @@ and quickstart snippet 14).
     environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
     view is projected from the coordinator's own events (worker tool calls and the permission events above), so a
     restart rebuilds it from `getEvents()`; approvals wait in the SDK permission handler, which resolves `no-result`
-    on detach so the platform asks again on resume.
+    on detach so the platform asks again on resume. While Dispatch holds a request, an attached Copilot CLI's answer
+    is refused ("Your application is answering this request."), so approvals happen in Dispatch; Esc in the CLI ends
+    its turn, and the request's `permission.completed` (`cancelled`) makes Dispatch let go of the held callback.
+    Verified live: a message typed in Copilot CLI shown as "from Copilot CLI", a CLI-started turn's request held by
+    Dispatch and cancelled from the CLI, and a declined request whose reason the coordinator followed.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),

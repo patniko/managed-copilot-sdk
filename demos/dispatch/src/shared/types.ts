@@ -63,6 +63,8 @@ export interface Decision {
   readonly endedAt?: string;
   /** The worker it concerns (create, message, stop, read). */
   readonly worker?: string;
+  /** That worker's session ID, once it is known. */
+  readonly workerId?: string;
   /** Workers waited for (wait). */
   readonly workers?: readonly string[];
   /** The blueprint a new sandbox comes from (create). */

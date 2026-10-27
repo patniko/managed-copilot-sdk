@@ -43,7 +43,10 @@ flowchart LR
   the questions.
 - **The same session, from anywhere.** **Open in Copilot CLI** attaches Copilot CLI to the coordinator session (or to
   any worker's). Messages typed there appear in Dispatch, labeled **from Copilot CLI**, and the coordinator answers in
-  both. Messages sent while the coordinator works go in right away: it answers between waits, then keeps waiting.
+  both. Messages sent while the coordinator works go in right away: it answers between waits, then keeps waiting. While
+  Dispatch has a conversation open, it answers that conversation's sandbox requests: the platform gives each request
+  to the app holding it, so Copilot CLI can't approve it there, but Esc in Copilot CLI cancels its turn, and Dispatch
+  drops the request.
 
 <img src="docs/screenshots/approval.png" alt="A follow-up asks for a new web research sandbox: the request shows in the chat with Approve and Deny, and as a dashed card in the dispatch-web row. Message #3, from Copilot CLI, sits above it." width="900">
 
@@ -95,11 +98,15 @@ pnpm dev                                       # server and UI with live reload 
 - **Decisions come from the session's own events.** `tool.execution_start` and `tool.execution_complete` for the
   worker tools, and `permission.requested` and `permission.completed` for sandbox requests, are projected into the
   card under the message that caused them. The projection is replayable: after a restart, Dispatch resumes each
-  session and rebuilds the same view from `session.getEvents()`.
+  session and rebuilds the same view from `session.getEvents()`. History never contains `session.idle` (it's
+  ephemeral), so a turn counts as over when the next one starts or when the platform reports it finished, and events
+  that arrive while the history loads are placed by their timestamps. Each decision is resolved to its worker's session
+  ID, so a name the coordinator reuses after stopping a worker never mixes the two up.
 - **Approvals use the SDK's permission handler.** Only `start_worker` asks for permission. Dispatch holds the
   handler's promise until you answer and resolves it with `approve-once` or `reject` (with your reason as feedback). If
-  Dispatch restarts first, it releases the handler without answering; the platform keeps the prompt and asks again
-  when the session is resumed.
+  the request ends some other way (its turn is cancelled, or it was answered while Dispatch was away), Dispatch lets go
+  as soon as `permission.completed` or the turn's end arrives. If Dispatch restarts first, it releases the handler
+  without answering; the platform keeps the prompt and asks again when the session is resumed.
 - **Workers come from the platform.** `managed.workers(session).list()` gives each worker's state, task, and report,
   and the `worker.*` platform events say when to look again. `managed.sessions.get(worker)` gives its sandbox,
   `managed.files(worker)` its workspace (listed every few seconds while it works), and `managed.artifacts(worker)` its

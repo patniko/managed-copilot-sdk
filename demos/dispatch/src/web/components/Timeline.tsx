@@ -131,7 +131,8 @@ export function Timeline({ view, blueprints, selected }: { readonly view: Conver
               <div key={worker.id} className="contents">
                 <button
                   type="button"
-                  onClick={() => navigate(conversationHref(view.id, { tab: "timeline", worker: worker.id }), { replace: true })}
+                  aria-pressed={worker.id === selected}
+                  onClick={() => navigate(conversationHref(view.id, { tab: "timeline", ...(worker.id === selected ? {} : { worker: worker.id }) }), { replace: true })}
                   className={cx("flex min-w-0 items-center gap-1.5 rounded-md px-1 text-left hover:bg-canvas-muted", worker.id === selected && "bg-accent-muted")}
                   style={{ "--lane": KIND_LANE[kind] } as CSSProperties}
                   title={`${worker.name} in ${worker.environment}: ${WORKER_STATE[worker.state].label}`}

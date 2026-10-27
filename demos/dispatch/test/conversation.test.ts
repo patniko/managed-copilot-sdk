@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionConfig } from "@github/copilot-sdk";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SYSTEM_MESSAGE, titleFrom, visibleFiles } from "../src/server/conversation.js";
+import { Conversation, SYSTEM_MESSAGE, titleFrom, visibleFiles } from "../src/server/conversation.js";
 import { EventHub } from "../src/server/hub.js";
 import { ConversationManager } from "../src/server/manager.js";
 import { digest, Store } from "../src/server/store.js";
@@ -125,6 +125,145 @@ describe("ConversationManager", () => {
     begin();
     const view = await manager.create("go", "ask");
     await expect(platform.sessions.get(view.id)!.ask({ kind: "custom-tool", toolName: "web_fetch", toolDescription: "", args: {} })).resolves.toEqual({ kind: "approve-once" });
+  });
+
+  it("drops a sandbox request answered in Copilot CLI, and lets go of its callback", async () => {
+    begin();
+    const view = await manager.create("go", "ask");
+    const session = platform.sessions.get(view.id)!;
+    session.emit(user("go", `${view.id}-message-1`));
+    session.emit(start("c1", "start_worker", { name: "py", environment: "dispatch-python", task: "t" }));
+    session.emit(event("permission.requested", { requestId: "r1", permissionRequest: startWorker("c1", "py", "dispatch-python") }));
+    const answer = session.ask(startWorker("c1", "py", "dispatch-python"));
+    await settle();
+    expect((await manager.view(view.id)).approvals).toHaveLength(1);
+    session.emit(event("permission.completed", { requestId: "r1", toolCallId: "c1", result: { kind: "approved" } }));
+    await expect(answer).resolves.toEqual({ kind: "no-result" });
+    const current = await manager.view(view.id);
+    expect(current.approvals).toEqual([]);
+    expect(current.status).toBe("working");
+    expect(() => manager.answer(view.id, "c1", true)).toThrow(/already answered/);
+  });
+
+  it("lets go of requests when their turn ends", async () => {
+    begin();
+    const view = await manager.create("go", "ask");
+    const session = platform.sessions.get(view.id)!;
+    session.emit(user("go", `${view.id}-message-1`));
+    const answer = session.ask(startWorker("c1", "py", "dispatch-python"));
+    await settle();
+    session.emit(event("session.idle", {}, { ephemeral: true }));
+    await expect(answer).resolves.toEqual({ kind: "no-result" });
+    expect(await manager.view(view.id)).toMatchObject({ approvals: [], status: "idle", busy: false });
+  });
+
+  it("doesn't ask again for a request the history shows was already answered", async () => {
+    const session = new FakeSession("answered", {} as SessionConfig);
+    session.history.push(
+      user("go", "m1"),
+      start("c1", "start_worker", { name: "py", task: "t" }),
+      event("permission.requested", { requestId: "r1", permissionRequest: startWorker("c1", "py", "dispatch-python") }),
+      event("permission.completed", { requestId: "r1", toolCallId: "c1", result: { kind: "approved" } }),
+    );
+    platform.sessions.set("answered", session);
+    platform.listed.set("answered", info("answered"));
+    // A stale delivery of the same prompt arrives while the history loads.
+    platform.pendingPrompts.set("answered", [startWorker("c1", "py", "dispatch-python")]);
+    begin();
+    await manager.sync();
+    await settle();
+    expect((await manager.view("answered")).approvals).toEqual([]);
+  });
+
+  it("keeps a conversation started while discovery reads the list, and doesn't revive one deleted meanwhile", async () => {
+    begin();
+    const doomed = await manager.create("delete me", "ask");
+    let release: (sessions: Awaited<ReturnType<FakePlatform["listSessions"]>>) => void = () => undefined;
+    // The list is read before both changes below.
+    const snapshot = [info(doomed.id)];
+    platform.listSessions = () => new Promise((resolve) => (release = resolve));
+    const syncing = manager.sync();
+    await settle();
+    const fresh = await manager.create("new one", "ask");
+    await manager.delete(doomed.id);
+    release(snapshot);
+    await syncing;
+    expect(manager.summaries().map((summary) => summary.id)).toEqual([fresh.id]);
+    // The deleted one wasn't brought back, not even briefly (it would be resumed, then found gone).
+    expect(platform.resumeAttempts).not.toContain(doomed.id);
+    await expect(manager.send(fresh.id, "still here?")).resolves.toBeUndefined();
+  });
+
+  it("keeps a conversation usable when deleting it fails", async () => {
+    begin();
+    const view = await manager.create("go", "ask");
+    const remove = platform.deleteSession.bind(platform);
+    platform.deleteSession = async () => {
+      throw new Error("gateway timeout");
+    };
+    await expect(manager.delete(view.id)).rejects.toMatchObject({ code: "delete_failed", status: 502 });
+    platform.deleteSession = remove;
+    const resumes = platform.resumed.length;
+    await manager.view(view.id);
+    expect(platform.resumed.length).toBe(resumes + 1);
+    await expect(manager.send(view.id, "still here?")).resolves.toBeUndefined();
+  });
+
+  it("attaches on the new connection when a reconnect cuts an attach short", async () => {
+    const session = new FakeSession("slow", {} as SessionConfig);
+    session.history.push(user("go", "m1"));
+    platform.sessions.set("slow", session);
+    platform.listed.set("slow", info("slow"));
+    begin();
+    const resume = platform.resumeSession.bind(platform);
+    let release: () => void = () => undefined;
+    let calls = 0;
+    platform.resumeSession = async (id, config) => {
+      calls += 1;
+      if (calls === 1) await new Promise<void>((resolve) => (release = resolve));
+      return resume(id, config);
+    };
+    const conversation = new Conversation(manager, "slow");
+    const first = conversation.attach();
+    await settle();
+    conversation.detach();
+    const second = conversation.attach();
+    await second;
+    release();
+    await first;
+    expect(calls).toBe(2);
+    expect(conversation.attached).toBe(true);
+    conversation.dispose();
+  });
+
+  it("puts events delivered while the history loads in order, so a newer turn stays busy", async () => {
+    const session = new FakeSession("overlap", {} as SessionConfig);
+    const t = (second: number) => Date.UTC(2026, 9, 27, 12, 0, second);
+    const newer = event("user.message", { content: "two", messageId: "m2" }, { at: t(5) });
+    session.history.push(event("user.message", { content: "one", messageId: "m1" }, { at: t(1) }), newer);
+    session.getEvents = async () => {
+      // Live delivery during the load: the end of turn one (never persisted), then turn two, which the history has.
+      session.handlers.onEvent?.(event("session.idle", {}, { ephemeral: true, at: t(3) }));
+      session.handlers.onEvent?.(newer);
+      return [...session.history];
+    };
+    platform.sessions.set("overlap", session);
+    platform.listed.set("overlap", info("overlap"));
+    begin();
+    await manager.sync();
+    expect(await manager.view("overlap")).toMatchObject({ busy: true, status: "working" });
+  });
+
+  it("labels messages by ID: the same words from Copilot CLI aren't Dispatch's", async () => {
+    const session = new FakeSession("labels", {} as SessionConfig);
+    session.history.push(user("continue", "from-dispatch"), event("session.idle", {}, { ephemeral: true }), user("continue", "from-cli"));
+    platform.sessions.set("labels", session);
+    platform.listed.set("labels", info("labels"));
+    store.ensure("labels", { settings: { approvals: "ask" } });
+    store.addOwn("labels", { id: "from-dispatch", digest: digest("continue") });
+    begin();
+    await manager.sync();
+    expect((await manager.view("labels")).messages.map((message) => message.via)).toEqual(["dispatch", "other"]);
   });
 
   it("resumes conversations after connecting: rebuilds them from their history and shows prompts still waiting", async () => {
