@@ -110,6 +110,8 @@ for a shared environment holds MCP server credentials, which the adapter attache
 
 - [Spec section 7: control network access](../spec/developer-experience.md#7-control-network-access) and
   [section 8: keep secrets out of the sandbox](../spec/developer-experience.md#8-keep-secrets-out-of-the-sandbox).
+- Proposed, not built: [OAuth sign-in to services](../spec/developer-experience.md#sign-in-to-services-with-oauth)
+  such as Slack, through connectors whose grants the platform keeps and refreshes outside every runtime.
 - [Architecture: network policy, egress, and vaults](../architecture.md#network-policy-egress-and-vaults-as-built)
   and [shared placement egress](../architecture.md#shared-placement-egress).
 
