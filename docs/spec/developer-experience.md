@@ -517,81 +517,102 @@ const client = await managed.client("coder", { vaults: [vault.id] });
 - Response/log redaction is defense in depth, not a guarantee against an authorized upstream reflecting or
   transforming a secret. The platform must not claim a malicious allowed service can never disclose one.
 
-### Sign in to services with OAuth
+### Connect any MCP server
 
 > **Proposed, not built** ([decisions 37–40](#decision-tracker), gate G6). Everything else in this section is built.
 
-A static token doesn't fit a service where each person signs in and tokens expire, such as Slack. A **connector** is
-an OAuth-protected remote MCP server that your deployment signs in to. A person connects it once; the platform keeps
-the grant, refreshes it, and attaches it to that server's requests, so agents use the service as that person in all
-of their sessions. Sign-ins in your local Copilot stay on your machine: connecting in a deployment makes a separate
-grant that lives, and is revoked, there.
+Agents get tools from MCP servers: GitHub's MCP server, Work IQ for Microsoft 365, Slack, or any other. A
+**connector** is one of those servers plus the credential it needs. You declare it once, and each person connects
+their own account once per deployment, with an OAuth sign-in or, where the service uses them, a token. The platform
+keeps the credential, refreshes it, and attaches it to the server's requests, so agents act as that person in all of
+their sessions. Sign-ins in your local Copilot stay on your machine; `connectors import` brings over your local
+servers' definitions, never their credentials, so you can connect the same servers here.
 
-Authorizing a service doesn't involve GitHub. The OAuth client is yours, consent happens at the service, the callback
-is your deployment's, and the grant stays in your deployment; no GitHub Connector, GitHub OAuth app, or GitHub token
-takes part. GitHub remains how people sign in to the platform itself (principle 5), so it identifies who owns a
-personal grant.
+Connecting a service doesn't depend on GitHub. The OAuth client is yours, consent happens at the service, the
+callback is your deployment's, and the credential stays in your deployment; neither GitHub's connector service nor
+your platform sign-in takes part. GitHub's own MCP server is one more connector, with a grant separate from your
+platform sign-in. GitHub remains how people sign in to the platform itself (principle 5), so it identifies who owns a
+personal connection.
 
-Declare connectors in the AppHost and list them in the environments that may use them:
+Declare connectors in the AppHost and list them in the environments that use them:
 
 ```ts
 // apphost.mts
+const githubAppSecret = await builder.addParameter("github-app-secret", { secret: true });
+const entraSecret = await builder.addParameter("entra-client-secret", { secret: true });
 const slackSecret = await builder.addParameter("slack-client-secret", { secret: true });
-const opsSecret = await builder.addParameter("ops-client-secret", { secret: true });
 
 await addManagedCopilot(builder, "copilot", {
   connectors: {
-    // Each person signs in with their own Slack account, through your Slack app.
+    // GitHub's MCP server, through your GitHub App; people may use a personal access token instead.
+    github: {
+      mcpServer: "https://api.githubcopilot.com/mcp/",
+      oauth: { clientId: "Iv23liExampleAppId", clientSecret: githubAppSecret },
+      token: true,
+    },
+    // Work IQ (Microsoft 365), through your Entra app registration.
+    workiq: {
+      mcpServer: "https://workiq.svc.cloud.microsoft/mcp",
+      oauth: {
+        clientId: "3f2b8c1e-5d4a-4c6b-9e7f-0a1b2c3d4e5f",
+        clientSecret: entraSecret,
+        authorizationServer: "https://login.microsoftonline.com/contoso.onmicrosoft.com/v2.0", // your tenant
+        scopes: ["api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask"],
+      },
+    },
+    // Slack, through your Slack app.
     slack: {
       mcpServer: "https://mcp.slack.com/mcp",
       oauth: { clientId: "1601185624273.8899143856786", clientSecret: slackSecret },
     },
-    // This server registers your deployment as an OAuth client itself: nothing to configure.
+    // A server that registers OAuth clients itself needs nothing more.
     tickets: { mcpServer: "https://mcp.fabrikam.example/tickets" },
-    // One service account for every session; no person signs in.
-    ops: {
-      mcpServer: "https://mcp.contoso.example/ops",
-      account: "service",
-      oauth: { clientId: "copilot-ops", clientSecret: opsSecret, grantType: "client_credentials" },
-    },
   },
   connectorReturnUrls: ["https://app.contoso.example/connected"], // where your app's sign-ins may return
   environments: {
-    chat: { type: "shared", connectors: ["slack", "tickets"] },
-    coder: { type: "isolated", connectors: ["slack", "ops"] },
+    chat: { type: "shared", connectors: ["github", "workiq", "slack", "tickets"] },
+    coder: { type: "isolated", connectors: ["github", "slack"] },
   },
 });
 ```
 
-`aspire run` and `aspire deploy` print the callback URL to register in each service's OAuth app, such as
-`https://copilot.contoso.example/v1/connectors/callback`. Slack accepts only HTTPS callbacks, so connect Slack through
-your Azure deployment or put an HTTPS tunnel in front of the local gateway.
+`aspire run` and `aspire deploy` print the callback URL to register as the redirect URL of each OAuth client (the
+GitHub App, the Entra app registration, the Slack app), such as
+`https://copilot.contoso.example/v1/connectors/callback`. Services that accept only HTTPS callbacks, such as Slack,
+need your Azure deployment or an HTTPS tunnel in front of the local gateway. Some services need an administrator
+first: Work IQ has to be enabled for the tenant, with admin
+consent for the app's `WorkIQAgent.Ask` permission.
 
 Connect once, from any terminal:
 
 ```powershell
-npx managed-copilot connect slack     # opens your browser; you approve in Slack, not GitHub
-npx managed-copilot connectors        # what you've connected, and which sessions wait for you
-npx managed-copilot disconnect slack  # revokes the grant; your sessions lose access at once
+npx managed-copilot connect workiq          # opens your browser; you sign in at Microsoft, not GitHub
+npx managed-copilot connect github --token  # prompts for a personal access token instead of signing in
+npx managed-copilot connectors              # what you've connected, and which sessions wait for you
+npx managed-copilot connectors import       # your local Copilot CLI's remote MCP servers, without credentials
+npx managed-copilot disconnect slack        # revokes it; your sessions lose access at once
 ```
 
 ```text
-CONNECTOR  STATE          ACCOUNT        SERVER
-slack      connected      pat (Contoso)  https://mcp.slack.com/mcp
-tickets    not connected                 https://mcp.fabrikam.example/tickets  (session 7f3a2c1 is waiting)
+CONNECTOR  STATE          ACCOUNT          SERVER
+github     connected      octocat (token)  https://api.githubcopilot.com/mcp/
+workiq     connected      pat@contoso.com  https://workiq.svc.cloud.microsoft/mcp
+slack      not connected                   https://mcp.slack.com/mcp  (session 7f3a2c1 is waiting)
+tickets    not connected                   https://mcp.fabrikam.example/tickets
 ```
 
-Sessions name the server as usual, in their own or their custom agents' `mcpServers`, and the platform attaches the
-grant by exact URL, as it does vault credentials:
+An environment's connectors join every session in it under their names, so code needs nothing new:
 
 ```ts
-const session = await managed.createSession({
-  environment: "chat",
-  mcpServers: { slack: { type: "http", url: "https://mcp.slack.com/mcp" } },
-  onPermissionRequest: approveAll,
-});
-await session.sendAndWait({ prompt: "Summarize today's discussion in #incidents" });
+const session = await managed.createSession({ environment: "chat", onPermissionRequest: approveAll });
+await session.sendAndWait({ prompt: "What did #incidents decide today, and is there a GitHub issue for it?" });
 ```
+
+A connector its owner hasn't connected starts switched off, and a session can leave one out with the SDK's
+`disabledMcpServers`. A session that names a connector's server in `mcpServers`, its own or a custom agent's,
+configures that same server (its headers and tool filters apply) rather than adding a second one. This is also how
+managed sessions get GitHub tools: the runtime's built-in GitHub MCP server stays off, because it would need your
+platform sign-in.
 
 **From your app.** A backend acting for its signed-in users starts a sign-in, sends the browser to it, and finishes
 it when the browser comes back:
@@ -599,7 +620,7 @@ it when the browser comes back:
 ```ts
 // Your app's "Connect Slack" button
 const { id, url } = await managed.connectors.connect("slack", {
-  gitHubToken: user.githubToken,                     // whose grant this is
+  gitHubToken: user.githubToken,                     // whose connection this is
   returnTo: "https://app.contoso.example/connected", // listed in connectorReturnUrls
 });
 appSession.connectorSignIn = id; // finish only in the app session that started it
@@ -611,13 +632,14 @@ await managed.connectors.complete(request.url, { id: appSession.connectorSignIn,
 
 A sign-in finishes only in the browser that opened its link, and only when the account that started it calls
 `complete` from the same app session, so a forwarded link can't attach someone else's account to yours.
-`npx managed-copilot connect` does both steps through a loopback URL. `managed.connectors.list()` shows each
-connector with its state (`connected`, `not_connected`, or `needs_sign_in`) and, to its owner, the connected
-account; `disconnect(name)` revokes a grant. No API returns a token.
+`npx managed-copilot connect` does both steps through a loopback URL. For a token, call
+`managed.connectors.connect("github", { token })` instead. `managed.connectors.list()` shows each connector with its
+state (`connected`, `not_connected`, or `needs_sign_in`) and, to its owner, the connected account;
+`disconnect(name)` revokes a credential. No API returns one.
 
-**Your own connectors.** People can add servers the AppHost doesn't declare, when an environment they can use allows
-the server's host. A connector created in code belongs to the account that created it and attaches only in that
-account's sessions; `delete(name)` removes it:
+**Your own connectors.** People can connect servers the AppHost doesn't declare, when an environment they can use
+allows the server's host. A connector created in code belongs to the account that created it and joins only that
+account's sessions that name its server; `delete(name)` removes it:
 
 ```ts
 await managed.connectors.create({ name: "wiki", mcpServer: "https://mcp.fabrikam.example/wiki" }); // registers itself
@@ -628,9 +650,40 @@ await managed.connectors.create({
 });
 ```
 
-From a terminal: `npx managed-copilot connect https://mcp.fabrikam.example/wiki --name wiki`. When two connectors
-could serve one server URL in a session, such as the AppHost's and your own, the session fails with `conflict`
-instead of choosing one.
+From a terminal, `npx managed-copilot connect https://mcp.fabrikam.example/wiki --name wiki` does the same, and
+`connectors import` does it for every remote server in your local Copilot CLI configuration. Import copies URLs and
+OAuth client IDs, never tokens, header values, or environment values, and lists local (stdio) servers rather than
+importing them. When two connectors could serve one server URL in a session, such as the AppHost's and your own, the
+session fails with `conflict` instead of choosing one.
+
+**Tokens, service accounts, and local servers.** The same declaration covers servers that take an API key, one
+account shared by every session, and credentials for local (stdio) servers and command-line tools in isolated
+sandboxes:
+
+```ts
+connectors: {
+  // People paste an API key; the platform sends it in the header the server expects.
+  search: { mcpServer: "https://mcp.fabrikam.example/search", token: { header: "x-api-key" } },
+  // One service account for every session; no person signs in.
+  ops: {
+    mcpServer: "https://mcp.contoso.example/ops",
+    account: "service",
+    oauth: { clientId: "copilot-ops", clientSecret: opsSecret, grantType: "client_credentials" },
+  },
+  // The same GitHub connection, also as a sandbox placeholder for gh and local GitHub MCP servers.
+  github: {
+    mcpServer: "https://api.githubcopilot.com/mcp/",
+    oauth: { clientId: "Iv23liExampleAppId", clientSecret: githubAppSecret },
+    token: true,
+    env: { GITHUB_PERSONAL_ACCESS_TOKEN: ["api.github.com"] },
+  },
+},
+```
+
+A connector's `env` gives each isolated sandbox a per-session placeholder in that variable, which the egress proxy
+replaces with the person's current credential only on the listed hosts, as it does for vault credentials. A local
+server that runs its own sign-in inside the sandbox, such as Work IQ's local server, isn't supported, because its
+tokens would live there; connect the service's remote server instead.
 
 **Bring a grant you already have.** If your app runs the service's sign-in itself, store the grant and the platform
 refreshes it. This corresponds to OpenAI's `mcp_oauth` vault credential:
@@ -655,9 +708,9 @@ await managed.connectors.create(
 );
 ```
 
-**When an agent needs a service its owner hasn't connected.** The session still starts, without that server's tools.
-The platform's `request_sign_in` tool names the session's connectors that still need a sign-in; an agent that needs
-one calls it and waits, the way a tool call waits for an offline app
+**When an agent needs a service its owner hasn't connected.** The session still starts, with that server switched
+off. The platform's `request_sign_in` tool names the session's connectors that still need a connection; an agent
+that needs one calls it and waits, the way a tool call waits for an offline app
 ([section 12](#12-keep-working-while-your-app-is-offline)). The call records a `sign_in` action, so the person can
 unblock it from anywhere: `npx managed-copilot connectors` lists waiting sessions and `connect` resumes them, and
 apps hear about it through `session.action_required`:
@@ -676,31 +729,32 @@ if (event.type === "session.action_required") {
 When the person connects, the platform starts the server in each of their sessions that lacked it, and
 `request_sign_in` returns once its tools are available; the agent continues with them. A service connector's
 `sign_in` action says `by: "operator"`: operators see it in the console and `npx managed-copilot operator`, and
-connecting the service grant resumes every session waiting on it. Aborting the turn ends the wait, and the 24-hour
-answer deadline ends it with `authentication_required`; the agent sees either result. Only a sign-in answers a
+connecting the service account resumes every session waiting on it. Aborting the turn ends the wait, and the 24-hour
+answer deadline ends it with `authentication_required`; the agent sees either result. Only a connection answers a
 `sign_in` action; `handleActions` and webhook capabilities leave it alone. Nothing falls back to another account.
 
-- **Where grants live.** Grants are sealed like vault values, stored only in your deployment, and never returned.
-  Sandboxes and the shared runtime never receive them. An isolated session's runtime holds a per-session placeholder
-  that the egress proxy replaces with the current access token only on TLS requests to the connector's exact host on
-  port 443. As with vault credentials, any process in that sandbox can use the placeholder against that host, so
-  grant only scopes the agent may use. A shared session reaches the server through the gateway's MCP adapter, which
-  attaches the token. A grant serves only its own MCP server.
-- **Whose account.** By default (`account: "user"`), each session uses its owner's grant and never another person's;
-  without one, the server stays out of the session rather than falling back. With `account: "service"`, one grant
+- **Where credentials live.** Grants and tokens are sealed like vault values, stored only in your deployment, and
+  never returned. Sandboxes and the shared runtime never receive them. An isolated session's runtime and processes
+  hold per-session placeholders that the egress proxy replaces with the current credential only on TLS requests to
+  the connector's exact hosts on port 443. As with vault credentials, any process in that sandbox can use a
+  placeholder against those hosts, so grant only scopes the agent may use. A shared session reaches the server
+  through the gateway's MCP adapter, which attaches the credential. A credential serves only its connector's server
+  and the hosts its `env` lists.
+- **Whose account.** By default (`account: "user"`), each session uses its owner's credential and never another
+  person's; without one, the server stays off rather than falling back. With `account: "service"`, one credential
   serves every session in the environments that list the connector: an operator connects it once, or a
   `client_credentials` grant needs no person at all. Only operators can connect, replace, or disconnect a service
-  grant.
-- **Client registration.** A connector uses the OAuth client it names, the AppHost's or a person's own. Otherwise the
-  platform follows the MCP authorization spec's registration order: a registration it already holds, then a client ID
-  metadata document when the service supports one and can reach your deployment, then dynamic client registration
-  when the service offers it. A service with none of these, such as Slack's, needs a named client. Registrations stay
+  account.
+- **Client registration.** A connector uses the OAuth client it names, the AppHost's or a person's own; GitHub,
+  Microsoft Entra (Work IQ), and Slack all need one. Otherwise the platform follows the MCP authorization spec's
+  registration order: a registration it already holds, then a client ID metadata document when the service supports
+  one and can reach your deployment, then dynamic client registration when the service offers it. Registrations stay
   bound to the service's verified issuer; a different issuer needs a new registration and sign-in.
-- **Refresh and revocation.** The platform refreshes a grant before it expires and after the service rejects it, one
-  refresh at a time. When a refresh's outcome is unknown, for example because its response was lost after the
-  service may have rotated the refresh token, the grant needs a new sign-in instead of a retry. A grant that can't be
-  refreshed becomes `needs_sign_in`: the call that found it fails with an explicit error and is never replayed, the
-  server is unavailable in the sessions using it until the person connects again, and agents can wait with
+- **Refresh and revocation.** The platform refreshes a grant before it expires and after the service rejects it,
+  one refresh at a time. When a refresh's outcome is unknown, for example because its response was lost after the
+  service may have rotated the refresh token, the connection needs a new sign-in instead of a retry. A credential
+  that stops working becomes `needs_sign_in`: the call that found it fails with an explicit error and is never
+  replayed, the server is off in the sessions using it until the person connects again, and agents can wait with
   `request_sign_in`. `disconnect` revokes the grant at the service where the service supports revocation and stops
   new requests at once; requests already sent can't be recalled.
 - **Scopes.** Scopes come from the connector (`oauth.scopes`) or the server's challenge. A server that asks for more
@@ -710,14 +764,15 @@ answer deadline ends it with `authentication_required`; the agent sees either re
   secret until it's used, so don't share it. A `sign_in` action carries no link; the person's own client asks for
   one.
 - **Policy still applies.** A connector grants no network access: the environment's network policy must allow the
-  server's host, and shared environments still admit only remote MCP servers. The platform's own requests for a
-  connector (discovery, registration, tokens, and revocation, including an imported grant's token endpoint) pass the
-  same destination checks as sandbox egress, at every redirect. Promotion keeps the source environment's connector
-  grants, as it does vault grants.
-- **Operators** see connectors and grant states, never tokens or the connected account.
-- **Not supported:** plain HTTP or ports other than 443, tokens in URLs or request bodies, and OAuth run by the
-  runtime itself (a browser login started inside a sandbox or the shared runtime). The platform answers the
-  runtime's credential requests for connector servers, so no token reaches it.
+  server's and `env` hosts, and deployment fails when an environment lists a connector its policy blocks. Shared
+  environments admit only remote servers and refuse `env` bindings. The platform's own requests for a connector
+  (discovery, registration, tokens, and revocation, including an imported grant's token endpoint) pass the same
+  destination checks as sandbox egress, at every redirect. Promotion keeps the source environment's connectors, as
+  it does vault grants.
+- **Operators** see connectors and connection states, never credentials or the connected account.
+- **Not supported:** plain HTTP or ports other than 443, credentials in URLs or request bodies, and sign-ins run by
+  the runtime or a local server (a browser login started inside a sandbox or the shared runtime). The platform
+  answers the runtime's credential requests for connector servers, so no credential reaches it.
 
 Later, connections made on GitHub could become another source for connectors, once the stock runtime can use them
 without a GitHub token in the sandbox ([decision 40](#decision-tracker)). Connectors will never require them.
@@ -1266,7 +1321,7 @@ limitations or unresolved gates, not reasons to claim feature parity.
 | Fast starts | Pre-warm a sandbox before creating its session | `warm: n` only on a backend qualified for isolated assignment and persistent state |
 | Network control | `enabled` (the default), `disabled`, or `restricted` to at most 100 exact host names | Same default and concepts, plus `network: false` and host-list shorthand; wildcard semantics differ and enforcement is gated |
 | Output files | Files under `/workspace/outputs` published as artifacts that outlive the sandbox | Same convention; turn-scoped immutable publication and explicit pending/failure state |
-| Secrets | Vaults for sandbox requests and MCP, including documented credential types | Target placeholders and scoped MCP credentials; header/TLS support is bounded. Refreshable MCP OAuth grants are proposed as connectors (section 8), not built |
+| Secrets | Vaults for sandbox requests and MCP, including documented credential types | Target placeholders and scoped MCP credentials; header/TLS support is bounded. Connectors for any MCP server, with OAuth sign-in and refresh, are proposed (section 8), not built |
 | Your functions while you're away | `required_actions` wait for a `tool_result`, and webhooks notify you | Durable actions with claims, replay reconciliation, signed webhooks, and polling; no blanket hook or process-resumption guarantee |
 | Schedules | Automations start/continue sessions; agents can request schedules | Same intended journeys, with stored tool declarations, authorized handler routes, and idempotent occurrences |
 | Multi-agent | Subagents with their own context in the same environment | Native SDK subagents are a candidate within admitted policy; their crash/suspend recovery is not established. Container-worker orchestration remains later |
@@ -1284,11 +1339,11 @@ limitations or unresolved gates, not reasons to claim feature parity.
 | Identity and billing | API keys with scopes; model usage at API rates plus container rates | GitHub identity; Copilot entitlement or Foundry, with compute on your Azure bill |
 | Models | OpenAI models | Any model your Copilot entitlement offers, or your Foundry deployments |
 | Idle sandboxes | Can expire after an hour without activity/keep-alives; published artifacts remain | Restore declared durable state after safe idle stop; active waits may incur compute cost. No general process hibernation |
-| MCP OAuth | Your application runs the provider's sign-in and stores the grant (`mcp_oauth`); OpenAI refreshes it | Proposed: the same, plus sign-in run by the deployment itself (CLI, an app's link, or a waiting agent) with your own OAuth client; grants refresh outside every runtime |
+| MCP credentials | Your application stores a static token or an OAuth grant it obtained (`static_bearer`, `mcp_oauth`); OpenAI refreshes OAuth grants | Proposed: connectors cover both, and the deployment can also run the sign-in itself (CLI, an app's link, or a waiting agent) with your own OAuth client; credentials refresh outside every runtime |
 
-These six workstreams do not exhaust the entire OpenAI API. Refreshable MCP OAuth credentials now have a proposed
-contract ([connectors](#sign-in-to-services-with-oauth)) that is not built, and additional vault protocol forms still
-need their own; static MCP credentials are not equivalent to either.
+These six workstreams do not exhaust the entire OpenAI API. MCP credentials, refreshable OAuth grants included, now
+have a proposed contract ([connectors](#connect-any-mcp-server)) that is not built, and additional vault protocol
+forms still need their own; static MCP credentials are not equivalent to connectors.
 Do not silently declare such gaps intentional or closed. They remain in the parity backlog within the requested
 vault workstream, and have to be explicitly implemented or reported unsupported.
 
@@ -1351,9 +1406,9 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | Validated | Container Apps Sandboxes with retained data disks; gateway state on Azure Files NFS; one gateway replica (G3) |
 | 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate | MCP OAuth proposed as connectors (rows 37–40); other request and auth formats not designed |
 | 36 | Operator control plane | A gateway-served web console, operator API, and CLI; operators named in the AppHost (every account on a loopback local gateway that names none); configuration with secrets redacted but no conversation content; a few guarded, audited actions and no deletes | Decided | Built (section 16) |
-| 37 | Service sign-in for agents | People sign in once to OAuth-protected remote MCP servers ("connectors"); the platform keeps and refreshes each grant outside every runtime, and an agent that needs a missing sign-in can be unblocked instead of failing (mechanism in row 39) | Decided | Not built: proposed in section 8, gate G6 |
-| 38 | Independence from GitHub | Authorizing a service needs no GitHub Connector, GitHub OAuth app, or GitHub token: the customer's own OAuth client (in the AppHost, in code, or automatic MCP registration) or a grant their app imports, with consent, callback, and tokens at the service and the deployment. GitHub stays the platform identity that owns personal grants (principle 5) | Decided | Not built |
-| 39 | Connector API shape | AppHost `connectors` (with `account: "user"` or `"service"`) and `connectorReturnUrls`; `connect`, `connectors`, and `disconnect` in the CLI; `managed.connectors` (`connect`, `complete`, `list`, `create`, `disconnect`, `delete`); `sign_in` actions and the `request_sign_in` platform tool; runtime credentials only through host-answered MCP headers | Proposed | Not built |
+| 37 | Any MCP server through connectors | Agents use any MCP server through one mechanism, such as GitHub's MCP server, Work IQ, Slack, and others, remote or local; each person connects their own account once per deployment (OAuth sign-in or token), the platform keeps and refreshes the credential outside every runtime, and an agent that needs a missing connection can be unblocked instead of failing (mechanism in row 39) | Decided | Not built: proposed in section 8, gate G6 |
+| 38 | Independence from GitHub | Connecting a service needs neither GitHub's connector service nor the platform's GitHub sign-in: the customer's own OAuth client (in the AppHost, in code, or automatic MCP registration), a token, or a grant their app imports, with consent, callback, and credentials at the service and the deployment. GitHub's MCP server is one more connector; GitHub stays the platform identity that owns personal connections (principle 5) | Decided | Not built |
+| 39 | Connector API shape | AppHost `connectors` (`mcpServer`, `oauth`, `token`, `env`, `account: "user"` or `"service"`), environment `connectors` that join every session, and `connectorReturnUrls`; `connect` (with `--token`), `connectors` (with `import`), and `disconnect` in the CLI; `managed.connectors` (`connect`, `complete`, `list`, `create`, `disconnect`, `delete`); `sign_in` actions and the `request_sign_in` platform tool; runtime credentials only through host-answered MCP headers | Proposed | Not built |
 | 40 | GitHub Connectors as a source | Optionally use connections made on GitHub once the stock runtime can use them without a GitHub token in the sandbox; never required | Later | Not built: sandboxes hold only a placeholder GitHub token |
 
 ## Platform contracts
@@ -1419,20 +1474,23 @@ not prevent overlap during deployment; leases/generations must fence old and rep
 
 ### Connector contract
 
-Proposed with [connectors](#sign-in-to-services-with-oauth). Gate G6 qualifies it on the pinned SDK 1.0.26 and
+Proposed with [connectors](#connect-any-mcp-server). Gate G6 qualifies it on the pinned SDK 1.0.26 and
 runtime 1.0.103, where the runtime APIs it relies on are marked experimental.
 
-- **Admission.** A connector server is a remote MCP server of the session or one of its custom agents whose URL
-  matches exactly one connector the session may use; more than one match is `conflict`. Admission hands connector
-  servers to the runtime as host-managed servers (`managedMcpServers`, whose credentials come only from
-  dynamic-header refresh) or as HTTP servers with dynamic headers (`headersRefreshTtlMs`), in both placements,
-  whichever keeps the customer's server and tool names. A server without a usable grant starts in
-  `disabledMcpServers`, so the runtime never contacts it unauthenticated.
+- **Admission.** Each environment's connectors join every session in it as MCP servers named after them; a person's
+  own connectors join the sessions that name their server. A server of the session or one of its custom agents whose
+  URL matches a connector configures that same server, and more than one matching connector is `conflict`. Admission
+  hands connector servers to the runtime as host-managed servers (`managedMcpServers`, whose credentials come only
+  from dynamic-header refresh) or as HTTP servers with dynamic headers (`headersRefreshTtlMs`), in both placements,
+  whichever keeps the customer's server and tool names. A server without a usable credential starts in
+  `disabledMcpServers`, so the runtime never contacts it unauthenticated. A connector's `env` binding gives isolated
+  sandboxes one placeholder per variable, registered with the egress proxy for its hosts like a vault credential;
+  shared placement refuses `env` bindings.
 - **Answers.** The gateway registers its own interest in `mcp.headers_refresh_required` and `mcp.oauth_required` on
   every create and resume, and clients' `registerInterest` and `releaseInterest` calls don't change it. For connector
   servers, header requests (`session.mcp.headers.handlePendingHeadersRefreshRequest`) get `headers` carrying the
-  session's placeholder in isolated placement, `none` in shared placement (the adapter attaches the token), or
-  `error` naming the sign-in when no grant is usable. OAuth requests (`session.mcp.oauth.handlePendingRequest`)
+  session's placeholder in isolated placement, `none` in shared placement (the adapter attaches the credential), or
+  `error` naming the connection when no credential is usable. OAuth requests (`session.mcp.oauth.handlePendingRequest`)
   always get `cancelled`, never a token or `runtimeRefresh`. Client answers for connector servers are refused
   (`conflict`).
 - **Refresh where tokens are resolved.** The egress proxy's per-use authorization and the shared adapter receive the
@@ -1454,15 +1512,20 @@ runtime 1.0.103, where the runtime APIs it relies on are marked experimental.
   grant, which the operator console and API list and which one operator sign-in resolves for every waiting session.
   Subagent calls keep the existing subagent limits.
 - **Sign-in flow.** Authorization code with PKCE (S256), `state`, the MCP server as the `resource` (RFC 8707), an
-  exact redirect URI, and issuer checks (RFC 9207) where the server advertises them. A link's one-time secret travels
+  exact redirect URI, issuer checks (RFC 9207) where the server advertises them, and `offline_access` when the
+  authorization server lists it, so the grant can refresh. A link's one-time secret travels
   in its URL fragment, as with `console`; opening it sets a short-lived `HttpOnly`, `SameSite=Lax` cookie, and the
   service's callback must return to that browser before the gateway exchanges the code. The gateway then holds the
   grant pending and sends the browser to `returnTo` with a one-time completion code. `returnTo` must be a loopback
   URL or an exact entry of `connectorReturnUrls`, without credentials or other schemes. `complete` binds the grant
   only for the account that minted the link, with the sign-in `id` its app kept in that person's session, and only
   within 10 minutes; otherwise the platform discards the grant and revokes it where the service supports revocation.
-  A link stolen before its first use remains a bearer secret, as an OAuth authorization request is. Connecting,
-  importing, or disconnecting a service grant requires an operator.
+  A link stolen before its first use remains a bearer secret, as an OAuth authorization request is. A token
+  connection skips the flow: the owner's authenticated call stores it. Connecting, importing, or disconnecting a
+  service account requires an operator.
+- **Import.** `connectors import` runs on the person's machine and reads only the MCP server definitions in their
+  Copilot CLI configuration. It sends URLs and OAuth client IDs, never tokens, header values, or environment values,
+  and creates nothing the person hasn't confirmed.
 - **Gateway requests.** Discovery, registration, token, and revocation requests go through `evaluateDestination`
   with pinned DNS answers: HTTPS on port 443, protected addresses blocked, private ones only for hosts an operator
   names, and every redirect hop checked again. Before contacting a user-created connector's server, the gateway
@@ -1472,7 +1535,8 @@ runtime 1.0.103, where the runtime APIs it relies on are marked experimental.
   requests at startup, on TTL expiry, and after a 401, and their answer window; that with the gateway's interest
   registered, no server starts the runtime's own OAuth; that a server in `disabledMcpServers` stays out of the tool
   list without failing session creation, and `startServer` later brings it up with headers; what an `error` answer
-  does to a running server and its calls; and that a running agent sees tools that load mid-turn. If any of these
+  does to a running server and its calls; that a running agent sees tools that load mid-turn; and that local (stdio)
+  servers the runtime starts in a sandbox see connector variables. If any of these
   fails, connector servers fail with `capability_unavailable` and the gap joins the [upstream gaps](#upstream-gaps);
   the platform never falls back to giving the runtime a token.
 
@@ -1537,7 +1601,7 @@ supported-capability reporting; a local result alone does not qualify Azure.
 | G3: Azure substrate and persistence | On the chosen Azure backend, create two isolated sessions, verify private assignment, replace compute, and recover files, declared package environment, HOME, and native runtime state. Test actual native locking/recovery and old-owner overlap. Demonstrate warm assignment only if advertised. Unsupported subprocess/subagent suspension fails visibly; no blind replay of setup effects | G1 |
 | G4: Identity, isolation, and egress | Two GitHub users cannot cross-read/list/attach/answer. Real user-attributed inference, refresh, expiry, and revocation work through the broker without exposing provider/platform tokens in the sandbox. Network-on works; false blocks session-time packages and shell/MCP/web egress while scoped inference still works. Shared attribution, direct-IP/DNS/redirect bypasses, and supported TLS vault clients are exercised locally and on the chosen Azure backend | G1, G3 for Azure qualification |
 | G5: Promotion and attached-session continuity | Preserve the same client/session identity, native caller-visible operation, history, and ordered outcomes through promotion. Inject pre/post-commit failures and stale responses; only one owner executes. Caller network restrictions remain. A real interactive CLI reconnects to that same session. App/relay support is a separate acceptance result, not inferred from CLI success | G2, G3, G4 |
-| G6: Connectors | Two accounts connect the same connector, and in shared and isolated placement each session uses only its owner's grant. No access token, refresh token, or client secret appears in a sandbox's environment, files, runtime state, events, or logs, and the runtime never starts its own OAuth. Refresh before expiry and after a 401, with rotation, holds under concurrent sessions, and late or duplicate 401s never discard a newer token; a crash around a refresh or a callback leaves a usable grant or `needs_sign_in`, never a reused refresh token; disconnect and revocation stop new requests at once. A call that fails for want of a grant fails explicitly and is not replayed, and connecting never restarts a connected server. An agent waiting on `request_sign_in` outlasts an app disconnect and a gateway restart, then continues after sign-in, including a non-operator owner's session resumed by a separate operator's service sign-in. A link forwarded to another person, a replayed link, a callback in a browser other than the one that opened the link, a completion by another account or app session, a `returnTo` outside the allowed list, two connectors for one URL, and gateway OAuth requests to protected addresses are all refused. Run with a service that needs a registered client (Slack) and one that registers automatically, locally and on Azure | G2, G4 |
+| G6: Connectors | Two accounts connect the same connector, and in shared and isolated placement each session uses only its owner's grant. No access token, refresh token, or client secret appears in a sandbox's environment, files, runtime state, events, or logs, and the runtime never starts its own OAuth. Refresh before expiry and after a 401, with rotation, holds under concurrent sessions, and late or duplicate 401s never discard a newer token; a crash around a refresh or a callback leaves a usable grant or `needs_sign_in`, never a reused refresh token; disconnect and revocation stop new requests at once. A call that fails for want of a grant fails explicitly and is not replayed, and connecting never restarts a connected server. An agent waiting on `request_sign_in` outlasts an app disconnect and a gateway restart, then continues after sign-in, including a non-operator owner's session resumed by a separate operator's service sign-in. A link forwarded to another person, a replayed link, a callback in a browser other than the one that opened the link, a completion by another account or app session, a `returnTo` outside the allowed list, two connectors for one URL, and gateway OAuth requests to protected addresses are all refused. Run with GitHub's MCP server (GitHub App sign-in and a personal access token), Work IQ (Entra sign-in with admin consent), Slack, a server that registers automatically, and a local server using an `env` placeholder in an isolated sandbox, locally and on Azure | G2, G4 |
 
 ### Gate results
 
