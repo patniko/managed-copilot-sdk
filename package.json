@@ -12,7 +12,8 @@
     "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.apphost.json",
     "test": "pnpm -r --if-present run test",
     "clean": "pnpm -r --if-present run clean",
-    "dev": "aspire run"
+    "dev": "aspire run",
+    "sample": "pnpm --silent --filter @managed-copilot/samples sample"
   },
   "devDependencies": {
     "@managed-copilot/aspire": "workspace:*",
