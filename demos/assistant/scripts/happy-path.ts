@@ -190,7 +190,7 @@ async function sandboxJourney(page: Page): Promise<void> {
 
   step("Follow up: the same sandbox gets it (reused, no new approval)");
   const starts = await page.locator('[data-testid="approval"][data-tool="start_worker"]').count();
-  await send(page, "Split it by meeting type too.");
+  await send(page, "Which day of the week is the busiest? Chart that too.");
   const reused = page.locator(`[data-testid="sandbox-card"][data-action="message"][data-worker="${stats}"]`).last();
   await reused.waitFor({ timeout: TURN_TIMEOUT });
   ok(`sent the follow-up to ${stats}`);

@@ -165,8 +165,8 @@ while Google is connected.
    Python sandbox?**, showing the sandbox's name, size, network (off), and the exact task, events included. Click
    **Start sandbox**: a card shows the new sandbox at work, the chart appears under the reply, and the side panel lists
    it under **Sandboxes**.
-8. Ask *"Split it by meeting type too."* The follow-up goes to the same sandbox, marked **reused**, with no new
-   approval: it still has the events.
+8. Ask *"Which day of the week is the busiest? Chart that too."* The follow-up goes to the same sandbox, marked
+   **reused**, with no new approval: it still has the events.
 9. Ask *"Also check what the candidate in my next interview works on in open source."* That's different work, so the
    assistant asks to start a **web research sandbox**, which can reach only `github.com` and `api.github.com`. The side
    panel lists both sandboxes with their state and number of tasks. The assistant stops a sandbox once it can't help
@@ -255,10 +255,11 @@ after its report, a topic the person moved on from, or the least useful one when
 - **Following them.** The server uses public SDK calls only, and never attaches a client to a sandbox (an attached
   client would answer its prompts): `managed.workers(session).list()`, `managed.on("worker.started" | "worker.idle"
   | "worker.failed" | "worker.stopped")`, `managed.sessions.get(worker.id)` for its sandbox, and
-  `managed.artifacts(worker.id)` for the files it published from `/workspace/outputs`. Each card's time comes from
-  those events and states and is kept in the server's store. Images are copied there too, so a chart stays in the chat
-  after its sandbox is deleted; the route that serves them answers only this app's pages and sends a sandboxing
-  Content Security Policy.
+  `managed.artifacts(worker.id)` for the files it published from `/workspace/outputs`. The events prompt a fresh
+  listing, and each card's time comes from those listings, matched by the sandbox's message count rather than by
+  comparing clocks (an event can arrive late after a reconnect); times are kept in the server's store. Images are
+  copied there too, so a chart stays in the chat after its sandbox is deleted; the route that serves them answers only
+  this app's pages and sends a sandboxing Content Security Policy.
 - **Talking while they work.** While a turn runs (for example while the agent waits for a sandbox), new messages are
   sent with `mode: "immediate"`, so the assistant answers them right away; the sandbox keeps working.
 - **Older conversations.** A conversation created before the environment was an orchestrator can't start sandboxes;

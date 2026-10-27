@@ -495,6 +495,65 @@ describe("Sandboxes", () => {
     subject.stop();
   });
 
+  it("doesn't end a follow-up's work with an earlier finish that arrives late", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "idle", updatedAt: at(30) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    expect(subject.view.runs.c1).toMatchObject({ finishedAt: at(30), outcome: "idle" });
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) }));
+    state.workers = [{ ...stats, state: "working", messages: 2, updatedAt: at(41) }];
+    await subject.refresh();
+    // The event stream reconnected and caught up: the first task's finish arrives now.
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(30));
+    await subject.refresh();
+    expect(subject.view.runs.c2).toMatchObject({ startedAt: at(41), finishedAt: undefined });
+    state.workers = [{ ...stats, state: "failed", messages: 2, error: "Python crashed", updatedAt: at(90) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(90), outcome: "failed" });
+    subject.stop();
+  });
+
+  it("knows a sandbox stopped after it finished, when its card showed up late and the clocks differ", async () => {
+    const cards: WorkerItem[] = [];
+    const research = worker({ id: "w1", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [research], cards });
+    await subject.refresh();
+    // Finished at :39 by the platform's clock; the card (timed by another clock) says its work started at :41.
+    emit("worker.idle", { workerId: "w1", name: "research", state: "idle" }, at(39));
+    cards.push(card({ id: "c1", workerId: "w1", worker: "research", environment: "assistant-web", endedAt: at(41) }));
+    emit("worker.stopped", { workerId: "w1", name: "research", state: "stopped" }, at(600));
+    state.workers = [{ ...research, state: "stopped", updatedAt: at(600) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(41), outcome: "idle" });
+
+    // Seen finished by a listing before its card showed up, and that finish's event was missed.
+    const lateCards: WorkerItem[] = [];
+    const other = sandboxes({ workers: [{ ...research, state: "idle", updatedAt: at(25) }], cards: lateCards });
+    await other.subject.refresh();
+    lateCards.push(card({ id: "c1", workerId: "w1", worker: "research", environment: "assistant-web" }));
+    other.state.workers = [{ ...research, state: "stopped", updatedAt: at(600) }];
+    await other.subject.refresh();
+    expect(other.subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    subject.stop();
+    other.subject.stop();
+  });
+
+  it("knows a sandbox stopped mid-task was cut short", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "idle", updatedAt: at(30) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(30));
+    await subject.refresh();
+    // The follow-up was under way when the sandbox was stopped: one finish reported for two messages.
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) }));
+    emit("worker.stopped", { workerId: "w1", name: "stats", state: "stopped" }, at(50));
+    state.workers = [{ ...stats, state: "stopped", messages: 2, updatedAt: at(50) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(50), outcome: "stopped" });
+    subject.stop();
+  });
+
   it("writes nothing for a conversation replaced while it was being read", async () => {
     const cards = [card({ id: "c1", workerId: "w1", worker: "stats" })];
     const { subject, state, store } = sandboxes({ workers: [worker({ id: "w1", name: "stats" })], artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] }, cards });
@@ -576,15 +635,20 @@ describe("Sandboxes", () => {
     subject.stop();
   });
 
-  it("times work by the platform's events and ignores other conversations' sandboxes", async () => {
-    const { subject, emit, state, views } = sandboxes({ workers: [worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) })], cards: [card({ id: "c1", workerId: "w1", worker: "stats" })] });
+  it("times work by listings that its events prompt, and ignores other conversations' sandboxes", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats" }), card({ id: "c2", workerId: "w2", worker: "research", environment: "assistant-web" })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const research = worker({ id: "w2", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) });
+    const { subject, emit, state, views } = sandboxes({ workers: [stats, research], cards });
     await subject.refresh();
     expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: undefined, outcome: undefined });
-    emit("worker.idle", { workerId: "w9", name: "other", state: "idle" }, at(10), "someone-else");
+    // A finish in another conversation (even for the same ID) isn't this one's.
+    emit("worker.idle", { workerId: "w2", name: "research", state: "idle" }, at(10), "someone-else");
     emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(21));
-    state.workers = [worker({ id: "w1", name: "stats", state: "idle", updatedAt: at(22) })];
+    state.workers = [{ ...stats, state: "idle", updatedAt: at(21) }, { ...research, state: "stopped", updatedAt: at(30) }];
     await subject.refresh();
     expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(21), outcome: "idle" });
+    expect(subject.view.runs.c2).toEqual({ workerId: "w2", startedAt: at(2), finishedAt: at(30), outcome: "stopped" });
     expect(views.at(-1)!.workers[0]!.state).toBe("idle");
     subject.stop();
   });
