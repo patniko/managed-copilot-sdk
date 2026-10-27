@@ -58,6 +58,8 @@ const CLEANUP_RETRY_MAX_MS = 30 * 60_000;
 /** Attempts at approving one prompt before it is left to a person. */
 const APPROVAL_ATTEMPTS = 3;
 const REMEMBERED_PROMPTS = 1_000;
+/** How long after a worker's runtime connection closes its state is checked: core's queued events land first. */
+const STOPPED_SETTLE_MS = 1_000;
 
 interface RunState {
   /** The run's latest root reply with content. */
@@ -109,6 +111,10 @@ export class WorkerManager {
   readonly #runStarts = new Map<string, number>();
   /** Workers a coordinator message (or their task) is being sent to right now. */
   readonly #sending = new Set<string>();
+  /** Workers whose runtime connection closed, to settle shortly (`#onStopped`). */
+  readonly #stoppedChecks = new Map<string, NodeJS.Timeout>();
+  /** Workers whose runtime connection closed while a send to them (or their start) was under way. */
+  readonly #stoppedDuringSend = new Set<string>();
   readonly #waiters = new Set<Waiter>();
   readonly #approving = new Set<string>();
   /** Prompts left to a person (managed policy requires one, or approving failed repeatedly): not tried again. */
@@ -120,11 +126,8 @@ export class WorkerManager {
   #cleanupDelay = CLEANUP_RETRY_MS;
   readonly #disposers: (() => void)[] = [];
   #closed = false;
-  #onClose!: () => void;
-  /** Resolves when the gateway starts shutting down. */
-  readonly #stopping = new Promise<void>((resolve) => {
-    this.#onClose = resolve;
-  });
+  /** Waits to end when the gateway starts shutting down; each removes itself when it ends first. */
+  readonly #onShutdown = new Set<() => void>();
 
   constructor(options: WorkerManagerOptions) {
     this.#app = options.app;
@@ -169,9 +172,12 @@ export class WorkerManager {
 
   close(): void {
     this.#closed = true;
-    this.#onClose();
+    for (const end of [...this.#onShutdown]) end();
+    this.#onShutdown.clear();
     if (this.#cleanupTimer) clearTimeout(this.#cleanupTimer);
     this.#cleanupTimer = undefined;
+    for (const timer of this.#stoppedChecks.values()) clearTimeout(timer);
+    this.#stoppedChecks.clear();
     for (const dispose of this.#disposers.splice(0)) dispose();
     // Waits stay unanswered: the ledger runs them again after the restart, and they wait again.
     for (const waiter of [...this.#waiters]) waiter.abandon();
@@ -216,6 +222,10 @@ export class WorkerManager {
     // Fails now, before admitting, when nothing can act for the owner. The worker's own session never uses this
     // credential: its coordinator's connected clients (or the owner's background sign-in) serve it.
     const principal = await this.#principal(coordinator.id);
+    // A shutdown meanwhile leaves the call unanswered (nothing admitted: its rerun starts the worker), and the
+    // coordinator must still be the session that asked.
+    if (this.#closed) return unanswered();
+    if (this.#coordinator(context).record.incarnation !== coordinator.incarnation) throw new ManagedCopilotError("not_found", `Session ${context.sessionId} was not found`);
     const { record: admitted, created } = this.#store.admit(
       {
         id: randomUUID(),
@@ -253,26 +263,19 @@ export class WorkerManager {
     const target = this.#find(coordinator, input["worker"]);
     const message = requiredText(input["message"], "message", TASK_LIMIT);
     assertMessageable(target);
-    this.#store.beginMessage(context.idempotencyKey, target.id);
-    let principal: Principal;
-    try {
-      principal = await this.#principal(target.id);
-    } catch (error) {
-      if (this.#closed) return unanswered();
-      this.#store.abandonMessage(context.idempotencyKey);
-      throw error;
-    }
+    const principal = await this.#principal(target.id);
+    // A shutdown meanwhile leaves the call unanswered, with nothing recorded: its rerun sends the message.
     if (this.#closed) return unanswered();
     // As it is now: it may have changed while the credential was checked. From here to the send, synchronously, so no
-    // event changes it in between.
+    // event changes it in between; the message is recorded in the same step it is counted.
     const worker = this.#store.get(target.id) ?? target;
     const prior = worker.state;
     const working = prior === "idle" || prior === "failed" ? this.#store.messaged(worker.id, [prior]) : undefined;
     if (!working) {
-      this.#store.abandonMessage(context.idempotencyKey);
       assertMessageable(worker);
       throw new ManagedCopilotError("conflict", `Worker "${worker.name}" changed while the message was being sent. Check list_workers, then try again.`);
     }
+    this.#store.beginMessage(context.idempotencyKey, worker.id);
     const runs = this.#runStarts.get(worker.id) ?? 0;
     this.#changed(working);
     this.#sending.add(worker.id);
@@ -286,8 +289,9 @@ export class WorkerManager {
       if (this.#closed) return unanswered();
       const reason = describeError(error);
       if (this.#store.get(worker.id)?.state === "stopped") {
-        this.#store.abandonMessage(context.idempotencyKey);
-        throw new ManagedCopilotError("conflict", `Worker "${worker.name}" was stopped before your message reached it.`);
+        // It may have run already: the record stays bound to this worker, so a rerun of this call never sends the
+        // message to a newer worker that took its name.
+        throw new ManagedCopilotError("conflict", `Worker "${worker.name}" was stopped while your message was being sent.`);
       }
       if ((this.#runStarts.get(worker.id) ?? 0) !== runs) {
         // A run started while it was sent: the message most likely arrived, so its record stays (outcome unknown).
@@ -299,6 +303,7 @@ export class WorkerManager {
       throw new ManagedCopilotError(isManagedCopilotError(error) ? error.code : "internal", `Couldn't deliver your message to "${worker.name}": ${reason}`);
     } finally {
       this.#sending.delete(worker.id);
+      this.#recheckStopped(worker.id);
     }
     return `Sent to "${worker.name}". Call wait_for_workers for its reply.`;
   }
@@ -523,14 +528,14 @@ export class WorkerManager {
   }
 
   /**
-   * A worker the stopped gateway left working. Core ends a run the restart cut (its root error and idle reach
-   * `#onEvent`), and a run waiting on a prompt continues once it is answered: a running turn is theirs. Otherwise the
-   * worker's last recorded turn decides if it ran the coordinator's latest message (it ended after that was sent); if
-   * not, that message never started a run.
+   * A worker the stopped gateway left working. A turn that still goes on is core's (which ends a turn the restart cut)
+   * or durable's (a turn waiting on a prompt continues once it is answered). Otherwise the worker's last recorded turn
+   * decides if it ran the coordinator's latest message (it ended after that was sent); if not, that message never
+   * started a run.
    */
   #settleAfterRestart(worker: WorkerRecord, session: SessionRecord): void {
+    if (this.#turnContinues(worker, session)) return;
     const turn = session.lastTurn;
-    if (turn?.status === "running") return;
     const ran = turn !== undefined && (turn.completedAt === undefined || (worker.sentAt !== undefined && turn.completedAt >= worker.sentAt));
     if (!turn || !ran) {
       this.#fail(worker, "The platform restarted before it received your last message. Message it again to continue.", ["working"]);
@@ -666,6 +671,7 @@ export class WorkerManager {
       if (this.#closed) return;
       const latest = this.#store.get(worker.id);
       if (latest?.cleanup) void this.#cleanup(latest);
+      this.#recheckStopped(worker.id);
     });
     this.#launches.set(worker.id, run.catch((error: unknown) => this.#log.warn("A worker start ended unexpectedly", { workerId: worker.id, error: (error as Error).message })));
   }
@@ -686,13 +692,15 @@ export class WorkerManager {
         clientName: WORKER_CLIENT_NAME,
       });
       created = true;
+      // A gateway shutting down leaves the rest to recovery, which finds the session by its parent.
+      if (this.#closed) return;
       const incarnation = result.incarnation ?? sessions.get(worker.id)?.incarnation;
       if (!incarnation) throw new ManagedCopilotError("not_found", "The worker's session was deleted while it started");
       this.#store.setIncarnation(worker.id, incarnation);
       if (!this.#stillStarting(worker.id)) return;
       // Fails now when nothing can act for the owner; the send itself lends no credential to the worker.
       const sender = await this.#principal(worker.id);
-      if (!this.#stillStarting(worker.id)) return;
+      if (this.#closed || !this.#stillStarting(worker.id)) return;
       const working = this.#store.messaged(worker.id, ["starting"]);
       if (!working) return;
       const runs = this.#runStarts.get(worker.id) ?? 0;
@@ -868,11 +876,8 @@ export class WorkerManager {
         const run = this.#run(sessionId);
         const content = typeof data["content"] === "string" ? data["content"] : "";
         if (content.trim()) run.latest = content;
-        // The run went on after an error (for example, after a retry), or after the platform settled it as ended
-        // (its runtime came back with the run still going): it is not over.
+        // The run went on after an error (for example, after a retry): it is not over.
         run.error = undefined;
-        const resumed = this.#store.update(sessionId, { state: "working", error: null }, ["failed"]);
-        if (resumed) this.#changed(resumed);
         return;
       }
       case "session.error": {
@@ -908,17 +913,64 @@ export class WorkerManager {
   /**
    * A worker's runtime connection closed (its sandbox stopped, or its runtime went away). Core ends a running turn the
    * connection cut (its root error and idle reach `#onEvent`), and a turn waiting on a prompt continues when its
-   * runtime comes back. A working worker with no turn running is settled here, unless a send to it is still under
-   * way (its outcome decides): its run reported an error but never ended, or the latest message never started a run.
+   * runtime comes back. A working worker with no turn running is settled once the events core still had queued from
+   * that runtime have landed, unless a send to it is under way then (its outcome decides): its run reported an error
+   * but never ended, or the latest message never started a run.
    */
   #onStopped(workerId: string): void {
+    if (this.#stoppedChecks.has(workerId)) return;
+    const timer = setTimeout(() => {
+      this.#stoppedChecks.delete(workerId);
+      if (!this.#closed) this.#settleStopped(workerId);
+    }, STOPPED_SETTLE_MS);
+    timer.unref?.();
+    this.#stoppedChecks.set(workerId, timer);
+  }
+
+  #settleStopped(workerId: string): void {
     const worker = this.#store.get(workerId);
-    if (worker?.state !== "working" || this.#sending.has(workerId) || this.#launches.has(workerId)) return;
+    if (worker?.state !== "working" || !this.#workers.has(workerId)) return;
+    // A send (or a start) still under way decides first; the check runs again once it is done.
+    if (this.#sending.has(workerId) || this.#launches.has(workerId)) {
+      this.#stoppedDuringSend.add(workerId);
+      return;
+    }
     const session = this.#app.service("sessions").get(workerId);
-    if (!session || session.incarnation !== worker.incarnation || session.lastTurn?.status === "running") return;
+    if (!session || session.incarnation !== worker.incarnation || this.#turnContinues(worker, session)) return;
     const run = this.#runs.get(workerId);
     this.#runs.delete(workerId);
-    this.#fail(worker, run?.error ?? "Its sandbox stopped before it started on your last message. Message it again to continue.", ["working"]);
+    const reason =
+      run?.error ??
+      (run ? "Its run was cut off when its sandbox stopped. Message it to continue." : "Its sandbox stopped before it started on your last message. Message it again to continue.");
+    this.#fail(worker, reason, ["working"]);
+  }
+
+  /** Checks again a worker whose runtime connection closed while a send to it (or its start) was under way. */
+  #recheckStopped(workerId: string): void {
+    if (this.#stoppedDuringSend.delete(workerId) && !this.#closed) this.#onStopped(workerId);
+  }
+
+  /**
+   * Whether the worker's last turn still goes on although its runtime went away: core still runs it (core ends it
+   * when its runtime is lost and nothing carries it), or it waits on durable work (a prompt or tool call) that
+   * continues once its runtime comes back. Core records a turn failed at a root error before the turn ends, so such a
+   * turn goes on only in the second case.
+   */
+  #turnContinues(worker: WorkerRecord, session: SessionRecord): boolean {
+    const turn = session.lastTurn;
+    if (!turn || turn.completedAt !== undefined) return false;
+    return turn.status === "running" || this.#hasOpenActions(worker);
+  }
+
+  #hasOpenActions(worker: WorkerRecord): boolean {
+    const actions = this.#app.services.actions;
+    if (!actions || !worker.incarnation) return false;
+    try {
+      return actions.hasOpenActions(worker.id, { incarnation: worker.incarnation });
+    } catch {
+      // Leaving a worker working that turns out to be done is recoverable (stop it); failing a live one is not.
+      return true;
+    }
   }
 
   #onDeleted(sessionId: string): void {
@@ -1034,7 +1086,7 @@ export class WorkerManager {
   async #publications(workers: readonly WorkerRecord[], signal: AbortSignal | undefined): Promise<Map<string, string>> {
     const notes = new Map<string, string>();
     const artifacts = this.#app.services.artifacts;
-    if (!artifacts || signal?.aborted) return notes;
+    if (!artifacts || signal?.aborted || this.#closed) return notes;
     const waits = Promise.all(
       workers
         .filter((worker) => worker.state === "idle" && worker.incarnation !== undefined)
@@ -1049,7 +1101,16 @@ export class WorkerManager {
         }),
     );
     // A shutdown ends the wait at once (the call is then left unanswered); the waits above settle on their own.
-    await Promise.race([waits, this.#stopping]);
+    let end!: () => void;
+    const stopping = new Promise<void>((resolve) => {
+      end = resolve;
+    });
+    this.#onShutdown.add(end);
+    try {
+      await Promise.race([waits, stopping]);
+    } finally {
+      this.#onShutdown.delete(end);
+    }
     return notes;
   }
 

@@ -46,6 +46,10 @@ export const ORCHESTRATOR_MIGRATIONS: readonly string[] = [
      worker_id TEXT NOT NULL,
      created_at TEXT NOT NULL
    );`,
+  // The same backfill again, for ledgers that took migration 2 before it had one. Checking a stopped worker whose
+  // session is already gone again is harmless.
+  `UPDATE orchestrator_workers SET cleanup = 1 WHERE state = 'stopped' AND cleanup = 0;
+   UPDATE orchestrator_workers SET sent_at = updated_at WHERE state = 'working' AND sent_at IS NULL;`,
 ];
 
 /** States in which a worker is busy: a wait for it continues. */

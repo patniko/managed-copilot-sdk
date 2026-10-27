@@ -254,23 +254,29 @@ describe("orchestrator recovery", () => {
   });
 
   it("checks again, after an upgrade, whether stopped workers' sessions outlived them", () => {
-    const db = openDatabase(":memory:");
-    try {
-      // A ledger from before cleanups and send times were recorded.
-      migrate(db, "orchestrator", ORCHESTRATOR_MIGRATIONS.slice(0, 1));
-      const insert = db.prepare(
-        `INSERT INTO orchestrator_workers (id, coordinator_id, coordinator_incarnation, owner_id, incarnation, name, environment, task, state, messages, start_key, created_at, updated_at)
-         VALUES (?, 'coord', 'inc-c', 1001, ?, ?, 'coder', 'task', ?, 1, ?, ?, ?)`,
-      );
-      insert.run("w-stopped", "inc-1", "stopped", "stopped", "k1", "2026-10-26T00:00:00.000Z", "2026-10-26T00:00:00.000Z");
-      insert.run("w-working", "inc-2", "working", "working", "k2", "2026-10-26T00:00:00.000Z", "2026-10-26T01:00:00.000Z");
-      insert.run("w-idle", "inc-3", "idle", "idle", "k3", "2026-10-26T00:00:00.000Z", "2026-10-26T02:00:00.000Z");
-      const store = new WorkerStore(db);
-      expect(store.pendingCleanup().map((worker) => worker.id)).toEqual(["w-stopped"]);
-      expect(store.get("w-working")).toMatchObject({ sentAt: "2026-10-26T01:00:00.000Z", cleanup: false });
-      expect(store.get("w-idle")?.sentAt).toBeUndefined();
-    } finally {
-      db.close();
+    // A ledger from before cleanups and send times were recorded, and one that took migration 2 before it backfilled them.
+    const earlierSecond = `ALTER TABLE orchestrator_workers ADD COLUMN sent_at TEXT;
+      ALTER TABLE orchestrator_workers ADD COLUMN cleanup INTEGER NOT NULL DEFAULT 0;
+      CREATE INDEX orchestrator_workers_cleanup ON orchestrator_workers (cleanup) WHERE cleanup = 1;
+      CREATE TABLE orchestrator_stops (key TEXT PRIMARY KEY, worker_id TEXT NOT NULL, created_at TEXT NOT NULL);`;
+    for (const applied of [ORCHESTRATOR_MIGRATIONS.slice(0, 1), [ORCHESTRATOR_MIGRATIONS[0]!, earlierSecond]]) {
+      const db = openDatabase(":memory:");
+      try {
+        migrate(db, "orchestrator", applied);
+        const insert = db.prepare(
+          `INSERT INTO orchestrator_workers (id, coordinator_id, coordinator_incarnation, owner_id, incarnation, name, environment, task, state, messages, start_key, created_at, updated_at)
+           VALUES (?, 'coord', 'inc-c', 1001, ?, ?, 'coder', 'task', ?, 1, ?, ?, ?)`,
+        );
+        insert.run("w-stopped", "inc-1", "stopped", "stopped", "k1", "2026-10-26T00:00:00.000Z", "2026-10-26T00:00:00.000Z");
+        insert.run("w-working", "inc-2", "working", "working", "k2", "2026-10-26T00:00:00.000Z", "2026-10-26T01:00:00.000Z");
+        insert.run("w-idle", "inc-3", "idle", "idle", "k3", "2026-10-26T00:00:00.000Z", "2026-10-26T02:00:00.000Z");
+        const store = new WorkerStore(db);
+        expect(store.pendingCleanup().map((worker) => worker.id)).toEqual(["w-stopped"]);
+        expect(store.get("w-working")).toMatchObject({ sentAt: "2026-10-26T01:00:00.000Z", cleanup: false });
+        expect(store.get("w-idle")?.sentAt).toBeUndefined();
+      } finally {
+        db.close();
+      }
     }
   });
 });

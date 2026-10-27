@@ -32,6 +32,15 @@ describe("orchestrator environments", () => {
   const sessions = () => app().service("sessions");
   const workers = (coordinatorId: string): WorkerInfo[] => app().service("orchestrator").listFor(ALICE_PRINCIPAL, coordinatorId);
   const worker = (coordinatorId: string, name: string): WorkerInfo => app().service("orchestrator").getFor(ALICE_PRINCIPAL, coordinatorId, name);
+  /**
+   * Waits until the worker's current run started in the runtime. A worker is `working` as soon as its task or message
+   * is being sent; events a test emits before the run starts would belong to no run.
+   */
+  const runStarted = (coordinatorId: string, name: string) =>
+    waitUntil(() => {
+      const info = worker(coordinatorId, name);
+      return info.state === "working" && sessions().get(info.id)?.lastTurn?.status === "running";
+    });
   const connect = async (environment = "team", token = ALICE) => {
     const client = await RawClient.connect(gateway.url, token, environment);
     clients.push(client);
@@ -149,7 +158,7 @@ describe("orchestrator environments", () => {
   it("keeps the coordinator's turn open until its workers finish, without polling", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "slow", task: "stall" });
-    await waitUntil(() => worker(sessionId, "slow").state === "working");
+    await runStarted(sessionId, "slow");
     const workerId = worker(sessionId, "slow").id;
 
     const timedOut = await call(client, sessionId, "wait_for_workers", { timeoutSeconds: 1 });
@@ -171,7 +180,7 @@ describe("orchestrator environments", () => {
   it("records a worker turn's error, and a later turn makes it work again", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "flaky", task: "stall" });
-    await waitUntil(() => worker(sessionId, "flaky").state === "working");
+    await runStarted(sessionId, "flaky");
     const workerId = worker(sessionId, "flaky").id;
     runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
     runtime.emitEvent(workerId, "session.idle", {});
@@ -188,7 +197,7 @@ describe("orchestrator environments", () => {
   it("messages a worker only between runs, keeps a run's report through steering, and fails a run that reported an error when it ends", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "steady", task: "stall" });
-    await waitUntil(() => worker(sessionId, "steady").state === "working");
+    await runStarted(sessionId, "steady");
     const workerId = worker(sessionId, "steady").id;
     // A working worker is waited for first: nothing is queued behind its run.
     expect(await call(client, sessionId, "message_worker", { worker: "steady", message: "also this" })).toMatch(/is still working\. Call wait_for_workers/);
@@ -210,7 +219,7 @@ describe("orchestrator environments", () => {
 
     // A run that reports an error fails when it ends (until then it is still working, and takes no message).
     await call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
-    await waitUntil(() => worker(sessionId, "steady").state === "working");
+    await runStarted(sessionId, "steady");
     runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
     await sleep(100);
     expect(worker(sessionId, "steady").state).toBe("working");
@@ -221,7 +230,7 @@ describe("orchestrator environments", () => {
 
     // A run that goes on after an error (a retry) finishes with its reply.
     await call(client, sessionId, "message_worker", { worker: "steady", message: "stall" });
-    await waitUntil(() => worker(sessionId, "steady").state === "working");
+    await runStarted(sessionId, "steady");
     runtime.emitEvent(workerId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
     runtime.emitEvent(workerId, "assistant.message", { messageId: "a2", content: "recovered" });
     runtime.emitEvent(workerId, "session.idle", {});
@@ -233,7 +242,7 @@ describe("orchestrator environments", () => {
   it("fails a working worker whose runtime went away after its run reported an error, before the run ended", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "vanished", task: "stall" });
-    await waitUntil(() => worker(sessionId, "vanished").state === "working");
+    await runStarted(sessionId, "vanished");
     const workerId = worker(sessionId, "vanished").id;
     // Core records the turn failed at its error, so it does not end the turn again when the connection closes.
     runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
@@ -246,6 +255,44 @@ describe("orchestrator environments", () => {
     expect(await call(client, sessionId, "message_worker", { worker: "vanished", message: "again" })).toContain('Sent to "vanished"');
     await waitUntil(() => worker(sessionId, "vanished").result === "echo: again");
     expect(worker(sessionId, "vanished").state).toBe("idle");
+  });
+
+  it("fails a worker whose runtime went away while the message that started its run was still unanswered", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "midsend", task: "hello" });
+    await waitUntil(() => worker(sessionId, "midsend").state === "idle");
+    const workerId = worker(sessionId, "midsend").id;
+    // The runtime starts the run but has not answered the send yet; the run reports an error; the connection closes.
+    const held = runtime.holdNext("session.send", workerId);
+    const sending = call(client, sessionId, "message_worker", { worker: "midsend", message: "stall" });
+    await held.held;
+    await waitUntil(() => worker(sessionId, "midsend").state === "working" && sessions().get(workerId)?.lastTurn?.status === "running");
+    runtime.emitEvent(workerId, "session.error", { errorType: "model", message: "The model call failed" });
+    await waitUntil(() => sessions().get(workerId)?.lastTurn?.status === "failed");
+    sandboxes.streams.get(workerId)!.destroy();
+    // The run had started, so the message most likely arrived; the run is then settled as ended.
+    expect(await sending).toMatch(/may have reached "midsend"/);
+    held.release();
+    await waitUntil(() => worker(sessionId, "midsend").state === "failed");
+    expect(worker(sessionId, "midsend").error).toBe("The model call failed");
+  });
+
+  it("keeps a working worker whose runtime went away while its run waits on a prompt, also after an error it went on from", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "patient", task: "stall" });
+    await runStarted(sessionId, "patient");
+    const workerId = worker(sessionId, "patient").id;
+    // A retried error (core records the turn failed), then a prompt only a person may answer.
+    runtime.emitEvent(workerId, "session.error", { errorType: "rate_limit", message: "Rate limited; retrying" });
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a1", content: "retrying worked" });
+    runtime.emitEvent(workerId, "permission.requested", { requestId: "perm-wait", permissionRequest: { kind: "shell", fullCommandText: "rm -rf /data", managedApprovalRequired: true } });
+    const actions = app().service("actions");
+    await waitUntil(() => actions.list(workerId, { open: true }).some((action) => action.requestId === "perm-wait"));
+    expect(sessions().get(workerId)?.lastTurn?.status).toBe("failed");
+    sandboxes.streams.get(workerId)!.destroy();
+    // Durable carries the prompt: the run continues once it is answered, so the worker stays working.
+    await sleep(1_500);
+    expect(worker(sessionId, "patient").state).toBe("working");
   });
 
   it("takes back a message the runtime refused", async () => {
@@ -306,6 +353,48 @@ describe("orchestrator environments", () => {
     expect(worker(sessionId, first).state).toBe("stopped");
   });
 
+  it("keeps the record of a message whose worker was stopped while it was sent, so running the call again never sends it to a newer worker", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "relay", task: "hello" });
+    await waitUntil(() => worker(sessionId, "relay").state === "idle");
+    const original = worker(sessionId, "relay").id;
+    const manager = app().service("orchestrator");
+    const context = { sessionId, ownerId: 1001, environment: "team", toolCallId: "call-relay", idempotencyKey: `msg-${sessionId}` };
+    // The message reaches the worker and runs, but its send's answer is lost while the worker is stopped.
+    const service = sessions();
+    const send = service.send.bind(service);
+    let delivered!: () => void;
+    const ran = new Promise<void>((resolve) => (delivered = resolve));
+    let lose!: () => void;
+    const lost = new Promise<void>((resolve) => (lose = resolve));
+    service.send = async (principal, id, input, options) => {
+      if (id !== original) return send(principal, id, input, options);
+      await send(principal, id, input, options);
+      delivered();
+      await lost;
+      throw new Error("The runtime connection closed");
+    };
+    try {
+      const sending = manager.message({ worker: "relay", message: "more" }, context).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await ran;
+      await waitUntil(() => worker(sessionId, original).result === "echo: more");
+      expect(await call(client, sessionId, "stop_worker", { worker: "relay" })).toContain('Stopped worker "relay"');
+      lose();
+      expect(await sending).toMatchObject({ code: "conflict", message: expect.stringMatching(/was stopped while your message was being sent/) });
+    } finally {
+      delete (service as { send?: unknown }).send;
+    }
+    // A newer worker takes the name; the same call again answers from its record instead of sending.
+    await call(client, sessionId, "start_worker", { name: "relay", task: "hello again" });
+    await waitUntil(() => worker(sessionId, "relay").id !== original && worker(sessionId, "relay").state === "idle");
+    const newer = worker(sessionId, "relay").id;
+    expect(await manager.message({ worker: "relay", message: "more" }, context)).toMatch(/may have reached "relay"/);
+    expect(sends(newer)).toEqual(["hello again"]);
+  });
+
   it("says so when a stopped worker's sandbox could not be deleted, and finishes the cleanup later", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "sticky", task: "hello" });
@@ -346,7 +435,7 @@ describe("orchestrator environments", () => {
   it("approves a worker's permission prompts once each, and leaves the ones a person must answer", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "shell", task: "stall" });
-    await waitUntil(() => worker(sessionId, "shell").state === "working");
+    await runStarted(sessionId, "shell");
     const workerId = worker(sessionId, "shell").id;
     const answers = () => runtime.calls("session.permissions.handlePendingPermissionRequest").filter((request) => request.params["sessionId"] === workerId);
 
@@ -379,7 +468,7 @@ describe("orchestrator environments", () => {
   it("approves a prompt once its full request shows no person is required, read as the ledger reads it", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "prompts", task: "stall" });
-    await waitUntil(() => worker(sessionId, "prompts").state === "working");
+    await runStarted(sessionId, "prompts");
     const workerId = worker(sessionId, "prompts").id;
     const answered = (requestId: string) =>
       runtime.calls("session.permissions.handlePendingPermissionRequest").some((request) => request.params["sessionId"] === workerId && request.params["requestId"] === requestId);
@@ -461,7 +550,7 @@ describe("orchestrator environments", () => {
   it("waits for a finished worker's outputs to be published before reporting them", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "publisher", task: "stall" });
-    await waitUntil(() => worker(sessionId, "publisher").state === "working");
+    await runStarted(sessionId, "publisher");
     const workerId = worker(sessionId, "publisher").id;
     const services = app().services as Record<string, unknown>;
     const real = services["artifacts"];
@@ -543,7 +632,7 @@ describe("orchestrator environments", () => {
   it("stops and deletes the workers of a deleted coordinator", async () => {
     const { client, sessionId } = await coordinator();
     await call(client, sessionId, "start_worker", { name: "orphan", task: "stall" });
-    await waitUntil(() => worker(sessionId, "orphan").state === "working");
+    await runStarted(sessionId, "orphan");
     const workerId = worker(sessionId, "orphan").id;
     const owned = app().service("orchestrator").listFor(ALICE_PRINCIPAL, sessionId);
     await sessions().delete(1001, sessionId);

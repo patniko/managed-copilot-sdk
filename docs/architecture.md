@@ -762,12 +762,17 @@ and quickstart snippet 14).
   for the run (a later root reply means it went on), and the run's root `session.idle` marks the worker `failed` with
   that error, or `idle` with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are
   the signals the stock `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way. A
-  worker is never messageable while its run is open, so no message can start a run before the previous run's idle.
-  A root reply for a `failed` worker (its run continued after its runtime came back) makes it `working` again. When a
-  worker's runtime connection closes (`sessions.onLifecycle("stopped")`) while it is `working`, no send to it is under
-  way, and core has no turn running for it, the worker fails: with its run's error when the error came without an
-  idle (core records the turn failed at the error, so it does not end it again), or because its latest message never
-  started a run. A sandbox's idle stop therefore also settles any worker left `working` with an idle runtime.
+  worker is never messageable while its run is open, so no message can start a run before the previous run's idle,
+  and only a new run makes a `failed` worker `working` again. A worker's last turn still goes on, although its runtime
+  went away, while core runs it (core ends it if nothing carries it) or while it waits on durable work (`hasOpenActions`:
+  open prompts and tool calls, and answers not yet delivered), which continues when its runtime comes back; core
+  records a turn `failed` at a root error before the turn ends (also for a subagent's error, and for an error the
+  run goes on from), so for such a turn only the second applies. When a worker's runtime connection closes
+  (`sessions.onLifecycle("stopped")`), it is checked a second later, once the events core still had queued from that
+  runtime have landed, and again after a send to it (or its start) that was under way then has settled: if it is still
+  `working` and its last turn no longer goes on, the worker fails, with its run's error when the error came without
+  an idle, as cut off when its run had started, or because its latest message never started a run. A sandbox's idle
+  stop therefore also settles any worker left `working` with an idle runtime.
 - **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
   of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
   the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
@@ -781,7 +786,9 @@ and quickstart snippet 14).
   never resolves it, and each handler checks after its awaits), so nothing is recorded while the database closes and
   durable runs the call again after the restart; each tool is idempotent by its key, so the rerun answers with what
   the first run did (a message that was being sent says it may have arrived) or does it again (a wait waits again).
-  Waits on worker state and on publication end at once.
+  A start or message cut before it admitted the worker or recorded the message records nothing, so its rerun does it.
+  Waits on worker state and on publication end at once (each publication wait unsubscribes from shutdown when it
+  ends).
 - **Approvals.** The module subscribes to the actions ledger's `onChange` and, for a `pending` permission action of
   one of its workers (one no attached client claimed), claims and answers it with `{ kind: "approve-once" }` through
   the ledger's `platform` caller (`ActionCaller { type: "platform", ownerId, responder: "orchestrator" }`; recorded as
@@ -795,16 +802,18 @@ and quickstart snippet 14).
   waited across a restart.
 - **Messages and files.** `message_worker` takes a worker between runs only (`idle` or `failed`); a `working` one
   answers `session_busy`, so nothing queues behind a run. It records the tool call's key and worker
-  (`orchestrator_messages`) before `sessions.send`, so a replay never sends twice (a replay without a recorded message
-  ID says the outcome is unknown); the worker's state is read again after the credential check and changed in the
-  same step as the send starts. When the send fails: if a run started meanwhile, the message most likely arrived, so
-  its record stays and the coordinator is told it may have arrived; if the worker was stopped meanwhile, it is told
-  so; otherwise the send is forgotten, its count taken back, the earlier state restored, and the failure reported
-  (runtime errors without their own wording). Worker tools report refusals as failed tool results
-  (`resultType: "failure"`), so the model reads them. `read_worker_file` and `copy_worker_files` use the sandbox
-  service's file API (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox), each call pinned with the
-  worker's `sandboxId` (read while the session is still the worker's incarnation; the sandbox service checks it before
-  and after starting the sandbox), so a call never reaches a newer session that reuses the ID. Text up to 256 KiB is read
+  (`orchestrator_messages`) in the same step it counts the message and marks the worker `working`, just before
+  `sessions.send`, so a replay never sends twice (a replay without a recorded message ID says the outcome is unknown);
+  the worker's state is read again after the credential check. When the send fails: if a run started meanwhile, the
+  message most likely arrived, so its record stays and the coordinator is told it may have arrived; if the worker was
+  stopped meanwhile, the record stays too (bound to that worker, so a rerun never sends the message to a newer worker
+  with the same name) and the coordinator is told; otherwise the send is forgotten, its count taken back, the earlier
+  state restored, and the failure reported (runtime errors without their own wording). Worker tools report refusals as
+  failed tool results (`resultType: "failure"`), so the model reads them. `read_worker_file` and `copy_worker_files` use
+  the sandbox service's file API (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox), each call
+  pinned with the worker's `sandboxId` (read while the session is still the worker's incarnation; the sandbox service
+  checks it before and after starting the sandbox), so a call never reaches a newer session that reuses the ID. Text up
+  to 256 KiB is read
   (64,000 characters returned, binary files detected), directories are listed, and copies of at most 500 files and
   64 MiB stream sandbox to sandbox through the gateway, so they work on Docker and Azure alike; every download is
   destroyed when its copy ends, and list errors are reported. Paths are workspace-relative and may not contain `..`;
@@ -824,8 +833,9 @@ and quickstart snippet 14).
   them.
 - **Restarts.** At start the module settles what a stopped gateway left: outstanding cleanups run; workers of a
   coordinator that no longer exists are stopped and deleted; a `starting` worker without a session fails and holds no
-  slot, and one with its session fails with a note that it never got its task. A `working` worker whose turn core
-  still runs is left to core (which ends a turn the restart cut) or to durable (a turn waiting on a prompt). Otherwise
+  slot, and one with its session fails with a note that it never got its task. A `working` worker whose last turn
+  still goes on (the rule under **Runs**) is left to core (which ends a turn the restart cut) or to durable (a turn
+  waiting on a prompt). Otherwise
   its last recorded turn decides only if it ended after the coordinator's latest message was sent (`sent_at`): the
   worker becomes `idle` (its reply was not captured) or `failed`; if not, that message never started a run, and the
   worker fails with its earlier report kept.
