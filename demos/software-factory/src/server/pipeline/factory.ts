@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { defineTool, type PermissionHandler, type SessionConfig, type SessionEvent, type Tool } from "@github/copilot-sdk";
-import { isManagedCopilotError, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
+import { isManagedCopilotError, type ArtifactInfo, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
 import { z } from "zod";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, SANDBOX_SIZES } from "../../shared/environments.js";
 import { findTemplate } from "../../shared/templates.js";
@@ -154,8 +154,10 @@ interface Run {
   /** The run ended paused at its checkpoint; the work order resumes when the platform is ready. */
   paused: boolean;
   readonly gates: Semaphore;
-  readonly decisions: Map<string, ToolStart>;
+  readonly decisions: Map<string, { readonly start: ToolStart; readonly firstMessage: boolean }>;
   workerSync?: Promise<WorkerInfo[]>;
+  workerRevision: number;
+  workerSnapshotRevision: number;
   stopCoordinator?: (error: unknown) => void;
 }
 
@@ -210,6 +212,7 @@ const MAX_READ_FAILURES = 5;
 export class Factory {
   readonly #options: FactoryOptions;
   readonly #runs = new Map<string, Run>();
+  readonly #cancelling = new Set<string>();
   readonly #sandboxes: Semaphore;
   readonly #usageTimers = new Map<string, NodeJS.Timeout>();
   /** Work orders paused by a lost platform connection, and how many times. */
@@ -241,7 +244,7 @@ export class Factory {
   }
 
   isActive(id: string): boolean {
-    return this.#runs.has(id);
+    return this.#runs.has(id) || this.#cancelling.has(id);
   }
 
   activity(id: string, stationId?: string): ActivityItem[] {
@@ -335,6 +338,7 @@ export class Factory {
   }
 
   async cancel(id: string): Promise<WorkOrder> {
+    if (this.#cancelling.has(id)) throw new StationError("conflict", "This work order is already being cancelled.");
     const run = this.#runs.get(id);
     if (!run) {
       const stored = this.#store.getWorkOrder(id);
@@ -343,11 +347,19 @@ export class Factory {
       // Interrupted by a restart (or paused by a lost connection) and never resumed: cancel the record directly.
       const wo = stored as MWorkOrder;
       this.#forgetPause(id);
-      if (workOrderMode(wo) === "agent") await this.#deleteWorkerSessions(wo);
-      this.#cancelStations(wo);
-      Object.assign(wo, { status: "cancelled", completedAt: now() });
-      this.#persist(wo);
-      return wo;
+      this.#cancelling.add(id);
+      try {
+        if (workOrderMode(wo) === "agent") {
+          await this.#stopPersistedCoordinator(wo);
+          await this.#deleteWorkerSessions(wo);
+        }
+        this.#cancelStations(wo);
+        Object.assign(wo, { status: "cancelled", completedAt: now() });
+        this.#persist(wo);
+        return wo;
+      } finally {
+        this.#cancelling.delete(id);
+      }
     }
     run.abort.abort();
     await Promise.allSettled([...run.sessions.values()].map((active) => active.session.abort()));
@@ -390,7 +402,7 @@ export class Factory {
 
   /** Deletes the work order, its records, and (best effort) its platform sessions, sandboxes, and artifacts. */
   async delete(id: string): Promise<void> {
-    if (this.#runs.has(id)) throw new StationError("conflict", "Cancel the work order before deleting it.");
+    if (this.isActive(id)) throw new StationError("conflict", "Finish cancelling the work order before deleting it.");
     const wo = this.#store.getWorkOrder(id);
     if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
     this.#forgetPause(id);
@@ -409,7 +421,7 @@ export class Factory {
    */
   resumeInterrupted(): void {
     for (const stored of this.#store.listWorkOrders()) {
-      if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.#runs.has(stored.id)) continue;
+      if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.isActive(stored.id)) continue;
       if (!this.#options.readiness(workOrderMode(stored)).ready) continue;
       this.#resume(stored as MWorkOrder);
     }
@@ -529,6 +541,8 @@ export class Factory {
       paused: false,
       gates: new Semaphore(1),
       decisions: new Map(),
+      workerRevision: 0,
+      workerSnapshotRevision: -1,
     };
     this.#runs.set(wo.id, run);
     run.done = this.#execute(run).finally(() => this.#finish(run));
@@ -980,13 +994,13 @@ export class Factory {
         await this.#endCoordinatorTurn(run, active);
         this.#activity(run.wo, station.id, "Resumed the same coordinator session; reconciling its workers before continuing", "info");
       }
-      await this.#syncWorkers(run);
+      await this.#syncWorkers(run, true);
       unwatch = this.#watchWorkers(run);
       for (let attempt = 0; attempt <= MAX_NUDGES; attempt++) {
         const prompt = attempt === 0 ? coordinatorPrompt(run.wo, this.#platform.models, resuming) : coordinatorReminder();
         await Promise.race([this.#turn(run, station, active, prompt, resuming ? "continue" : "work", 1), failed]);
         if (failure) throw failure;
-        await this.#syncWorkers(run);
+        await this.#syncWorkers(run, true);
         if (run.wo.release && this.#station(run, "release").status === "done") {
           this.#updateStation(run, station, { status: "done", detail: "Release accepted by the factory", finishedAt: now() });
           return;
@@ -996,7 +1010,7 @@ export class Factory {
       throw new StationError("release_incomplete", "The coordinator stopped without getting the release accepted by the factory.");
     } catch (error) {
       if (!this.#stopping) {
-        if (active) await this.#abortCoordinator(active);
+        if (active) await this.#abortCoordinator(active.session);
         if (!(error instanceof CancelledError) && !run.abort.signal.aborted) await this.#failStation(run, station, failure ?? error);
         if (run.abort.signal.aborted || run.failed) await this.#deleteWorkerSessions(run.wo);
       }
@@ -1008,30 +1022,68 @@ export class Factory {
     }
   }
 
-  async #abortCoordinator(active: ActiveSession): Promise<void> {
+  async #abortCoordinator(session: StationSession): Promise<void> {
     let timer: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
-        active.session.abort(),
+        session.abort(),
         new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new StationError("timeout", "The coordinator didn't acknowledge the stop.")), ABORT_TIMEOUT_MS); }),
       ]);
     } catch (error) {
-      log.warn("Couldn't stop the coordinator turn", { sessionId: active.session.sessionId, error: toFactoryError(error).message });
+      log.warn("Couldn't stop the coordinator turn", { sessionId: session.sessionId, error: toFactoryError(error).message });
     } finally {
       clearTimeout(timer);
     }
   }
 
   async #endCoordinatorTurn(run: Run, active: ActiveSession): Promise<void> {
-    let info = await this.#platform.sessionInfo(active.session.sessionId);
+    await this.#stopCoordinatorTurn(active.session, () => this.#ensureCoordinatorRun(run));
+  }
+
+  async #stopCoordinatorTurn(session: StationSession, ensureActive: () => void): Promise<void> {
+    let info = await this.#platform.sessionInfo(session.sessionId);
     if (!info.lastTurn || info.lastTurn.completedAt) return;
-    await this.#abortCoordinator(active);
+    await this.#abortCoordinator(session);
     const deadline = Date.now() + ABORT_TIMEOUT_MS;
     while (info.lastTurn && !info.lastTurn.completedAt) {
-      this.#ensureCoordinatorRun(run);
+      ensureActive();
       if (Date.now() >= deadline) throw new StationError("timeout", "The coordinator's interrupted turn has not stopped yet. Retry once the platform has ended it.");
       await new Promise((resolve) => setTimeout(resolve, this.#options.pollMs ?? 250));
-      info = await this.#platform.sessionInfo(active.session.sessionId);
+      info = await this.#platform.sessionInfo(session.sessionId);
+    }
+  }
+
+  async #stopPersistedCoordinator(wo: MWorkOrder): Promise<void> {
+    const station = wo.stations.find((item) => item.kind === "coordinate");
+    if (!station?.sessionId) return;
+    let info: SessionInfo;
+    try {
+      info = await this.#platform.sessionInfo(station.sessionId);
+    } catch (error) {
+      if (isManagedCopilotError(error, "not_found")) return;
+      throw error;
+    }
+    if (!info.lastTurn || info.lastTurn.completedAt) return;
+    const session = await this.#platform.resumeSession("coordinator", station.sessionId, {
+      agent: station.agent,
+      tools: [],
+      onPermissionRequest: () => ({ kind: "reject", feedback: "This work order is being cancelled." }),
+    });
+    try {
+      await this.#stopCoordinatorTurn(session, () => {});
+      this.#activity(wo, station.id, "Stopped the persisted coordinator turn before cancelling its workers", "info");
+    } finally {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          session.disconnect(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Coordinator detach timed out")), DETACH_TIMEOUT_MS); }),
+        ]);
+      } catch (error) {
+        log.warn("Couldn't detach the cancelled coordinator", { sessionId: station.sessionId, error: toFactoryError(error).message });
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
 
@@ -1047,16 +1099,21 @@ export class Factory {
       });
     };
     const unlisten = this.#platform.onWorkerEvent?.((id) => {
-      if (id === this.#station(run, "coordinator").sessionId) refresh();
+      if (id === this.#station(run, "coordinator").sessionId) {
+        run.workerRevision++;
+        refresh();
+      }
     });
     const timer = setInterval(refresh, this.#options.pollMs ?? 3_000);
     timer.unref();
     return () => { stopped = true; clearInterval(timer); unlisten?.(); };
   }
 
-  async #syncWorkers(run: Run): Promise<WorkerInfo[]> {
+  async #syncWorkers(run: Run, fresh = false): Promise<WorkerInfo[]> {
+    // A gate needs a pass that began after its preceding I/O, not a watcher pass already partway through its reads.
+    if (fresh && run.workerSync) await run.workerSync;
     if (run.workerSync) return run.workerSync;
-    const sync = async (): Promise<WorkerInfo[]> => {
+    const read = async (): Promise<WorkerInfo[]> => {
       this.#ensureCoordinatorRun(run);
       const coordinator = this.#station(run, "coordinator");
       if (!coordinator.sessionId) return [];
@@ -1077,7 +1134,7 @@ export class Factory {
           this.#updateStation(run, station, {
             previousSessionIds: [...(station.previousSessionIds ?? []), prior.id],
             round: 0, turn: undefined, seeded: undefined, workerCheck: undefined, passedRound: undefined,
-            reviewedMessages: undefined, reportVersion: undefined, staleReportVersion: undefined, awaitingFix: undefined,
+            reviewedMessages: undefined, reviewedTurnId: undefined, reportVersion: undefined, staleReportVersion: undefined, awaitingFix: undefined,
             failedChecks: undefined, inputRevision: undefined, sandbox: undefined, tests: undefined, finishedAt: undefined,
           });
           this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
@@ -1088,7 +1145,7 @@ export class Factory {
           const nextRound = Boolean(reviewed) || station.awaitingFix;
           const round = nextRound ? station.round + 1 : Math.max(1, station.round);
           this.#updateStation(run, station, {
-            round, passedRound: undefined, workerCheck: undefined, reviewedMessages: undefined,
+            round, passedRound: undefined, workerCheck: undefined, reviewedMessages: undefined, reviewedTurnId: undefined,
             staleReportVersion: station.reportVersion, awaitingFix: undefined, finishedAt: undefined,
             ...(nextRound ? { failedChecks: 0 } : {}),
             turn: { kind: nextRound ? "fix" : station.round === 0 ? "work" : "nudge", round, sentAt: worker.updatedAt },
@@ -1099,15 +1156,16 @@ export class Factory {
           sessionId: worker.id, model: worker.model ?? station.model, startedAt: station.startedAt ?? worker.createdAt,
           worker: {
             id: worker.id, name: worker.name, state: worker.state, messages: worker.messages,
+            ...(!replaced && prior?.turnId ? { turnId: prior.turnId } : {}),
             createdRound: replaced ? 1 : prior?.createdRound ?? 1, ...(worker.error ? { error: worker.error } : {}),
           },
         });
-        if (worker.state !== "starting") await this.#refreshSandbox(run, station);
+        if (worker.state !== "starting" && worker.state !== "stopped") await this.#refreshSandbox(run, station, worker.state === "idle" || worker.state === "working");
         this.#ensureCoordinatorRun(run);
         if (worker.state === "starting" || worker.state === "working") {
           this.#updateStation(run, station, {
             status: worker.state === "starting" ? "starting" : "working",
-            detail: !station.seeded ? "Waiting for workspace preparation" : station.round > 1 ? `Fixing review findings (round ${station.round})` : "Working in the coordinator's sandbox",
+            detail: !station.seeded ? "Waiting for workspace preparation" : station.round > 1 ? `Fixing review findings (round ${station.round})` : "Working in its own sandbox",
           });
         } else if (station.turn && !station.turn.completedAt) {
           this.#updateStation(run, station, {
@@ -1122,8 +1180,26 @@ export class Factory {
       if (run.wo.workersStarted !== workers.length) this.#setWorkOrder(run, { workersStarted: workers.length });
       return workers;
     };
+    const sync = async (): Promise<WorkerInfo[]> => {
+      for (;;) {
+        const revision = run.workerRevision;
+        const workers = await read();
+        // Worker events and coordinator mutation tools invalidate even a partially read snapshot.
+        if (revision === run.workerRevision) {
+          run.workerSnapshotRevision = revision;
+          return workers;
+        }
+      }
+    };
     run.workerSync = sync().finally(() => { delete run.workerSync; });
     return run.workerSync;
+  }
+
+  #requireWorkerSnapshot(run: Run): void {
+    const changing = [...run.decisions.values()].some(({ start }) => start.data.toolName === "message_worker" || start.data.toolName === "stop_worker");
+    if (run.workerSync || run.workerSnapshotRevision !== run.workerRevision || changing) {
+      throw new StationError("conflict", "Worker instructions changed while the factory was checking them. Wait for pending worker tools to finish, then call the factory gate again.");
+    }
   }
 
   #coordinatorPermissions(run: Run, mapper: StationActivityMapper): PermissionHandler {
@@ -1143,7 +1219,7 @@ export class Factory {
         const inherited = this.#station(run, "coordinator").model;
         if ((args.model ?? inherited) !== this.#platform.models[role]) throw new StationError("invalid_request", `Use model ${this.#platform.models[role]} for the ${role}.`);
         if (args.task !== WORKER_READY_TASK) throw new StationError("invalid_request", `Use the factory's readiness task exactly: ${JSON.stringify(WORKER_READY_TASK)}`);
-        const workers = await this.#syncWorkers(run);
+        const workers = await this.#syncWorkers(run, true);
         if (workers.some((worker) => worker.name === args.name && worker.state !== "stopped")) {
           throw new StationError("conflict", `Worker ${args.name} already exists. Reuse it with message_worker, or wait_for_workers while it is busy.`);
         }
@@ -1207,7 +1283,9 @@ export class Factory {
     const build = this.#station(run, `build:${taskId}`);
     return this.#station(run, `review:${taskId}`).status === "done"
       && build.workerCheck?.passed === true && build.workerCheck.messages === build.worker?.messages
-      && build.reviewedMessages === build.worker?.messages && build.worker?.state !== "stopped" && !build.sessionGone;
+      && build.workerCheck.turnId === build.worker?.turnId
+      && build.reviewedMessages === build.worker?.messages && build.reviewedTurnId === build.worker?.turnId
+      && build.worker?.state === "idle" && !build.sessionGone;
   }
 
   #requireDependencies(run: Run, task: PlanTask): void {
@@ -1216,6 +1294,7 @@ export class Factory {
   }
 
   #requireAcceptedTasks(run: Run): void {
+    this.#requireWorkerSnapshot(run);
     const waiting = run.wo.plan!.tasks.filter((task) => !this.#taskAccepted(run, task.id));
     if (waiting.length) throw new StationError("conflict", `The release must wait for these tasks to pass checks and review: ${waiting.map((task) => task.id).join(", ")}.`);
   }
@@ -1223,7 +1302,7 @@ export class Factory {
   async #workerFor(run: Run, station: MStation, ref?: string, bootstrap = false): Promise<WorkerInfo> {
     const deadline = Date.now() + Math.min(this.#options.config.turnTimeoutMs.builder, 180_000);
     for (;;) {
-      const workers = await this.#syncWorkers(run);
+      const workers = await this.#syncWorkers(run, true);
       const worker = workers.find((item) => item.id === station.worker?.id);
       if (!worker || (ref && worker.name !== ref && worker.id !== ref)) throw new StationError("invalid_request", `Start the ${station.taskId ? builderName(station.taskId) : "release"} worker first.`);
       if (worker.coordinatorId !== this.#station(run, "coordinator").sessionId || worker.environment !== station.environment || worker.agent !== station.agent) {
@@ -1237,6 +1316,7 @@ export class Factory {
           throw new StationError("conflict", `Worker ${worker.name} doesn't have the expected sandbox.`);
         }
         if (info.lastTurn && !info.lastTurn.completedAt) throw new StationError("session_busy", `Worker ${worker.name} still has an unfinished turn. Use wait_for_workers.`);
+        if (station.worker) this.#updateStation(run, station, { worker: { ...station.worker, turnId: info.lastTurn?.turnId } });
         return worker;
       }
       if (!bootstrap || worker.messages > 1) throw new StationError("session_busy", `Worker ${worker.name} is still working. Use wait_for_workers, then call this tool again.`);
@@ -1245,14 +1325,17 @@ export class Factory {
     }
   }
 
-  async #seedWorker(run: Run, station: MStation, files: readonly SeedFile[]): Promise<void> {
+  async #seedWorker(run: Run, station: MStation, files: readonly SeedFile[], inputRevision?: string): Promise<void> {
     const writer = this.#platform.files(station.sessionId!);
     for (const file of files) {
       this.#ensureCoordinatorRun(run);
       await writer.write(file.path, file.content);
     }
     this.#ensureCoordinatorRun(run);
-    this.#updateStation(run, station, { seeded: true, status: "waiting", detail: "Workspace ready; waiting for the coordinator's instructions" });
+    this.#updateStation(run, station, {
+      seeded: true, status: "waiting", detail: "Workspace ready; waiting for the coordinator's instructions",
+      ...(inputRevision ? { inputRevision } : {}),
+    });
     this.#activity(run.wo, station.id, `Factory prepared ${files.length} input files in ${station.worker!.name}`, "info");
   }
 
@@ -1261,6 +1344,8 @@ export class Factory {
     const task = run.wo.plan!.tasks.find((candidate) => candidate.id === taskId)!;
     this.#requireDependencies(run, task);
     const worker = await this.#workerFor(run, station, ref, true);
+    this.#requireWorkerSnapshot(run);
+    this.#requireDependencies(run, task);
     const dependencyFiles = this.#dependencyFiles(run, task);
     if (!station.seeded) {
       if (worker.messages > 1) throw new StationError("conflict", "This builder started work before its inputs were prepared. Stop it and start a fresh builder with the readiness task.");
@@ -1275,21 +1360,29 @@ export class Factory {
 
   async #checkWorker(run: Run, station: MStation, release: boolean): Promise<Record<string, unknown>> {
     const worker = await this.#workerFor(run, station);
+    this.#requireWorkerSnapshot(run);
     if (!station.seeded || worker.messages < 2) throw new StationError("conflict", "Prepare the workspace and send its real task with message_worker before checking it.");
     if (release) {
       this.#requireAcceptedTasks(run);
       if (station.inputRevision !== this.#inputRevision(run)) throw new StationError("conflict", "A builder changed after the release inputs were prepared. Review that build, then prepare a new release worker.");
     }
+    const turnId = station.worker?.turnId;
+    if (!turnId) throw new StationError("conflict", "The worker has not completed a runtime turn to check.");
     const previous = station.workerCheck;
-    if (previous?.messages === worker.messages) return this.#checkReply(station, release);
+    if (previous?.messages === worker.messages && previous.turnId === turnId) return this.#checkReply(station, release);
     if (worker.state !== "idle") {
       return { ok: false, summary: `Worker **${worker.name}** failed: ${worker.error ?? "its turn did not finish"}`, message: continuePrompt(release), worker: worker.name };
     }
-    const outcome = await this.#collect(run, station, release, { version: station.staleReportVersion });
-    await this.#syncWorkers(run);
+    const outcome = await this.#collect(run, station, release, { version: station.staleReportVersion, turnId });
+    await this.#syncWorkers(run, true);
     this.#ensureCoordinatorRun(run);
-    if (station.worker?.id !== worker.id || station.worker.messages !== worker.messages || station.worker.state !== "idle") {
+    this.#requireWorkerSnapshot(run);
+    if (station.worker?.id !== worker.id || station.worker.messages !== worker.messages || station.worker.state !== "idle" || station.worker.turnId !== turnId) {
       throw new StationError("conflict", "The worker changed while the factory was checking it. Wait for the new work to finish, then check again.");
+    }
+    if (release) {
+      this.#requireAcceptedTasks(run);
+      if (station.inputRevision !== this.#inputRevision(run)) throw new StationError("conflict", "A builder changed while the release was being checked. Review its new output and prepare a new release worker.");
     }
     let problem = outcome.problem;
     let code = outcome.code;
@@ -1302,7 +1395,7 @@ export class Factory {
     }
     const passed = outcome.passed && !problem;
     this.#updateStation(run, station, {
-      workerCheck: { messages: worker.messages, passed, code, problem },
+      workerCheck: { messages: worker.messages, turnId, passed, code, problem },
       status: passed ? "done" : "waiting", detail: passed ? `${outcome.report!.summary.passed} tests passed${release ? "" : " · ready for review"}` : `Check failed: ${problem}`,
       ...(passed ? { passedRound: station.round, finishedAt: now() } : { failedChecks: (station.failedChecks ?? 0) + 1 }),
     });
@@ -1331,19 +1424,23 @@ export class Factory {
   async #reviewWorker(run: Run, taskId: string): Promise<Record<string, unknown>> {
     const build = this.#taskStation(run, taskId);
     const worker = await this.#workerFor(run, build);
-    if (!build.workerCheck?.passed || build.workerCheck.messages !== worker.messages) throw new StationError("conflict", "Call check_build on the latest worker output and get a passing report before requesting review.");
+    this.#requireWorkerSnapshot(run);
+    const turnId = build.worker?.turnId;
+    if (!build.workerCheck?.passed || build.workerCheck.messages !== worker.messages || build.workerCheck.turnId !== turnId) throw new StationError("conflict", "Call check_build on the latest worker output and get a passing report before requesting review.");
     const review = this.#station(run, `review:${taskId}`);
     const task = run.wo.plan!.tasks.find((candidate) => candidate.id === taskId)!;
-    const verdict = await this.#reviewRound(run, task, build, this.#latestReport(run, build.id), worker.result, build.reviewedMessages === worker.messages);
-    await this.#syncWorkers(run);
+    const verdict = await this.#reviewRound(run, task, build, this.#latestReport(run, build.id), worker.result, build.reviewedMessages === worker.messages && build.reviewedTurnId === turnId);
+    await this.#syncWorkers(run, true);
     this.#ensureCoordinatorRun(run);
-    if (build.worker?.id !== worker.id || build.worker.messages !== worker.messages || build.worker.state !== "idle") {
+    this.#requireWorkerSnapshot(run);
+    if (build.worker?.id !== worker.id || build.worker.messages !== worker.messages || build.worker.state !== "idle" || build.worker.turnId !== turnId) {
       this.#updateStation(run, review, { status: "waiting", detail: "The builder changed during review; check and review its new output" });
       throw new StationError("conflict", "The builder changed during review. Check its new output and request review again.");
     }
     const accepted = verdict.verdict === "approve" || build.round >= run.wo.maxReviewRounds;
-    this.#updateStation(run, build, { reviewedMessages: worker.messages, awaitingFix: !accepted });
+    this.#updateStation(run, build, { reviewedMessages: worker.messages, reviewedTurnId: turnId, awaitingFix: !accepted });
     if (accepted) {
+      this.#updateStation(run, build, { detail: `${build.tests?.passed ?? 0} tests passed` });
       this.#updateStation(run, review, {
         status: "done", finishedAt: now(), acceptedWithFindings: verdict.verdict !== "approve",
         detail: verdict.verdict === "approve" ? `Approved in round ${build.round}` : `Accepted after ${build.round} rounds with findings open`,
@@ -1354,7 +1451,7 @@ export class Factory {
       ok: true, accepted, worker: worker.name, round: build.round, verdict: verdict.verdict, findings: verdict.findings,
       summary: accepted
         ? `Factory review: **${worker.name}** ${verdict.verdict === "approve" ? "approved" : "accepted with open findings"} in round ${build.round}`
-        : `Factory review: **${verdict.findings.length} findings** for **${worker.name}**; reuse this builder for round ${build.round + 1}`,
+        : `Factory review: **${verdict.findings.length} ${verdict.findings.length === 1 ? "finding" : "findings"}** for **${worker.name}**; reuse this builder for round ${build.round + 1}`,
       ...(accepted ? {} : { message: fixPrompt(build.round + 1, run.wo.maxReviewRounds, verdict.findings, verdict.summary) }),
     };
   }
@@ -1362,12 +1459,12 @@ export class Factory {
   #inputRevision(run: Run): string {
     return sha256(JSON.stringify(run.wo.plan!.tasks.map((task) => {
       const build = this.#station(run, `build:${task.id}`);
-      return [task.id, build.worker?.id, build.workerCheck?.messages, build.reportVersion];
+      return [task.id, build.worker?.id, build.workerCheck?.messages, build.workerCheck?.turnId, build.reportVersion];
     })));
   }
 
   async #prepareAgentRelease(run: Run, ref: string): Promise<Record<string, unknown>> {
-    await this.#syncWorkers(run);
+    await this.#syncWorkers(run, true);
     this.#requireAcceptedTasks(run);
     const station = this.#station(run, "release");
     const worker = await this.#workerFor(run, station, ref, true);
@@ -1403,11 +1500,10 @@ export class Factory {
       if (missing.length) {
         return { ok: true, ready: false, summary: "Release needs the accepted builders' files copied in", copies, next: "Run these copy_worker_files operations, then call prepare_release again. Do not send the release its task yet." };
       }
-      await this.#syncWorkers(run);
+      await this.#syncWorkers(run, true);
       this.#requireAcceptedTasks(run);
       if (this.#inputRevision(run) !== revision) throw new StationError("conflict", "A builder changed while the factory prepared the release. Check and review it again.");
-      await this.#seedWorker(run, station, releaseSeed(run.wo, run.wo.plan!, copied, this.#skillsRoot).files);
-      this.#updateStation(run, station, { inputRevision: revision });
+      await this.#seedWorker(run, station, releaseSeed(run.wo, run.wo.plan!, copied, this.#skillsRoot).files, revision);
       this.#setWorkOrder(run, { status: "releasing" });
     }
     return {
@@ -1417,7 +1513,7 @@ export class Factory {
   }
 
   async #coordinatorStatus(run: Run): Promise<Record<string, unknown>> {
-    const workers = await this.#syncWorkers(run);
+    const workers = await this.#syncWorkers(run, true);
     return {
       ok: true, summary: run.wo.release ? "The release is accepted." : "Factory checkpoints",
       releaseAccepted: Boolean(run.wo.release),
@@ -1438,17 +1534,24 @@ export class Factory {
   #coordinatorEvent(run: Run, event: SessionEvent): void {
     if (this.#stopping || run.closed || event.agentId) return;
     if (event.type === "tool.execution_start") {
-      run.decisions.set(event.data.toolCallId, event);
-      const decision = toolDecision(event.data.toolName, event.data.arguments, "running");
+      if (["start_worker", "message_worker", "copy_worker_files", "stop_worker"].includes(event.data.toolName)) run.workerRevision++;
+      const args = event.data.arguments;
+      const ref = args && typeof args === "object" && "worker" in args ? args.worker : undefined;
+      const firstMessage = event.data.toolName === "message_worker"
+        && run.wo.stations.some((station) => station.worker?.messages === 1 && (station.worker.name === ref || station.worker.id === ref));
+      run.decisions.set(event.data.toolCallId, { start: event, firstMessage });
+      const decision = toolDecision(event.data.toolName, args, "running", firstMessage);
       if (decision) {
         this.#emitItem(run.wo, { id: `decision:${event.data.toolCallId}`, stationId: "coordinator", kind: "decision", ...decision });
-        if (decision.decision.action === "wait") this.#updateStation(run, this.#station(run, "coordinator"), { detail: decision.text.replace(/\*\*/g, "") });
+        this.#updateStation(run, this.#station(run, "coordinator"), { detail: decision.text.replace(/\*\*/g, "") });
       }
     } else if (event.type === "tool.execution_complete") {
-      const start = run.decisions.get(event.data.toolCallId);
-      if (!start) return;
+      const running = run.decisions.get(event.data.toolCallId);
+      if (!running) return;
       run.decisions.delete(event.data.toolCallId);
-      const decision = toolDecision(start.data.toolName, start.data.arguments, event.data.success ? "done" : "failed");
+      const { start, firstMessage } = running;
+      if (["start_worker", "message_worker", "copy_worker_files", "stop_worker"].includes(start.data.toolName)) run.workerRevision++;
+      const decision = toolDecision(start.data.toolName, start.data.arguments, event.data.success ? "done" : "failed", firstMessage);
       if (!decision) return;
       const result = parseJson<{ summary?: unknown }>(event.data.result?.content);
       this.#emitItem(run.wo, {
@@ -1473,6 +1576,7 @@ export class Factory {
         }
       }));
     } catch (error) {
+      if (isManagedCopilotError(error, "not_found")) return;
       const message = `Couldn't stop every worker: ${toFactoryError(error).message}. Delete the work order to retry cleanup.`;
       wo.error = { code: "cleanup_failed", message };
       this.#activity(wo, "coordinator", message, "error");
@@ -1619,12 +1723,13 @@ export class Factory {
     );
   }
 
-  async #refreshSandbox(run: Run, station: MStation): Promise<void> {
+  async #refreshSandbox(run: Run, station: MStation, strict = false): Promise<void> {
     if (!station.sessionId) return;
     try {
       const info = await this.#platform.sessionInfo(station.sessionId);
       if (info.id !== station.sessionId) return;
       const patch: Partial<MStation> = { sessionState: info.state, sessionGone: undefined };
+      if (station.worker) patch.worker = { ...station.worker, turnId: info.lastTurn?.turnId };
       if (info.sandbox) {
         patch.sandbox = {
           id: info.sandbox.id,
@@ -1637,6 +1742,7 @@ export class Factory {
       }
       this.#updateStation(run, station, patch);
     } catch (error) {
+      if (strict) throw error;
       log.debug("Sandbox details unavailable", { station: station.id, error: (error as Error).message });
     }
   }
@@ -1785,10 +1891,10 @@ export class Factory {
 
   // ─── Artifacts and checks ───────────────────────────────────────────────────────────────────────────────────
 
-  async #collect(run: Run, station: MStation, release: boolean, freshAfter?: { readonly version?: number }): Promise<CheckOutcome> {
+  async #collect(run: Run, station: MStation, release: boolean, freshAfter?: { readonly version?: number; readonly turnId?: string }): Promise<CheckOutcome> {
     const previousVersion = freshAfter ? freshAfter.version : station.reportVersion;
     this.#updateStation(run, station, { status: "collecting", detail: "Collecting artifacts" });
-    await this.#capturePublication(run, station);
+    const published = await this.#capturePublication(run, station);
     await this.#refreshSandbox(run, station);
     this.#throwIfCancelled(run);
     const latest = this.#store.latestArtifacts(run.wo.id, station.id);
@@ -1800,6 +1906,9 @@ export class Factory {
     const check = release ? "npm run check:release" : "npm run check";
     const fail = (code: string, problem: string): CheckOutcome => ({ passed: false, code, problem, ...(report ? { report } : {}), ...(manifest ? { manifest } : {}) });
     if (!report) return fail("no_test_report", `no test report was published (run \`${check}\`)`);
+    if (freshAfter?.turnId && published.find((artifact) => artifact.path === "test-report.json" && artifact.state === "published")?.turnId !== freshAfter.turnId) {
+      return fail("check_not_run", `\`${check}\` wasn't run in the worker's latest turn`);
+    }
     if (previousVersion !== undefined && reportArtifact!.version <= previousVersion) return fail("check_not_run", `\`${check}\` wasn't run after the latest changes`);
     if (report.summary.total === 0) return fail("no_tests", "no tests ran (name test files like test/<name>.test.js)");
     if (report.summary.failed > 0) return fail("tests_failed", `${report.summary.failed} of ${report.summary.total} tests failed`);
@@ -1809,7 +1918,7 @@ export class Factory {
     return { passed: true, code: "ok", problem: "", report, manifest };
   }
 
-  async #capturePublication(run: Run, station: MStation): Promise<void> {
+  async #capturePublication(run: Run, station: MStation): Promise<ArtifactInfo[]> {
     const sessionId = station.sessionId!;
     const artifacts = this.#platform.artifacts(sessionId);
     const publication = await artifacts.waitForPublication({ timeoutMs: this.#options.config.publicationTimeoutMs });
@@ -1843,6 +1952,7 @@ export class Factory {
       this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
       this.#emitItem(run.wo, { stationId: station.id, kind: "artifact", text: `Published ${added} file${added === 1 ? "" : "s"}`, level: "info" });
     }
+    return list;
   }
 
   /**
@@ -1988,7 +2098,7 @@ export class Factory {
 
   /** The stored work order when it's still active and nothing runs it (it may have been cancelled or deleted meanwhile). */
   #resumable(id: string): MWorkOrder | undefined {
-    if (this.#stopping || this.#runs.has(id)) return undefined;
+    if (this.#stopping || this.isActive(id)) return undefined;
     const stored = this.#store.getWorkOrder(id);
     return stored && ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) ? (stored as MWorkOrder) : undefined;
   }

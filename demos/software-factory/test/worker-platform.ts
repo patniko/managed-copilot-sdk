@@ -16,6 +16,7 @@ export class WorkerPlatform extends FakePlatform {
   readonly resumed: { role: StationRole; id: string }[] = [];
   readonly copies: { from: string; to: string; paths: string[]; destination?: string }[] = [];
   readonly #listeners = new Set<WorkerEventListener>();
+  #turn = 0;
   get workerIds(): string[] { return [...this.workerRecords.keys()]; }
 
   override async script(session: FakeSession, prompt: string): Promise<void> {
@@ -26,7 +27,10 @@ export class WorkerPlatform extends FakePlatform {
     return super.script(session, prompt);
   }
 
-  override turnStarted(session: FakeSession): void { this.lastTurnStatus.set(session.sessionId, "running"); }
+  override turnStarted(session: FakeSession): void {
+    this.lastTurnStatus.set(session.sessionId, "running");
+    this.turnIds.set(session.sessionId, `turn-${++this.#turn}`);
+  }
   override turnEnded(session: FakeSession, error?: unknown): void { this.lastTurnStatus.set(session.sessionId, error ? "failed" : "completed"); }
   override turnStopped(session: FakeSession): void { this.lastTurnStatus.set(session.sessionId, "cancelled"); }
 
@@ -46,6 +50,10 @@ export class WorkerPlatform extends FakePlatform {
   onWorkerEvent(listener: WorkerEventListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  emitWorkerEvent(workerId: string): void {
+    this.#changed(this.workerRecords.get(workerId)!);
   }
 
   override workers(coordinatorId: string): StationWorkers {

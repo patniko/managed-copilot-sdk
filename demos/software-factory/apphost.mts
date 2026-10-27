@@ -145,6 +145,7 @@ export function softwareFactory(options: SoftwareFactoryOptions = {}): SoftwareF
       type: "orchestrator",
       description: "Software factory: a coordinator agent that creates builder and release sandboxes as the plan needs them",
       customizations: coordinator,
+      network: false,
       // The first is the default; builders and the release each get their own sandbox from these.
       workers: [FACTORY_ENVIRONMENTS.builder, FACTORY_ENVIRONMENTS.release],
       maxWorkers: FACTORY_MAX_WORKERS,

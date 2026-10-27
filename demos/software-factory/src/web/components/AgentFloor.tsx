@@ -14,7 +14,7 @@ export function AgentFloor({ workOrder, selectedId, onSelect }: {
   const release = workOrder.stations.find((station) => station.kind === "release");
   const rows = taskRows(workOrder);
   const card = (station: Station, heading?: string) => (
-    <StationCard station={station} selected={selectedId === station.id} onSelect={() => onSelect(station.id)} heading={heading} />
+    <StationCard station={station} selected={selectedId === station.id} onSelect={() => onSelect(station.id)} heading={heading} compact />
   );
   return (
     <section aria-label="Agent-led factory floor" className="Box @container min-w-0 overflow-auto bg-dot-grid p-4 xl:h-full xl:min-h-0">
@@ -30,7 +30,7 @@ export function AgentFloor({ workOrder, selectedId, onSelect }: {
               {row.dependsOn.length ? (
                 <p className="mb-2 flex items-center gap-1 text-xs text-fg-muted"><LinkIcon size={12} /> After {row.dependsOn.map((id) => taskTitle(workOrder, id)).join(", ")}</p>
               ) : null}
-              <div className="grid items-start gap-2 @sm:grid-cols-2">
+              <div className="grid items-start gap-2 @sm:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
                 {row.build ? card(row.build, row.build.round ? `Build · round ${row.build.round}` : "Build") : null}
                 {row.review ? card(row.review, row.review.round ? `Review · round ${row.review.round}` : "Review") : null}
               </div>

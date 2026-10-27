@@ -23,7 +23,14 @@ export function CoordinatorDecisions({ workOrder }: { readonly workOrder: WorkOr
     </Callout>
   );
   if (!resource?.data) return <p role="status" className="flex items-center gap-2 text-fg-muted"><Spinner size={16} /> Loading decisions…</p>;
-  const decisions = resource.data.filter((item) => item.decision || item.kind === "error");
+  const decisions = resource.data.filter((item) => {
+    if (item.kind === "error") return true;
+    const decision = item.decision;
+    if (!decision) return false;
+    if (decision.action === "wait" && decision.status === "done") return false;
+    if (decision.action === "prepare" && !decision.workers?.includes("release")) return false;
+    return true;
+  });
   const visible = all ? decisions : decisions.slice(-100);
   return (
     <>

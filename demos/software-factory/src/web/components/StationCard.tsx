@@ -68,6 +68,8 @@ export interface StationCardProps {
   readonly heading?: string;
   /** Placeholder for a station the server hasn't created yet. */
   readonly ghost?: boolean;
+  /** Compact floor cards keep their headings readable; full environment details remain in the station panel. */
+  readonly compact?: boolean;
 }
 
 function Meta({ icon: Glyph, children, title }: { readonly icon?: Icon; readonly children: ReactNode; readonly title?: string }) {
@@ -79,7 +81,7 @@ function Meta({ icon: Glyph, children, title }: { readonly icon?: Icon; readonly
   );
 }
 
-export function StationCard({ station, selected, onSelect, heading, ghost = false }: StationCardProps) {
+export function StationCard({ station, selected, onSelect, heading, ghost = false, compact = false }: StationCardProps) {
   const meta = stationStatusMeta(station);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
@@ -103,34 +105,34 @@ export function StationCard({ station, selected, onSelect, heading, ghost = fals
     >
       <div className="flex w-full items-center gap-2">
         <StatusIcon meta={meta} />
-        <span className={cx("min-w-0 flex-1 truncate font-semibold", muted && "text-fg-muted")}>{heading ?? station.title}</span>
+        <span className={cx("min-w-0 flex-1 font-semibold", compact ? "whitespace-normal" : "truncate", muted && "text-fg-muted")}>{heading ?? station.title}</span>
         {elapsed !== undefined ? (
           <span className="shrink-0 text-xs text-fg-muted tabular-nums" title={active ? "Elapsed" : "Duration"}>
             {active ? formatClock(elapsed) : formatDuration(elapsed)}
           </span>
         ) : null}
       </div>
-      <span className="mt-0.5 block w-full truncate pl-6 text-xs text-fg-muted" title={detail}>
+      <span className={cx("mt-0.5 block w-full text-xs text-fg-muted", compact ? "line-clamp-2" : "truncate pl-6")} title={detail}>
         {meta.label}
         {detail ? ` · ${detail}` : ""}
       </span>
       {station.worker ? (
-        <span className="mt-2 flex w-full flex-wrap gap-1 pl-6">
+        <span className="mt-2 flex w-full flex-wrap gap-1">
           <Chip tone="success">created by coordinator</Chip>
           {station.round > station.worker.createdRound ? <Chip tone="accent">reused for round {station.round}</Chip> : null}
           <span className="w-full truncate pt-0.5 text-xs text-fg-muted" title={station.worker.name}>{station.worker.name}</span>
         </span>
       ) : null}
 
-      <div className="mt-2 flex w-full flex-wrap items-center gap-x-3 gap-y-1 pl-6 text-xs text-fg-muted">
+      <div className={cx("mt-2 flex w-full flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted", !compact && "pl-6")}>
         <Meta icon={CopilotIcon}>@{station.agent}</Meta>
         {model ? <Meta title={model}>{model}</Meta> : null}
         <Meta icon={station.placement === "sandbox" ? ContainerIcon : ServerIcon} title={station.sandbox ? `Isolated sandbox ${station.sandbox.id}` : undefined}>
           {station.worker || station.kind === "coordinate" ? station.environment : station.placement === "sandbox" ? "Sandbox" : "Shared"}
           {station.sandbox ? <span className="ml-1 font-mono">{shortId(station.sandbox.id, 6)}</span> : null}
         </Meta>
-        {size ? <Meta icon={CpuIcon}>{formatSandboxSize(size)}</Meta> : null}
-        {network ? (
+        {size && !compact ? <Meta icon={CpuIcon}>{formatSandboxSize(size)}</Meta> : null}
+        {network && !compact ? (
           <NetworkTooltip network={network}>
             <Meta icon={networkIcon(network)}>{network.label}</Meta>
           </NetworkTooltip>

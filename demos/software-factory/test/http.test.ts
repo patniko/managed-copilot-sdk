@@ -126,6 +126,7 @@ describe("factory HTTP API", () => {
     expect(created.status).toBe(201);
     const wo = await waitFor((created.body as WorkOrder).id);
     expect(wo.status).toBe("completed");
+    expect(wo.mode).toBe("classic");
 
     const activity = await json<unknown[]>(`/api/work-orders/${wo.id}/activity?stationId=plan`);
     expect(activity.body.length).toBeGreaterThan(0);
@@ -178,6 +179,7 @@ describe("factory HTTP API", () => {
     const notJson = await fetch(`${base}/api/work-orders`, { method: "POST", headers: { "content-type": "text/plain" }, body: "hi" });
     expect(notJson.status).toBe(415);
     expect((await post("/api/work-orders", { title: "x", brief: "y" })).status).toBe(400);
+    expect((await post("/api/work-orders", { title: "Valid", brief: "A brief long enough to submit a work order.", mode: "invalid" })).status).toBe(400);
     expect((await fetch(`${base}/api/nope`)).status).toBe(404);
     expect((await fetch(`${base}/api/work-orders`, { method: "PATCH" })).status).toBe(405);
     expect((await post("/api/sessions/not-ours/attach", {})).status).toBe(404);

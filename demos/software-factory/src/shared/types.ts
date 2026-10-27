@@ -92,6 +92,8 @@ export interface WorkerView {
   readonly createdRound: number;
   /** Messages it received from the coordinator, its first task included. */
   readonly messages: number;
+  /** Latest runtime turn, including turns sent from an attached CLI rather than by the coordinator. */
+  readonly turnId?: string;
   readonly error?: string;
 }
 
@@ -215,12 +217,14 @@ export interface Station {
   /** Agent-led: a check is idempotent for a worker's message number; new messages require a fresh report. */
   readonly workerCheck?: {
     readonly messages: number;
+    readonly turnId?: string;
     readonly passed: boolean;
     readonly code: string;
     readonly problem: string;
   };
   /** Agent-led: the worker message whose passing output received the latest review. */
   readonly reviewedMessages?: number;
+  readonly reviewedTurnId?: string;
   /** Agent-led checkpoint: the `test-report.json` version published before the latest work was sent; a check needs a newer one. */
   readonly staleReportVersion?: number;
   /** Agent-led checkpoint: the review requested changes, so the next work sent to this builder starts the next round. */

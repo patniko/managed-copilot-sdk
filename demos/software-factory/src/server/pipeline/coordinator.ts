@@ -77,7 +77,7 @@ export interface CoordinatorDecision {
 }
 
 /** Names come from SDK tool arguments; results are displayed as text, never treated as instructions. */
-export function toolDecision(name: string, args: unknown, status: DecisionView["status"]): CoordinatorDecision | undefined {
+export function toolDecision(name: string, args: unknown, status: DecisionView["status"], firstMessage = false): CoordinatorDecision | undefined {
   const input = record(args);
   const worker = text(input.worker);
   const workers = Array.isArray(input.workers) ? input.workers.filter((item): item is string => typeof item === "string") : [];
@@ -91,7 +91,9 @@ export function toolDecision(name: string, args: unknown, status: DecisionView["
     case "start_worker":
       return make("create", `${done ? "Created" : "Creating"} **${text(input.name)}** in ${text(input.environment)}, agent ${text(input.agent)}`, [text(input.name)], "new");
     case "message_worker":
-      return make("message", `${done ? "Sent work" : "Sending work"} to the same **${worker}** sandbox`, [worker], "reused");
+      return firstMessage
+        ? make("message", `${done ? "Sent the task" : "Sending the task"} to **${worker}**`, [worker])
+        : make("message", `${done ? "Sent follow-up work" : "Sending follow-up work"} to the same **${worker}** sandbox`, [worker], "reused");
     case "wait_for_workers":
       return make("wait", `${done ? "Finished waiting for" : "Waiting for"} ${workers.length ? workers.map((item) => `**${item}**`).join(", ") : "the workers"}${done ? "" : " · no model time"}`, workers);
     case "copy_worker_files":

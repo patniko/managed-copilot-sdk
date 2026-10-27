@@ -153,7 +153,13 @@ async function coordinate(session: FakeSession, platform: WorkerPlatform): Promi
 
 describe("agent-led factory", () => {
   it("defaults to agent-led, creates workers, reuses a builder for review fixes, and verifies copied release inputs", async () => {
-    const { factory, platform } = setup();
+    const { factory, platform, store } = setup();
+    const save = store.saveWorkOrder.bind(store);
+    store.saveWorkOrder = (order) => {
+      const release = order.stations.find((station) => station.kind === "release");
+      if (release?.seeded) expect(release.inputRevision).toBeTruthy();
+      save(order);
+    };
     const work = factory.create(CREATE);
     const wo = await settled(factory, work.id);
     expect(wo.error).toBeUndefined();
@@ -223,7 +229,7 @@ describe("agent-led factory", () => {
     expect(wo.status).toBe("completed");
     const builder = wo.stations.find((station) => station.id === "build:csv2json")!;
     expect(builder.round).toBe(2);
-    expect(platform.sessions.get(builder.sessionId!)?.prompts.some((prompt) => prompt.includes("wasn't run after the latest changes"))).toBe(true);
+    expect(platform.sessions.get(builder.sessionId!)?.prompts.some((prompt) => prompt.includes("wasn't run in the worker's latest turn"))).toBe(true);
   });
 
   it("bounds review rounds and passes open findings to release metadata", async () => {
@@ -326,6 +332,116 @@ describe("agent-led factory", () => {
     expect(platform.resumed.some((item) => platform.workerIds.includes(item.id))).toBe(false);
   });
 
+  it("re-runs an interrupted review without replaying a builder's work", async () => {
+    let finish!: () => void;
+    const blocked = new Promise<void>((resolve) => { finish = resolve; });
+    const defaults = scriptsFor();
+    const first = setup({ reviewer: async (session, prompt, fake) => { await blocked; await defaults.reviewer(session, prompt, fake); } });
+    const created = first.factory.create(CREATE);
+    await until(() => first.factory.get(created.id)?.stations.some((station) => station.kind === "review" && station.status === "working") ?? false);
+    const builderId = first.platform.workerIds[0]!;
+    const messages = first.platform.sessions.get(builderId)!.prompts.length;
+    await first.factory.stop();
+    const second = setup({}, first.store, first.platform);
+    second.factory.resumeInterrupted();
+    await until(() => first.platform.sessionsFor("reviewer").length >= 2);
+    expect(first.platform.sessions.get(builderId)!.prompts).toHaveLength(messages);
+    finish();
+    const wo = await settled(second.factory, created.id);
+    expect(wo.error).toBeUndefined();
+    expect(wo.status).toBe("completed");
+    const review = wo.stations.find((station) => station.id === "review:csv2json")!;
+    expect(review.reviews?.map((record) => record.round)).toEqual([1, 2]);
+    expect(wo.stations.find((station) => station.id === "build:csv2json")?.sessionId).toBe(builderId);
+  });
+
+  it("resumes a release worker in flight without copying or sending its work twice", async () => {
+    let finish!: () => void;
+    const blocked = new Promise<void>((resolve) => { finish = resolve; });
+    const defaults = scriptsFor();
+    const first = setup({ release: async (session, prompt, fake) => { await blocked; await defaults.release(session, prompt, fake); } });
+    const created = first.factory.create(CREATE);
+    await until(() => [...first.platform.workerRecords.values()].some((worker) => worker.name === "release" && worker.messages === 2));
+    const releaseId = [...first.platform.workerRecords.values()].find((worker) => worker.name === "release")!.id;
+    const copies = first.platform.copies.length;
+    await first.factory.stop();
+    const second = setup({}, first.store, first.platform);
+    second.factory.resumeInterrupted();
+    finish();
+    const wo = await settled(second.factory, created.id);
+    expect(wo.error).toBeUndefined();
+    expect(wo.status).toBe("completed");
+    expect(wo.stations.find((station) => station.id === "release")?.sessionId).toBe(releaseId);
+    expect(first.platform.sessions.get(releaseId)!.prompts).toHaveLength(2);
+    expect(first.platform.copies).toHaveLength(copies);
+  });
+
+  it("verifies copied bytes rather than accepting a copy tool's claimed success", async () => {
+    let rejected = false;
+    const defaults = scriptsFor();
+    const { factory } = setup({
+      coordinator: async (session, prompt, fake) => {
+        const platform = fake as WorkerPlatform;
+        const original = session.callTool.bind(session);
+        let preparations = 0;
+        session.callTool = async (name, args) => {
+          if (name === "prepare_release" && ++preparations === 2) {
+            const release = await platform.workers(session.sessionId).get("release");
+            platform.workspaces.get(release.id)!.set(".factory/incoming/csv2json/outputs/files/bin/csv2json.js", "not the reviewed build");
+            const refused = z.object({ textResultForLlm: z.string() }).parse(await original(name, args));
+            const result = GateSchema.parse(JSON.parse(refused.textResultForLlm));
+            expect(result.ready).toBe(false);
+            rejected = true;
+            for (const copy of result.copies!) await original("copy_worker_files", copy);
+          }
+          return original(name, args);
+        };
+        await defaults.coordinator(session, prompt, platform);
+      },
+    });
+    const wo = await settled(factory, factory.create(CREATE).id);
+    expect(wo.status).toBe("completed");
+    expect(rejected).toBe(true);
+    expect(factory.releaseFiles(wo.id)?.files.some((file) => file.content.includes("not the reviewed build"))).toBe(false);
+  });
+
+  it("does not cache a review of a builder that changed while the review was running", async () => {
+    let concurrentChange = false;
+    const defaults = scriptsFor();
+    const { factory, platform } = setup({
+      reviewer: async (session, prompt, fake) => {
+        const p = fake as WorkerPlatform;
+        if (!concurrentChange) {
+          concurrentChange = true;
+          const coordinator = p.sessionsFor("coordinator")[0]!;
+          await coordinator.callTool("message_worker", { worker: "builder-csv2json", message: "Another change; run npm run check again." });
+          await coordinator.callTool("wait_for_workers", { workers: ["builder-csv2json"] });
+        }
+        await defaults.reviewer(session, prompt, fake);
+      },
+      coordinator: async (session, prompt, fake) => {
+        const original = session.callTool.bind(session);
+        session.callTool = async (name, args) => {
+          const result = await original(name, args);
+          if (name !== "request_review") return result;
+          const value = GateSchema.parse(JSON.parse(z.object({ textResultForLlm: z.string() }).parse(result).textResultForLlm));
+          if (!value.ok && !value.fatal && value.summary.includes("changed during review")) {
+            const checked = GateSchema.parse(JSON.parse(z.object({ textResultForLlm: z.string() }).parse(await original("check_build", args)).textResultForLlm));
+            expect(checked.ok).toBe(true);
+            return original(name, args);
+          }
+          return result;
+        };
+        await defaults.coordinator(session, prompt, fake);
+      },
+    });
+    const wo = await settled(factory, factory.create(CREATE).id);
+    expect(wo.error).toBeUndefined();
+    expect(wo.status).toBe("completed");
+    expect(concurrentChange).toBe(true);
+    expect(platform.sessionsFor("reviewer").flatMap((session) => session.prompts).filter((prompt) => prompt.includes('"csv2json: csv2json" (round 1'))).toHaveLength(2);
+  });
+
   it("validates the mode and keeps legacy work orders classic", async () => {
     const { factory } = setup();
     expect(() => factory.create({ ...CREATE, mode: "invalid" as "agent" })).toThrow(/agent.*classic/);
@@ -333,5 +449,175 @@ describe("agent-led factory", () => {
     expect(classic.status).toBe("completed");
     expect(classic.stations.some((station) => station.kind === "coordinate")).toBe(false);
     expect(classic.workersStarted).toBeUndefined();
+  });
+
+  it("rejects a previous unchecked turn's test report after another worker message", async () => {
+    let injected = false;
+    let refused = false;
+    const defaults = scriptsFor();
+    const { factory } = setup({
+      builder: async (session, prompt, fake) => {
+        if (prompt === "Unchecked edit") {
+          fake.publish(session.sessionId, { "files/bin/csv2json.js": "// changed without a check" });
+          return;
+        }
+        await defaults.builder(session, prompt, fake);
+      },
+      coordinator: async (session, prompt, fake) => {
+        const original = session.callTool.bind(session);
+        session.callTool = async (name, args) => {
+          if (name === "check_build" && !injected) {
+            injected = true;
+            await original("message_worker", { worker: "builder-csv2json", message: "Unchecked edit" });
+            await original("wait_for_workers", { workers: ["builder-csv2json"] });
+            const result = await original(name, args);
+            const reply = GateSchema.parse(JSON.parse(z.object({ textResultForLlm: z.string() }).parse(result).textResultForLlm));
+            expect(reply.ok).toBe(false);
+            expect(reply.summary).toContain("latest turn");
+            refused = true;
+            return result;
+          }
+          return original(name, args);
+        };
+        await defaults.coordinator(session, prompt, fake);
+      },
+    });
+    const wo = await settled(factory, factory.create(CREATE).id);
+    expect(wo.error).toBeUndefined();
+    expect(wo.status).toBe("completed");
+    expect(refused).toBe(true);
+    expect(wo.stations.find((station) => station.id === "build:csv2json")?.workerCheck?.turnId).toBeTruthy();
+  });
+
+  it("revalidates builder acceptance after release artifact collection", async () => {
+    let changed = false;
+    let refused = false;
+    const defaults = scriptsFor();
+    const { factory } = setup({
+      coordinator: async (session, prompt, fake) => {
+        if (refused) return;
+        const originalTool = session.callTool.bind(session);
+        const originalArtifacts = fake.artifacts.bind(fake);
+        fake.artifacts = (id) => {
+          const artifacts = originalArtifacts(id);
+          if (fake.sessions.get(id)?.role !== "release") return artifacts;
+          return {
+            ...artifacts,
+            waitForPublication: async (options) => {
+              const publication = await artifacts.waitForPublication(options);
+              if (!changed) {
+                changed = true;
+                await originalTool("message_worker", { worker: "builder-csv2json", message: "Change the build again and run its check." });
+                await originalTool("wait_for_workers", { workers: ["builder-csv2json"] });
+              }
+              return publication;
+            },
+          };
+        };
+        session.callTool = async (name, args) => {
+          const result = await originalTool(name, args);
+          if (name === "check_release") {
+            const reply = GateSchema.parse(JSON.parse(z.object({ textResultForLlm: z.string() }).parse(result).textResultForLlm));
+            expect(reply.ok).toBe(false);
+            expect(reply.accepted).not.toBe(true);
+            refused = true;
+            return { resultType: "failure", textResultForLlm: JSON.stringify({ ...reply, fatal: true }) };
+          }
+          return result;
+        };
+        await defaults.coordinator(session, prompt, fake);
+      },
+    });
+    const wo = await settled(factory, factory.create(CREATE).id);
+    expect(refused).toBe(true);
+    expect(wo.release).toBeUndefined();
+    expect(wo.status).not.toBe("completed");
+    expect(wo.stations.find((station) => station.id === "review:csv2json")?.status).not.toBe("done");
+  });
+
+  it("cancels a persisted coordinator before resumption, without attaching to workers", async () => {
+    const first = setup({ builder: async () => { await new Promise(() => {}); } });
+    const created = first.factory.create(CREATE);
+    await until(() => [...first.platform.workerRecords.values()].some((worker) => worker.messages === 2));
+    const coordinator = first.factory.get(created.id)!.stations.find((station) => station.kind === "coordinate")!.sessionId!;
+    await first.factory.stop();
+    expect(first.platform.lastTurnStatus.get(coordinator)).toBe("running");
+    const second = setup({}, first.store, first.platform);
+    const cancelling = second.factory.cancel(created.id);
+    second.factory.resumeInterrupted();
+    await expect(second.factory.delete(created.id)).rejects.toThrow(/cancelling/);
+    const wo = await cancelling;
+    expect(wo.status).toBe("cancelled");
+    expect(first.platform.sessions.get(coordinator)?.aborted).toBe(true);
+    expect(first.platform.lastTurnStatus.get(coordinator)).not.toBe("running");
+    expect(first.platform.resumed).toEqual([{ role: "coordinator", id: coordinator }]);
+    expect([...first.platform.workerRecords.values()].every((worker) => worker.state === "stopped")).toBe(true);
+  });
+
+  it("does not reuse a partly read watcher snapshot for final release validation", async () => {
+    let changed = false;
+    let refused = false;
+    let holdOnce = false;
+    let held!: () => void;
+    let releaseRead!: () => void;
+    const readingB = new Promise<void>((resolve) => { held = resolve; });
+    const finishB = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const defaults = scriptsFor();
+    const { factory } = setup({
+      coordinator: async (session, prompt, fake) => {
+        if (refused) return;
+        const platform = fake as WorkerPlatform;
+        const originalTool = session.callTool.bind(session);
+        const originalInfo = platform.sessionInfo.bind(platform);
+        const originalArtifacts = platform.artifacts.bind(platform);
+        platform.sessionInfo = async (id) => {
+          const snapshot = await originalInfo(id);
+          if (holdOnce && platform.workerRecords.get(id)?.name === "builder-json2csv") {
+            holdOnce = false;
+            held();
+            await finishB;
+          }
+          return snapshot;
+        };
+        platform.artifacts = (id) => {
+          const artifacts = originalArtifacts(id);
+          if (platform.sessions.get(id)?.role !== "release") return artifacts;
+          return {
+            ...artifacts,
+            waitForPublication: async (options) => {
+              const publication = await artifacts.waitForPublication(options);
+              if (!changed) {
+                changed = true;
+                holdOnce = true;
+                const builder = [...platform.workerRecords.values()].find((item) => item.name === "builder-csv2json")!;
+                platform.emitWorkerEvent(builder.id);
+                await readingB;
+                await originalTool("message_worker", { worker: builder.id, message: "A new change after the release inputs were prepared." });
+                await originalTool("wait_for_workers", { workers: [builder.id] });
+                // The post-collection gate joins while the watcher still holds A's old state.
+                setTimeout(releaseRead, 30);
+              }
+              return publication;
+            },
+          };
+        };
+        session.callTool = async (name, args) => {
+          const result = await originalTool(name, args);
+          if (name === "check_release") {
+            const reply = GateSchema.parse(JSON.parse(z.object({ textResultForLlm: z.string() }).parse(result).textResultForLlm));
+            expect(reply.ok).toBe(false);
+            expect(reply.accepted).not.toBe(true);
+            refused = true;
+            return { resultType: "failure", textResultForLlm: JSON.stringify({ ...reply, fatal: true }) };
+          }
+          return result;
+        };
+        await defaults.coordinator(session, prompt, platform);
+      },
+    });
+    const wo = await settled(factory, factory.create(CREATE).id);
+    expect(refused).toBe(true);
+    expect(wo.release).toBeUndefined();
+    expect(wo.status).not.toBe("completed");
   });
 });

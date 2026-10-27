@@ -103,6 +103,7 @@ export class FakeSession implements StationSession {
 interface StoredFile {
   content: string;
   version: number;
+  turnId?: string;
 }
 
 export type Script = (session: FakeSession, prompt: string, platform: FakePlatform) => Promise<void>;
@@ -117,6 +118,7 @@ export class FakePlatform implements FactoryPlatform {
   readonly scripts: Partial<Record<StationRole, Script>>;
   /** What `sessionInfo().lastTurn.status` reports per session (default "completed"). */
   readonly lastTurnStatus = new Map<string, "running" | "completed" | "failed" | "cancelled">();
+  readonly turnIds = new Map<string, string>();
   /** When each session's sandbox last started (`sessionInfo().sandbox.startedAt`). */
   readonly sandboxStartedAt = new Map<string, string>();
   /** Errors the next sessionInfo calls throw, in order (e.g. a read that ran out of time). */
@@ -194,7 +196,7 @@ export class FakePlatform implements FactoryPlatform {
       updatedAt: new Date().toISOString(),
       pendingActions: [],
       lastTurn: {
-        turnId: "t", status: this.lastTurnStatus.get(sessionId) ?? "completed",
+        turnId: this.turnIds.get(sessionId) ?? "t", status: this.lastTurnStatus.get(sessionId) ?? "completed",
         ...(this.lastTurnStatus.get(sessionId) === "running" ? {} : { completedAt: new Date().toISOString() }),
       },
       ...(session?.role === "builder" || session?.role === "release"
@@ -245,7 +247,7 @@ export class FakePlatform implements FactoryPlatform {
     for (const [path, content] of Object.entries(files)) {
       const existing = outputs.get(path);
       if (existing?.content === content) continue;
-      outputs.set(path, { content, version: (existing?.version ?? 0) + 1 });
+      outputs.set(path, { content, version: (existing?.version ?? 0) + 1, turnId: this.turnIds.get(sessionId) });
     }
   }
 
@@ -256,14 +258,14 @@ export class FakePlatform implements FactoryPlatform {
       path,
       size: Buffer.byteLength(file.content),
       digest: `sha256:${file.version}`,
-      turnId: "t",
+      turnId: file.turnId ?? "t",
       version: file.version,
       state: "published",
       publishedAt: new Date().toISOString(),
     });
     return {
       waitForPublication: async (): Promise<PublicationResult> => ({
-        turnId: "t",
+        turnId: this.turnIds.get(sessionId) ?? "t",
         state: "published",
         artifacts: [...outputs()].map(([path, file]) => info(path, file)),
       }),

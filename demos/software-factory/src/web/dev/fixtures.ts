@@ -1343,6 +1343,59 @@ function queued(now: number, fixtures: Fixtures): void {
   });
 }
 
+/** Decorates only explicitly agent-led fixture records; never loaded by production. */
+export function withPreviewCoordinator(workOrder: WorkOrder): WorkOrder {
+  if (workOrder.mode !== "agent") return workOrder;
+  const planned = Boolean(workOrder.plan);
+  const status = !planned ? "waiting" : workOrder.status === "completed" ? "done" : workOrder.status === "cancelled" ? "cancelled" : workOrder.status === "failed" ? "failed" : "working";
+  const coordinator: Station = {
+    id: "coordinator", kind: "coordinate", title: "Coordinator", role: "coordinator",
+    environment: "factory-coordinator", placement: "shared", agent: "coordinator", model: environmentFor("coordinator").model,
+    status, round: planned ? 1 : 0, detail: planned ? "Waiting for the workers · no model time" : "Waits for the accepted plan",
+    ...(planned ? { sessionId: `fixture_coordinator_${workOrder.id}`, startedAt: workOrder.startedAt } : {}),
+  };
+  const stations = workOrder.stations.filter((item) => item.kind !== "coordinate").map((item): Station => {
+    if ((item.kind !== "build" && item.kind !== "release") || !item.sessionId) return item;
+    return {
+      ...item,
+      worker: {
+        id: item.sessionId, name: item.kind === "release" ? "release" : `builder-${item.taskId}`, createdRound: 1,
+        messages: Math.max(item.round + 1, 2),
+        state: item.status === "starting" ? "starting" : item.status === "working" ? "working" : item.status === "failed" ? "failed" : item.status === "cancelled" ? "stopped" : "idle",
+      },
+    };
+  });
+  return {
+    ...workOrder, workersStarted: stations.filter((item) => item.worker).length,
+    stations: [...stations.filter((item) => item.kind === "plan"), coordinator, ...stations.filter((item) => item.kind !== "plan")],
+  };
+}
+
+function agentLedFixture(fixtures: Fixtures, now: number): void {
+  const index = fixtures.workOrders.findIndex((item) => item.id === "wo_csvjson");
+  const original = fixtures.workOrders[index];
+  if (!original) return;
+  const order = withPreviewCoordinator({ ...original, mode: "agent" });
+  fixtures.workOrders[index] = order;
+  const decisions: ActivityItem[] = order.stations.flatMap((item) => item.worker ? [{
+    id: `decision:create:${item.id}`, workOrderId: order.id, stationId: "coordinator", kind: "decision" as const,
+    at: item.startedAt ?? order.createdAt, text: `Created **${item.worker.name}** in ${item.environment}, agent ${item.agent}`,
+    decision: { action: "create" as const, status: "done" as const, workers: [item.worker.name], tag: "new" as const },
+  }] : []);
+  for (const item of order.stations.filter((candidate) => candidate.worker && candidate.round > 1)) {
+    decisions.push({
+      id: `decision:review:${item.id}`, workOrderId: order.id, stationId: "coordinator", kind: "decision",
+      at: at(now, -70 * SECOND), text: `Factory review requested changes to **${item.worker!.name}** on a second model`,
+      decision: { action: "review", status: "done", workers: [item.worker!.name] },
+    }, {
+      id: `decision:reuse:${item.id}`, workOrderId: order.id, stationId: "coordinator", kind: "decision",
+      at: at(now, -40 * SECOND), text: `Sent the findings to the same **${item.worker!.name}** sandbox`,
+      decision: { action: "message", status: "done", workers: [item.worker!.name], tag: "reused" },
+    });
+  }
+  fixtures.activity.set(order.id, [...(fixtures.activity.get(order.id) ?? []), ...decisions]);
+}
+
 export function createFixtures(now: number, variant: string): Fixtures {
   const state: PlatformStatus["state"] =
     variant === "platform-down" ? "unavailable" : variant === "misconfigured" ? "misconfigured" : variant === "connecting" ? "connecting" : "connected";
@@ -1354,6 +1407,7 @@ export function createFixtures(now: number, variant: string): Fixtures {
   semverToolkit(now, fixtures);
   markdownFormatter(now, fixtures);
   csvCli(now, fixtures);
+  agentLedFixture(fixtures, now);
   return fixtures;
 }
 
