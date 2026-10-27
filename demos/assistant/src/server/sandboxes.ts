@@ -17,7 +17,7 @@ import { sandboxEnvironments } from "./environments.js";
 import { HttpError } from "./http.js";
 import { errorMessage, type Logger } from "./log.js";
 import type { Platform } from "./platform.js";
-import type { SandboxOutputRecord, Store } from "./store.js";
+import type { SandboxOutputRecord, SandboxRunRecord, Store } from "./store.js";
 
 const IMAGE_TYPES: Readonly<Record<string, string>> = {
   ".png": "image/png",
@@ -37,19 +37,28 @@ const BUSY_POLL_MS = 10_000;
 const PUBLICATION_WAIT_MS = 45_000;
 const DEBOUNCE_MS = 250;
 const RETRY_MS = 15_000;
-/** Times a sandbox left unread (its outputs couldn't be listed or an image copied) is read again, backing off. */
+/** Times a sandbox that couldn't be read in full (its outputs' listing, or an image copy) is read again, backing off. */
 const MAX_RETRIES = 5;
 
 export const SANDBOXES_LEGACY =
   "This conversation started before your assistant could use sandboxes. Start a new conversation (Settings → Start over) to use them.";
 export const SANDBOXES_UNSUPPORTED = "This deployment can't run sandboxes, so your assistant works without them.";
 
-const SETTLED = new Set(["idle", "failed", "stopped"]);
 type Settled = "idle" | "failed" | "stopped";
 /** How a sandbox's work ended, by the platform's clock. */
 interface Finish {
   readonly at: string;
-  readonly state: "idle" | "failed";
+  readonly state: Settled;
+}
+
+/** What listings (and events right after them) showed about one sandbox. */
+interface WorkerFacts {
+  /** How the work for each message ended (by message number, from 1), as first seen. */
+  readonly finished: Map<number, Finish>;
+  /** Its task never reached it: it failed or was stopped while starting. */
+  undelivered?: Finish;
+  /** The latest listing: it places a finish event that follows it. */
+  last?: { readonly state: string; readonly messages: number; readonly at: string };
 }
 
 export interface SandboxesDeps {
@@ -106,10 +115,10 @@ export class Sandboxes {
   readonly #awaited = new Map<string, string>();
   /** Workers whose publication is being awaited right now. */
   readonly #publishing = new Set<string>();
-  /** Finishes (idle or failed) reported by events per worker: how many, and the latest. */
-  readonly #completions = new Map<string, Finish & { readonly count: number }>();
-  /** Per worker, the latest listing that showed it finished (idle or failed), with the messages it had by then. */
-  readonly #lastFinished = new Map<string, Finish & { readonly messages: number }>();
+  /** Per worker: how each of its messages' work ended, as far as listings showed it. */
+  readonly #facts = new Map<string, WorkerFacts>();
+  /** Per worker: reads that failed (a listing of its outputs or an image copy) at its current state. */
+  readonly #failures = new Map<string, { readonly updatedAt: string; readonly count: number }>();
   #refreshing: Promise<void> | undefined;
   #again = false;
   #timer: NodeJS.Timeout | undefined;
@@ -167,10 +176,16 @@ export class Sandboxes {
     if (!sessionId || event.sessionId !== sessionId) return;
     const { workerId, state } = event.data as { workerId?: unknown; state?: unknown };
     if (typeof workerId !== "string") return;
-    // Events only prompt a fresh listing, which decides when work ended: an event can arrive late (the stream catches
-    // up after reconnecting). Finishes are counted, for a sandbox stopped before a listing saw it finish.
+    // Events mostly prompt a fresh listing, which says how work ended. A finish just after a listing that saw the
+    // sandbox working is that message's; any other (for example one that arrives late, after the stream reconnected)
+    // is left to listings.
     if (state === "idle" || state === "failed") {
-      this.#completions.set(workerId, { count: (this.#completions.get(workerId)?.count ?? 0) + 1, at: iso(event.createdAt), state });
+      const facts = this.#facts.get(workerId);
+      const at = iso(event.createdAt);
+      const last = facts?.last;
+      if (facts && last?.state === "working" && last.messages > 0 && at >= last.at && !facts.finished.has(last.messages)) {
+        facts.finished.set(last.messages, { at, state });
+      }
       this.#awaitPublication(workerId);
     }
     this.#dirty.add(workerId);
@@ -299,6 +314,7 @@ export class Sandboxes {
       const workers = await managed.workers(sessionId).list();
       if (!current()) return;
       this.#workers = workers;
+      for (const worker of workers) this.#observe(worker);
       await Promise.all(workers.map((worker) => this.#inspect(managed, sessionId, worker, current)));
       if (!current()) return;
       this.#track(sessionId, workers);
@@ -341,14 +357,22 @@ export class Sandboxes {
     if (!current()) return;
     if (info?.sandbox) this.#sandboxStates.set(worker.id, info.sandbox.state);
     if (busy) return;
-    if (!artifacts) {
-      // Read again next time.
-      this.#dirty.add(worker.id);
-      return;
-    }
-    // Images that couldn't be copied are tried again on the next refresh.
-    if (await this.#record(managed, coordinatorId, worker.id, artifacts, current)) this.#inspected.set(worker.id, worker.updatedAt);
-    else if (current()) this.#dirty.add(worker.id);
+    // What couldn't be read (its outputs' listing, or an image copy) is read again on a later refresh.
+    if (!artifacts) return this.#unread(worker);
+    if (await this.#record(managed, coordinatorId, worker.id, artifacts, current)) {
+      this.#inspected.set(worker.id, worker.updatedAt);
+      this.#failures.delete(worker.id);
+    } else if (current()) this.#unread(worker);
+  }
+
+  /** A sandbox couldn't be read in full: read it again later, a few times at most until it changes or publishes. */
+  #unread(worker: WorkerInfo): void {
+    const before = this.#failures.get(worker.id);
+    const count = before?.updatedAt === worker.updatedAt ? before.count + 1 : 1;
+    this.#failures.set(worker.id, { updatedAt: worker.updatedAt, count });
+    if (count < MAX_RETRIES) this.#dirty.add(worker.id);
+    // Given up at this state: polls skip it until it changes or publishes again.
+    else this.#inspected.set(worker.id, worker.updatedAt);
   }
 
   /**
@@ -393,48 +417,60 @@ export class Sandboxes {
     }
   }
 
+  /** Remembers what a listing shows about a sandbox's messages: which one's work finished, when, and how. */
+  #observe(worker: WorkerInfo): void {
+    let facts = this.#facts.get(worker.id);
+    if (!facts) this.#facts.set(worker.id, (facts = { finished: new Map() }));
+    const at = iso(worker.updatedAt);
+    // A message the platform took back (it couldn't be delivered) never ran: forget what was said about it.
+    for (const message of facts.finished.keys()) if (message > worker.messages) facts.finished.delete(message);
+    if (worker.messages === 0 && (worker.state === "failed" || worker.state === "stopped")) facts.undelivered ??= { at, state: worker.state };
+    else if (worker.messages > 0 && (worker.state === "idle" || worker.state === "failed") && !facts.finished.has(worker.messages)) {
+      facts.finished.set(worker.messages, { at, state: worker.state });
+    }
+    facts.last = { state: worker.state, messages: worker.messages, at };
+  }
+
   /**
-   * Times each card's work: from its tool call until its sandbox finished it. A listing decides, by counting the
-   * sandbox's messages rather than comparing times: an event can arrive late, and the platform's clock and the one
-   * that timed the cards can differ (a time is only kept from ending before its card started).
+   * Times each card's work: from its tool call until its sandbox finished the card's message. Cards are matched to
+   * the sandbox's messages by number, never by comparing the platform's clock with the one that timed the cards (they
+   * can differ); a time is only kept between its card's start and the next card's.
    */
   #track(coordinatorId: string, workers: readonly WorkerInfo[]): void {
     const store = this.#deps.store;
     this.#registerRuns(coordinatorId, workers);
-    // A follow-up reaches a sandbox only once it finished its earlier work, so an earlier card's work ended by then.
-    const runs = store.runs(coordinatorId);
-    const byWorker = new Map<string, typeof runs>();
-    for (const run of runs) if (run.workerId) byWorker.set(run.workerId, [...(byWorker.get(run.workerId) ?? []), run]);
-    for (const list of byWorker.values()) {
-      for (let index = 0; index < list.length - 1; index++) {
-        const run = list[index]!;
-        if (!run.finishedAt) store.finishRun(run.cardId, list[index + 1]!.startedAt, "idle");
-      }
-    }
-    for (const worker of workers) {
-      if (worker.state === "idle" || worker.state === "failed") {
-        this.#lastFinished.set(worker.id, { at: iso(worker.updatedAt), state: worker.state, messages: worker.messages });
-      }
-      // The latest card's work is over once its sandbox settled with that card's message counted.
-      const list = byWorker.get(worker.id);
-      const last = list?.at(-1);
-      if (!list || !last || last.finishedAt || !SETTLED.has(worker.state) || worker.messages < list.length) continue;
-      const end: { at: string; state: Settled } = worker.state === "stopped" ? this.#endBeforeStop(worker) : { at: iso(worker.updatedAt), state: worker.state as Settled };
-      store.finishRun(last.cardId, end.at > last.startedAt ? end.at : last.startedAt, end.state);
+    const byWorker = new Map<string, SandboxRunRecord[]>();
+    for (const run of store.runs(coordinatorId)) if (run.workerId) byWorker.set(run.workerId, [...(byWorker.get(run.workerId) ?? []), run]);
+    for (const [workerId, list] of byWorker) {
+      const listing = workers.find((worker) => worker.id === workerId);
+      const facts = this.#facts.get(workerId);
+      // A start whose task never reached the sandbox has no message, so the cards after it count from the first.
+      const shift = facts?.undelivered ? 1 : 0;
+      list.forEach((run, index) => {
+        if (run.finishedAt) return;
+        const next = list[index + 1];
+        const end = this.#endOf(index + 1 - shift, next, listing, facts);
+        if (!end) return;
+        let at = end.at > run.startedAt ? end.at : run.startedAt;
+        if (next && at > next.startedAt) at = next.startedAt;
+        store.finishRun(run.cardId, at, end.state);
+      });
     }
   }
 
   /**
-   * How a stopped sandbox's latest work ended: it finished first if a listing saw it finished after its last message,
-   * or it reported as many finishes as it was sent messages (it was stopped before a listing saw it). Otherwise the
-   * stop cut it short.
+   * How the work for a card's message ended, as far as is known: as a listing (or the event right after one) saw it;
+   * else by the next card, since a follow-up only reaches a sandbox that finished; else by the sandbox moving on or
+   * being stopped for good, which cuts short what was under way.
    */
-  #endBeforeStop(worker: WorkerInfo): { at: string; state: Settled } {
-    const seen = this.#lastFinished.get(worker.id);
-    if (seen && seen.messages >= worker.messages) return seen;
-    const counted = this.#completions.get(worker.id);
-    if (counted && counted.count >= worker.messages) return counted;
-    return { at: iso(worker.updatedAt), state: "stopped" };
+  #endOf(message: number, next: SandboxRunRecord | undefined, listing: WorkerInfo | undefined, facts: WorkerFacts | undefined): Finish | undefined {
+    const seen = message === 0 ? facts?.undelivered : facts?.finished.get(message);
+    if (seen) return seen;
+    if (next) return { at: next.startedAt, state: "idle" };
+    if (!listing) return undefined;
+    if (listing.messages > message) return { at: iso(listing.updatedAt), state: "idle" };
+    if (listing.state === "stopped") return { at: iso(listing.updatedAt), state: "stopped" };
+    return undefined;
   }
 
   /** The sandbox a card is about when its tool result didn't name it: the newest one by that name started by then. */
@@ -520,8 +556,8 @@ export class Sandboxes {
     this.#workers = [];
     this.#inspected.clear();
     this.#awaited.clear();
-    this.#completions.clear();
-    this.#lastFinished.clear();
+    this.#facts.clear();
+    this.#failures.clear();
     this.#dirty.clear();
     this.#sandboxStates.clear();
     this.#set({ ...this.#currentBase(), workers: [], runs: {} });

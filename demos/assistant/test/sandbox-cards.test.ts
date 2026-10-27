@@ -108,6 +108,10 @@ describe("sandboxCardStates", () => {
       view([sandbox({ state: "idle", messages: 2, updatedAt: at(39) })], { c1: { workerId: "w1", startedAt: at(1), finishedAt: at(30), outcome: "idle" }, c2: { workerId: "w1", startedAt: at(41) } }),
     );
     expect(skewed(followUp)).toMatchObject({ phase: "done", finishedAt: at(39) });
+    // A start card's sandbox has no earlier work: it failed before its task arrived, whatever the clocks say.
+    const start = card("c4", 40, { workerId: "w1", endedAt: at(41) });
+    const failed = sandboxCardStates([start], view([sandbox({ state: "failed", messages: 0, error: "Couldn't start", updatedAt: at(37) })]))(start);
+    expect(failed).toMatchObject({ phase: "failed" });
     // Started, but not listed yet.
     const fresh = card("c3", 50);
     expect(sandboxCardStates([fresh], view([]))(fresh)).toMatchObject({ phase: "starting" });

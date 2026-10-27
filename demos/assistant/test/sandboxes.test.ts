@@ -450,7 +450,8 @@ describe("Sandboxes", () => {
     const cards: WorkerItem[] = [];
     const research = worker({ id: "w1", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) });
     const { subject, emit, state } = sandboxes({ workers: [research], cards });
-    // The card isn't in the chat yet (the conversation wasn't loaded) when the sandbox finishes.
+    // Listed at work, but its card isn't in the chat yet (the conversation wasn't loaded) when it finishes.
+    await subject.refresh();
     emit("worker.idle", { workerId: "w1", name: "research", state: "idle" }, at(25));
     emit("worker.stopped", { workerId: "w1", name: "research", state: "stopped" }, at(600));
     state.workers = [{ ...research, state: "stopped", updatedAt: at(600) }];
@@ -464,6 +465,7 @@ describe("Sandboxes", () => {
     const cards: WorkerItem[] = [];
     const research = worker({ id: "w1", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) });
     const { subject, emit, state } = sandboxes({ workers: [research], cards });
+    await subject.refresh();
     emit("worker.idle", { workerId: "w1", name: "research", state: "idle" }, at(25));
     cards.push(card({ id: "c1", workerId: "w1", worker: "research", environment: "assistant-web" }));
     // Stopped before anything listed the sandboxes again.
@@ -476,10 +478,11 @@ describe("Sandboxes", () => {
 
   it("ends a card's work when its sandbox finishes, though the platform's clock differs from the card's", async () => {
     const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(30) })];
-    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(28) });
+    // The platform's clock is behind: by it, the task was sent at :26 and finished at :27, before the card's tool call
+    // returned at :30 by the other clock.
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(26) });
     const { subject, emit, state } = sandboxes({ workers: [stats], cards });
     await subject.refresh();
-    // The platform's clock is behind: by it, the sandbox finished before the card's tool call returned.
     emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(27));
     state.workers = [{ ...stats, state: "idle", updatedAt: at(27) }];
     await subject.refresh();
@@ -545,12 +548,84 @@ describe("Sandboxes", () => {
     const { subject, emit, state } = sandboxes({ workers: [stats], cards });
     emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(30));
     await subject.refresh();
-    // The follow-up was under way when the sandbox was stopped: one finish reported for two messages.
+    // The follow-up was under way when the sandbox was stopped: nothing says its message's work finished.
     cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) }));
+    state.workers = [{ ...stats, state: "working", messages: 2, updatedAt: at(41) }];
+    await subject.refresh();
     emit("worker.stopped", { workerId: "w1", name: "stats", state: "stopped" }, at(50));
     state.workers = [{ ...stats, state: "stopped", messages: 2, updatedAt: at(50) }];
     await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(30), outcome: "idle" });
     expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(50), outcome: "stopped" });
+    subject.stop();
+  });
+
+  it("keeps a failure a listing saw when a follow-up's card shows up while the sandbox is read", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const { subject, state } = sandboxes({ workers: [worker({ id: "w1", name: "stats", state: "failed", error: "Python crashed", updatedAt: at(30) })], cards });
+    let open!: () => void;
+    state.listGate = new Promise((resolve) => (open = resolve));
+    const reading = subject.refresh();
+    await vi.waitFor(() => expect(state.lists).toBeGreaterThan(0));
+    // The agent sent the work again meanwhile.
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) }));
+    open();
+    await reading;
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(30), outcome: "failed" });
+    expect(subject.view.runs.c2).toMatchObject({ startedAt: at(41), finishedAt: undefined });
+    subject.stop();
+  });
+
+  it("knows how a follow-up ended after a restart, from a listing and the finish right after it", async () => {
+    // This server started while the sandbox worked on its second message: it never saw the first.
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) }), card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", messages: 2, updatedAt: at(41) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(70));
+    emit("worker.stopped", { workerId: "w1", name: "stats", state: "stopped" }, at(80));
+    state.workers = [{ ...stats, state: "stopped", updatedAt: at(80) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(41), outcome: "idle" });
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(70), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("knows a start whose task never arrived failed, and counts the retry as the first message", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "failed", messages: 0, error: "Couldn't give it its task", updatedAt: at(5) });
+    const { subject, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(5), outcome: "failed" });
+    // The agent sent the task again, and the sandbox was stopped while it worked on it.
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) }));
+    state.workers = [{ ...stats, state: "working", messages: 1, error: undefined, updatedAt: at(41) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toMatchObject({ finishedAt: undefined });
+    state.workers = [{ ...stats, state: "stopped", messages: 1, error: undefined, updatedAt: at(60) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(60), outcome: "stopped" });
+    subject.stop();
+  });
+
+  it("forgets a finish reported for a task the platform took back, so the retry isn't ended by it", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    // Listed just after the task was counted, while it was being delivered.
+    const stats = worker({ id: "w1", name: "stats", state: "working", messages: 1, updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    // Delivery failed: the platform takes the message back and reports the sandbox failed.
+    emit("worker.failed", { workerId: "w1", name: "stats", state: "failed" }, at(4));
+    state.workers = [{ ...stats, state: "failed", messages: 0, error: "Couldn't give it its task", updatedAt: at(4) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(4), outcome: "failed" });
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(40), endedAt: at(41) }));
+    state.workers = [{ ...stats, state: "working", messages: 1, updatedAt: at(41) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toMatchObject({ startedAt: at(41), finishedAt: undefined });
+    state.workers = [{ ...stats, state: "idle", messages: 1, updatedAt: at(70) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(41), finishedAt: at(70), outcome: "idle" });
     subject.stop();
   });
 
@@ -619,6 +694,27 @@ describe("Sandboxes", () => {
     await subject.refresh();
     expect(store.output("a1")?.cached).toBe(true);
     subject.stop();
+  });
+
+  it("stops copying a broken image after a few tries, even while another sandbox keeps the list polled", async () => {
+    vi.useFakeTimers();
+    try {
+      const { subject, state } = sandboxes({
+        workers: [worker({ id: "w1", name: "stats" }), worker({ id: "w2", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) })],
+        artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] },
+      });
+      state.failReads = Number.POSITIVE_INFINITY;
+      await subject.refresh();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      const tries = state.reads;
+      expect(tries).toBeLessThanOrEqual(7);
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(state.reads).toBe(tries);
+      expect(state.lists).toBeGreaterThan(0);
+      subject.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reads every sandbox again when a sandbox tool finishes", async () => {

@@ -256,7 +256,7 @@ after its report, a topic the person moved on from, or the least useful one when
   client would answer its prompts): `managed.workers(session).list()`, `managed.on("worker.started" | "worker.idle"
   | "worker.failed" | "worker.stopped")`, `managed.sessions.get(worker.id)` for its sandbox, and
   `managed.artifacts(worker.id)` for the files it published from `/workspace/outputs`. The events prompt a fresh
-  listing, and each card's time comes from those listings, matched by the sandbox's message count rather than by
+  listing, and each card's time comes from those listings, matched to the sandbox's messages by number rather than by
   comparing clocks (an event can arrive late after a reconnect); times are kept in the server's store. Images are
   copied there too, so a chart stays in the chat after its sandbox is deleted; the route that serves them answers only
   this app's pages and sends a sandboxing Content Security Policy.
