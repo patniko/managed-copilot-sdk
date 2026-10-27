@@ -1,10 +1,12 @@
 import { ArrowDownIcon } from "@primer/octicons-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { TimelineItem } from "../../../shared/protocol";
+import type { SandboxesView, TimelineItem } from "../../../shared/protocol";
+import { sandboxCardStates } from "../sandboxCards";
 import { buildBlocks } from "../timelineBlocks";
 import type { PendingMessage } from "../useAssistant";
 import { ApprovalCard } from "./ApprovalCard";
 import { AssistantMessage, NoticeLine, ToolRow, TriggerRow, TypingIndicator, UserBubble } from "./Items";
+import { SandboxCard, SandboxImages } from "./Sandbox";
 
 export interface TimelineProps {
   items: readonly TimelineItem[];
@@ -13,6 +15,10 @@ export interface TimelineProps {
   busy: boolean;
   unreadAnchor: string | undefined;
   empty: ReactNode;
+  /** The conversation's sandboxes: live state, timing, and outputs for the sandbox cards. */
+  sandboxes?: SandboxesView;
+  /** A sandbox card to draw attention to (opened from the side panel). */
+  highlightCard?: string;
   onDecide(id: string, decision: "approve" | "deny", feedback?: string): Promise<unknown>;
   onRetry(message: PendingMessage): void;
   onDiscard(localId: string): void;
@@ -43,9 +49,19 @@ export function Timeline(props: TimelineProps) {
   /** The unread divider already scrolled to (it can arrive after the first render, once the live history loads). */
   const anchoredTo = useRef<string | undefined>(undefined);
   const blocks = useMemo(() => buildBlocks(items, timeZone, unreadAnchor), [items, timeZone, unreadAnchor]);
+  const stateOf = useMemo(() => sandboxCardStates(items, props.sandboxes), [items, props.sandboxes]);
   const lastItem = items[items.length - 1];
   const streamingText = lastItem?.kind === "assistant" ? lastItem.text.length : 0;
-  const showTyping = busy && !(lastItem?.kind === "assistant" && lastItem.streaming) && !(lastItem?.kind === "approval" && lastItem.status === "pending");
+  // While a sandbox of this turn works, its card shows the progress (the assistant is only waiting for it).
+  const sandboxWorking = useMemo(() => {
+    for (let index = items.length - 1; index >= 0; index--) {
+      const item = items[index]!;
+      if (item.kind === "user" || item.kind === "trigger") return false;
+      if (item.kind === "worker" && ["calling", "starting", "working"].includes(stateOf(item).phase ?? "")) return true;
+    }
+    return false;
+  }, [items, stateOf]);
+  const showTyping = busy && !(lastItem?.kind === "assistant" && lastItem.streaming) && !(lastItem?.kind === "approval" && lastItem.status === "pending") && !sandboxWorking;
   const isEmpty = items.length === 0 && pending.length === 0;
 
   const measure = () => {
@@ -86,6 +102,17 @@ export function Timeline(props: TimelineProps) {
   useEffect(() => {
     measure();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Images (a sandbox's charts) load after layout; keep following the conversation if it was at the bottom.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const onLoad = (event: Event) => {
+      if (event.target instanceof HTMLImageElement && stick.current) el.scrollTop = el.scrollHeight;
+    };
+    el.addEventListener("load", onLoad, true);
+    return () => el.removeEventListener("load", onLoad, true);
   }, []);
 
   const jump = () => {
@@ -132,9 +159,15 @@ export function Timeline(props: TimelineProps) {
                     case "user":
                       return <UserBubble key={block.key} text={item.text} at={item.at} timeZone={timeZone} />;
                     case "assistant":
-                      return <AssistantMessage key={block.key} item={item} timeZone={timeZone} scheduleLabel={block.scheduleLabel} />;
+                      return (
+                        <AssistantMessage key={block.key} item={item} timeZone={timeZone} scheduleLabel={block.scheduleLabel}>
+                          {block.sandboxCards && <SandboxImages cards={block.sandboxCards} stateOf={stateOf} />}
+                        </AssistantMessage>
+                      );
                     case "notice":
                       return <NoticeLine key={block.key} item={item} />;
+                    case "worker":
+                      return <SandboxCard key={block.key} item={item} state={stateOf(item)} approval={block.approval} timeZone={timeZone} highlight={props.highlightCard === item.id} />;
                     case "approval":
                       return (
                         <ApprovalCard

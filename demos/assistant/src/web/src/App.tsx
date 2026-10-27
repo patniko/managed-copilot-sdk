@@ -134,6 +134,22 @@ export function App({ preview }: { preview?: ReactNode }) {
     setTimeout(() => setHighlight(undefined), 2600);
   }, []);
 
+  const sandboxes = snapshot?.sandboxes;
+  const [highlightCard, setHighlightCard] = useState<string>();
+  /** Shows a sandbox's latest card in the chat (from the side panel). */
+  const openSandbox = useCallback(
+    (workerId: string) => {
+      const runs = Object.entries(sandboxes?.runs ?? {}).filter(([, run]) => run.workerId === workerId);
+      const latest = runs.sort(([, a], [, b]) => Date.parse(a.startedAt) - Date.parse(b.startedAt)).pop()?.[0];
+      if (!latest) return;
+      setPanelOpen(false);
+      setHighlightCard(latest);
+      setTimeout(() => document.getElementById(`sandbox-card-${latest}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 50);
+      setTimeout(() => setHighlightCard(undefined), 2600);
+    },
+    [sandboxes],
+  );
+
   const platform = snapshot?.platform;
   const conversation = snapshot?.conversation;
   const status = statusOf(stream, platform, conversation);
@@ -155,9 +171,15 @@ export function App({ preview }: { preview?: ReactNode }) {
       account={snapshot?.account}
       platform={platform}
       connections={snapshot?.connections}
+      sandboxes={sandboxes}
       timeZone={timeZone}
       highlightSchedule={highlight}
       actions={actions}
+      onOpenSandbox={openSandbox}
+      onOpenSettings={() => {
+        setPanelOpen(false);
+        setSettingsOpen(true);
+      }}
     />
   );
 
@@ -207,6 +229,8 @@ export function App({ preview }: { preview?: ReactNode }) {
               timeZone={timeZone}
               busy={conversation?.busy ?? false}
               unreadAnchor={state.unreadAnchor}
+              sandboxes={sandboxes}
+              highlightCard={highlightCard}
               empty={
                 <EmptyState
                   name={snapshot?.account?.name}
@@ -214,6 +238,7 @@ export function App({ preview }: { preview?: ReactNode }) {
                   timeZone={timeZone}
                   demo={demo}
                   background={snapshot?.background}
+                  sandboxes={sandboxes?.enabled ?? false}
                   onPick={(text) => void actions.send(text)}
                   onNeedBackground={() => {
                     openBackground();
@@ -229,7 +254,14 @@ export function App({ preview }: { preview?: ReactNode }) {
               onAtBottomChange={setAtBottom}
             />
           )}
-          <Composer disabled={!live} disabledReason={disabledReason} busy={conversation?.busy ?? false} onSend={(text) => void actions.send(text)} onStop={() => void actions.abort()} />
+          <Composer
+            disabled={!live}
+            disabledReason={disabledReason}
+            busy={conversation?.busy ?? false}
+            hint={sandboxes?.enabled ? "Sending mail, changing your calendar, and starting sandboxes always ask you first" : undefined}
+            onSend={(text) => void actions.send(text)}
+            onStop={() => void actions.abort()}
+          />
         </main>
       </div>
 

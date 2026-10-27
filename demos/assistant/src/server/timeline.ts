@@ -4,15 +4,17 @@
  */
 import { createHash } from "node:crypto";
 import type { SessionEvent } from "@github/copilot-sdk";
-import type { ApprovalItem, ApprovalStatus, AssistantItem, TimelineItem, ToolItem } from "../shared/protocol.js";
-import { describeApproval, describeTool, HIDDEN_TOOLS, isBackgroundWorkError, scheduleIdFrom } from "./describe.js";
-import { APPROVAL_TOOLS, SCHEDULING_TOOLS } from "./tools/index.js";
+import type { ApprovalItem, ApprovalStatus, AssistantItem, TimelineItem, ToolItem, ToolStatus, WorkerItem } from "../shared/protocol.js";
+import { describeApproval, describeTool, HIDDEN_TOOLS, isBackgroundWorkError, scheduleIdFrom, type SandboxLookup } from "./describe.js";
+import { PERSON_APPROVES, SCHEDULING_TOOLS, WORKER_CARD_TOOLS, WORKER_TOOLS } from "./tools/index.js";
 
 export type TimelineChange =
   | { readonly type: "item"; readonly item: TimelineItem }
   | { readonly type: "delta"; readonly id: string; readonly text: string }
   | { readonly type: "busy"; readonly busy: boolean }
   | { readonly type: "schedules-changed" }
+  /** A sandbox tool finished (started, messaged, waited for, or stopped a sandbox): its live state may have changed. */
+  | { readonly type: "workers-changed" }
   /** A proactive (schedule-started) turn finished with this message. */
   | { readonly type: "proactive"; readonly itemId: string; readonly text: string };
 
@@ -23,9 +25,22 @@ export interface TimelineContext {
   isOffline(toolCallId: string): boolean;
   /** Whether a live permission handler currently holds this request, so the UI can answer it. */
   isActionable(requestId: string): boolean;
+  /** The conversation's sandbox environments, for sandbox cards and approvals (none when it can't start sandboxes). */
+  sandboxEnvironment?: SandboxLookup;
 }
 
 const MAX_ERROR_LENGTH = 400;
+
+/** The worker a `start_worker` result names: `Started worker "x" (ID <id>) in environment "e"…`. */
+function startedWorker(content: string | undefined): { id?: string; environment?: string } {
+  if (!content) return {};
+  return { id: /\(ID ([A-Za-z0-9_-]{8,})\)/.exec(content)?.[1], environment: /\bin environment "([a-z][a-z0-9-]*)"/.exec(content)?.[1] };
+}
+
+function stringArg(args: unknown, key: string): string | undefined {
+  const value = args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>)[key] : undefined;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
 
 /**
  * Approval cards are keyed by tool call so the permission event and the live permission callback meet on one item.
@@ -61,6 +76,10 @@ export class Timeline {
   readonly #approvals = new Map<string, string>();
   /** Looked-up approval card details by item ID; kept across rebuilds (tool call IDs are unique). */
   readonly #details = new Map<string, Pick<ApprovalItem, "title" | "preview">>();
+  /** Sandboxes started in this conversation, by name: the latest one's ID and environment (follow-up cards use them). */
+  readonly #sandboxes = new Map<string, { id?: string; environment?: string }>();
+  /** Sandbox ID → name, for follow-ups that name a sandbox by its ID. */
+  readonly #sandboxNames = new Map<string, string>();
   #origin: "user" | "schedule" = "user";
   #busy = false;
   /** A turn started and has not ended (`session.idle` is not persisted, so history replays rely on this). */
@@ -96,6 +115,8 @@ export class Timeline {
     this.#seen.clear();
     this.#tools.clear();
     this.#approvals.clear();
+    this.#sandboxes.clear();
+    this.#sandboxNames.clear();
     this.#origin = "user";
     this.#busy = false;
     this.#turnOpen = false;
@@ -127,9 +148,39 @@ export class Timeline {
     const changes: TimelineChange[] = [];
     for (const item of this.#items.values()) {
       if (item.kind === "assistant" && item.streaming) changes.push(this.set({ ...item, streaming: false }));
-      if (item.kind === "tool" && item.status === "running") changes.push(this.set({ ...item, status: "failed", error: "Stopped before it finished." }));
+      if ((item.kind === "tool" || item.kind === "worker") && item.status === "running") changes.push(this.set({ ...item, status: "failed", error: "Stopped before it finished." }));
     }
     return changes;
+  }
+
+  /** The sandbox card for a `start_worker` or `message_worker` call; `done` once the call finished. */
+  #workerItem(id: string, tool: string, args: unknown, at: string, status: ToolStatus, done?: { content?: string; error?: string; endedAt: string }): WorkerItem {
+    if (tool === "start_worker") {
+      const worker = stringArg(args, "name") ?? "sandbox";
+      const started = status === "succeeded" ? startedWorker(done?.content) : {};
+      const environment = stringArg(args, "environment") ?? started.environment ?? this.#ctx.sandboxEnvironment?.(undefined)?.name;
+      if (status === "succeeded") {
+        this.#sandboxes.set(worker, { id: started.id, environment });
+        if (started.id) this.#sandboxNames.set(started.id, worker);
+      }
+      return { kind: "worker", id, at, action: "start", worker, environment, text: stringArg(args, "task") ?? "", status, error: done?.error, workerId: started.id, endedAt: done?.endedAt };
+    }
+    const ref = stringArg(args, "worker") ?? "sandbox";
+    const worker = this.#sandboxNames.get(ref) ?? ref;
+    const known = this.#sandboxes.get(worker);
+    return {
+      kind: "worker",
+      id,
+      at,
+      action: "message",
+      worker,
+      environment: known?.environment,
+      text: stringArg(args, "message") ?? "",
+      status,
+      error: done?.error,
+      workerId: known?.id,
+      endedAt: done?.endedAt,
+    };
   }
 
   /** Refreshes derived flags (offline badges, actionable approvals, schedule names) after the context changed. */
@@ -211,6 +262,7 @@ export class Timeline {
         if (parentToolCallId) return [];
         const started = new Date(at);
         this.#tools.set(toolCallId, { name: toolName, args, at: started });
+        if (WORKER_CARD_TOOLS.has(toolName)) return [this.set(this.#workerItem(toolCallId, toolName, args, at, "running"))];
         if (HIDDEN_TOOLS.has(toolName)) return [];
         const description = describeTool(toolName, args, "running", undefined, this.#ctx.timeZone(), started);
         const item: ToolItem = {
@@ -230,7 +282,16 @@ export class Timeline {
         const { toolCallId, success, result, error, parentToolCallId } = event.data;
         if (parentToolCallId) return [];
         const started = this.#tools.get(toolCallId);
-        if (!started || HIDDEN_TOOLS.has(started.name)) return [];
+        if (!started) return [];
+        const sandboxes: TimelineChange[] = WORKER_TOOLS.has(started.name) ? [{ type: "workers-changed" }] : [];
+        if (WORKER_CARD_TOOLS.has(started.name)) {
+          const existing = this.#items.get(toolCallId);
+          const content = result?.content;
+          const failure = success ? undefined : errorText(error?.message ?? content ?? "The tool failed.");
+          const item = this.#workerItem(toolCallId, started.name, started.args, existing?.at ?? at, success ? "succeeded" : "failed", { content, error: failure, endedAt: at });
+          return [this.set(item), ...sandboxes];
+        }
+        if (HIDDEN_TOOLS.has(started.name)) return sandboxes;
         const existing = this.#items.get(toolCallId) as ToolItem | undefined;
         const status = success ? "succeeded" : "failed";
         const content = result?.content;
@@ -254,17 +315,18 @@ export class Timeline {
           needsBackgroundWork: needsBackgroundWork || undefined,
           endedAt: at,
         };
-        const changes: TimelineChange[] = [this.set(item)];
+        const changes: TimelineChange[] = [this.set(item), ...sandboxes];
         if (scheduling) changes.push({ type: "schedules-changed" });
         return changes;
       }
       case "permission.requested": {
         const { requestId, permissionRequest, resolvedByHook } = event.data;
-        if (resolvedByHook || permissionRequest.kind !== "custom-tool" || !APPROVAL_TOOLS.has(permissionRequest.toolName)) return [];
+        if (resolvedByHook || permissionRequest.kind !== "custom-tool" || !PERSON_APPROVES.has(permissionRequest.toolName)) return [];
         const id = approvalItemId(permissionRequest);
         this.#approvals.set(requestId, id);
         if (this.#items.has(id)) return [];
-        const description = this.#details.get(id) ?? describeApproval(permissionRequest.toolName, permissionRequest.args, this.#ctx.timeZone());
+        const description =
+          this.#details.get(id) ?? describeApproval(permissionRequest.toolName, permissionRequest.args, this.#ctx.timeZone(), undefined, this.#ctx.sandboxEnvironment);
         return [
           this.set({
             kind: "approval",

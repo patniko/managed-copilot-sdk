@@ -12,7 +12,7 @@ import { errorMessage, type Logger } from "./log.js";
 import type { Platform } from "./platform.js";
 import type { Store } from "./store.js";
 import { approvalItemId, Timeline, type TimelineChange, type TimelineContext } from "./timeline.js";
-import { APPROVAL_TOOLS } from "./tools/index.js";
+import { PERSON_APPROVES } from "./tools/index.js";
 
 const HEARTBEAT_MS = 15_000;
 const HEARTBEAT_TIMEOUT_MS = 10_000;
@@ -24,9 +24,12 @@ export interface ConversationDeps {
   readonly platform: Platform;
   accountId(): number | undefined;
   tools(): Tool<any>[];
-  systemMessage(): Promise<string>;
+  /** The system message for the session about to be resumed (its ID) or created (undefined). */
+  systemMessage(sessionId: string | undefined): Promise<string>;
   /** The event as it stands today, for update/delete approval cards. */
   currentEvent(id: string): Promise<{ title: string; start: string; end: string } | undefined>;
+  /** Why this conversation can't start sandboxes right now, if it can't: a start is then refused without asking. */
+  sandboxBlocked?(): string | undefined;
   timeline: Omit<TimelineContext, "isActionable">;
   onChanges(changes: readonly TimelineChange[]): void;
   /** The timeline was rebuilt from history; broadcast a full snapshot. */
@@ -137,14 +140,14 @@ export class Conversation {
         onPermissionRequest: (request: PermissionRequest) => this.#onPermissionRequest(request, generation),
         onEvent,
         streaming: true,
-        systemMessage: { content: await this.#deps.systemMessage() },
         // The platform's durable schedule_task is the only scheduler; the runtime's in-process one would not survive restarts.
         manageScheduleEnabled: false,
       };
       const sessionId = this.#deps.store.getUser(accountId)?.sessionId ?? (await this.#discover(managed, accountId));
       if (sessionId) {
         try {
-          session = await client.resumeSession(sessionId, { ...shared, continuePendingWork: true, suppressResumeEvent: true });
+          const systemMessage = { content: await this.#deps.systemMessage(sessionId) };
+          session = await client.resumeSession(sessionId, { ...shared, systemMessage, continuePendingWork: true, suppressResumeEvent: true });
         } catch (error) {
           if (!isMissingSession(error)) throw error;
           this.#deps.log.warn("Stored conversation no longer exists; starting a new one", { sessionId });
@@ -153,7 +156,7 @@ export class Conversation {
       }
       if (!current()) return await abandon();
       if (!session) {
-        session = await client.createSession({ ...shared, model: this.#deps.config.model });
+        session = await client.createSession({ ...shared, systemMessage: { content: await this.#deps.systemMessage(undefined) }, model: this.#deps.config.model });
         this.#deps.store.setSessionId(accountId, session.sessionId);
         this.#deps.log.info("Started a new conversation", { sessionId: session.sessionId });
         this.#deps.onSessionChanged();
@@ -237,12 +240,17 @@ export class Conversation {
     if (changes.some((change) => change.type === "busy")) this.#deps.onStatus(this.status);
   }
 
-  /** Native permission callback: consequential tools wait for the person's decision in chat. */
+  /** Native permission callback: consequential tools and new sandboxes wait for the person's decision in chat. */
   async #onPermissionRequest(request: PermissionRequest, generation: number): Promise<PermissionRequestResult> {
     if (request.kind !== "custom-tool") {
-      return { kind: "reject", feedback: "This assistant only uses its own mail, calendar, and scheduling tools." };
+      return { kind: "reject", feedback: "This assistant only uses its own mail, calendar, scheduling, and sandbox tools." };
     }
-    if (!APPROVAL_TOOLS.has(request.toolName)) return { kind: "approve-once" };
+    if (!PERSON_APPROVES.has(request.toolName)) return { kind: "approve-once" };
+    if (request.toolName === "start_worker") {
+      // Nothing to ask the person when a sandbox couldn't start anyway; the reason goes to the model instead.
+      const blocked = this.#deps.sandboxBlocked?.();
+      if (blocked) return { kind: "reject", feedback: blocked };
+    }
     const id = approvalItemId(request);
     const decided = this.timeline.get(id);
     if (request.toolCallId && decided?.kind === "approval" && (decided.status === "approved" || decided.status === "denied")) {
@@ -258,7 +266,7 @@ export class Conversation {
     if (generation !== this.#generation) return { kind: "no-result" };
     const latest = this.timeline.get(id);
     if (latest?.kind === "approval" && latest.status !== "pending") return { kind: "no-result" };
-    const description = describeApproval(request.toolName, args, this.#deps.timeline.timeZone(), current);
+    const description = describeApproval(request.toolName, args, this.#deps.timeline.timeZone(), current, this.#deps.timeline.sandboxEnvironment);
     this.timeline.enrichApproval(id, description);
     return await new Promise<PermissionRequestResult>((resolve) => {
       this.#release(id);
@@ -312,7 +320,9 @@ export class Conversation {
     const session = this.#session;
     if (!session) throw new UserFacingError("not_attached", "The conversation isn't connected.");
     try {
-      return await session.send({ prompt: text });
+      // While a turn runs (for example, waiting for a sandbox), the message goes to it right away instead of queuing
+      // behind it, so the assistant can answer it before the work finishes.
+      return await session.send({ prompt: text, ...(this.timeline.busy ? { mode: "immediate" as const } : {}) });
     } catch (error) {
       this.#lost(`send failed: ${errorMessage(error)}`);
       throw new UserFacingError("send_failed", `Your message wasn't delivered: ${errorMessage(error)}`);

@@ -16,6 +16,7 @@ import { EventHub, HttpError, redirect, Router, type RequestContext } from "./ht
 import { createLogger, errorMessage, type Logger } from "./log.js";
 import { OfflineWorker } from "./offline.js";
 import { Platform } from "./platform.js";
+import { Sandboxes } from "./sandboxes.js";
 import { Schedules } from "./schedules.js";
 import { loadOrCreateDevSealingKey, Sealer } from "./seal.js";
 import { Store } from "./store.js";
@@ -51,6 +52,7 @@ export class Assistant {
   readonly hub = new EventHub();
   readonly conversation: Conversation;
   readonly schedules: Schedules;
+  readonly sandboxes: Sandboxes;
   readonly offline: OfflineWorker;
   readonly background: BackgroundWork;
   readonly #effects: EffectLedger;
@@ -99,23 +101,41 @@ export class Assistant {
       platform: this.platform,
       accountId: () => this.#account?.id,
       tools: () => this.#tools(),
-      systemMessage: async () => {
+      systemMessage: async (sessionId) => {
         const account = this.#requireAccount();
-        return systemInstructions({ name: account.name ?? account.login });
+        return systemInstructions({ name: account.name ?? account.login, sandboxes: await this.sandboxes.canStart(sessionId) });
       },
       currentEvent: async (id) => {
         const event = await (await this.workspace()).calendar.get(id, this.timeZone());
         return { title: event.title, start: event.start, end: event.end };
       },
+      sandboxBlocked: () => this.sandboxes.blocked(),
       timeline: {
         timeZone: () => this.timeZone(),
         scheduleNameFor: (_messageId, text) => this.schedules.nameFor(text),
         isOffline: (id) => this.offline.isOffline(id),
+        sandboxEnvironment: (name) => this.sandboxes.environment(name),
       },
       onChanges: (changes) => this.#onTimelineChanges(changes),
-      onReset: () => this.#broadcastSnapshot(),
+      onReset: () => {
+        this.#broadcastSnapshot();
+        // The chat's sandbox cards are known now, so their work can be timed.
+        this.sandboxes.schedule();
+      },
       onStatus: () => this.#broadcastStatus(),
-      onSessionChanged: () => void this.schedules.refresh(),
+      onSessionChanged: () => {
+        void this.schedules.refresh();
+        this.sandboxes.schedule();
+      },
+    });
+    this.sandboxes = new Sandboxes({
+      log: log.child("sandboxes"),
+      store: this.store,
+      platform: this.platform,
+      environment: config.environment,
+      sessionId: () => this.conversation.sessionId,
+      cards: () => this.conversation.timeline.list().filter((item) => item.kind === "worker"),
+      onChange: (sandboxes) => this.#broadcast({ type: "sandboxes", sandboxes }),
     });
     this.schedules = new Schedules({
       config,
@@ -174,6 +194,7 @@ export class Assistant {
     clearTimeout(this.#detachTimer);
     clearTimeout(this.#schedulesTimer);
     clearTimeout(this.#attachTimer);
+    this.sandboxes.stop();
     this.hub.close();
     await this.conversation.detach("server stopping").catch(() => undefined);
     await this.platform.stop();
@@ -191,8 +212,11 @@ export class Assistant {
     this.#broadcastStatus();
     this.#broadcast({ type: "connections", connections: this.connections() });
     void this.background.refresh("platform ready");
+    // Sandbox events arrive on this connection; the previous one's subscriptions closed with it.
+    this.sandboxes.listen(managed);
     // Know the conversation (even with no tab open) before listing its schedules and answering its webhooks.
     await this.conversation.ensureKnown().catch((error) => this.log.warn("Couldn't find the conversation yet", { error: errorMessage(error) }));
+    void this.sandboxes.refresh();
     await this.schedules.refresh();
     void this.refreshAgenda();
     if (this.#viewers > 0) this.#ensureAttached();
@@ -234,6 +258,7 @@ export class Assistant {
     this.#detachTimer = undefined;
     this.#ensureAttached();
     if (this.platform.status.state === "ready" && this.background.due(BACKGROUND_FRESH_MS)) void this.background.refresh("tab opened");
+    if (this.platform.status.state === "ready") this.sandboxes.schedule();
   }
 
   #viewerLeft(): void {
@@ -367,6 +392,7 @@ export class Assistant {
       settings: { timeZone: this.timeZone() },
       offline: this.offline.view() as OfflineView,
       agenda: this.#agenda,
+      sandboxes: this.sandboxes.view,
     };
   }
 
@@ -396,6 +422,9 @@ export class Assistant {
         case "schedules-changed":
           clearTimeout(this.#schedulesTimer);
           this.#schedulesTimer = setTimeout(() => void this.schedules.refresh(), 300);
+          break;
+        case "workers-changed":
+          this.sandboxes.schedule();
           break;
         case "proactive":
           this.#broadcast({ type: "notify", title: "Your assistant", body: plainText(change.text).slice(0, 180), itemId: change.itemId });
@@ -503,12 +532,17 @@ export class Assistant {
         // Schedules that target the old conversation would fail once it is deleted.
         for (const schedule of this.schedules.list) await this.schedules.remove(schedule.id).catch(() => undefined);
         await this.conversation.startOver();
+        // Deleting the old conversation deleted its sandboxes too.
+        this.sandboxes.reset(previous);
         this.offline.reset();
         this.#ensureAttached();
         void this.schedules.refresh();
         return { ok: true, previous };
       }),
     );
+
+    // A file a sandbox published (an image shown in the chat, or a download). Only this app's pages may load it.
+    router.add("GET", "/api/sandboxes/outputs/:id", (ctx) => run(() => this.sandboxes.serveOutput(ctx.res, ctx.params.id!)), { sameOrigin: true });
 
     router.add("POST", "/api/schedules/briefing", async () => run(() => this.#scheduling(() => this.schedules.addMorningBriefing())));
     router.add("POST", "/api/schedules/:id/pause", async (ctx) => run(() => this.schedules.pause(ctx.params.id!)));

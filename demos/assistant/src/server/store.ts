@@ -92,6 +92,30 @@ const MIGRATIONS: readonly string[] = [
    CREATE INDEX demo_events_account ON demo_events (account_id, start);`,
   // The browser's time zone, remembered so scheduled runs with no tab open use the same zone.
   `ALTER TABLE users ADD COLUMN detected_time_zone TEXT;`,
+  // Sandboxes (orchestrator workers): their published outputs, with a copy of each image so charts stay in the chat
+  // after a sandbox is deleted, and when each start or follow-up card's work ran.
+  `CREATE TABLE sandbox_outputs (
+     artifact_id TEXT PRIMARY KEY,
+     coordinator_id TEXT NOT NULL,
+     worker_id TEXT NOT NULL,
+     path TEXT NOT NULL,
+     version INTEGER NOT NULL,
+     size INTEGER NOT NULL,
+     content_type TEXT,
+     published_at TEXT,
+     bytes BLOB
+   );
+   CREATE INDEX sandbox_outputs_worker ON sandbox_outputs (coordinator_id, worker_id);
+   CREATE TABLE sandbox_runs (
+     card_id TEXT PRIMARY KEY,
+     coordinator_id TEXT NOT NULL,
+     worker_name TEXT NOT NULL,
+     worker_id TEXT,
+     started_at TEXT NOT NULL,
+     finished_at TEXT,
+     outcome TEXT
+   );
+   CREATE INDEX sandbox_runs_worker ON sandbox_runs (worker_id, finished_at);`,
 ];
 
 export interface UserRecord {
@@ -124,6 +148,29 @@ export interface EffectRecord {
   readonly tool: string;
   readonly state: "started" | "completed";
   readonly result?: string;
+}
+
+/** A published sandbox output this server knows about (and, for images, keeps a copy of). */
+export interface SandboxOutputRecord {
+  readonly artifactId: string;
+  readonly coordinatorId: string;
+  readonly workerId: string;
+  readonly path: string;
+  readonly version: number;
+  readonly size: number;
+  readonly contentType?: string;
+  readonly publishedAt?: string;
+  readonly cached: boolean;
+}
+
+/** When one start or follow-up card's work ran. */
+export interface SandboxRunRecord {
+  readonly cardId: string;
+  readonly workerName: string;
+  readonly workerId?: string;
+  readonly startedAt: string;
+  readonly finishedAt?: string;
+  readonly outcome?: "idle" | "failed" | "stopped";
 }
 
 type Row = Record<string, unknown>;
@@ -351,5 +398,96 @@ export class Store {
 
   clearOfflineCalls(): void {
     this.db.prepare("DELETE FROM offline_calls").run();
+  }
+
+  // ---- sandboxes ---------------------------------------------------------------------------------------------------
+
+  #outputRecord(row: Row): SandboxOutputRecord {
+    return {
+      artifactId: String(row.artifact_id),
+      coordinatorId: String(row.coordinator_id),
+      workerId: String(row.worker_id),
+      path: String(row.path),
+      version: Number(row.version),
+      size: Number(row.size),
+      contentType: str(row.content_type),
+      publishedAt: str(row.published_at),
+      cached: Number(row.cached) === 1,
+    };
+  }
+
+  /** Records published outputs (new ones only: a published version never changes). */
+  recordOutputs(outputs: readonly Omit<SandboxOutputRecord, "cached">[]): void {
+    const insert = this.db.prepare(
+      `INSERT INTO sandbox_outputs (artifact_id, coordinator_id, worker_id, path, version, size, content_type, published_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (artifact_id) DO NOTHING`,
+    );
+    for (const output of outputs) {
+      insert.run(output.artifactId, output.coordinatorId, output.workerId, output.path, output.version, output.size, output.contentType ?? null, output.publishedAt ?? null);
+    }
+  }
+
+  outputs(coordinatorId: string): SandboxOutputRecord[] {
+    const rows = this.db
+      .prepare("SELECT artifact_id, coordinator_id, worker_id, path, version, size, content_type, published_at, bytes IS NOT NULL AS cached FROM sandbox_outputs WHERE coordinator_id = ? ORDER BY published_at, path, version")
+      .all(coordinatorId) as Row[];
+    return rows.map((row) => this.#outputRecord(row));
+  }
+
+  output(artifactId: string): SandboxOutputRecord | undefined {
+    const row = this.db
+      .prepare("SELECT artifact_id, coordinator_id, worker_id, path, version, size, content_type, published_at, bytes IS NOT NULL AS cached FROM sandbox_outputs WHERE artifact_id = ?")
+      .get(artifactId) as Row | undefined;
+    return row ? this.#outputRecord(row) : undefined;
+  }
+
+  outputBytes(artifactId: string): Uint8Array | undefined {
+    const row = this.db.prepare("SELECT bytes FROM sandbox_outputs WHERE artifact_id = ?").get(artifactId) as Row | undefined;
+    return row?.bytes instanceof Uint8Array ? row.bytes : undefined;
+  }
+
+  cacheOutput(artifactId: string, bytes: Uint8Array): void {
+    this.db.prepare("UPDATE sandbox_outputs SET bytes = ? WHERE artifact_id = ?").run(bytes, artifactId);
+  }
+
+  /** Starts timing a card's work, once; later calls only fill in the sandbox's ID when it was unknown. */
+  startRun(run: { cardId: string; coordinatorId: string; workerName: string; workerId?: string; startedAt: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO sandbox_runs (card_id, coordinator_id, worker_name, worker_id, started_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (card_id) DO UPDATE SET worker_id = COALESCE(sandbox_runs.worker_id, excluded.worker_id)`,
+      )
+      .run(run.cardId, run.coordinatorId, run.workerName, run.workerId ?? null, run.startedAt);
+  }
+
+  /** Ends a sandbox's open runs that started by `at`: it finished (or stopped) then. */
+  finishRuns(workerId: string, at: string, outcome: "idle" | "failed" | "stopped"): number {
+    const result = this.db
+      .prepare("UPDATE sandbox_runs SET finished_at = ?, outcome = ? WHERE worker_id = ? AND finished_at IS NULL AND started_at <= ?")
+      .run(at, outcome, workerId, at);
+    return Number(result.changes);
+  }
+
+  /** Ends one card's run if it is still open (and started by `at`). */
+  finishRun(cardId: string, at: string, outcome: "idle" | "failed" | "stopped"): void {
+    this.db.prepare("UPDATE sandbox_runs SET finished_at = ?, outcome = ? WHERE card_id = ? AND finished_at IS NULL AND started_at <= ?").run(at, outcome, cardId, at);
+  }
+
+  runs(coordinatorId: string): SandboxRunRecord[] {
+    const rows = this.db.prepare("SELECT * FROM sandbox_runs WHERE coordinator_id = ? ORDER BY started_at").all(coordinatorId) as Row[];
+    return rows.map((row) => ({
+      cardId: String(row.card_id),
+      workerName: String(row.worker_name),
+      workerId: str(row.worker_id),
+      startedAt: String(row.started_at),
+      finishedAt: str(row.finished_at),
+      outcome: row.outcome === "idle" || row.outcome === "failed" || row.outcome === "stopped" ? row.outcome : undefined,
+    }));
+  }
+
+  /** Forgets a conversation's sandboxes (it was replaced by a new one, and the platform deleted them with it). */
+  clearSandboxes(coordinatorId: string): void {
+    this.db.prepare("DELETE FROM sandbox_outputs WHERE coordinator_id = ?").run(coordinatorId);
+    this.db.prepare("DELETE FROM sandbox_runs WHERE coordinator_id = ?").run(coordinatorId);
   }
 }
