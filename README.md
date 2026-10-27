@@ -130,12 +130,13 @@ All three demos run under `aspire run` with real models, and the same AppHost pu
 ### AI software factory
 
 <p align="center">
-  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The factory floor: a plan split into two tasks, each built by its own builder in its own sandbox, with reviews and a release waiting" width="900">
+  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The agent-led factory floor: a coordinator that created two builder sandboxes and reused them for review fixes, with its decisions listed live" width="900">
 </p>
 
-Describe the software you want. A planner splits it into tasks, and a builder per task works in **its own sandbox**,
-all in parallel. A reviewer on a different model sends work back with file-and-line findings. A release agent then
-integrates the tasks, adds integration tests and a README, and publishes a tested release you can download.
+Describe the software you want. A planner splits it into tasks. A coordinator agent then creates a builder in **its
+own sandbox** for each task, sends review findings back to the same builder, and creates a release sandbox once every
+task passes. The factory still decides what counts: real test reports, a reviewer on a different model, and the
+accepted release. The original app-driven pipeline remains as **Classic** mode.
 
 <p align="center">
   <img src="demos/software-factory/docs/screenshots/deliverable.png" alt="The deliverable: release ready, 38 of 38 tests passed, release notes, and per-task review results" width="900">
@@ -235,8 +236,9 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
   example (14) passes locally and on Azure.
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
-- **The demos run end to end.** The factory and the assistant run locally and on Azure. Dispatch runs locally, including
-  a message from Copilot CLI attached to the same conversation.
+- **The demos run end to end.** The factory's classic pipeline and the assistant run locally and on Azure. The
+  factory's agent-led mode (including a restart mid-build) and Dispatch (including a message from Copilot CLI attached
+  to the same conversation) run locally.
 - **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
   process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
   list what each gate proved and what it did not.

@@ -87,12 +87,12 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `packages/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `platform/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `platform/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant |
+| Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant, Dispatch |
 | Samples | `samples` | scripts (`pnpm sample <nn>`) | The walkthroughs' runnable code, documented in `samples/*/README.md` |
 
 ### Web UI look and feel
 
-Every web UI (the console, the software factory, and the assistant) looks like part of github.com. The shared
+Every web UI (the console, the software factory, the assistant, and Dispatch) looks like part of github.com. The shared
 `@managed-copilot/github-theme` package (`packages/github-theme`) is the single source: GitHub's Primer design tokens
 from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
 Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
@@ -867,6 +867,28 @@ and quickstart snippet 14).
   starting"), and coordinators observed live wait for the worker and copy again. A worker therefore starts its task
   before files copied for it arrive; tasks that depend on them should say so (the coordinator's own task text usually
   does).
+- **Apps on coordinators.** Two demos run on coordinator sessions, with the decisions left to the model and the app
+  observing workers through `managed.workers(coordinator).list()`, the `worker.*` events, and `managed.sessions.get`,
+  never by attaching a client to a worker (which would take over its prompts).
+  - *Software factory, agent-led mode* (the default; `demos/software-factory`). `factory-coordinator` is an
+    orchestrator with network off, the `coordinator` agent from `customizations/coordinator`, workers
+    `factory-builder` (the default) and `factory-release`, and `maxWorkers` 6 (up to four tasks, the release, and a
+    replacement). The factory registers `defineTool` gates on the coordinator session (`prepare_workspace`,
+    `check_build`, `request_review`, `prepare_release`, `check_release`, `factory_status`) that never start or
+    message a worker themselves. Its permission handler approves a `start_worker` only for the work order's named
+    builders and release worker, in their environment, with their agent and model, and with a `READY` first task;
+    preparation waits for that turn, seeds the sandbox with `managed.files().write()`, and hands the real task back to
+    the coordinator. Gates are pinned to the worker's message count and runtime turn, so an earlier report can't pass
+    as new work and a repeated call consumes no nudge or review round. Release inputs arrive by `copy_worker_files`
+    under `.factory/incoming/<task>/` and are verified against the accepted artifacts. After a restart the factory
+    resumes the same coordinator with its tools, stops only the coordinator's unfinished turn, and reconciles worker
+    IDs; cancelling deletes worker sessions through the REST API. Classic mode keeps the app-orchestrated pipeline on
+    the four station environments.
+  - *Dispatch* (`demos/dispatch`). A conversation is a session of the `dispatch` orchestrator (four worker
+    environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
+    view is projected from the coordinator's own events (worker tool calls and the permission events above), so a
+    restart rebuilds it from `getEvents()`; approvals wait in the SDK permission handler, which resolves `no-result`
+    on detach so the platform asks again on resume.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
