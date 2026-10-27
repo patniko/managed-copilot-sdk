@@ -122,16 +122,12 @@ export class Platform {
       this.#managed = managed;
       this.#token = token;
       this.#attempt = 0;
-      const limits = [
-        env.scheduling ? undefined : `The "${environment}" environment doesn't allow agent scheduling (scheduling: true), so reminders are unavailable.`,
-        env.type === "orchestrator" && !managed.info.capabilities.includes("orchestrator") ? "This deployment can't run sandboxes, so your assistant works without them." : undefined,
-      ].filter(Boolean);
       this.#set({
         state: "ready",
         environment,
         url: managed.url,
         deployment: { name: managed.info.name, mode: managed.info.mode, version: managed.info.version },
-        message: limits.length > 0 ? limits.join(" ") : undefined,
+        message: env.scheduling ? undefined : `The "${environment}" environment doesn't allow agent scheduling (scheduling: true), so reminders are unavailable.`,
       });
       this.#log.info("Connected to Managed Copilot", { url: managed.url, account: managed.account.login, environment });
     } catch (error) {

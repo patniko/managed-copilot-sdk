@@ -11,6 +11,8 @@
  *   --offline            Close the tab, let a scheduled check-in use the calendar through the webhook, then reopen
  *   --sandbox            Chart the meeting load in a Python sandbox (approved in the chat), send it a follow-up that
  *                        reuses it, then research a candidate in a web research sandbox (a new one)
+ *   --sandbox-away       In a new conversation, close the tab while a new sandbox waits for approval (nothing starts),
+ *                        reopen and approve it, then ask something else while it works
  *   --enable-background  If background work is off, turn it on with the side panel's one-click button (your consent
  *                        to keep a sealed copy of your GitHub sign-in on the deployment for scheduled work)
  *   --screenshots <dir>  Save screenshots (light, dark, and mobile) into <dir>
@@ -51,7 +53,7 @@ async function shot(page: Page, name: string): Promise<void> {
   ok(`saved ${name}.png`);
 }
 
-async function open(browser: Browser, options: { colorScheme?: "light" | "dark"; mobile?: boolean } = {}): Promise<{ context: BrowserContext; page: Page }> {
+async function open(browser: Browser, options: { colorScheme?: "light" | "dark"; mobile?: boolean; busy?: boolean } = {}): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({
     viewport: options.mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 },
     deviceScaleFactor: 2,
@@ -61,12 +63,13 @@ async function open(browser: Browser, options: { colorScheme?: "light" | "dark";
   });
   const page = await context.newPage();
   await page.goto(url);
-  await waitOnline(page);
+  await waitOnline(page, options.busy);
   return { context, page };
 }
 
-async function waitOnline(page: Page): Promise<void> {
-  await page.locator('[data-testid="status"][data-status="ok"]').waitFor({ timeout: 120_000 });
+/** Waits until the assistant is online (`busy`: or online with a turn running, e.g. one waiting for an approval). */
+async function waitOnline(page: Page, busy = false): Promise<void> {
+  await page.locator(busy ? '[data-testid="status"]:is([data-status="ok"], [data-status="busy"])' : '[data-testid="status"][data-status="ok"]').waitFor({ timeout: 120_000 });
 }
 
 /** Waits for a turn to start and finish (the header goes busy, then back to online). */
@@ -96,8 +99,8 @@ interface SandboxesState {
   workers: { id: string; name: string; environment: string; state: string; messages: number; outputs: { path: string; image: boolean }[] }[];
 }
 
-/** Approves the newest sandbox the assistant asks to start, then waits for its card to finish its work. */
-async function approveSandbox(page: Page, environment: string, screenshot?: string): Promise<string> {
+/** Approves the newest sandbox the assistant asks to start, then (unless `wait` is false) waits for its card to finish its work. */
+async function approveSandbox(page: Page, environment: string, screenshot?: string, options: { wait?: boolean } = {}): Promise<string> {
   const approval = page.locator('[data-testid="approval"][data-tool="start_worker"][data-status="pending"][data-actionable="true"]').last();
   await approval.waitFor({ timeout: TURN_TIMEOUT });
   const title = (await approval.locator("h3").innerText()).trim();
@@ -110,9 +113,62 @@ async function approveSandbox(page: Page, environment: string, screenshot?: stri
   await approval.getByRole("button", { name: "Start sandbox" }).click();
   // Once approved, the approval card turns into the sandbox's own card.
   await page.locator(`[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"]`).last().waitFor({ timeout: 60_000 });
-  ok(`created sandbox ${worker}; waiting for its work`);
+  ok(`created sandbox ${worker}${options.wait === false ? "" : "; waiting for its work"}`);
+  if (options.wait === false) return worker;
   await page.locator(`[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"][data-phase="done"]`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
   return worker;
+}
+
+/**
+ * Starting a sandbox waits for the person even when they are away: in a new conversation (so there's no sandbox to
+ * reuse), close the tab with the approval pending, check that nothing started meanwhile, reopen, and approve it then.
+ * Also asks something new while that sandbox works.
+ */
+async function sandboxAwayJourney(browser: Browser, context: BrowserContext, page: Page): Promise<{ context: BrowserContext; page: Page }> {
+  step("Start a new conversation, ask for a sandbox, then close the tab before approving it");
+  await startOver(page, { demo: false });
+  await send(page, "Use a Python sandbox to work out my average meeting length for each of the last four weeks, and chart it as SVG.");
+  const approval = page.locator('[data-testid="approval"][data-tool="start_worker"][data-status="pending"][data-actionable="true"]').last();
+  await approval.waitFor({ timeout: TURN_TIMEOUT });
+  const worker = (await approval.locator('[data-testid="sandbox-approval"] .font-semibold').first().innerText()).trim();
+  const known = (await state(page)).sandboxes.workers.length;
+  await context.close();
+  ok(`tab closed while ${worker} waits for approval; waiting for the assistant to detach`);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 45_000));
+  const away = (await (await fetch(`${url}/api/state`, { headers: { "sec-fetch-site": "same-origin" } })).json()) as {
+    conversation: { attach: string };
+    offline: { waitingApprovals: number };
+    sandboxes: SandboxesState;
+  };
+  if (away.conversation.attach !== "detached") throw new Error(`Expected the conversation to be detached, but it is ${away.conversation.attach}.`);
+  if (away.sandboxes.workers.length !== known) throw new Error("A sandbox started while nobody was there to approve it.");
+  ok(`detached; nothing started; ${away.offline.waitingApprovals} approval${away.offline.waitingApprovals === 1 ? "" : "s"} waiting for you`);
+
+  step("Come back: the same approval is waiting");
+  ({ context, page } = await open(browser, { busy: true }));
+  const back = page.locator(`[data-testid="approval"][data-tool="start_worker"][data-status="pending"][data-actionable="true"]`).last();
+  await back.waitFor({ timeout: 60_000 });
+  const again = (await back.locator('[data-testid="sandbox-approval"] .font-semibold').first().innerText()).trim();
+  if (again !== worker) throw new Error(`Expected the approval for ${worker}, got ${again}.`);
+  ok(`the approval for ${worker} is back and can be answered`);
+  await approveSandbox(page, "assistant-python", undefined, { wait: false });
+
+  step("Ask something new while it works");
+  await page.locator(`[data-testid="sandbox-card"][data-worker="${worker}"]:is([data-phase="starting"], [data-phase="working"], [data-phase="done"])`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
+  const replies = await page.locator('[data-testid="assistant-message"]').count();
+  await send(page, "While that runs: when is my first meeting tomorrow?");
+  await page.locator('[data-testid="assistant-message"][data-streaming="false"]').nth(replies).waitFor({ timeout: TURN_TIMEOUT });
+  const phase = await page.locator(`[data-testid="sandbox-card"][data-worker="${worker}"]`).last().getAttribute("data-phase");
+  ok(`answered (${await lastReply(page)}…) while ${worker} was ${phase}`);
+  await page.locator(`[data-testid="sandbox-card"][data-worker="${worker}"][data-phase="done"]`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
+  await waitTurn(page, SANDBOX_TIMEOUT);
+  ok(`reply: ${await lastReply(page)}…`);
+  return { context, page };
+}
+
+/** Brings the side panel's Sandboxes section into view (its own scroll), for screenshots of the chat beside it. */
+async function showSandboxesPanel(page: Page): Promise<void> {
+  await page.locator('[data-testid="sandboxes"]').scrollIntoViewIfNeeded().catch(() => undefined);
 }
 
 async function sandboxJourney(page: Page): Promise<void> {
@@ -129,6 +185,7 @@ async function sandboxJourney(page: Page): Promise<void> {
   await page.locator(`[data-testid="sandbox-row"][data-worker="${stats}"]`).waitFor({ timeout: 30_000 });
   ok(`side panel lists ${stats}`);
   await page.locator('[data-testid="assistant-message"]').last().scrollIntoViewIfNeeded();
+  await showSandboxesPanel(page);
   await shot(page, "sandbox");
 
   step("Follow up: the same sandbox gets it (reused, no new approval)");
@@ -142,11 +199,12 @@ async function sandboxJourney(page: Page): Promise<void> {
   const startsAfter = await page.locator('[data-testid="approval"][data-tool="start_worker"]').count();
   if (startsAfter !== starts) throw new Error("The follow-up started a new sandbox instead of reusing the first one.");
   ok(`reply: ${await lastReply(page)}…`);
-  await page.locator('[data-testid="assistant-message"]').last().scrollIntoViewIfNeeded();
+  await page.locator(`[data-testid="sandbox-card"][data-action="message"][data-worker="${stats}"]`).last().scrollIntoViewIfNeeded();
+  await showSandboxesPanel(page);
   await shot(page, "sandbox-reused");
 
   step("Research the candidate (a different kind of work: a new web research sandbox)");
-  await send(page, "Also check what the 2 PM candidate works on in open source.");
+  await send(page, "Also check what the candidate in my next interview works on in open source.");
   const research = await approveSandbox(page, "assistant-web", "sandbox-research-approval");
   await waitTurn(page, SANDBOX_TIMEOUT);
   ok(`reply: ${await lastReply(page)}…`);
@@ -156,6 +214,7 @@ async function sandboxJourney(page: Page): Promise<void> {
   const statsWorker = after.find((worker) => worker.name === stats);
   if (!statsWorker || statsWorker.messages < 2) throw new Error(`${stats} should have received the follow-up as its second task.`);
   if (!after.some((worker) => worker.name === research && worker.environment === "assistant-web")) throw new Error(`${research} should be a sandbox in assistant-web.`);
+  await showSandboxesPanel(page);
   await shot(page, "sandbox-research");
 }
 
@@ -182,6 +241,18 @@ async function ensureBackgroundWork(page: Page): Promise<void> {
   ok("background work is on");
 }
 
+/** Settings → Start over (and, with `demo`, fresh demo data), then waits for the new, empty conversation. */
+async function startOver(page: Page, options: { demo: boolean }): Promise<void> {
+  await page.evaluate(async (paths) => {
+    for (const path of paths) {
+      const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+      if (!response.ok) throw new Error(`${path} failed: HTTP ${response.status}`);
+    }
+  }, options.demo ? ["/api/conversation/reset", "/api/demo/reset"] : ["/api/conversation/reset"]);
+  await page.getByText("Triage my inbox").waitFor({ timeout: 120_000 });
+  await waitOnline(page);
+}
+
 async function main(): Promise<void> {
   const browser = await chromium.launch({ channel: "msedge", headless: !flag("headed") });
   try {
@@ -191,14 +262,7 @@ async function main(): Promise<void> {
 
     if (flag("fresh")) {
       step("Starting a new conversation with fresh demo data");
-      await page.evaluate(async () => {
-        for (const path of ["/api/conversation/reset", "/api/demo/reset"]) {
-          const response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-          if (!response.ok) throw new Error(`${path} failed: HTTP ${response.status}`);
-        }
-      });
-      await page.getByText("Triage my inbox").waitFor({ timeout: 120_000 });
-      await waitOnline(page);
+      await startOver(page, { demo: true });
       ok("fresh conversation ready");
     }
 
@@ -233,6 +297,7 @@ async function main(): Promise<void> {
     }
 
     if (flag("sandbox")) await sandboxJourney(page);
+    if (flag("sandbox-away")) ({ context, page } = await sandboxAwayJourney(browser, context, page));
 
     if (flag("reminder")) {
       step("Ask for a reminder one minute from now");
