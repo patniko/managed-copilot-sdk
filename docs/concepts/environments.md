@@ -19,13 +19,14 @@ flowchart LR
 
 The sandbox IDs come from a live run: two `coder` sessions created by one client got two different sandboxes.
 
-## Three types
+## Four types
 
 | Type | Where a session runs | Its tools | Good for |
 | --- | --- | --- | --- |
 | `shared` | In the one shared runtime, next to other sessions | Your app's tools, web fetches, and remote MCP servers; no shell, no files | Chat agents, assistants, high volume |
 | `isolated` | In its own new sandbox | A shell, files, packages, git, plus your app's tools | Coding agents, builds, data work |
 | `promotable` | Shared at first, then once in its own sandbox | Shared tools, then sandbox tools after the move | Chats that sometimes need to run code |
+| `orchestrator` | A coordinator on the shared runtime; each worker it starts gets its own sandbox | Tools to start, message, wait for, and stop workers; workers get their environment's sandbox tools | Jobs with parts that can run in parallel |
 
 ## Which type should I use?
 
@@ -35,6 +36,7 @@ flowchart TD
   Q -- "never" --> S["shared<br/>fast to start, nothing to set up"]
   Q -- "always" --> I["isolated<br/>a fresh sandbox per session"]
   Q -- "only sometimes" --> P["promotable<br/>starts shared, moves when it must"]
+  Q -- "in several parts at once" --> O["orchestrator<br/>a coordinator with workers in their own sandboxes"]
 ```
 
 ## Declare environments once
@@ -53,6 +55,7 @@ await addManagedCopilot(builder, "copilot", {
     },
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" },
+    team: { type: "orchestrator", workers: ["coder"], maxWorkers: 3 }, // workers run as coder sessions
   },
   inline: { types: ["shared", "isolated"], sizes: ["small"] }, // what code may ask for without a name
 });
@@ -91,7 +94,8 @@ four of them, which the root AppHost spreads into its list.
 
 > [!TIP]
 > **Try it:** [walkthrough 05](../../samples/05-choose-environments/README.md) creates a session each way and shows the
-> sandbox each one got. [Walkthrough 03](../../samples/03-sandbox/README.md) shows one client getting two sandboxes.
+> sandbox each one got. [Walkthrough 03](../../samples/03-sandbox/README.md) shows one client getting two sandboxes,
+> and [walkthrough 11](../../samples/11-orchestrator/README.md) a coordinator splitting a job across two workers.
 
 <details>
 <summary><strong>Under the hood</strong></summary>

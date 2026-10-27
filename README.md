@@ -101,7 +101,8 @@ await addManagedCopilot(builder, "copilot", {
 ```
 
 An environment is a template; a client only picks one. Every `chat` session shares one runtime, every `coder` session
-gets its own new sandbox, and a `helper` session moves once into a sandbox when it needs one. From a live run:
+gets its own new sandbox, a `helper` session moves once into a sandbox when it needs one, and a `team` session starts
+workers that each get a sandbox of their own. From live runs:
 
 ```mermaid
 flowchart LR
@@ -114,9 +115,13 @@ flowchart LR
   H -. "moves once" .-> S3["its own new sandbox<br/>(coder's image, size, setup)"]
   K1["coder session 1"] --> S1["sandbox sbx_96fd…"]
   K2["coder session 2"] --> S2["sandbox sbx_1635…"]
+  T["team session<br/>(coordinator)"] --> RT
+  T -. "start_worker" .-> W1["worker prime-counter<br/>sandbox sbx_85a3…"]
+  T -. "start_worker" .-> W2["worker fib-digits<br/>sandbox sbx_602b…"]
 ```
 
-More in [environments](docs/concepts/environments.md) and [sandboxes](docs/concepts/sandboxes.md).
+More in [environments](docs/concepts/environments.md), [sandboxes](docs/concepts/sandboxes.md), and the
+[orchestrator](docs/concepts/orchestrator.md).
 
 ## The demos
 
