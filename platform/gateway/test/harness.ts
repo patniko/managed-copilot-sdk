@@ -46,6 +46,8 @@ export class FakeRuntime {
   port = 0;
   /** Like stock runtime 1.0.103: lifecycle notifications follow the create/resume answer (default: before it). */
   lifecycleAfterAnswer = false;
+  /** Each session's `session.queue.pendingItems` snapshot: queued items and steering messages (test hook). */
+  readonly queues = new Map<string, { items: { id: string; kind: string }[]; steeringMessages: string[]; inFlightSteeringCount?: number }>();
 
   async start(): Promise<void> {
     this.#server = createServer((socket) => this.#accept(socket));
@@ -311,6 +313,9 @@ export class FakeRuntime {
         };
       case "session.permissions.pendingRequests":
         return { items: [] };
+      case "session.queue.pendingItems":
+        // What the session's queue holds (test hook `queues`); an empty queue otherwise.
+        return this.queues.get(String(sessionId)) ?? { items: [], steeringMessages: [] };
       case "session.metadata.isProcessing":
         return { processing: this.#processing.has(String(sessionId)) || [...this.#pendingTools.values()].some((pending) => pending.sessionId === sessionId) };
       case "session.permissions.handlePendingPermissionRequest":

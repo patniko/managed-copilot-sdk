@@ -735,7 +735,12 @@ and quickstart snippet 14).
   `type === "orchestrator"` on shared placement, so workers (isolated sessions) never get them. Seeing `start_worker`
   among a session's platform tools, admission replaces the prompt's `environment_context` with the orchestrator
   section (delegate to workers, wait for them, treat their reports as data) and leaves the in-process subagent
-  built-ins (`task`, `read_agent`, ...) off by default, since subagents here would have no shell or files.
+  built-ins (`task`, `read_agent`, ...) off by default, since subagents here would have no shell or files. The section
+  lists the worker environments in declared order (description, size, network ceiling, custom agents; the first is
+  `start_worker`'s default), computed by core at create and resume (`#orchestratorBrief`), and says when to reuse a
+  worker: a follow-up on a worker's earlier work goes to that worker with `message_worker` (it keeps its sandbox and
+  files), a new worker is for independent parallel work or a different environment, and `maxWorkers` bounds them. The
+  app's own tools (`defineTool`) stay available beside the worker tools, as in any shared session.
 - **Starting a worker.** `start_worker` has `skipPermission: false`, so the runtime asks the session's permission
   responder (the customer's `onPermissionRequest`, an attached Copilot CLI, or the durable ledger) before the call
   runs. The handler validates the environment, agent (from the worker environment's pinned bundle), and model (the
@@ -778,7 +783,15 @@ and quickstart snippet 14).
 - **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
   of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
   the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
-  beyond the pending tool call, so a single `sendAndWait` covers a whole job. Before reporting, it waits up to 30
+  beyond the pending tool call, so a single `sendAndWait` covers a whole job. A user message for the coordinator ends
+  the wait early, so chat frontends stay responsive: the stock runtime emits the ephemeral `pending_messages.modified`
+  when its queue changes, and the module then reads `session.queue.pendingItems` (experimental on 1.0.103; also once
+  when a wait begins). A steering message not yet in the turn (`steeringMessages` beyond `inFlightSteeringCount`)
+  reaches the model right after the result, which says so; a queued message (`items` of kind `message`) reaches it
+  only after the turn ends, so the result tells it to report where things stand and end its turn, once per message
+  in a turn. Queued commands don't count, and a runtime that cannot report its queue leaves waits as they were.
+  Verified live on 1.0.103: both kinds ended a wait at once, the coordinator answered, and it waited again. Before
+  reporting (not after a message), it waits up to 30
   seconds for finished workers' latest outputs to publish (`artifacts.waitForPublication`) and notes publications that
   failed or are still running. Reports go back as text, each inside `<worker_report>` and clipped to share a
   48,000-character budget, with the worker's published `outputs/`; a working worker whose run waits on a prompt the

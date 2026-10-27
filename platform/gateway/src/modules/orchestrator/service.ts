@@ -80,10 +80,23 @@ interface Waiter {
   readonly coordinatorId: string;
   /** Re-checks the workers waited for; resolves the wait once none is busy. */
   readonly check: () => void;
-  /** Resolves the wait now (the coordinator's turn is over). */
-  readonly finish: () => void;
+  /** Resolves the wait now: the coordinator's turn is over, or a message for it is waiting (`end`). */
+  readonly finish: (end?: WaitEnd) => void;
   /** Drops the wait without answering it (shutdown: the ledger runs it again after the restart). */
   readonly abandon: () => void;
+}
+
+/**
+ * Why a wait ended. A user message for the coordinator ends it early: a steering message reaches the model right after
+ * the wait's result (in the same turn), a queued one only once the turn ends.
+ */
+type WaitEnd = { readonly reason: "settled" | "timeout" | "ended" } | { readonly reason: "message"; readonly delivery: "steering" | "queued" };
+
+/** `session.queue.pendingItems` (stock runtime 1.0.103, experimental): what is waiting for the coordinator. */
+interface QueueSnapshot {
+  readonly items?: readonly { readonly id?: string; readonly kind?: string }[];
+  readonly steeringMessages?: readonly string[];
+  readonly inFlightSteeringCount?: number;
 }
 
 interface ActionChange {
@@ -114,6 +127,11 @@ export class WorkerManager {
   /** Workers whose runtime connection closed, to settle shortly (`#onStopped`). */
   readonly #stoppedChecks = new Map<string, NodeJS.Timeout>();
   readonly #waiters = new Set<Waiter>();
+  /** Coordinators whose message queue is being read (`#checkQueue`), and those to read again after it. */
+  readonly #queueChecks = new Set<string>();
+  readonly #queueRechecks = new Set<string>();
+  /** Queued messages each coordinator was told about during its current turn (it is told once). */
+  readonly #reportedQueued = new Map<string, Set<string>>();
   readonly #approving = new Set<string>();
   /** Prompts left to a person (managed policy requires one, or approving failed repeatedly): not tried again. */
   readonly #refused = new Set<string>();
@@ -326,20 +344,31 @@ export class WorkerManager {
       return `None of this session's workers are working. ${this.#reports(this.#latest(all), "Their latest reports:", notes)}`;
     }
     const started = Date.now();
-    await this.#waitUntilSettled(coordinator.id, selected.map((worker) => worker.id), timeout * 1000, context.signal);
-    if (this.#closed) return unanswered();
-    const notes = await this.#publications(this.#latest(selected), context.signal);
+    const end = await this.#waitUntilSettled(coordinator.id, selected.map((worker) => worker.id), timeout * 1000, context.signal);
     if (this.#closed) return unanswered();
     const latest = this.#latest(selected);
     const busy = latest.filter((worker) => BUSY_STATES.includes(worker.state));
+    if (end.reason === "message") {
+      // The user is waiting for an answer: no wait for outputs to publish (reports list what is published so far).
+      const still = busy.length === 0 ? "" : busy.length === 1 ? ` "${busy[0]!.name}" keeps working meanwhile.` : ` ${busy.length} workers keep working meanwhile.`;
+      const heading =
+        end.delivery === "steering"
+          ? `The user sent you a message while you waited; it follows this result. Answer it.${still}${busy.length > 0 ? " Call wait_for_workers again when you need their results." : ""}`
+          : `The user sent you a new message while you waited. It reaches you only after this turn ends, so reply now with where things stand and end your turn.${still}${busy.length > 0 ? " You can wait for them again in your next turn." : ""}`;
+      return this.#reports(latest, heading);
+    }
+    const notes = await this.#publications(latest, context.signal);
+    if (this.#closed) return unanswered();
+    const reported = this.#latest(selected);
+    const pending = reported.filter((worker) => BUSY_STATES.includes(worker.state));
     const seconds = Math.round((Date.now() - started) / 1000);
     const heading =
-      busy.length === 0
-        ? latest.length === 1
-          ? `"${latest[0]!.name}" is done.`
-          : `All ${latest.length} workers you waited for are done.`
-        : `${busy.length} of ${latest.length} workers ${busy.length === 1 ? "is" : "are"} still working after ${seconds} seconds. Call wait_for_workers again to keep waiting.`;
-    return this.#reports(latest, heading, notes);
+      pending.length === 0
+        ? reported.length === 1
+          ? `"${reported[0]!.name}" is done.`
+          : `All ${reported.length} workers you waited for are done.`
+        : `${pending.length} of ${reported.length} workers ${pending.length === 1 ? "is" : "are"} still working after ${seconds} seconds. Call wait_for_workers again to keep waiting.`;
+    return this.#reports(reported, heading, notes);
   }
 
   list(_args: unknown, context: PlatformToolCallContext): string {
@@ -860,8 +889,15 @@ export class WorkerManager {
     // Subagent events are part of the worker's run, not its own replies.
     if (event.agentId) return;
     if (!this.#workers.has(sessionId)) {
-      // The coordinator's turn ended (for example, cancelled): its waits have nobody left to wait for them.
-      if (event.type === "session.idle") for (const waiter of [...this.#waiters]) if (waiter.coordinatorId === sessionId) waiter.finish();
+      if (event.type === "session.idle") {
+        // The coordinator's turn ended (for example, cancelled): its waits have nobody left to wait for them, and the
+        // messages it was told about start the next turns.
+        for (const waiter of [...this.#waiters]) if (waiter.coordinatorId === sessionId) waiter.finish();
+        this.#reportedQueued.delete(sessionId);
+      } else if (event.type === "pending_messages.modified") {
+        // A message for a waiting coordinator ends its wait, so it can answer (`#checkQueue`).
+        void this.#checkQueue(sessionId);
+      }
       return;
     }
     const data = event.data ?? {};
@@ -967,6 +1003,7 @@ export class WorkerManager {
       else if (worker.cleanup && !this.#launches.has(worker.id)) this.#store.update(worker.id, { cleanup: false });
     }
     // A coordinator: its workers go with it.
+    this.#reportedQueued.delete(sessionId);
     const coordinator = sessions.get(sessionId);
     for (const orphan of this.#store.forCoordinatorId(sessionId)) {
       if (orphan.state === "stopped" || coordinator?.incarnation === orphan.coordinatorIncarnation) continue;
@@ -1029,35 +1066,76 @@ export class WorkerManager {
   }
 
   /** Resolves once none of `ids` is starting or working, the wait times out, or the coordinator's turn is gone. */
-  #waitUntilSettled(coordinatorId: string, ids: readonly string[], timeoutMs: number, signal: AbortSignal | undefined): Promise<void> {
-    return new Promise<void>((resolve) => {
+  #waitUntilSettled(coordinatorId: string, ids: readonly string[], timeoutMs: number, signal: AbortSignal | undefined): Promise<WaitEnd> {
+    return new Promise<WaitEnd>((resolve) => {
       let timer: NodeJS.Timeout | undefined;
-      const finish = () => {
+      const finish = (end: WaitEnd = { reason: "ended" }) => {
         if (!this.#waiters.has(waiter)) return;
         this.#waiters.delete(waiter);
         if (timer) clearTimeout(timer);
-        signal?.removeEventListener("abort", finish);
-        resolve();
+        signal?.removeEventListener("abort", aborted);
+        resolve(end);
       };
+      const aborted = () => finish();
       const waiter: Waiter = {
         coordinatorId,
         check: () => {
-          if (!ids.some((id) => BUSY_STATES.includes(this.#store.get(id)?.state ?? "stopped"))) finish();
+          if (!ids.some((id) => BUSY_STATES.includes(this.#store.get(id)?.state ?? "stopped"))) finish({ reason: "settled" });
         },
         finish,
         abandon: () => {
           // Never answered: the ledger runs the wait again after the restart.
           this.#waiters.delete(waiter);
           if (timer) clearTimeout(timer);
-          signal?.removeEventListener("abort", finish);
+          signal?.removeEventListener("abort", aborted);
         },
       };
       this.#waiters.add(waiter);
-      timer = setTimeout(finish, timeoutMs);
+      timer = setTimeout(() => finish({ reason: "timeout" }), timeoutMs);
       timer.unref?.();
-      signal?.addEventListener("abort", finish, { once: true });
+      signal?.addEventListener("abort", aborted, { once: true });
       waiter.check();
+      // A message that arrived before the wait began ends it too.
+      if (this.#waiters.has(waiter)) void this.#checkQueue(coordinatorId);
     });
+  }
+
+  /**
+   * Ends the coordinator's waits when a user message for it is waiting, so it can answer while its workers keep
+   * working. The runtime signals queue changes (`pending_messages.modified`); the queue itself says whether a message
+   * is waiting and how it is delivered. A queued message is reported once: the coordinator is told to end its turn.
+   */
+  async #checkQueue(coordinatorId: string): Promise<void> {
+    if (this.#closed || ![...this.#waiters].some((waiter) => waiter.coordinatorId === coordinatorId)) return;
+    if (this.#queueChecks.has(coordinatorId)) {
+      this.#queueRechecks.add(coordinatorId);
+      return;
+    }
+    this.#queueChecks.add(coordinatorId);
+    try {
+      const sessions = this.#app.service("sessions");
+      const incarnation = sessions.get(coordinatorId)?.incarnation;
+      let queue: QueueSnapshot | undefined;
+      try {
+        queue = await sessions.request<QueueSnapshot>(coordinatorId, "session.queue.pendingItems", {}, incarnation ? { incarnation } : {});
+      } catch (error) {
+        // Without the queue, waits end as they would have (workers done, timeout, or the turn over).
+        this.#log.debug("Could not read a coordinator's message queue", { coordinatorId, error: (error as Error).message });
+        return;
+      }
+      if (this.#closed || !queue) return;
+      const steering = (queue.steeringMessages?.length ?? 0) > (queue.inFlightSteeringCount ?? 0);
+      const reported = this.#reportedQueued.get(coordinatorId) ?? new Set<string>();
+      const fresh = (queue.items ?? []).filter((item) => item.kind === "message" && typeof item.id === "string" && !reported.has(item.id));
+      if (!steering && fresh.length === 0) return;
+      for (const item of fresh) reported.add(item.id!);
+      if (fresh.length > 0) this.#reportedQueued.set(coordinatorId, reported);
+      const end: WaitEnd = { reason: "message", delivery: steering ? "steering" : "queued" };
+      for (const waiter of [...this.#waiters]) if (waiter.coordinatorId === coordinatorId) waiter.finish(end);
+    } finally {
+      this.#queueChecks.delete(coordinatorId);
+      if (this.#queueRechecks.delete(coordinatorId)) void this.#checkQueue(coordinatorId);
+    }
   }
 
   #latest(workers: readonly WorkerRecord[]): WorkerRecord[] {

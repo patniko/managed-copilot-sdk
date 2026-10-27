@@ -6,7 +6,17 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { isManagedCopilotError, NETWORK_ENABLED, parseConfig, type PlatformEvent } from "@managed-copilot/protocol";
 import { openDatabase, transaction } from "../src/db.js";
 import { redact } from "../src/log.js";
-import { admitOptionsUpdate, admitSession, lockSystemMessage, PROMOTABLE_ENVIRONMENT_CONTEXT, SHARED_ENVIRONMENT_CONTEXT, sharedToolFilters, type AdmissionContext } from "../src/modules/core/admission.js";
+import {
+  admitOptionsUpdate,
+  admitSession,
+  lockSystemMessage,
+  ORCHESTRATOR_ENVIRONMENT_CONTEXT,
+  orchestratorEnvironmentContext,
+  PROMOTABLE_ENVIRONMENT_CONTEXT,
+  SHARED_ENVIRONMENT_CONTEXT,
+  sharedToolFilters,
+  type AdmissionContext,
+} from "../src/modules/core/admission.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
 import { PlatformEvents } from "../src/modules/core/events.js";
@@ -204,6 +214,29 @@ describe("shared admission", () => {
     // Promotable sessions are pointed at request_sandbox for work that needs a shell or files.
     expect(lockSystemMessage(undefined, { promotable: true })).toMatchObject({ sections: { environment_context: { action: "replace", content: PROMOTABLE_ENVIRONMENT_CONTEXT } } });
     expect(PROMOTABLE_ENVIRONMENT_CONTEXT).toContain("call request_sandbox first");
+  });
+
+  it("tells an orchestrator's coordinator its worker environments and when to reuse a worker", () => {
+    const text = orchestratorEnvironmentContext({
+      maxWorkers: 3,
+      workers: [
+        { name: "py", description: "Python lab\nfor  analysis", size: "medium", network: { access: "disabled", allowedDomains: [] }, agents: [] },
+        {
+          name: "web",
+          size: "small",
+          network: { access: "restricted", allowedDomains: ["a.example", "b.example", "c.example", "d.example", "e.example", "f.example", "g.example"] },
+          agents: [{ name: "researcher", description: "Finds sources" }, { name: "plain" }],
+        },
+      ],
+    });
+    expect(text).toContain("- py (default): Python lab for analysis · size medium · no network");
+    expect(text).toContain("- web · size small · network limited to a.example, b.example, c.example, d.example, e.example, f.example, and 1 more · agents: researcher (Finds sources); plain");
+    expect(text).toContain("At most 3 workers can exist at once.");
+    expect(text).toContain("send it to that worker with message_worker instead of starting a new one");
+    expect(text).toContain("If the user sends a new message while you wait, it returns early");
+    // Without known worker environments, the section still explains delegation.
+    expect(lockSystemMessage(undefined, { orchestrator: true })).toMatchObject({ sections: { environment_context: { action: "replace", content: ORCHESTRATOR_ENVIRONMENT_CONTEXT } } });
+    expect(ORCHESTRATOR_ENVIRONMENT_CONTEXT).not.toContain("Worker environments");
   });
 
   it("allows workload capabilities in sandbox placement but keeps credentials and billing platform-owned", () => {

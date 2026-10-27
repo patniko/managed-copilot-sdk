@@ -1017,7 +1017,7 @@ The coordinator manages its workers with platform tools that only orchestrator s
 | Tool | What it does |
 | --- | --- |
 | `start_worker` | Starts a worker in a worker environment with a name and a self-contained task, and optionally a custom `agent` and `model`. Returns at once while the sandbox starts. Asks for the session's permission |
-| `wait_for_workers` | Waits until the named workers (by default, every busy one) finish, then returns each one's state and final report. Uses no model time. Returns after at most an hour; the coordinator calls it again to keep waiting |
+| `wait_for_workers` | Waits until the named workers (by default, every busy one) finish, then returns each one's state and final report. Uses no model time. Returns early when a message from the user is waiting, and after at most an hour; the coordinator calls it again to keep waiting |
 | `message_worker` | Sends a follow-up to a worker that finished or failed its current work. A working worker is waited for first (`session_busy`) |
 | `list_workers` | The worker environments and their agents, and each worker's state and latest report |
 | `read_worker_file` | Reads a text file from a worker's `/workspace`, or lists a directory |
@@ -1038,11 +1038,14 @@ The coordinator manages its workers with platform tools that only orchestrator s
    (read as the stock SDK documents it); those prompts wait for one (attach Copilot CLI to the worker), the
    coordinator's reports say a worker is waiting for a person, and a client attached to a worker answers that worker's
    prompts itself. The coordinator's model never approves anything.
-3. **No polling.** `wait_for_workers` holds the coordinator's turn open without model calls, so one `sendAndWait`
-   covers the whole job. Pass a timeout longer than the work (the stock default is 60 seconds). A worker run that
-   reports an error fails when it ends, as `sendAndWait` reports it. Before it reports, `wait_for_workers` waits up to
-   30 seconds for finished workers' outputs to publish. Worker reports are clipped to a bounded size and reach the
-   coordinator marked as data from another agent, never as instructions.
+3. **No polling, and a conversation stays responsive.** `wait_for_workers` holds the coordinator's turn open without
+   model calls, so one `sendAndWait` covers the whole job. Pass a timeout longer than the work (the stock default is
+   60 seconds). A message the user sends while the coordinator waits ends the wait early so it can answer, and the
+   workers keep working: one sent with `mode: "immediate"` reaches it in the same turn, and a queued one once it ends
+   its turn (it is told to). A worker run that reports an error fails when it ends, as `sendAndWait` reports it.
+   Before it reports, `wait_for_workers` waits up to 30 seconds for finished workers' outputs to publish. Worker
+   reports are clipped to a bounded size and reach the coordinator marked as data from another agent, never as
+   instructions.
 4. **Workers run as the owner, within the coordinator's limits.** While a worker has no client of its own, the
    coordinator's connected client serves its model calls, then the owner's background sign-in
    (`npx managed-copilot login`), from the worker's creation on: a credential taken from a connection never serves a

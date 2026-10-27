@@ -112,6 +112,12 @@ describe("orchestrator environments", () => {
     const prompt = JSON.stringify(params["systemMessage"]);
     expect(prompt).toContain("coordinates workers");
     expect(prompt).toContain("wait_for_workers");
+    // Its worker environments, in declared order, and when to reuse a worker instead of starting one.
+    expect(prompt).toContain("Worker environments you can start workers in");
+    expect(prompt).toContain("- coder (default): Builds things · size small · network access");
+    expect(prompt).toContain("- reviewer · size small");
+    expect(prompt).toContain("send it to that worker with message_worker instead of starting a new one");
+    expect(prompt).toContain("At most 2 workers can exist at once.");
     // In-process subagents would have no shell or files here: the coordinator delegates to workers instead.
     expect(params["availableTools"]).not.toContain("builtin:task");
 
@@ -120,6 +126,21 @@ describe("orchestrator environments", () => {
     await chat.request("session.create", { sessionId: chatId, requestPermission: true });
     expect(((createParams(chatId)["tools"] as { name: string }[] | undefined) ?? []).map((tool) => tool.name)).not.toContain("start_worker");
     expect(await rest(`/v1/sessions/${chatId}/workers`)).toMatchObject({ status: 400, body: { error: { code: "invalid_request" } } });
+  });
+
+  it("keeps the app's own tools on a coordinator, beside the worker tools", async () => {
+    const client = await connect();
+    const sessionId = crypto.randomUUID();
+    await client.request("session.create", { sessionId, tools: [{ name: "lookup_order", description: "Looks up an order" }], requestPermission: true });
+    client.answer = () => ({});
+    const tools = (createParams(sessionId)["tools"] as { name: string }[]).map((tool) => tool.name);
+    expect(tools).toEqual(expect.arrayContaining(["lookup_order", "start_worker", "wait_for_workers"]));
+    // The app's tool runs in the app, as in any shared session.
+    await client.request("session.send", { sessionId, prompt: "tool:lookup_order please" });
+    const requested = await client.waitForEvent("external_tool.requested");
+    await client.request("session.tools.handlePendingToolCall", { sessionId, requestId: (requested["data"] as Record<string, unknown>)["requestId"], result: "shipped" });
+    const message = await client.waitForEvent("assistant.message");
+    expect((message["data"] as Record<string, unknown>)["content"]).toBe("tool said: shipped");
   });
 
   it("starts a worker in its own sandbox with the task, and wait_for_workers returns its report", async () => {
@@ -381,6 +402,72 @@ describe("orchestrator environments", () => {
     expect(sessions().get(workerId)).toMatchObject({ state: "failed", lastTurn: { status: "failed" } });
     await sessions().delete(1001, workerId);
     await waitUntil(() => worker(sessionId, "undeleted").state === "stopped");
+  });
+
+  it("ends a wait when the user sends the coordinator a message, so it answers while its workers keep working", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "steady", task: "stall" });
+    await runStarted(sessionId, "steady");
+    const manager = app().service("orchestrator");
+    const context = (n: number) => ({ sessionId, ownerId: 1001, environment: "team", toolCallId: `call-steady-${n}`, idempotencyKey: `wait-steady-${n}-${sessionId}` });
+    try {
+      const waiting = manager.wait({ workers: ["steady"] }, context(1));
+      await sleep(50);
+      // A steering message arrives: the runtime reports a queue change, and the queue holds a message not yet in the turn.
+      runtime.queues.set(sessionId, { items: [], steeringMessages: ["How is it going?"], inFlightSteeringCount: 0 });
+      runtime.emitEvent(sessionId, "pending_messages.modified", {});
+      const reply = await waiting;
+      expect(reply).toMatch(/^The user sent you a message while you waited; it follows this result\. Answer it\. "steady" keeps working meanwhile\./);
+      expect(worker(sessionId, "steady").state).toBe("working");
+      // Once the turn took it in, it no longer ends waits.
+      runtime.queues.set(sessionId, { items: [], steeringMessages: ["How is it going?"], inFlightSteeringCount: 1 });
+      const again = manager.wait({ workers: ["steady"], timeoutSeconds: 1 }, context(2));
+      runtime.emitEvent(sessionId, "pending_messages.modified", {});
+      expect(await again).toMatch(/still working after 1 seconds/);
+    } finally {
+      runtime.queues.delete(sessionId);
+    }
+  });
+
+  it("tells a waiting coordinator about a queued message once, also one queued before the wait began", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "queued-for", task: "stall" });
+    await runStarted(sessionId, "queued-for");
+    const manager = app().service("orchestrator");
+    const context = (n: number) => ({ sessionId, ownerId: 1001, environment: "team", toolCallId: `call-queued-${n}`, idempotencyKey: `wait-queued-${n}-${sessionId}` });
+    try {
+      // A queued command is not a message for the coordinator.
+      runtime.queues.set(sessionId, { items: [{ id: "cmd-1", kind: "command" }], steeringMessages: [] });
+      expect(await manager.wait({ workers: ["queued-for"], timeoutSeconds: 1 }, context(1))).toMatch(/still working after 1 seconds/);
+      // A message queued before the wait began ends it at once: it reaches the coordinator only after its turn.
+      runtime.queues.set(sessionId, { items: [{ id: "cmd-1", kind: "command" }, { id: "msg-1", kind: "message" }], steeringMessages: [] });
+      expect(await manager.wait({ workers: ["queued-for"] }, context(2))).toMatch(
+        /^The user sent you a new message while you waited\. It reaches you only after this turn ends, so reply now with where things stand and end your turn\. "queued-for" keeps working meanwhile\. You can wait for them again in your next turn\./,
+      );
+      // The coordinator was told: the same message does not end its next wait.
+      const next = manager.wait({ workers: ["queued-for"], timeoutSeconds: 1 }, context(3));
+      runtime.emitEvent(sessionId, "pending_messages.modified", {});
+      expect(await next).toMatch(/still working after 1 seconds/);
+    } finally {
+      runtime.queues.delete(sessionId);
+    }
+  });
+
+  it("waits as before when the runtime cannot report its queue", async () => {
+    const { client, sessionId } = await coordinator();
+    await call(client, sessionId, "start_worker", { name: "unqueued", task: "stall" });
+    await runStarted(sessionId, "unqueued");
+    const workerId = worker(sessionId, "unqueued").id;
+    const manager = app().service("orchestrator");
+    runtime.failNext("session.queue.pendingItems", sessionId, "Unhandled method session.queue.pendingItems");
+    runtime.failNext("session.queue.pendingItems", sessionId, "Unhandled method session.queue.pendingItems");
+    const waiting = manager.wait({ workers: ["unqueued"] }, { sessionId, ownerId: 1001, environment: "team", toolCallId: "call-unqueued", idempotencyKey: `wait-unqueued-${sessionId}` });
+    await sleep(50);
+    runtime.emitEvent(sessionId, "pending_messages.modified", {});
+    await sleep(50);
+    runtime.emitEvent(workerId, "assistant.message", { messageId: "a1", content: "all done" });
+    runtime.emitEvent(workerId, "session.idle", {});
+    expect(await waiting).toMatch(/^"unqueued" is done\./);
   });
 
   it("takes back a message the runtime refused", async () => {

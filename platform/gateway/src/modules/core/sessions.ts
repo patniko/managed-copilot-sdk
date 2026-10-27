@@ -7,6 +7,7 @@ import { connect as connectTcp } from "node:net";
 import { join, resolve as resolvePath } from "node:path";
 import type { Duplex } from "node:stream";
 import {
+  DEFAULT_MAX_WORKERS,
   isManagedCopilotError,
   ManagedCopilotError,
   type NetworkPolicy,
@@ -27,7 +28,20 @@ import {
   type AttachedResponder,
   type RuntimeSessionEvent,
 } from "../durable/contract.js";
-import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, isRecord, isRemoteMcp, SANDBOX_CUSTOMIZATIONS_DIR, type AdmissionContext, type AdmittedSession } from "./admission.js";
+import {
+  admitOptionsUpdate,
+  admitSend,
+  admitSession,
+  admitToolsSet,
+  checkModel,
+  isRecord,
+  isRemoteMcp,
+  SANDBOX_CUSTOMIZATIONS_DIR,
+  type AdmissionContext,
+  type AdmittedSession,
+  type OrchestratorBrief,
+  type WorkerEnvironmentBrief,
+} from "./admission.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -1921,6 +1935,7 @@ export class SessionManager implements SessionsService {
         platformTools: this.#platformToolsFor(environment, placement),
         workingDirectory: this.#workingDirectory(placement, sessionId),
         tokenRegistrationId,
+        ...(environment.type === "orchestrator" ? { orchestrator: this.#orchestratorBrief(environment) } : {}),
       },
       mode,
     );
@@ -2007,6 +2022,26 @@ export class SessionManager implements SessionsService {
 
   #platformToolsFor(environment: ResolvedEnvironment, placement: Placement) {
     return this.#options.platformTools.forSession({ environment: environment.name, type: environment.type, placement });
+  }
+
+  /** An orchestrator's worker environments as its coordinator's environment section lists them (declared order). */
+  #orchestratorBrief(environment: ResolvedEnvironment): OrchestratorBrief {
+    const workers: WorkerEnvironmentBrief[] = [];
+    for (const name of environment.config.workers ?? []) {
+      try {
+        const worker = this.#options.environments.resolve(name);
+        workers.push({
+          name,
+          ...(worker.config.description ? { description: worker.config.description } : {}),
+          size: worker.config.size ?? "small",
+          network: worker.network,
+          agents: (worker.customizations?.agents ?? []).map((agent) => ({ name: agent.name, ...(agent.description ? { description: agent.description } : {}) })),
+        });
+      } catch {
+        // Left out (for example its customizations were rejected): a worker started there fails with the reason.
+      }
+    }
+    return { workers, maxWorkers: environment.config.maxWorkers ?? DEFAULT_MAX_WORKERS };
   }
 
   #workingDirectory(placement: Placement, sessionId: string): string {

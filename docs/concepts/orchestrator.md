@@ -56,6 +56,18 @@ everything from their environment: image, size, setup, network rules, vaults, an
 | `copy_worker_files` | Copies files from one worker's `/workspace` to another's, for example from a builder to a reviewer |
 | `stop_worker` | Stops a worker and deletes its sandbox |
 
+## A conversation, not just a job
+
+A coordinator is an ordinary session, so any frontend can talk to it: your app's chat, a pipeline like the software
+factory, Copilot CLI (`npx managed-copilot attach <session>`), or a script. Across messages it decides, for each part
+of the work, whether to create a sandbox or to reuse one it already has:
+
+- Its instructions list your worker environments (description, size, network, agents), so it picks the right one.
+- A follow-up on earlier work goes to the worker that did it (`message_worker`), which still has its files. New,
+  independent work, or work that needs another environment, gets a new worker. It stops workers it no longer needs.
+- While it waits for workers, a new message from you ends the wait, so it answers right away and the workers keep
+  working. Send it with `mode: "immediate"` to reach the coordinator in the same turn.
+
 ## Who approves what
 
 ```mermaid
