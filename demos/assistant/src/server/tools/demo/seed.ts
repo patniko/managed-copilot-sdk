@@ -336,7 +336,6 @@ function pastMeetings(now: Date, timeZone: string, event: (entry: Omit<SeedEvent
           meetings.push(event({ title: "Architecture office hours", start: at(day, 14, 0), end: at(day, 15, 15), location: "Room 4.2" }));
           break;
         case 5:
-          meetings.push(event({ title: "Lunch & learn", start: at(day, 12, 30), end: at(day, 13, 30), location: "Room 4.2" }));
           meetings.push(event({ title: "Demo day", start: at(day, 15, 0), end: at(day, 16, 0), attendees: team }));
           break;
       }

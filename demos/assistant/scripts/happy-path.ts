@@ -6,8 +6,11 @@
  *
  *   --url <url>          Assistant URL (default http://localhost:7490)
  *   --fresh              Start a new conversation first (Settings → Start over)
+ *   --skip-basics        Skip the inbox triage and the meeting with Sam
  *   --reminder           Ask for a reminder one minute out and wait for the proactive message (needs schedules)
  *   --offline            Close the tab, let a scheduled check-in use the calendar through the webhook, then reopen
+ *   --sandbox            Chart the meeting load in a Python sandbox (approved in the chat), send it a follow-up that
+ *                        reuses it, then research a candidate in a web research sandbox (a new one)
  *   --enable-background  If background work is off, turn it on with the side panel's one-click button (your consent
  *                        to keep a sealed copy of your GitHub sign-in on the deployment for scheduled work)
  *   --screenshots <dir>  Save screenshots (light, dark, and mobile) into <dir>
@@ -27,6 +30,8 @@ const option = (name: string) => {
 const url = (option("url") ?? "http://localhost:7490").replace(/\/+$/, "");
 const screenshots = option("screenshots") ? resolve(option("screenshots")!) : undefined;
 const TURN_TIMEOUT = 4 * 60_000;
+/** A sandbox turn includes starting the sandbox and its work. */
+const SANDBOX_TIMEOUT = 12 * 60_000;
 
 function step(message: string): void {
   console.log(`\n▸ ${message}`);
@@ -65,9 +70,9 @@ async function waitOnline(page: Page): Promise<void> {
 }
 
 /** Waits for a turn to start and finish (the header goes busy, then back to online). */
-async function waitTurn(page: Page): Promise<void> {
+async function waitTurn(page: Page, timeout = TURN_TIMEOUT): Promise<void> {
   await page.locator('[data-testid="status"][data-status="busy"]').waitFor({ timeout: 30_000 }).catch(() => undefined);
-  await page.locator('[data-testid="status"][data-status="ok"]').waitFor({ timeout: TURN_TIMEOUT });
+  await page.locator('[data-testid="status"][data-status="ok"]').waitFor({ timeout });
 }
 
 async function send(page: Page, text: string): Promise<void> {
@@ -81,8 +86,77 @@ async function lastReply(page: Page): Promise<string> {
   return text.replace(/\s+/g, " ").slice(0, 160);
 }
 
-async function state(page: Page): Promise<{ schedulesError?: string; offline: { webhookConfigured: boolean }; background: { state: string } }> {
+async function state(page: Page): Promise<{ schedulesError?: string; offline: { webhookConfigured: boolean }; background: { state: string }; sandboxes: SandboxesState }> {
   return page.evaluate(async () => (await fetch("/api/state")).json());
+}
+
+interface SandboxesState {
+  enabled: boolean;
+  unavailable?: { reason: string };
+  workers: { id: string; name: string; environment: string; state: string; messages: number; outputs: { path: string; image: boolean }[] }[];
+}
+
+/** Approves the newest sandbox the assistant asks to start, then waits for its card to finish its work. */
+async function approveSandbox(page: Page, environment: string, screenshot?: string): Promise<string> {
+  const approval = page.locator('[data-testid="approval"][data-tool="start_worker"][data-status="pending"][data-actionable="true"]').last();
+  await approval.waitFor({ timeout: TURN_TIMEOUT });
+  const title = (await approval.locator("h3").innerText()).trim();
+  const details = (await approval.locator('[data-testid="sandbox-approval"]').innerText()).replace(/\s+/g, " ");
+  ok(`asked first: ${title} ${details.slice(0, 140)}…`);
+  if (!details.includes(environment)) throw new Error(`Expected a sandbox in ${environment}, but the approval card shows: ${details.slice(0, 200)}`);
+  const worker = (await approval.locator('[data-testid="sandbox-approval"] .font-semibold').first().innerText()).trim();
+  await approval.scrollIntoViewIfNeeded();
+  if (screenshot) await shot(page, screenshot);
+  await approval.getByRole("button", { name: "Start sandbox" }).click();
+  // Once approved, the approval card turns into the sandbox's own card.
+  await page.locator(`[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"]`).last().waitFor({ timeout: 60_000 });
+  ok(`created sandbox ${worker}; waiting for its work`);
+  await page.locator(`[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"][data-phase="done"]`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
+  return worker;
+}
+
+async function sandboxJourney(page: Page): Promise<void> {
+  const before = await state(page);
+  if (!before.sandboxes.enabled) throw new Error(`Sandboxes aren't available: ${before.sandboxes.unavailable?.reason ?? "the assistant environment isn't an orchestrator"}`);
+
+  step("Chart the meeting load (a new Python sandbox, after you approve it)");
+  await send(page, "How did my meeting load change over the last four weeks? A chart would help.");
+  const stats = await approveSandbox(page, "assistant-python", "sandbox-approval");
+  await waitTurn(page, SANDBOX_TIMEOUT);
+  ok(`reply: ${await lastReply(page)}…`);
+  const images = await page.locator('[data-testid="sandbox-image"] img').count();
+  ok(images > 0 ? `${images} chart${images === 1 ? "" : "s"} from the sandbox in the chat` : "the sandbox published no image this time");
+  await page.locator(`[data-testid="sandbox-row"][data-worker="${stats}"]`).waitFor({ timeout: 30_000 });
+  ok(`side panel lists ${stats}`);
+  await page.locator('[data-testid="assistant-message"]').last().scrollIntoViewIfNeeded();
+  await shot(page, "sandbox");
+
+  step("Follow up: the same sandbox gets it (reused, no new approval)");
+  const starts = await page.locator('[data-testid="approval"][data-tool="start_worker"]').count();
+  await send(page, "Split it by meeting type too.");
+  const reused = page.locator(`[data-testid="sandbox-card"][data-action="message"][data-worker="${stats}"]`).last();
+  await reused.waitFor({ timeout: TURN_TIMEOUT });
+  ok(`sent the follow-up to ${stats}`);
+  await page.locator(`[data-testid="sandbox-card"][data-action="message"][data-worker="${stats}"][data-phase="done"]`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
+  await waitTurn(page, SANDBOX_TIMEOUT);
+  const startsAfter = await page.locator('[data-testid="approval"][data-tool="start_worker"]').count();
+  if (startsAfter !== starts) throw new Error("The follow-up started a new sandbox instead of reusing the first one.");
+  ok(`reply: ${await lastReply(page)}…`);
+  await page.locator('[data-testid="assistant-message"]').last().scrollIntoViewIfNeeded();
+  await shot(page, "sandbox-reused");
+
+  step("Research the candidate (a different kind of work: a new web research sandbox)");
+  await send(page, "Also check what the 2 PM candidate works on in open source.");
+  const research = await approveSandbox(page, "assistant-web", "sandbox-research-approval");
+  await waitTurn(page, SANDBOX_TIMEOUT);
+  ok(`reply: ${await lastReply(page)}…`);
+
+  const after = (await state(page)).sandboxes.workers;
+  for (const worker of after) ok(`sandbox ${worker.name} (${worker.environment}): ${worker.state}, ${worker.messages} task${worker.messages === 1 ? "" : "s"}, ${worker.outputs.length} output${worker.outputs.length === 1 ? "" : "s"}`);
+  const statsWorker = after.find((worker) => worker.name === stats);
+  if (!statsWorker || statsWorker.messages < 2) throw new Error(`${stats} should have received the follow-up as its second task.`);
+  if (!after.some((worker) => worker.name === research && worker.environment === "assistant-web")) throw new Error(`${research} should be a sandbox in assistant-web.`);
+  await shot(page, "sandbox-research");
 }
 
 /** Scheduled steps need background work; with --enable-background the script clicks the side panel's button. */
@@ -136,25 +210,29 @@ async function main(): Promise<void> {
     }
     if (flag("fresh")) await shot(page, "welcome");
 
-    step("Triage the demo inbox");
-    await send(page, "Triage my unread email: what needs a reply, what's FYI, and what can wait?");
-    await waitTurn(page);
-    await page.locator('[data-testid="tool"][data-tool="search_email"][data-status="succeeded"]').first().waitFor({ timeout: 10_000 });
-    ok(`reply: ${await lastReply(page)}…`);
-    await shot(page, "triage");
+    if (!flag("skip-basics")) {
+      step("Triage the demo inbox");
+      await send(page, "Triage my unread email: what needs a reply, what's FYI, and what can wait?");
+      await waitTurn(page);
+      await page.locator('[data-testid="tool"][data-tool="search_email"][data-status="succeeded"]').first().waitFor({ timeout: 10_000 });
+      ok(`reply: ${await lastReply(page)}…`);
+      await shot(page, "triage");
 
-    step("Schedule a meeting with Sam (needs approval)");
-    await send(page, "Sam asked for 30 minutes to go over the Q3 launch plan. Find a time in the next few days that works (mornings are best for Sam) and send the invite.");
-    const approval = page.locator('[data-testid="approval"][data-status="pending"][data-actionable="true"]').last();
-    await approval.waitFor({ timeout: TURN_TIMEOUT });
-    ok(`approval requested: ${(await approval.locator("div").first().innerText()).split("\n")[0]}`);
-    await approval.scrollIntoViewIfNeeded();
-    await shot(page, "approval");
-    await approval.getByRole("button", { name: /Add to calendar|Send email|Save changes/ }).click();
-    await page.locator('[data-testid="approval"][data-status="approved"]').last().waitFor({ timeout: 30_000 });
-    await waitTurn(page);
-    ok(`reply: ${await lastReply(page)}…`);
-    await shot(page, "meeting");
+      step("Schedule a meeting with Sam (needs approval)");
+      await send(page, "Sam asked for 30 minutes to go over the Q3 launch plan. Find a time in the next few days that works (mornings are best for Sam) and send the invite.");
+      const approval = page.locator('[data-testid="approval"][data-status="pending"][data-actionable="true"]').last();
+      await approval.waitFor({ timeout: TURN_TIMEOUT });
+      ok(`approval requested: ${(await approval.locator("div").first().innerText()).split("\n")[0]}`);
+      await approval.scrollIntoViewIfNeeded();
+      await shot(page, "approval");
+      await approval.getByRole("button", { name: /Add to calendar|Send email|Save changes/ }).click();
+      await page.locator('[data-testid="approval"][data-status="approved"]').last().waitFor({ timeout: 30_000 });
+      await waitTurn(page);
+      ok(`reply: ${await lastReply(page)}…`);
+      await shot(page, "meeting");
+    }
+
+    if (flag("sandbox")) await sandboxJourney(page);
 
     if (flag("reminder")) {
       step("Ask for a reminder one minute from now");
