@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { defineTool, type SessionConfig } from "@github/copilot-sdk";
-import { isManagedCopilotError, type SessionInfo } from "@managed-copilot/sdk";
+import { defineTool, type PermissionHandler, type SessionConfig, type SessionEvent, type Tool } from "@github/copilot-sdk";
+import { isManagedCopilotError, type ArtifactInfo, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
+import { z } from "zod";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, SANDBOX_SIZES } from "../../shared/environments.js";
 import { findTemplate } from "../../shared/templates.js";
 import {
   ACTIVE_WORK_ORDER_STATUSES,
   formatWorkOrderNumber,
   TERMINAL_STATION_STATUSES,
+  workOrderMode,
   type ActivityItem,
   type ArtifactFileView,
   type ArtifactIndex,
@@ -24,6 +26,7 @@ import {
   type TestReport,
   type TestSummary,
   type WorkOrder,
+  type WorkOrderMode,
   type WorkOrderSummary,
 } from "../../shared/types.js";
 import type { FactoryConfig } from "../config.js";
@@ -32,6 +35,19 @@ import { log } from "../log.js";
 import type { FactoryPlatform, StationSession } from "../platform.js";
 import type { StoredArtifact, FactoryStore } from "../store.js";
 import { StationActivityMapper } from "./activity.js";
+import {
+  builderName,
+  coordinatorPrompt,
+  coordinatorReminder,
+  NoArgsSchema,
+  ReleaseWorkerSchema,
+  TaskSchema,
+  TaskWorkerSchema,
+  taskStart,
+  toolDecision,
+  WORKER_READY_TASK,
+  type ToolStart,
+} from "./coordinator.js";
 import { CancelledError, isPlatformInterruption, PlatformUnavailableError, StationError, toFactoryError } from "./errors.js";
 import { factoryPermissions } from "./permissions.js";
 import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, validateReview, type ValidReview } from "./plan.js";
@@ -47,7 +63,7 @@ import {
   reviewPrompt,
   reviewRetryPrompt,
 } from "./prompts.js";
-import { builderSeed, DEFAULT_SKILLS_ROOT, releaseSeed, type SeedFile, type TaskOutcome } from "./seed.js";
+import { builderSeed, DEFAULT_SKILLS_ROOT, releaseSeed, sha256, type SeedFile, type TaskOutcome } from "./seed.js";
 import { Semaphore } from "./semaphore.js";
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -63,7 +79,7 @@ const TEXT_EXTENSIONS = new Set([
   "toml", "ini", "sh", "bash", "py", "rb", "go", "rs", "java", "cs", "html", "htm", "css", "scss", "xml", "svg", "sql", "env", "gitignore", "npmignore", "editorconfig", "lock", "log",
 ]);
 
-const ROLE_FOR_KIND: Readonly<Record<StationKind, StationRole>> = { plan: "planner", build: "builder", review: "reviewer", release: "release" };
+const ROLE_FOR_KIND: Readonly<Record<StationKind, StationRole>> = { plan: "planner", coordinate: "coordinator", build: "builder", review: "reviewer", release: "release" };
 
 export function isTextPath(path: string): boolean {
   const name = path.split("/").pop() ?? path;
@@ -137,6 +153,12 @@ interface Run {
   failed: boolean;
   /** The run ended paused at its checkpoint; the work order resumes when the platform is ready. */
   paused: boolean;
+  readonly gates: Semaphore;
+  readonly decisions: Map<string, { readonly start: ToolStart; readonly firstMessage: boolean }>;
+  workerSync?: Promise<WorkerInfo[]>;
+  workerRevision: number;
+  workerSnapshotRevision: number;
+  stopCoordinator?: (error: unknown) => void;
 }
 
 interface CheckOutcome {
@@ -152,7 +174,7 @@ export interface FactoryOptions {
   readonly hub: EventHub;
   readonly platform: FactoryPlatform;
   /** Whether the platform can run work orders right now, with a user-facing reason when it can't. */
-  readonly readiness: () => { readonly ready: boolean; readonly reason?: string };
+  readonly readiness: (mode?: WorkOrderMode) => { readonly ready: boolean; readonly reason?: string };
   readonly account: () => { readonly login: string; readonly avatarUrl?: string } | undefined;
   readonly config: Pick<FactoryConfig, "maxSandboxes" | "turnTimeoutMs" | "publicationTimeoutMs">;
   readonly skillsRoot?: string;
@@ -190,6 +212,7 @@ const MAX_READ_FAILURES = 5;
 export class Factory {
   readonly #options: FactoryOptions;
   readonly #runs = new Map<string, Run>();
+  readonly #cancelling = new Set<string>();
   readonly #sandboxes: Semaphore;
   readonly #usageTimers = new Map<string, NodeJS.Timeout>();
   /** Work orders paused by a lost platform connection, and how many times. */
@@ -221,7 +244,7 @@ export class Factory {
   }
 
   isActive(id: string): boolean {
-    return this.#runs.has(id);
+    return this.#runs.has(id) || this.#cancelling.has(id);
   }
 
   activity(id: string, stationId?: string): ActivityItem[] {
@@ -274,13 +297,21 @@ export class Factory {
   // ─── Commands ───────────────────────────────────────────────────────────────────────────────────────────────
 
   create(request: CreateWorkOrderRequest): WorkOrder {
+    if (!request || typeof request !== "object" || typeof request.title !== "string" || typeof request.brief !== "string") {
+      throw new StationError("invalid_request", "Give the work order a title and a brief.");
+    }
     const title = request.title?.trim() ?? "";
     const brief = request.brief?.trim() ?? "";
     if (title.length < 3 || title.length > 120) throw new StationError("invalid_request", "Give the work order a title of 3 to 120 characters.");
     if (brief.length < 20 || brief.length > 8000) throw new StationError("invalid_request", "Describe the work in 20 to 8,000 characters.");
     const rounds = request.maxReviewRounds ?? 2;
     if (!Number.isInteger(rounds) || rounds < 1 || rounds > 3) throw new StationError("invalid_request", "Review rounds must be 1, 2, or 3.");
-    this.#requireReady();
+    const mode = request.mode ?? "agent";
+    if (mode !== "agent" && mode !== "classic") throw new StationError("invalid_request", 'Choose "agent" or "classic" for the work order mode.');
+    this.#requireReady(mode);
+    if (mode === "agent" && this.#platform.models.builder === this.#platform.models.reviewer) {
+      throw new StationError("invalid_request", "Choose a reviewer model different from the builder model for independent review.");
+    }
     const template = findTemplate(request.templateId);
     const owner = this.#options.account();
     const created = now();
@@ -289,13 +320,14 @@ export class Factory {
       number: this.#store.nextWorkOrderNumber(),
       title,
       brief,
+      mode,
       source: template ? { kind: "template", templateId: template.id } : { kind: "brief" },
       maxReviewRounds: rounds,
       status: "queued",
       createdAt: created,
       updatedAt: created,
       taskCount: 0,
-      stations: [this.#newStation("plan"), this.#newStation("release")],
+      stations: [this.#newStation("plan"), ...(mode === "agent" ? [this.#newStation("coordinate")] : []), this.#newStation("release")],
       ...(owner ? { owner } : {}),
     };
     this.#store.saveWorkOrder(wo);
@@ -306,6 +338,7 @@ export class Factory {
   }
 
   async cancel(id: string): Promise<WorkOrder> {
+    if (this.#cancelling.has(id)) throw new StationError("conflict", "This work order is already being cancelled.");
     const run = this.#runs.get(id);
     if (!run) {
       const stored = this.#store.getWorkOrder(id);
@@ -314,10 +347,19 @@ export class Factory {
       // Interrupted by a restart (or paused by a lost connection) and never resumed: cancel the record directly.
       const wo = stored as MWorkOrder;
       this.#forgetPause(id);
-      this.#cancelStations(wo);
-      Object.assign(wo, { status: "cancelled", completedAt: now() });
-      this.#persist(wo);
-      return wo;
+      this.#cancelling.add(id);
+      try {
+        if (workOrderMode(wo) === "agent") {
+          await this.#stopPersistedCoordinator(wo);
+          await this.#deleteWorkerSessions(wo);
+        }
+        this.#cancelStations(wo);
+        Object.assign(wo, { status: "cancelled", completedAt: now() });
+        this.#persist(wo);
+        return wo;
+      } finally {
+        this.#cancelling.delete(id);
+      }
     }
     run.abort.abort();
     await Promise.allSettled([...run.sessions.values()].map((active) => active.session.abort()));
@@ -330,7 +372,7 @@ export class Factory {
     const stored = this.#store.getWorkOrder(id);
     if (!stored) throw new StationError("not_found", "That work order doesn't exist.");
     if (stored.status !== "failed" && stored.status !== "cancelled") throw new StationError("conflict", "Only a failed or cancelled work order can be retried.");
-    this.#requireReady();
+    this.#requireReady(workOrderMode(stored));
     const wo = stored as MWorkOrder;
     delete wo.error;
     delete wo.completedAt;
@@ -348,6 +390,7 @@ export class Factory {
         station.detail = "Queued for retry";
         delete station.error;
         delete station.finishedAt;
+        if (workOrderMode(wo) === "agent") station.failedChecks = 0;
       }
     }
     this.#persist(wo);
@@ -359,7 +402,7 @@ export class Factory {
 
   /** Deletes the work order, its records, and (best effort) its platform sessions, sandboxes, and artifacts. */
   async delete(id: string): Promise<void> {
-    if (this.#runs.has(id)) throw new StationError("conflict", "Cancel the work order before deleting it.");
+    if (this.isActive(id)) throw new StationError("conflict", "Finish cancelling the work order before deleting it.");
     const wo = this.#store.getWorkOrder(id);
     if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
     this.#forgetPause(id);
@@ -378,7 +421,8 @@ export class Factory {
    */
   resumeInterrupted(): void {
     for (const stored of this.#store.listWorkOrders()) {
-      if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.#runs.has(stored.id)) continue;
+      if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.isActive(stored.id)) continue;
+      if (!this.#options.readiness(workOrderMode(stored)).ready) continue;
       this.#resume(stored as MWorkOrder);
     }
   }
@@ -468,6 +512,8 @@ export class Factory {
     this.#stopping = true;
     const runs = [...this.#runs.values()];
     for (const run of runs) {
+      run.closed = true;
+      run.stopCoordinator?.(new CancelledError());
       for (const active of run.sessions.values()) active.mapper.close();
       await Promise.allSettled([...run.sessions.values()].map((active) => active.session.disconnect()));
     }
@@ -478,8 +524,8 @@ export class Factory {
 
   // ─── Run loop ───────────────────────────────────────────────────────────────────────────────────────────────
 
-  #requireReady(): void {
-    const { ready, reason } = this.#options.readiness();
+  #requireReady(mode: WorkOrderMode): void {
+    const { ready, reason } = this.#options.readiness(mode);
     if (!ready) throw new StationError("platform_unavailable", reason ?? "The Managed Copilot platform isn't ready.");
   }
 
@@ -493,6 +539,10 @@ export class Factory {
       interrupted: false,
       failed: false,
       paused: false,
+      gates: new Semaphore(1),
+      decisions: new Map(),
+      workerRevision: 0,
+      workerSnapshotRevision: -1,
     };
     this.#runs.set(wo.id, run);
     run.done = this.#execute(run).finally(() => this.#finish(run));
@@ -503,9 +553,13 @@ export class Factory {
     try {
       if (!wo.plan) await this.#plan(run);
       this.#setWorkOrder(run, { status: "building" });
-      await this.#buildAll(run);
-      this.#setWorkOrder(run, { status: "releasing" });
-      await this.#release(run);
+      if (workOrderMode(wo) === "agent") {
+        await this.#coordinate(run);
+      } else {
+        await this.#buildAll(run);
+        this.#setWorkOrder(run, { status: "releasing" });
+        await this.#release(run);
+      }
       this.#setWorkOrder(run, { status: "completed", completedAt: now() });
       log.info("Work order completed", { id: wo.id, tests: wo.release?.tests });
     } catch (error) {
@@ -589,6 +643,7 @@ export class Factory {
       run.wo.taskCount = plan.tasks.length;
       run.wo.stations = [
         station,
+        ...(workOrderMode(run.wo) === "agent" ? [this.#station(run, "coordinator")] : []),
         ...tasks.flatMap((task) => [this.#newStation("build", task), this.#newStation("review", task)]),
         this.#station(run, "release"),
       ];
@@ -776,10 +831,10 @@ export class Factory {
     return parseJson<TestReport>(this.#store.latestArtifacts(run.wo.id, stationId).find((artifact) => artifact.path === "test-report.json")?.content);
   }
 
-  async #reviewRound(run: Run, task: PlanTask, build: MStation, report: TestReport | undefined, builderSummary: string | undefined): Promise<ValidReview> {
+  async #reviewRound(run: Run, task: PlanTask, build: MStation, report: TestReport | undefined, builderSummary: string | undefined, reuse = true): Promise<ValidReview> {
     const review = this.#station(run, `review:${task.id}`);
     const round = build.round;
-    const existing = review.reviews?.find((record) => record.round === round);
+    const existing = reuse ? review.reviews?.find((record) => record.round === round) : undefined;
     if (existing) return existing;
     let active = run.sessions.get(review.id);
     const capture: Capture = active?.capture ?? {};
@@ -809,7 +864,7 @@ export class Factory {
     const verdict = captured();
     if (!verdict) throw new StationError("review_missing", "The reviewer didn't submit a verdict.");
     const record: ReviewRecord = { round, verdict: verdict.verdict, summary: verdict.summary, findings: verdict.findings, at: now() };
-    this.#updateStation(run, review, { reviews: [...(review.reviews ?? []), record] });
+    this.#updateStation(run, review, { reviews: [...(review.reviews ?? []).filter((item) => item.round !== round), record] });
     const blocking = verdict.findings.filter((finding) => finding.severity !== "minor").length;
     this.#emitItem(run.wo, {
       id: `${review.id}:review:${round}`,
@@ -832,10 +887,7 @@ export class Factory {
     const station = this.#station(run, "release");
     if (station.status === "done" && run.wo.release) return;
     const plan = run.wo.plan!;
-    const outcomes: TaskOutcome[] = plan.tasks.map((task) => {
-      const review = this.#station(run, `review:${task.id}`);
-      return { task, reviews: review.reviews ?? [], acceptedWithFindings: Boolean(review.acceptedWithFindings), files: this.#taskFiles(run, task.id) };
-    });
+    const outcomes = this.#outcomes(run);
     const seed = releaseSeed(run.wo, plan, outcomes, this.#skillsRoot);
     this.#updateStation(run, station, { detail: "Queued for a sandbox" });
     const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
@@ -855,18 +907,7 @@ export class Factory {
           await this.#turn(run, station, active, checkFailedPrompt(problem, outcome.report, true), "nudge", station.round);
           continue;
         }
-        const manifest = outcome.manifest!;
-        const patch = latest.find((artifact) => artifact.path === "project.patch");
-        const release: ReleaseSummary = {
-          files: manifest.files.length,
-          bytes: manifest.files.reduce((total, file) => total + file.size, 0),
-          tests: summaryOf(outcome.report!),
-          ...(patch ? { patchBytes: patch.size } : {}),
-          ...(notes ? { notes } : {}),
-        };
-        run.wo.release = release;
-        this.#updateStation(run, station, { status: "done", detail: `Release ready · ${release.tests!.passed} tests passed`, finishedAt: now() });
-        this.#activity(run.wo, station.id, `Release ready: ${release.files} files, ${release.tests!.passed} tests passed`, "success");
+        this.#acceptRelease(run, station, outcome);
         return;
       }
     } catch (error) {
@@ -875,6 +916,671 @@ export class Factory {
     } finally {
       releaseSlot();
       if (!this.#stopping) await this.#closeSession(run, station.id);
+    }
+  }
+
+  #outcomes(run: Run): TaskOutcome[] {
+    return run.wo.plan!.tasks.map((task) => {
+      const review = this.#station(run, `review:${task.id}`);
+      return { task, reviews: review.reviews ?? [], acceptedWithFindings: Boolean(review.acceptedWithFindings), files: this.#taskFiles(run, task.id) };
+    });
+  }
+
+  #acceptRelease(run: Run, station: MStation, outcome: CheckOutcome): void {
+    const latest = this.#store.latestArtifacts(run.wo.id, station.id);
+    const patch = latest.find((artifact) => artifact.path === "project.patch");
+    const notes = latest.find((artifact) => artifact.path === "RELEASE.md")?.content;
+    const manifest = outcome.manifest!;
+    const release: ReleaseSummary = {
+      files: manifest.files.length,
+      bytes: manifest.files.reduce((total, file) => total + file.size, 0),
+      tests: summaryOf(outcome.report!),
+      ...(patch ? { patchBytes: patch.size } : {}),
+      ...(notes ? { notes } : {}),
+    };
+    run.wo.release = release;
+    this.#updateStation(run, station, { status: "done", detail: `Release ready · ${release.tests!.passed} tests passed`, finishedAt: now() });
+    this.#activity(run.wo, station.id, `Release ready: ${release.files} files, ${release.tests!.passed} tests passed`, "success");
+  }
+
+  // ─── Agent-led coordination ────────────────────────────────────────────────────────────────────────────────
+
+  #ensureCoordinatorRun(run: Run): void {
+    if (this.#stopping || run.closed || this.#runs.get(run.wo.id) !== run) throw new CancelledError();
+    this.#throwIfCancelled(run);
+  }
+
+  async #coordinate(run: Run): Promise<void> {
+    const station = this.#station(run, "coordinator");
+    if (run.wo.release && this.#station(run, "release").status === "done") {
+      this.#updateStation(run, station, { status: "done", detail: "Release accepted", finishedAt: now() });
+      return;
+    }
+    let active: ActiveSession | undefined;
+    let unwatch = () => {};
+    let failure: unknown;
+    const failed = new Promise<never>((_, reject) => {
+      run.stopCoordinator = (error) => { failure ??= error; reject(error); };
+    });
+    // A gate can fail during the resume RPC, before a completion wait has been installed.
+    void failed.catch(() => undefined);
+    const cancelled = () => run.stopCoordinator?.(new CancelledError());
+    run.abort.signal.addEventListener("abort", cancelled, { once: true });
+    try {
+      const resuming = Boolean(station.sessionId);
+      const mapper = this.#newMapper(run, station);
+      const config = this.#sessionConfig(run, station, mapper, {
+        tools: this.#coordinatorTools(run),
+        onPermissionRequest: this.#coordinatorPermissions(run, mapper),
+        onEvent: (event) => {
+          mapper.handle(event);
+          this.#coordinatorEvent(run, event);
+        },
+      });
+      this.#updateStation(run, station, {
+        status: "starting", detail: resuming ? "Reattaching to the coordinator" : "Opening the coordinator",
+        model: station.model ?? this.#platform.models.coordinator, startedAt: station.startedAt ?? now(),
+      });
+      const session = station.sessionId
+        ? await this.#platform.resumeSession("coordinator", station.sessionId, config)
+        : await this.#platform.createSession("coordinator", { ...config, model: station.model });
+      active = { session, mapper, capture: {} };
+      run.sessions.set(station.id, active);
+      this.#ensureCoordinatorRun(run);
+      this.#updateStation(run, station, { sessionId: session.sessionId });
+      if (resuming) {
+        // App tools interrupted by a restart may need reconciliation. Their effects are checkpointed and idempotent:
+        // end only the coordinator's old turn, then let a fresh turn read those checkpoints. Workers keep running.
+        await this.#endCoordinatorTurn(run, active);
+        this.#activity(run.wo, station.id, "Resumed the same coordinator session; reconciling its workers before continuing", "info");
+      }
+      await this.#syncWorkers(run, true);
+      unwatch = this.#watchWorkers(run);
+      for (let attempt = 0; attempt <= MAX_NUDGES; attempt++) {
+        const prompt = attempt === 0 ? coordinatorPrompt(run.wo, this.#platform.models, resuming) : coordinatorReminder();
+        await Promise.race([this.#turn(run, station, active, prompt, resuming ? "continue" : "work", 1), failed]);
+        if (failure) throw failure;
+        await this.#syncWorkers(run, true);
+        if (run.wo.release && this.#station(run, "release").status === "done") {
+          this.#updateStation(run, station, { status: "done", detail: "Release accepted by the factory", finishedAt: now() });
+          return;
+        }
+        this.#activity(run.wo, station.id, "The coordinator stopped before the release passed; asking it to continue from the factory checkpoints", "warning");
+      }
+      throw new StationError("release_incomplete", "The coordinator stopped without getting the release accepted by the factory.");
+    } catch (error) {
+      if (!this.#stopping) {
+        if (active) await this.#abortCoordinator(active.session);
+        if (!(error instanceof CancelledError) && !run.abort.signal.aborted) await this.#failStation(run, station, failure ?? error);
+        if (run.abort.signal.aborted || run.failed) await this.#deleteWorkerSessions(run.wo);
+      }
+      throw failure ?? error;
+    } finally {
+      unwatch();
+      run.abort.signal.removeEventListener("abort", cancelled);
+      delete run.stopCoordinator;
+    }
+  }
+
+  async #abortCoordinator(session: StationSession): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        session.abort(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new StationError("timeout", "The coordinator didn't acknowledge the stop.")), ABORT_TIMEOUT_MS); }),
+      ]);
+    } catch (error) {
+      log.warn("Couldn't stop the coordinator turn", { sessionId: session.sessionId, error: toFactoryError(error).message });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async #endCoordinatorTurn(run: Run, active: ActiveSession): Promise<void> {
+    await this.#stopCoordinatorTurn(active.session, () => this.#ensureCoordinatorRun(run));
+  }
+
+  async #stopCoordinatorTurn(session: StationSession, ensureActive: () => void): Promise<void> {
+    let info = await this.#platform.sessionInfo(session.sessionId);
+    if (!info.lastTurn || info.lastTurn.completedAt) return;
+    await this.#abortCoordinator(session);
+    const deadline = Date.now() + ABORT_TIMEOUT_MS;
+    while (info.lastTurn && !info.lastTurn.completedAt) {
+      ensureActive();
+      if (Date.now() >= deadline) throw new StationError("timeout", "The coordinator's interrupted turn has not stopped yet. Retry once the platform has ended it.");
+      await new Promise((resolve) => setTimeout(resolve, this.#options.pollMs ?? 250));
+      info = await this.#platform.sessionInfo(session.sessionId);
+    }
+  }
+
+  async #stopPersistedCoordinator(wo: MWorkOrder): Promise<void> {
+    const station = wo.stations.find((item) => item.kind === "coordinate");
+    if (!station?.sessionId) return;
+    let info: SessionInfo;
+    try {
+      info = await this.#platform.sessionInfo(station.sessionId);
+    } catch (error) {
+      if (isManagedCopilotError(error, "not_found")) return;
+      throw error;
+    }
+    if (!info.lastTurn || info.lastTurn.completedAt) return;
+    const session = await this.#platform.resumeSession("coordinator", station.sessionId, {
+      agent: station.agent,
+      tools: [],
+      onPermissionRequest: () => ({ kind: "reject", feedback: "This work order is being cancelled." }),
+    });
+    try {
+      await this.#stopCoordinatorTurn(session, () => {});
+      this.#activity(wo, station.id, "Stopped the persisted coordinator turn before cancelling its workers", "info");
+    } finally {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          session.disconnect(),
+          new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Coordinator detach timed out")), DETACH_TIMEOUT_MS); }),
+        ]);
+      } catch (error) {
+        log.warn("Couldn't detach the cancelled coordinator", { sessionId: station.sessionId, error: toFactoryError(error).message });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  }
+
+  #watchWorkers(run: Run): () => void {
+    let stopped = false;
+    let failures = 0;
+    const refresh = () => {
+      if (stopped || this.#stopping || run.closed) return;
+      void this.#syncWorkers(run).then(() => { failures = 0; }, (error: unknown) => {
+        if (stopped || this.#stopping || run.closed) return;
+        log.warn("Couldn't reconcile the coordinator's workers", { id: run.wo.id, error: toFactoryError(error).message });
+        if (++failures >= MAX_READ_FAILURES || !this.#options.readiness().ready) run.stopCoordinator?.(error);
+      });
+    };
+    const unlisten = this.#platform.onWorkerEvent?.((id) => {
+      if (id === this.#station(run, "coordinator").sessionId) {
+        run.workerRevision++;
+        refresh();
+      }
+    });
+    const timer = setInterval(refresh, this.#options.pollMs ?? 3_000);
+    timer.unref();
+    return () => { stopped = true; clearInterval(timer); unlisten?.(); };
+  }
+
+  async #syncWorkers(run: Run, fresh = false): Promise<WorkerInfo[]> {
+    // A gate needs a pass that began after its preceding I/O, not a watcher pass already partway through its reads.
+    if (fresh && run.workerSync) await run.workerSync;
+    if (run.workerSync) return run.workerSync;
+    const read = async (): Promise<WorkerInfo[]> => {
+      this.#ensureCoordinatorRun(run);
+      const coordinator = this.#station(run, "coordinator");
+      if (!coordinator.sessionId) return [];
+      const workers = await this.#platform.workers(coordinator.sessionId).list();
+      this.#ensureCoordinatorRun(run);
+      for (const station of run.wo.stations.filter((item) => item.kind === "build" || item.kind === "release")) {
+        const name = station.taskId ? builderName(station.taskId) : "release";
+        const worker = [...workers].reverse().find((item) => item.name === name);
+        if (!worker) continue;
+        const prior = station.worker;
+        const replaced = prior !== undefined && prior.id !== worker.id;
+        if (replaced) {
+          this.#store.deleteStationArtifacts(run.wo.id, station.id);
+          if (station.taskId) {
+            const review = this.#station(run, `review:${station.taskId}`);
+            this.#updateStation(run, review, { status: "waiting", round: 0, reviews: undefined, acceptedWithFindings: undefined, finishedAt: undefined });
+          }
+          this.#updateStation(run, station, {
+            previousSessionIds: [...(station.previousSessionIds ?? []), prior.id],
+            round: 0, turn: undefined, seeded: undefined, workerCheck: undefined, passedRound: undefined,
+            reviewedMessages: undefined, reviewedTurnId: undefined, reportVersion: undefined, staleReportVersion: undefined, awaitingFix: undefined,
+            failedChecks: undefined, inputRevision: undefined, sandbox: undefined, tests: undefined, finishedAt: undefined,
+          });
+          this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
+        }
+        const newMessage = !replaced && prior !== undefined && worker.messages > prior.messages && station.seeded;
+        if (newMessage) {
+          const reviewed = station.taskId && this.#station(run, `review:${station.taskId}`).reviews?.some((review) => review.round === station.round);
+          const nextRound = Boolean(reviewed) || station.awaitingFix;
+          const round = nextRound ? station.round + 1 : Math.max(1, station.round);
+          this.#updateStation(run, station, {
+            round, passedRound: undefined, workerCheck: undefined, reviewedMessages: undefined, reviewedTurnId: undefined,
+            staleReportVersion: station.reportVersion, awaitingFix: undefined, finishedAt: undefined,
+            ...(nextRound ? { failedChecks: 0 } : {}),
+            turn: { kind: nextRound ? "fix" : station.round === 0 ? "work" : "nudge", round, sentAt: worker.updatedAt },
+          });
+          if (station.taskId) this.#updateStation(run, this.#station(run, `review:${station.taskId}`), { status: "waiting", detail: "Waits for the updated build", finishedAt: undefined });
+        }
+        this.#updateStation(run, station, {
+          sessionId: worker.id, model: worker.model ?? station.model, startedAt: station.startedAt ?? worker.createdAt,
+          worker: {
+            id: worker.id, name: worker.name, state: worker.state, messages: worker.messages,
+            ...(!replaced && prior?.turnId ? { turnId: prior.turnId } : {}),
+            createdRound: replaced ? 1 : prior?.createdRound ?? 1, ...(worker.error ? { error: worker.error } : {}),
+          },
+        });
+        if (worker.state !== "starting" && worker.state !== "stopped") await this.#refreshSandbox(run, station, worker.state === "idle" || worker.state === "working");
+        this.#ensureCoordinatorRun(run);
+        if (worker.state === "starting" || worker.state === "working") {
+          this.#updateStation(run, station, {
+            status: worker.state === "starting" ? "starting" : "working",
+            detail: !station.seeded ? "Waiting for workspace preparation" : station.round > 1 ? `Fixing review findings (round ${station.round})` : "Working in its own sandbox",
+          });
+        } else if (station.turn && !station.turn.completedAt) {
+          this.#updateStation(run, station, {
+            turn: { ...station.turn, completedAt: worker.updatedAt }, status: "waiting",
+            detail: worker.state === "idle" ? "Work finished; awaits the factory check" : worker.error ?? `Worker ${worker.state}`,
+          });
+        }
+        if (worker.state === "idle" && (prior?.state !== "idle" || prior.messages !== worker.messages) && worker.result) {
+          this.#emitItem(run.wo, { id: `worker:${worker.id}:${worker.messages}`, stationId: station.id, kind: "message", text: worker.result });
+        }
+      }
+      if (run.wo.workersStarted !== workers.length) this.#setWorkOrder(run, { workersStarted: workers.length });
+      return workers;
+    };
+    const sync = async (): Promise<WorkerInfo[]> => {
+      for (;;) {
+        const revision = run.workerRevision;
+        const workers = await read();
+        // Worker events and coordinator mutation tools invalidate even a partially read snapshot.
+        if (revision === run.workerRevision) {
+          run.workerSnapshotRevision = revision;
+          return workers;
+        }
+      }
+    };
+    run.workerSync = sync().finally(() => { delete run.workerSync; });
+    return run.workerSync;
+  }
+
+  #requireWorkerSnapshot(run: Run): void {
+    const changing = [...run.decisions.values()].some(({ start }) => start.data.toolName === "message_worker" || start.data.toolName === "stop_worker");
+    if (run.workerSync || run.workerSnapshotRevision !== run.workerRevision || changing) {
+      throw new StationError("conflict", "Worker instructions changed while the factory was checking them. Wait for pending worker tools to finish, then call the factory gate again.");
+    }
+  }
+
+  #coordinatorPermissions(run: Run, mapper: StationActivityMapper): PermissionHandler {
+    const ordinary = factoryPermissions("shared", (kind) => mapper.status(`Denied a "${kind}" request`, "warning"));
+    return async (request, invocation) => {
+      if (request.managedApprovalRequired) return { kind: "no-result" };
+      if (request.kind !== "custom-tool" || request.toolName !== "start_worker") return ordinary(request, invocation);
+      try {
+        this.#ensureCoordinatorRun(run);
+        const args = z.object({ name: z.string(), task: z.string(), environment: z.string(), agent: z.string(), model: z.string().optional() }).parse(request.args);
+        const task = run.wo.plan!.tasks.find((candidate) => builderName(candidate.id) === args.name);
+        const role = task ? "builder" : args.name === "release" ? "release" : undefined;
+        if (!role) throw new StationError("invalid_request", "Start only a named builder from the accepted plan, or the release worker.");
+        if (args.environment !== FACTORY_ENVIRONMENTS[role] || args.agent !== role) {
+          throw new StationError("invalid_request", `Use environment ${FACTORY_ENVIRONMENTS[role]} and agent ${role}.`);
+        }
+        const inherited = this.#station(run, "coordinator").model;
+        if ((args.model ?? inherited) !== this.#platform.models[role]) throw new StationError("invalid_request", `Use model ${this.#platform.models[role]} for the ${role}.`);
+        if (args.task !== WORKER_READY_TASK) throw new StationError("invalid_request", `Use the factory's readiness task exactly: ${JSON.stringify(WORKER_READY_TASK)}`);
+        const workers = await this.#syncWorkers(run, true);
+        if (workers.some((worker) => worker.name === args.name && worker.state !== "stopped")) {
+          throw new StationError("conflict", `Worker ${args.name} already exists. Reuse it with message_worker, or wait_for_workers while it is busy.`);
+        }
+        if (task) this.#requireDependencies(run, task);
+        else this.#requireAcceptedTasks(run);
+        this.#ensureCoordinatorRun(run);
+        return { kind: "approve-once" };
+      } catch (error) {
+        const message = error instanceof z.ZodError ? "Pass a worker name, readiness task, environment, agent, and model from the factory instructions." : toFactoryError(error).message;
+        this.#emitItem(run.wo, { stationId: "coordinator", kind: "decision", decision: { action: "declined", status: "failed" }, text: `Worker start declined: ${message}`, level: "warning" });
+        if (!(error instanceof StationError) && !(error instanceof z.ZodError) && !(error instanceof CancelledError)) run.stopCoordinator?.(error);
+        return { kind: "reject", feedback: message };
+      }
+    };
+  }
+
+  #coordinatorTools(run: Run): NonNullable<SessionConfig["tools"]> {
+    const tool = <T>(name: string, description: string, parameters: z.ZodType<T>, handler: (args: T) => Promise<Record<string, unknown>>): Tool<T> =>
+      defineTool(name, {
+        description, parameters, skipPermission: true,
+        handler: async (args) => {
+          const parsed = parameters.safeParse(args);
+          if (!parsed.success) return { resultType: "failure", textResultForLlm: JSON.stringify({ ok: false, summary: "Invalid tool arguments. Use the parameters in this tool's schema." }) };
+          const release = await run.gates.acquire(run.abort.signal);
+          try {
+            this.#ensureCoordinatorRun(run);
+            const result = await handler(parsed.data);
+            this.#ensureCoordinatorRun(run);
+            return { resultType: result.ok === false ? "failure" : "success", textResultForLlm: JSON.stringify(result) };
+          } catch (error) {
+            const refusal = error instanceof StationError && ["invalid_request", "conflict", "session_busy"].includes(error.code);
+            if (!refusal && !this.#stopping && !run.closed) run.stopCoordinator?.(error);
+            return { resultType: "failure", textResultForLlm: JSON.stringify({ ok: false, fatal: !refusal, summary: toFactoryError(error).message, error: toFactoryError(error) }) };
+          } finally {
+            release();
+          }
+        },
+      });
+    return [
+      tool("prepare_workspace", "Prepare a builder's inputs after its readiness turn, then return the task to send with message_worker. Idempotent; never creates a worker.", TaskWorkerSchema,
+        ({ taskId, worker }) => this.#prepareBuilder(run, taskId, worker)),
+      tool("check_build", "Check the builder's latest published files and fresh test report. Returns a fix message when they fail. Never starts or messages a worker.", TaskSchema,
+        ({ taskId }) => this.#checkWorker(run, this.#taskStation(run, taskId), false)),
+      tool("request_review", "Review a checked build in factory-reviewer on a second model. Returns acceptance or findings to send to the SAME builder. Review rounds are bounded.", TaskSchema,
+        ({ taskId }) => this.#reviewWorker(run, taskId)),
+      tool("prepare_release", "After all tasks are accepted, list the copy_worker_files operations needed for the release. Call again after copying: verifies copied bytes, seeds the release, and returns its task.", ReleaseWorkerSchema,
+        ({ worker }) => this.#prepareAgentRelease(run, worker)),
+      tool("check_release", "Check the release worker's fresh full test suite, bundle, patch, and release notes; only this tool can accept the deliverable.", NoArgsSchema,
+        () => this.#checkWorker(run, this.#station(run, "release"), true)),
+      tool("factory_status", "Read the factory's persisted checkpoints and the coordinator's current workers, including which factory gate each task needs next.", NoArgsSchema,
+        () => this.#coordinatorStatus(run)),
+    ];
+  }
+
+  #taskStation(run: Run, taskId: string): MStation {
+    if (!run.wo.plan!.tasks.some((task) => task.id === taskId)) throw new StationError("invalid_request", `There is no task "${taskId}" in the accepted plan.`);
+    return this.#station(run, `build:${taskId}`);
+  }
+
+  #taskAccepted(run: Run, taskId: string): boolean {
+    const build = this.#station(run, `build:${taskId}`);
+    return this.#station(run, `review:${taskId}`).status === "done"
+      && build.workerCheck?.passed === true && build.workerCheck.messages === build.worker?.messages
+      && build.workerCheck.turnId === build.worker?.turnId
+      && build.reviewedMessages === build.worker?.messages && build.reviewedTurnId === build.worker?.turnId
+      && build.worker?.state === "idle" && !build.sessionGone;
+  }
+
+  #requireDependencies(run: Run, task: PlanTask): void {
+    const waiting = task.dependsOn.filter((id) => !this.#taskAccepted(run, id));
+    if (waiting.length) throw new StationError("conflict", `Wait for these dependencies to pass the factory's review: ${waiting.join(", ")}.`);
+  }
+
+  #requireAcceptedTasks(run: Run): void {
+    this.#requireWorkerSnapshot(run);
+    const waiting = run.wo.plan!.tasks.filter((task) => !this.#taskAccepted(run, task.id));
+    if (waiting.length) throw new StationError("conflict", `The release must wait for these tasks to pass checks and review: ${waiting.map((task) => task.id).join(", ")}.`);
+  }
+
+  async #workerFor(run: Run, station: MStation, ref?: string, bootstrap = false): Promise<WorkerInfo> {
+    const deadline = Date.now() + Math.min(this.#options.config.turnTimeoutMs.builder, 180_000);
+    for (;;) {
+      const workers = await this.#syncWorkers(run, true);
+      const worker = workers.find((item) => item.id === station.worker?.id);
+      if (!worker || (ref && worker.name !== ref && worker.id !== ref)) throw new StationError("invalid_request", `Start the ${station.taskId ? builderName(station.taskId) : "release"} worker first.`);
+      if (worker.coordinatorId !== this.#station(run, "coordinator").sessionId || worker.environment !== station.environment || worker.agent !== station.agent) {
+        throw new StationError("invalid_request", "This worker doesn't belong to the factory station's coordinator, environment, and agent.");
+      }
+      if (worker.state === "stopped") throw new StationError("conflict", `Worker ${worker.name} was stopped. Start its replacement with the same name.`);
+      if (worker.state !== "working" && worker.state !== "starting") {
+        const info = await this.#platform.sessionInfo(worker.id);
+        this.#ensureCoordinatorRun(run);
+        if (info.parentSessionId !== worker.coordinatorId || info.placement !== "sandbox" || !info.sandbox) {
+          throw new StationError("conflict", `Worker ${worker.name} doesn't have the expected sandbox.`);
+        }
+        if (info.lastTurn && !info.lastTurn.completedAt) throw new StationError("session_busy", `Worker ${worker.name} still has an unfinished turn. Use wait_for_workers.`);
+        if (station.worker) this.#updateStation(run, station, { worker: { ...station.worker, turnId: info.lastTurn?.turnId } });
+        return worker;
+      }
+      if (!bootstrap || worker.messages > 1) throw new StationError("session_busy", `Worker ${worker.name} is still working. Use wait_for_workers, then call this tool again.`);
+      if (Date.now() >= deadline) throw new StationError("timeout", `Worker ${worker.name} didn't finish preparing its sandbox in time.`);
+      await new Promise((resolve) => setTimeout(resolve, this.#options.pollMs ?? 1_000));
+    }
+  }
+
+  async #seedWorker(run: Run, station: MStation, files: readonly SeedFile[], inputRevision?: string): Promise<void> {
+    const writer = this.#platform.files(station.sessionId!);
+    for (const file of files) {
+      this.#ensureCoordinatorRun(run);
+      await writer.write(file.path, file.content);
+    }
+    this.#ensureCoordinatorRun(run);
+    this.#updateStation(run, station, {
+      seeded: true, status: "waiting", detail: "Workspace ready; waiting for the coordinator's instructions",
+      ...(inputRevision ? { inputRevision } : {}),
+    });
+    this.#activity(run.wo, station.id, `Factory prepared ${files.length} input files in ${station.worker!.name}`, "info");
+  }
+
+  async #prepareBuilder(run: Run, taskId: string, ref: string): Promise<Record<string, unknown>> {
+    const station = this.#taskStation(run, taskId);
+    const task = run.wo.plan!.tasks.find((candidate) => candidate.id === taskId)!;
+    this.#requireDependencies(run, task);
+    const worker = await this.#workerFor(run, station, ref, true);
+    this.#requireWorkerSnapshot(run);
+    this.#requireDependencies(run, task);
+    const dependencyFiles = this.#dependencyFiles(run, task);
+    if (!station.seeded) {
+      if (worker.messages > 1) throw new StationError("conflict", "This builder started work before its inputs were prepared. Stop it and start a fresh builder with the readiness task.");
+      await this.#seedWorker(run, station, builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot));
+    }
+    return {
+      ok: true, ready: true, summary: `Prepared **${worker.name}** for ${task.title}`,
+      worker: worker.name, alreadyWorking: worker.messages > 1,
+      message: buildPrompt(run.wo, task, [...dependencyFiles.keys()]),
+    };
+  }
+
+  async #checkWorker(run: Run, station: MStation, release: boolean): Promise<Record<string, unknown>> {
+    const worker = await this.#workerFor(run, station);
+    this.#requireWorkerSnapshot(run);
+    if (!station.seeded || worker.messages < 2) throw new StationError("conflict", "Prepare the workspace and send its real task with message_worker before checking it.");
+    if (release) {
+      this.#requireAcceptedTasks(run);
+      if (station.inputRevision !== this.#inputRevision(run)) throw new StationError("conflict", "A builder changed after the release inputs were prepared. Review that build, then prepare a new release worker.");
+    }
+    const turnId = station.worker?.turnId;
+    if (!turnId) throw new StationError("conflict", "The worker has not completed a runtime turn to check.");
+    const previous = station.workerCheck;
+    if (previous?.messages === worker.messages && previous.turnId === turnId) return this.#checkReply(station, release);
+    if (worker.state !== "idle") {
+      return { ok: false, summary: `Worker **${worker.name}** failed: ${worker.error ?? "its turn did not finish"}`, message: continuePrompt(release), worker: worker.name };
+    }
+    const outcome = await this.#collect(run, station, release, { version: station.staleReportVersion, turnId });
+    await this.#syncWorkers(run, true);
+    this.#ensureCoordinatorRun(run);
+    this.#requireWorkerSnapshot(run);
+    if (station.worker?.id !== worker.id || station.worker.messages !== worker.messages || station.worker.state !== "idle" || station.worker.turnId !== turnId) {
+      throw new StationError("conflict", "The worker changed while the factory was checking it. Wait for the new work to finish, then check again.");
+    }
+    if (release) {
+      this.#requireAcceptedTasks(run);
+      if (station.inputRevision !== this.#inputRevision(run)) throw new StationError("conflict", "A builder changed while the release was being checked. Review its new output and prepare a new release worker.");
+    }
+    let problem = outcome.problem;
+    let code = outcome.code;
+    if (outcome.passed && release) {
+      const latest = this.#store.latestArtifacts(run.wo.id, station.id);
+      if (!latest.some((item) => item.path === "RELEASE.md" && item.content?.trim()) || !latest.some((item) => item.path === "project.patch" && item.content?.trim())) {
+        problem = "The release must publish outputs/RELEASE.md and outputs/project.patch.";
+        code = "release_incomplete";
+      }
+    }
+    const passed = outcome.passed && !problem;
+    this.#updateStation(run, station, {
+      workerCheck: { messages: worker.messages, turnId, passed, code, problem },
+      status: passed ? "done" : "waiting", detail: passed ? `${outcome.report!.summary.passed} tests passed${release ? "" : " · ready for review"}` : `Check failed: ${problem}`,
+      ...(passed ? { passedRound: station.round, finishedAt: now() } : { failedChecks: (station.failedChecks ?? 0) + 1 }),
+    });
+    if (!passed && station.failedChecks! > MAX_NUDGES) {
+      const error = new StationError(code, `The ${release ? "release" : "builder"} couldn't get the factory check to pass: ${problem}`);
+      await this.#failStation(run, station, error);
+      throw error;
+    }
+    if (passed && release) this.#acceptRelease(run, station, outcome);
+    return this.#checkReply(station, release);
+  }
+
+  #checkReply(station: MStation, release: boolean): Record<string, unknown> {
+    const check = station.workerCheck!;
+    return {
+      ok: check.passed, accepted: release && check.passed, worker: station.worker!.name,
+      summary: check.passed
+        ? `${release ? "Release accepted" : `Factory check for **${station.worker!.name}**`}: **${station.tests?.passed ?? 0} tests pass**`
+        : `Factory check for **${station.worker!.name}** failed: ${check.problem}`,
+      tests: station.tests,
+      ...(check.passed ? { next: release ? "The deliverable is ready. Stop workers you no longer need and report the result." : "Call request_review." }
+        : { message: checkFailedPrompt(check.problem, undefined, release), error: { code: check.code, message: check.problem } }),
+    };
+  }
+
+  async #reviewWorker(run: Run, taskId: string): Promise<Record<string, unknown>> {
+    const build = this.#taskStation(run, taskId);
+    const worker = await this.#workerFor(run, build);
+    this.#requireWorkerSnapshot(run);
+    const turnId = build.worker?.turnId;
+    if (!build.workerCheck?.passed || build.workerCheck.messages !== worker.messages || build.workerCheck.turnId !== turnId) throw new StationError("conflict", "Call check_build on the latest worker output and get a passing report before requesting review.");
+    const review = this.#station(run, `review:${taskId}`);
+    const task = run.wo.plan!.tasks.find((candidate) => candidate.id === taskId)!;
+    const verdict = await this.#reviewRound(run, task, build, this.#latestReport(run, build.id), worker.result, build.reviewedMessages === worker.messages && build.reviewedTurnId === turnId);
+    await this.#syncWorkers(run, true);
+    this.#ensureCoordinatorRun(run);
+    this.#requireWorkerSnapshot(run);
+    if (build.worker?.id !== worker.id || build.worker.messages !== worker.messages || build.worker.state !== "idle" || build.worker.turnId !== turnId) {
+      this.#updateStation(run, review, { status: "waiting", detail: "The builder changed during review; check and review its new output" });
+      throw new StationError("conflict", "The builder changed during review. Check its new output and request review again.");
+    }
+    const accepted = verdict.verdict === "approve" || build.round >= run.wo.maxReviewRounds;
+    this.#updateStation(run, build, { reviewedMessages: worker.messages, reviewedTurnId: turnId, awaitingFix: !accepted });
+    if (accepted) {
+      this.#updateStation(run, build, { detail: `${build.tests?.passed ?? 0} tests passed` });
+      this.#updateStation(run, review, {
+        status: "done", finishedAt: now(), acceptedWithFindings: verdict.verdict !== "approve",
+        detail: verdict.verdict === "approve" ? `Approved in round ${build.round}` : `Accepted after ${build.round} rounds with findings open`,
+      });
+      await this.#closeSession(run, review.id);
+    }
+    return {
+      ok: true, accepted, worker: worker.name, round: build.round, verdict: verdict.verdict, findings: verdict.findings,
+      summary: accepted
+        ? `Factory review: **${worker.name}** ${verdict.verdict === "approve" ? "approved" : "accepted with open findings"} in round ${build.round}`
+        : `Factory review: **${verdict.findings.length} ${verdict.findings.length === 1 ? "finding" : "findings"}** for **${worker.name}**; reuse this builder for round ${build.round + 1}`,
+      ...(accepted ? {} : { message: fixPrompt(build.round + 1, run.wo.maxReviewRounds, verdict.findings, verdict.summary) }),
+    };
+  }
+
+  #inputRevision(run: Run): string {
+    return sha256(JSON.stringify(run.wo.plan!.tasks.map((task) => {
+      const build = this.#station(run, `build:${task.id}`);
+      return [task.id, build.worker?.id, build.workerCheck?.messages, build.workerCheck?.turnId, build.reportVersion];
+    })));
+  }
+
+  async #prepareAgentRelease(run: Run, ref: string): Promise<Record<string, unknown>> {
+    await this.#syncWorkers(run, true);
+    this.#requireAcceptedTasks(run);
+    const station = this.#station(run, "release");
+    const worker = await this.#workerFor(run, station, ref, true);
+    const revision = this.#inputRevision(run);
+    const outcomes = this.#outcomes(run);
+    const seed = releaseSeed(run.wo, run.wo.plan!, outcomes, this.#skillsRoot);
+    if (station.seeded && station.inputRevision !== revision) throw new StationError("conflict", "The accepted builder outputs changed. Stop the release worker and start a fresh one.");
+    if (!station.seeded) {
+      if (worker.messages > 1) throw new StationError("conflict", "The release started before its inputs were prepared. Stop it and start a fresh release worker.");
+      const copies = outcomes.map(({ task }) => ({
+        from: this.#station(run, `build:${task.id}`).worker!.name,
+        to: worker.name, paths: ["outputs/files"], destination: `.factory/incoming/${task.id}`,
+      }));
+      const copied: TaskOutcome[] = [];
+      const missing: string[] = [];
+      const reader = this.#platform.files(worker.id);
+      for (const outcome of outcomes) {
+        const files = new Map<string, string>();
+        for (const [path, expected] of outcome.files) {
+          this.#ensureCoordinatorRun(run);
+          const source = `.factory/incoming/${outcome.task.id}/outputs/files/${path}`;
+          try {
+            const content = await reader.read(source);
+            if (sha256(content) !== sha256(expected)) missing.push(source);
+            else files.set(path, content);
+          } catch (error) {
+            if (isManagedCopilotError(error, "not_found")) missing.push(source);
+            else throw error;
+          }
+        }
+        copied.push({ ...outcome, files });
+      }
+      if (missing.length) {
+        return { ok: true, ready: false, summary: "Release needs the accepted builders' files copied in", copies, next: "Run these copy_worker_files operations, then call prepare_release again. Do not send the release its task yet." };
+      }
+      await this.#syncWorkers(run, true);
+      this.#requireAcceptedTasks(run);
+      if (this.#inputRevision(run) !== revision) throw new StationError("conflict", "A builder changed while the factory prepared the release. Check and review it again.");
+      await this.#seedWorker(run, station, releaseSeed(run.wo, run.wo.plan!, copied, this.#skillsRoot).files, revision);
+      this.#setWorkOrder(run, { status: "releasing" });
+    }
+    return {
+      ok: true, ready: true, worker: worker.name, summary: "Verified copied outputs and prepared the **release** sandbox",
+      message: releasePrompt(run.wo, run.wo.plan!, seed.conflicts),
+    };
+  }
+
+  async #coordinatorStatus(run: Run): Promise<Record<string, unknown>> {
+    const workers = await this.#syncWorkers(run, true);
+    return {
+      ok: true, summary: run.wo.release ? "The release is accepted." : "Factory checkpoints",
+      releaseAccepted: Boolean(run.wo.release),
+      tasks: run.wo.plan!.tasks.map((task) => {
+        const build = this.#station(run, `build:${task.id}`);
+        const review = this.#station(run, `review:${task.id}`);
+        return {
+          taskId: task.id, dependsOn: task.dependsOn, worker: build.worker, seeded: Boolean(build.seeded), round: build.round,
+          check: build.workerCheck, accepted: this.#taskAccepted(run, task.id), latestReview: review.reviews?.at(-1),
+          start: taskStart(task, this.#platform.models.builder),
+        };
+      }),
+      release: this.#station(run, "release"),
+      workers: workers.map(({ id, name, environment, state, messages, error }) => ({ id, name, environment, state, messages, error })),
+    };
+  }
+
+  #coordinatorEvent(run: Run, event: SessionEvent): void {
+    if (this.#stopping || run.closed || event.agentId) return;
+    if (event.type === "tool.execution_start") {
+      if (["start_worker", "message_worker", "copy_worker_files", "stop_worker"].includes(event.data.toolName)) run.workerRevision++;
+      const args = event.data.arguments;
+      const ref = args && typeof args === "object" && "worker" in args ? args.worker : undefined;
+      const firstMessage = event.data.toolName === "message_worker"
+        && run.wo.stations.some((station) => station.worker?.messages === 1 && (station.worker.name === ref || station.worker.id === ref));
+      run.decisions.set(event.data.toolCallId, { start: event, firstMessage });
+      const decision = toolDecision(event.data.toolName, args, "running", firstMessage);
+      if (decision) {
+        this.#emitItem(run.wo, { id: `decision:${event.data.toolCallId}`, stationId: "coordinator", kind: "decision", ...decision });
+        this.#updateStation(run, this.#station(run, "coordinator"), { detail: decision.text.replace(/\*\*/g, "") });
+      }
+    } else if (event.type === "tool.execution_complete") {
+      const running = run.decisions.get(event.data.toolCallId);
+      if (!running) return;
+      run.decisions.delete(event.data.toolCallId);
+      const { start, firstMessage } = running;
+      if (["start_worker", "message_worker", "copy_worker_files", "stop_worker"].includes(start.data.toolName)) run.workerRevision++;
+      const decision = toolDecision(start.data.toolName, start.data.arguments, event.data.success ? "done" : "failed", firstMessage);
+      if (!decision) return;
+      const result = parseJson<{ summary?: unknown }>(event.data.result?.content);
+      this.#emitItem(run.wo, {
+        id: `decision:${event.data.toolCallId}`, stationId: "coordinator", kind: "decision", ...decision,
+        text: typeof result?.summary === "string" ? result.summary : decision.text,
+        level: event.data.success ? "info" : "warning",
+      });
+    }
+  }
+
+  /** Cancelling a work order must stop its workers without attaching a client that would take over their prompts. */
+  async #deleteWorkerSessions(wo: MWorkOrder): Promise<void> {
+    const id = wo.stations.find((station) => station.kind === "coordinate")?.sessionId;
+    if (!id) return;
+    try {
+      const workers = await this.#platform.workers(id).list();
+      await Promise.all(workers.filter((worker) => worker.state !== "stopped").map(async (worker) => {
+        try {
+          await this.#platform.deleteSession(worker.id);
+        } catch (error) {
+          if (!isManagedCopilotError(error, "not_found")) throw error;
+        }
+      }));
+    } catch (error) {
+      if (isManagedCopilotError(error, "not_found")) return;
+      const message = `Couldn't stop every worker: ${toFactoryError(error).message}. Delete the work order to retry cleanup.`;
+      wo.error = { code: "cleanup_failed", message };
+      this.#activity(wo, "coordinator", message, "error");
+      log.warn("Worker cleanup failed", { id: wo.id, error: message });
     }
   }
 
@@ -1017,12 +1723,13 @@ export class Factory {
     );
   }
 
-  async #refreshSandbox(run: Run, station: MStation): Promise<void> {
+  async #refreshSandbox(run: Run, station: MStation, strict = false): Promise<void> {
     if (!station.sessionId) return;
     try {
       const info = await this.#platform.sessionInfo(station.sessionId);
       if (info.id !== station.sessionId) return;
       const patch: Partial<MStation> = { sessionState: info.state, sessionGone: undefined };
+      if (station.worker) patch.worker = { ...station.worker, turnId: info.lastTurn?.turnId };
       if (info.sandbox) {
         patch.sandbox = {
           id: info.sandbox.id,
@@ -1035,6 +1742,7 @@ export class Factory {
       }
       this.#updateStation(run, station, patch);
     } catch (error) {
+      if (strict) throw error;
       log.debug("Sandbox details unavailable", { station: station.id, error: (error as Error).message });
     }
   }
@@ -1183,21 +1891,25 @@ export class Factory {
 
   // ─── Artifacts and checks ───────────────────────────────────────────────────────────────────────────────────
 
-  async #collect(run: Run, station: MStation, release: boolean): Promise<CheckOutcome> {
+  async #collect(run: Run, station: MStation, release: boolean, freshAfter?: { readonly version?: number; readonly turnId?: string }): Promise<CheckOutcome> {
+    const previousVersion = freshAfter ? freshAfter.version : station.reportVersion;
     this.#updateStation(run, station, { status: "collecting", detail: "Collecting artifacts" });
-    await this.#capturePublication(run, station);
+    const published = await this.#capturePublication(run, station);
     await this.#refreshSandbox(run, station);
+    this.#throwIfCancelled(run);
     const latest = this.#store.latestArtifacts(run.wo.id, station.id);
     const reportArtifact = latest.find((artifact) => artifact.path === "test-report.json");
     const report = parseJson<TestReport>(reportArtifact?.content);
     const manifest = parseJson<OutputManifest>(latest.find((artifact) => artifact.path === "manifest.json")?.content);
-    const previousVersion = station.reportVersion;
     if (reportArtifact) this.#updateStation(run, station, { reportVersion: reportArtifact.version });
     if (report) this.#updateStation(run, station, { tests: summaryOf(report, reportArtifact?.publishedAt) });
     const check = release ? "npm run check:release" : "npm run check";
     const fail = (code: string, problem: string): CheckOutcome => ({ passed: false, code, problem, ...(report ? { report } : {}), ...(manifest ? { manifest } : {}) });
     if (!report) return fail("no_test_report", `no test report was published (run \`${check}\`)`);
-    if (previousVersion !== undefined && reportArtifact!.version === previousVersion) return fail("check_not_run", `\`${check}\` wasn't run after the latest changes`);
+    if (freshAfter?.turnId && published.find((artifact) => artifact.path === "test-report.json" && artifact.state === "published")?.turnId !== freshAfter.turnId) {
+      return fail("check_not_run", `\`${check}\` wasn't run in the worker's latest turn`);
+    }
+    if (previousVersion !== undefined && reportArtifact!.version <= previousVersion) return fail("check_not_run", `\`${check}\` wasn't run after the latest changes`);
     if (report.summary.total === 0) return fail("no_tests", "no tests ran (name test files like test/<name>.test.js)");
     if (report.summary.failed > 0) return fail("tests_failed", `${report.summary.failed} of ${report.summary.total} tests failed`);
     if (report.summary.passed === 0) return fail("no_tests", "no test passed: every test was skipped");
@@ -1206,10 +1918,11 @@ export class Factory {
     return { passed: true, code: "ok", problem: "", report, manifest };
   }
 
-  async #capturePublication(run: Run, station: MStation): Promise<void> {
+  async #capturePublication(run: Run, station: MStation): Promise<ArtifactInfo[]> {
     const sessionId = station.sessionId!;
     const artifacts = this.#platform.artifacts(sessionId);
     const publication = await artifacts.waitForPublication({ timeoutMs: this.#options.config.publicationTimeoutMs });
+    this.#throwIfCancelled(run);
     if (publication.state === "failed") throw new StationError("publication_failed", publication.error ?? "The platform couldn't publish this turn's artifacts.");
     const list = await artifacts.list({ versions: "latest" });
     let added = 0;
@@ -1220,6 +1933,7 @@ export class Factory {
         const text = await this.#readArtifact(artifacts, station, info.path, info.version);
         content = text.includes("\u0000") ? undefined : text;
       }
+      this.#throwIfCancelled(run);
       this.#store.putArtifact({
         workOrderId: run.wo.id,
         stationId: station.id,
@@ -1238,6 +1952,7 @@ export class Factory {
       this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
       this.#emitItem(run.wo, { stationId: station.id, kind: "artifact", text: `Published ${added} file${added === 1 ? "" : "s"}`, level: "info" });
     }
+    return list;
   }
 
   /**
@@ -1264,10 +1979,10 @@ export class Factory {
 
   #newStation(kind: StationKind, task?: PlanTask): MStation {
     const role = ROLE_FOR_KIND[kind];
-    const title = { plan: "Plan", build: `Build · ${task?.title ?? ""}`, review: `Review · ${task?.title ?? ""}`, release: "Release" }[kind];
-    const detail = { plan: "Queued", build: "Queued", review: "Waits for the build", release: "Waits for every task" }[kind];
+    const title = { plan: "Plan", coordinate: "Coordinator", build: `Build · ${task?.title ?? ""}`, review: `Review · ${task?.title ?? ""}`, release: "Release" }[kind];
+    const detail = { plan: "Queued", coordinate: "Waits for the accepted plan", build: "Queued", review: "Waits for the build", release: "Waits for every task" }[kind];
     return {
-      id: task ? `${kind}:${task.id}` : kind,
+      id: task ? `${kind}:${task.id}` : kind === "coordinate" ? "coordinator" : kind,
       kind,
       title,
       ...(task ? { taskId: task.id } : {}),
@@ -1275,7 +1990,7 @@ export class Factory {
       detail,
       role,
       environment: FACTORY_ENVIRONMENTS[role],
-      placement: role === "planner" || role === "reviewer" ? "shared" : "sandbox",
+      placement: role === "planner" || role === "reviewer" || role === "coordinator" ? "shared" : "sandbox",
       agent: ROLE_AGENTS[role],
       model: this.#platform.models[role],
       round: 0,
@@ -1289,7 +2004,7 @@ export class Factory {
   }
 
   #throwIfCancelled(run: Run): void {
-    if (run.abort.signal.aborted) throw new CancelledError();
+    if (run.abort.signal.aborted || run.closed || this.#stopping) throw new CancelledError();
   }
 
   async #failStation(run: Run, station: MStation, error: unknown): Promise<void> {
@@ -1383,7 +2098,7 @@ export class Factory {
 
   /** The stored work order when it's still active and nothing runs it (it may have been cancelled or deleted meanwhile). */
   #resumable(id: string): MWorkOrder | undefined {
-    if (this.#stopping || this.#runs.has(id)) return undefined;
+    if (this.#stopping || this.isActive(id)) return undefined;
     const stored = this.#store.getWorkOrder(id);
     return stored && ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) ? (stored as MWorkOrder) : undefined;
   }
@@ -1449,7 +2164,7 @@ export class Factory {
   }
 
   #onItem(run: Run, station: MStation, item: ActivityItem): void {
-    if (this.#stopping) return;
+    if (this.#stopping || run.closed) return;
     this.#store.upsertActivity(item);
     this.#options.hub.publish({ type: "activity", item });
     if (station.status !== "working") return;
@@ -1476,6 +2191,7 @@ export function toSummary(wo: WorkOrder): WorkOrderSummary {
     id: wo.id,
     number: wo.number,
     title: wo.title,
+    mode: workOrderMode(wo),
     status: wo.status,
     createdAt: wo.createdAt,
     updatedAt: wo.updatedAt,

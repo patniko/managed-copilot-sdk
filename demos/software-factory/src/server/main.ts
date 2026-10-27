@@ -16,7 +16,12 @@ const factory = new Factory({
   store,
   hub,
   platform,
-  readiness: () => ({ ready: platform.status.features.runs, ...(platform.status.message ? { reason: platform.status.message } : {}) }),
+  readiness: (mode) => {
+    const status = platform.status;
+    const ready = status.features.runs && (mode !== "agent" || status.features.agentLed);
+    const reason = status.message ?? (mode === "agent" ? status.agentLedHint : undefined);
+    return { ready, ...(reason ? { reason } : {}) };
+  },
   account: () => {
     const account = platform.status.account;
     return account ? { login: account.login, ...(account.avatarUrl ? { avatarUrl: account.avatarUrl } : {}) } : undefined;

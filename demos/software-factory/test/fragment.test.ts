@@ -10,9 +10,10 @@ describe("AppHost fragment", () => {
 
   it("declares environments the protocol schema accepts", () => {
     const config = parseConfig({ environments: fragment.environments });
-    expect(Object.keys(config.environments).sort()).toEqual(["factory-builder", "factory-planner", "factory-release", "factory-reviewer"]);
+    expect(Object.keys(config.environments).sort()).toEqual(["factory-builder", "factory-coordinator", "factory-planner", "factory-release", "factory-reviewer"]);
     expect(config.environments["factory-planner"]).toMatchObject({ type: "shared", network: false });
     expect(config.environments["factory-builder"]).toMatchObject({ type: "isolated", size: "small" });
+    expect(config.environments["factory-coordinator"]).toMatchObject({ type: "orchestrator", workers: ["factory-builder", "factory-release"], maxWorkers: 6 });
   });
 
   it("matches the environment names the server uses", () => {
@@ -47,7 +48,7 @@ describe("AppHost fragment", () => {
       const agent = readFileSync(join(folder, "agents", `${ROLE_AGENTS[role as keyof typeof ROLE_AGENTS]}.agent.md`), "utf8");
       expect(agent).toMatch(new RegExp(`^---\\r?\\nname: ${ROLE_AGENTS[role as keyof typeof ROLE_AGENTS]}\\r?\\n`));
       expect(readdirSync(join(folder, "instructions")).some((file) => file.endsWith(".instructions.md"))).toBe(true);
-      for (const skill of readdirSync(join(folder, "skills"))) {
+      for (const skill of existsSync(join(folder, "skills")) ? readdirSync(join(folder, "skills")) : []) {
         expect(readFileSync(join(folder, "skills", skill, "SKILL.md"), "utf8")).toMatch(new RegExp(`^---\\r?\\nname: ${skill}\\r?\\n`));
       }
     }

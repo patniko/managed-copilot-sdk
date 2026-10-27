@@ -29,6 +29,7 @@ import { useStore } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
 import type { Tone } from "../lib/tone.js";
 import { ActivityStream } from "./ActivityStream.js";
+import { CoordinatorDecisions } from "./CoordinatorDecisions.js";
 import { NetworkChip, useEnvironment } from "./StationCard.js";
 import { Button, IconButton } from "./ui/Button.js";
 import { Chip, StatusIcon } from "./ui/Chip.js";
@@ -126,9 +127,10 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
 
   return (
     <section aria-label={`${station.title} station`} className={PANEL_CLASS}>
-      <PanelHeader station={station} />
+      <PanelHeader station={station} title={station.kind === "coordinate" ? "Coordinator decisions" : undefined} />
       <div ref={scroller} className={SCROLL_CLASS}>
         <div ref={content} className="space-y-6 p-4">
+          {station.kind === "coordinate" ? <CoordinatorDecisions workOrder={workOrder} /> : null}
           <Details workOrder={workOrder} station={station} />
           {station.kind === "review" ? <ReviewHistory station={station} /> : null}
           {station.acceptedWithFindings ? (
@@ -141,12 +143,13 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
               <span>{station.error.message}</span> <code className="inline-code">{station.error.code}</code>
             </Callout>
           ) : null}
-          <section aria-label="Activity">
-            <h3 className="text-sm font-semibold">Activity</h3>
+          {station.kind !== "coordinate" ? <section aria-label="Activity">
+            <h3 className="text-sm font-semibold">{station.worker ? "Worker reports" : "Activity"}</h3>
+            {station.worker ? <p className="mt-1 text-xs text-fg-muted">The factory observes this worker through the platform, without attaching a client that would take over its approvals.</p> : null}
             <div className="mt-2">
               <ActivityStream workOrder={workOrder} station={station} />
             </div>
-          </section>
+          </section> : null}
         </div>
       </div>
       {showJump ? (
@@ -168,7 +171,7 @@ type AttachState =
   | { readonly sessionId: string; readonly status: "pending" }
   | { readonly sessionId: string; readonly status: "done"; readonly result: AttachResponse; readonly failed: boolean };
 
-function PanelHeader({ station }: { readonly station: Station }) {
+function PanelHeader({ station, title }: { readonly station: Station; readonly title?: string }) {
   const meta = stationStatusMeta(station);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
@@ -204,7 +207,7 @@ function PanelHeader({ station }: { readonly station: Station }) {
         <StatusIcon meta={meta} className="mt-1" />
         <div className="min-w-0 flex-1">
           <h2 className="truncate text-base font-semibold" title={station.title}>
-            {station.title}
+            {title ?? station.title}
           </h2>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
             <span>{meta.label}</span>
@@ -218,6 +221,7 @@ function PanelHeader({ station }: { readonly station: Station }) {
         </div>
       </div>
       {station.detail && station.detail !== meta.label ? <p className="mt-2 text-fg-muted">{station.detail}</p> : null}
+      {station.kind === "coordinate" ? <p className="mt-1 text-xs text-fg-muted">{station.environment} · {station.model}</p> : null}
       {sessionId && attachAllowed ? (
         <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
           <Button
@@ -311,7 +315,7 @@ function Mono({ children, title }: { readonly children: ReactNode; readonly titl
 }
 
 function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readonly station: Station }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(station.kind !== "coordinate");
   const environment = useEnvironment(station.environment);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
@@ -366,10 +370,11 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
           <Row label="Environment">
             <span className="flex min-w-0 flex-wrap items-center gap-1.5">
               <Mono>{station.environment || "—"}</Mono>
-              {environment ? <Chip>{environment.type === "shared" ? "Shared" : "Isolated"}</Chip> : null}
+              {environment ? <Chip>{environment.type === "orchestrator" ? "Orchestrator" : environment.type === "shared" ? "Shared" : "Isolated"}</Chip> : null}
             </span>
           </Row>
           <Row label="Placement">{station.placement === "sandbox" ? "Fresh isolated sandbox" : "Shared environment (no sandbox)"}</Row>
+          {station.worker ? <Row label="Worker"><span className="font-mono text-xs">{station.worker.name}</span> <Chip tone="success">created by coordinator</Chip>{station.round > station.worker.createdRound ? <Chip tone="accent">reused for round {station.round}</Chip> : null}</Row> : null}
           <Row label="Agent">
             <span>
               @{station.agent} <span className="text-fg-muted">· {station.role}</span>

@@ -13,7 +13,7 @@ export interface NetworkView {
   readonly allowedDomains: readonly string[];
 }
 
-export type StationRole = "planner" | "builder" | "reviewer" | "release";
+export type StationRole = "planner" | "builder" | "reviewer" | "release" | "coordinator";
 
 export interface EnvironmentView {
   readonly role: StationRole;
@@ -52,11 +52,15 @@ export interface PlatformStatus {
   /** What this deployment lets the factory do. */
   readonly features: {
     readonly runs: boolean;
+    /** Agent-led work orders: the `factory-coordinator` orchestrator environment and the `orchestrator` capability. */
+    readonly agentLed: boolean;
     readonly isolated: boolean;
     readonly artifacts: boolean;
     readonly files: boolean;
     readonly attach: boolean;
   };
+  /** Why agent-led work orders can't run here, when `features.agentLed` is false while classic ones can. */
+  readonly agentLedHint?: string;
   readonly checkedAt: string;
 }
 
@@ -64,7 +68,34 @@ export interface PlatformStatus {
 
 export type WorkOrderStatus = "queued" | "planning" | "building" | "releasing" | "completed" | "failed" | "cancelled";
 
-export type StationKind = "plan" | "build" | "review" | "release";
+/**
+ * - `agent`: agent-led. A coordinator agent in an orchestrator environment decides which sandboxes to create (a builder
+ *   per task, reused for review fixes, then a release worker); the factory still validates the plan, checks builds,
+ *   reviews them on a second model, and accepts the release.
+ * - `classic`: the factory app runs the pipeline itself, one session per station.
+ */
+export type WorkOrderMode = "agent" | "classic";
+
+export type StationKind = "plan" | "coordinate" | "build" | "review" | "release";
+
+/** A worker's state on the platform (`managed.workers(coordinator)`). */
+export type WorkerState = "starting" | "working" | "idle" | "failed" | "stopped";
+
+/** The worker the coordinator created for a build or release station (agent-led work orders). */
+export interface WorkerView {
+  /** The worker's own session ID. */
+  readonly id: string;
+  /** The name the coordinator gave it, unique within the coordinator session. */
+  readonly name: string;
+  readonly state: WorkerState;
+  /** The build round it was created for; later rounds in the same sandbox reuse it. */
+  readonly createdRound: number;
+  /** Messages it received from the coordinator, its first task included. */
+  readonly messages: number;
+  /** Latest runtime turn, including turns sent from an attached CLI rather than by the coordinator. */
+  readonly turnId?: string;
+  readonly error?: string;
+}
 
 export type StationStatus =
   /** Not started; upstream work is not finished. */
@@ -133,7 +164,7 @@ export interface ReviewRecord {
 }
 
 export interface Station {
-  /** `plan`, `build:<taskId>`, `review:<taskId>`, or `release`. */
+  /** `plan`, `coordinator`, `build:<taskId>`, `review:<taskId>`, or `release`. */
   readonly id: string;
   readonly kind: StationKind;
   readonly title: string;
@@ -179,6 +210,27 @@ export interface Station {
   readonly sessionState?: string;
   /** Set once the platform answered `not_found` for `sessionId`, so reconciliation stops looking it up. */
   readonly sessionGone?: boolean;
+  /** Agent-led build and release stations: the worker the coordinator created (its session is `sessionId`). */
+  readonly worker?: WorkerView;
+  /** Agent-led checkpoint: factory checks that failed in the current round (bounded like classic nudges). */
+  readonly failedChecks?: number;
+  /** Agent-led: a check is idempotent for a worker's message number; new messages require a fresh report. */
+  readonly workerCheck?: {
+    readonly messages: number;
+    readonly turnId?: string;
+    readonly passed: boolean;
+    readonly code: string;
+    readonly problem: string;
+  };
+  /** Agent-led: the worker message whose passing output received the latest review. */
+  readonly reviewedMessages?: number;
+  readonly reviewedTurnId?: string;
+  /** Agent-led checkpoint: the `test-report.json` version published before the latest work was sent; a check needs a newer one. */
+  readonly staleReportVersion?: number;
+  /** Agent-led checkpoint: the review requested changes, so the next work sent to this builder starts the next round. */
+  readonly awaitingFix?: boolean;
+  /** Agent-led release: pins its inputs to the accepted builders and their checked message numbers. */
+  readonly inputRevision?: string;
   readonly error?: FactoryError;
 }
 
@@ -225,6 +277,8 @@ export interface WorkOrderSummary {
   /** Sequential number, displayed as WO-0007. */
   readonly number: number;
   readonly title: string;
+  /** Absent on work orders recorded before agent-led mode existed: those are classic. */
+  readonly mode?: WorkOrderMode;
   readonly status: WorkOrderStatus;
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -243,6 +297,8 @@ export interface WorkOrder extends WorkOrderSummary {
   readonly stations: readonly Station[];
   readonly release?: ReleaseSummary;
   readonly owner?: { readonly login: string; readonly avatarUrl?: string };
+  /** Agent-led: sandboxes (workers) the coordinator created, replacements included. */
+  readonly workersStarted?: number;
 }
 
 export interface WorkOrderTemplate {
@@ -263,6 +319,8 @@ export interface CreateWorkOrderRequest {
   readonly templateId?: string;
   /** 1-3; defaults to 2. */
   readonly maxReviewRounds?: number;
+  /** Defaults to `agent`. */
+  readonly mode?: WorkOrderMode;
 }
 
 // ─── Activity ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -280,7 +338,33 @@ export type ActivityKind =
   | "skill"
   | "review"
   | "artifact"
+  /** Agent-led: something the coordinator decided, e.g. "Created builder-csv2json in factory-builder". */
+  | "decision"
   | "error";
+
+export type DecisionAction =
+  | "create"
+  | "prepare"
+  | "message"
+  | "wait"
+  | "check"
+  | "review"
+  | "copy"
+  | "read"
+  | "list"
+  | "stop"
+  | "status"
+  | "declined";
+
+/** A coordinator decision (`ActivityItem.kind === "decision"`); `text` says it in a sentence with **names** in bold. */
+export interface DecisionView {
+  readonly action: DecisionAction;
+  readonly status: "running" | "done" | "failed";
+  /** Workers it concerns, by name. */
+  readonly workers?: readonly string[];
+  /** `new` when it created a sandbox, `reused` when it sent work to one that already existed. */
+  readonly tag?: "new" | "reused";
+}
 
 export interface ToolActivity {
   readonly callId: string;
@@ -306,6 +390,7 @@ export interface ActivityItem {
   readonly tool?: ToolActivity;
   readonly tests?: TestSummary;
   readonly review?: { readonly round: number; readonly verdict: ReviewVerdict; readonly findings: number };
+  readonly decision?: DecisionView;
   /** Set when a sub-agent produced the item. */
   readonly subagent?: string;
   readonly level?: "info" | "success" | "warning" | "error";
@@ -425,6 +510,11 @@ export type ServerEvent =
 
 export const ACTIVE_WORK_ORDER_STATUSES: readonly WorkOrderStatus[] = ["queued", "planning", "building", "releasing"];
 export const TERMINAL_STATION_STATUSES: readonly StationStatus[] = ["done", "failed", "cancelled", "skipped"];
+
+/** A work order's mode; records from before agent-led mode existed are classic. */
+export function workOrderMode(workOrder: Pick<WorkOrderSummary, "mode">): WorkOrderMode {
+  return workOrder.mode ?? "classic";
+}
 
 export function formatWorkOrderNumber(n: number): string {
   return `WO-${String(n).padStart(4, "0")}`;

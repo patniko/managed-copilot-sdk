@@ -12,10 +12,13 @@ import {
   type ArtifactInfo,
   type EnvironmentInfo,
   type FileEntry,
+  type PlatformEvent,
   type PublicationResult,
   type SessionInfo,
+  type WorkerEventData,
+  type WorkerInfo,
 } from "@managed-copilot/sdk";
-import { FACTORY_ENVIRONMENTS, ROLES } from "../shared/environments.js";
+import { CLASSIC_ROLES, FACTORY_ENVIRONMENTS, ROLES } from "../shared/environments.js";
 import type { EnvironmentView, PlatformStatus, StationRole } from "../shared/types.js";
 import type { FactoryConfig } from "./config.js";
 import { log } from "./log.js";
@@ -33,6 +36,7 @@ export interface StationSession {
 
 export interface StationFiles {
   write(remotePath: string, data: string | Uint8Array): Promise<FileEntry>;
+  read(remotePath: string): Promise<string>;
 }
 
 export interface StationArtifacts {
@@ -40,6 +44,17 @@ export interface StationArtifacts {
   list(options?: { versions?: "latest" | "all" }): Promise<ArtifactInfo[]>;
   read(path: string, options?: { version?: number }): Promise<string>;
 }
+
+/** An agent-led coordinator's workers (`managed.workers(coordinator)`). The factory only reads them: it never attaches. */
+export interface StationWorkers {
+  /** Every worker the coordinator started, oldest first, stopped ones included. */
+  list(): Promise<WorkerInfo[]>;
+  /** One worker, by its ID or name. */
+  get(worker: string): Promise<WorkerInfo>;
+}
+
+/** A `worker.*` platform event: the coordinator's session ID and the worker's details. */
+export type WorkerEventListener = (coordinatorId: string, data: WorkerEventData) => void;
 
 /** What the pipeline needs from Managed Copilot. Implemented by `Platform`; faked in unit tests. */
 export interface FactoryPlatform {
@@ -53,11 +68,19 @@ export interface FactoryPlatform {
   deleteSession(sessionId: string): Promise<void>;
   files(sessionId: string): StationFiles;
   artifacts(sessionId: string): StationArtifacts;
+  workers(coordinatorId: string): StationWorkers;
+  /** Subscribes to `worker.*` platform events (hints to look again; the worker list stays the source of truth). */
+  onWorkerEvent?(listener: WorkerEventListener): () => void;
   environment(role: StationRole): EnvironmentInfo | undefined;
 }
 
 /** Platform capabilities the factory needs before it accepts work orders. */
 export const REQUIRED_CAPABILITIES = ["shared", "isolated", "files", "artifacts"] as const;
+
+/** The capability agent-led work orders need on top: orchestrator environments (spec section 17). */
+export const AGENT_LED_CAPABILITY = "orchestrator";
+
+const WORKER_EVENTS = ["worker.started", "worker.idle", "worker.failed", "worker.stopped"] as const;
 
 /** Timings of the connection loop. Every step has a deadline, so a request held open in front of the gateway can't stall it. */
 export interface PlatformTimings {
@@ -213,6 +236,7 @@ export class Platform implements FactoryPlatform {
   readonly #options: PlatformOptions;
   readonly #timings: PlatformTimings;
   readonly #listeners = new Set<StatusListener>();
+  readonly #workerListeners = new Set<WorkerEventListener>();
   readonly #clients = new Map<StationRole, Promise<CopilotClient>>();
   #managed: ManagedCopilot | undefined;
   #models: Record<StationRole, string>;
@@ -256,6 +280,11 @@ export class Platform implements FactoryPlatform {
   onStatus(listener: StatusListener): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  onWorkerEvent(listener: WorkerEventListener): () => void {
+    this.#workerListeners.add(listener);
+    return () => this.#workerListeners.delete(listener);
   }
 
   start(): void {
@@ -356,6 +385,28 @@ export class Platform implements FactoryPlatform {
   }
 
   /**
+   * Forwards `worker.*` platform events to the factory. Subscribed once per connection: closing a connection drops its
+   * subscriptions, and the next connection subscribes again.
+   */
+  #subscribeWorkerEvents(managed: ManagedCopilot): void {
+    const forward = (event: PlatformEvent): void => {
+      if (this.#managed !== managed || !event.sessionId) return;
+      const { workerId, name, environment, state, error } = event.data;
+      if (typeof workerId !== "string" || typeof name !== "string" || typeof environment !== "string") return;
+      if (state !== "starting" && state !== "working" && state !== "idle" && state !== "failed" && state !== "stopped") return;
+      const data: WorkerEventData = { workerId, name, environment, state, ...(typeof error === "string" ? { error } : {}) };
+      for (const listener of this.#workerListeners) {
+        try {
+          listener(event.sessionId, data);
+        } catch (error) {
+          log.debug("A worker event listener failed", { error: errorText(error) });
+        }
+      }
+    };
+    for (const type of WORKER_EVENTS) managed.on(type, forward);
+  }
+
+  /**
    * Pings every client's connection. Proxies in front of the gateway close WebSockets that carry nothing for a while
    * (the Azure Container Apps ingress after 240 s), which would disconnect a station's session while it waits.
    */
@@ -422,7 +473,9 @@ export class Platform implements FactoryPlatform {
   /** The signed-in user's sessions in the factory's environments (owner-scoped, newest first, capped per environment). */
   async listSessions(): Promise<SessionInfo[]> {
     const managed = this.#managedOrThrow();
-    const environments = [...new Set(ROLES.map((role) => FACTORY_ENVIRONMENTS[role]))];
+    // Only declared ones: a deployment without the coordinator's environment still lists the classic stations.
+    const declared = new Set(managed.info.environments.map((env) => env.name));
+    const environments = [...new Set(ROLES.map((role) => FACTORY_ENVIRONMENTS[role]))].filter((name) => declared.has(name));
     const lists = await Promise.all(environments.map((environment) => managed.sessions.list({ environment, limit: 1000 })));
     return lists.flat();
   }
@@ -433,6 +486,15 @@ export class Platform implements FactoryPlatform {
 
   files(sessionId: string): StationFiles {
     return this.#managedOrThrow().files(sessionId);
+  }
+
+  workers(coordinatorId: string): StationWorkers {
+    const workers = this.#managedOrThrow().workers(coordinatorId);
+    const ms = this.#timings.healthTimeoutMs;
+    return {
+      list: () => unanswered(withDeadline(workers.list(), ms, "Listing the coordinator's workers")),
+      get: (worker) => unanswered(withDeadline(workers.get(worker), ms, "Reading a worker")),
+    };
   }
 
   artifacts(sessionId: string): StationArtifacts {
@@ -471,6 +533,7 @@ export class Platform implements FactoryPlatform {
       return;
     }
     this.#managed = managed;
+    this.#subscribeWorkerEvents(managed);
     await this.#refreshModels();
     if (this.#stopped || this.#managed !== managed) return;
     const reconnected = this.#connectedOnce;
@@ -602,14 +665,23 @@ export class Platform implements FactoryPlatform {
   #connectedStatus(): PlatformStatus {
     const managed = this.#managedOrThrow();
     const capabilities = managed.info.capabilities;
-    const missingEnvironments = ROLES.map((role) => FACTORY_ENVIRONMENTS[role]).filter(
-      (name) => !managed.info.environments.some((env) => env.name === name),
-    );
+    const declared = (role: StationRole) => managed.info.environments.find((env) => env.name === FACTORY_ENVIRONMENTS[role]);
+    const missingEnvironments = ROLES.filter((role) => !declared(role)).map((role) => FACTORY_ENVIRONMENTS[role]);
+    const missingClassic = CLASSIC_ROLES.filter((role) => !declared(role));
     const missingCapabilities = REQUIRED_CAPABILITIES.filter((capability) => !capabilities.includes(capability));
-    const ready = missingEnvironments.length === 0 && missingCapabilities.length === 0;
+    const ready = missingClassic.length === 0 && missingCapabilities.length === 0;
+    const coordinator = declared("coordinator");
+    let agentLedHint: string | undefined;
+    if (!coordinator) {
+      agentLedHint = `This deployment doesn't declare the ${FACTORY_ENVIRONMENTS.coordinator} environment. Add softwareFactory() from demos/software-factory/apphost.mts to your AppHost again and restart it.`;
+    } else if (coordinator.type !== "orchestrator") {
+      agentLedHint = `${FACTORY_ENVIRONMENTS.coordinator} is a ${coordinator.type} environment here; agent-led work orders need it to be an orchestrator.`;
+    } else if (!capabilities.includes(AGENT_LED_CAPABILITY)) {
+      agentLedHint = "This deployment can't run orchestrator environments right now: they need sandboxes and the actions ledger.";
+    }
     let message: string | undefined;
     let hint: string | undefined;
-    if (missingEnvironments.length > 0) {
+    if (missingClassic.length > 0) {
       message = "This deployment doesn't declare the factory's environments.";
       hint = "Add `softwareFactory()` from `demos/software-factory/apphost.mts` to your AppHost and restart `aspire run`.";
     } else if (missingCapabilities.length > 0) {
@@ -638,11 +710,13 @@ export class Platform implements FactoryPlatform {
       missingEnvironments,
       features: {
         runs: ready,
+        agentLed: ready && agentLedHint === undefined,
         isolated: capabilities.includes("isolated"),
         artifacts: capabilities.includes("artifacts"),
         files: capabilities.includes("files"),
         attach: capabilities.includes("attach.cli"),
       },
+      ...(ready && agentLedHint ? { agentLedHint } : {}),
       checkedAt: new Date().toISOString(),
     };
   }
@@ -652,7 +726,7 @@ export class Platform implements FactoryPlatform {
       state,
       environments: [],
       missingEnvironments: [],
-      features: { runs: false, isolated: false, artifacts: false, files: false, attach: false },
+      features: { runs: false, agentLed: false, isolated: false, artifacts: false, files: false, attach: false },
       checkedAt: new Date().toISOString(),
       ...extra,
     };
