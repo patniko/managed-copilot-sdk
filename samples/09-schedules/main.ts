@@ -49,7 +49,14 @@ try {
 } finally {
   // The run started its own session. If no poll saw it yet, look it up once, then delete it and the schedule.
   let sessionId = run?.sessionId;
-  if (!sessionId && run) sessionId = (await managed.schedules.runs(schedule.id).catch(() => [])).find((r) => r.id === run?.id)?.sessionId;
+  if (!sessionId && run) {
+    const runId = run.id;
+    const runs = await managed.schedules.runs(schedule.id).catch((error: Error) => {
+      couldNotDelete(`the session of run ${runId} (its lookup failed)`)(error);
+      return [];
+    });
+    sessionId = runs.find((candidate) => candidate.id === runId)?.sessionId;
+  }
   if (sessionId) await managed.sessions.delete(sessionId).catch(couldNotDelete(`session ${sessionId}`));
   await managed.schedules.delete(schedule.id).catch(couldNotDelete(`schedule ${schedule.id}`));
   await managed.close();
