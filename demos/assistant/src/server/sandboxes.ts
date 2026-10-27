@@ -35,6 +35,8 @@ const MAX_DOWNLOAD_BYTES = 32 * 1024 * 1024;
 const BUSY_POLL_MS = 10_000;
 /** How long to wait for a finished sandbox's outputs to publish (the platform's own wait is 30 seconds). */
 const PUBLICATION_WAIT_MS = 45_000;
+/** Finishes remembered per sandbox until their runs are known. */
+const MAX_FINISHES = 20;
 const DEBOUNCE_MS = 250;
 const RETRY_MS = 15_000;
 
@@ -99,6 +101,8 @@ export class Sandboxes {
   readonly #awaited = new Map<string, string>();
   /** Workers whose publication is being awaited right now. */
   readonly #publishing = new Set<string>();
+  /** Recent finishes seen as events, per worker: applied again once their cards' runs are known. */
+  readonly #finishes = new Map<string, { readonly at: string; readonly state: Settled }[]>();
   #refreshing: Promise<void> | undefined;
   #again = false;
   #timer: NodeJS.Timeout | undefined;
@@ -153,15 +157,27 @@ export class Sandboxes {
     if (!sessionId || event.sessionId !== sessionId) return;
     const { workerId, state } = event.data as { workerId?: unknown; state?: unknown };
     if (typeof workerId !== "string") return;
-    if (typeof state === "string" && SETTLED.has(state)) this.#deps.store.finishRuns(workerId, iso(event.createdAt), state as Settled);
+    if (typeof state === "string" && SETTLED.has(state)) {
+      const finish = { at: iso(event.createdAt), state: state as Settled };
+      this.#finishes.set(workerId, [...(this.#finishes.get(workerId) ?? []), finish].slice(-MAX_FINISHES));
+      this.#registerRuns(sessionId, this.#workers);
+      this.#deps.store.finishRuns(workerId, finish.at, finish.state);
+    }
     if (state === "idle" || state === "failed") this.#awaitPublication(workerId);
     this.#dirty.add(workerId);
     this.schedule();
   }
 
   #onPublished(event: PlatformEvent): void {
-    if (!event.sessionId || !this.#workers.some((worker) => worker.id === event.sessionId)) return;
+    if (!event.sessionId) return;
+    // Possibly a sandbox not listed yet: marking it costs nothing if it isn't one of this conversation's.
     this.#dirty.add(event.sessionId);
+    if (this.#workers.length === 0 || this.#workers.some((worker) => worker.id === event.sessionId)) this.schedule();
+  }
+
+  /** A sandbox tool finished (for example a wait, which returns once outputs published): read every sandbox again. */
+  changed(): void {
+    for (const worker of this.#workers) this.#dirty.add(worker.id);
     this.schedule();
   }
 
@@ -302,12 +318,13 @@ export class Sandboxes {
       this.#dirty.add(worker.id);
       return;
     }
-    await this.#record(managed, coordinatorId, worker.id, artifacts);
-    this.#inspected.set(worker.id, worker.updatedAt);
+    // Images that couldn't be copied are tried again on the next refresh.
+    if (await this.#record(managed, coordinatorId, worker.id, artifacts)) this.#inspected.set(worker.id, worker.updatedAt);
+    else this.#dirty.add(worker.id);
   }
 
-  /** Records a sandbox's published outputs and copies the images not copied yet. */
-  async #record(managed: ManagedCopilot, coordinatorId: string, workerId: string, artifacts: readonly ArtifactInfo[]): Promise<void> {
+  /** Records a sandbox's published outputs and copies the images not copied yet. False if a copy failed. */
+  async #record(managed: ManagedCopilot, coordinatorId: string, workerId: string, artifacts: readonly ArtifactInfo[]): Promise<boolean> {
     const published = artifacts.filter((artifact) => artifact.state === "published");
     this.#deps.store.recordOutputs(
       published.map((artifact) => ({
@@ -321,23 +338,33 @@ export class Sandboxes {
         publishedAt: artifact.publishedAt ? iso(artifact.publishedAt) : undefined,
       })),
     );
+    let copied = true;
     for (const artifact of published) {
       if (!imageType(artifact.path, artifact.contentType) || artifact.size > MAX_IMAGE_BYTES || this.#deps.store.output(artifact.id)?.cached) continue;
       try {
         this.#deps.store.cacheOutput(artifact.id, await managed.artifacts(workerId).readBytes(artifact.path, { version: artifact.version }));
       } catch (error) {
+        copied = false;
         this.#deps.log.debug("Couldn't copy a sandbox image", { workerId, path: artifact.path, error: errorMessage(error) });
       }
+    }
+    return copied;
+  }
+
+  /** Starts timing the chat's cards that aren't timed yet (a card's work starts when its tool call returns). */
+  #registerRuns(coordinatorId: string, workers: readonly WorkerInfo[]): void {
+    for (const card of this.#deps.cards()) {
+      if (card.status !== "succeeded") continue;
+      this.#deps.store.startRun({ cardId: card.id, coordinatorId, workerName: card.worker, workerId: card.workerId ?? this.#workerFor(workers, card)?.id, startedAt: iso(card.endedAt ?? card.at) });
     }
   }
 
   /** Times each card's work: from its tool call until its sandbox settled (events end it on time; states catch up). */
   #track(coordinatorId: string, workers: readonly WorkerInfo[]): void {
     const store = this.#deps.store;
-    const cards = this.#deps.cards().filter((card) => card.status === "succeeded");
-    for (const card of cards) {
-      store.startRun({ cardId: card.id, coordinatorId, workerName: card.worker, workerId: card.workerId ?? this.#workerFor(workers, card)?.id, startedAt: iso(card.endedAt ?? card.at) });
-    }
+    this.#registerRuns(coordinatorId, workers);
+    // Finishes seen before their cards' runs were known (or before a run learned its sandbox) end them in order.
+    for (const [workerId, finishes] of this.#finishes) for (const finish of finishes) store.finishRuns(workerId, finish.at, finish.state);
     // A follow-up reaches a sandbox only once it finished its earlier work, so an earlier card's work ended by then.
     const runs = store.runs(coordinatorId);
     const byWorker = new Map<string, typeof runs>();
@@ -430,6 +457,7 @@ export class Sandboxes {
     this.#workers = [];
     this.#inspected.clear();
     this.#awaited.clear();
+    this.#finishes.clear();
     this.#dirty.clear();
     this.#sandboxStates.clear();
     this.#set({ ...this.#currentBase(), workers: [], runs: {} });

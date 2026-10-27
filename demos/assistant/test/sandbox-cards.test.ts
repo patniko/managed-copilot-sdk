@@ -80,12 +80,12 @@ describe("sandboxCardStates", () => {
     const first = card("c1", 0);
     const followUp = card("c2", 40, { action: "message", text: "Split it" });
     const outputs = [output("a1", "meetings.svg", 25), output("a2", "meetings-by-type.svg", 60), output("a3", "notes.svg")];
-    const stateOf = sandboxCardStates([first, followUp], view([sandbox({ messages: 2, outputs })]));
+    const stateOf = sandboxCardStates([first, followUp], view([sandbox({ messages: 2, outputs, updatedAt: at(62) })]));
     expect(stateOf(first)).toMatchObject({ latest: false, phase: "done" });
     expect(stateOf(first).outputs.map((entry) => entry.path)).toEqual(["meetings.svg"]);
     // The latest card also gets outputs without a publication time.
     expect(stateOf(followUp).outputs.map((entry) => entry.path)).toEqual(["meetings-by-type.svg", "notes.svg"]);
-    expect(stateOf(followUp)).toMatchObject({ latest: true, phase: "done", finishedAt: at(30) });
+    expect(stateOf(followUp)).toMatchObject({ latest: true, phase: "done", finishedAt: at(62) });
   });
 
   it("reports a failed or stopped sandbox on its latest card", () => {
@@ -93,6 +93,28 @@ describe("sandboxCardStates", () => {
     expect(sandboxCardStates([start], view([sandbox({ state: "failed", error: "Python crashed" })]))(start)).toMatchObject({ phase: "failed", worker: { error: "Python crashed" } });
     expect(sandboxCardStates([start], view([sandbox({ state: "stopped" })]))(start)).toMatchObject({ phase: "stopped" });
     expect(formatElapsed(3_723_000)).toBe("1:02:03");
+  });
+
+  it("doesn't take a sandbox's earlier state for a new card's work", () => {
+    const first = card("c1", 0, { workerId: "w1" });
+    const followUp = card("c2", 40, { action: "message", workerId: "w1", endedAt: at(41) });
+    // The follow-up just went out; the last listing still shows the sandbox idle after its first task.
+    const stale = sandboxCardStates([first, followUp], view([sandbox({ state: "idle", updatedAt: at(30) })], { c1: { workerId: "w1", startedAt: at(1), finishedAt: at(30), outcome: "idle" } }));
+    expect(stale(followUp)).toMatchObject({ phase: "working", finishedAt: undefined });
+    expect(stale(first)).toMatchObject({ phase: "done", finishedAt: at(30) });
+    // Started, but not listed yet.
+    const fresh = card("c3", 50);
+    expect(sandboxCardStates([fresh], view([]))(fresh)).toMatchObject({ phase: "starting" });
+    // Listed since (it has a run), and its sandbox is gone: no progress shown.
+    expect(sandboxCardStates([fresh], view([], { c3: { startedAt: at(51) } }))(fresh).phase).toBeUndefined();
+  });
+
+  it("splits a sandbox's outputs between consecutive cards without overlap", () => {
+    const first = card("c1", 0);
+    const followUp = card("c2", 40, { action: "message", endedAt: at(41) });
+    const stateOf = sandboxCardStates([first, followUp], view([sandbox({ messages: 2, outputs: [output("a1", "early.svg", 38), output("a2", "late.svg", 60)] })]));
+    expect(stateOf(first).outputs.map((entry) => entry.path)).toEqual(["early.svg"]);
+    expect(stateOf(followUp).outputs.map((entry) => entry.path)).toEqual(["late.svg"]);
   });
 });
 

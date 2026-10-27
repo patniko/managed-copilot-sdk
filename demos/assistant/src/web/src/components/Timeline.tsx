@@ -53,15 +53,12 @@ export function Timeline(props: TimelineProps) {
   const images = useMemo(() => replyImages(items, stateOf), [items, stateOf]);
   const lastItem = items[items.length - 1];
   const streamingText = lastItem?.kind === "assistant" ? lastItem.text.length : 0;
-  // While a sandbox of this turn works, its card shows the progress (the assistant is only waiting for it).
+  // While a sandbox works, its card shows the progress: the assistant is only waiting for it. Right after a new message
+  // (for example a question asked meanwhile), the assistant is answering, so the dots show.
   const sandboxWorking = useMemo(() => {
-    for (let index = items.length - 1; index >= 0; index--) {
-      const item = items[index]!;
-      if (item.kind === "user" || item.kind === "trigger") return false;
-      if (item.kind === "worker" && ["calling", "starting", "working"].includes(stateOf(item).phase ?? "")) return true;
-    }
-    return false;
-  }, [items, stateOf]);
+    if (lastItem?.kind === "user" || lastItem?.kind === "trigger") return false;
+    return items.some((item) => item.kind === "worker" && ["calling", "starting", "working"].includes(stateOf(item).phase ?? ""));
+  }, [items, lastItem, stateOf]);
   const showTyping = busy && !(lastItem?.kind === "assistant" && lastItem.streaming) && !(lastItem?.kind === "approval" && lastItem.status === "pending") && !sandboxWorking;
   const isEmpty = items.length === 0 && pending.length === 0;
 

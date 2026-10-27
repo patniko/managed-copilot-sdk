@@ -266,7 +266,7 @@ interface FakeOptions {
 function sandboxes(options: FakeOptions = {}) {
   const store = new Store(":memory:");
   const listeners = new Map<string, Set<(event: PlatformEvent) => void>>();
-  const state = { workers: options.workers ?? [], artifacts: options.artifacts ?? {}, reads: 0, lists: 0, waits: 0 };
+  const state = { workers: options.workers ?? [], artifacts: options.artifacts ?? {}, reads: 0, lists: 0, waits: 0, failReads: 0 };
   const managed = {
     info: { environments: options.environments ?? ENVIRONMENTS, capabilities: options.capabilities ?? ["orchestrator"] } as unknown as DeploymentInfo,
     on: (type: string, handler: (event: PlatformEvent) => void) => {
@@ -295,6 +295,10 @@ function sandboxes(options: FakeOptions = {}) {
       },
       readBytes: async (path: string) => {
         state.reads++;
+        if (state.failReads > 0) {
+          state.failReads--;
+          throw new Error("connection reset");
+        }
         if (!state.workers.some((candidate) => candidate.id === id && candidate.state !== "stopped")) throw new ManagedCopilotError("not_found", "gone");
         return new TextEncoder().encode(`<svg><!-- ${path} --></svg>`);
       },
@@ -426,6 +430,48 @@ describe("Sandboxes", () => {
     reconnect();
     await subject.refresh();
     expect(subject.view.workers[0]!.outputs.map((output) => output.path)).toEqual(["chart.svg"]);
+    subject.stop();
+  });
+
+  it("keeps a finish that arrived before its card's run was known, even after the sandbox is stopped", async () => {
+    const cards: WorkerItem[] = [];
+    const research = worker({ id: "w1", name: "research", environment: "assistant-web", state: "working", updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [research], cards });
+    // The card isn't in the chat yet (the conversation wasn't loaded) when the sandbox finishes.
+    emit("worker.idle", { workerId: "w1", name: "research", state: "idle" }, at(25));
+    emit("worker.stopped", { workerId: "w1", name: "research", state: "stopped" }, at(600));
+    state.workers = [{ ...research, state: "stopped", updatedAt: at(600) }];
+    cards.push(card({ id: "c1", workerId: "w1", worker: "research", environment: "assistant-web" }));
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("copies an image again after a failed copy, though the sandbox didn't change", async () => {
+    const { subject, state, store } = sandboxes({ workers: [worker({ id: "w1", name: "stats" })], artifacts: { w1: [artifact({ id: "a1", path: "chart.svg" })] } });
+    state.failReads = Number.POSITIVE_INFINITY;
+    await subject.refresh();
+    // Its publication wait settles (and fails to copy too); the next refresh fails again.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await subject.refresh();
+    expect(store.output("a1")?.cached).toBe(false);
+    state.failReads = 0;
+    await subject.refresh();
+    expect(store.output("a1")?.cached).toBe(true);
+    subject.stop();
+  });
+
+  it("reads every sandbox again when a sandbox tool finishes", async () => {
+    const { subject, state } = sandboxes({ workers: [worker({ id: "w1", name: "stats" }), worker({ id: "w2", name: "research", environment: "assistant-web" })] });
+    await subject.refresh();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await subject.refresh();
+    const lists = state.lists;
+    await subject.refresh();
+    expect(state.lists).toBe(lists);
+    subject.changed();
+    await subject.refresh();
+    expect(state.lists).toBe(lists + 2);
     subject.stop();
   });
 

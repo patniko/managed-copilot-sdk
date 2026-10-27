@@ -424,7 +424,7 @@ export class Assistant {
           this.#schedulesTimer = setTimeout(() => void this.schedules.refresh(), 300);
           break;
         case "workers-changed":
-          this.sandboxes.schedule();
+          this.sandboxes.changed();
           break;
         case "proactive":
           this.#broadcast({ type: "notify", title: "Your assistant", body: plainText(change.text).slice(0, 180), itemId: change.itemId });

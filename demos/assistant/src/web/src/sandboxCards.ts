@@ -66,8 +66,10 @@ export function sandboxCardStates(items: readonly TimelineItem[], sandboxes: San
     const index = siblings.findIndex((candidate) => candidate.id === card.id);
     const next = index >= 0 ? siblings[index + 1] : undefined;
     const latest = card.status === "succeeded" && index >= 0 && next === undefined;
-    const from = time(startedAt) - SLACK_MS;
-    const until = next ? time(next.endedAt ?? next.at) : Number.POSITIVE_INFINITY;
+    // Consecutive cards of a sandbox split its outputs at the next card's start; only the first allows for clock slack.
+    const startOf = (entry: WorkerItem) => sandboxes?.runs[entry.id]?.startedAt ?? entry.endedAt ?? entry.at;
+    const from = index > 0 ? time(startedAt) : time(startedAt) - SLACK_MS;
+    const until = next ? time(startOf(next)) : Number.POSITIVE_INFINITY;
     const outputs = card.status !== "succeeded" ? [] : (worker?.outputs ?? []).filter((output) => (output.publishedAt ? time(output.publishedAt) >= from && time(output.publishedAt) < until : latest));
 
     let phase: CardPhase | undefined;
@@ -76,11 +78,19 @@ export function sandboxCardStates(items: readonly TimelineItem[], sandboxes: San
     else if (card.status === "failed") phase = "call-failed";
     else if (run?.finishedAt && run.outcome) phase = run.outcome === "idle" ? "done" : run.outcome;
     else if (worker && latest) {
-      phase = worker.state === "idle" ? "done" : worker.state;
-      if (phase !== "starting" && phase !== "working") finishedAt ??= worker.updatedAt;
+      // A state from before this card's work (the sandboxes haven't been listed since) says nothing about it yet.
+      const stale = worker.state !== "starting" && worker.state !== "working" && time(worker.updatedAt) < time(startedAt) - SLACK_MS / 5;
+      if (stale) phase = card.action === "start" ? "starting" : "working";
+      else {
+        phase = worker.state === "idle" ? "done" : worker.state;
+        if (phase !== "starting" && phase !== "working") finishedAt ??= worker.updatedAt;
+      }
     } else if (worker) {
       // An earlier card of a sandbox that has moved on: its work ended before the next card's.
       phase = worker.state === "stopped" && !next ? "stopped" : "done";
+    } else if (sandboxes?.enabled && card.status === "succeeded" && !run) {
+      // Just started or messaged: the sandboxes haven't been listed since (once they are, every card has a run).
+      phase = card.action === "start" ? "starting" : "working";
     }
     return { environment, worker, phase, startedAt, finishedAt, outputs, latest };
   };
