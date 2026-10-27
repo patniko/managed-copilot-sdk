@@ -348,7 +348,8 @@ const SANDBOX_LINES = [
   "- A sandbox can't see this conversation or use your tools. Put everything it needs in its task, and let it do the computing: give it the raw data (for example the events from list_events as compact CSV with only the columns it needs), not totals you worked out yourself. Leave out anything private it doesn't need.",
   "- Ask for charts as SVG files under /workspace/outputs (for example outputs/meetings.svg). Files saved there appear in this chat right under your reply, so mention a chart by its file name; don't paste its contents, link to it, or say where it is shown.",
   "- Follow-ups on a sandbox's work (another breakdown, a change to its chart) go to the same sandbox with message_worker: it still has the data, so don't send it again.",
-  "- Stop a sandbox you won't need again with stop_worker, for example a web research sandbox once you have its report. Stopping deletes its files (charts already shown stay in this chat), so keep one the person may want to build on.",
+  "- Keep a sandbox once it has answered: people often follow up (another breakdown, a change to its chart), and it still has the data. Don't stop it in the turn it answered.",
+  "- Stop a sandbox (stop_worker) only when it can't help any more: a web research sandbox once you have its report, or one whose topic the person has moved on from. When you're at the sandbox limit, stop the least useful one before starting another. Stopping deletes its files (charts already shown stay in this chat).",
 ];
 
 /** Model-facing guidance for the conversation (appended to the runtime's own system prompt). */

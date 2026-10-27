@@ -168,8 +168,9 @@ while Google is connected.
 8. Ask *"Split it by meeting type too."* The follow-up goes to the same sandbox, marked **reused**, with no new
    approval: it still has the events.
 9. Ask *"Also check what the candidate in my next interview works on in open source."* That's different work, so the
-   assistant asks to start a **web research sandbox**, which can reach only `github.com` and `api.github.com`. Once it
-   has the report, the assistant stops it, and the side panel shows it as stopped.
+   assistant asks to start a **web research sandbox**, which can reach only `github.com` and `api.github.com`. The side
+   panel lists both sandboxes with their state and number of tasks. The assistant stops a sandbox once it can't help
+   any more, and the panel keeps listing it as stopped.
 
 The same journey runs automatically against the live platform, in your installed Microsoft Edge:
 
@@ -242,8 +243,9 @@ environments, in its own sandbox. It can't see the conversation or use this app'
 data it needs in its task (for example the calendar events, as CSV). The agent's instructions keep sandboxes for
 hands-on work (computation, charts and files, research on the web), send follow-ups on a sandbox's work to that same
 sandbox (`message_worker`, shown as **reused**), and start a new one only for independent work or another kind of
-sandbox, which the platform's own prompt describes from each environment's `description`. It stops sandboxes it won't
-need again (`stop_worker`).
+sandbox, which the platform's own prompt describes from each environment's `description`. It keeps a sandbox after it
+answers, since follow-ups are common, and stops one (`stop_worker`) once it can't help any more: a web research sandbox
+after its report, a topic the person moved on from, or the least useful one when it needs room for another.
 
 - **Asking first.** `start_worker` asks for permission, because approving it approves what the sandbox does in its
   sandbox. This app shows it as an approval card with the sandbox's environment, size, network, and exact task, and

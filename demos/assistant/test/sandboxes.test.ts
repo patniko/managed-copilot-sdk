@@ -126,6 +126,7 @@ describe("sandbox descriptions", () => {
     expect(withSandboxes).toMatch(/Sandboxes \(your workers\)/);
     expect(withSandboxes).toMatch(/can't see this conversation or use your tools/);
     expect(withSandboxes).toMatch(/message_worker/);
+    expect(withSandboxes).toMatch(/Don't stop it in the turn it answered/);
     expect(withSandboxes).toMatch(/starting a sandbox require the person's approval/);
     const without = systemInstructions({ name: "Mona" });
     expect(without).not.toMatch(/start_worker|sandbox/i);
