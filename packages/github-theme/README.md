@@ -1,7 +1,7 @@
 # @managed-copilot/github-theme
 
-GitHub's look and feel for the Managed Copilot web apps (the assistant and software factory demos, and the operator
-console). It packages:
+GitHub's look and feel for the Managed Copilot web apps (the assistant, software factory, and Dispatch demos, and the
+operator console). It packages:
 
 - **Primer design tokens** from [`@primer/primitives`](https://github.com/primer/primitives): the same CSS variables
   github.com uses, with GitHub's light and dark themes.

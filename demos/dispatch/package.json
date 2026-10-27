@@ -1,0 +1,41 @@
+{
+  "name": "@managed-copilot/demo-dispatch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dispatch: talk to an orchestrator agent that creates a sandbox for each part of the job, or sends work to the ones it has, and watch it happen.",
+  "type": "module",
+  "exports": {
+    "./apphost": "./apphost.mts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.tooling.json",
+    "dev": "tsx watch --clear-screen=false src/server/main.ts",
+    "start": "node dist/server/main.js",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.26",
+    "@managed-copilot/protocol": "workspace:*",
+    "@managed-copilot/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@managed-copilot/github-theme": "workspace:*",
+    "@primer/octicons-react": "19.40.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "^4.0.0"
+  }
+}

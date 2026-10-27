@@ -125,7 +125,7 @@ More in [environments](docs/concepts/environments.md), [sandboxes](docs/concepts
 
 ## The demos
 
-Both demos run under `aspire run` with real models, and both run on Azure from the same AppHost.
+All three demos run under `aspire run` with real models, and the same AppHost publishes them to Azure.
 
 ### AI software factory
 
@@ -157,6 +157,20 @@ webhook for the tool calls it needs.
 
 → [demos/assistant](demos/assistant/README.md)
 
+### Dispatch
+
+<p align="center">
+  <img src="demos/dispatch/docs/screenshots/conversation.png" alt="A Dispatch conversation: the first message created three Python sandboxes in parallel; the second reused one of them and created a writer's sandbox" width="900">
+</p>
+
+A chat with an orchestrator agent that builds the environments your request needs. For every message, the
+coordinator decides whether to create new sandboxes, from blueprints the AppHost declares (a Python lab, a Node
+workshop, web research, a writer's desk), or to send the work to sandboxes it already has. Each message shows what the
+agent did, each sandbox shows which messages created it and reused it, and you approve every new sandbox. Open the same
+conversation in Copilot CLI and keep talking there.
+
+→ [demos/dispatch](demos/dispatch/README.md)
+
 ## Run it locally
 
 You need Node 24, pnpm 10, Docker Desktop, the Aspire CLI 13.6, a GitHub account with Copilot (`gh auth login`), and
@@ -168,9 +182,9 @@ pnpm build
 aspire run        # the dashboard, the platform at http://localhost:7400, and the demos
 ```
 
-`aspire run` starts the gateway, the software factory (http://localhost:7480), and the assistant
-(http://localhost:7490). Your code finds the platform with no configuration: `ManagedCopilot.connect()` reads the
-discovery record the local gateway writes. From another terminal:
+`aspire run` starts the gateway, Dispatch (http://localhost:7470), the software factory (http://localhost:7480), and
+the assistant (http://localhost:7490). Your code finds the platform with no configuration: `ManagedCopilot.connect()`
+reads the discovery record the local gateway writes. From another terminal:
 
 ```powershell
 npx managed-copilot status             # the deployment, your account, and its environments
@@ -190,10 +204,11 @@ To run every snippet from the spec against your platform, start **quickstart** i
 - **Behind a NuGet proxy.** If nuget.org is blocked, point the Aspire CLI at your proxy with
   `ASPIRE_CLI_NUGET_SERVICE_INDEX=<proxy>/v3/index.json` and add an untracked `NuGet.config` at the repository root
   whose `packageSourceMapping` maps `*` to that proxy (the file is git-ignored).
-- **A port is in use.** The gateway (7400), the factory (7480), and the assistant (7490) use fixed ports; the
-  assistant's is fixed for its Google OAuth redirect. Stop whatever holds the port, then restart the resource.
+- **A port is in use.** The gateway (7400), Dispatch (7470), the factory (7480), and the assistant (7490) use fixed
+  ports; the assistant's is fixed for its Google OAuth redirect. Stop whatever holds the port, then restart the
+  resource.
 - **A second copy beside the first** (for example another checkout): set `MANAGED_COPILOT_PORT_OFFSET=300` to move
-  its ports to 7700, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at it with
+  its ports to 7700, 7770, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at it with
   `MANAGED_COPILOT_URL=http://localhost:7700`.
 
 ## Deploy to Azure
@@ -220,7 +235,8 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
   example (14) passes locally and on Azure.
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
-- **Both demos run end to end** locally and on Azure.
+- **The demos run end to end.** The factory and the assistant run locally and on Azure. Dispatch runs locally, including
+  a message from Copilot CLI attached to the same conversation.
 - **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
   process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
   list what each gate proved and what it did not.
@@ -235,6 +251,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
 | [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail and Google Calendar |
+| [Dispatch](demos/dispatch/README.md) | A chat with an orchestrator agent that creates a sandbox for each part of a request, or reuses the ones it has |
 | [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
 | [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
 | [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
@@ -255,7 +272,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
 | `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
 | `samples` | The walkthroughs' code: small, commented scripts you run with `pnpm sample <number>` |
-| `demos/software-factory`, `demos/assistant` | The AI software factory and the long-running assistant |
+| `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
 | `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |
 
 ## Develop

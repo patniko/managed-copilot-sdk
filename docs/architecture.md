@@ -859,6 +859,14 @@ and quickstart snippet 14).
   binds each worker to the identity that owns the coordinator, so `managed.files(worker.id)` acts as the same user.
   The CLI has `workers <session>`, and `sessions` marks workers with their coordinator. `/v1/info` advertises
   `orchestrator` while sandboxes work.
+- **Clients.** Each `start_worker` prompt reaches the coordinator's clients as the stock `permission.requested` event
+  (`custom-tool`, with its `toolCallId` and arguments) and ends with `permission.completed`, so an app can show sandbox
+  requests and their outcome from the session's own history; Dispatch (`demos/dispatch`) does, and a denial's
+  feedback is how a person steers the coordinator to another environment. A worker's sandbox takes files only once it
+  has started: `read_worker_file` and `copy_worker_files` on a `starting` worker answer `session_busy` ("still
+  starting"), and coordinators observed live wait for the worker and copy again. A worker therefore starts its task
+  before files copied for it arrive; tasks that depend on them should say so (the coordinator's own task text usually
+  does).
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
@@ -1258,9 +1266,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
-- `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
-  `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
-  `MANAGED_COPILOT_PORT_OFFSET` shifts all four ports for a second copy, which also sets `discovery: false`
+- `aspire run` from the repository root starts: the gateway (7400), `dispatch` (7470), `software-factory` (7480),
+  `assistant` (7490), and `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on
+  7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all five ports for a second copy, which also sets `discovery: false`
   (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 
 ### Copilot CLI attach (spec section 14)
@@ -1501,7 +1509,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
+| Demo ports | 7470, 7480, 7490, 7485 | Dispatch, software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
@@ -1535,6 +1543,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **attach** (was devloop) | `packages/aspire/**` (except `src/publish/**`, azure), `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
+| **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent that shows each sandbox it creates or reuses |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |

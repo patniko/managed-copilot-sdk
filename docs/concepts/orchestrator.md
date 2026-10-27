@@ -102,7 +102,8 @@ its workers.
 
 > [!TIP]
 > **Try it:** [walkthrough 11](../../samples/11-orchestrator/README.md) runs two workers in parallel and prints
-> their sandboxes.
+> their sandboxes. [Dispatch](../../demos/dispatch/README.md) is a whole app around one coordinator: each message
+> shows the sandboxes it created or reused, you approve each new one, and Copilot CLI can join the same conversation.
 
 <details>
 <summary><strong>Under the hood</strong></summary>

@@ -91,4 +91,4 @@ Each page answers one question, diagram first.
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../packages/cli/README.md) | Every command |
 | [Quickstart](../demos/quickstart/README.md) | Every spec snippet as an automated acceptance check |
-| [AI software factory](../demos/software-factory/README.md) and [assistant](../demos/assistant/README.md) | Two complete apps built on the platform |
+| [AI software factory](../demos/software-factory/README.md), [assistant](../demos/assistant/README.md), and [Dispatch](../demos/dispatch/README.md) | Three complete apps built on the platform |

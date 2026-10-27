@@ -1,12 +1,13 @@
 # Managed Copilot SDK: developer experience
 
 > **Status: built, and qualified within the limits recorded below (2026-10-24; orchestrator environments on
-> 2026-10-26).** The SDK, Aspire integration, CLI, gateway, sandbox image, and egress proxy are implemented on the
-> published `@github/copilot-sdk` 1.0.26 and runtime 1.0.103, unmodified. They run locally with `aspire run` and on
-> Azure with `aspire deploy`; orchestrator environments have run locally only so far. The 14 customer snippets
-> run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
-> [software factory](../../demos/software-factory) and [assistant](../../demos/assistant) demos use the platform end
-> to end with real models. The six OpenAI gaps are implemented and exercised; that is not a claim of full parity. The
+> 2026-10-26, and on Azure on 2026-10-27).** The SDK, Aspire integration, CLI, gateway, sandbox image, and egress
+> proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime 1.0.103, unmodified. They run
+> locally with `aspire run` and on Azure with `aspire deploy`, orchestrator environments included. The 14 customer
+> snippets run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
+> [software factory](../../demos/software-factory), [assistant](../../demos/assistant), and
+> [Dispatch](../../demos/dispatch) demos use the platform end to end with real models. The six OpenAI gaps are
+> implemented and exercised; that is not a claim of full parity. The
 > [delivery gates](#delivery-gates) record what each gate proved and what it did not, and the
 > [decision tracker](#decision-tracker) separates user decisions from their delivery state.
 > [architecture.md](../architecture.md) and [deployment.md](../deployment.md) describe the system as built.
@@ -1130,7 +1131,7 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `platform/gateway`, `platform/sandbox`, `platform/egress` |
 | Orchestrator environments | A shared coordinator with worker tools, workers as sessions in their own sandboxes, approvals within each worker's start, and cleanup (section 17) | Built: gateway `modules/orchestrator`, with real models locally and on Azure |
 | Operator console | Web console and operator API for health, deployed state, sessions, harness configuration, and guarded actions (section 16) | Built: `platform/console`, served by the gateway at `/console` |
-| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, same-session CLI attachment, and orchestrator workers | Built: `demos/quickstart` (14 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` |
+| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, same-session CLI attachment, and orchestrator workers | Built: `demos/quickstart` (14 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant`, and `demos/dispatch` (a chat with an orchestrator that shows each sandbox it creates or reuses) |
 
 ## Comparison with OpenAI's Agents API
 
