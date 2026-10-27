@@ -338,6 +338,7 @@ Alternatives when an address allowlist does not fit:
 | Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Enabled network returns 200; vault substitution and response redaction pass; CA fingerprint is unchanged across proxy revisions |
 | Files and artifacts in sandboxes | Yes | File injection, upload/read, report output and real PNG artifact pass |
 | Promotion (shared → isolated) | Yes | Explicit promotion and continuation pass; broader interactive CLI continuity is a separate gate |
+| Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every coordinator tool live) | Not run yet. Workers are isolated sessions on the same Container Apps Sandboxes path, and their file tools use the sandbox file API rather than a shared disk, but no deployment has run a coordinator |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
 | Demos (software factory, assistant) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; assistant uses labelled demo Google data |

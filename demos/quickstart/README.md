@@ -19,6 +19,7 @@ checks after it.
 | `11-polling.ts` | §12 Keep working while your app is offline (polling) |
 | `12-schedules.ts` | §13 Run on a schedule |
 | `13-attach.ts` | §14 Open a session in Copilot CLI |
+| `14-orchestrator.ts` | §17 Orchestrator: a coordinator with workers |
 
 ## Run
 

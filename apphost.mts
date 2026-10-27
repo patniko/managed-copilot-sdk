@@ -42,6 +42,8 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     },
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
+    // A coordinator on the shared runtime that starts workers, each a session of `coder` in its own sandbox (section 17).
+    team: { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
     ...factory.environments,
     ...assistant.environments,
   },

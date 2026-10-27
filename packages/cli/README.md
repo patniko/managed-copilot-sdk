@@ -10,6 +10,7 @@ npx managed-copilot sessions [--environment chat]   # your sessions
 npx managed-copilot new chat [--model <id>]         # a new session in that environment, opened in Copilot CLI
 npx managed-copilot attach 7f3a2c1                  # Copilot CLI on a live session
 npx managed-copilot promote 7f3a2c1                 # move a promotable session into its own sandbox
+npx managed-copilot workers 7f3a2c1                 # an orchestrator session's workers and their latest reports
 npx managed-copilot artifacts 7f3a2c1 --download .\out
 npx managed-copilot schedules [list|runs|pause|resume|delete|run] [schedule]
 npx managed-copilot console                         # the operator console in your browser (operators only)

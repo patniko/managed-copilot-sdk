@@ -44,6 +44,7 @@ export const DEV_DEFAULT_CONFIG = {
     chat: { type: "shared", description: "Chat agent with your own tools" },
     coder: { type: "isolated", size: "small", description: "Coding agent in its own sandbox" },
     helper: { type: "promotable", promoteTo: "coder", description: "Starts shared, moves into a sandbox when it needs one" },
+    team: { type: "orchestrator", workers: ["coder"], description: "Coordinates workers, each in its own sandbox" },
   },
   inline: { types: ["shared", "isolated"], sizes: ["small"] },
 } as const;

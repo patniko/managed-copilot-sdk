@@ -42,8 +42,9 @@ on your machine, and `aspire deploy` puts the same AppHost on Azure Container Ap
 `CopilotClient` and `CopilotSession` objects, standard session events, and `defineTool` tools. What works today, end
 to end with real models:
 
-- **Shared, isolated, and promotable environments.** Chat on a shared runtime, coding agents in their own sandboxes
-  with setup, files, and artifacts, and sessions that start cheap and move into a sandbox when they need one.
+- **Shared, isolated, promotable, and orchestrator environments.** Chat on a shared runtime, coding agents in their
+  own sandboxes with setup, files, and artifacts, sessions that start cheap and move into a sandbox when they need
+  one, and coordinators that split work across workers, each in its own sandbox.
 - **Policy you can see.** Per-environment network allowlists, and vault credentials applied at the egress proxy so
   secrets never enter a sandbox.
 - **Work that continues without you.** Tool calls wait durably and are answered later by your webhook or a poller;
@@ -83,6 +84,7 @@ More in [docs/architecture.md](docs/architecture.md): topology, protocol facts, 
 | `shared` | A lightweight session on the shared runtime; its tools run inside your app | Chat agents and assistants |
 | `isolated` | Its own sandbox: a workspace, a shell, the packages you set up, and network rules you control | Coding agents, builds, data work |
 | `promotable` | Starts on the shared runtime, then moves into a sandbox as the same session when it needs one | Chats that sometimes need to run code |
+| `orchestrator` | A coordinator on the shared runtime that starts workers, each a session with its own sandbox, and waits for their reports | Parallel and multi-agent work |
 
 ```ts
 // apphost.mts: declared once, picked by name with managed.client("coder")
@@ -91,6 +93,7 @@ await addManagedCopilot(builder, "copilot", {
     chat:   { type: "shared", network: ["learn.microsoft.com"] },
     coder:  { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" },
+    team:   { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
   },
 });
 ```
@@ -186,8 +189,9 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 ## What's verified
 
-- **Every example in the spec runs as an automated check** against the real platform with real models. All 13 pass
-  locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass.
+- **Every example in the spec runs as an automated check** against the real platform with real models. The first 13
+  pass locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass. The orchestrator
+  example (14) passes locally and has not run on Azure yet.
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
 - **Both demos run end to end** locally and on Azure.
