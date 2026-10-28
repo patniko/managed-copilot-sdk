@@ -124,6 +124,26 @@ describe.runIf(enabled)("commands run directly in sandboxes, end to end", () => 
     expect(await managed.artifacts(sandbox).read("report.md")).toBe("# Report\n");
   }, 120_000);
 
+  it("replaces a file only if it still has the content it was read with (ifMatch)", async () => {
+    const { createHash } = await import("node:crypto");
+    const { Readable } = await import("node:stream");
+    const service = (gateway as unknown as { app: { service(name: string): any } }).app.service("sandboxes");
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    await managed.files(sandbox).write("edit.txt", "one\n");
+    await service.writeFile(sandbox.id, "edit.txt", Readable.from([Buffer.from("two\n")]), { ifMatch: sha("one\n") });
+    expect(await managed.files(sandbox).read("edit.txt")).toBe("two\n");
+    // Stale: the file changed since it was read.
+    await expect(service.writeFile(sandbox.id, "edit.txt", Readable.from([Buffer.from("three\n")]), { ifMatch: sha("one\n") })).rejects.toMatchObject({ code: "conflict" });
+    expect(await managed.files(sandbox).read("edit.txt")).toBe("two\n");
+    // Two edits of the same content at once: exactly one applies.
+    const results = await Promise.allSettled(
+      ["a\n", "b\n"].map((text) => service.writeFile(sandbox.id, "edit.txt", Readable.from([Buffer.from(text)]), { ifMatch: sha("two\n") })),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(["a\n", "b\n"]).toContain(await managed.files(sandbox).read("edit.txt"));
+    await expect(service.writeFile(sandbox.id, "missing.txt", Readable.from([Buffer.from("x")]), { ifMatch: sha("x") })).rejects.toMatchObject({ code: "not_found" });
+  }, 120_000);
+
   it("refuses agent operations on it and exec where the operator turned it off", async () => {
     const client = await managed.client("python");
     await expect(client.resumeSession(sandbox.id, { onPermissionRequest: () => ({ kind: "approved" }) })).rejects.toThrow(/workspace-only/);

@@ -19,9 +19,10 @@ import polling from "./11-polling.js";
 import schedules from "./12-schedules.js";
 import attach from "./13-attach.js";
 import orchestrator from "./14-orchestrator.js";
+import directExecution from "./15-direct-execution.js";
 import { runSnippet, style, symbols, type Outcome, type SnippetResult } from "./harness.js";
 
-const ALL = [idea, sharedChat, isolatedCoder, setup, artifacts, network, vaults, promotable, comeBackLater, offlineWebhook, polling, schedules, attach, orchestrator];
+const ALL = [idea, sharedChat, isolatedCoder, setup, artifacts, network, vaults, promotable, comeBackLater, offlineWebhook, polling, schedules, attach, orchestrator, directExecution];
 
 const args = process.argv.slice(2);
 const strict = args.includes("--strict");

@@ -1067,11 +1067,91 @@ The coordinator manages its workers with platform tools that only orchestrator s
    a deleted worker's ID. A worker's `/workspace/outputs` publishes as that worker's artifacts.
 
 Platform events report workers on the coordinator's session: `worker.started`, `worker.idle`, `worker.failed`, and
-`worker.stopped`, with `data: { workerId, name, environment, state, error? }`.
+`worker.stopped`, with `data: { workerId, name, environment, state, error?, role?, agentId? }` (`role: "hands"` for a
+direct or mixed coordinator's own sandbox, below).
 
 Not in this delivery: delivering worker results to an idle coordinator as new turns (the coordinator waits instead),
 steering a worker in the middle of its work, relaying each worker prompt to your `onPermissionRequest`, a shared
 volume between workers, nested workers, and worker environments written by the model.
+
+### Execution styles: delegate, direct, mixed
+
+One knob on the orchestrator type chooses how the coordinator gets work done. Every style uses the same worker
+environments, so image, size, setup, network rules, vaults, and idle stop are shared.
+
+```ts
+// apphost.mts
+environments: {
+  coder: { type: "isolated", size: "medium" },
+  team: { type: "orchestrator", workers: ["coder"] },                          // delegate (default)
+  operator: { type: "orchestrator", workers: ["coder"], execution: "direct" }, // exactly one environment
+  crew: { type: "orchestrator", workers: ["coder"], execution: "direct", subagents: "own" },
+  lead: { type: "orchestrator", workers: ["coder", "python"], execution: "mixed" },
+},
+```
+
+```ts
+const client = await managed.client("operator");
+const session = await client.createSession({
+  model: "claude-sonnet-5",
+  // bash, write_bash, create, and edit ask here, once per call; view, glob, grep, read_bash, list_bash, and stop_bash don't.
+  onPermissionRequest: approveAll,
+});
+session.on("tool.execution_start", (e) => console.log(`${e.agentId ?? "root"} → ${e.data.toolName}`));
+await session.sendAndWait({ prompt: "Use two sub-agents in parallel: one counts primes below 100,000 in Python, the other finds the digits of the 1,000th Fibonacci number." }, 10 * 60_000);
+
+const [hands] = (await managed.workers(session).list()).filter((w) => w.role === "hands");
+console.log(await managed.files(hands.id).list());                        // the files its agents made
+for (const command of await managed.exec.list(hands.id)) console.log(command.caller?.agentId ?? "root", command.command);
+```
+
+| Style | The coordinator's tools |
+| --- | --- |
+| `delegate` (default) | The worker tools above. No shell or files of its own; the stock sub-agent tools are off |
+| `direct` | `bash`, `read_bash`, `write_bash`, `stop_bash`, `list_bash`, `view`, `create`, `edit`, `glob`, `grep` (the built-in names and argument shapes, acting on a sandbox of its one worker environment), and the stock sub-agent tools `task`, `read_agent`, `write_agent`, `list_agents`. No worker tools |
+| `mixed` | Both sets. Its own sandbox is in the first worker environment, and it can start workers in any. `copy_worker_files` and `read_worker_file` call its own sandbox `self` |
+
+#### Execution styles contract
+
+7. **Validation.** `execution` and `subagents` are valid only on orchestrator environments; `direct` needs exactly one
+   worker environment, and `subagents` applies only to `direct` and `mixed`. `/v1/info` reports `execution` (and
+   `subagents`) for orchestrators. `delegate` is unchanged.
+8. **Hands sandboxes.** The coordinator's hands run in a **hands sandbox**: a workspace-only sandbox (section 18) of
+   the environment, owned by the session's owner, with no runtime, agent, or credential in it. It is created the first
+   time an agent needs it, counts against `maxWorkers` (over the bound, `policy_violation`, like `start_worker`), is
+   listed by `managed.workers(session).list()` with `role: "hands"` (and `agentId` for a sub-agent's), is announced
+   with `worker.started`, and is deleted with the coordinator. `wait_for_workers`, `message_worker`, and
+   `stop_worker` refuse it, and worker recovery skips it. Its `/workspace/outputs` publishes as its artifacts at the
+   end of each of the coordinator's turns. `exec: false` on the environment governs only `managed.exec` and its routes,
+   never a coordinator's own tools.
+9. **Sub-agents.** `subagents: "shared"` (default): the coordinator and every sub-agent use one sandbox; `edit` is an
+   atomic compare-and-replace that fails with `conflict` if the file changed underneath it, and commands are not
+   otherwise synchronized. `subagents: "own"`: each sub-agent (by its `agentId`) gets its own sandbox; when its
+   `subagent.completed` or `subagent.failed` arrives, the files it saved under `/workspace/outputs` are copied into the
+   coordinator's sandbox under `outputs/<agentId>/` and its sandbox is deleted. A call the runtime reported as a
+   sub-agent's that arrives without its `agentId` fails with `capability_unavailable`; it never falls back to the
+   root agent's sandbox.
+10. **Commands.** Each `bash` call runs `bash -c` in a fresh process as the workload identity in `/workspace` (no state
+   carries over between calls). `mode: "sync"` (default) waits up to `initial_wait` seconds (default 120, at most
+   1,800), then returns the output so far and a `shellId` while the command keeps running; `mode: "async"` returns at
+   once. `read_bash` returns output since the last read (waiting up to `delay` seconds), `write_bash` sends input
+   (`{enter}`, `{tab}`, `{ctrl+d}`), `stop_bash` kills the process group, and `list_bash` lists the commands with their
+   state. A cancelled sync call stops its command; async commands run on until stopped, the sandbox's idle stop, or
+   deletion. Every command is recorded with the tool and the calling agent (`ExecInfo.caller`).
+11. **Never run twice.** `bash` and `write_bash` are never rerun after a gateway or runtime restart: an interrupted
+   `bash` reattaches to its command through the sandbox journal (or reports that it may have run), and an interrupted
+   `write_bash` reports that its input may have been sent.
+12. **Files.** Paths must be under `/workspace`. `view`, `glob`, and `grep` run as the workload identity and follow
+   symbolic links only inside `/workspace`; `create` and `edit` write through the sandbox's file worker, which never
+   follows links. `glob` and `grep` use ripgrep (hidden and ignored files are skipped).
+13. **Mixed is the model's choice.** A mixed coordinator's environment section describes its own sandbox and each
+   worker environment neutrally; the platform sets no rule for when to delegate.
+14. **Untrusted output.** Command output and files are ordinary tool results that enter the same context that can
+   call your `defineTool` tools; the environment section marks them as data. Decide approvals of your own tools with
+   that in mind.
+
+A tool your app defines with a hands tool's name (`bash`, `view`, …) is refused in direct and mixed sessions
+(`conflict`) and stays your own tool everywhere else.
 
 ## 18. Run commands directly: `managed.exec`
 

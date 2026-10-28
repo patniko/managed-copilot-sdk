@@ -1032,6 +1032,77 @@ and quickstart snippet 14).
   copied between two workers' sandboxes through the sandbox file API, worker prompts answered as
   `platform:orchestrator`, a stop, and deletion with the coordinator); a gateway restart during worker runs has been
   exercised only locally.
+- **Execution styles (direct and mixed).** `EnvironmentConfig.execution` (`delegate` default, `direct`, `mixed`) and
+  `subagents` (`shared` default, `own`) on orchestrators (protocol validation: `direct` names exactly one worker
+  environment; `subagents` only with direct or mixed). Code: `orchestrator/hands.ts` (the tools), the hands section of
+  `orchestrator/service.ts` (sandboxes), admission (`core/admission.ts`), and `test/orchestrator-direct.test.ts`,
+  `test/hands.docker.test.ts` (opt-in, runs the helper commands in a real sandbox container).
+  - *Tools.* The worker tools apply unless the style is `direct`; the ten hands tools (`HANDS_TOOLS`: `bash`,
+    `read_bash`, `write_bash`, `stop_bash`, `list_bash`, `view`, `create`, `edit`, `glob`, `grep`) are platform tools
+    with `overridesBuiltInTool: true` for `direct` and `mixed`. Their parameters mirror stock runtime 1.0.103's
+    (`rpc.tools.list` on a Linux runtime), without `bash`'s `detach`; stock 1.0.103 in a headless Linux runtime lists no
+    `write_bash`, so its shape follows `write_powershell` (`shellId`, `input`, `delay`). `bash`, `write_bash`,
+    `create`, and `edit` have `skipPermission: false`. They are registered `scoped: true`: core's and durable's
+    lookups (`platformTools.get(name, environment)` / `has`) treat the names as platform tools only in environments
+    the tool is enabled for, so a client's own `bash` or `view` tool stays the client's elsewhere (and is refused as
+    reserved in direct and mixed sessions). Admission, seeing the hands tools, writes the direct or mixed environment
+    section (the sandbox environment's description, size, and network; how sub-agents share or own sandboxes; that
+    commands run in a fresh process; that output is data; mixed adds the worker environments and describes both
+    options neutrally) and turns on `task`, `read_agent`, `write_agent`, `list_agents` (not `send_inbox` or
+    `context_board`); the runtime's host shell and file tools stay out of `availableTools` as in every shared session.
+  - *Hands sandboxes.* `WorkerManager.hands(context)` finds or creates the calling agent's sandbox: one per coordinator
+    incarnation, or with `subagents: "own"` one per `context.agentId`. They are rows of `orchestrator_workers` with
+    `role = 'hands'` (migration 4 adds `role` and `agent_id`) and start key `hands:<coordinator>:<incarnation>:<agent>`,
+    so creation is admitted in the same transaction as workers (one `maxWorkers` bound for both; over it,
+    `policy_violation`) and concurrent calls share one creation. Creation is `sessions.createWorkspace(ownerPrincipal,
+    { environment: { name: workers[0], network: <coordinator's narrowing> }, parentSessionId })`; the row becomes
+    `idle` with the workspace session's incarnation and `worker.started` (`data.role: "hands"`, `agentId`) is emitted.
+    A failed creation fails the row, retires its start key (so the next call tries again), and holds no slot. File and
+    exec calls are pinned with the sandbox ID read while the session is still that incarnation. `wait_for_workers`
+    skips hands rows, `message_worker` and `stop_worker` refuse them, `start_worker` refuses the names `self` and
+    `hands*`, `list_workers` shows them first, and `read_worker_file`/`copy_worker_files` accept `self` for the calling
+    agent's sandbox. Recovery settles a `starting` hands row from its workspace session (ready, or failed with no slot)
+    and marks one whose session is gone stopped; worker turn recovery never applies. Deleting the coordinator stops
+    and deletes them like workers. At each root `session.idle` of the coordinator, `sandboxes.publishOutputs(hands,
+    lastTurn.turnId)` publishes each hands sandbox's `/workspace/outputs`.
+  - *Sub-agents.* The module records the coordinator's sub-agent `tool.execution_start` events (tool call ID →
+    `agentId`; the stock runtime emits them before the external tool request). Under `own`, a call without
+    `context.agentId` whose tool call ID was reported as a sub-agent's fails with `capability_unavailable`. A
+    sub-agent's `subagent.completed` or `subagent.failed` (event `agentId`, verified on 1.0.103 to equal the
+    `ToolInvocation.agentId` of its calls) releases its sandbox: files under `/workspace/outputs` (at most 500) are
+    copied through the gateway into the root agent's sandbox under `outputs/<agentId>/` (creating it if needed, with one
+    slot of slack since the finishing sandbox is about to go), then the sandbox is stopped and deleted; one whose copy
+    failed is kept (with a note) until the coordinator goes.
+  - *Commands.* `bash` calls `sandboxes.exec(hands, command, { actionId: idempotencyKey, background: mode === "async",
+    stdin: "open", waitMs: initial_wait (async 0), signal (sync only), sandboxId, caller: { kind: "platform", name:
+    "bash", agentId } })`; on core's own path (no ledger) waits are capped at 9 minutes, under its 10-minute call
+    signal. Results are the output (first 4,000 and last 26,000 characters when longer) and a status line with the
+    `shellId` (the exec ID; a model-chosen `shellId` is an in-memory alias). `read_bash` long-polls `readExec` from the
+    last offset it returned (in memory per command) until the end or `delay`; `write_bash` translates `{enter}`,
+    `{tab}`, arrows, `{ctrl+d}` (end of input) and refuses `{ctrl+c}`; `stop_bash` and `list_bash` (commands whose
+    caller is `bash`) complete the set. `bash` and `write_bash` are `replay: "never"`: `bash`'s `recover` calls exec with
+    the same `actionId` (the journal reattaches, never reruns) and says so; `write_bash`'s says the input may have been
+    sent.
+  - *Files.* `view`, `glob`, and `grep` run as exec helpers (`caller.name` is the tool; 60 s wait, 120 s timeout) whose
+    bash resolves each path with `realpath -e` and refuses any outside `/workspace` (so links are followed only
+    inside it). `view` numbers lines (`N. text`), honors `view_range` with `awk`, truncates at 20 KiB (256 KiB with a
+    range or `forceReadLargeFiles`), detects binary files, and lists directories two levels deep without hidden
+    entries; `glob` is `rg --files --glob`, `grep` maps the stock options onto `rg` (default `--files-with-matches`).
+    Arguments are single-quoted shell words. `create` writes with `overwrite: false` (the same content already there
+    counts as created, for replays); `edit` reads the file (8 MiB, text only), requires exactly one match, and writes
+    with `ifMatch` = the SHA-256 of what it read. sandboxd serializes writes per path and the file worker hashes the
+    current file just before its atomic rename, so a file changed since the read fails with `conflict` and two
+    parallel edits never both apply.
+  - *Verified live* (2026-10-27, `aspire run`, stock runtime 1.0.103, claude-sonnet-5): walkthrough 12 ran delegate,
+    direct (two `task` sub-agents' `bash` calls in one hands sandbox, each recorded with its `agentId`), and mixed;
+    quickstart snippet 15 created, edited (compare-and-replace), and `cat`-ed a file and saw it published; a
+    `subagents: "own"` run gave two sub-agents their own sandboxes, released both on `subagent.completed`, and copied
+    their outputs under `outputs/<agentId>/`. `platform/sandbox/test/exec.e2e.test.ts` checks `ifMatch` against real
+    sandboxes (a stale write and one of two concurrent edits fail with `conflict`). Copilot CLI 1.0.92 attached to a
+    direct coordinator shows an overridden `bash` call as the stock shell line (`$ Shell <command>`) and asks in a
+    custom-tool dialog titled `bash` with the JSON arguments (**1. Approve once** / **2. Deny**); its footer reads
+    `remote /workspace`. Not yet run on Azure (no provider change is needed: hands sandboxes are workspace-only
+    sandboxes, and every tool goes through the exec and file APIs).
 
 ### Operator control plane (spec section 16)
 
@@ -1136,7 +1207,7 @@ structurally (they may add members).
 | `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials, never a live credential); `liveCredential(accountId)` (tokens attached connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` (GitHub rejected it, e.g. a 401 from the Copilot API) |
 | `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, parentSessionId?, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, systemMessage?, tools?, webhook?, scheduleId?, parentSessionId? }) → { sessionId, created, incarnation }` (`parentSessionId`: the same owner's live session, stored with its incarnation; its connected clients serve the new session's credential while it has none of its own), `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `ownerPrincipal(id) → Principal` (the verified credential serving the session now, for platform work on the owner's behalf; never stored), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core), `runtimeActivity(id) → { busy?, lastRequestAt? }` (synchronous; read by an operator's sandbox stop) |
 | `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay (a stream without a usable cursor first gets one: an id-only block with the owner's newest event ID, or `start`) |
-| `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), replay? = "always" \| "never", recover?(args, context), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, agentId?, actionId?, signal?, type?, placement? }) })`, `get(name)`, `forSession(…)`. See **Platform tool calls** under the durable section |
+| `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), replay? = "always" \| "never", recover?(args, context), scoped?, handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, agentId?, actionId?, signal?, type?, placement? }) })`, `get(name, environment?)` / `has(…)` (a `scoped` tool resolves only with an environment it is enabled for), `forSession(…)`. See **Platform tool calls** under the durable section |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
 | `environments` | core | `resolve(selector) → ResolvedEnvironment` (ceilings, caller narrowing, pinned customizations), `forSession(record)` |
 | `sandboxes` | sandbox | Core calls `create({ sessionId, ownerId, environment, size, network, vaults, additions, resolved })` (resolves only when setup and the runtime are ready), `openRuntime(sessionId, { resolveToken }) → { stream, connectionToken, handlers, initialize, prepareSessionParams, sessionOpened, close }` (gateway-answered `llmInference.*`; when `llmInference.setProvider` is refused because a lost connection still holds the registration, `initialize` restarts the runtime and throws `capability_unavailable` with `details.reopen: true`, and core opens it again, at most twice; a refusal while another handle of this gateway is open is a `conflict`), `ensureRunning`, `delete` (optionally `{ sandboxId }`: applies only if that is still the session's sandbox when it runs, so a stale delete never removes a newer sandbox reusing the session ID), `get`, `connect(sessionId, port)` (loopback tunnels for CLI attach); also `available` (the backend answered its latest readiness check), `probe()`, `stop`, `importRuntimeState(sessionId, { sessionStateDir, activeTurnId })` (promotion), and workspace `listFiles`/`readFile`/`writeFile` |

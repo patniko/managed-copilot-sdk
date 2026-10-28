@@ -68,6 +68,55 @@ of the work, whether to create a sandbox or to reuse one it already has:
 - While it waits for workers, a new message from you ends the wait, so it answers right away and the workers keep
   working. Send it with `mode: "immediate"` to reach the coordinator in the same turn.
 
+## Three ways to get work done
+
+Workers are the right shape for independent, long-running parts of a job. A harness that already has its own planning
+and sub-agents often just wants them to *act* inside an isolated machine. One setting picks the shape:
+
+```ts
+environments: {
+  coder: { type: "isolated", size: "medium" },
+  team: { type: "orchestrator", workers: ["coder"] },                          // delegate (the default)
+  operator: { type: "orchestrator", workers: ["coder"], execution: "direct" }, // acts in a coder sandbox itself
+  lead: { type: "orchestrator", workers: ["coder"], execution: "mixed" },      // both; the model chooses
+},
+```
+
+```mermaid
+flowchart LR
+  subgraph D["delegate"]
+    C1["coordinator"] -- start_worker --> W1["worker agent"] --> S1[("sandbox")]
+  end
+  subgraph X["direct"]
+    C2["coordinator + its sub-agents"] -- "bash, view, create, edit, glob, grep" --> S2[("hands sandbox<br/>no agent")]
+  end
+  subgraph M["mixed"]
+    C3["coordinator"] -- "bash, edit, …" --> S3[("its sandbox")]
+    C3 -- start_worker --> W3["worker agent"] --> S4[("sandbox")]
+  end
+```
+
+| | Delegate | Direct | Mixed |
+| --- | --- | --- | --- |
+| **Who thinks** | The coordinator, plus one agent per worker | The coordinator and the stock sub-agents it starts (`task`) | Either, per part of the job |
+| **Model loops** | One per worker, each in its sandbox | All in the shared runtime; the sandbox runs only commands | Both |
+| **Tools** | The worker tools above | `bash`, `read_bash`, `write_bash`, `stop_bash`, `list_bash`, `view`, `create`, `edit`, `glob`, `grep`: the built-in names and shapes, acting on the sandbox | Both sets; `self` names its own sandbox in `copy_worker_files` |
+| **Approvals** | One per worker (`start_worker`) | One per `bash`, `write_bash`, `create`, and `edit` call; reads don't ask | Both |
+| **Sub-agents' sandboxes** | Sub-agents off | `subagents: "shared"` (default): one sandbox; `"own"`: one each, whose `outputs/` come back to the coordinator's sandbox when they finish | Like direct |
+| **Fits** | Long, independent parts; factories, research swarms | Tight edit-run loops, data analysis, a harness with its own planning: "do it yourself, but not on my host" | A conversation with both kinds of work |
+
+- **The hands sandbox is a sandbox like any other.** `managed.workers(session).list()` lists it with `role: "hands"`,
+  `managed.files(hands.id)` and `managed.artifacts(hands.id)` read it, and every command in it is recorded with the
+  agent that ran it (`managed.exec.list(hands.id)`). It starts with the first tool call that needs it, counts toward
+  `maxWorkers`, and goes with the coordinator.
+- **Long commands keep going.** A `bash` call waits up to `initial_wait` seconds (default 120, at most 1,800), then
+  returns what the command printed so far and a `shellId`; the command keeps running, and `read_bash` picks it up. A
+  command is never run twice: after a restart, an interrupted call reattaches to its command or says it may have run.
+- **Parallel sub-agents on one sandbox.** `edit` fails instead of overwriting a file that changed underneath it, so
+  the agent reads it again. Use `subagents: "own"` when sub-agents should not share a disk.
+- **Sandbox output is data.** It enters the same context that can call your own tools, so decide approvals of those
+  tools with that in mind.
+
 ## Who approves what
 
 ```mermaid
@@ -102,7 +151,8 @@ its workers.
 
 > [!TIP]
 > **Try it:** [walkthrough 11](../../samples/11-orchestrator/README.md) runs two workers in parallel and prints
-> their sandboxes. [Dispatch](../../demos/dispatch/README.md) is a whole app around one coordinator: each message
+> their sandboxes, and [walkthrough 12](../../samples/12-direct-execution/README.md) runs the same job directly and
+> then gives a mixed coordinator the choice. [Dispatch](../../demos/dispatch/README.md) is a whole app around one coordinator: each message
 > shows the sandboxes it created or reused, you approve each new one, and Copilot CLI can join the same conversation.
 > The [assistant](../../demos/assistant/README.md) is a coordinator too: it asks before starting a Python or web
 > research sandbox for hands-on work, and sends follow-ups to the same one.

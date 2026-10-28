@@ -56,6 +56,7 @@ await addManagedCopilot(builder, "copilot", {
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" },
     team: { type: "orchestrator", workers: ["coder"], maxWorkers: 3 }, // workers run as coder sessions
+    operator: { type: "orchestrator", workers: ["coder"], execution: "direct" }, // its own hands in a coder sandbox
   },
   inline: { types: ["shared", "isolated"], sizes: ["small"] }, // what code may ask for without a name
 });
