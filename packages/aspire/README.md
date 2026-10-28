@@ -16,6 +16,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     chat: { type: "shared", models: ["claude-sonnet-5"], network: ["learn.microsoft.com"] },
     coder: { type: "isolated", size: "medium", vaults: ["payments"] },
     helper: { type: "promotable", promoteTo: "coder" },
+    team: { type: "orchestrator", workers: ["coder"], maxWorkers: 3 }, // a coordinator; workers run in coder sandboxes
   },
   vaults: { payments: [{ env: "STRIPE_API_KEY", value: stripeKey, hosts: ["api.stripe.com"] }] },
 });

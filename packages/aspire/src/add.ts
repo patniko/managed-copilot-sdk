@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
-import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
+import { sandboxedType, type ManagedCopilotConfig } from "@managed-copilot/protocol";
 import type { AspireBuilder, AspireNodeAppBuilder, EndpointOf, GatewayResourceOf } from "./aspire.js";
 import { normalizeOptions, type ManagedCopilotOptions } from "./options.js";
 
@@ -102,7 +102,7 @@ export async function addManagedCopilot<B extends AspireBuilder>(
   const npmRegistry = hostNpmRegistry();
   if (npmRegistry) gateway = gateway.withEnvironment("MANAGED_COPILOT_NPM_REGISTRY", npmRegistry);
   // Sandboxes are gateway-managed; this only moves the image build and relay start to gateway startup.
-  const hasSandboxes = Object.values(config.environments).some((environment) => environment.type !== "shared");
+  const hasSandboxes = Object.values(config.environments).some((environment) => sandboxedType(environment.type));
   if (options.prepareSandboxes ?? hasSandboxes) gateway = gateway.withEnvironment("MANAGED_COPILOT_SANDBOX_PREPARE", "1");
   if (options.discovery === false) gateway = gateway.withEnvironment("MANAGED_COPILOT_WRITE_DISCOVERY", "0");
   for (const secret of secrets) gateway = gateway.withEnvironment(secret.env, secret.value);

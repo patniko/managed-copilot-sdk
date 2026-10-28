@@ -832,6 +832,9 @@ export class DurableActions implements ActionsService {
     if (row.kind === "elicitation" && caller.type === "capability") {
       throw new ManagedCopilotError("forbidden", "A webhook capability cannot answer a question meant for a person");
     }
+    if (caller.type === "platform" && row.kind !== "permission") {
+      throw new ManagedCopilotError("forbidden", `The platform answers only permission prompts on the owner's behalf, not ${row.kind} actions`);
+    }
     const from: ActionState[] = row.state === "needs_reconciliation" && options.reconcile ? ["needs_reconciliation"] : ["pending"];
     if (!from.includes(row.state)) throw conflict(describeUnclaimable(row), row);
     if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) {
@@ -840,7 +843,9 @@ export class DurableActions implements ActionsService {
     const label =
       caller.type === "capability"
         ? `webhook:${options.responder ?? caller.capability.webhook}`
-        : `poll:${caller.principal.login}${options.responder ? `/${options.responder}` : ""}`;
+        : caller.type === "platform"
+          ? `platform:${caller.responder}`
+          : `poll:${caller.principal.login}${options.responder ? `/${options.responder}` : ""}`;
     const claimToken = newId("mct", 24);
     const claimed = this.#store.claim(
       row.id,
@@ -877,6 +882,12 @@ export class DurableActions implements ActionsService {
     }
 
     if (row.state === "expired" || row.state === "cancelled") throw conflict(`This action was ${row.state}${row.reason ? `: ${row.reason}` : ""}`, row);
+    if (caller.type === "platform") {
+      const decision = request.result as { readonly kind?: unknown; readonly approvedInteractively?: unknown } | undefined;
+      if (decision?.approvedInteractively === true || decision?.kind === "denied-interactively-by-user") {
+        throw new ManagedCopilotError("forbidden", "The platform cannot answer on a person's behalf");
+      }
+    }
     // A claim taken with a capability stays a webhook's answer whoever submits it.
     const responder: DecisionResponder = caller.type === "capability" || row.responder_type === "webhook" ? "webhook" : "poll";
     const outcome = this.#outcomeFromSubmission(row, request, now, responder);
@@ -1487,7 +1498,8 @@ export class DurableActions implements ActionsService {
       if (!current || (caller.capability.incarnation !== undefined && caller.capability.incarnation !== current.incarnation)) return undefined;
       return current.incarnation;
     }
-    if (!current || current.view.ownerId !== caller.principal.accountId) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
+    const accountId = caller.type === "platform" ? caller.ownerId : caller.principal.accountId;
+    if (!current || current.view.ownerId !== accountId) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
     return current.incarnation;
   }
 

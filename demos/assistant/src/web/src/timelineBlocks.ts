@@ -2,7 +2,7 @@
  * How the chat timeline groups into blocks for display. Pure (no React, no DOM), so the grouping rules are unit tested
  * on their own (test/timeline-blocks.test.ts).
  */
-import type { ApprovalItem, AssistantItem, NoticeItem, TimelineItem, ToolItem, TriggerItem, UserItem } from "../../shared/protocol";
+import type { ApprovalItem, AssistantItem, NoticeItem, TimelineItem, ToolItem, TriggerItem, UserItem, WorkerItem } from "../../shared/protocol";
 import { dayKey, dayLabel } from "./format";
 
 /** An informational note (like "Stopped."). It reads as part of the activity around it; warnings and errors stand alone. */
@@ -14,7 +14,15 @@ export type RunItem = ToolItem | TriggerItem | InfoNotice;
 export type Block =
   | { type: "day"; key: string; label: string }
   | { type: "unread"; key: string }
-  | { type: "item"; key: string; item: UserItem | AssistantItem | ApprovalItem | NoticeItem; scheduleLabel?: string; outcome?: ToolItem }
+  | {
+      type: "item";
+      key: string;
+      item: UserItem | AssistantItem | ApprovalItem | NoticeItem | WorkerItem;
+      scheduleLabel?: string;
+      outcome?: ToolItem;
+      /** A sandbox card: the person's approval that started the sandbox. */
+      approval?: ApprovalItem;
+    }
   | { type: "run"; key: string; items: RunItem[] };
 
 function isRunItem(item: TimelineItem): item is RunItem {
@@ -28,34 +36,56 @@ function isRunItem(item: TimelineItem): item is RunItem {
  * - consecutive tool calls, schedule runs, and info notes as one run, which day and unread dividers split;
  * - every other item on its own, with warning and error notices standing alone;
  * - a proactive reply labeled with the schedule whose trigger started it (the label clears at the person's next message);
- * - an approved call's tool progress attached to its approval card (tool `<id>` ↔ approval `approval:<id>`), not in a run.
+ * - an approved call's tool progress attached to its approval card (tool `<id>` ↔ approval `approval:<id>`), not in a run;
+ * - a sandbox the person approved shown as its card, carrying that approval; one waiting for (or refused) approval
+ *   shown as its approval card.
  */
 export function buildBlocks(items: readonly TimelineItem[], timeZone: string, unreadAnchor: string | undefined, now: Date = new Date()): Block[] {
   const blocks: Block[] = [];
+  const approvals = new Map(items.filter((item): item is ApprovalItem => item.kind === "approval").map((item) => [item.id, item]));
   // A consequential tool call's progress is shown inside its approval card instead of as a separate row.
-  const approvalIds = new Set(items.filter((item) => item.kind === "approval").map((item) => item.id));
   const outcomes = new Map<string, ToolItem>();
+  /** Sandbox cards shown as their (pending or refused) approval card instead. */
+  const asApproval = new Set<string>();
+  /** Approvals shown as the card of the sandbox they started, by card ID. */
+  const approvedBy = new Map<string, ApprovalItem>();
   for (const item of items) {
-    if (item.kind === "tool" && approvalIds.has(`approval:${item.id}`)) outcomes.set(`approval:${item.id}`, item);
+    const approval = approvals.get(`approval:${item.id}`);
+    if (!approval) continue;
+    if (item.kind === "tool") outcomes.set(approval.id, item);
+    else if (item.kind === "worker") {
+      if (approval.status === "approved") approvedBy.set(item.id, approval);
+      else asApproval.add(item.id);
+    }
   }
+  const startApprovals = new Set([...approvedBy.values()].map((approval) => approval.id));
+  const hidden = (item: TimelineItem) =>
+    (item.kind === "tool" && outcomes.has(`approval:${item.id}`)) || (item.kind === "worker" && asApproval.has(item.id)) || (item.kind === "approval" && startApprovals.has(item.id));
+
   let lastDay: string | undefined;
   let run: RunItem[] | undefined;
   let scheduleLabel: string | undefined;
+  /** The unread anchor was an item shown elsewhere (an approval shown as its sandbox's card): mark the next one. */
+  let unreadPending = false;
   const flush = () => {
     if (run?.length) blocks.push({ type: "run", key: `run:${run[0]!.id}`, items: run });
     run = undefined;
   };
   for (const item of items) {
-    if (item.kind === "tool" && outcomes.has(`approval:${item.id}`)) continue;
+    if (hidden(item)) {
+      if (item.id === unreadAnchor) unreadPending = true;
+      continue;
+    }
     const day = dayKey(item.at, timeZone);
     if (day !== lastDay) {
       flush();
       blocks.push({ type: "day", key: `day:${day}`, label: dayLabel(item.at, timeZone, now) });
       lastDay = day;
     }
-    if (item.id === unreadAnchor) {
+    if (item.id === unreadAnchor || unreadPending) {
       flush();
       blocks.push({ type: "unread", key: "unread" });
+      unreadPending = false;
     }
     if (item.kind === "trigger") scheduleLabel = item.scheduleName;
     if (item.kind === "user") scheduleLabel = undefined;
@@ -70,6 +100,7 @@ export function buildBlocks(items: readonly TimelineItem[], timeZone: string, un
       item,
       scheduleLabel: item.kind === "assistant" && item.proactive ? scheduleLabel : undefined,
       outcome: item.kind === "approval" ? outcomes.get(item.id) : undefined,
+      approval: item.kind === "worker" ? approvedBy.get(item.id) : undefined,
     });
   }
   flush();

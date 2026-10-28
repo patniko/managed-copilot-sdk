@@ -143,6 +143,7 @@ function WorkOrderItem({
           </span>
           <span aria-hidden>·</span>
           <span id={`${id}-meta`} className="truncate">
+            {summary.mode === "agent" ? "Agent-led" : "Classic"} ·{" "}
             {meta.label}
             {summary.taskCount > 0 ? ` · ${pluralize(summary.taskCount, "task")}` : ""} ·{" "}
             <span title={formatFullDateTime(summary.createdAt)}>{formatRelative(summary.createdAt, now)}</span>

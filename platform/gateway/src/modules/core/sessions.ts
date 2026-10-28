@@ -7,6 +7,7 @@ import { connect as connectTcp } from "node:net";
 import { join, resolve as resolvePath } from "node:path";
 import type { Duplex } from "node:stream";
 import {
+  DEFAULT_MAX_WORKERS,
   isManagedCopilotError,
   ManagedCopilotError,
   type NetworkPolicy,
@@ -27,7 +28,20 @@ import {
   type AttachedResponder,
   type RuntimeSessionEvent,
 } from "../durable/contract.js";
-import { admitOptionsUpdate, admitSend, admitSession, admitToolsSet, checkModel, isRecord, isRemoteMcp, SANDBOX_CUSTOMIZATIONS_DIR, type AdmissionContext, type AdmittedSession } from "./admission.js";
+import {
+  admitOptionsUpdate,
+  admitSend,
+  admitSession,
+  admitToolsSet,
+  checkModel,
+  isRecord,
+  isRemoteMcp,
+  SANDBOX_CUSTOMIZATIONS_DIR,
+  type AdmissionContext,
+  type AdmittedSession,
+  type OrchestratorBrief,
+  type WorkerEnvironmentBrief,
+} from "./admission.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -45,6 +59,7 @@ import {
   type SessionEventListener,
   type SessionRecord,
   type SessionRuntime,
+  type SessionSendOptions,
   type SessionsService,
   type VaultHeaderSource,
 } from "./contracts.js";
@@ -231,6 +246,11 @@ interface LiveSession {
   /** In-flight create, resume, or restore; concurrent callers wait for it. */
   residency: Promise<RuntimeUpstream> | undefined;
   deleting: boolean;
+  /**
+   * Its runtime connection closed while it was being deleted, which reports and ends nothing then (it ends with
+   * `deleted`). A deletion that fails leaves the session in place and handles that close then (`#deleteOwned`).
+   */
+  closedWhileDeleting: boolean;
   /** An open placement cutover (promotion). */
   cutover: CutoverState | undefined;
   /** Clients' `sendAndWait` calls in flight upstream (a cutover fences and seals them). */
@@ -334,6 +354,14 @@ const EXPIRED = Symbol("expired");
 /** The ending a turn gets when the platform lost the runtime connection it needed (a standard `session.error`). */
 const INTERRUPTED_TURN =
   "This turn was interrupted because the platform lost the connection to the session's runtime (for example, during an update or restart). Send your message again to continue.";
+
+/**
+ * Whether a turn has not ended yet: it ends with its root `session.idle`. Its status alone does not say so: a root
+ * `session.error` marks it `failed` before it ends (also an error the turn goes on from, and a subagent's).
+ */
+function unfinished(turn: SessionRecord["lastTurn"]): turn is NonNullable<SessionRecord["lastTurn"]> {
+  return turn !== undefined && turn.completedAt === undefined;
+}
 
 /**
  * What a `sendAndWait` the runtime connection was lost under learns. Which turn was its own is not known here (only its
@@ -569,6 +597,7 @@ export class SessionManager implements SessionsService {
       pendingActions,
       ...(record.lastTurn ? { lastTurn: record.lastTurn } : {}),
       ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),
+      ...(record.parentSessionId ? { parentSessionId: record.parentSessionId } : {}),
     };
   }
 
@@ -590,6 +619,13 @@ export class SessionManager implements SessionsService {
       }
     }
     const environment = this.#options.environments.resolve(request.environment);
+    // A worker's coordinator: the same owner's live session, pinned to the incarnation that starts it.
+    let parent: { readonly id: string; readonly incarnation: string } | undefined;
+    if (request.parentSessionId !== undefined) {
+      const record = this.getOwned(principal.accountId, request.parentSessionId);
+      if (record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${record.id} was not found`, { sessionId: record.id });
+      parent = { id: record.id, incarnation: record.incarnation };
+    }
     const raw: Record<string, unknown> = {
       sessionId,
       ...(request.model ? { model: request.model } : {}),
@@ -607,7 +643,7 @@ export class SessionManager implements SessionsService {
       ...(request.clientName ? { clientName: request.clientName } : {}),
     };
     try {
-      await this.#create({ principal, environment, raw, peer: undefined, scheduleId: request.scheduleId, webhook: request.webhook, clientName: request.clientName });
+      await this.#create({ principal, environment, raw, peer: undefined, scheduleId: request.scheduleId, webhook: request.webhook, clientName: request.clientName, parent });
     } catch (error) {
       // A concurrent create of the same deterministic ID by the same owner won the race.
       const winner = isManagedCopilotError(error, "conflict") ? this.#ledger.get(sessionId) : undefined;
@@ -618,11 +654,12 @@ export class SessionManager implements SessionsService {
     return { sessionId, created: true, ...(created ? { incarnation: created } : {}) };
   }
 
-  async send(principal: Principal, sessionId: string, input: { prompt: string; source?: string; mode?: string }, options: SessionCallOptions = {}): Promise<{ messageId: string }> {
+  async send(principal: Principal, sessionId: string, input: { prompt: string; source?: string; mode?: string }, options: SessionSendOptions = {}): Promise<{ messageId: string }> {
     this.getOwned(principal.accountId, sessionId);
     this.#checkIncarnation(sessionId, options.incarnation);
-    // The caller's verified credential serves the session while this call runs (a restore it triggers, for example).
-    const release = this.presence(sessionId, principal);
+    // The caller's verified credential serves the session while this call runs (a restore it triggers, for example),
+    // unless the caller only borrowed it from another session's connection.
+    const release = options.lendCredential === false ? undefined : this.presence(sessionId, principal);
     try {
       const result = await this.request<{ messageId: string }>(
         sessionId,
@@ -632,11 +669,11 @@ export class SessionManager implements SessionsService {
           mode: input.mode ?? "enqueue",
           ...(input.source ? { source: input.source } : {}),
         },
-        options,
+        { ...(options.incarnation !== undefined ? { incarnation: options.incarnation } : {}) },
       );
       return { messageId: result.messageId };
     } finally {
-      release();
+      release?.();
     }
   }
 
@@ -799,6 +836,16 @@ export class SessionManager implements SessionsService {
         live.deleting = false;
         // The session stays (failed, and deletable again), so steps on its runtime are no longer ended.
         if (!this.#stopped) live.ending = new AbortController();
+        // Its runtime connection, which the deletion closed (or saw close), is lost like any other now that the session
+        // stays: observers learn its runtime stopped, and a turn the connection cut ends unless durable carries it (as
+        // `#onUpstreamClosed` does; also a turn an earlier failed deletion left, whose ending this one preempted). The
+        // session stays failed.
+        const closed = live.closedWhileDeleting;
+        live.closedWhileDeleting = false;
+        if (!live.upstream && !live.residency) {
+          if (closed) this.#emitLifecycle(sessionId, "stopped");
+          if (!live.cutover && !this.#stopped) this.#endLostTurn(live);
+        }
       }
       throw error instanceof ManagedCopilotError ? error : new ManagedCopilotError("internal", `Deleting session ${sessionId} failed; it is marked failed and can be deleted again`);
     }
@@ -831,9 +878,10 @@ export class SessionManager implements SessionsService {
     }
     // Turns the stopped gateway was running were cut with its runtime connections (its shared runtime stopped with it,
     // and a sandbox runtime cannot serve a new gateway's inference): they end, unless durable carries their pending
-    // work. A session a client restored meanwhile has its turn checked by that restore instead.
-    for (const record of this.#ledger.byState("running")) {
-      const turnId = record.lastTurn?.status === "running" ? record.lastTurn.turnId : undefined;
+    // work. So does a turn a failed deletion cut (the session stays `failed`), including one just finished above. A
+    // session a client restored meanwhile has its turn checked by that restore instead.
+    for (const record of [...this.#ledger.byState("running"), ...this.#ledger.byState("failed")]) {
+      const turnId = unfinished(record.lastTurn) ? record.lastTurn.turnId : undefined;
       if (!turnId) continue;
       let live: LiveSession;
       try {
@@ -1120,7 +1168,7 @@ export class SessionManager implements SessionsService {
     this.#ledger.update(live.id, {
       placement: "sandbox",
       generation,
-      state: record.lastTurn?.status === "running" ? "running" : "idle",
+      state: unfinished(record.lastTurn) ? "running" : "idle",
       admitted: {
         params: storedParams(destination.admitted.params),
         ...(stored?.tools ? { tools: stored.tools } : {}),
@@ -1705,6 +1753,7 @@ export class SessionManager implements SessionsService {
     scheduleId?: string | undefined;
     webhook?: string | undefined;
     clientName?: string | undefined;
+    parent?: { readonly id: string; readonly incarnation: string } | undefined;
   }): Promise<unknown> {
     const sessionId = input.raw["sessionId"] as string;
     // Reserve the ID synchronously so concurrent creates of the same ID cannot both proceed.
@@ -1719,7 +1768,16 @@ export class SessionManager implements SessionsService {
   }
 
   async #createReserved(
-    input: { principal: Principal; environment: ResolvedEnvironment; raw: Record<string, unknown>; peer: ClientPeer | undefined; scheduleId?: string | undefined; webhook?: string | undefined; clientName?: string | undefined },
+    input: {
+      principal: Principal;
+      environment: ResolvedEnvironment;
+      raw: Record<string, unknown>;
+      peer: ClientPeer | undefined;
+      scheduleId?: string | undefined;
+      webhook?: string | undefined;
+      clientName?: string | undefined;
+      parent?: { readonly id: string; readonly incarnation: string } | undefined;
+    },
     sessionId: string,
   ): Promise<unknown> {
     const { principal, environment } = input;
@@ -1779,13 +1837,16 @@ export class SessionManager implements SessionsService {
         ...(input.clientName ? { clientName: input.clientName } : {}),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
         ...(input.webhook ? { webhook: input.webhook } : {}),
+        ...(input.parent ? { parentSessionId: input.parent.id, parentIncarnation: input.parent.incarnation } : {}),
       });
       const created = this.#register(record, environment, tokenRegistrationId);
       live = created;
       // The creating principal's verified credential serves the session while it is created (without a client, the
-      // runtime asks for one during `session.create`).
+      // runtime asks for one during `session.create`). A session another one starts (an orchestrator's worker) is
+      // served by its parent's connected clients instead, checked at every request, so a credential borrowed from a
+      // connection never outlives it.
       const presence = Symbol(sessionId);
-      if (!input.peer) created.presences.set(presence, principal);
+      if (!input.peer && !input.parent) created.presences.set(presence, principal);
       let result: unknown;
       await this.#serialize(created, async () => {
         let upstream: RuntimeUpstream;
@@ -1874,6 +1935,7 @@ export class SessionManager implements SessionsService {
         platformTools: this.#platformToolsFor(environment, placement),
         workingDirectory: this.#workingDirectory(placement, sessionId),
         tokenRegistrationId,
+        ...(environment.type === "orchestrator" ? { orchestrator: this.#orchestratorBrief(environment) } : {}),
       },
       mode,
     );
@@ -1962,6 +2024,26 @@ export class SessionManager implements SessionsService {
     return this.#options.platformTools.forSession({ environment: environment.name, type: environment.type, placement });
   }
 
+  /** An orchestrator's worker environments as its coordinator's environment section lists them (declared order). */
+  #orchestratorBrief(environment: ResolvedEnvironment): OrchestratorBrief {
+    const workers: WorkerEnvironmentBrief[] = [];
+    for (const name of environment.config.workers ?? []) {
+      try {
+        const worker = this.#options.environments.resolve(name);
+        workers.push({
+          name,
+          ...(worker.config.description ? { description: worker.config.description } : {}),
+          size: worker.config.size ?? "small",
+          network: worker.network,
+          agents: (worker.customizations?.agents ?? []).map((agent) => ({ name: agent.name, ...(agent.description ? { description: agent.description } : {}) })),
+        });
+      } catch {
+        // Left out (for example its customizations were rejected): a worker started there fails with the reason.
+      }
+    }
+    return { workers, maxWorkers: environment.config.maxWorkers ?? DEFAULT_MAX_WORKERS };
+  }
+
   #workingDirectory(placement: Placement, sessionId: string): string {
     if (placement === "sandbox") return "/workspace";
     const root = this.#options.sharedRuntime?.workspacesRoot ?? join(this.#options.app.config.dataDir, "runtime", "shared", "workspaces");
@@ -1993,6 +2075,7 @@ export class SessionManager implements SessionsService {
       ending: new AbortController(),
       residency: undefined,
       deleting: false,
+      closedWhileDeleting: false,
       cutover: undefined,
       waits: new Set(),
       held: [],
@@ -2475,8 +2558,9 @@ export class SessionManager implements SessionsService {
       live.ready = false;
       // Held completions wait for the owner's events; outside a cutover, losing the owner's runtime fails them.
       if (!live.cutover) for (const held of live.held.splice(0)) held.reject(new RpcError(-32000, "The session's runtime connection closed before the turn completed", { code: "state_restore_failed" }));
-      // A session being deleted ends with `deleted`, not `stopped`.
-      if (!live.deleting) this.#emitLifecycle(live.id, "stopped");
+      // A session being deleted ends with `deleted`, not `stopped`; if its deletion fails, the close is handled then.
+      if (live.deleting) live.closedWhileDeleting = true;
+      else this.#emitLifecycle(live.id, "stopped");
       // Its running turn cannot finish without this connection (on stock 1.0.103 a sandbox's inference provider goes
       // with it, and a runtime that restarts loses its turns): it ends now, for the clients still waiting on it.
       if (!live.deleting && !live.cutover && !this.#stopped) this.#endLostTurn(live);
@@ -2487,11 +2571,12 @@ export class SessionManager implements SessionsService {
   // Turns a lost runtime connection cut
 
   /**
-   * Ends the session's running turn when the runtime connection it needed was lost and nothing can carry it: work
-   * durable owns (a pending tool call or permission) survives in a resumed runtime (`continuePendingWork`, verified on
-   * 1.0.103), and an external shared runtime keeps running its turns. The ending is what the runtime would send: a
-   * root `session.error` and `session.idle`, so waits settle, observers (`sessions.subscribe`) see the turn end, and
-   * the ledger records it `failed`. A turn the session's restore finds is still running continues (`#settleTurn`).
+   * Ends the session's unfinished turn (one whose root `session.idle` has not arrived, including one that already
+   * reported an error) when the runtime connection it needed was lost and nothing can carry it: work durable owns (a
+   * pending tool call or permission) survives in a resumed runtime (`continuePendingWork`, verified on 1.0.103), and an
+   * external shared runtime keeps running its turns. The ending is what the runtime would send: a root `session.error`
+   * and `session.idle`, so waits settle, observers (`sessions.subscribe`) see the turn end, and the ledger records it
+   * `failed`. A turn the session's restore finds is still running continues (`#settleTurn`).
    */
   #endLostTurn(live: LiveSession, turnId?: string): void {
     void this.#endTurn(live, (record) => (turnId === undefined || record.lastTurn?.turnId === turnId) && this.#lostTurnEnds(live));
@@ -2504,7 +2589,7 @@ export class SessionManager implements SessionsService {
   }
 
   /**
-   * After a restore, a turn the ledger still has running is checked against the runtime that now owns the session:
+   * After a restore, a turn the ledger has not seen end is checked against the runtime that now owns the session:
    * one it still processes, or whose pending work durable owns and the runtime still awaits, continues; any other ended
    * while the connection was lost. Only answers decide: a check the runtime cannot answer leaves the turn as it is, and
    * a connection that is gone or stopped answering fails the restore (the session's next request tries again). The end
@@ -2512,7 +2597,7 @@ export class SessionManager implements SessionsService {
    */
   async #settleTurn(live: LiveSession, upstream: RuntimeUpstream): Promise<void> {
     const turn = this.get(live.id)?.lastTurn;
-    if (turn?.status !== "running") return;
+    if (!unfinished(turn)) return;
     const moves = live.moves;
     const ask = <T,>(method: string): Promise<T | undefined> => this.#check<T>(live, upstream, method);
     if ((await ask<{ processing?: unknown }>("session.metadata.isProcessing"))?.processing !== false) return;
@@ -2581,7 +2666,7 @@ export class SessionManager implements SessionsService {
     const end = async (): Promise<void> => {
       const record = this.get(live.id);
       const turn = record?.lastTurn;
-      if (!record || turn?.status !== "running" || live.deleting || this.#live.get(live.id) !== live || !applies(record)) return;
+      if (!record || !unfinished(turn) || live.deleting || this.#live.get(live.id) !== live || !applies(record)) return;
       const now = new Date().toISOString();
       if (outcome === "interrupted") {
         this.#log.warn("Ending a turn whose runtime connection was lost", { sessionId: live.id, turnId: turn.turnId });
@@ -3030,17 +3115,23 @@ export class SessionManager implements SessionsService {
 
   /**
    * The session owner's credential for its runtime: the token of a connected client of the owner (attached to the
-   * session, or present on it like an attached Copilot CLI), re-verified; otherwise only the owner's current
+   * session, or present on it like an attached Copilot CLI), re-verified; then, for a session another one started (an
+   * orchestrator's worker), its parent's connected clients the same way; otherwise only the owner's current
    * background sign-in, re-verified too, never a token remembered from an earlier connection. Only attached clients'
    * tokens count as the account's live credential (presences may be background work, like a schedule's send).
    */
   async #ownerToken(live: LiveSession): Promise<{ token: string; expiresAt?: number }> {
     const auth = this.#options.auth;
+    const parent = this.#credentialParent(live);
     // Each candidate must still be connected (or present) once its verification finishes.
-    const present: { readonly principal: Principal; readonly current: () => boolean; readonly background: boolean }[] = [
-      ...this.#preferred(live).map((attachment) => ({ principal: attachment.peer.principal, current: () => live.attachments.get(attachment.peer.id) === attachment && !attachment.peer.closed, background: false })),
-      ...[...live.presences.entries()].map(([key, principal]) => ({ principal, current: () => live.presences.get(key) === principal, background: true })),
-    ];
+    const present: { readonly principal: Principal; readonly current: () => boolean; readonly background: boolean }[] = [];
+    for (const source of parent ? [live, parent] : [live]) {
+      const usable = () => !source.deleting && (source === live || this.#credentialParent(live) === source);
+      present.push(
+        ...this.#preferred(source).map((attachment) => ({ principal: attachment.peer.principal, current: () => usable() && source.attachments.get(attachment.peer.id) === attachment && !attachment.peer.closed, background: false })),
+        ...[...source.presences.entries()].map(([key, principal]) => ({ principal, current: () => usable() && source.presences.get(key) === principal, background: true })),
+      );
+    }
     for (const { principal, current, background } of present) {
       if (principal.accountId !== live.ownerId) continue;
       try {
@@ -3068,6 +3159,19 @@ export class SessionManager implements SessionsService {
     throw new ManagedCopilotError("authentication_required", "The session owner has no connected client and no background sign-in; reconnect, or run `managed-copilot login` for work while you are away");
   }
 
+  /**
+   * The live parent whose connected clients may serve this session's credential: the same owner's session that
+   * started it, still the incarnation that did, and not being deleted. One level only.
+   */
+  #credentialParent(live: LiveSession): LiveSession | undefined {
+    const record = this.#ledger.get(live.id);
+    if (!record?.parentSessionId) return undefined;
+    const parent = this.#live.get(record.parentSessionId);
+    if (!parent || parent === live || parent.deleting || parent.ownerId !== live.ownerId) return undefined;
+    if (this.get(record.parentSessionId)?.incarnation !== record.parentIncarnation) return undefined;
+    return parent;
+  }
+
   presence(sessionId: string, principal: Principal): () => void {
     this.getOwned(principal.accountId, sessionId);
     const live = this.#liveFor(sessionId);
@@ -3076,6 +3180,15 @@ export class SessionManager implements SessionsService {
     return () => {
       live.presences.delete(key);
     };
+  }
+
+  async ownerPrincipal(sessionId: string): Promise<Principal> {
+    const live = this.#liveFor(sessionId);
+    const credential = await this.#ownerToken(live);
+    // Background: work the platform does for the owner never becomes the account's live credential.
+    const principal = await this.#options.auth.authenticate(credential.token, { background: true });
+    if (principal.accountId !== live.ownerId) throw new ManagedCopilotError("authentication_required", "The session's credential belongs to another account");
+    return principal;
   }
 
   async attachCli(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment> {
@@ -3229,7 +3342,9 @@ export class SessionManager implements SessionsService {
           const record = this.get(live.id);
           const turn = record?.lastTurn;
           const status = data["aborted"] === true ? "cancelled" : turn?.status === "failed" ? "failed" : "completed";
-          this.#ledger.update(live.id, { ...state("idle"), ...(turn ? { lastTurn: { turnId: turn.turnId, status, completedAt: new Date().toISOString() } } : {}) });
+          // A session whose deletion failed stays failed (deletable again) when a turn ends, until it runs another.
+          const next = record?.state === "failed" ? {} : state("idle");
+          this.#ledger.update(live.id, { ...next, ...(turn ? { lastTurn: { turnId: turn.turnId, status, completedAt: new Date().toISOString() } } : {}) });
           if (record) this.#options.events.emit("session.idle", { ownerId: record.ownerId, sessionId: live.id, environment: record.environment, data: { status, incarnation: record.incarnation } });
           break;
         }

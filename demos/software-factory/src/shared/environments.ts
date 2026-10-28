@@ -6,6 +6,7 @@ export const FACTORY_ENVIRONMENTS: Readonly<Record<StationRole, string>> = {
   builder: "factory-builder",
   reviewer: "factory-reviewer",
   release: "factory-release",
+  coordinator: "factory-coordinator",
 };
 
 /** Custom agents deployed with each environment's customizations bundle. */
@@ -14,9 +15,14 @@ export const ROLE_AGENTS: Readonly<Record<StationRole, string>> = {
   builder: "builder",
   reviewer: "reviewer",
   release: "release",
+  coordinator: "coordinator",
 };
 
-export const ROLES: readonly StationRole[] = ["planner", "builder", "reviewer", "release"];
+/** The roles classic work orders use; a deployment needs their environments to run work orders at all. */
+export const CLASSIC_ROLES: readonly StationRole[] = ["planner", "builder", "reviewer", "release"];
+
+/** Every role, including the agent-led coordinator. */
+export const ROLES: readonly StationRole[] = [...CLASSIC_ROLES, "coordinator"];
 
 export const SANDBOX_SIZES: Readonly<Record<"small" | "medium" | "large", { readonly cpus: number; readonly memoryGiB: number }>> = {
   small: { cpus: 1, memoryGiB: 2 },

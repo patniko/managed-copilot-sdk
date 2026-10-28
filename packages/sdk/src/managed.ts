@@ -10,6 +10,7 @@ import { promoteSession } from "./features/promote.js";
 import { createSchedulesApi } from "./features/schedules.js";
 import { createSessionsApi } from "./features/sessions.js";
 import { createVaultsApi } from "./features/vaults.js";
+import { createWorkersApi } from "./features/workers.js";
 import type {
   ConnectOptions,
   EnvironmentSelector,
@@ -21,6 +22,7 @@ import type {
   ManagedSessionConfig,
   ManagedSessions,
   ManagedVaults,
+  ManagedWorkers,
   OpenCliOptions,
   PlatformEventHandler,
   SessionRef,
@@ -93,6 +95,11 @@ export class ManagedCopilot {
 
   promote(session: SessionRef): Promise<PromoteResult> {
     return promoteSession(this.#ctx, sessionIdOf(session));
+  }
+
+  /** An orchestrator session's workers: each one's state, task, and latest report, and its own session ID. */
+  workers(session: SessionRef): ManagedWorkers {
+    return createWorkersApi(this.#ctx, sessionIdOf(session));
   }
 
   /** Runs Copilot CLI in this terminal, attached to the live session. Resolves with the CLI's exit code. */

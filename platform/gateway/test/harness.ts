@@ -7,7 +7,8 @@ import { createServer as createHttpServer, type Server as HttpServer } from "nod
 import { connect as connectTcp, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, type EnvironmentRequest } from "@managed-copilot/protocol";
+import { Readable } from "node:stream";
+import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, ManagedCopilotError, type EnvironmentRequest } from "@managed-copilot/protocol";
 import { WebSocket } from "ws";
 import { loadConfig } from "../src/config.js";
 import { RpcEndpoint, RpcError, streamTransport, webSocketTransport } from "../src/modules/core/rpc.js";
@@ -45,6 +46,8 @@ export class FakeRuntime {
   port = 0;
   /** Like stock runtime 1.0.103: lifecycle notifications follow the create/resume answer (default: before it). */
   lifecycleAfterAnswer = false;
+  /** Each session's `session.queue.pendingItems` snapshot: queued items and steering messages (test hook). */
+  readonly queues = new Map<string, { items: { id: string; kind: string }[]; steeringMessages: string[]; inFlightSteeringCount?: number }>();
 
   async start(): Promise<void> {
     this.#server = createServer((socket) => this.#accept(socket));
@@ -61,6 +64,11 @@ export class FakeRuntime {
   dropConnections(): void {
     this.#processing.clear();
     for (const endpoint of this.#endpoints) endpoint.close();
+  }
+
+  /** Forgets one session's running turn, as a runtime that restarted would (test hook). */
+  forgetTurn(sessionId: string): void {
+    this.#processing.delete(sessionId);
   }
 
   /** Sessions whose turn is running (between its root `user.message` and `session.idle`). */
@@ -96,8 +104,11 @@ export class FakeRuntime {
     pending.resolve({ requestId, result });
   }
 
-  /** Holds the response to the next request of `method` (optionally for one session) until `release()` (test hook). */
-  holdNext(method: string, sessionId?: string): { readonly held: Promise<void>; release(): void } {
+  /**
+   * Holds the response to the next request of `method` (optionally for one session) until `release()` (test hook).
+   * With `before`, holds the request itself: the runtime handles it only once released.
+   */
+  holdNext(method: string, sessionId?: string, options: { readonly before?: boolean } = {}): { readonly held: Promise<void>; release(): void } {
     let release!: () => void;
     let arrived!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -106,7 +117,7 @@ export class FakeRuntime {
     const held = new Promise<void>((resolve) => {
       arrived = resolve;
     });
-    this.#holds.push({ method, sessionId, gate, arrived });
+    this.#holds.push({ method, sessionId, before: options.before === true, gate, arrived });
     return { held, release };
   }
 
@@ -122,7 +133,7 @@ export class FakeRuntime {
     return endpoint.request(method, params);
   }
 
-  readonly #holds: { method: string; sessionId: string | undefined; gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #holds: { method: string; sessionId: string | undefined; before: boolean; gate: Promise<void>; arrived: () => void }[] = [];
   readonly #failures: { method: string; sessionId: string | undefined; message: string }[] = [];
   readonly #byConnection = new Map<number, RpcEndpoint>();
 
@@ -146,6 +157,13 @@ export class FakeRuntime {
         const failure = failAt >= 0 ? this.#failures.splice(failAt, 1)[0] : undefined;
         const run = () => (failure ? Promise.reject(new RpcError(-32603, failure.message)) : this.#handle(endpoint, method, body, context.signal));
         const hold = this.#holds.findIndex(matches);
+        if (hold >= 0 && this.#holds[hold]!.before) {
+          // Held before the runtime handles it: nothing it would do has happened yet.
+          const [entry] = this.#holds.splice(hold, 1);
+          entry!.arrived();
+          await entry!.gate;
+          return run();
+        }
         if (hold >= 0) {
           const [entry] = this.#holds.splice(hold, 1);
           const settled = await run().then(
@@ -252,7 +270,8 @@ export class FakeRuntime {
       case "session.send": {
         if (!session) throw new RpcError(-32603, `Session not found: ${sessionId}`);
         const messageId = randomUUID();
-        void this.#turn(endpoint, session, String(params["prompt"] ?? ""), messageId);
+        // `queued` is accepted but never started (as if queued behind other work when its runtime went away).
+        if (params["prompt"] !== "queued") void this.#turn(endpoint, session, String(params["prompt"] ?? ""), messageId);
         return { messageId };
       }
       case "session.sendAndWait": {
@@ -294,6 +313,9 @@ export class FakeRuntime {
         };
       case "session.permissions.pendingRequests":
         return { items: [] };
+      case "session.queue.pendingItems":
+        // What the session's queue holds (test hook `queues`); an empty queue otherwise.
+        return this.queues.get(String(sessionId)) ?? { items: [], steeringMessages: [] };
       case "session.metadata.isProcessing":
         return { processing: this.#processing.has(String(sessionId)) || [...this.#pendingTools.values()].some((pending) => pending.sessionId === sessionId) };
       case "session.permissions.handlePendingPermissionRequest":
@@ -374,12 +396,44 @@ export class FakeSandboxes {
   readonly initializeFailures: Error[] = [];
   /** Fails the next `delete` (test hook). */
   failNextDelete: Error | undefined;
+  /** Fails the next `writeFile` before it reads its body (test hook). */
+  failNextWrite: Error | undefined;
+  /** Every download `readFile` handed out, in order (test hook: were they released?). */
+  readonly downloads: Readable[] = [];
+  /** Each session's current sandbox ID; a session created again under the same ID gets a new one. */
+  readonly #sandboxIds = new Map<string, string>();
+  readonly #generations = new Map<string, number>();
   readonly #openHolds: { gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #listHolds: { gate: Promise<void>; arrived: () => void }[] = [];
+  readonly #deleteHolds: { gate: Promise<Error | undefined>; arrived: () => void }[] = [];
 
   constructor(private readonly runtime: FakeRuntime) {}
 
   /** Holds the next `openRuntime` until `release()` (test hook). */
   holdNextOpen(): { readonly held: Promise<void>; release(): void } {
+    return FakeSandboxes.#hold(this.#openHolds);
+  }
+
+  /** Holds the next `listFiles` until `release()`, after it checked its sandbox (test hook). */
+  holdNextList(): { readonly held: Promise<void>; release(): void } {
+    return FakeSandboxes.#hold(this.#listHolds);
+  }
+
+  /** Holds the next `delete` until `release(failure?)`, which ends it with `failure` when given (test hook). */
+  holdNextDelete(): { readonly held: Promise<void>; release(failure?: Error): void } {
+    let release!: (failure?: Error) => void;
+    let arrived!: () => void;
+    const gate = new Promise<Error | undefined>((resolve) => {
+      release = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    this.#deleteHolds.push({ gate, arrived });
+    return { held, release };
+  }
+
+  static #hold(holds: { gate: Promise<void>; arrived: () => void }[]): { readonly held: Promise<void>; release(): void } {
     let release!: () => void;
     let arrived!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -388,7 +442,7 @@ export class FakeSandboxes {
     const held = new Promise<void>((resolve) => {
       arrived = resolve;
     });
-    this.#openHolds.push({ gate, arrived });
+    holds.push({ gate, arrived });
     return { held, release };
   }
 
@@ -403,7 +457,10 @@ export class FakeSandboxes {
   async create(request: { sessionId: string; ownerId: number; environment: string; size: string }): Promise<unknown> {
     this.log.push({ op: "create", sessionId: request.sessionId, detail: { ...request } });
     if (this.failCreate) throw this.failCreate;
-    return { sandboxId: `sbx-${request.sessionId}` };
+    const generation = (this.#generations.get(request.sessionId) ?? 0) + 1;
+    this.#generations.set(request.sessionId, generation);
+    this.#sandboxIds.set(request.sessionId, generation === 1 ? `sbx-${request.sessionId}` : `sbx-${request.sessionId}-${generation}`);
+    return { sandboxId: this.#sandboxIds.get(request.sessionId) };
   }
 
   async ensureRunning(sessionId: string): Promise<unknown> {
@@ -454,15 +511,103 @@ export class FakeSandboxes {
     };
   }
 
-  async delete(sessionId: string): Promise<void> {
+  async delete(sessionId: string, options: { readonly sandboxId?: string } = {}): Promise<void> {
     this.log.push({ op: "delete", sessionId });
+    const hold = this.#deleteHolds.shift();
+    if (hold) {
+      hold.arrived();
+      const failure = await hold.gate;
+      if (failure) throw failure;
+    }
     const failure = this.failNextDelete;
     this.failNextDelete = undefined;
     if (failure) throw failure;
+    // Like the real service: a delete for a sandbox that was replaced since does nothing.
+    if (options.sandboxId !== undefined && this.#sandboxIds.get(sessionId) !== options.sandboxId) return;
+    this.files.delete(sessionId);
+    this.#sandboxIds.delete(sessionId);
   }
 
-  get(): undefined {
-    return undefined;
+  /** Only what the file API needs to pin a sandbox: its ID while it exists. */
+  async get(sessionId: string): Promise<{ id: string; size: "small"; state: "running"; network: { access: "disabled" } } | undefined> {
+    const id = this.#sandboxIds.get(sessionId);
+    return id && this.reportSandboxes ? { id, size: "small", state: "running", network: { access: "disabled" } } : undefined;
+  }
+
+  /** Whether `get` reports sandboxes (the orchestrator pins them; other suites expect none). */
+  reportSandboxes = false;
+
+  /** Each sandbox's workspace files, by workspace-relative path (test hook and file API). */
+  readonly files = new Map<string, Map<string, Buffer>>();
+
+  workspace(sessionId: string): Map<string, Buffer> {
+    let files = this.files.get(sessionId);
+    if (!files) {
+      files = new Map();
+      this.files.set(sessionId, files);
+    }
+    return files;
+  }
+
+  #expect(sessionId: string, sandboxId: string | undefined): void {
+    if (sandboxId !== undefined && this.#sandboxIds.get(sessionId) !== sandboxId) {
+      throw new ManagedCopilotError("not_found", `Session ${sessionId} no longer has the sandbox this call was for.`, { sessionId, sandboxId });
+    }
+  }
+
+  /** Like sandboxd: a file lists as itself, a missing path is `not_found`. */
+  async listFiles(
+    sessionId: string,
+    path: string,
+    options: { readonly recursive?: boolean; readonly sandboxId?: string } = {},
+  ): Promise<{ path: string; type: "file" | "directory"; size: number; modifiedAt: string }[]> {
+    this.#expect(sessionId, options.sandboxId);
+    const hold = this.#listHolds.shift();
+    if (hold) {
+      hold.arrived();
+      await hold.gate;
+    }
+    const workspace = this.workspace(sessionId);
+    const file = workspace.get(path);
+    if (file) return [{ path, type: "file", size: file.length, modifiedAt: new Date(0).toISOString() }];
+    const root = path === "." || path === "" ? "" : `${path.replace(/\/+$/, "")}/`;
+    const files = [...workspace.entries()].filter(([name]) => name.startsWith(root));
+    if (root && files.length === 0) throw new ManagedCopilotError("not_found", `"${path}" does not exist.`);
+    const entries = new Map<string, { path: string; type: "file" | "directory"; size: number; modifiedAt: string }>();
+    for (const [name, content] of files) {
+      const rest = name.slice(root.length);
+      const slash = rest.indexOf("/");
+      if (slash >= 0 && !options.recursive) entries.set(root + rest.slice(0, slash), { path: root + rest.slice(0, slash), type: "directory", size: 0, modifiedAt: new Date(0).toISOString() });
+      else entries.set(name, { path: name, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() });
+    }
+    return [...entries.values()];
+  }
+
+  /** Like sandboxd: a directory is `invalid_request` (list it instead), a missing path `not_found`. */
+  async readFile(sessionId: string, path: string, options: { readonly sandboxId?: string } = {}): Promise<{ entry: { path: string; type: "file"; size: number; modifiedAt: string }; body: Readable }> {
+    this.#expect(sessionId, options.sandboxId);
+    const workspace = this.workspace(sessionId);
+    const content = workspace.get(path);
+    if (!content) {
+      const prefix = path === "." ? "" : `${path}/`;
+      if ([...workspace.keys()].some((name) => name.startsWith(prefix))) throw new ManagedCopilotError("invalid_request", `"${path}" is a directory; list it instead.`);
+      throw new ManagedCopilotError("not_found", `"${path}" does not exist.`);
+    }
+    const body = Readable.from([content]);
+    this.downloads.push(body);
+    return { entry: { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() }, body };
+  }
+
+  async writeFile(sessionId: string, path: string, body: Readable, options: { readonly sandboxId?: string } = {}): Promise<{ path: string; type: "file"; size: number; modifiedAt: string }> {
+    this.#expect(sessionId, options.sandboxId);
+    const failure = this.failNextWrite;
+    this.failNextWrite = undefined;
+    if (failure) throw failure;
+    const chunks: Buffer[] = [];
+    for await (const chunk of body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+    const content = Buffer.concat(chunks);
+    this.workspace(sessionId).set(path, content);
+    return { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() };
   }
 }
 

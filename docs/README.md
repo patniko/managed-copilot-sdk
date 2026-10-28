@@ -17,7 +17,7 @@ flowchart LR
 | I'm… | Read | Then run |
 | --- | --- | --- |
 | **Evaluating it** | [How it works](concepts/how-it-works.md), then [environments](concepts/environments.md) | [01 · Your first agent](../samples/01-first-agent/README.md) |
-| **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../samples/README.md) |
+| **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../samples/README.md), and [11](../samples/11-orchestrator/README.md) for multi-agent jobs |
 | **Running the platform** | [Local and Azure](concepts/local-and-azure.md), then [identity and access](concepts/identity.md) | [10 · Azure from your laptop](../samples/10-azure/README.md) |
 
 ## Concepts
@@ -30,6 +30,7 @@ Each page answers one question, diagram first.
 | [Environments](concepts/environments.md) | Where does my agent run, and how do I choose? |
 | [Sandboxes](concepts/sandboxes.md) | What is a sandbox's life? How do files get in and results out? |
 | [Promotion](concepts/promotion.md) | How does a chat move into a sandbox when it needs one? |
+| [Orchestrator](concepts/orchestrator.md) | How do I split a job across agents that each work in their own sandbox? |
 | [Identity and access](concepts/identity.md) | Who am I to the platform, where does my token go, and who can use it? |
 | [The harness](concepts/harness.md) | How do I shape what the agent knows and can do? |
 | [Work while you're away](concepts/offline-work.md) | What happens when my app isn't connected? How do schedules work? |
@@ -45,6 +46,7 @@ Each page answers one question, diagram first.
 | Build a chat agent that uses my app's data | [The harness](concepts/harness.md) | [02](../samples/02-your-own-tools/README.md) |
 | Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../samples/03-sandbox/README.md) |
 | Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../samples/04-promotion/README.md) |
+| Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../samples/11-orchestrator/README.md) |
 | Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../samples/05-choose-environments/README.md), [06](../samples/06-harness/README.md) |
 | Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../samples/01-first-agent/README.md), [06](../samples/06-harness/README.md) |
 | Give an agent an API key without putting it in the sandbox | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
@@ -66,6 +68,8 @@ Each page answers one question, diagram first.
 | **Shared runtime** | One stock Copilot runtime process that hosts many lightweight sessions; no shell, no files |
 | **Sandbox** | A Linux workspace for exactly one session: Docker locally, a microVM on Azure |
 | **Promotion** | The one-time move of a `promotable` session from the shared runtime into its own sandbox |
+| **Orchestrator** | An environment type whose sessions are coordinators: agents on the shared runtime that start workers and wait for their reports |
+| **Worker** | A session a coordinator started: an ordinary session of an isolated environment, in its own sandbox, whose `parentSessionId` names the coordinator |
 | **Harness** | How the stock runtime is configured for a session: instructions, agents, skills, tools, models, and limits |
 | **Customizations** | A folder of agents, skills, and instructions shipped read-only with an environment |
 | **Gateway** | The platform's front door: sign-in, admission, placement, routing, and the durable record of work |
@@ -87,4 +91,4 @@ Each page answers one question, diagram first.
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../packages/cli/README.md) | Every command |
 | [Quickstart](../demos/quickstart/README.md) | Every spec snippet as an automated acceptance check |
-| [AI software factory](../demos/software-factory/README.md) and [assistant](../demos/assistant/README.md) | Two complete apps built on the platform |
+| [AI software factory](../demos/software-factory/README.md), [assistant](../demos/assistant/README.md), and [Dispatch](../demos/dispatch/README.md) | Three complete apps built on the platform |

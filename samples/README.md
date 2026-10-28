@@ -1,6 +1,6 @@
 # Walkthroughs
 
-Ten short, hands-on walkthroughs. Each one has a small, commented script you run against your platform, a diagram of
+Eleven short, hands-on walkthroughs. Each one has a small, commented script you run against your platform, a diagram of
 what happens, and the real output from a run. Start with 01; after that, pick what you need.
 
 ```mermaid
@@ -20,7 +20,11 @@ flowchart LR
   subgraph Cloud["Azure"]
     W10["10 · Azure from your laptop"]
   end
+  subgraph Many["Many agents"]
+    W11["11 · workers in parallel"]
+  end
   Basics --> Where --> Build --> Cloud
+  Where --> Many
 ```
 
 | # | Walkthrough | You'll see | Time |
@@ -35,6 +39,7 @@ flowchart LR
 | 08 | [Keep working while your app is offline](08-offline/README.md) | A tool call that waits for you, answered by polling | 1 min |
 | 09 | [Run on a schedule](09-schedules/README.md) | A weekday schedule, run now, with the agent's reply | 1 min |
 | 10 | [Your agent in Azure, from your laptop](10-azure/README.md) | The same samples against Azure, and a sandbox in Copilot CLI | 5 min |
+| 11 | [Split a job across workers](11-orchestrator/README.md) | A coordinator starts two workers in their own sandboxes and puts their reports together | 1 min |
 
 ## Before you start
 

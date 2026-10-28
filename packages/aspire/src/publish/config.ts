@@ -9,7 +9,7 @@
  * - A public deployment must say which GitHub accounts may use it.
  */
 import { isAbsolute, relative, sep } from "node:path";
-import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
+import { sandboxedType, type ManagedCopilotConfig } from "@managed-copilot/protocol";
 
 /** Where the gateway image keeps the AppHost files it needs (customizations). */
 export const APPHOST_DIR_IN_IMAGE = "/opt/managed-copilot/apphost";
@@ -67,7 +67,7 @@ export function prepareAzureConfig(config: ManagedCopilotConfig, appHostDirector
     delete next.image;
     environments[name] = next;
   }
-  const isolated = Object.values(config.environments).some((environment) => environment.type !== "shared") || (config.inline?.types ?? []).some((type) => type !== "shared");
+  const isolated = Object.values(config.environments).some((environment) => sandboxedType(environment.type)) || (config.inline?.types ?? []).some((type) => sandboxedType(type));
   if (isolated) sandboxImages["*"] = {};
   return { config: { ...config, environments }, customizations: [...customizations].sort(), sandboxImages };
 }

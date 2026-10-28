@@ -1,11 +1,13 @@
 # Managed Copilot SDK: developer experience
 
-> **Status: built, and qualified within the limits recorded below (2026-10-24).** The SDK, Aspire integration, CLI,
-> gateway, sandbox image, and egress proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime
-> 1.0.103, unmodified. They run locally with `aspire run` and on Azure with `aspire deploy`. The 13 customer snippets
-> run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
-> [software factory](../../demos/software-factory) and [assistant](../../demos/assistant) demos use the platform end
-> to end with real models. The six OpenAI gaps are implemented and exercised; that is not a claim of full parity. The
+> **Status: built, and qualified within the limits recorded below (2026-10-24; orchestrator environments on
+> 2026-10-26, and on Azure on 2026-10-27).** The SDK, Aspire integration, CLI, gateway, sandbox image, and egress
+> proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime 1.0.103, unmodified. They run
+> locally with `aspire run` and on Azure with `aspire deploy`, orchestrator environments included. The 14 customer
+> snippets run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
+> [software factory](../../demos/software-factory), [assistant](../../demos/assistant), and
+> [Dispatch](../../demos/dispatch) demos use the platform end to end with real models. The six OpenAI gaps are
+> implemented and exercised; that is not a claim of full parity. The
 > [delivery gates](#delivery-gates) record what each gate proved and what it did not, and the
 > [decision tracker](#decision-tracker) separates user decisions from their delivery state.
 > [architecture.md](../architecture.md) and [deployment.md](../deployment.md) describe the system as built.
@@ -78,7 +80,7 @@ const session = await managed.createSession({ environment: "chat", model: "claud
 | `shared` | One runtime shared by many sessions | Session-safe tools, approved remote MCP, and filtered web access; no workload filesystem or subprocess tools | No per-session container allocation | Per-session state and identity in a shared process | Chat, support, Q&A, high volume |
 | `isolated` | A fresh Linux **sandbox** (container) for each session | Policy-approved shell, files, git, and image toolchain | Cold start or warm allocation; latency to measure | A container per session | Coding and data agents |
 | `promotable` | Starts `shared`, then moves once into its own fresh sandbox | Shared tools, then the admitted sandbox tools | Shared start plus an explicit cutover | Shared, then a container | Assistants that occasionally need a shell |
-| `orchestrator` *(later)* | A shared coordinator that starts workers in dynamic containers | Per worker | | A container per worker | Parallel and multi-agent work |
+| `orchestrator` | A shared coordinator that starts workers, each a session with its own sandbox ([section 17](#17-orchestrator-a-coordinator-with-workers)) | Coordinator: session-safe tools and worker tools; workers: their environment's sandbox tools | Shared start; each worker starts like an isolated session | Shared coordinator; a container per worker | Parallel and multi-agent work |
 
 ## 1. Declare your environments
 
@@ -973,6 +975,104 @@ the console with the ticket in the URL fragment, which never reaches server logs
 HttpOnly, `SameSite=Strict` session cookie that lasts 8 hours (1 hour idle) and re-verifies the operator's GitHub
 credential on every request. Scripts call the same operator API (`/v1/operator/*`) with a GitHub bearer token.
 
+## 17. Orchestrator: a coordinator with workers
+
+An `orchestrator` environment runs a coordinator agent that splits work across **workers**. The coordinator runs on
+the shared runtime. Each worker is an ordinary session of one of your isolated environments, with its own sandbox.
+
+```ts
+// apphost.mts
+environments: {
+  coder: { type: "isolated", size: "medium" },
+  team: {
+    type: "orchestrator",
+    workers: ["coder"], // isolated environments its workers run in; the first is the default
+    maxWorkers: 3,      // workers one session can have at once (default 4, at most 16)
+  },
+},
+```
+
+```ts
+managed.on("worker.started", (e) => console.log(`${e.data.name} started in ${e.data.environment}`));
+
+const client = await managed.client("team");
+const session = await client.createSession({ model: "claude-sonnet-5", onPermissionRequest: approveAll });
+
+// The coordinator starts workers, waits for their reports, and answers: one sendAndWait covers the whole job.
+const reply = await session.sendAndWait(
+  {
+    prompt:
+      "In parallel, use one worker to compute the sum of the integers from 1 to 1000 with Python and another to compute 20 factorial with Python. Report both numbers.",
+  },
+  25 * 60_000,
+);
+console.log(reply?.data.content);
+
+for (const worker of await managed.workers(session).list()) {
+  console.log(worker.name, worker.environment, worker.state, worker.result);
+}
+```
+
+The coordinator manages its workers with platform tools that only orchestrator sessions get:
+
+| Tool | What it does |
+| --- | --- |
+| `start_worker` | Starts a worker in a worker environment with a name and a self-contained task, and optionally a custom `agent` and `model`. Returns at once while the sandbox starts. Asks for the session's permission |
+| `wait_for_workers` | Waits until the named workers (by default, every busy one) finish, then returns each one's state and final report. Uses no model time. Returns early when a message from the user is waiting, and after at most an hour; the coordinator calls it again to keep waiting |
+| `message_worker` | Sends a follow-up to a worker that finished or failed its current work. A working worker is waited for first (`session_busy`) |
+| `list_workers` | The worker environments and their agents, and each worker's state and latest report |
+| `read_worker_file` | Reads a text file from a worker's `/workspace`, or lists a directory |
+| `copy_worker_files` | Copies files or directories from one worker's `/workspace` to another's, through the gateway |
+| `stop_worker` | Cancels a worker's work and deletes its session and sandbox |
+
+### Orchestrator contract
+
+1. **Workers are sessions.** A worker is a session of a declared isolated environment, owned by the coordinator's
+   owner, in its own sandbox with that environment's image, setup, network policy, vaults, and idle stop. Its
+   `SessionInfo.parentSessionId` names the coordinator. `managed.files(worker.id)`, `managed.artifacts(worker.id)`,
+   `managed.resumeSession(worker.id)`, and `npx managed-copilot attach <worker>` work on it unchanged, and
+   `npx managed-copilot workers <session>` lists a coordinator's workers.
+2. **One approval per worker.** `start_worker` asks the coordinator session's permission: your `onPermissionRequest`,
+   or the person in an attached Copilot CLI. Approving it approves the worker's work in its sandbox. The platform then
+   answers the worker's own permission prompts once each, as `approveAll` does, and records each answer in the actions
+   ledger as `platform:orchestrator`. Whether managed policy reserves a prompt for a person is the ledger's decision
+   (read as the stock SDK documents it); those prompts wait for one (attach Copilot CLI to the worker), the
+   coordinator's reports say a worker is waiting for a person, and a client attached to a worker answers that worker's
+   prompts itself. The coordinator's model never approves anything.
+3. **No polling, and a conversation stays responsive.** `wait_for_workers` holds the coordinator's turn open without
+   model calls, so one `sendAndWait` covers the whole job. Pass a timeout longer than the work (the stock default is
+   60 seconds). A message the user sends while the coordinator waits ends the wait early so it can answer, and the
+   workers keep working: one sent with `mode: "immediate"` reaches it in the same turn, and a queued one once it ends
+   its turn (it is told to). A worker run that reports an error fails when it ends, as `sendAndWait` reports it.
+   Before it reports, `wait_for_workers` waits up to 30 seconds for finished workers' outputs to publish. Worker
+   reports are clipped to a bounded size and reach the coordinator marked as data from another agent, never as
+   instructions.
+4. **Workers run as the owner, within the coordinator's limits.** While a worker has no client of its own, the
+   coordinator's connected client serves its model calls, then the owner's background sign-in
+   (`npx managed-copilot login`), from the worker's creation on: a credential taken from a connection never serves a
+   worker after that connection closes, even while a message to the worker is being sent. Nothing broadens: a worker
+   uses the coordinator's model when its environment allows it (otherwise the environment's own), a client's network
+   narrowing of the coordinator applies to its workers, and workers cannot start workers.
+5. **Bounded and cleaned up.** A session has at most `maxWorkers` workers at once. Stopped workers, and starts that
+   failed before a session existed, don't count. `stop_worker`, or deleting the coordinator, deletes workers with
+   their sandboxes and files; a deletion that fails, or that another deletion still has under way, is reported and
+   followed up until the session is gone, also after a restart. Tool calls are idempotent, and a call a gateway
+   shutdown interrupts runs again after the restart: a replayed `stop_worker` stops the worker it chose, never a newer
+   one with the same name, and a replayed `message_worker` never sends twice. After a gateway restart, a start the
+   restart interrupted fails, a worker turn it cut ends, and a message that never started a run fails the worker with
+   the earlier report kept, so waits finish.
+6. **Files move through the gateway.** Workers don't share a disk, so the same tools work on Docker and on Azure:
+   `read_worker_file` returns up to 64,000 characters of text, and `copy_worker_files` copies at most 500 files and
+   64 MiB per call. File calls are pinned to the worker's own sandbox, so they never reach a newer session that reuses
+   a deleted worker's ID. A worker's `/workspace/outputs` publishes as that worker's artifacts.
+
+Platform events report workers on the coordinator's session: `worker.started`, `worker.idle`, `worker.failed`, and
+`worker.stopped`, with `data: { workerId, name, environment, state, error? }`.
+
+Not in this delivery: delivering worker results to an idle coordinator as new turns (the coordinator waits instead),
+steering a worker in the middle of its work, relaying each worker prompt to your `onPermissionRequest`, a shared
+volume between workers, nested workers, and worker environments written by the model.
+
 ## What runs where
 
 This is the intended trust topology, not a deployed system. The bridge is transport code on the customer's
@@ -991,8 +1091,8 @@ flowchart LR
     GW["Authenticated gateway<br/>routing and admission"]
     Owner["Session owner<br/>action claims, webhooks, schedules"]
     Identity["Credential / inference broker"]
-    Shared["Shared runtime<br/>shared and promotable sessions"]
-    Sbx["Sandboxes<br/>one per isolated or promoted session"]
+    Shared["Shared runtime<br/>shared, promotable, and orchestrator sessions"]
+    Sbx["Sandboxes<br/>one per isolated or promoted session, or worker"]
     Egress["Egress proxy<br/>network rules and vault secrets"]
     Store[("Durable session / action ledger<br/>state and artifact storage")]
   end
@@ -1009,6 +1109,7 @@ flowchart LR
   Owner --> Store
   Owner --> Identity
   Shared -. "promote" .-> Sbx
+  Shared -. "start_worker" .-> Sbx
   Shared --> Egress
   Sbx --> Egress
   Egress --> Web
@@ -1024,12 +1125,13 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 
 | Piece | What it is | Status |
 | --- | --- | --- |
-| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
+| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `workers`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
 | `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `packages/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
-| `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
+| `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `platform/gateway`, `platform/sandbox`, `platform/egress` |
+| Orchestrator environments | A shared coordinator with worker tools, workers as sessions in their own sandboxes, approvals within each worker's start, and cleanup (section 17) | Built: gateway `modules/orchestrator`, with real models locally and on Azure |
 | Operator console | Web console and operator API for health, deployed state, sessions, harness configuration, and guarded actions (section 16) | Built: `platform/console`, served by the gateway at `/console` |
-| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment | Built: `demos/quickstart` (13 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` |
+| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, same-session CLI attachment, and orchestrator workers | Built: `demos/quickstart` (14 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` (which asks before starting Python or web research sandboxes for hands-on work), and `demos/dispatch` (a chat with an orchestrator that shows each sandbox it creates or reuses) |
 
 ## Comparison with OpenAI's Agents API
 
@@ -1064,7 +1166,7 @@ limitations or unresolved gates, not reasons to claim feature parity.
 | Secrets | Vaults for sandbox requests and MCP, including documented credential types | Target placeholders and scoped MCP credentials; header/TLS support is bounded. MCP OAuth lifecycle parity is not established |
 | Your functions while you're away | `required_actions` wait for a `tool_result`, and webhooks notify you | Durable actions with claims, replay reconciliation, signed webhooks, and polling; no blanket hook or process-resumption guarantee |
 | Schedules | Automations start/continue sessions; agents can request schedules | Same intended journeys, with stored tool declarations, authorized handler routes, and idempotent occurrences |
-| Multi-agent | Subagents with their own context in the same environment | Native SDK subagents are a candidate within admitted policy; their crash/suspend recovery is not established. Container-worker orchestration remains later |
+| Multi-agent | Subagents with their own context in the same environment | `orchestrator` environments: a coordinator starts workers, each a session with its own sandbox (section 17). Native SDK subagents remain a candidate within admitted policy; their crash/suspend recovery is not established |
 
 ### Where they differ by design
 
@@ -1135,7 +1237,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 25 | Background credential | Supported refreshable GitHub user authorization, current entitlement, revocation, and pause/error behavior | Partly validated | Sealed sign-in, re-verification, revocation, and visible pauses work; no refresh, so an expired token needs `login` again |
 | 26 | Suspended waits | Qualify root-agent checkpoints independently; no promise for subagent or OS-process survival | Validated | Root-agent waits on durable actions outlast the app and gateway restarts; other interrupted turns end visibly as failed (G2) |
 | 27 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later | Not built |
-| 28 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later | Not built |
+| 28 | `orchestrator` environments | A shared coordinator whose workers are sessions of declared isolated environments, each in its own sandbox; one approval per worker at `start_worker` covers its prompts (as `approveAll`); waits without polling (section 17) | Decided | Built with Docker sandboxes and real models (G6), and run on Azure Container Apps Sandboxes |
 | 29 | GitHub App registration | Operator-owned registration versus a supported shared registration, including callback setup and tenant separation | Needs decision | Not built: callers use their own GitHub sign-in (`gh` or `GH_TOKEN`) |
 | 30 | Active-wait cost policy | Proposed resident waits until a qualified checkpoint; exact limits and cancel/recovery behavior need agreement | Needs decision | Interim: waits stay resident until the 24-hour answer deadline |
 | 31 | Background callback scope | Reject unsupported required hooks rather than bypass them; decide release scope after G2 without claiming full SDK callback parity | Needs decision | Interim: while a session's hook handler is away, new turns on it, unattended ones included, are refused (`background_callback_unsupported`). A turn already running when the handler leaves runs hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` without it |
@@ -1260,6 +1362,7 @@ supported-capability reporting; a local result alone does not qualify Azure.
 | G3: Azure substrate and persistence | On the chosen Azure backend, create two isolated sessions, verify private assignment, replace compute, and recover files, declared package environment, HOME, and native runtime state. Test actual native locking/recovery and old-owner overlap. Demonstrate warm assignment only if advertised. Unsupported subprocess/subagent suspension fails visibly; no blind replay of setup effects | G1 |
 | G4: Identity, isolation, and egress | Two GitHub users cannot cross-read/list/attach/answer. Real user-attributed inference, refresh, expiry, and revocation work through the broker without exposing provider/platform tokens in the sandbox. Network-on works; false blocks session-time packages and shell/MCP/web egress while scoped inference still works. Shared attribution, direct-IP/DNS/redirect bypasses, and supported TLS vault clients are exercised locally and on the chosen Azure backend | G1, G3 for Azure qualification |
 | G5: Promotion and attached-session continuity | Preserve the same client/session identity, native caller-visible operation, history, and ordered outcomes through promotion. Inject pre/post-commit failures and stale responses; only one owner executes. Caller network restrictions remain. A real interactive CLI reconnects to that same session. App/relay support is a separate acceptance result, not inferred from CLI success | G2, G3, G4 |
+| G6: Orchestrator workers | A coordinator starts workers in their own sandboxes only through the session's permission policy; one `sendAndWait` covers waiting for their reports without polling; worker prompts are answered within that approval and never on a person's behalf; files move between workers; workers are deleted with their coordinator; a restart settles interrupted starts and turns | G1, G2, G3 for Azure qualification |
 
 ### Gate results
 
@@ -1274,11 +1377,13 @@ was shown except for the items in the last column, which fail explicitly or are 
 | G3 | Passed with limits | Docker sandbox e2e (idle stop and resume with workspace and tools intact); gateway rollover e2e 3/3 | Container Apps Sandboxes: idle/recreate probe 8/8; a compute replacement kept data disks, workspace, HOME, the declared Python package, and native history. NFS storage 10/10 with cross-host lease exclusion; revision canaries. Interrupted factory work recovered by explicit Retry (9 files, 44/44 tests) | Warm assignment (`warm > 0` is refused); more than one gateway replica; partition-tolerant recovery |
 | G4 | Passed with limits | Egress Docker suite 11/11, 7 cases in sandbox-like client containers and 4 in real sandboxes: `network: false` blocks curl, pip, npm, git, and raw sockets; host lists; metadata, private, direct-IP, port, and peer destinations blocked; vault substitution scoped to session, host, and header. Sandboxes hold no GitHub token. Gated SDK e2e keeps another account's sessions invisible | Network-denied CONNECT returns 403 while inference works; allowed hosts return 200; vault substitution and response redaction pass | A live check with two real GitHub accounts (tests use distinct identities); refresh of expiring user tokens |
 | G5 | Passed for Copilot CLI | Promotion e2e and snippet 08: same session object and ID, ordered outcomes, published artifact. The stock Copilot CLI attached live: one responder per prompt, `ask_user`, no host paths, and promotion of an attached session with the CLI reconnecting by itself | Explicit promotion and continuation; non-interactive AHP probe for shared and isolated sessions | GitHub Copilot app publication (refused with `transport_unsupported`); an interactive terminal check on Azure |
+| G6 | Passed (locally 2026-10-26, again after review fixes 2026-10-27; Azure 2026-10-27) | Snippet 14: the coordinator started two workers in parallel in Docker sandboxes, approved through `approveAll`, and reported both results in one `sendAndWait`; their Python prompts were answered as `platform:orchestrator`, and deleting the coordinator deleted both sandboxes. A live run of every coordinator tool: a builder's files read and copied to a reviewer, a follow-up message, and a stop. After the review fixes: snippet 14 and walkthrough 11 again, and a live run in which `message_worker` refused a working worker and the model waited and sent it again, a copy and read went through pinned sandboxes, `wait_for_workers` listed a published output, and two stops deleted their sessions. Gateway integration and restart tests cover limits, prompts a person must answer, the credential fallback, replays, and cleanup. Three apps run on coordinators: Dispatch (approvals held in the app, a declined request's reason followed, a pending approval resumed after a hard restart, and a follow-up typed in an interactive Copilot CLI attached to the coordinator), the factory's agent-led mode (builders reused for fixes, and a factory restart mid-build that kept the coordinator and its workers), and the assistant (a sandbox started only after the person approved, a follow-up sent to the same sandbox, a second kind of sandbox, and an approval that waited while the tab was closed) | Passed (westus2, 2026-10-27): snippet 14 and walkthrough 11, each worker in its own Container Apps sandbox. A run of every coordinator tool passed 10/10 checks: a builder's script read, copied to a second worker's sandbox and run there after a follow-up message, worker prompts answered as `platform:orchestrator`, a stop that deleted the builder's session, and deleting the coordinator deleting the other worker. Dispatch: two approved workers, and a follow-up from an interactive Copilot CLI attached to the coordinator that reused one. The agent-led factory: a 47-test release built from three sandboxes | A gateway restart during worker runs on Azure (covered by local restart tests); the assistant's sandboxes on Azure; an interactive Copilot CLI attached to a worker |
 
 The demos run end to end on both targets. The software factory completed work orders locally (most recently the
 two-builder CSV ⇄ JSON toolkit on the final build: reviewed, fixed, and released with 40/40 tests) and on Azure (9
 files, 37/37 tests), and recovered interrupted Azure work through explicit checkpoint Retry. The assistant's
-triage, approvals, reminders, and background work passed locally and on Azure with its labelled demo Google data.
+triage, approvals, reminders, and background work passed locally and on Azure with its labelled demo Google data;
+its sandboxes, on an orchestrator, passed locally.
 Its real Gmail and Google Calendar provider is implemented, but it needs the operator's own Google OAuth client and
 was not run against real accounts.
 

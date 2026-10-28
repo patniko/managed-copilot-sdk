@@ -14,6 +14,9 @@ export const ROUTES = {
   sessions: "/v1/sessions",
   session: (id: string) => `/v1/sessions/${e(id)}`,
   promote: (id: string) => `/v1/sessions/${e(id)}/promote`,
+  /** `GET`: an orchestrator session's workers (`WorkerInfo[]`); `.../workers/:workerId` one of them. */
+  workers: (id: string) => `/v1/sessions/${e(id)}/workers`,
+  worker: (id: string, workerId: string) => `/v1/sessions/${e(id)}/workers/${e(workerId)}`,
   /** `POST` returns short-lived `AttachMaterial` for Copilot CLI attach (spec section 14). */
   attach: (id: string) => `/v1/sessions/${e(id)}/attach`,
   /** WebSocket (AHP) upgrade for an attach ticket: `Authorization: Bearer <ticket>` or `?tkn=<ticket>`. */

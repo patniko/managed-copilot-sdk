@@ -2,6 +2,7 @@
 import { createBuilder } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
+import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
@@ -15,7 +16,13 @@ const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
 if (!Number.isInteger(offset) || offset < 0 || offset > 50_000) {
   throw new Error(`MANAGED_COPILOT_PORT_OFFSET must be a whole number from 0 to 50000 (got "${process.env.MANAGED_COPILOT_PORT_OFFSET}").`);
 }
-const ports = { gateway: 7400 + offset, factory: 7480 + offset, quickstartWebhook: 7485 + offset, assistant: ASSISTANT_PORT + offset };
+const ports = {
+  gateway: 7400 + offset,
+  dispatch: DISPATCH_DEFAULT_PORT + offset,
+  factory: 7480 + offset,
+  quickstartWebhook: 7485 + offset,
+  assistant: ASSISTANT_PORT + offset,
+};
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
 // Generated once and kept in the AppHost's user secrets, so restarts keep the same values.
@@ -23,6 +30,7 @@ const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue
 
 // The demos bring their own environments (and the assistant its webhook) as plain data.
 const factory = softwareFactory({ port: ports.factory });
+const dispatchDemo = dispatch({ port: ports.dispatch });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const quickstartWebhook = { port: ports.quickstartWebhook, secret: await generatedSecret("quickstart-webhook-secret") };
 
@@ -42,8 +50,11 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     },
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
+    // A coordinator on the shared runtime that starts workers, each a session of `coder` in its own sandbox (section 17).
+    team: { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
     ...factory.environments,
     ...assistant.environments,
+    ...dispatchDemo.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -88,7 +99,12 @@ function addDemo(demo: Demo, deployment: DemoDeployment) {
 // An AI software factory: plans a work order, builds tasks in parallel sandboxes, reviews, and releases.
 await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", allowedHostsEnv: "FACTORY_ALLOWED_HOSTS", gatewayUrlEnv: ["FACTORY_ATTACH_URL"] });
 
-// A long-running assistant you talk to like a bot: reminders, briefings, Gmail, and Google Calendar.
+// Dispatch: one conversation with an orchestrator agent that, message by message, creates a sandbox for each part of
+// the work or sends it to a sandbox it already has.
+await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allowedHostsEnv: "DISPATCH_ALLOWED_HOSTS", gatewayUrlEnv: ["DISPATCH_ATTACH_URL"] });
+
+// A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
+// for hands-on work.
 const assistantApp = await (
   await addDemo(
     { ...ASSISTANT_DEMO, port: ports.assistant, env: { ...ASSISTANT_DEMO.env, ASSISTANT_PUBLIC_URL: assistantUrl } },

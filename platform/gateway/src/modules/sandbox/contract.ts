@@ -124,6 +124,17 @@ export interface FileWriteOptions {
   readonly overwrite?: boolean;
   /** Declared size when known; uploads larger than the limit fail before streaming. */
   readonly size?: number;
+  /** See `FileCallOptions.sandboxId`. */
+  readonly sandboxId?: string;
+}
+
+export interface FileCallOptions {
+  /**
+   * The sandbox (from `get(sessionId).id`) the call is for: it fails with `not_found`, before and after starting a
+   * stopped sandbox, unless that is still the session's sandbox, so a call made for one session never reaches a newer
+   * session that reuses its ID.
+   */
+  readonly sandboxId?: string;
 }
 
 export interface FileDownload {
@@ -165,8 +176,8 @@ export interface SandboxesService {
   /** Records activity that should postpone idle stop. */
   touch(sessionId: string): void;
   setupRecord(sessionId: string): SandboxSetupRecord | undefined;
-  listFiles(sessionId: string, path: string, options?: { readonly recursive?: boolean }): Promise<FileEntry[]>;
-  readFile(sessionId: string, path: string): Promise<FileDownload>;
+  listFiles(sessionId: string, path: string, options?: FileCallOptions & { readonly recursive?: boolean }): Promise<FileEntry[]>;
+  readFile(sessionId: string, path: string, options?: FileCallOptions): Promise<FileDownload>;
   writeFile(sessionId: string, path: string, body: Readable, options?: FileWriteOptions): Promise<FileEntry>;
 }
 

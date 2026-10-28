@@ -3,7 +3,7 @@
  * timeline items and streams them over server-sent events (`GET /api/events`).
  */
 
-export type TimelineItemKind = "user" | "trigger" | "assistant" | "tool" | "approval" | "notice";
+export type TimelineItemKind = "user" | "trigger" | "assistant" | "tool" | "approval" | "notice" | "worker";
 
 interface BaseItem {
   readonly id: string;
@@ -52,7 +52,43 @@ export interface ToolItem extends BaseItem {
   readonly endedAt?: string;
 }
 
-export type ToolIcon = "mail" | "send" | "draft" | "calendar" | "calendar-plus" | "calendar-edit" | "calendar-x" | "clock" | "repeat" | "bell" | "tool";
+export type ToolIcon =
+  | "mail"
+  | "send"
+  | "draft"
+  | "calendar"
+  | "calendar-plus"
+  | "calendar-edit"
+  | "calendar-x"
+  | "clock"
+  | "repeat"
+  | "bell"
+  | "file"
+  | "copy"
+  | "trash"
+  | "tool";
+
+/**
+ * The assistant started a sandbox (`start_worker`) or sent one a follow-up (`message_worker`). A sandbox is a worker:
+ * its own session of an isolated environment (spec section 17). This item is the coordinator's tool call; the
+ * sandbox's live state, timing, and outputs are in `SandboxesView`, keyed by this item's ID in `runs`.
+ */
+export interface WorkerItem extends BaseItem {
+  readonly kind: "worker";
+  readonly action: "start" | "message";
+  /** The sandbox's name, as the assistant gave it. */
+  readonly worker: string;
+  /** Its environment: the one asked for or the default (start), or the sandbox's own (follow-up, when known). */
+  readonly environment?: string;
+  /** What it was asked: the task (start) or the follow-up (message). */
+  readonly text: string;
+  /** The tool call. A started sandbox keeps working after it returns; `SandboxesView` follows that. */
+  readonly status: ToolStatus;
+  readonly error?: string;
+  /** The sandbox's session ID, once the platform named it. */
+  readonly workerId?: string;
+  readonly endedAt?: string;
+}
 
 export type ApprovalStatus = "pending" | "approved" | "denied" | "expired";
 
@@ -79,6 +115,21 @@ export type ApprovalPreview =
       readonly current?: { readonly title: string; readonly start: string; readonly end: string };
       readonly timeZone: string;
     }
+  | {
+      /** `start_worker`: starting a sandbox. Approving it approves what the sandbox does inside it. */
+      readonly type: "sandbox";
+      readonly worker: string;
+      readonly environment: string;
+      readonly kind: SandboxKind;
+      /** "Python sandbox", "web research sandbox". */
+      readonly label: string;
+      readonly size?: string;
+      /** What it can reach, e.g. "network off". */
+      readonly network?: string;
+      readonly task: string;
+      readonly agent?: string;
+      readonly model?: string;
+    }
   | { readonly type: "generic"; readonly summary: string };
 
 export interface ApprovalItem extends BaseItem {
@@ -99,7 +150,81 @@ export interface NoticeItem extends BaseItem {
   readonly text: string;
 }
 
-export type TimelineItem = UserItem | TriggerItem | AssistantItem | ToolItem | ApprovalItem | NoticeItem;
+export type TimelineItem = UserItem | TriggerItem | AssistantItem | ToolItem | ApprovalItem | NoticeItem | WorkerItem;
+
+/** What a sandbox environment is for, which sets its icon and wording. */
+export type SandboxKind = "python" | "web" | "general";
+
+/** A worker environment of the conversation's orchestrator environment: a kind of sandbox the assistant can start. */
+export interface SandboxEnvironmentView {
+  readonly name: string;
+  readonly kind: SandboxKind;
+  /** Used mid-sentence: "Python sandbox", "web research sandbox", "sandbox". */
+  readonly label: string;
+  readonly description?: string;
+  readonly size?: string;
+  /** "network off", "can reach github.com and api.github.com only", or "full network access". */
+  readonly network: string;
+  /** Used when the assistant doesn't name an environment. */
+  readonly default: boolean;
+}
+
+/** A file a sandbox published from its `/workspace/outputs` (one version of it). */
+export interface SandboxOutputView {
+  /** The artifact's ID; this server serves it at `url`. */
+  readonly id: string;
+  /** Path under `outputs/`. */
+  readonly path: string;
+  readonly version: number;
+  readonly size: number;
+  readonly contentType?: string;
+  readonly publishedAt?: string;
+  /** PNG, JPEG, GIF, WebP, or SVG: shown in the chat. Other files are downloads. */
+  readonly image: boolean;
+  readonly url: string;
+}
+
+export type SandboxState = "starting" | "working" | "idle" | "failed" | "stopped";
+
+/** One of the conversation's sandboxes (a worker of its orchestrator session). */
+export interface SandboxWorkerView {
+  readonly id: string;
+  readonly name: string;
+  readonly environment: string;
+  readonly state: SandboxState;
+  /** Messages it received, its task included. */
+  readonly messages: number;
+  readonly error?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  /** Its sandbox's own state ("running", "stopped", ...) while it has one. */
+  readonly sandboxState?: string;
+  readonly outputs: readonly SandboxOutputView[];
+}
+
+/** When one start or follow-up card's work ran: from its tool call until the sandbox finished. */
+export interface SandboxRunView {
+  readonly workerId?: string;
+  readonly startedAt: string;
+  readonly finishedAt?: string;
+  readonly outcome?: "idle" | "failed" | "stopped";
+}
+
+export interface SandboxesView {
+  /** The assistant can start sandboxes in this conversation. */
+  readonly enabled: boolean;
+  /** Why it can't although its environment has sandboxes, in plain words; `startOver` offers a new conversation. */
+  readonly unavailable?: { readonly reason: string; readonly startOver?: boolean };
+  readonly environments: readonly SandboxEnvironmentView[];
+  /** Sandboxes one conversation can have at once (stopped ones don't count). */
+  readonly maxWorkers?: number;
+  /** Every sandbox the conversation started, oldest first, stopped ones included. */
+  readonly workers: readonly SandboxWorkerView[];
+  /** Timing of each start or follow-up card, by the card's ID. */
+  readonly runs: Readonly<Record<string, SandboxRunView>>;
+  /** The last refresh failed; the lists are the last known ones. */
+  readonly error?: string;
+}
 
 export type PlatformState = "connecting" | "ready" | "unavailable" | "unauthenticated" | "misconfigured";
 
@@ -213,6 +338,7 @@ export interface Snapshot {
   readonly settings: { readonly timeZone: string };
   readonly offline: OfflineView;
   readonly agenda?: AgendaView;
+  readonly sandboxes: SandboxesView;
 }
 
 export type ServerEvent =
@@ -225,6 +351,7 @@ export type ServerEvent =
   | { readonly type: "connections"; readonly connections: ConnectionsView }
   | { readonly type: "offline"; readonly offline: OfflineView }
   | { readonly type: "agenda"; readonly agenda: AgendaView }
+  | { readonly type: "sandboxes"; readonly sandboxes: SandboxesView }
   | { readonly type: "settings"; readonly settings: { readonly timeZone: string } }
   | { readonly type: "read"; readonly lastReadAt: string }
   | { readonly type: "notify"; readonly title: string; readonly body: string; readonly itemId?: string };

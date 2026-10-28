@@ -44,8 +44,9 @@ on your machine, and `aspire deploy` puts the same AppHost on Azure Container Ap
 `CopilotClient` and `CopilotSession` objects, standard session events, and `defineTool` tools. What works today, end
 to end with real models:
 
-- **Shared, isolated, and promotable environments.** Chat on a shared runtime, coding agents in their own sandboxes
-  with setup, files, and artifacts, and sessions that start cheap and move into a sandbox when they need one.
+- **Shared, isolated, promotable, and orchestrator environments.** Chat on a shared runtime, coding agents in their
+  own sandboxes with setup, files, and artifacts, sessions that start cheap and move into a sandbox when they need
+  one, and coordinators that split work across workers, each in its own sandbox.
 - **Policy you can see.** Per-environment network allowlists, and vault credentials applied at the egress proxy so
   secrets never enter a sandbox.
 - **Work that continues without you.** Tool calls wait durably and are answered later by your webhook or a poller;
@@ -85,6 +86,7 @@ More in [docs/architecture.md](docs/architecture.md): topology, protocol facts, 
 | `shared` | A lightweight session on the shared runtime; its tools run inside your app | Chat agents and assistants |
 | `isolated` | Its own sandbox: a workspace, a shell, the packages you set up, and network rules you control | Coding agents, builds, data work |
 | `promotable` | Starts on the shared runtime, then moves into a sandbox as the same session when it needs one | Chats that sometimes need to run code |
+| `orchestrator` | A coordinator on the shared runtime that starts workers, each a session with its own sandbox, and waits for their reports | Parallel and multi-agent work |
 
 ```ts
 // apphost.mts: declared once, picked by name with managed.client("coder")
@@ -93,12 +95,14 @@ await addManagedCopilot(builder, "copilot", {
     chat:   { type: "shared", network: ["learn.microsoft.com"] },
     coder:  { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" },
+    team:   { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
   },
 });
 ```
 
 An environment is a template; a client only picks one. Every `chat` session shares one runtime, every `coder` session
-gets its own new sandbox, and a `helper` session moves once into a sandbox when it needs one. From a live run:
+gets its own new sandbox, a `helper` session moves once into a sandbox when it needs one, and a `team` session starts
+workers that each get a sandbox of their own. From live runs:
 
 ```mermaid
 flowchart LR
@@ -111,23 +115,28 @@ flowchart LR
   H -. "moves once" .-> S3["its own new sandbox<br/>(coder's image, size, setup)"]
   K1["coder session 1"] --> S1["sandbox sbx_96fd…"]
   K2["coder session 2"] --> S2["sandbox sbx_1635…"]
+  T["team session<br/>(coordinator)"] --> RT
+  T -. "start_worker" .-> W1["worker prime-counter<br/>sandbox sbx_85a3…"]
+  T -. "start_worker" .-> W2["worker fib-digits<br/>sandbox sbx_602b…"]
 ```
 
-More in [environments](docs/concepts/environments.md) and [sandboxes](docs/concepts/sandboxes.md).
+More in [environments](docs/concepts/environments.md), [sandboxes](docs/concepts/sandboxes.md), and the
+[orchestrator](docs/concepts/orchestrator.md).
 
 ## The demos
 
-Both demos run under `aspire run` with real models, and both run on Azure from the same AppHost.
+All three demos run under `aspire run` with real models, and the same AppHost publishes them to Azure.
 
 ### AI software factory
 
 <p align="center">
-  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The factory floor: a plan split into two tasks, each built by its own builder in its own sandbox, with reviews and a release waiting" width="900">
+  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The agent-led factory floor: a coordinator that created two builder sandboxes and reused them for review fixes, with its decisions listed live" width="900">
 </p>
 
-Describe the software you want. A planner splits it into tasks, and a builder per task works in **its own sandbox**,
-all in parallel. A reviewer on a different model sends work back with file-and-line findings. A release agent then
-integrates the tasks, adds integration tests and a README, and publishes a tested release you can download.
+Describe the software you want. A planner splits it into tasks. A coordinator agent then creates a builder in **its
+own sandbox** for each task, sends review findings back to the same builder, and creates a release sandbox once every
+task passes. The factory still decides what counts: real test reports, a reviewer on a different model, and the
+accepted release. The original app-driven pipeline remains as **Classic** mode.
 
 <p align="center">
   <img src="demos/software-factory/docs/screenshots/deliverable.png" alt="The deliverable: release ready, 38 of 38 tests passed, release notes, and per-task review results" width="900">
@@ -143,11 +152,26 @@ integrates the tasks, adds integration tests and a README, and publishes a teste
 </p>
 
 A bot you chat with that reads your mail and manages your calendar. It uses a clearly labelled demo workspace until
-you connect Google, and it always asks before it sends mail or changes your calendar. Reminders and recurring
-briefings run as you, and it keeps working with the tab closed: the platform runs the turn and calls the assistant's
-webhook for the tool calls it needs.
+you connect Google, and it always asks before it sends mail or changes your calendar. For hands-on work, such as
+charting your meeting load or researching on GitHub, it asks to start a sandbox: an agent in its own isolated
+environment, which it reuses for follow-ups. Reminders and recurring briefings run as you, and it keeps working with
+the tab closed: the platform runs the turn and calls the assistant's webhook for the tool calls it needs.
 
 → [demos/assistant](demos/assistant/README.md)
+
+### Dispatch
+
+<p align="center">
+  <img src="demos/dispatch/docs/screenshots/conversation.png" alt="A Dispatch conversation: the first message created three Python sandboxes in parallel; the second reused one of them and created a writer's sandbox" width="900">
+</p>
+
+A chat with an orchestrator agent that builds the environments your request needs. For every message, the
+coordinator decides whether to create new sandboxes, from blueprints the AppHost declares (a Python lab, a Node
+workshop, web research, a writer's desk), or to send the work to sandboxes it already has. Each message shows what the
+agent did, each sandbox shows which messages created it and reused it, and you approve every new sandbox. Open the same
+conversation in Copilot CLI and keep talking there.
+
+→ [demos/dispatch](demos/dispatch/README.md)
 
 ## Run it locally
 
@@ -160,9 +184,9 @@ pnpm build
 aspire run        # the dashboard, the platform at http://localhost:7400, and the demos
 ```
 
-`aspire run` starts the gateway, the software factory (http://localhost:7480), and the assistant
-(http://localhost:7490). Your code finds the platform with no configuration: `ManagedCopilot.connect()` reads the
-discovery record the local gateway writes. From another terminal:
+`aspire run` starts the gateway, Dispatch (http://localhost:7470), the software factory (http://localhost:7480), and
+the assistant (http://localhost:7490). Your code finds the platform with no configuration: `ManagedCopilot.connect()`
+reads the discovery record the local gateway writes. From another terminal:
 
 ```powershell
 npx managed-copilot status             # the deployment, your account, and its environments
@@ -182,10 +206,11 @@ To run every snippet from the spec against your platform, start **quickstart** i
 - **Behind a NuGet proxy.** If nuget.org is blocked, point the Aspire CLI at your proxy with
   `ASPIRE_CLI_NUGET_SERVICE_INDEX=<proxy>/v3/index.json` and add an untracked `NuGet.config` at the repository root
   whose `packageSourceMapping` maps `*` to that proxy (the file is git-ignored).
-- **A port is in use.** The gateway (7400), the factory (7480), and the assistant (7490) use fixed ports; the
-  assistant's is fixed for its Google OAuth redirect. Stop whatever holds the port, then restart the resource.
+- **A port is in use.** The gateway (7400), Dispatch (7470), the factory (7480), and the assistant (7490) use fixed
+  ports; the assistant's is fixed for its Google OAuth redirect. Stop whatever holds the port, then restart the
+  resource.
 - **A second copy beside the first** (for example another checkout): set `MANAGED_COPILOT_PORT_OFFSET=300` to move
-  its ports to 7700, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at it with
+  its ports to 7700, 7770, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at it with
   `MANAGED_COPILOT_URL=http://localhost:7700`.
 
 ## Deploy to Azure
@@ -207,11 +232,15 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 ## What's verified
 
-- **Every example in the spec runs as an automated check** against the real platform with real models. All 13 pass
-  locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass.
+- **Every example in the spec runs as an automated check** against the real platform with real models. The first 13
+  pass locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass. The orchestrator
+  example (14) passes locally and on Azure.
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
-- **Both demos run end to end** locally and on Azure.
+- **The demos run end to end, locally and on Azure.** The factory runs in both modes: the classic pipeline, and the
+  agent-led mode, whose restart mid-build was tested locally. The assistant runs too; its sandboxes, added last, have
+  been verified locally only. Dispatch runs as well, including a follow-up typed in Copilot CLI attached to the same
+  conversation.
 - **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
   process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
   list what each gate proved and what it did not.
@@ -225,7 +254,8 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
-| [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail and Google Calendar |
+| [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail, Google Calendar, and sandboxes for hands-on work |
+| [Dispatch](demos/dispatch/README.md) | A chat with an orchestrator agent that creates a sandbox for each part of a request, or reuses the ones it has |
 | [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
 | [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
 | [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
@@ -246,7 +276,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
 | `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
 | `samples` | The walkthroughs' code: small, commented scripts you run with `pnpm sample <number>` |
-| `demos/software-factory`, `demos/assistant` | The AI software factory and the long-running assistant |
+| `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
 | `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |
 
 ## Develop

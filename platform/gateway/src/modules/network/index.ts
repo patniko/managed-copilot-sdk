@@ -3,7 +3,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { NETWORK_BLOCKED_EVENT, PLATFORM_EVENT_TYPES, type EgressReport, type EgressStatus, type NetworkPolicy, type Placement, type PlatformEventType, type VaultInfo } from "@managed-copilot/protocol";
+import { NETWORK_BLOCKED_EVENT, PLATFORM_EVENT_TYPES, sandboxedType, type EgressReport, type EgressStatus, type NetworkPolicy, type Placement, type PlatformEventType, type VaultInfo } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
 import type { Database } from "../../db.js";
 import { optionalService, type EventsService, type PlatformToolRegistry } from "../core/contracts.js";
@@ -90,7 +90,7 @@ export const networkModule: GatewayModule = {
     const egressKey = sealedKey(app.db, sealer, "egress_key", env.MANAGED_COPILOT_EGRESS_KEY);
     const adapterKey = Buffer.from(sealedKey(app.db, sealer, "mcp_adapter_key", undefined), "base64url");
     const deployment = app.config.deployment;
-    const needsSandboxes = Object.values(deployment.environments).some((environment) => environment.type !== "shared") || (deployment.inline?.types ?? []).includes("isolated");
+    const needsSandboxes = Object.values(deployment.environments).some((environment) => sandboxedType(environment.type)) || (deployment.inline?.types ?? []).includes("isolated");
     const requested = (env.MANAGED_COPILOT_EGRESS ?? "auto").toLowerCase();
     const mode: EgressMode = requested === "docker" || requested === "external" || requested === "off" ? requested : "auto";
 

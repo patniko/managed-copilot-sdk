@@ -1,16 +1,19 @@
 /**
- * AppHost fragment for the AI software factory demo (spec sections 1, 4-8, 10). Plain data: no Aspire imports.
+ * AppHost fragment for the AI software factory demo (spec sections 1, 4-8, 10, 17). Plain data: no Aspire imports.
  *
- * | Environment        | Type     | Customizations | Agent      | Network                          |
- * | ------------------ | -------- | -------------- | ---------- | -------------------------------- |
- * | `factory-planner`  | shared   | `office`       | `planner`  | off                              |
- * | `factory-builder`  | isolated | `workshop`     | `builder`  | package registry and GitHub only |
- * | `factory-reviewer` | shared   | `office`       | `reviewer` | off                              |
- * | `factory-release`  | isolated | `workshop`     | `release`  | package registry and GitHub only |
+ * | Environment           | Type         | Customizations | Agent         | Network                          |
+ * | --------------------- | ------------ | -------------- | ------------- | -------------------------------- |
+ * | `factory-planner`     | shared       | `office`       | `planner`     | off                              |
+ * | `factory-builder`     | isolated     | `workshop`     | `builder`     | package registry and GitHub only |
+ * | `factory-reviewer`    | shared       | `office`       | `reviewer`    | off                              |
+ * | `factory-release`     | isolated     | `workshop`     | `release`     | package registry and GitHub only |
+ * | `factory-coordinator` | orchestrator | `coordinator`  | `coordinator` | none of its own (workers have theirs) |
  *
- * `customizations/office` and `customizations/workshop` are ordinary Copilot customization bundles (`agents/`,
- * `skills/`, `instructions/`) deployed with their environments (spec section 10). The workshop's `factory-check`
- * skill ships the test harness the sandboxes run.
+ * `customizations/office`, `customizations/workshop`, and `customizations/coordinator` are ordinary Copilot
+ * customization bundles (`agents/`, `skills/`, `instructions/`) deployed with their environments (spec section 10). The
+ * workshop's `factory-check` skill ships the test harness the sandboxes run. Agent-led work orders run a coordinator in
+ * `factory-coordinator` that starts builder and release workers in `factory-builder` and `factory-release` sandboxes
+ * (spec section 17).
  *
  * Wire it into the root AppHost:
  *
@@ -34,7 +37,14 @@ export const FACTORY_ENVIRONMENTS = {
   builder: "factory-builder",
   reviewer: "factory-reviewer",
   release: "factory-release",
+  coordinator: "factory-coordinator",
 } as const;
+
+/**
+ * Workers one agent-led work order's coordinator can have at once: a builder for each of the plan's (at most four)
+ * tasks, the release worker, and one replacement.
+ */
+export const FACTORY_MAX_WORKERS = 6;
 
 export const FACTORY_DEFAULT_PORT = 7480;
 
@@ -100,6 +110,7 @@ export function softwareFactory(options: SoftwareFactoryOptions = {}): SoftwareF
   const sandboxEnv = { CI: "1", NO_COLOR: "1" };
   const office = here("./customizations/office");
   const workshop = here("./customizations/workshop");
+  const coordinator = here("./customizations/coordinator");
 
   const environments: Record<string, EnvironmentConfig> = {
     [FACTORY_ENVIRONMENTS.planner]: {
@@ -129,6 +140,15 @@ export function softwareFactory(options: SoftwareFactoryOptions = {}): SoftwareF
       size: "small",
       network: sandboxNetwork,
       env: sandboxEnv,
+    },
+    [FACTORY_ENVIRONMENTS.coordinator]: {
+      type: "orchestrator",
+      description: "Software factory: a coordinator agent that creates builder and release sandboxes as the plan needs them",
+      customizations: coordinator,
+      network: false,
+      // The first is the default; builders and the release each get their own sandbox from these.
+      workers: [FACTORY_ENVIRONMENTS.builder, FACTORY_ENVIRONMENTS.release],
+      maxWorkers: FACTORY_MAX_WORKERS,
     },
   };
 

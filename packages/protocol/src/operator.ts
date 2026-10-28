@@ -375,6 +375,9 @@ export interface OperatorEnvironment {
   readonly vaults: readonly OperatorVaultRef[];
   readonly scheduling: boolean;
   readonly promoteTo?: string;
+  /** Orchestrator environments: the isolated environments workers run in, and how many one session can have at once. */
+  readonly workers?: readonly string[];
+  readonly maxWorkers?: number;
   readonly idleTimeoutSeconds?: number;
   readonly warm?: number;
   readonly inference?: { readonly foundry: string };
@@ -498,6 +501,8 @@ export interface OperatorSessionSummary {
   readonly agent?: string;
   readonly clientName?: string;
   readonly scheduleId?: string;
+  /** An orchestrator's worker: the coordinator session that started it. */
+  readonly parentSessionId?: string;
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
   readonly createdAt: string;
   readonly updatedAt: string;

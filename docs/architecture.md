@@ -73,6 +73,13 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
   `session.idle`, and the in-flight `sendAndWait`'s `{ aborted: true }` reply. `sessions.close` sends `session.shutdown`
   before its answer. A later `session.resume` (with `continuePendingWork`, the pending call stays pending and is not
   requested again) is answered before the resumed session's first event (`session.resume`).
+- Ephemeral events never reach history (verified live on 1.0.103 from a coordinator's `events.jsonl`): `session.idle`,
+  `session.title_changed`, `assistant.message_delta`, and `pending_messages.modified` are always ephemeral, so
+  `session.getEvents()` has no turn ends. An app rebuilding a session from history infers them: Dispatch takes the next
+  turn's `user.message` (delivery `idle`) as the end of the previous turn and `SessionInfo.lastTurn.completedAt` for
+  the last one, and places events delivered live while the history loads by timestamp. A permission-gated tool emits
+  `tool.execution_start`, then `permission.requested`, `permission.completed` (with `toolCallId`), and
+  `tool.execution_complete`, all persisted.
 
 ## Components
 
@@ -87,12 +94,12 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `packages/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `platform/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `platform/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant |
+| Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant, Dispatch |
 | Samples | `samples` | scripts (`pnpm sample <nn>`) | The walkthroughs' runnable code, documented in `samples/*/README.md` |
 
 ### Web UI look and feel
 
-Every web UI (the console, the software factory, and the assistant) looks like part of github.com. The shared
+Every web UI (the console, the software factory, the assistant, and Dispatch) looks like part of github.com. The shared
 `@managed-copilot/github-theme` package (`packages/github-theme`) is the single source: GitHub's Primer design tokens
 from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
 Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
@@ -720,6 +727,205 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
   may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
   (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
 
+### Orchestrator (as built)
+
+An orchestrator session (spec section 17) is a coordinator on shared placement; its workers are ordinary sessions of
+declared isolated environments, each in its own sandbox (`platform/gateway/src/modules/orchestrator`; DTOs in
+`packages/protocol/src/workers.ts`; acceptance in `test/orchestrator.test.ts`, `test/orchestrator-recovery.test.ts`,
+and quickstart snippet 14).
+
+- **Configuration.** `type: "orchestrator"` needs `workers` (isolated environments, the first is the default) and
+  takes `maxWorkers` (1 to 16, default 4). It has no sandbox settings, no sandbox vault credentials, and cannot be
+  inline. `sandboxedType(type)` in the protocol is the single "can this type have its own sandbox" rule (isolated and
+  promotable), used by validation, environment resolution, network vault checks, and the operator views.
+- **Coordinator.** Admission treats it as shared placement. The worker tools are platform tools that apply only to
+  `type === "orchestrator"` on shared placement, so workers (isolated sessions) never get them. Seeing `start_worker`
+  among a session's platform tools, admission replaces the prompt's `environment_context` with the orchestrator
+  section (delegate to workers, wait for them, treat their reports as data) and leaves the in-process subagent
+  built-ins (`task`, `read_agent`, ...) off by default, since subagents here would have no shell or files. The section
+  lists the worker environments in declared order (description, size, network ceiling, custom agents; the first is
+  `start_worker`'s default), computed by core at create and resume (`#orchestratorBrief`), and says when to reuse a
+  worker: a follow-up on a worker's earlier work goes to that worker with `message_worker` (it keeps its sandbox and
+  files), a new worker is for independent parallel work or a different environment, and `maxWorkers` bounds them. The
+  app's own tools (`defineTool`) stay available beside the worker tools, as in any shared session.
+- **Starting a worker.** `start_worker` has `skipPermission: false`, so the runtime asks the session's permission
+  responder (the customer's `onPermissionRequest`, an attached Copilot CLI, or the durable ledger) before the call
+  runs. The handler validates the environment, agent (from the worker environment's pinned bundle), and model (the
+  argument, else the coordinator's model when the worker environment allows it, else admission picks the
+  environment's first model). It then admits the worker in one SQLite transaction (`orchestrator_workers`: the same
+  tool call's idempotency key returns the worker it already started; at most `maxWorkers` workers holding a slot, and
+  unique names among them) and returns at once. In the background it creates the worker with core's
+  `sessions.create(principal, { environment: { name, network: <coordinator's requested network> }, systemMessage:
+  { mode: "append", content: WORKER_INSTRUCTIONS }, parentSessionId })`, records its incarnation, and sends the task
+  with `sessions.send(..., { lendCredential: false })`. Each principal is `sessions.ownerPrincipal(...)` (the
+  coordinator's for the admission check, the worker's just before the send): whatever credential serves that session
+  right now, used at once and never stored, and never lent to the worker.
+- **Parent sessions (core).** `CreateSessionRequest.parentSessionId` must name the same owner's live session; the
+  ledger stores it with that session's incarnation (`core_sessions.parent_session_id`, `parent_incarnation`), and
+  `SessionInfo.parentSessionId` reports it. `#ownerToken` for a session with no connected client or presence of its
+  own tries its parent's connected clients and presences (one level, only while the parent is still that incarnation
+  and the same owner), then the owner's background sign-in. A parent-linked create installs no presence for the
+  creating principal, and `sessions.send` with `lendCredential: false` installs none for the sender, so this chain
+  serves the worker from its creation on and a credential taken from a connection never outlives it. So a worker's
+  brokered inference runs on the coordinator's connected client while there is one.
+- **Runs.** The module follows workers through `sessions.subscribe`, using root events only: a `user.message` that
+  starts a run (not steering, an autopilot continuation, or a skill prompt, as core reads them) marks the worker
+  `working`, the last root `assistant.message` with content becomes its result, a root `session.error` is remembered
+  for the run (a later root reply means it went on), and the run's root `session.idle` marks the worker `failed` with
+  that error, or `idle` with the result (clipped to 16,000 characters; an aborted turn says so in `error`). These are
+  the signals the stock `sendAndWait` completes on, and core's synthesized end of a lost turn arrives the same way. A
+  worker is never messageable while its run is open, so no message can start a run before the previous run's idle,
+  and only a new run makes a `failed` worker `working` again. A worker's last turn that has not ended (no root
+  `session.idle`, whatever its status) is core's to end: core ends a turn whose runtime was lost unless durable work
+  carries it, checks one again when the session is restored, and ends the ones a stopped gateway left at startup, also
+  when the turn had reported an error (and one a failed deletion of the worker's session cut); its end reaches the
+  worker as the run's error and idle. When a worker's runtime
+  connection closes (`sessions.onLifecycle("stopped")`), it is checked a second after the latest close, once the
+  events core still had queued from that runtime have landed: if it is still `working` and core has no unfinished turn
+  for it, its latest message never started a run, and the worker fails. A send to the worker under way then decides by
+  its own outcome, and the end of any send cancels the check: a failed send settled the worker itself, and a successful
+  one was answered by a connection open then. `sessions.send` settles in the same chain of promise steps as that
+  answer, so the close of the connection that answered is seen only after the send ended, and schedules a new check.
+  A sandbox's idle stop therefore also settles any worker left `working` with an idle runtime.
+- **Waiting.** `wait_for_workers` registers a waiter that every worker state change re-checks; it resolves when none
+  of the workers waited for is `starting` or `working`, after `timeoutSeconds` (default 900, at most 3600), or when
+  the coordinator's root `session.idle` shows its turn is over. It makes no model calls and holds no runtime resources
+  beyond the pending tool call, so a single `sendAndWait` covers a whole job. A user message for the coordinator ends
+  the wait early, so chat frontends stay responsive: the stock runtime emits the ephemeral `pending_messages.modified`
+  when its queue changes, and the module then reads `session.queue.pendingItems` (experimental on 1.0.103; also once
+  when a wait begins). A steering message not yet in the turn (`steeringMessages` beyond `inFlightSteeringCount`)
+  reaches the model right after the result, which says so; a queued message (`items` of kind `message`) reaches it
+  only after the turn ends, so the result tells it to report where things stand and end its turn, once per message
+  in a turn. Queued commands don't count, and a runtime that cannot report its queue leaves waits as they were.
+  Verified live on 1.0.103: both kinds ended a wait at once, the coordinator answered, and it waited again. Before
+  reporting (not after a message), it waits up to 30
+  seconds for finished workers' latest outputs to publish (`artifacts.waitForPublication`) and notes publications that
+  failed or are still running. Reports go back as text, each inside `<worker_report>` and clipped to share a
+  48,000-character budget, with the worker's published `outputs/`; a working worker whose run waits on a prompt the
+  platform leaves to a person (managed policy, repeated failures, a prompt without its full request, or a question)
+  is reported as waiting for a person, with the attach command.
+- **Shutdown.** Every worker tool call still running when the module stops is left unanswered (the tool wrapper
+  never resolves it, and each handler checks after its awaits), so nothing is recorded while the database closes and
+  durable runs the call again after the restart; each tool is idempotent by its key, so the rerun answers with what
+  the first run did (a message that was being sent says it may have arrived) or does it again (a wait waits again).
+  A start or message cut before it admitted the worker or recorded the message records nothing, so its rerun does it.
+  Waits on worker state and on publication end at once (each publication wait unsubscribes from shutdown when it
+  ends).
+- **Approvals.** The module subscribes to the actions ledger's `onChange` and, for a `pending` permission action of
+  one of its workers (one no attached client claimed), claims and answers it with `{ kind: "approve-once" }` through
+  the ledger's `platform` caller (`ActionCaller { type: "platform", ownerId, responder: "orchestrator" }`; recorded as
+  `platform:orchestrator`). That caller has a poller's authority on permission prompts only: durable refuses it for
+  tools and elicitations, never lets it attest a person (`approvedInteractively`, `denied-interactively-by-user`), and
+  checks managed policy as for any poller, so whether a person is required is the ledger's decision (`needsPerson`:
+  the derived `promptRequest` for standard kinds, the raw request otherwise). A prompt known only in its derived form
+  waits until the runtime asks again with the full request (the ledger offers it again then). One the ledger refuses
+  (`forbidden`) is released for a person and not tried again; other failures are released and retried up to three
+  times. The answer happens after the ledger's own step (`setImmediate`), and a startup sweep answers prompts that
+  waited across a restart.
+- **Messages and files.** `message_worker` takes a worker between runs only (`idle` or `failed`); a `working` one
+  answers `session_busy`, so nothing queues behind a run. It records the tool call's key and worker
+  (`orchestrator_messages`) in the same step it counts the message and marks the worker `working`, just before
+  `sessions.send`, so a replay never sends twice (a replay without a recorded message ID says the outcome is unknown);
+  the worker's state is read again after the credential check. When the send fails: if a run started meanwhile, the
+  message most likely arrived, so its record stays and the coordinator is told it may have arrived; if the worker was
+  stopped meanwhile, the record stays too (bound to that worker, so a rerun never sends the message to a newer worker
+  with the same name) and the coordinator is told; otherwise the send is forgotten, its count taken back, the earlier
+  state restored, and the failure reported (runtime errors without their own wording). Worker tools report refusals as
+  failed tool results (`resultType: "failure"`), so the model reads them. `read_worker_file` and `copy_worker_files` use
+  the sandbox service's file API (`readFile`, `listFiles`, `writeFile`, which restart a stopped sandbox), each call
+  pinned with the worker's `sandboxId` (read while the session is still the worker's incarnation; the sandbox service
+  checks it before and after starting the sandbox), so a call never reaches a newer session that reuses the ID. Text up
+  to 256 KiB is read
+  (64,000 characters returned, binary files detected), directories are listed, and copies of at most 500 files and
+  64 MiB stream sandbox to sandbox through the gateway, so they work on Docker and Azure alike; every download is
+  destroyed when its copy ends, and list errors are reported. Paths are workspace-relative and may not contain `..`;
+  sandboxd checks them again.
+- **Stopping and cleanup.** `stop_worker` records the worker it chose under the tool call's key
+  (`orchestrator_stops`), so a replay stops that worker and never a newer one with its name. Stopping marks the worker
+  `stopped` with `cleanup` outstanding and deletes its session (core deletes the sandbox and artifacts) only while the
+  session is the worker's own (its recorded incarnation, or before that the session its start created, by parent and
+  owner); a start still in flight deletes what it created when it ends. A deletion that fails is reported to the
+  coordinator, stays outstanding, and is retried with backoff, again on the next `stop_worker`, and at startup. A
+  deletion of the session already under way elsewhere (`conflict`) is reported as under way and stays outstanding too:
+  the cleanup is recorded done only once the worker's session is gone (`sessions.onLifecycle("deleted")` or a check).
+  `sessions.onLifecycle("deleted")` stops the workers of a deleted coordinator (any incarnation other than the current
+  one) and marks a worker whose own session was deleted. Platform events `worker.started`, `worker.idle`,
+  `worker.failed`, and `worker.stopped` (session ID and environment of the coordinator, `data: WorkerEventData`,
+  errors clipped to 500 characters) go through core's events service, so SSE, webhooks, and the operator feed see
+  them.
+- **Restarts.** At start the module settles what a stopped gateway left: outstanding cleanups run; workers of a
+  coordinator that no longer exists are stopped and deleted; a `starting` worker without a session fails and holds no
+  slot, and one with its session fails with a note that it never got its task. A `working` worker whose last turn
+  has not ended (the rule under **Runs**) is left to core (which ends a turn the restart cut) or to durable (a turn
+  waiting on a prompt). Otherwise
+  its last recorded turn decides only if it ended after the coordinator's latest message was sent (`sent_at`): the
+  worker becomes `idle` (its reply was not captured) or `failed`; if not, that message never started a run, and the
+  worker fails with its earlier report kept.
+- **REST and clients.** `GET /v1/sessions/:id/workers` and `.../workers/:workerId` (ID or name) are owner-scoped and
+  answer `invalid_request` for sessions that are not orchestrators. The SDK's `managed.workers(session)` lists them and
+  binds each worker to the identity that owns the coordinator, so `managed.files(worker.id)` acts as the same user.
+  The CLI has `workers <session>`, and `sessions` marks workers with their coordinator. `/v1/info` advertises
+  `orchestrator` while sandboxes work.
+- **Clients.** Each `start_worker` prompt reaches the coordinator's clients as the stock `permission.requested` event
+  (`custom-tool`, with its `toolCallId` and arguments) and ends with `permission.completed`, so an app can show sandbox
+  requests and their outcome from the session's own history; Dispatch (`demos/dispatch`) does, and a denial's
+  feedback is how a person steers the coordinator to another environment. A worker's sandbox takes files only once it
+  has started: `read_worker_file` and `copy_worker_files` on a `starting` worker answer `session_busy` ("still
+  starting"), and coordinators observed live wait for the worker and copy again. A worker therefore starts its task
+  before files copied for it arrive; tasks that depend on them should say so (the coordinator's own task text usually
+  does).
+- **Apps on coordinators.** Three demos run on coordinator sessions, with the decisions left to the model and the app
+  observing workers through `managed.workers(coordinator).list()`, the `worker.*` events, and `managed.sessions.get`,
+  never by attaching a client to a worker (which would take over its prompts).
+  - *Software factory, agent-led mode* (the default; `demos/software-factory`). `factory-coordinator` is an
+    orchestrator with network off, the `coordinator` agent from `customizations/coordinator`, workers
+    `factory-builder` (the default) and `factory-release`, and `maxWorkers` 6 (up to four tasks, the release, and a
+    replacement). The factory registers `defineTool` gates on the coordinator session (`prepare_workspace`,
+    `check_build`, `request_review`, `prepare_release`, `check_release`, `factory_status`) that never start or
+    message a worker themselves. Its permission handler approves a `start_worker` only for the work order's named
+    builders and release worker, in their environment, with their agent and model, and with a `READY` first task;
+    preparation waits for that turn, seeds the sandbox with `managed.files().write()`, and hands the real task back to
+    the coordinator. Gates are pinned to the worker's message count and runtime turn, so an earlier report can't pass
+    as new work and a repeated call consumes no nudge or review round. Release inputs arrive by `copy_worker_files`
+    under `.factory/incoming/<task>/` and are verified against the accepted artifacts. After a restart the factory
+    resumes the same coordinator with its tools, stops only the coordinator's unfinished turn, and reconciles worker
+    IDs; cancelling deletes worker sessions through the REST API. Classic mode keeps the app-orchestrated pipeline on
+    the four station environments. On Azure (westus2, 2026-10-27), a factory run against the deployed gateway
+    completed a work order with three Container Apps sandboxes, one builder reused for two fix rounds, and a 47-test
+    release.
+  - *Dispatch* (`demos/dispatch`). A conversation is a session of the `dispatch` orchestrator (four worker
+    environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
+    view is projected from the coordinator's own events (worker tool calls and the permission events above), so a
+    restart rebuilds it from `getEvents()`; approvals wait in the SDK permission handler, which resolves `no-result`
+    on detach so the platform asks again on resume. While Dispatch holds a request, an attached Copilot CLI's answer
+    is refused ("Your application is answering this request."), so approvals happen in Dispatch; Esc in the CLI ends
+    its turn, and the request's `permission.completed` (`cancelled`) makes Dispatch let go of the held callback.
+    Verified live: a message typed in Copilot CLI shown as "from Copilot CLI", a CLI-started turn's request held by
+    Dispatch and cancelled from the CLI, and a declined request whose reason the coordinator followed. On Azure
+    (2026-10-27), the deployed app ran two approved workers in their own sandboxes, an attached Copilot CLI's
+    follow-up reused one, and deleting the conversation deleted all three sessions.
+  - *Assistant* (`demos/assistant`). The `assistant` environment is an orchestrator (scheduling on, network off,
+    `maxWorkers` 3) with workers `assistant-python` (the default: medium, no network) and `assistant-web` (small,
+    `github.com` and `api.github.com` only). Its agent keeps the app's own tools (mail, calendar, reminders) and
+    starts a sandbox only for hands-on work, passing the data it needs in the task, since a worker can't see the
+    conversation or use the app's tools; follow-ups go to the same worker (`message_worker`). A `start_worker` waits
+    in the SDK permission handler for the person: the webhook and the poller never answer permission requests, so a
+    scheduled run's request waits until they're back. The server copies each published image as soon as it publishes
+    (charts outlive their worker) and times each sandbox card from worker listings, matched to the worker's messages
+    by number rather than across clocks. A finish event ends a message only when a listing asked for on the same
+    event subscription saw the worker working on it (so no finish since was missed), or when it was an idle event for
+    a worker stopped with that single message (a task the platform took back only fails, never goes idle). A
+    conversation created before the environment became an orchestrator can't start sandboxes and offers Start over.
+    Verified live locally (approval, a reused sandbox, a second kind of sandbox, approval after the tab was closed);
+    not yet on Azure.
+- **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
+  (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
+  turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
+  snippet 14, walkthrough 11, and a run of every coordinator tool passed on Container Apps Sandboxes (files read and
+  copied between two workers' sandboxes through the sandbox file API, worker prompts answered as
+  `platform:orchestrator`, a stop, and deletion with the coordinator); a gateway restart during worker runs has been
+  exercised only locally.
+
 ### Operator control plane (spec section 16)
 
 The operator module (`platform/gateway/src/modules/operator`, registered last) serves the operator API under
@@ -821,7 +1027,7 @@ structurally (they may add members).
 | Service key | Provided by | Shape core provides or consumes |
 | --- | --- | --- |
 | `auth` | core | `authenticate(token, { background? }) → Principal` (GitHub `/user`, cached; AppHost access rules; `mcc_…` capability tokens rejected; GitHub outages → `upstream_unavailable`, see Identity; `background` for stored credentials, never a live credential); `liveCredential(accountId)` (tokens attached connected callers presented within the cache TTL), `tokenExpiration(token)`, `forgetCredential(token)` (logout), `invalidate(token)` (GitHub rejected it, e.g. a 401 from the Copilot API) |
-| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, tools?, webhook?, scheduleId? }) → { sessionId, created, incarnation }`, `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core), `runtimeActivity(id) → { busy?, lastRequestAt? }` (synchronous; read by an operator's sandbox stop) |
+| `sessions` | core | `get(id)` (`{ id, incarnation, ownerId, environment, state, generation, lastTurn, parentSessionId?, … }`; not interrupted creates), `getOwned`, `info(accountId, id) → SessionInfo`, `list`, `create(principal, { sessionId?, environment, model?, agent?, systemMessage?, tools?, webhook?, scheduleId?, parentSessionId? }) → { sessionId, created, incarnation }` (`parentSessionId`: the same owner's live session, stored with its incarnation; its connected clients serve the new session's credential while it has none of its own), `send(principal, id, { prompt, source?, mode? = "enqueue" }, { incarnation? })`, `request(id, method, params, { incarnation? })` (with `incarnation`, `not_found` unless the session is still that incarnation when the call is written), `abort`, `delete(accountId, id)`, `subscribe(listener)` (synchronous, in order, before fan-out; includes the root `session.error` + `session.idle` core synthesizes to end a turn a lost runtime connection cut), `subscribeSession`, `attached(id)`, `runtime(id) → { connectionId, request, connect(port), closed }`, `presence(id, principal) → release` (owner present without a `/v1/connect` attachment, e.g. CLI attach), `ownerPrincipal(id) → Principal` (the verified credential serving the session now, for platform work on the owner's behalf; never stored), `attachCli(accountId, id, { connectionId, createdAt?, notify, principal? }) → { connectionId, incarnation, generation, write(op, send), answer(method, params), close() }` (an attached Copilot CLI as a `cli` responder; see Core), `onLifecycle`, `cutover(id, { generation }) → PlacementCutover` (promotion; see Core), `runtimeActivity(id) → { busy?, lastRequestAt? }` (synchronous; read by an operator's sandbox stop) |
 | `events` | core | `publish(event, { ownerId })` → `true` once stored for replay (also for an ID this owner already stored; listeners hear every call, at-least-once), `emit(type, { ownerId, sessionId?, environment?, data? })`, `subscribe((event, { ownerId }) => …)`; feeds SSE `/v1/events` with `Last-Event-ID` replay (a stream without a usable cursor first gets one: an id-only block with the owner's newest event ID, or `start`) |
 | `platformTools` | core | `register({ name, description, parameters?, overridesBuiltInTool?, skipPermission? = true, enabledFor?(env), appliesTo?({ environment, type, placement }), handler(args, { sessionId, ownerId, environment, toolCallId, idempotencyKey, … }) })`, `get(name)`, `forSession(…)` |
 | `runtimeRequests` | core | `register(method \| "ns.*", handler, { upstream: "shared" \| "sandbox" \| "*" })` for runtime → client requests the gateway answers itself (core registers `gitHubToken.getToken` for shared) |
@@ -830,17 +1036,19 @@ structurally (they may add members).
 | `artifacts` | sandbox | Turn-scoped publication from `/workspace/outputs` into immutable, versioned storage: `list(sessionId, { versions })`, `waitForPublication(sessionId, { turnId, timeoutMs })`, `open(sessionId, artifactId)` |
 | `policy` | network | Core calls `bindSession({ sessionId, owner, environment, type, requested, vaults }) → NetworkPolicy` on create, `session(id) → { policy, ownerId, environment, type, vaults }` on resume, `releaseSession(id)` on delete, and `adaptMcpServer(sessionId, name, server)` for every shared remote MCP server. Sandbox calls `registerSandbox({ sandboxId, sessionId, proxy?: { host, port } }) → { proxyUrl, env, caCertificate, policy }`, `updateSandbox(id, { address })`, `unregisterSandbox(id)`. Promotion calls `promoteSession(id, target) → NetworkPolicy` before creating the candidate, then `commitPromotion(id)` at commit or `revertPromotion(id) → NetworkPolicy \| undefined` on pre-commit rollback. Also `ceiling(env)`, `effective(env, requested)`, `blocked(id)`, `caCertificate()`, `egressStatus()` |
 | `vaults` | network | `list(ownerId)`, `get(ownerId, id)`, `create(ownerId, request)`, `delete(ownerId, id)` (values sealed, never returned), `mcpHeaders(sessionId, url, placement)` (placeholder headers for an isolated session's sandbox MCP servers, `undefined` when none apply, throws `capability_unavailable` for servers the proxy cannot substitute for; shared placement uses the adapter) |
-| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions` (current incarnation), `hasOpenActions(sessionId)` for `continuePendingWork` on resume, `promptVisibility(...)` for Copilot CLI attach, REST claim/result, capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits |
+| `actions` | durable | Router hooks (`onSessionEvent`, `onClientAnswer`, `onAttached`, `onDetached`, `releaseLiveClaim`), `list(sessionId, { open })` for `SessionInfo.pendingActions` (current incarnation), `hasOpenActions(sessionId)` for `continuePendingWork` on resume, `promptVisibility(...)` for Copilot CLI attach, REST claim/result (callers: the owner, a webhook capability, or a `platform` module answering permission prompts with a poller's authority and never for a person), capabilities, reconciliation; `onGenerationChanged(id, generation, { carried })` after a promotion commits; `onChange` (pending/resolved changes, used by schedules and the orchestrator) |
 | `webhooks` | durable | `enqueue(event, { ownerId })` for AppHost subscriptions (subscribed to `events`), `subscribers`, `deliveries` |
 | `schedules` | durable | Cron/one-shot schedules, occurrences, runs, `pauseAllForOwner`; registers the agent scheduling platform tools |
 | `credentials` | durable | `store`/`status`/`revoke`/`has`, and `principalFor(accountId)` (re-verified as background work, never another account); tells core `auth.forgetCredential(token)` when a credential is removed or replaced |
 | `promotion` | promotion | `promote(principal, id) → PromoteResult` (REST `POST /v1/sessions/:id/promote`), `latest(id)`, `participate({ name, fence(id, signal), release(id, { committed, sealed }) }) → unregister` (paths into the source core's fence does not cover, such as attach); registers the `request_sandbox` platform tool and publishes `session.promoted` |
+| `orchestrator` | orchestrator | `listFor(principal, coordinatorId) → WorkerInfo[]` and `getFor(principal, coordinatorId, idOrName)` (REST `GET /v1/sessions/:id/workers[/:workerId]`); registers the seven worker platform tools for orchestrator sessions, answers approved workers' permission prompts, and publishes `worker.*` events (see Orchestrator) |
 | `coreOperator` | core | Read-only operator views for the operator module: `gateway()`, `info()`, `storage()`, `runtime()`, `sessions(query)`, `session(id)`, `sessionCounts()`, `connections()`, `upstreams()`, `accounts()`, `accountDirectory()`, `environments()`, `customizationFile(env, path)`, `events(query)`, `toOperatorEvent(event, owner)`. Other modules add optional `operator*` members to their own services (`sandboxes.operatorStatus`/`operatorSandboxes`/`operatorStop`, `policy.operatorEgress`/`operatorBlocks`, `actions.operatorActions`/`operatorActionCounts`, `webhooks.operator*`/`retry`, `schedules.operator*`/`schedulerStatus`, `credentials.operatorStatuses`), read through `modules/operator/contract.ts` |
 
 `/v1/info` advertises `capabilities`: `shared` and `events` from core, plus `isolated`/`files` (`sandboxes`, while
 `sandboxes.available` is not `false`), `artifacts`, `vaults`, `actions`, `webhooks`, `schedules`, `background`
 (`credentials`) when those services are registered, and anything a module adds to `app.capabilities` (for example
-`promotion`, `attach.cli`); sandbox-backed module capabilities (`promotion`) appear only while `isolated` does. Stored
+`promotion`, `orchestrator`, `attach.cli`); sandbox-backed module capabilities (`promotion`, `orchestrator`) appear
+only while `isolated` does. Stored
 artifacts stay readable while the sandbox backend is down, so `artifacts` follows the artifacts service alone.
 
 ## Core: shared runtime and router
@@ -856,7 +1064,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - **Per-session credentials.** Shared sessions get a gateway-owned `gitHubTokenProviderRegistrationId`. The runtime's
   `gitHubToken.getToken` (and a sandbox broker's `resolveToken`) is answered with the token of a connected client of
   the owner, re-verified: one attached to the session, or one present on it (`sessions.presence(id, principal)`, held
-  by an attached Copilot CLI while it attaches and by service `create`/`send` while they run). Without one, only the
+  by an attached Copilot CLI while it attaches and by service `create`/`send` while they run). A session another one
+  started (an orchestrator's worker, `parentSessionId`) then tries its parent's connected clients and presences the
+  same way, while the parent is still that incarnation and the same owner. Without one, only the
   owner's current background sign-in (`credentials.principalFor`, then re-verified by `auth` too, so a token GitHub
   rejected since is never used, and still the owner's sign-in once that finishes) serves the session, never a token
   remembered from an earlier connection; otherwise the answer is `cancelled` (fail closed). A registration answers only
@@ -907,7 +1117,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   `llmInference` provider registration of a closed connection, so a turn that was mid-inference (or running a
   built-in tool) never finishes, and a restarted runtime neither continues nor ends it on resume. Core ends such a turn
   itself when the connection closes (not for deletes, cutovers, or gateway shutdown) and, at startup, for turns a
-  stopped gateway left running. Attached clients and `sessions.subscribe`/`subscribeSession` listeners get an
+  stopped gateway left running. A deletion that fails (the session stays `failed`, deletable again) handles the runtime
+  connection it closed as lost: `stopped`, and the turn it cut ends by the same rules; startup also ends the unfinished
+  turns of `failed` sessions, and a turn's end leaves a `failed` session `failed` until it runs another. Attached
+  clients and `sessions.subscribe`/`subscribeSession` listeners get an
   ephemeral root `session.error` (`errorType: "interrupted"`, "This turn was interrupted because the platform lost the
   connection to the session's runtime … Send your message again to continue.") and a root `session.idle`. The ledger
   records `lastTurn` `failed` (state `idle`) and emits `session.failed` and `session.idle` (`status: "failed"`), so
@@ -918,8 +1131,11 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   queued message may have started another), so it never claims the turn was interrupted. The session stays
   resumable; the next turn restores it. A turn waiting on work durable
   owns (`hasOpenActions`) is kept, because `continuePendingWork` keeps the runtime's pending tool call or permission
-  and answering it continues the turn. On every restore, a turn the ledger still has running is checked against the
-  runtime that now owns the session. It ends only on answers: `session.metadata.isProcessing` is `false`, and, while
+  and answering it continues the turn. On every restore, a turn the ledger has not seen end is checked against the
+  runtime that now owns the session. "Not ended" means no root `session.idle` yet (`lastTurn.completedAt` unset), not
+  `status: "running"`: the ledger marks a turn `failed` at a root `session.error` before the turn ends (also an error
+  the turn goes on from, and a subagent's), and such a turn is ended or kept by the same rules (also at startup and
+  when its connection is lost). It ends only on answers: `session.metadata.isProcessing` is `false`, and, while
   durable has open actions, the runtime lists no pending tool or permission requests. A check the runtime answers
   with an error leaves the turn running. A connection that is gone or silent fails the restore, and the next request
   retries it. The end applies only while that runtime still owns the session, so a cutover that commits meanwhile
@@ -1052,7 +1268,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   to the pinned runtime). `close` detaches the responder. Recovery, deletion, and discarding an interrupted create each
   re-check the row's incarnation and state under a per-ID reservation before touching anything, so they never act on a
   session created or deleted since. A session being deleted emits `deleted` only, never `stopped` for the runtime
-  connection the delete closes.
+  connection the delete closes; if the deletion fails, the session stays and that close is reported (`stopped`) and
+  handled like any lost connection then.
 - **Sends.** Shared sessions accept only inline (`blob`) attachments; file, directory, and selection attachments
   name paths the runtime would read on the platform host. Sandbox attachment paths must stay in `/workspace`.
   Credential and routing model headers and shell agent mode are rejected.
@@ -1100,9 +1317,9 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
-- `aspire run` from the repository root starts: the gateway (7400), `software-factory` (7480), `assistant` (7490), and
-  `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on 7485.
-  `MANAGED_COPILOT_PORT_OFFSET` shifts all four ports for a second copy, which also sets `discovery: false`
+- `aspire run` from the repository root starts: the gateway (7400), `dispatch` (7470), `software-factory` (7480),
+  `assistant` (7490), and `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on
+  7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all five ports for a second copy, which also sets `discovery: false`
   (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 
 ### Copilot CLI attach (spec section 14)
@@ -1253,8 +1470,8 @@ sequenceDiagram
 ### CLI and quickstart
 
 - `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
-  `new`, `attach`, `promote`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the sign-in link;
-  `--no-open` prints it), and `operator [overview|infra|environments|sessions|sandboxes|schedules|webhooks]`. It uses
+  `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the
+  sign-in link; `--no-open` prints it), and `operator [overview|infra|environments|sessions|sandboxes|schedules|webhooks]`. It uses
   the SDK and `@managed-copilot/sdk/internal` (first-party only:
   `HttpClient`, URL/token resolution, `findCopilot`, `launchAttachedCli`). Tokens never come from argv. Errors print the
   stable code and a hint; usage errors exit 2.
@@ -1343,7 +1560,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7480, 7490, 7485 | Software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
+| Demo ports | 7470, 7480, 7490, 7485 | Dispatch, software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
@@ -1376,8 +1593,10 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
 | **attach** (was devloop) | `packages/aspire/**` (except `src/publish/**`, azure), `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
-| **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
+| **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
+| **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent that shows each sandbox it creates or reuses |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
+| **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `platform/console/**`, `packages/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
 | **design** | `packages/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |

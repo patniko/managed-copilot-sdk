@@ -31,6 +31,7 @@ import { InferenceBroker, isProviderTaken } from "./broker.js";
 import type {
   CreateSandboxRequest,
   EgressRegistration,
+  FileCallOptions,
   FileDownload,
   FileWriteOptions,
   OpenRuntimeOptions,
@@ -1009,19 +1010,30 @@ export class SandboxService implements SandboxesService {
 
   // Files --------------------------------------------------------------------------------------------------------
 
-  /** The session's sandbox agent, starting the sandbox if it is stopped. */
-  async agentFor(sessionId: string): Promise<SandboxAgentClient> {
+  /**
+   * The session's sandbox agent, starting the sandbox if it is stopped. With `sandboxId`, only while that is still the
+   * session's sandbox (checked before the start and again after it).
+   */
+  async agentFor(sessionId: string, sandboxId?: string): Promise<SandboxAgentClient> {
+    this.#expectSandbox(sessionId, sandboxId);
     await this.ensureRunning(sessionId);
-    return this.#agent(this.#row(sessionId));
+    const row = this.#row(sessionId);
+    this.#expectSandbox(sessionId, sandboxId, row);
+    return this.#agent(row);
   }
 
-  async listFiles(sessionId: string, path: string, options: { readonly recursive?: boolean } = {}): Promise<FileEntry[]> {
-    const agent = await this.agentFor(sessionId);
+  #expectSandbox(sessionId: string, sandboxId: string | undefined, row: SandboxRow | undefined = this.#options.store.bySession(sessionId)): void {
+    if (sandboxId === undefined || (row?.id === sandboxId && row.state !== "deleting" && row.state !== "deleted")) return;
+    throw new ManagedCopilotError("not_found", `Session ${sessionId} no longer has the sandbox this call was for.`, { sessionId, sandboxId });
+  }
+
+  async listFiles(sessionId: string, path: string, options: FileCallOptions & { readonly recursive?: boolean } = {}): Promise<FileEntry[]> {
+    const agent = await this.agentFor(sessionId, options.sandboxId);
     return this.track(sessionId, agent.listFiles(path, options.recursive === true));
   }
 
-  async readFile(sessionId: string, path: string): Promise<FileDownload> {
-    const agent = await this.agentFor(sessionId);
+  async readFile(sessionId: string, path: string, options: FileCallOptions = {}): Promise<FileDownload> {
+    const agent = await this.agentFor(sessionId, options.sandboxId);
     const live = this.#liveFor(sessionId);
     live.busy++;
     let released = false;
@@ -1048,7 +1060,7 @@ export class SandboxService implements SandboxesService {
     if (options.size !== undefined && options.size > SANDBOX_LIMITS.uploadBytes) {
       throw new ManagedCopilotError("invalid_request", `Uploads are limited to ${Math.round(SANDBOX_LIMITS.uploadBytes / (1024 * 1024))} MiB.`);
     }
-    const agent = await this.agentFor(sessionId);
+    const agent = await this.agentFor(sessionId, options.sandboxId);
     const entry = await this.track(sessionId, agent.writeFile(path, body, { overwrite: options.overwrite !== false, ...(options.size !== undefined ? { size: options.size } : {}) }));
     return { path: entry.path, type: entry.type, size: entry.size, modifiedAt: entry.modifiedAt };
   }

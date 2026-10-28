@@ -1,6 +1,7 @@
 /** Human-facing titles for tool activity and approval prompts, shared by live events and rebuilt history. */
-import type { ApprovalPreview, ToolIcon, ToolStatus } from "../shared/protocol.js";
+import type { ApprovalPreview, SandboxEnvironmentView, ToolIcon, ToolStatus } from "../shared/protocol.js";
 import { describeCron } from "./cron.js";
+import { withArticle } from "./environments.js";
 import { formatWhen, parseDateTime } from "./time.js";
 
 type Args = Record<string, unknown>;
@@ -127,8 +128,14 @@ export interface ToolDescription {
   readonly detail?: string;
 }
 
-/** Runtime-internal or noisy tools that the chat does not show. */
-export const HIDDEN_TOOLS = new Set(["get_current_time", "report_intent", "task_complete", "think", "update_todo"]);
+/** Runtime-internal or noisy tools that the chat does not show. Waiting on and listing sandboxes show on their cards. */
+export const HIDDEN_TOOLS = new Set(["get_current_time", "report_intent", "task_complete", "think", "update_todo", "wait_for_workers", "list_workers"]);
+
+/** "outputs/report.md", or undefined for the top level of a sandbox's /workspace. */
+function workspacePath(value: unknown): string | undefined {
+  const path = text(value)?.replace(/^\.?\/+/, "").replace(/^workspace(\/|$)/, "").replace(/\/+$/, "");
+  return !path || path === "." ? undefined : path;
+}
 
 export function describeTool(name: string, rawArgs: unknown, status: ToolStatus, resultContent: string | undefined, timeZone: string, at: Date): ToolDescription {
   const args = asArgs(rawArgs);
@@ -207,6 +214,30 @@ export function describeTool(name: string, rawArgs: unknown, status: ToolStatus,
       return { icon: "clock", title: done ? "Checked your scheduled tasks" : "Checking your scheduled tasks…" };
     case "cancel_schedule":
       return { icon: "clock", title: done ? (failed ? "Couldn't cancel the scheduled task" : "Cancelled a scheduled task") : "Cancelling a scheduled task…" };
+    case "read_worker_file": {
+      const worker = text(args.worker) ?? "a sandbox";
+      const path = workspacePath(args.path);
+      if (!path) return { icon: "file", title: done ? (failed ? `Couldn't list the files in ${worker}` : `Listed the files in ${worker}`) : `Listing the files in ${worker}…` };
+      return {
+        icon: "file",
+        title: done ? (failed ? `Couldn't read ${path} from ${worker}` : `Read ${path} from ${worker}`) : `Reading ${path} from ${worker}…`,
+      };
+    }
+    case "copy_worker_files": {
+      const paths = list(args.paths);
+      const what = paths.length === 1 ? (workspacePath(paths[0]) ?? "all its files") : `${paths.length || "some"} files`;
+      const from = text(args.from) ?? "one sandbox";
+      const to = text(args.to) ?? "another";
+      return {
+        icon: "copy",
+        title: done ? (failed ? `Couldn't copy ${what} from ${from} to ${to}` : `Copied ${what} from ${from} to ${to}`) : `Copying ${what} from ${from} to ${to}…`,
+        detail: paths.length > 1 ? paths.join(", ") : undefined,
+      };
+    }
+    case "stop_worker": {
+      const worker = text(args.worker) ?? "a sandbox";
+      return { icon: "trash", title: done ? (failed ? `Couldn't stop ${worker}` : `Stopped ${worker} · its sandbox is deleted`) : `Stopping ${worker}…` };
+    }
     default:
       return { icon: "tool", title: done ? `Used ${name}` : `Using ${name}…` };
   }
@@ -227,10 +258,39 @@ function isoOrRaw(value: unknown, timeZone: string): string | undefined {
   }
 }
 
+/** Looks up a sandbox environment by name; no name means the default one. */
+export type SandboxLookup = (name: string | undefined) => SandboxEnvironmentView | undefined;
+
 /** The approval card for a consequential tool call: the exact message or event the person is approving. */
-export function describeApproval(tool: string, rawArgs: unknown, timeZone: string, current?: { title: string; start: string; end: string }): ApprovalDescription {
+export function describeApproval(
+  tool: string,
+  rawArgs: unknown,
+  timeZone: string,
+  current?: { title: string; start: string; end: string },
+  sandbox?: SandboxLookup,
+): ApprovalDescription {
   const args = asArgs(rawArgs);
   switch (tool) {
+    case "start_worker": {
+      const requested = text(args.environment);
+      const environment = sandbox?.(requested);
+      const label = environment?.label ?? "sandbox";
+      return {
+        title: `Start ${withArticle(label)}?`,
+        preview: {
+          type: "sandbox",
+          worker: text(args.name) ?? "sandbox",
+          environment: environment?.name ?? requested ?? "the default environment",
+          kind: environment?.kind ?? "general",
+          label,
+          size: environment?.size,
+          network: environment?.network,
+          task: typeof args.task === "string" ? args.task.trim() : "",
+          agent: text(args.agent),
+          model: text(args.model),
+        },
+      };
+    }
     case "send_email":
       return {
         title: `Send this email to ${people(list(args.to))}?`,

@@ -15,6 +15,7 @@ import {
   normalizeDestinationHost,
   normalizeNetwork,
   parseIpAddress,
+  sandboxedType,
   VAULT_PLACEHOLDER_PREFIX,
   type EgressBlockReason,
   type EgressCredentialBinding,
@@ -257,12 +258,12 @@ export class PolicyService {
       if (!owned) throw new ManagedCopilotError("not_found", `Vault ${reference} was not found. Vaults created in code belong to the account that created them.`);
       resolved.set(owned.id, owned);
     }
-    if (type === "shared") {
+    if (!sandboxedType(type)) {
       for (const vault of resolved.values()) {
         if (vault.credentials.some((credential) => credential.kind === "env")) {
           throw new ManagedCopilotError(
             "policy_violation",
-            `Vault "${vault.name}" holds sandbox credentials (environment variables), which shared environments cannot use. Use an isolated environment, or an MCP credential.`,
+            `Vault "${vault.name}" holds sandbox credentials (environment variables), which ${type} environments cannot use. Use an isolated environment, or an MCP credential.`,
           );
         }
       }

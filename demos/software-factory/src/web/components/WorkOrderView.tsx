@@ -1,6 +1,7 @@
 import {
   AlertIcon,
   ClockIcon,
+  CopilotIcon,
   DownloadIcon,
   FileDirectoryIcon,
   PackageIcon,
@@ -30,6 +31,7 @@ import { cancelWorkOrder, deleteWorkOrder, ensureWorkOrder, retryWorkOrder, useS
 import { useNow } from "../lib/time.js";
 import { toast } from "../lib/toast.js";
 import { ArtifactsView } from "./ArtifactsView.js";
+import { AgentFloor } from "./AgentFloor.js";
 import { DeliverableView } from "./Deliverable.js";
 import { Pipeline } from "./Floor.js";
 import { PlanView } from "./PlanView.js";
@@ -87,7 +89,7 @@ function FloorTab({ workOrder, query }: { readonly workOrder: WorkOrder; readonl
   const selectedId =
     requested && (stationExists || placeholders.includes(requested) || requested.startsWith("build:") || requested.startsWith("review:"))
       ? requested
-      : defaultStationId(workOrder);
+      : workOrder.mode === "agent" ? "coordinator" : defaultStationId(workOrder);
   const station = findStation(workOrder, selectedId);
 
   const select = (stationId: string): void => {
@@ -96,7 +98,9 @@ function FloorTab({ workOrder, query }: { readonly workOrder: WorkOrder; readonl
 
   return (
     <div className="grid gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,1fr)_23.75rem] 2xl:grid-cols-[minmax(0,1fr)_26.25rem]">
-      <Pipeline workOrder={workOrder} selectedId={selectedId} onSelect={select} />
+      {workOrder.mode === "agent"
+        ? <AgentFloor workOrder={workOrder} selectedId={selectedId} onSelect={select} />
+        : <Pipeline workOrder={workOrder} selectedId={selectedId} onSelect={select} />}
       <div className="min-w-0 xl:min-h-0">
         {selectedId === "intake" ? (
           <IntakePanel workOrder={workOrder} />
@@ -146,6 +150,10 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
             <StateIcon size={16} />
             {meta.label}
           </span>
+          <span className={cx("Label", workOrder.mode === "agent" ? "Label--done" : "Label--secondary")}>
+            {workOrder.mode === "agent" ? <CopilotIcon size={12} /> : null}
+            {workOrder.mode === "agent" ? "Agent-led" : "Classic"}
+          </span>
           <span title={formatFullDateTime(started)}>
             {workOrder.startedAt ? "Started" : "Created"} {formatDateTime(started)}
           </span>
@@ -167,6 +175,7 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
           <span>{workOrder.taskCount > 0 ? pluralize(workOrder.taskCount, "task") : "No tasks yet"}</span>
           <span aria-hidden>·</span>
           <span>Up to {pluralize(workOrder.maxReviewRounds, "review round")}</span>
+          {workOrder.mode === "agent" ? <><span aria-hidden>·</span><span>{workOrder.workersStarted ?? 0} workers created by the coordinator</span></> : null}
         </div>
 
         {workOrder.error ? (

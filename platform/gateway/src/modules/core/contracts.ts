@@ -72,6 +72,12 @@ export interface SessionRecord {
   readonly clientName?: string;
   readonly scheduleId?: string;
   readonly webhook?: string;
+  /**
+   * The owner's session that started this one (an orchestrator's coordinator, for a worker) and the incarnation it had
+   * then. While this session has no connected client of its own, its parent's connected clients serve its credential.
+   */
+  readonly parentSessionId?: string;
+  readonly parentIncarnation?: string;
   readonly network: NetworkPolicy;
   readonly environmentRequest: EnvironmentRequest;
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
@@ -210,6 +216,12 @@ export interface CreateSessionRequest {
   readonly webhook?: string;
   readonly scheduleId?: string;
   readonly clientName?: string;
+  /**
+   * The owner's session that starts this one (an orchestrator's coordinator starting a worker); same owner only. While
+   * the new session has no connected client of its own, the parent's connected clients' credentials serve it before
+   * the owner's background sign-in, from its creation on: the creating principal only names its owner.
+   */
+  readonly parentSessionId?: string;
 }
 
 export interface CliAttachOptions {
@@ -262,6 +274,17 @@ export interface SessionCallOptions {
   readonly incarnation?: string;
 }
 
+/** Options of `sessions.send`. */
+export interface SessionSendOptions extends SessionCallOptions {
+  /**
+   * Default true: the caller's verified credential serves the session while the send runs (a restore it triggers, for
+   * example). False: only the session's own credential sources do (its connected clients, its parent's, the owner's
+   * background sign-in), so a credential taken from a connection never serves the session after that connection
+   * closes.
+   */
+  readonly lendCredential?: boolean;
+}
+
 export interface SessionsService {
   /** The session's ledger record; undefined for unknown and deleted sessions and for creates the gateway never finished. */
   get(sessionId: string): SessionRecord | undefined;
@@ -275,8 +298,12 @@ export interface SessionsService {
    * created, or the existing session's when `created` is false.
    */
   create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
-  /** Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. */
-  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }, options?: SessionCallOptions): Promise<{ readonly messageId: string }>;
+  /**
+   * Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. Settles in the same chain of
+   * promise steps as the runtime's answer (no I/O in between), so a caller sees the close of the connection that
+   * answered (`onLifecycle("stopped")`) only after the send settled.
+   */
+  send(principal: Principal, sessionId: string, input: { readonly prompt: string; readonly source?: string; readonly mode?: string }, options?: SessionSendOptions): Promise<{ readonly messageId: string }>;
   /** Forwards a session-scoped RPC to the runtime that owns the session. The caller is responsible for authorization. */
   request<T = unknown>(sessionId: string, method: string, params?: Record<string, unknown>, options?: SessionCallOptions): Promise<T>;
   abort(sessionId: string): Promise<void>;
@@ -296,6 +323,13 @@ export interface SessionsService {
    * Returns the release function.
    */
   presence?(sessionId: string, principal: Principal): () => void;
+  /**
+   * The verified owner principal whose credential serves the session right now (its connected client, a presence, its
+   * parent's connected client, or the owner's background sign-in), for work the platform does on the owner's behalf in
+   * that session's context (an orchestrator starting a worker). Use it at once; never keep it. `authentication_required`
+   * when none is available.
+   */
+  ownerPrincipal?(sessionId: string): Promise<Principal>;
   /**
    * Attaches a Copilot CLI (attach module) to one session incarnation as a `cli` responder: no tools or callbacks of
    * its own beyond permission and elicitation prompts. Pins the incarnation, placement, generation, and runtime it

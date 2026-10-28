@@ -10,6 +10,9 @@ import type {
   ConnectionsView,
   OfflineView,
   PlatformStatus,
+  SandboxEnvironmentView,
+  SandboxesView,
+  SandboxOutputView,
   ScheduleView,
   Snapshot,
   TimelineItem,
@@ -19,6 +22,9 @@ import { dayLabel, timeOf } from "../format";
 export const VARIANTS = [
   { id: "", label: "Conversation", description: "Markdown, tools, approvals, a reminder" },
   { id: "busy", label: "Working on a reply", description: "Thinking, then streaming" },
+  { id: "sandboxes", label: "Sandboxes", description: "A chart, a reused sandbox, and a new one to approve" },
+  { id: "sandbox-working", label: "Sandbox at work", description: "A sandbox running its task" },
+  { id: "sandboxes-legacy", label: "Sandboxes unavailable", description: "A conversation from before sandboxes" },
   { id: "welcome", label: "Welcome", description: "A new conversation" },
   { id: "empty", label: "Welcome, background work off", description: "Suggestions wait for consent" },
   { id: "background-off", label: "Background work stopped", description: "A reminder that couldn't be set" },
@@ -38,6 +44,61 @@ export const PREVIEW_REPLY =
   "This is **preview data**, so nothing real happens here. In the running app I'd answer from your mail and calendar, and anything that sends mail or changes your calendar would ask you first.";
 
 const MINUTE = 60_000;
+
+export const SANDBOX_ENVIRONMENTS: readonly SandboxEnvironmentView[] = [
+  {
+    name: "assistant-python",
+    kind: "python",
+    label: "Python sandbox",
+    description: "Python sandbox: calculations, data analysis, and SVG charts from data passed in its task. Python standard library only, no network.",
+    size: "medium",
+    network: "network off",
+    default: true,
+  },
+  {
+    name: "assistant-web",
+    kind: "web",
+    label: "web research sandbox",
+    description: "Web research sandbox: reads public pages and APIs on github.com and api.github.com only.",
+    size: "small",
+    network: "can reach github.com and api.github.com only",
+    default: false,
+  },
+];
+
+/** A stacked bar chart as an SVG data URL, like the charts a Python sandbox draws (the preview has no server to serve files). */
+export function chartDataUrl(title: string, labels: readonly string[], series: readonly { name: string; color: string; values: readonly number[] }[]): string {
+  const width = 560;
+  const height = 300;
+  const left = 48;
+  const bottom = 250;
+  const top = 56;
+  const totals = labels.map((_, index) => series.reduce((sum, entry) => sum + (entry.values[index] ?? 0), 0));
+  const max = Math.max(...totals, 1);
+  const scale = (bottom - top) / (Math.ceil(max / 5) * 5);
+  const slot = (width - left - 24) / labels.length;
+  const bars: string[] = [];
+  labels.forEach((label, index) => {
+    let y = bottom;
+    const x = left + index * slot + slot * 0.2;
+    for (const entry of series) {
+      const value = entry.values[index] ?? 0;
+      const h = value * scale;
+      y -= h;
+      bars.push(`<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(slot * 0.6).toFixed(1)}" height="${h.toFixed(1)}" fill="${entry.color}"/>`);
+    }
+    bars.push(`<text x="${(x + slot * 0.3).toFixed(1)}" y="${(y - 6).toFixed(1)}" text-anchor="middle" font-size="12" fill="#1f2328">${totals[index]!.toFixed(1)} h</text>`);
+    bars.push(`<text x="${(x + slot * 0.3).toFixed(1)}" y="${bottom + 18}" text-anchor="middle" font-size="12" fill="#59636e">${label}</text>`);
+  });
+  const legend = series.length > 1 ? series.map((entry, index) => `<rect x="${left + index * 150}" y="30" width="10" height="10" fill="${entry.color}"/><text x="${left + index * 150 + 16}" y="39" font-size="12" fill="#59636e">${entry.name}</text>`).join("") : "";
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif"><rect width="100%" height="100%" fill="#fff"/><text x="${left}" y="20" font-size="14" font-weight="600" fill="#1f2328">${title}</text>${legend}<line x1="${left}" y1="${bottom}" x2="${width - 16}" y2="${bottom}" stroke="#d1d9e0"/>${bars.join("")}</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+/** The preview's sandbox outputs: images as data URLs instead of this server's output route. */
+function chartOutput(id: string, path: string, publishedAt: string, url: string): SandboxOutputView {
+  return { id, path, version: 1, size: 2048, contentType: "image/svg+xml", publishedAt, image: true, url };
+}
 
 export function createSnapshot(variant: Variant, now = Date.now()): Snapshot {
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -354,6 +415,117 @@ export function createSnapshot(variant: Variant, now = Date.now()): Snapshot {
   const offline: OfflineView = { webhookConfigured: true, lastWebhookAt: ago(169), handledOffline: 2, waitingApprovals: 0 };
   const backgroundOn: BackgroundView = { state: "on", login: "mona", since: ago(5000), checkedAt: ago(1) };
 
+  // ── Sandboxes ────────────────────────────────────────────────────────────────────────────────────────────────
+  const noSandboxes: SandboxesView = { enabled: true, environments: SANDBOX_ENVIRONMENTS, maxWorkers: 3, workers: [], runs: {} };
+  const weeks = [4, 3, 2, 1].map((weeksAgo) => new Date(now - weeksAgo * 7 * 24 * 60 * MINUTE).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
+  const loadChart = chartDataUrl("Meeting hours per week", weeks, [{ name: "Meetings", color: "#0969da", values: [9, 10, 12, 15] }]);
+  const typeChart = chartDataUrl("Meeting hours per week, by type", weeks, [
+    { name: "Recurring meetings", color: "#0969da", values: [9, 9, 9, 9] },
+    { name: "Interviews, debriefs", color: "#bf8700", values: [0, 1, 3, 5] },
+    { name: "Hiring sync", color: "#8250df", values: [0, 0, 0, 1] },
+  ]);
+  const statsTask = [
+    "Here are my 47 calendar events from the last four weeks as CSV (date, start, end, title). Add up the meeting hours for each week (the 7 days ending yesterday, and the 3 weeks before), find what drives any change, and save a bar chart of hours per week as outputs/meetings.svg (plain SVG, Python standard library only).",
+    "",
+    "date,start,end,title",
+    "2026-09-29,09:30,09:45,Team standup",
+    "2026-09-29,10:00,11:00,Weekly planning",
+    "2026-09-30,11:00,11:30,1:1 with Priya",
+    "…",
+  ].join("\n");
+  const researchTask =
+    "Summarize the public repositories and recent activity of the GitHub user octocat (the 2:00 PM interview candidate, Robin Okafor): main languages, notable projects, and what they've worked on lately. Use only github.com and api.github.com, and report back.";
+  const sandboxPreview = (worker: string, environment: SandboxEnvironmentView, task: string) => ({
+    type: "sandbox" as const,
+    worker,
+    environment: environment.name,
+    kind: environment.kind,
+    label: environment.label,
+    size: environment.size,
+    network: environment.network,
+    task,
+  });
+  const [python, web] = SANDBOX_ENVIRONMENTS as [SandboxEnvironmentView, SandboxEnvironmentView];
+  const sandboxConversation: TimelineItem[] = [
+    { kind: "user", id: "u60", at: ago(14), text: "How did my meeting load change over the last four weeks? A chart would help." },
+    { kind: "tool", id: "t60", at: ago(13.95), name: "list_events", icon: "calendar", title: "Checked your calendar", detail: "47 events in the last four weeks", status: "succeeded", endedAt: ago(13.9) },
+    { kind: "worker", id: "w61", at: ago(13.85), action: "start", worker: "meeting-stats", environment: python.name, text: statsTask, status: "succeeded", workerId: "wk-stats", endedAt: ago(13.6) },
+    {
+      kind: "approval",
+      id: "approval:w61",
+      at: ago(13.84),
+      tool: "start_worker",
+      title: "Start a Python sandbox?",
+      preview: sandboxPreview("meeting-stats", python, statsTask),
+      status: "approved",
+      actionable: false,
+      decidedAt: ago(13.62),
+    },
+    {
+      kind: "assistant",
+      id: "a61",
+      at: ago(13.2),
+      text: "You spent **15 h** in meetings last week, up from **9 h** four weeks ago. Most of the increase is **interviews**: five last week, with debriefs, and none four weeks ago.\n\nThe chart is in **meetings.svg**.",
+      streaming: false,
+      proactive: false,
+    },
+    { kind: "user", id: "u62", at: ago(9), text: "Split it by meeting type too." },
+    {
+      kind: "worker",
+      id: "w62",
+      at: ago(8.95),
+      action: "message",
+      worker: "meeting-stats",
+      environment: python.name,
+      text: "Using the same events you already have, split each week's hours into recurring meetings, interviews with their debriefs, and the hiring sync. Save a stacked bar chart as outputs/meetings-by-type.svg.",
+      status: "succeeded",
+      workerId: "wk-stats",
+      endedAt: ago(8.9),
+    },
+    {
+      kind: "assistant",
+      id: "a62",
+      at: ago(8.7),
+      text: "Recurring meetings held steady at **9 h** a week. The growth is hiring: interviews and debriefs went from **0 h** to **5 h**, and last week's hiring sync added **1 h**. The split is in **meetings-by-type.svg**.",
+      streaming: false,
+      proactive: false,
+    },
+    { kind: "user", id: "u63", at: ago(1), text: "Also check what the 2 PM candidate works on in open source." },
+    { kind: "tool", id: "t63", at: ago(0.95), name: "list_events", icon: "calendar", title: "Checked your calendar", detail: "1 event", status: "succeeded", endedAt: ago(0.9) },
+    { kind: "worker", id: "w64", at: ago(0.85), action: "start", worker: "candidate-research", environment: web.name, text: researchTask, status: "running" },
+    {
+      kind: "approval",
+      id: "approval:w64",
+      at: ago(0.84),
+      tool: "start_worker",
+      title: "Start a web research sandbox?",
+      preview: sandboxPreview("candidate-research", web, researchTask),
+      status: "pending",
+      actionable: true,
+    },
+  ];
+  const sandboxesInUse: SandboxesView = {
+    ...noSandboxes,
+    workers: [
+      { id: "wk-repo", name: "release-notes", environment: web.name, state: "stopped", messages: 1, createdAt: ago(1510), updatedAt: ago(1500), outputs: [] },
+      {
+        id: "wk-stats",
+        name: "meeting-stats",
+        environment: python.name,
+        state: "idle",
+        messages: 2,
+        createdAt: ago(13.62),
+        updatedAt: ago(8.75),
+        sandboxState: "running",
+        outputs: [chartOutput("art-1", "meetings.svg", ago(13.24), loadChart), chartOutput("art-2", "meetings-by-type.svg", ago(8.74), typeChart)],
+      },
+    ],
+    runs: {
+      w61: { workerId: "wk-stats", startedAt: ago(13.6), finishedAt: ago(13.25), outcome: "idle" },
+      w62: { workerId: "wk-stats", startedAt: ago(8.9), finishedAt: ago(8.75), outcome: "idle" },
+    },
+  };
+
   const snapshot: Snapshot = {
     account,
     platform: readyPlatform,
@@ -366,12 +538,53 @@ export function createSnapshot(variant: Variant, now = Date.now()): Snapshot {
     settings: { timeZone },
     offline,
     agenda,
+    sandboxes: noSandboxes,
   };
 
   switch (variant) {
     case "":
     case "loading":
       return snapshot;
+    case "sandboxes":
+      return { ...snapshot, conversation: { ...snapshot.conversation, busy: true }, lastReadAt: ago(0.5), timeline: sandboxConversation, sandboxes: sandboxesInUse };
+    case "sandbox-working":
+      return {
+        ...snapshot,
+        conversation: { ...snapshot.conversation, busy: true },
+        lastReadAt: ago(0.5),
+        timeline: [
+          { kind: "user", id: "u70", at: ago(1), text: "How did my meeting load change over the last four weeks? A chart would help." },
+          { kind: "tool", id: "t70", at: ago(0.95), name: "list_events", icon: "calendar", title: "Checked your calendar", detail: "47 events in the last four weeks", status: "succeeded", endedAt: ago(0.9) },
+          { kind: "worker", id: "w71", at: ago(0.85), action: "start", worker: "meeting-stats", environment: python.name, text: statsTask, status: "succeeded", workerId: "wk-stats", endedAt: ago(0.55) },
+          {
+            kind: "approval",
+            id: "approval:w71",
+            at: ago(0.84),
+            tool: "start_worker",
+            title: "Start a Python sandbox?",
+            preview: sandboxPreview("meeting-stats", python, statsTask),
+            status: "approved",
+            actionable: false,
+            decidedAt: ago(0.57),
+          },
+        ],
+        sandboxes: {
+          ...noSandboxes,
+          workers: [{ id: "wk-stats", name: "meeting-stats", environment: python.name, state: "working", messages: 1, createdAt: ago(0.57), updatedAt: ago(0.5), sandboxState: "running", outputs: [] }],
+          runs: { w71: { workerId: "wk-stats", startedAt: ago(0.55) } },
+        },
+      };
+    case "sandboxes-legacy":
+      return {
+        ...snapshot,
+        sandboxes: {
+          enabled: false,
+          unavailable: { reason: "This conversation started before your assistant could use sandboxes. Start a new conversation (Settings → Start over) to use them.", startOver: true },
+          environments: SANDBOX_ENVIRONMENTS,
+          workers: [],
+          runs: {},
+        },
+      };
     case "busy":
       return {
         ...snapshot,

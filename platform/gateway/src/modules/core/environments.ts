@@ -4,11 +4,13 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
+  DEFAULT_MAX_WORKERS,
   EnvironmentRequestSchema,
   ManagedCopilotError,
   narrowNetwork,
   normalizeNetwork,
   NETWORK_ENABLED,
+  sandboxedType,
   type EnvironmentConfig,
   type EnvironmentInfo,
   type EnvironmentRequest,
@@ -244,8 +246,8 @@ export class Environments implements EnvironmentResolver {
       config = { type, ...(size ? { size } : {}) };
       inline = true;
     }
-    if (config.type === "shared" && (request.files || request.packages || request.env)) {
-      throw new ManagedCopilotError("policy_violation", `Per-session files, packages, and env apply to sandbox environments; "${name}" is shared`);
+    if (!sandboxedType(config.type) && (request.files || request.packages || request.env)) {
+      throw new ManagedCopilotError("policy_violation", `Per-session files, packages, and env apply to sandbox environments; "${name}" is ${config.type}`);
     }
     const network = narrowNetwork(this.ceiling(config), request.network);
     const state = inline ? undefined : this.#bundles.get(name);
@@ -274,8 +276,9 @@ export class Environments implements EnvironmentResolver {
         ...(env.description ? { description: env.description } : {}),
         ...(env.models ? { models: env.models } : {}),
         network: this.ceiling(env),
-        ...(env.type !== "shared" ? { size: env.size ?? "small" } : {}),
+        ...(sandboxedType(env.type) ? { size: env.size ?? "small" } : {}),
         ...(env.promoteTo ? { promoteTo: env.promoteTo } : {}),
+        ...(env.workers ? { workers: env.workers, maxWorkers: env.maxWorkers ?? DEFAULT_MAX_WORKERS } : {}),
         scheduling: env.scheduling === true,
         agents: bundle?.agents.map((agent) => agent.name) ?? [],
       };

@@ -21,6 +21,9 @@ export interface EnvironmentInfo {
   readonly network: NetworkPolicy;
   readonly size?: SandboxSize;
   readonly promoteTo?: string;
+  /** Orchestrator environments: the isolated environments workers run in (the first is the default), and how many at once. */
+  readonly workers?: readonly string[];
+  readonly maxWorkers?: number;
   readonly scheduling: boolean;
   readonly agents: readonly string[];
 }
@@ -106,6 +109,8 @@ export interface SessionInfo {
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
   /** Present when created by a schedule run. */
   readonly scheduleId?: string;
+  /** Present on an orchestrator's workers: the coordinator session that started this one. */
+  readonly parentSessionId?: string;
 }
 
 export interface SessionListQuery {

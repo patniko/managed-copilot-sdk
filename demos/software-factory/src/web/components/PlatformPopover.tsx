@@ -122,12 +122,13 @@ const TYPE_LABELS: Readonly<Record<EnvironmentView["type"], string>> = {
   shared: "Shared",
   isolated: "Isolated sandbox",
   promotable: "Promotable",
+  orchestrator: "Orchestrator",
 };
 
 function EnvironmentItem({ environment }: { readonly environment: EnvironmentView }) {
   const network = summarizeNetwork(environment.network);
   const NetworkIcon = network?.kind === "off" ? CloudOfflineIcon : network?.kind === "restricted" ? ShieldLockIcon : GlobeIcon;
-  const TypeIcon = environment.type === "shared" ? ServerIcon : ContainerIcon;
+  const TypeIcon = environment.type === "shared" || environment.type === "orchestrator" ? ServerIcon : ContainerIcon;
   return (
     <li className="Box-row">
       <div className="flex items-center gap-2">
