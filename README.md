@@ -152,9 +152,10 @@ accepted release. The original app-driven pipeline remains as **Classic** mode.
 </p>
 
 A bot you chat with that reads your mail and manages your calendar. It uses a clearly labelled demo workspace until
-you connect Google, and it always asks before it sends mail or changes your calendar. Reminders and recurring
-briefings run as you, and it keeps working with the tab closed: the platform runs the turn and calls the assistant's
-webhook for the tool calls it needs.
+you connect Google, and it always asks before it sends mail or changes your calendar. For hands-on work, such as
+charting your meeting load or researching on GitHub, it asks to start a sandbox: an agent in its own isolated
+environment, which it reuses for follow-ups. Reminders and recurring briefings run as you, and it keeps working with
+the tab closed: the platform runs the turn and calls the assistant's webhook for the tool calls it needs.
 
 → [demos/assistant](demos/assistant/README.md)
 
@@ -237,8 +238,9 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
 - **The demos run end to end, locally and on Azure.** The factory runs in both modes: the classic pipeline, and the
-  agent-led mode, whose restart mid-build was tested locally. The assistant runs too. Dispatch runs as well, including
-  a follow-up typed in Copilot CLI attached to the same conversation.
+  agent-led mode, whose restart mid-build was tested locally. The assistant runs too; its sandboxes, added last, have
+  been verified locally only. Dispatch runs as well, including a follow-up typed in Copilot CLI attached to the same
+  conversation.
 - **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
   process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
   list what each gate proved and what it did not.
@@ -252,7 +254,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
-| [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail and Google Calendar |
+| [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail, Google Calendar, and sandboxes for hands-on work |
 | [Dispatch](demos/dispatch/README.md) | A chat with an orchestrator agent that creates a sandbox for each part of a request, or reuses the ones it has |
 | [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
 | [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |

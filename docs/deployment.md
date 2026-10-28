@@ -8,12 +8,12 @@ reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public U
 > **Status.** The root AppHost deploys and both demo happy paths pass in westus2 (2026-10-24), using stock
 > SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
 > with the deployed assistant's webhook and reminder journeys checked separately. Orchestrator environments (snippet
-> 14 and every coordinator tool) passed on 2026-10-27, as did the two apps built on them: Dispatch and the factory's
-> agent-led mode. NFS locking, revision recovery,
-> and persistent proxy trust have been exercised. This is a single-writer deployment, not a partition-tolerant HA
-> claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for example
-> isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`, and
-> requests for them fail with `capability_unavailable` naming what is missing.
+> 14 and every coordinator tool) passed on 2026-10-27, as did two apps built on them: Dispatch and the factory's
+> agent-led mode. The assistant's sandboxes, also built on them, have not been checked on Azure yet. NFS locking,
+> revision recovery, and persistent proxy trust have been exercised. This is a single-writer deployment, not a
+> partition-tolerant HA claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for
+> example isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`,
+> and requests for them fail with `capability_unavailable` naming what is missing.
 >
 > **Recovery contract.** A gateway-only rollover recovered both services in 26.3 seconds without restarting the
 > factory. A native turn cut off by runtime replacement is ended visibly as failed/idle, not left falsely running.
@@ -343,7 +343,7 @@ Alternatives when an address allowlist does not fit:
 | Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every coordinator tool live) | Yes: snippet 14, walkthrough 11, and every coordinator tool passed (2026-10-27). Workers run in Container Apps Sandboxes, and their files move through the sandbox file API, not a shared disk. A gateway restart during worker runs has been tested only locally |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
-| Demos (software factory, assistant, Dispatch) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; the factory's agent-led mode and Dispatch pass with their workers in Container Apps Sandboxes; assistant uses labelled demo Google data |
+| Demos (software factory, assistant, Dispatch) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; the factory's agent-led mode and Dispatch pass with their workers in Container Apps Sandboxes; assistant uses labelled demo Google data, and its sandboxes (added 2026-10-27) are verified locally only |
 
 ## Live qualification
 

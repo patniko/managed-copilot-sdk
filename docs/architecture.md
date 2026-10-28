@@ -874,7 +874,7 @@ and quickstart snippet 14).
   starting"), and coordinators observed live wait for the worker and copy again. A worker therefore starts its task
   before files copied for it arrive; tasks that depend on them should say so (the coordinator's own task text usually
   does).
-- **Apps on coordinators.** Two demos run on coordinator sessions, with the decisions left to the model and the app
+- **Apps on coordinators.** Three demos run on coordinator sessions, with the decisions left to the model and the app
   observing workers through `managed.workers(coordinator).list()`, the `worker.*` events, and `managed.sessions.get`,
   never by attaching a client to a worker (which would take over its prompts).
   - *Software factory, agent-led mode* (the default; `demos/software-factory`). `factory-coordinator` is an
@@ -904,6 +904,18 @@ and quickstart snippet 14).
     Dispatch and cancelled from the CLI, and a declined request whose reason the coordinator followed. On Azure
     (2026-10-27), the deployed app ran two approved workers in their own sandboxes, an attached Copilot CLI's
     follow-up reused one, and deleting the conversation deleted all three sessions.
+  - *Assistant* (`demos/assistant`). The `assistant` environment is an orchestrator (scheduling on, network off,
+    `maxWorkers` 3) with workers `assistant-python` (the default: medium, no network) and `assistant-web` (small,
+    `github.com` and `api.github.com` only). Its agent keeps the app's own tools (mail, calendar, reminders) and
+    starts a sandbox only for hands-on work, passing the data it needs in the task, since a worker can't see the
+    conversation or use the app's tools; follow-ups go to the same worker (`message_worker`). A `start_worker` waits
+    in the SDK permission handler for the person: the webhook and the poller never answer permission requests, so a
+    scheduled run's request waits until they're back. The server copies each published image as soon as it publishes
+    (charts outlive their worker) and times each sandbox card from worker listings, matched to the worker's messages
+    by number rather than across clocks; a finish reported before a worker's first listing waits for that listing to
+    place it. A conversation created before the environment became an orchestrator can't start sandboxes and offers
+    Start over. Verified live locally (approval, a reused sandbox, a second kind of sandbox, approval after the tab
+    was closed); not yet on Azure.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
@@ -1579,7 +1591,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
 | **attach** (was devloop) | `packages/aspire/**` (except `src/publish/**`, azure), `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
-| **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, and Google Calendar |
+| **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent that shows each sandbox it creates or reuses |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |

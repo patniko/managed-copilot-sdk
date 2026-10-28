@@ -103,7 +103,8 @@ await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", al
 // the work or sends it to a sandbox it already has.
 await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allowedHostsEnv: "DISPATCH_ALLOWED_HOSTS", gatewayUrlEnv: ["DISPATCH_ATTACH_URL"] });
 
-// A long-running assistant you talk to like a bot: reminders, briefings, Gmail, and Google Calendar.
+// A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
+// for hands-on work.
 const assistantApp = await (
   await addDemo(
     { ...ASSISTANT_DEMO, port: ports.assistant, env: { ...ASSISTANT_DEMO.env, ASSISTANT_PUBLIC_URL: assistantUrl } },
