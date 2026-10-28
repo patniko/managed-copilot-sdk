@@ -7,7 +7,7 @@
  */
 import { z } from "zod";
 import { normalizeHostPattern } from "./network.js";
-import { MAX_WORKERS_LIMIT } from "./workers.js";
+import { EXECUTION_STYLES, MAX_WORKERS_LIMIT, SUBAGENT_SANDBOXES } from "./workers.js";
 
 export const ENVIRONMENT_TYPES = ["shared", "isolated", "promotable", "orchestrator"] as const;
 export type EnvironmentType = (typeof ENVIRONMENT_TYPES)[number];
@@ -121,6 +121,14 @@ export const EnvironmentConfigSchema = z
     workers: z.array(z.string().regex(RESOURCE_NAME)).min(1).optional(),
     /** Orchestrator only: how many workers one session can have at once (stopped workers don't count). Default 4. */
     maxWorkers: z.number().int().min(1).max(MAX_WORKERS_LIMIT).optional(),
+    /**
+     * Orchestrator only. `delegate` (default): the coordinator hands work to worker agents. `direct`: the coordinator
+     * and its sub-agents run commands and edit files in a sandbox of its only worker environment themselves. `mixed`:
+     * both, its own sandbox in the first worker environment.
+     */
+    execution: z.enum(EXECUTION_STYLES).optional(),
+    /** Orchestrator only, direct and mixed: one hands sandbox for the session (`shared`, default) or one per sub-agent (`own`). */
+    subagents: z.enum(SUBAGENT_SANDBOXES).optional(),
     packages: PackagesSchema.optional(),
     setupCommands: z.array(z.string().min(1)).optional(),
     /** Non-secret variables visible to sandbox code. */
@@ -237,6 +245,19 @@ export const ManagedCopilotConfigSchema = z
       }
       if (env.type !== "orchestrator" && (env.workers !== undefined || env.maxWorkers !== undefined)) {
         ctx.addIssue({ code: "custom", path: ["environments", name], message: "workers and maxWorkers are only valid on orchestrator environments" });
+      }
+      if (env.type !== "orchestrator" && (env.execution !== undefined || env.subagents !== undefined)) {
+        ctx.addIssue({ code: "custom", path: ["environments", name], message: "execution and subagents are only valid on orchestrator environments" });
+      }
+      if (env.type === "orchestrator" && env.execution === "direct" && env.workers !== undefined && env.workers.length !== 1) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["environments", name, "workers"],
+          message: `execution "direct" takes exactly one worker environment (the one its sandbox runs in); this names ${env.workers.length}. Use execution "mixed" to also start workers.`,
+        });
+      }
+      if (env.type === "orchestrator" && env.subagents !== undefined && (env.execution ?? "delegate") === "delegate") {
+        ctx.addIssue({ code: "custom", path: ["environments", name, "subagents"], message: 'subagents applies only to execution "direct" or "mixed"' });
       }
       for (const [index, worker] of (env.workers ?? []).entries()) {
         const target = envs[worker];

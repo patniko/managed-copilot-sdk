@@ -29,7 +29,7 @@ export const SANDBOXD_ROUTES = {
   tunnel: "/v1/tunnel",
   /** `GET ?path=&recursive=` lists workspace entries. */
   files: "/v1/files",
-  /** `GET ?path=` streams a workspace file; `PUT ?path=&overwrite=` writes one atomically. */
+  /** `GET ?path=` streams a workspace file; `PUT ?path=&overwrite=&ifMatch=` writes one atomically (`ifMatch`: replace only if its SHA-256 is still this). */
   fileContent: "/v1/files/content",
   /** `POST` hashes the bounded regular files under `/workspace/outputs`. */
   outputsManifest: "/v1/outputs/manifest",

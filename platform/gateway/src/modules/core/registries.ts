@@ -44,6 +44,7 @@ export class PlatformTools implements PlatformToolRegistry {
       ...(definition.overridesBuiltInTool ? { overridesBuiltInTool: true } : {}),
       ...(definition.appliesTo ? { appliesTo: definition.appliesTo } : {}),
       ...(definition.replay ? { replay: definition.replay } : {}),
+      ...(definition.scoped ? { scoped: true } : {}),
       ...(recover ? { recover: async (args: unknown, context: PlatformToolCallContext) => toToolResult(await recover(args, context)) } : {}),
       enabledFor: definition.enabledFor ?? (() => true),
       handler: async (args: unknown, context: PlatformToolCallContext) => toToolResult(await handler(args, context)),
@@ -54,12 +55,15 @@ export class PlatformTools implements PlatformToolRegistry {
     };
   }
 
-  get(name: string): RegisteredPlatformTool | undefined {
-    return this.#tools.get(name);
+  get(name: string, environment?: string): RegisteredPlatformTool | undefined {
+    const tool = this.#tools.get(name);
+    // A scoped tool's name is the platform's only where it is injected; elsewhere it is a client's tool name.
+    if (tool?.scoped && (environment === undefined || !tool.enabledFor(environment))) return undefined;
+    return tool;
   }
 
-  has(name: string): boolean {
-    return this.#tools.has(name);
+  has(name: string, environment?: string): boolean {
+    return this.get(name, environment) !== undefined;
   }
 
   forSession(context: { environment: string; type: EnvironmentType; placement: Placement }): readonly RegisteredPlatformTool[] {

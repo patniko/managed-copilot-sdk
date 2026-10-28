@@ -135,7 +135,13 @@ export function createSandboxdServer(options: ServerOptions): Server {
         const length = uploadLength(req);
         const controller = new AbortController();
         req.on("aborted", () => controller.abort());
-        const entry = await agent.writeFile(relative, req, { overwrite: url.searchParams.get("overwrite") !== "false", ...(length !== undefined ? { expectedBytes: length } : {}), signal: controller.signal });
+        const ifMatch = url.searchParams.get("ifMatch") ?? undefined;
+        const entry = await agent.writeFile(relative, req, {
+          overwrite: url.searchParams.get("overwrite") !== "false",
+          ...(length !== undefined ? { expectedBytes: length } : {}),
+          ...(ifMatch ? { ifMatch } : {}),
+          signal: controller.signal,
+        });
         sendJson(res, 201, entry);
         return;
       }

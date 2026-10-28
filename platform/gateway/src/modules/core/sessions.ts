@@ -1466,7 +1466,7 @@ export class SessionManager implements SessionsService {
       const present = !peer.closed;
       if (present) this.#checkHooksRegistration(live, peer, prepared);
       const previous = live.attachments.get(peer.id);
-      const change = present ? this.#inventoryChange(live, peer.id, previous, registrationOf(prepared, this.#options.platformTools)) : undefined;
+      const change = present ? this.#inventoryChange(live, peer.id, previous, registrationOf(prepared, this.#options.platformTools, live.environment.name)) : undefined;
       if (present) this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared, change);
       let result: unknown;
@@ -1584,7 +1584,7 @@ export class SessionManager implements SessionsService {
           break;
         case "session.tools.set": {
           const admitted = admitToolsSet(params, context());
-          const declarations = clientDeclarations(admitted.params["tools"], this.#options.platformTools);
+          const declarations = clientDeclarations(admitted.params["tools"], this.#options.platformTools, live.environment.name);
           // The client's registration changes in the step that writes it: what runs while this call waits (a restore,
           // a cutover's destination) registers what is in effect, and a call that never reaches a runtime changes
           // nothing. What it withdraws is decided against the registration before this call (also on a retry).
@@ -1941,7 +1941,7 @@ export class SessionManager implements SessionsService {
     let live: LiveSession | undefined;
     try {
       await this.#checkRemoteMcp(admitted, sessionId, placement, network);
-      const registration = registrationOf(admitted.params, this.#options.platformTools);
+      const registration = registrationOf(admitted.params, this.#options.platformTools, environment.name);
       const stored: AdmittedConfig = {
         params: storedParams(admitted.params),
         // Without a client, the declarations are the service's own; a client's are its callback registrations.
@@ -2168,7 +2168,13 @@ export class SessionManager implements SessionsService {
         // Left out (for example its customizations were rejected): a worker started there fails with the reason.
       }
     }
-    return { workers, maxWorkers: environment.config.maxWorkers ?? DEFAULT_MAX_WORKERS };
+    const execution = environment.config.execution ?? "delegate";
+    return {
+      workers,
+      maxWorkers: environment.config.maxWorkers ?? DEFAULT_MAX_WORKERS,
+      execution,
+      ...(execution !== "delegate" ? { subagents: environment.config.subagents ?? "shared" } : {}),
+    };
   }
 
   #workingDirectory(placement: Placement, sessionId: string): string {
@@ -2833,7 +2839,7 @@ export class SessionManager implements SessionsService {
       skillProvider: flag("hasSkillProvider"),
       transforms: Object.values(sections).some((section) => section?.action === "transform"),
       canvases: (Array.isArray(forwarded["canvases"]) && forwarded["canvases"].length > 0) || forwarded["requestCanvasRenderer"] !== undefined || forwarded["canvasProvider"] !== undefined,
-      declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))),
+      declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]), live.environment.name)),
       flags: Object.fromEntries([...WIRE_FLAGS, "streaming"].filter((key) => forwarded[key] !== undefined).map((key) => [key, forwarded[key]])),
       registered: { tools: { ...before?.registered.tools }, flags: { ...before?.registered.flags } },
     });
@@ -3125,7 +3131,7 @@ export class SessionManager implements SessionsService {
     const record = this.get(live.id);
     const actions = this.#actions;
     const toolName = event.type === "external_tool.requested" ? (event.data["toolName"] as string | undefined) : undefined;
-    const platformTool = toolName ? this.#options.platformTools.get(toolName) : undefined;
+    const platformTool = toolName ? this.#options.platformTools.get(toolName, live.environment.name) : undefined;
     if (actions && record) {
       // Events flushed after a cutover belong to the placement generation whose runtime emitted them.
       return actions.onSessionEvent({ sessionId: live.id, ...this.#incarnationOf(live.id), ownerId: record.ownerId, environment: record.environment, generation: generation ?? record.generation, event, attached: this.#responders(live) });
@@ -3147,7 +3153,7 @@ export class SessionManager implements SessionsService {
   }
 
   async #runPlatformTool(live: LiveSession, record: SessionRecord, event: RuntimeSessionEvent, name: string): Promise<void> {
-    const tool = this.#options.platformTools.get(name);
+    const tool = this.#options.platformTools.get(name, record.environment);
     const requestId = event.data["requestId"];
     const toolCallId = String(event.data["toolCallId"] ?? requestId);
     const call = new AbortController();
@@ -3641,12 +3647,12 @@ function applyInventory(base: CallbackInventory | undefined, change: InventoryCh
 }
 
 /** The registration in create/resume params: the client's tool declarations (no platform tools) and handler flags. */
-function registrationOf(params: Record<string, unknown>, platformTools: PlatformToolRegistry): { tools: Record<string, unknown>[]; flags: Record<string, unknown> } {
-  return { tools: clientDeclarations(params["tools"], platformTools), flags: Object.fromEntries(WIRE_FLAGS.filter((key) => params[key] !== undefined).map((key) => [key, params[key]])) };
+function registrationOf(params: Record<string, unknown>, platformTools: PlatformToolRegistry, environment: string): { tools: Record<string, unknown>[]; flags: Record<string, unknown> } {
+  return { tools: clientDeclarations(params["tools"], platformTools, environment), flags: Object.fromEntries(WIRE_FLAGS.filter((key) => params[key] !== undefined).map((key) => [key, params[key]])) };
 }
 
-function clientDeclarations(tools: unknown, platformTools: PlatformToolRegistry): Record<string, unknown>[] {
-  return ((Array.isArray(tools) ? tools : []) as Record<string, unknown>[]).filter((tool) => !platformTools.has(String(tool["name"])));
+function clientDeclarations(tools: unknown, platformTools: PlatformToolRegistry, environment: string): Record<string, unknown>[] {
+  return ((Array.isArray(tools) ? tools : []) as Record<string, unknown>[]).filter((tool) => !platformTools.has(String(tool["name"]), environment));
 }
 
 function trueFlags(flags: Readonly<Record<string, unknown>>): Record<string, true> {

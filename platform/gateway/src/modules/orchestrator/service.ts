@@ -20,7 +20,9 @@ import {
   DEFAULT_MAX_WORKERS,
   isManagedCopilotError,
   ManagedCopilotError,
+  OUTPUTS_DIR,
   type EnvironmentConfig,
+  type ExecutionStyle,
   type FileEntry,
   type PlatformEventType,
   type WorkerEventData,
@@ -38,6 +40,20 @@ import { WAIT_DEFAULT_SECONDS, WAIT_MAX_SECONDS, WORKER_INSTRUCTIONS } from "./t
 
 /** Recorded as the worker sessions' client name. */
 export const WORKER_CLIENT_NAME = "managed-copilot-orchestrator";
+/** Recorded as the hands sandboxes' client name. */
+export const HANDS_CLIENT_NAME = "managed-copilot-orchestrator-hands";
+
+/** A hands sandbox, ready for commands and files. */
+export interface HandsSandbox {
+  readonly record: WorkerRecord;
+  /** The sandbox to pin calls to (`sandboxId` of file and exec calls). */
+  readonly sandboxId: string;
+}
+
+/** What `copy_worker_files` and `read_worker_file` call the calling agent's own sandbox in mixed mode. */
+export const SELF_REF = "self";
+/** Remembered tool calls of sub-agents (attribution check). */
+const REMEMBERED_CALLS = 5_000;
 
 const NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 const TASK_LIMIT = 32_000;
@@ -142,6 +158,12 @@ export class WorkerManager {
   #cleanupDelay = CLEANUP_RETRY_MS;
   readonly #disposers: (() => void)[] = [];
   #closed = false;
+  /** Hands sandboxes being created, by record ID: concurrent calls wait for the same creation. */
+  readonly #handsLaunches = new Map<string, Promise<WorkerRecord>>();
+  /** Releases of sub-agents' hands sandboxes under way, by record ID. */
+  readonly #releases = new Map<string, Promise<void>>();
+  /** Tool call ID → the sub-agent that made it, from the coordinators' `tool.execution_start` events. */
+  readonly #subagentCalls = new Map<string, string>();
   /** Waits to end when the gateway starts shutting down; each removes itself when it ends first. */
   readonly #onShutdown = new Set<() => void>();
 
@@ -206,6 +228,9 @@ export class WorkerManager {
     const { record: coordinator, config } = this.#coordinator(context);
     const input = record(args);
     const name = workerName(input["name"]);
+    if (executionOf(config) !== "delegate" && (name === SELF_REF || name === "hands" || name.startsWith("hands-"))) {
+      throw new ManagedCopilotError("invalid_request", `"${name}" names your own sandbox. Pick another name for the worker.`);
+    }
     const task = requiredText(input["task"], "task", TASK_LIMIT);
     const workers = config.workers ?? [];
     const environment = optionalText(input["environment"]) ?? workers[0];
@@ -334,10 +359,10 @@ export class WorkerManager {
     if (refs !== undefined && (!Array.isArray(refs) || refs.length > 64)) throw new ManagedCopilotError("invalid_request", "workers must be a list of worker names or IDs");
     const timeout = Math.min(Math.max(typeof input["timeoutSeconds"] === "number" && Number.isFinite(input["timeoutSeconds"]) ? input["timeoutSeconds"] : WAIT_DEFAULT_SECONDS, 1), WAIT_MAX_SECONDS);
     const selected = Array.isArray(refs) && refs.length > 0
-      ? [...new Map(refs.map((ref) => this.#find(coordinator, ref)).map((worker) => [worker.id, worker])).values()]
-      : this.#store.forCoordinator(coordinator.id, coordinator.incarnation).filter((worker) => BUSY_STATES.includes(worker.state));
+      ? [...new Map(refs.map((ref) => agentWorker(this.#find(coordinator, ref))).map((worker) => [worker.id, worker])).values()]
+      : this.#store.forCoordinator(coordinator.id, coordinator.incarnation).filter((worker) => worker.role === "worker" && BUSY_STATES.includes(worker.state));
     if (selected.length === 0) {
-      const all = this.#store.forCoordinator(coordinator.id, coordinator.incarnation).filter(occupiesSlot);
+      const all = this.#store.forCoordinator(coordinator.id, coordinator.incarnation).filter((worker) => worker.role === "worker" && occupiesSlot(worker));
       if (all.length === 0) return "This session has no workers. Start one with start_worker.";
       const notes = await this.#publications(all, context.signal);
       if (this.#closed) return unanswered();
@@ -373,9 +398,22 @@ export class WorkerManager {
 
   list(_args: unknown, context: PlatformToolCallContext): string {
     const { record: coordinator, config } = this.#coordinator(context);
-    const workers = this.#store.forCoordinator(coordinator.id, coordinator.incarnation);
+    const all = this.#store.forCoordinator(coordinator.id, coordinator.incarnation);
+    const workers = all.filter((worker) => worker.role === "worker");
+    const hands = all.filter((worker) => worker.role === "hands" && worker.state !== "stopped");
     const max = config.maxWorkers ?? DEFAULT_MAX_WORKERS;
-    const lines: string[] = ["Worker environments you can start workers in:"];
+    const lines: string[] = [];
+    if (executionOf(config) !== "delegate") {
+      const own = config.workers?.[0] ?? "";
+      lines.push(
+        hands.length === 0
+          ? `Your own sandbox (environment ${own}) starts with your first shell or file tool call. copy_worker_files and read_worker_file call it "${SELF_REF}".`
+          : `Your own sandbox${hands.length > 1 ? "es" : ""} (environment ${own}; "${SELF_REF}" in copy_worker_files and read_worker_file):`,
+        ...hands.map((sandbox) => `- ${sandbox.name}${sandbox.agentId ? ` (sub-agent ${sandbox.agentId})` : ""}, ID ${sandbox.id}: ${sandbox.state === "idle" ? "ready" : sandbox.state}${sandbox.error ? ` (${clip(oneLine(sandbox.error), 200)})` : ""}`),
+        "",
+      );
+    }
+    lines.push("Worker environments you can start workers in:");
     for (const [index, name] of (config.workers ?? []).entries()) {
       const environment = this.#app.config.deployment.environments[name];
       const agents = this.#agents(name);
@@ -385,8 +423,8 @@ export class WorkerManager {
         }`,
       );
     }
-    const active = workers.filter(occupiesSlot).length;
-    lines.push("", workers.length === 0 ? `No workers yet. This session can have up to ${max} at once.` : `Workers (${active} of at most ${max} at once):`);
+    const active = all.filter(occupiesSlot).length;
+    lines.push("", workers.length === 0 ? `No workers yet. This session can have up to ${max} at once${hands.length > 0 ? ", counting your own sandboxes" : ""}.` : `Workers (${active} of at most ${max} at once${hands.length > 0 ? ", counting your own sandboxes" : ""}):`);
     for (const worker of workers) {
       const preview = worker.state === "idle" && worker.result ? `: ${clip(oneLine(worker.result), 300)}` : worker.error ? `: ${clip(oneLine(worker.error), 300)}` : "";
       lines.push(`- ${statusLine(worker)}${preview}`);
@@ -397,7 +435,7 @@ export class WorkerManager {
   async readFile(args: unknown, context: PlatformToolCallContext): Promise<string> {
     const { record: coordinator } = this.#coordinator(context);
     const input = record(args);
-    const worker = this.#withSandbox(this.#find(coordinator, input["worker"]));
+    const worker = this.#withSandbox(await this.#target(coordinator, input["worker"], context));
     const path = workspacePath(requiredText(input["path"], "path", 1024));
     const sandboxes = this.#sandboxes();
     const sandboxId = await this.#pin(worker);
@@ -427,8 +465,8 @@ export class WorkerManager {
   async copyFiles(args: unknown, context: PlatformToolCallContext): Promise<string> {
     const { record: coordinator } = this.#coordinator(context);
     const input = record(args);
-    const from = this.#withSandbox(this.#find(coordinator, input["from"]));
-    const to = this.#withSandbox(this.#find(coordinator, input["to"]));
+    const from = this.#withSandbox(await this.#target(coordinator, input["from"], context));
+    const to = this.#withSandbox(await this.#target(coordinator, input["to"], context));
     if (from.id === to.id) throw new ManagedCopilotError("invalid_request", "from and to must be different workers");
     const paths = input["paths"];
     if (!Array.isArray(paths) || paths.length === 0 || paths.length > COPY_PATHS || paths.some((path) => typeof path !== "string")) {
@@ -471,7 +509,7 @@ export class WorkerManager {
     const { record: coordinator } = this.#coordinator(context);
     // The same tool call again (a replay after a restart) stops the worker it chose, never a newer one with its name.
     const chosen = this.#store.stopFor(context.idempotencyKey);
-    const worker = chosen !== undefined ? this.#own(coordinator, chosen) : this.#find(coordinator, record(args)["worker"]);
+    const worker = chosen !== undefined ? this.#own(coordinator, chosen) : agentWorker(this.#find(coordinator, record(args)["worker"]));
     if (chosen === undefined) this.#store.recordStop(context.idempotencyKey, worker.id);
     if (worker.state !== "stopped") {
       this.#markStopped(worker, "Stopped by the coordinator.");
@@ -490,6 +528,226 @@ export class WorkerManager {
       case "failed":
         return `Stopped worker "${worker.name}", but its sandbox couldn't be deleted yet (${outcome.reason}). The platform keeps trying.`;
     }
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // Hands sandboxes (direct and mixed)
+
+  /**
+   * The calling agent's hands sandbox, created the first time an agent needs one: with `subagents: "own"` each
+   * sub-agent (`context.agentId`) gets its own, otherwise the coordinator incarnation has one. Creation is atomic and
+   * counts against `maxWorkers`; concurrent calls wait for the same creation.
+   */
+  async hands(context: PlatformToolCallContext): Promise<HandsSandbox> {
+    const { record: coordinator, config } = this.#coordinator(context);
+    if (executionOf(config) === "delegate") {
+      throw new ManagedCopilotError("capability_unavailable", `Environment "${coordinator.environment}" delegates work to workers; it has no sandbox of its own.`);
+    }
+    let agentId: string | undefined;
+    if (config.subagents === "own") {
+      agentId = context.agentId;
+      // The runtime reported this call as a sub-agent's, but its attribution did not arrive: never share the root's.
+      if (agentId === undefined && this.#subagentCalls.has(context.toolCallId)) {
+        throw new ManagedCopilotError("capability_unavailable", "The platform could not tell which sub-agent made this call, so it could not choose its sandbox. Try again.");
+      }
+    }
+    const record = await this.#ensureHands(coordinator, config, agentId);
+    return { record, sandboxId: await this.#pin(record) };
+  }
+
+  async #ensureHands(coordinator: SessionRecord, config: EnvironmentConfig, agentId: string | undefined, options: { readonly slack?: number } = {}): Promise<WorkerRecord> {
+    const startKey = `hands:${coordinator.id}:${coordinator.incarnation}:${agentId ?? ""}`;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const existing = this.#store.byStartKey(startKey);
+      if (existing) {
+        const launch = this.#handsLaunches.get(existing.id);
+        if (launch) return launch;
+        if (existing.state === "idle" && existing.incarnation) return existing;
+        if (existing.state === "starting") {
+          // A restart cut its creation: recovery settles it; until then, settle it here.
+          this.#settleHands(existing);
+          continue;
+        }
+        // Stopped or failed while keeping its key: a new one replaces it.
+        this.#store.retireStartKey(existing.id);
+        continue;
+      }
+      const environment = config.workers?.[0];
+      if (!environment) throw new ManagedCopilotError("capability_unavailable", `Environment "${coordinator.environment}" names no worker environment for its sandbox.`);
+      const max = (config.maxWorkers ?? DEFAULT_MAX_WORKERS) + (options.slack ?? 0);
+      const { record: admitted, created } = this.#store.admit(
+        {
+          id: randomUUID(),
+          coordinatorId: coordinator.id,
+          coordinatorIncarnation: coordinator.incarnation,
+          ownerId: coordinator.ownerId,
+          name: agentId ? `hands-${agentId.replace(/[^a-z0-9_-]/gi, "").slice(0, 8).toLowerCase() || "agent"}` : "hands",
+          environment,
+          task: agentId ? `Sandbox sub-agent ${agentId} works in directly.` : "Sandbox the coordinator works in directly.",
+          startKey,
+          role: "hands",
+          ...(agentId ? { agentId } : {}),
+        },
+        max,
+        {
+          hint: `This session already has ${max} sandboxes and workers, the most it can have at once. ${
+            agentId ? "Wait for a sub-agent to finish (its sandbox is released then) or stop a worker you no longer need" : "Stop a worker you no longer need"
+          }, then try again.`,
+        },
+      );
+      if (!created) continue;
+      this.#workers.add(admitted.id);
+      const launch = this.#launchHands(admitted, coordinator).finally(() => this.#handsLaunches.delete(admitted.id));
+      this.#handsLaunches.set(admitted.id, launch);
+      return launch;
+    }
+    throw new ManagedCopilotError("conflict", "This session's sandbox changed while it was being prepared. Try again.");
+  }
+
+  async #launchHands(hands: WorkerRecord, coordinator: SessionRecord): Promise<WorkerRecord> {
+    const sessions = this.#app.service("sessions");
+    try {
+      if (!sessions.createWorkspace) throw new ManagedCopilotError("capability_unavailable", "This gateway cannot create workspace-only sandboxes.");
+      const principal = await this.#principal(coordinator.id);
+      if (this.#closed) return unanswered();
+      const network = coordinator.environmentRequest.network;
+      const result = await sessions.createWorkspace(principal, {
+        sessionId: hands.id,
+        environment: { name: hands.environment, ...(network !== undefined ? { network } : {}) },
+        parentSessionId: coordinator.id,
+        clientName: HANDS_CLIENT_NAME,
+      });
+      if (this.#closed) return unanswered();
+      const incarnation = result.incarnation ?? sessions.get(hands.id)?.incarnation;
+      if (!incarnation) throw new ManagedCopilotError("not_found", "The sandbox was deleted while it started");
+      this.#store.setIncarnation(hands.id, incarnation);
+      const ready = this.#store.update(hands.id, { state: "idle", error: null }, ["starting"]);
+      if (!ready) {
+        // Stopped meanwhile (its coordinator was deleted): what was created goes now.
+        const latest = this.#store.get(hands.id);
+        if (latest?.cleanup) void this.#cleanup(latest);
+        throw new ManagedCopilotError("conflict", "This session's sandbox was stopped while it started.");
+      }
+      this.#emit("worker.started", ready);
+      this.#log.info("Hands sandbox ready", { coordinatorId: coordinator.id, sandboxSessionId: hands.id, environment: hands.environment, agentId: hands.agentId });
+      if (!this.#coordinatorCurrent(ready)) {
+        const stopped = this.#markStopped(ready, "Its coordinator session was deleted.");
+        if (stopped) void this.#cleanup(stopped);
+        throw new ManagedCopilotError("not_found", `Session ${coordinator.id} was not found`);
+      }
+      return ready;
+    } catch (error) {
+      if (this.#closed) return unanswered();
+      const reason = `Couldn't prepare the sandbox: ${describeError(error)}`;
+      const failed = this.#store.update(hands.id, { state: "failed", error: reason }, ["starting"]);
+      if (failed) {
+        this.#emit("worker.failed", failed);
+        this.#store.retireStartKey(hands.id);
+        if (failed.incarnation === undefined) this.#workers.delete(hands.id);
+        else {
+          const stopped = this.#markStopped(failed, reason);
+          if (stopped) void this.#cleanup(stopped);
+        }
+      }
+      this.#log.warn("A hands sandbox failed to start", { coordinatorId: coordinator.id, sandboxSessionId: hands.id, error: (error as Error).message });
+      throw isManagedCopilotError(error) ? new ManagedCopilotError(error.code, reason, error.details) : new ManagedCopilotError("internal", reason);
+    }
+  }
+
+  /** A hands sandbox a stopped gateway left `starting`: ready if its workspace session exists, else failed (no slot). */
+  #settleHands(hands: WorkerRecord): void {
+    const session = this.#app.service("sessions").get(hands.id);
+    if (session && this.#isWorkerSession(session, hands) && session.kind === "workspace") {
+      this.#store.setIncarnation(hands.id, session.incarnation);
+      this.#store.update(hands.id, { state: "idle", error: null }, ["starting"]);
+      return;
+    }
+    this.#store.update(hands.id, { state: "failed", error: "The platform restarted before this sandbox was ready." }, ["starting"]);
+    this.#store.retireStartKey(hands.id);
+    this.#workers.delete(hands.id);
+  }
+
+  /**
+   * Releases a sub-agent's hands sandbox (`subagents: "own"`) when the sub-agent finished: its `/workspace/outputs` is
+   * copied into the root agent's sandbox under `outputs/<agent>/`, then it is deleted. A sandbox whose outputs could not
+   * be copied is kept (it goes with the coordinator).
+   */
+  #releaseHands(coordinatorId: string, agentId: string): void {
+    const coordinator = this.#app.service("sessions").get(coordinatorId);
+    if (!coordinator) return;
+    const hands = this.#store.byStartKey(`hands:${coordinator.id}:${coordinator.incarnation}:${agentId}`);
+    if (!hands || hands.state === "stopped" || this.#releases.has(hands.id)) return;
+    const run = (async () => {
+      const launch = this.#handsLaunches.get(hands.id);
+      const ready = launch ? await launch.catch(() => undefined) : this.#store.get(hands.id);
+      if (!ready || ready.state !== "idle" || !ready.incarnation || this.#closed) return;
+      const config = this.#app.config.deployment.environments[coordinator.environment];
+      try {
+        await this.#copyOutputs(ready, coordinator, config, agentId);
+      } catch (error) {
+        if (this.#closed) return;
+        this.#log.warn("Could not copy a sub-agent's outputs; its sandbox is kept", { coordinatorId, sandboxSessionId: hands.id, error: (error as Error).message });
+        this.#store.update(hands.id, { error: `Its outputs could not be copied into the main sandbox (${describeError(error)}); it is kept until the session is deleted.` });
+        return;
+      }
+      if (this.#closed) return;
+      const stopped = this.#markStopped(ready, "Its sub-agent finished.");
+      if (stopped) await this.#cleanup(stopped);
+    })()
+      .catch((error: unknown) => this.#log.warn("Releasing a sub-agent's sandbox failed", { coordinatorId, sandboxSessionId: hands.id, error: (error as Error).message }))
+      .finally(() => this.#releases.delete(hands.id));
+    this.#releases.set(hands.id, run);
+  }
+
+  async #copyOutputs(from: WorkerRecord, coordinator: SessionRecord, config: EnvironmentConfig | undefined, agentId: string): Promise<void> {
+    const sandboxes = this.#sandboxes();
+    const source = await this.#pin(from);
+    const outputs = OUTPUTS_DIR.replace(/^\/workspace\//, "");
+    let entries: FileEntry[];
+    try {
+      entries = await sandboxes.listFiles(from.id, outputs, { recursive: true, sandboxId: source });
+    } catch (error) {
+      if (isManagedCopilotError(error, "not_found")) return;
+      throw error;
+    }
+    const files = entries.filter((entry) => entry.type === "file").slice(0, COPY_FILES);
+    if (files.length === 0 || !config || config.type !== "orchestrator") return;
+    // The root agent's sandbox may not exist yet; the finishing sub-agent's slot is freed right after.
+    const root = await this.#ensureHands(coordinator, config, undefined, { slack: 1 });
+    const target = await this.#pin(root);
+    const label = agentId.replace(/[^A-Za-z0-9_-]/g, "") || "agent";
+    for (const file of files) {
+      const download = await sandboxes.readFile(from.id, file.path, { sandboxId: source });
+      try {
+        const rest = file.path.slice(outputs.length + 1);
+        await sandboxes.writeFile(root.id, `${outputs}/${label}/${rest}`, download.body, { size: download.entry.size, sandboxId: target });
+      } finally {
+        download.body.destroy();
+      }
+    }
+  }
+
+  /** Publishes the coordinator's hands sandboxes' `/workspace/outputs` at the end of its turn (they have no turns). */
+  #publishHands(coordinatorId: string, event: RuntimeSessionEvent): void {
+    const coordinator = this.#app.service("sessions").get(coordinatorId);
+    if (!coordinator || coordinator.type !== "orchestrator") return;
+    const hands = this.#store.forCoordinator(coordinator.id, coordinator.incarnation).filter((record) => record.role === "hands" && record.state === "idle" && record.incarnation);
+    if (hands.length === 0) return;
+    const turnId = coordinator.lastTurn?.turnId ?? String(event.id ?? randomUUID());
+    for (const record of hands) {
+      void this.#sandboxes()
+        .publishOutputs(record.id, turnId)
+        .catch((error: unknown) => this.#log.warn("Publishing a hands sandbox's outputs failed", { coordinatorId, sandboxSessionId: record.id, error: (error as Error).message }));
+    }
+  }
+
+  /** `self` (the calling agent's own sandbox, in direct and mixed) or a worker by name or ID. */
+  async #target(coordinator: SessionRecord, ref: unknown, context: PlatformToolCallContext): Promise<WorkerRecord> {
+    if (typeof ref === "string" && ref.trim().toLowerCase() === SELF_REF) {
+      const config = this.#app.config.deployment.environments[coordinator.environment];
+      if (config && config.type === "orchestrator" && executionOf(config) !== "delegate") return (await this.hands(context)).record;
+    }
+    return this.#find(coordinator, ref);
   }
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -527,6 +785,12 @@ export class WorkerManager {
       }
       const session = sessions.get(worker.id);
       const own = session !== undefined && this.#isWorkerSession(session, worker);
+      // Hands sandboxes have no turns: ready, or gone.
+      if (worker.role === "hands") {
+        if (worker.state === "starting") this.#settleHands(worker);
+        else if (worker.incarnation !== undefined && !own) this.#markStopped(worker, "Its sandbox no longer exists.", { sessionGone: true });
+        continue;
+      }
       if (worker.state === "starting") {
         if (!own) {
           // Its create never finished (core discards what that left): no session, no slot.
@@ -858,6 +1122,7 @@ export class WorkerManager {
       environment: worker.environment,
       state: worker.state,
       ...(worker.error ? { error: clip(worker.error, EVENT_ERROR_LIMIT) } : {}),
+      ...(worker.role === "hands" ? { role: "hands" as const, ...(worker.agentId ? { agentId: worker.agentId } : {}) } : {}),
     };
     try {
       this.#app.service("events").emit(type, {
@@ -886,10 +1151,22 @@ export class WorkerManager {
   }
 
   #onEvent(sessionId: string, event: RuntimeSessionEvent): void {
-    // Subagent events are part of the worker's run, not its own replies.
-    if (event.agentId) return;
     if (!this.#workers.has(sessionId)) {
+      // A coordinator's sub-agents: their tool calls (attribution check) and their ends (their own sandboxes go).
+      if (event.agentId) {
+        if (event.type === "tool.execution_start") {
+          const toolCallId = event.data?.["toolCallId"];
+          if (typeof toolCallId === "string") {
+            this.#subagentCalls.set(toolCallId, event.agentId);
+            if (this.#subagentCalls.size > REMEMBERED_CALLS) this.#subagentCalls.delete(this.#subagentCalls.keys().next().value!);
+          }
+        } else if (event.type === "subagent.completed" || event.type === "subagent.failed") {
+          this.#releaseHands(sessionId, event.agentId);
+        }
+        return;
+      }
       if (event.type === "session.idle") {
+        this.#publishHands(sessionId, event);
         // The coordinator's turn ended (for example, cancelled): its waits have nobody left to wait for them, and the
         // messages it was told about start the next turns.
         for (const waiter of [...this.#waiters]) if (waiter.coordinatorId === sessionId) waiter.finish();
@@ -900,6 +1177,8 @@ export class WorkerManager {
       }
       return;
     }
+    // Subagent events are part of the worker's run, not its own replies.
+    if (event.agentId) return;
     const data = event.data ?? {};
     switch (event.type) {
       case "user.message": {
@@ -1211,6 +1490,21 @@ export class WorkerManager {
 // -----------------------------------------------------------------------------------------------------------------
 // Helpers
 
+export function executionOf(config: EnvironmentConfig): ExecutionStyle {
+  return config.execution ?? "delegate";
+}
+
+/** Refuses a hands sandbox where only an agent makes sense (messages, waits, stops). */
+function agentWorker(worker: WorkerRecord): WorkerRecord {
+  if (worker.role === "hands") {
+    throw new ManagedCopilotError(
+      "invalid_request",
+      `"${worker.name}" is your own sandbox, not a worker: no agent runs in it. Use your shell and file tools on it, or "${SELF_REF}" in read_worker_file and copy_worker_files.`,
+    );
+  }
+  return worker;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
@@ -1235,6 +1529,7 @@ function workerName(value: unknown): string {
 
 /** A worker takes a message between runs: idle or failed, with a session. */
 function assertMessageable(worker: WorkerRecord): void {
+  agentWorker(worker);
   if (worker.state === "stopped") throw new ManagedCopilotError("conflict", `Worker "${worker.name}" was stopped. Start a new worker instead.`);
   if (worker.state === "starting") throw new ManagedCopilotError("session_busy", `Worker "${worker.name}" is still starting. Call wait_for_workers, then message it.`);
   if (worker.state === "working") {

@@ -516,7 +516,8 @@ export interface PlatformToolDefinition {
 
 export interface DurablePlatformToolsPort {
   register(definition: PlatformToolDefinition): void;
-  get?(name: string): PlatformToolDefinition | undefined;
+  /** By name; tools scoped to environments resolve only with an `environment` they are enabled for. */
+  get?(name: string, environment?: string): PlatformToolDefinition | undefined;
 }
 
 /** Core's authenticator, as the background-credential service uses it. */

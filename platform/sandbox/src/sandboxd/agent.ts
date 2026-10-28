@@ -42,6 +42,8 @@ export class SandboxAgent {
   #secrets: string[] = [];
   #envKey: string | undefined;
   #persisting: Promise<void> = Promise.resolve();
+  /** The write in progress per workspace path (writes to one path are serialized). */
+  readonly #writes = new Map<string, Promise<void>>();
   /** What commands run with (`execs`), set by each start; undefined until the first start. */
   #workloadEnv: Record<string, string> | undefined;
   /** False for a workspace-only sandbox: the runtime is never started. */
@@ -223,10 +225,26 @@ export class SandboxAgent {
     return JSON.parse(result) as FileEntry;
   }
 
-  /** Writes a workspace file atomically as the workload identity. */
-  async writeFile(relative: string, body: Buffer | Readable, options: { overwrite: boolean; expectedBytes?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
-    const args = ["write", "workspace", relative, options.overwrite ? "1" : "0", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
-    return JSON.parse(await this.#worker(args, body, options.signal)) as FileEntry & { sha256: string };
+  /**
+   * Writes a workspace file atomically as the workload identity. With `ifMatch` (the SHA-256 it was read with), it
+   * replaces the file only if it is still that content (`conflict` otherwise). Writes to one path run one at a time,
+   * so two compare-and-replace edits of one file never both succeed.
+   */
+  async writeFile(relative: string, body: Buffer | Readable, options: { overwrite: boolean; expectedBytes?: number; ifMatch?: string; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
+    const args = ["write", "workspace", relative, options.overwrite || options.ifMatch !== undefined ? "1" : "0", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
+    if (options.ifMatch !== undefined) args.push(options.ifMatch);
+    const previous = this.#writes.get(relative) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.#worker(args, body, options.signal));
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#writes.set(relative, settled);
+    try {
+      return JSON.parse(await run) as FileEntry & { sha256: string };
+    } finally {
+      if (this.#writes.get(relative) === settled) this.#writes.delete(relative);
+    }
   }
 
   /** Lists workspace entries as the workload identity. */

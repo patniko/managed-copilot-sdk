@@ -415,7 +415,7 @@ export class DurableActions implements ActionsService {
     const now = this.#now();
     for (const row of this.#store.listLiveClaims()) this.#orphan(row, "The gateway restarted while a client was handling this action", now);
     for (const row of this.#store.listOwnedBy("platform")) {
-      const definition = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
+      const definition = row.tool ? this.#deps.platformTools()?.get?.(row.tool, row.environment) : undefined;
       if (!definition) {
         // Nothing can run or recover it now: it stays uncertain (keeping its platform claim, so a restarted runtime
         // that asks again once the tool is registered gets its recover path, never a blind rerun).
@@ -437,7 +437,7 @@ export class DurableActions implements ActionsService {
   /** Pending actions whose `session.action_required` never went out (a crash inside the debounce window). */
   #announceUnnotified(now: number, olderThanMs = 0): void {
     for (const row of this.#store.listUnnotifiedPending(now - olderThanMs)) {
-      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool, row.environment)) continue;
       // Only the session's current incarnation is ever announced (older ones are closed at startup).
       if (this.#current(row.session_id)?.incarnation !== row.incarnation) continue;
       if (!this.#notifyTimers.has(row.session_id)) this.#scheduleNotify(row);
@@ -535,7 +535,7 @@ export class DurableActions implements ActionsService {
       return { actionId: row.id, withhold: everyEligible };
     }
 
-    const platformTool = parsed.kind === "tool" && parsed.tool ? this.#deps.platformTools()?.get?.(parsed.tool) : undefined;
+    const platformTool = parsed.kind === "tool" && parsed.tool ? this.#deps.platformTools()?.get?.(parsed.tool, row.environment) : undefined;
     if (platformTool) {
       this.#startPlatformTool(row, platformTool);
       return { actionId: row.id, withhold: everyEligible };
@@ -657,7 +657,7 @@ export class DurableActions implements ActionsService {
     const replay: RuntimeSessionEvent[] = [];
     for (const row of this.#store.listBySession(input.sessionId, attached.incarnation, ["pending"])) {
       if (!isEligible(input.responder, { kind: row.kind, tool: row.tool })) continue;
-      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool, row.environment)) continue;
       if (input.responder.kind === "sdk" && lacksRawRequest(row)) continue;
       if (heldBefore(row, input.responder.connectionId)) continue;
       if (this.#claimLive(row, input.responder)) {
@@ -856,7 +856,7 @@ export class DurableActions implements ActionsService {
     }
     const from: ActionState[] = row.state === "needs_reconciliation" && options.reconcile ? ["needs_reconciliation"] : ["pending"];
     if (!from.includes(row.state)) throw conflict(describeUnclaimable(row), row);
-    if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) {
+    if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool, row.environment)) {
       throw new ManagedCopilotError("forbidden", `${row.tool} is a platform tool; the gateway answers it`);
     }
     const label =
@@ -1032,7 +1032,7 @@ export class DurableActions implements ActionsService {
         });
         if (row.incarnation !== incarnation || !created) continue;
         this.#log.info("Recorded a waiting tool call the ledger had not seen", { sessionId, actionId: row.id, tool: toolName });
-        const platformTool = this.#deps.platformTools()?.get?.(toolName);
+        const platformTool = this.#deps.platformTools()?.get?.(toolName, row.environment);
         if (platformTool) this.#startPlatformTool(row, platformTool);
         else this.#scheduleNotify(row);
       }
@@ -1263,7 +1263,7 @@ export class DurableActions implements ActionsService {
     const row = this.#store.findByToolCall(sessionId, incarnation, toolCallId);
     if (!row) return undefined;
     if (runtimeRequestId(row) === requestId || row.generation > generation) return row;
-    const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
+    const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool, row.environment) : undefined;
     // Only a registered platform tool can be run (or recovered) again; one that is not registered now stays uncertain
     // with its claim, like a client's, until a rebuild finds it registered.
     const platform = platformTool !== undefined;

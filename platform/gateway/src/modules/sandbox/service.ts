@@ -1100,7 +1100,10 @@ export class SandboxService implements SandboxesService {
       throw new ManagedCopilotError("invalid_request", `Uploads are limited to ${Math.round(SANDBOX_LIMITS.uploadBytes / (1024 * 1024))} MiB.`);
     }
     const agent = await this.agentFor(sessionId, options.sandboxId);
-    const entry = await this.track(sessionId, agent.writeFile(path, body, { overwrite: options.overwrite !== false, ...(options.size !== undefined ? { size: options.size } : {}) }));
+    const entry = await this.track(
+      sessionId,
+      agent.writeFile(path, body, { overwrite: options.overwrite !== false, ...(options.size !== undefined ? { size: options.size } : {}), ...(options.ifMatch ? { ifMatch: options.ifMatch } : {}) }),
+    );
     return { path: entry.path, type: entry.type, size: entry.size, modifiedAt: entry.modifiedAt };
   }
 

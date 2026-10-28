@@ -130,6 +130,12 @@ export interface SandboxRuntime {
 export interface FileWriteOptions {
   /** Default true: atomically replace an existing file (last writer wins). False: fail with `conflict` if it exists. */
   readonly overwrite?: boolean;
+  /**
+   * Compare-and-replace: the SHA-256 (hex) of the content the caller read. The file is replaced only if it still has
+   * that content; otherwise the write fails with `conflict` (`not_found` when it is gone). Writes to one path are
+   * serialized in the sandbox, so two such edits of one file never both succeed.
+   */
+  readonly ifMatch?: string;
   /** Declared size when known; uploads larger than the limit fail before streaming. */
   readonly size?: number;
   /** See `FileCallOptions.sandboxId`. */

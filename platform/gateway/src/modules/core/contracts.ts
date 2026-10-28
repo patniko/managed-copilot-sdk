@@ -481,11 +481,17 @@ export interface PlatformToolInput {
   readonly replay?: PlatformToolReplay;
   /** With `replay: "never"`: answers an interrupted call (reattach, or read the recorded outcome) instead of the handler. */
   readonly recover?: (args: unknown, context: PlatformToolCallContext) => unknown | Promise<unknown>;
+  /**
+   * The name is the platform's only in environments where `enabledFor` holds (`get`/`has` with that environment); in
+   * any other session a client's tool of the same name stays the client's. For tools named like built-ins (`bash`).
+   */
+  readonly scoped?: boolean;
 }
 
 /** A registered tool, normalized so it also satisfies durable's `PlatformToolDefinition`. */
 export interface RegisteredPlatformTool extends PlatformToolDefinition {
   readonly overridesBuiltInTool?: boolean;
+  readonly scoped?: boolean;
   readonly skipPermission: boolean;
   readonly appliesTo?: PlatformToolInput["appliesTo"];
   readonly handler: (args: unknown, context: PlatformToolCallContext) => Promise<PlatformToolResult>;
@@ -494,8 +500,9 @@ export interface RegisteredPlatformTool extends PlatformToolDefinition {
 
 export interface PlatformToolRegistry {
   register(definition: PlatformToolInput): () => void;
-  get(name: string): RegisteredPlatformTool | undefined;
-  has(name: string): boolean;
+  /** The tool by name; a `scoped` tool only with an `environment` it is enabled for. */
+  get(name: string, environment?: string): RegisteredPlatformTool | undefined;
+  has(name: string, environment?: string): boolean;
   /** Tools injected into sessions of this environment and placement. */
   forSession(context: { readonly environment: string; readonly type: EnvironmentType; readonly placement: Placement }): readonly RegisteredPlatformTool[];
 }

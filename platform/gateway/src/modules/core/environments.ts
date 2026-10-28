@@ -279,6 +279,7 @@ export class Environments implements EnvironmentResolver {
         ...(sandboxedType(env.type) ? { size: env.size ?? "small" } : {}),
         ...(env.promoteTo ? { promoteTo: env.promoteTo } : {}),
         ...(env.workers ? { workers: env.workers, maxWorkers: env.maxWorkers ?? DEFAULT_MAX_WORKERS } : {}),
+        ...(env.type === "orchestrator" ? { execution: env.execution ?? "delegate", ...(env.execution && env.execution !== "delegate" ? { subagents: env.subagents ?? "shared" } : {}) } : {}),
         scheduling: env.scheduling === true,
         agents: bundle?.agents.map((agent) => agent.name) ?? [],
         ...(env.type === "isolated" ? { exec: env.exec !== false } : {}),

@@ -4,7 +4,8 @@
 import { isManagedCopilotError } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
 import type { PlatformToolCallContext, PlatformToolResult } from "../core/contracts.js";
-import { WorkerManager } from "./service.js";
+import { HANDS_TOOL_DEFINITIONS, HandsTools } from "./hands.js";
+import { executionOf, WorkerManager } from "./service.js";
 import { WorkerStore } from "./store.js";
 import { WORKER_TOOLS } from "./tools.js";
 
@@ -55,6 +56,10 @@ export const orchestratorModule: GatewayModule = {
       stop_worker: (args, context) => manager.stop(args, context),
     };
     const platformTools = app.service("platformTools");
+    const styleOf = (environment: string) => {
+      const config = app.config.deployment.environments[environment];
+      return config?.type === "orchestrator" ? executionOf(config) : undefined;
+    };
     for (const tool of WORKER_TOOLS) {
       const handler = handlers[tool.name];
       if (!handler) throw new Error(`No handler for worker tool ${tool.name}`);
@@ -63,9 +68,32 @@ export const orchestratorModule: GatewayModule = {
         description: tool.description,
         parameters: tool.parameters,
         skipPermission: tool.skipPermission,
-        // Only coordinators get them: workers (isolated sessions) cannot start workers.
-        appliesTo: ({ type, placement }) => type === "orchestrator" && placement === "shared",
+        // Only coordinators that delegate get them: workers (isolated sessions) cannot start workers.
+        appliesTo: ({ environment, type, placement }) => type === "orchestrator" && placement === "shared" && styleOf(environment) !== "direct",
         handler: forModel(manager, handler),
+      });
+    }
+
+    // Direct and mixed coordinators: the stock shell and file tools, run in their hands sandboxes.
+    const hands = new HandsTools(manager, () => app.service("sandboxes"));
+    const handsHandlers = hands.handlers();
+    const recoverers = hands.recoverers();
+    for (const tool of HANDS_TOOL_DEFINITIONS) {
+      const handler = handsHandlers[tool.name];
+      if (!handler) throw new Error(`No handler for hands tool ${tool.name}`);
+      const recover = recoverers[tool.name];
+      platformTools.register({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+        skipPermission: tool.skipPermission,
+        overridesBuiltInTool: true,
+        // Named like the built-ins: elsewhere, a client's own `bash` or `view` tool stays the client's.
+        scoped: true,
+        enabledFor: (environment) => styleOf(environment) === "direct" || styleOf(environment) === "mixed",
+        appliesTo: ({ environment, type, placement }) => type === "orchestrator" && placement === "shared" && (styleOf(environment) === "direct" || styleOf(environment) === "mixed"),
+        handler: forModel(manager, handler),
+        ...(tool.replay === "never" ? { replay: "never" as const, ...(recover ? { recover: forModel(manager, recover) } : {}) } : {}),
       });
     }
 

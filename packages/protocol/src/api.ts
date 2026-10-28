@@ -5,6 +5,7 @@
 import type { EnvironmentRequest, EnvironmentType, SandboxSize, ToolDeclaration } from "./config.js";
 import type { NetworkPolicy } from "./network.js";
 import type { ExecState } from "./sandbox.js";
+import type { ExecutionStyle, SubagentSandboxes } from "./workers.js";
 
 export interface AccountInfo {
   /** Stable GitHub account ID; ownership binds to this, never to the mutable login. */
@@ -25,6 +26,9 @@ export interface EnvironmentInfo {
   /** Orchestrator environments: the isolated environments workers run in (the first is the default), and how many at once. */
   readonly workers?: readonly string[];
   readonly maxWorkers?: number;
+  /** Orchestrator environments: how the coordinator gets work done, and (direct and mixed) its sub-agents' sandboxes. */
+  readonly execution?: ExecutionStyle;
+  readonly subagents?: SubagentSandboxes;
   readonly scheduling: boolean;
   readonly agents: readonly string[];
   /**

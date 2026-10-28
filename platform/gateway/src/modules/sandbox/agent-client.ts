@@ -178,9 +178,9 @@ export class SandboxAgentClient {
     return { size: Number(res.headers["content-length"] ?? 0), modifiedAt: String(res.headers["x-file-modified-at"] ?? new Date().toISOString()), body: res };
   }
 
-  writeFile(path: string, body: Readable | Buffer, options: { overwrite: boolean; size?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256?: string }> {
+  writeFile(path: string, body: Readable | Buffer, options: { overwrite: boolean; size?: number; ifMatch?: string; signal?: AbortSignal }): Promise<FileEntry & { sha256?: string }> {
     return this.#json("PUT", SANDBOXD_ROUTES.fileContent, {
-      query: { path, overwrite: String(options.overwrite) },
+      query: { path, overwrite: String(options.overwrite), ...(options.ifMatch ? { ifMatch: options.ifMatch } : {}) },
       body,
       headers: { "content-type": "application/octet-stream", ...(options.size !== undefined ? { "content-length": String(options.size) } : { "transfer-encoding": "chunked" }) },
       ...(options.signal ? { signal: options.signal } : {}),

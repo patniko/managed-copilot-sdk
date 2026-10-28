@@ -11,6 +11,7 @@ import type { EnvironmentType, Packages, SandboxSize } from "./config.js";
 import type { PlatformEventType } from "./events.js";
 import type { EgressBlockReason, NetworkPolicy } from "./network.js";
 import type { SandboxSetupRecord } from "./sandbox.js";
+import type { ExecutionStyle, SubagentSandboxes } from "./workers.js";
 
 const e = encodeURIComponent;
 
@@ -378,6 +379,9 @@ export interface OperatorEnvironment {
   /** Orchestrator environments: the isolated environments workers run in, and how many one session can have at once. */
   readonly workers?: readonly string[];
   readonly maxWorkers?: number;
+  /** Orchestrator environments: delegate, direct, or mixed, and (direct and mixed) the sub-agents' sandboxes. */
+  readonly execution?: ExecutionStyle;
+  readonly subagents?: SubagentSandboxes;
   readonly idleTimeoutSeconds?: number;
   readonly warm?: number;
   readonly inference?: { readonly foundry: string };
