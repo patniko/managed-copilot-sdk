@@ -90,6 +90,7 @@ Each page answers one question, diagram first.
 | [Video tour](tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Developer experience spec](spec/developer-experience.md) | The customer contract: every API, decision, and delivery gate |
 | [Architecture](architecture.md) | How it's built: topology, protocol facts, and each module |
+| [Security model and threat model](threat-model.md) | Trust boundaries between your machine and the cloud, STRIDE threats, and review findings |
 | [Proposal: direct execution](proposals/direct-execution.md) | Research, not built: one brain whose tools and sub-agents act inside sandboxes, beside today's delegating orchestrator |
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../packages/cli/README.md) | Every command |
