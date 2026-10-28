@@ -476,6 +476,32 @@ describe("Sandboxes", () => {
     subject.stop();
   });
 
+  it("keeps a finish reported before the sandbox was ever listed, when the first listing finds it stopped", async () => {
+    const cards: WorkerItem[] = [];
+    const research = worker({ id: "w1", name: "research", environment: "assistant-web", state: "stopped", updatedAt: at(30) });
+    const { subject, emit } = sandboxes({ workers: [research], cards });
+    // Just after a restart: it finishes, its card shows up, and it's stopped, all before anything lists it.
+    emit("worker.idle", { workerId: "w1", name: "research", state: "idle" }, at(25));
+    cards.push(card({ id: "c1", workerId: "w1", worker: "research", environment: "assistant-web" }));
+    emit("worker.stopped", { workerId: "w1", name: "research", state: "stopped" }, at(30));
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("places a finish reported before the first listing by that listing, when it was taken before the finish", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(25));
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    state.workers = [{ ...stats, state: "stopped", updatedAt: at(600) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    subject.stop();
+  });
+
   it("ends a card's work when its sandbox finishes, though the platform's clock differs from the card's", async () => {
     const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(30) })];
     // The platform's clock is behind: by it, the task was sent at :26 and finished at :27, before the card's tool call

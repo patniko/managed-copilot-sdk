@@ -51,6 +51,13 @@ interface Finish {
   readonly state: Settled;
 }
 
+/** What one listing showed about a sandbox, by the platform's clock. */
+interface Listed {
+  readonly state: string;
+  readonly messages: number;
+  readonly at: string;
+}
+
 /** What listings (and events right after them) showed about one sandbox. */
 interface WorkerFacts {
   /** How the work for each message ended (by message number, from 1), as first seen. */
@@ -58,7 +65,9 @@ interface WorkerFacts {
   /** Its task never reached it: it failed or was stopped while starting. */
   undelivered?: Finish;
   /** The latest listing: it places a finish event that follows it. */
-  last?: { readonly state: string; readonly messages: number; readonly at: string };
+  last?: Listed;
+  /** Finishes reported before the sandbox was first listed (just after a restart or a reconnect), oldest first. */
+  early?: Finish[];
 }
 
 export interface SandboxesDeps {
@@ -177,15 +186,13 @@ export class Sandboxes {
     const { workerId, state } = event.data as { workerId?: unknown; state?: unknown };
     if (typeof workerId !== "string") return;
     // Events mostly prompt a fresh listing, which says how work ended. A finish just after a listing that saw the
-    // sandbox working is that message's; any other (for example one that arrives late, after the stream reconnected)
-    // is left to listings.
+    // sandbox working is that message's. One reported before the sandbox was ever listed waits for its first listing
+    // to place it; any other (for example one that arrives late, after the stream reconnected) is left to listings.
     if (state === "idle" || state === "failed") {
-      const facts = this.#facts.get(workerId);
-      const at = iso(event.createdAt);
-      const last = facts?.last;
-      if (facts && last?.state === "working" && last.messages > 0 && at >= last.at && !facts.finished.has(last.messages)) {
-        facts.finished.set(last.messages, { at, state });
-      }
+      const facts = this.#factsOf(workerId);
+      const finish: Finish = { at: iso(event.createdAt), state };
+      if (facts.last) this.#finishedAfter(facts, facts.last, finish);
+      else (facts.early ??= []).push(finish);
       this.#awaitPublication(workerId);
     }
     this.#dirty.add(workerId);
@@ -417,10 +424,22 @@ export class Sandboxes {
     }
   }
 
+  #factsOf(workerId: string): WorkerFacts {
+    let facts = this.#facts.get(workerId);
+    if (!facts) this.#facts.set(workerId, (facts = { finished: new Map() }));
+    return facts;
+  }
+
+  /** A finish reported after a listing that saw the sandbox working ended that listing's message. */
+  #finishedAfter(facts: WorkerFacts, listed: Listed, finish: Finish): boolean {
+    if (listed.state !== "working" || listed.messages === 0 || finish.at < listed.at || facts.finished.has(listed.messages)) return false;
+    facts.finished.set(listed.messages, finish);
+    return true;
+  }
+
   /** Remembers what a listing shows about a sandbox's messages: which one's work finished, when, and how. */
   #observe(worker: WorkerInfo): void {
-    let facts = this.#facts.get(worker.id);
-    if (!facts) this.#facts.set(worker.id, (facts = { finished: new Map() }));
+    const facts = this.#factsOf(worker.id);
     const at = iso(worker.updatedAt);
     // A message the platform took back (it couldn't be delivered) never ran: forget what was said about it.
     for (const message of facts.finished.keys()) if (message > worker.messages) facts.finished.delete(message);
@@ -428,7 +447,18 @@ export class Sandboxes {
     else if (worker.messages > 0 && (worker.state === "idle" || worker.state === "failed") && !facts.finished.has(worker.messages)) {
       facts.finished.set(worker.messages, { at, state: worker.state });
     }
-    facts.last = { state: worker.state, messages: worker.messages, at };
+    const listed: Listed = { state: worker.state, messages: worker.messages, at };
+    // Finishes reported before this first listing count as if reported just after it. A sandbox it shows stopped
+    // with a single message, of which one finish was reported, ended that message then: the stop came after.
+    const early = facts.early;
+    if (early) {
+      delete facts.early;
+      const only = early.length === 1 ? early[0] : undefined;
+      if (!early.some((finish) => this.#finishedAfter(facts, listed, finish)) && only && worker.state === "stopped" && worker.messages === 1 && only.at <= at && !facts.finished.has(1)) {
+        facts.finished.set(1, only);
+      }
+    }
+    facts.last = listed;
   }
 
   /**
