@@ -62,8 +62,9 @@ await addManagedCopilot(builder, "copilot", {
 ```
 
 An environment can also set `image` (a Dockerfile folder built on the platform's base image), `packages`,
-`setupCommands`, `env`, `vaults`, `idleTimeoutSeconds`, and `scheduling`. Sizes are `small` (1 vCPU, 2 GiB),
-`medium` (2 vCPU, 4 GiB), and `large` (4 vCPU, 8 GiB).
+`setupCommands`, `env`, `vaults`, `idleTimeoutSeconds`, and `scheduling`. Isolated environments can set `exec: false`
+to turn off [running commands directly](sandboxes.md#run-commands-directly) (`managed.exec`). Sizes are `small`
+(1 vCPU, 2 GiB), `medium` (2 vCPU, 4 GiB), and `large` (4 vCPU, 8 GiB).
 
 ## Pick one from code
 

@@ -48,7 +48,11 @@ export async function sessions(ctx: Context): Promise<void> {
   }
   const rows = list.map((session) => [
     style.bold(shortId(session.id)),
-    session.parentSessionId ? `${session.environment} ${style.dim(`(worker of ${shortId(session.parentSessionId)})`)}` : session.environment,
+    session.parentSessionId
+      ? `${session.environment} ${style.dim(`(${session.kind === "workspace" ? "sandbox" : "worker"} of ${shortId(session.parentSessionId)})`)}`
+      : session.kind === "workspace"
+        ? `${session.environment} ${style.dim("(sandbox)")}`
+        : session.environment,
     session.placement === "sandbox" && session.sandbox ? `sandbox ${style.dim(session.sandbox.state)}` : session.placement,
     describeSession(session, style),
     truncate(session.title ?? style.dim("untitled"), 40, style.ellipsis),

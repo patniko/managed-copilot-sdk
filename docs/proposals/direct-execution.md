@@ -1,8 +1,9 @@
 # Proposal: direct execution (one brain, hands in sandboxes)
 
-> **Status: research and calibration.** Nothing here is built or part of the customer contract
-> ([spec](../spec/developer-experience.md)). The snippets show the intended customer experience so we can agree on it
-> before implementation. The core mechanism is verified on the stock SDK and runtime (see [Evidence](#evidence)).
+> **Status: in progress.** The sandbox execution primitive and `managed.exec` are built (see
+> [What the platform needs to build](#what-the-platform-needs-to-build)); the `direct` and `mixed` orchestrator styles
+> are not yet. The snippets show the intended customer experience. The core mechanism is verified on the stock SDK and
+> runtime (see [Evidence](#evidence)).
 
 Today an orchestrator **delegates**: the coordinator talks to workers, and each worker is a whole agent (its own
 runtime, model loop, and context) inside its own sandbox. That is the right shape for independent, long-running
@@ -178,16 +179,16 @@ shows a coordinator choosing between them (see [Demos](#demos)).
 
 | Area | Change |
 | --- | --- |
-| sandboxd | `POST /v1/exec` and `/v1/exec/<id>` (read, input, stop, list): runs `bash -c` as uid 10001 through `asWorkload` (cwd `/workspace`, egress env and vault placeholders, never the GitHub token), in its own process group. Each execution is journaled by ID with a bounded output buffer and its exit, so a caller can reattach, read new output since an offset, send input, or stop it; timeouts and stops kill the process group. File tools reuse the existing uid-10001 file worker; `edit` is an atomic compare-and-replace in that worker |
-| sandbox service | `sandboxes.exec(sessionId, command, { actionId, background, timeoutMs, signal, sandboxId })` plus `readExec`, `writeExec`, `stopExec`, `listExecs`, pinned like file calls; a `runtime: false` create option so a hands sandbox never starts `copilot-runtime` (no inference broker, no placeholder). A running exec holds off idle stop |
-| core | A **workspace-only** session kind: a child session with a sandbox and no runtime. Core must not open a runtime for it, refuses agent operations on it (`send`, `resume`, attach) with `invalid_request`, and gives it its own busy accounting (a running exec), idle stop, and artifact publication (at the end of each of the coordinator's root turns, since the hands sandbox has no turns of its own). sandboxd and the sandbox service skip runtime start and runtime health checks when `runtime: false`. Platform-tool context gains `agentId` and the runtime's cancellation of the tool call, on both the live and durable paths |
+| sandboxd | **Built** (except the file-tool parts: `edit` compare-and-replace and `view`/`glob`/`grep` subprocesses). `POST /v1/exec` and `/v1/exec/<id>` (read, input, stop, list): runs `bash -c` as uid 10001 through `asWorkload` (cwd `/workspace`, egress env and vault placeholders, never the GitHub token), in its own process group. Each execution is journaled by ID with a bounded output buffer and its exit, so a caller can reattach, read new output since an offset, send input, or stop it; timeouts and stops kill the process group. File tools reuse the existing uid-10001 file worker; `edit` is an atomic compare-and-replace in that worker |
+| sandbox service | **Built.** `sandboxes.exec(sessionId, command, { actionId, background, timeoutMs, signal, sandboxId })` plus `readExec`, `writeExec`, `stopExec`, `listExecs`, pinned like file calls; a `runtime: false` create option so a hands sandbox never starts `copilot-runtime` (no inference broker, no placeholder). A running exec holds off idle stop |
+| core | **Built** (the workspace-only kind; platform-tool `agentId` and cancellation are a separate slice). A **workspace-only** session kind: a child session with a sandbox and no runtime. Core must not open a runtime for it, refuses agent operations on it (`send`, `resume`, attach) with `invalid_request`, and gives it its own busy accounting (a running exec), idle stop, and artifact publication (at the end of each of the coordinator's root turns, since the hands sandbox has no turns of its own). sandboxd and the sandbox service skip runtime start and runtime health checks when `runtime: false`. Platform-tool context gains `agentId` and the runtime's cancellation of the tool call, on both the live and durable paths |
 | orchestrator | `execution` (`delegate`, `direct`, `mixed`) and `subagents` config; the ten hands tool handlers; a persisted (coordinator incarnation, agent) → hands-session map with atomic lazy creation inside the `maxWorkers` bound; worker recovery and `wait_for_workers` skip workspace-only children; in `mixed`, `copy_worker_files` accepts the coordinator's own sandbox as a source or target |
 | durable actions | Hands tools opt out of "platform tools run again after a restart": an interrupted exec is reattached through the sandbox journal, or reported as an uncertain outcome; it is never rerun blindly |
 | core admission | Direct- and mixed-mode tool filters (the hands tools, the sub-agent built-ins, and in `mixed` the worker tools) and environment sections; validation that `direct` names exactly one worker environment |
-| REST and SDK | `POST /v1/sandboxes` (a workspace-only session of an isolated environment, owned by the caller), `POST /v1/sessions/:id/exec` and the matching read, input, stop, and list routes; `managed.sandboxes.create`, `managed.exec` (result, or a background handle with `output`, `result`, `write`, `stop`). They work on any sandbox session the caller owns: an isolated session, a worker, or a hands sandbox. Every exec is recorded in the actions ledger with its caller |
-| CLI | `npx managed-copilot exec <session> -- <command>` for debugging |
-| protocol | Additive: `EnvironmentConfig` gains `execution` and `subagents` (orchestrator) and `exec` (isolated), `EnvironmentInfo` reports `exec`; plus `WorkerInfo.role`, `ExecResult`, `ExecInfo`, and the new routes |
-| docs and samples | Spec section 17 extension and a new section for `managed.exec`, concept page sections, walkthroughs 12 and 13, a mode switch in Dispatch |
+| REST and SDK | **Built.** `POST /v1/sandboxes` (a workspace-only session of an isolated environment, owned by the caller), `POST /v1/sessions/:id/exec` and the matching read, input, stop, and list routes; `managed.sandboxes.create`, `managed.exec` (result, or a background handle with `output`, `result`, `write`, `stop`). They work on any sandbox session the caller owns: an isolated session, a worker, or a hands sandbox. Every exec is recorded in the actions ledger with its caller |
+| CLI | **Built.** `npx managed-copilot exec <session> -- <command>` for debugging |
+| protocol | **Built** for exec (`exec`, `ExecResult`, `ExecInfo`, routes); `execution`, `subagents`, and `WorkerInfo.role` not yet. Additive: `EnvironmentConfig` gains `execution` and `subagents` (orchestrator) and `exec` (isolated), `EnvironmentInfo` reports `exec`; plus `WorkerInfo.role`, `ExecResult`, `ExecInfo`, and the new routes |
+| docs and samples | **Built** for exec (spec section 18, the sandboxes concept page, walkthrough 13). Spec section 17 extension and a new section for `managed.exec`, concept page sections, walkthroughs 12 and 13, a mode switch in Dispatch |
 
 Sandbox creation is lazy: the first tool call that needs a sandbox creates it (seconds on Docker, longer on Azure),
 reported with the existing `worker.started` event.
@@ -216,7 +217,7 @@ The probe proves the mechanism; these are what make it a platform feature rather
   `team` and then `operator`, printing which agent ran which command, how many sandboxes and model loops each used,
   and the wall time. One script shows both shapes, then a `lead` (mixed) session gets a job with a long test suite and
   a quick fix, and the script prints which parts the model chose to do itself and which it gave to a worker.
-- **Walkthrough 13 · Your own harness**: `managed.sandboxes.create`, `managed.exec` with a background command, and
+- **Walkthrough 13 · Your own harness** ([built](../../samples/13-your-own-harness/README.md)): `managed.sandboxes.create`, `managed.exec` with a background command, and
   a stock client whose overridden `bash` and file tools run through `managed.exec`: the probe, on the platform.
 - **Dispatch**: a three-way switch beside the composer, "Delegate to workers" / "Work directly" / "Mixed". The
   message's sandbox cards stay the same; direct work lists the commands the brain and its sub-agents ran.

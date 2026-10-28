@@ -1073,6 +1073,79 @@ Not in this delivery: delivering worker results to an idle coordinator as new tu
 steering a worker in the middle of its work, relaying each worker prompt to your `onPermissionRequest`, a shared
 volume between workers, nested workers, and worker environments written by the model.
 
+## 18. Run commands directly: `managed.exec`
+
+For a harness that already runs its own agent loop and only wants its hands somewhere isolated: create a sandbox with
+no agent in it, and run commands and move files in it from your code. It works on any sandbox you own.
+
+```ts
+// A workspace-only sandbox of an isolated environment: setup, network rules, and vaults apply; no agent runs in it.
+const sandbox = await managed.sandboxes.create({ environment: "python" });
+
+const result = await managed.exec(sandbox, "python3 -c 'print(6 * 7)'", { timeoutMs: 60_000 });
+console.log(result.exitCode, result.output);      // 0 "42\n"
+
+// Long-running: start it, read as it goes, stop it.
+const job = await managed.exec(sandbox, "pytest -q", { background: true });
+for await (const chunk of job.output) process.stdout.write(chunk);
+console.log((await job.result).exitCode);         // or: await job.stop()
+
+// Your own harness: override the stock tools so your agent's hands (and its sub-agents') are in the sandbox.
+const bash = defineTool("bash", {
+  description: "Run a bash command in the Linux workspace (/workspace).",
+  parameters: z.object({ command: z.string() }),
+  overridesBuiltInTool: true,
+  handler: async ({ command }) => (await managed.exec(sandbox, command)).output,
+});
+
+await managed.sessions.delete(sandbox.id);        // deletes the sandbox and its files
+```
+
+```ts
+// apphost.mts: operators turn it off per isolated environment (default true).
+coder: { type: "isolated", size: "large", exec: false },
+```
+
+```powershell
+npx managed-copilot exec 7f3a2c1 -- python3 --version
+```
+
+### `managed.exec` contract
+
+1. **Workspace-only sandboxes.** `managed.sandboxes.create({ environment })` creates a session of an isolated
+   environment, owned by the caller, with `kind: "workspace"`: its image, setup, network policy, vaults, and idle stop
+   apply, and no Copilot runtime starts in it (no inference, no placeholder credential). Prompts, resume, and Copilot
+   CLI attach are refused with `invalid_request`; `managed.files`, `managed.artifacts`, `managed.exec`, and
+   `managed.sessions.delete` work. Its state is `running` while commands run and `idle` otherwise. `/workspace/outputs`
+   publishes after each command ends, with the command's ID as the turn ID.
+2. **Commands.** `managed.exec(session, command)` runs `bash -c <command>` in `/workspace` as the sandbox's
+   unprivileged user, with the environment's variables, proxy settings, and vault placeholders, never a GitHub token,
+   in its own process group, starting a stopped sandbox. It resolves when the command ends with an `ExecResult`:
+   `state` (`completed` with any `exitCode`, `timed_out`, `stopped` with a `reason`, `failed` if it could not start, or
+   `uncertain`), and the newest 1 MiB of combined output (`skippedBytes` counts what was dropped). A non-zero exit is a
+   result, not an error. Default `timeoutMs`: 10 minutes; a timeout or `stop` kills the whole process group; stdin is
+   closed. It works on any sandbox the caller owns: a workspace-only sandbox, an isolated session's, or a worker's.
+3. **Background commands.** `{ background: true }` resolves at once with a handle: `output` (an async iterable of the
+   output from the start), `result`, `write`/`end` (stdin, open by default), `stop`, and `info`. No timeout unless you
+   set one. A running command holds off its sandbox's idle stop for up to the environment's idle timeout after its
+   last output; an idle stop, sandbox stop, or platform restart stops it, and it then reads as `stopped` with the
+   reason. Processes a command detached itself run until the sandbox stops.
+4. **Never run twice.** Each command is journaled by ID in the sandbox before it runs, and recorded by the platform
+   with who ran it (`managed.exec.list(session)`, `caller`). Passing your own `id` makes a call idempotent: the same ID
+   again answers with that command. A command whose outcome the platform lost reads as `uncertain` and is never run
+   again by itself.
+5. **Owner-scoped and policy-bound.** Only the session's owner can run commands, like `managed.files().write()`;
+   commands run within the sandbox's network rules and vaults. Operators turn it off per isolated environment with
+   `exec: false`: then `managed.sandboxes.create` and `managed.exec` fail with `policy_violation` ("Running commands
+   directly is turned off for environment <name>."), and `EnvironmentInfo.exec` reports `false` so apps can check
+   first. It governs these customer APIs only.
+
+REST: `POST /v1/sandboxes`, `POST|GET /v1/sessions/:id/exec`, `GET /v1/sessions/:id/exec/:execId?offset=&waitMs=`,
+`POST .../exec/:execId/input`, and `POST .../exec/:execId/stop`.
+
+Not in this delivery: the orchestrator's `direct` and `mixed` styles, whose coordinator tools are built on the same
+platform service ([proposal](../proposals/direct-execution.md)).
+
 ## What runs where
 
 This is the intended trust topology, not a deployed system. The bridge is transport code on the customer's

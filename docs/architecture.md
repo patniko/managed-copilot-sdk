@@ -381,6 +381,87 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
   request; the SDK keeps waiting), and `GET .../artifacts/:artifactId/content`.
 
+### Commands run directly in sandboxes (as built)
+
+`managed.exec`, `managed.sandboxes.create`, and the sandbox service's `exec` API (spec section 18; the proposal
+[direct execution](proposals/direct-execution.md)). Code: `platform/sandbox/src/sandboxd/execs.ts`,
+`platform/gateway/src/modules/sandbox/execs.ts` (with `store.ts`, `routes.ts`, `service.ts`), core's workspace-only
+session kind in `core/sessions.ts`, `packages/sdk/src/features/exec.ts`, and `packages/cli/src/commands/exec.ts`.
+
+- **sandboxd command journal.** `POST /v1/exec` (`SandboxExecRequest { id, command, timeoutMs?, stdin? }`) runs
+  `bash -c <command>` through `asWorkload` (uid/gid 10001, `no_new_privs`, empty capability sets) in `/workspace` with
+  the workload environment of the latest start (customer `env`, proxy settings, vault placeholders, CA variables; never
+  `COPILOT_CONNECTION_TOKEN` or a GitHub token), in its own process group (`detached`). Each command is journaled by ID
+  in root-only `/var/lib/managed-copilot/sandboxd/exec/<id>.json` **before** it is spawned (the record, then the
+  newest 1 MiB of combined stdout/stderr, saved every 2 s while output changes and at the end). A start with an ID the
+  journal has answers with that command and runs nothing. `GET /v1/exec/<id>?offset=&waitMs=` reads output from a byte
+  offset (at most 256 KiB, never splitting a UTF-8 character; older output than the kept tail is reported as
+  `skippedBytes`), long-polling up to 30 s for new output or the end; `?output=false` waits for the end only.
+  `POST .../input` writes stdin (`{ data?, eof? }`; stdin is closed from the start unless `stdin: "open"`),
+  `POST .../stop?reason=` and timeouts send SIGTERM to the group and SIGKILL after 3 s, `GET /v1/exec` lists, and
+  `POST /v1/exec-stop?reason=` stops every running command. A command counts as ended at exit plus 250 ms for its
+  pipes (a child it left in the background no longer holds it); stopped and timed-out commands' groups are killed.
+  Limits: 32 running, 200 ended ones kept, 128 KiB per command, 1 MiB per stdin write. sandboxd shutdown stops running
+  commands ("The sandbox stopped…"), and a journal entry still `running` at load reads `stopped` ("The sandbox
+  restarted…"). States: `running`, `completed` (any exit code; `signal` when killed from outside), `timed_out`,
+  `stopped` (with the reason), `failed` (could not start).
+- **Workspace-only sandboxes.** `SandboxStartRequest.runtime: false` (the gateway passes it for
+  `CreateSandboxRequest.runtime: false`, stored as `sandbox_sandboxes.runtime`) runs trust and setup and reports ready
+  without starting `copilot-runtime`; `ensureRunning` health checks ignore the runtime for such a sandbox, `openRuntime`
+  refuses it (`invalid_request`), and sandboxd refuses a runtime restart. No inference broker or placeholder credential
+  is ever in use for it.
+- **Gateway journal and caller.** `sandboxes.exec(sessionId, command, { id?, actionId?, background?, timeoutMs?,
+  waitMs?, stdin?, signal?, sandboxId?, caller? })` starts the sandbox if it is stopped, records the command in
+  `sandbox_execs` (keyed by sandbox and ID, with the session, owner, command, `caller` `{ kind: "api" | "platform",
+  accountId?, login?, name?, agentId? }`, state, exit, reason, and output size) as `starting`, then asks sandboxd. The
+  ID is the caller's, `ex_` + SHA-256 of `actionId` (so a replayed tool call reattaches), or random. A start whose
+  answer was lost is looked up in sandboxd's journal: found, it is reattached; absent, it never ran and the error
+  stands; unreachable, it stays `starting`. A `starting` command the gateway did not see confirmed (it restarted) is
+  looked up the same way and, absent, becomes `uncertain`; a `running` one sandboxd no longer has becomes `uncertain`
+  too. `uncertain` is final and is never rerun. The call then collects output until the end, `waitMs`, or `signal`
+  (which stops a command that is not `background`), answering an `ExecResult` (`ExecInfo` plus the newest 1 MiB of
+  output, `offset`, `skippedBytes`). `readExec`, `writeExec`, `stopExec`, `listExecs`, and `publishOutputs` complete
+  the API; every call is pinned to the sandbox like file calls (`sandboxId`). The session's deletion deletes its
+  commands' records.
+- **Following commands, idle stop, and restarts.** The gateway follows each live command with 25 s `output=false`
+  long polls until it ends, so ends are recorded (and published) without readers. A command's wait counts as busy
+  (`track`); a background command holds an idle stop while it wrote output (or started) within the environment's idle
+  timeout, checked against sandboxd's list at the stop. Any stop first stops the sandbox's running commands with a
+  reason ("The sandbox stopped after N min without activity…") and records them; an operator's stop is refused while
+  commands run. Gateway shutdown stops sandboxes and so their commands; at start, reconciliation follows the running
+  commands of sandboxes still running again and settles those of stopped sandboxes.
+- **Core: workspace-only sessions.** `sessions.createWorkspace(principal, { sessionId?, environment, parentSessionId?,
+  clientName? })` records a session with `kind: "workspace"` (`core_sessions.kind`), binds network policy and vaults,
+  and creates its sandbox with `runtime: false`; failures leave nothing behind. Core never opens a runtime for it: every
+  agent path (send, abort, client resume, CLI attach, promotion, `ownerPrincipal`) goes through `#liveFor`, which
+  refuses it with `invalid_request` ("…a workspace-only sandbox…"); creating an agent session with its ID is refused
+  too. `SessionInfo.kind` is `"workspace"`; its state is `ready`, then `running` while commands run and `idle` after
+  (`sessions.execActivity`, called by the sandbox service). Files, artifacts, exec, and delete work as for any sandbox
+  session. A standalone one (no `parentSessionId`) publishes `/workspace/outputs` after each command ends, with the
+  command's ID as the turn ID (stopped and timed-out commands record a failed publication); one with a parent publishes
+  only when its owner calls `publishOutputs` (the orchestrator, on coordinator turns).
+- **REST and policy.** `POST /v1/sandboxes` (`CreateSandboxRequest { environment, sessionId? }`, 201 with `SessionInfo`,
+  200 for an existing one) needs an isolated environment. `POST /v1/sessions/:id/exec` (`ExecRequest`; waits ≤30 s,
+  default 10-minute timeout unless `background`), `GET .../exec`, `GET .../exec/:execId?offset=&waitMs=`,
+  `POST .../exec/:execId/input`, and `POST .../exec/:execId/stop` work on any sandbox session the caller owns (isolated,
+  worker, or workspace-only), recording `caller: { kind: "api", accountId, login }`. Environment `exec: false`
+  (isolated only, default true) makes `POST /v1/sandboxes` and every exec route answer `policy_violation` ("Running
+  commands directly is turned off for environment <name>."); it governs only these customer routes, not the service API
+  platform tools use. `EnvironmentInfo.exec` reports it, and `/v1/info` advertises `exec` with `isolated`.
+- **SDK and CLI.** `managed.sandboxes.create({ environment, sessionId? })` returns the `SessionInfo` plus `sessionId`
+  (so it works as a `SessionRef`); `managed.exec(ref, command, { timeoutMs?, background?, id?, stdin?, signal? })`
+  starts with a client-chosen ID (a start whose answer was lost is read back by it) and long-polls reads, resolving an
+  `ExecResult`; with `background: true` it resolves an `ExecHandle` (`output` async iterable, `result`, `write`, `end`,
+  `stop`, `info`). `managed.exec.list(ref)` lists. `npx managed-copilot exec <session> [--timeout <s>] -- <command>`
+  streams output and exits with the command's code (124 timed out, 130 stopped).
+- **Verified.** Unit suites for the journal (`platform/sandbox/test/execs.test.ts`, run on Windows and in a Linux
+  container, where process-group kills are checked), the gateway service (`test/sandbox-exec.test.ts`), core
+  (`test/core.workspace.test.ts`), and the CLI; `platform/sandbox/test/exec.e2e.test.ts` (opt-in, real Docker) runs
+  uid, cwd, env, stdin, stop, timeout, idempotency, files, publication, and policy against real sandboxes; walkthrough
+  13 ran live against `aspire run` with real models (a stock client whose sub-agents' `bash`/`create` ran through
+  `managed.exec`). The Azure provider needs no change: exec uses the same sandboxd endpoint, and long polls stay under
+  30 s.
+
 ### Shared placement egress
 
 One shared runtime process cannot carry per-session egress identity through a proxy. Shared sessions therefore get

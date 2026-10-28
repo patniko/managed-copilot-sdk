@@ -47,6 +47,7 @@ Each page answers one question, diagram first.
 | Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../samples/03-sandbox/README.md) |
 | Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../samples/04-promotion/README.md) |
 | Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../samples/11-orchestrator/README.md) |
+| Run my own agent loop with its hands in a sandbox, or run commands in a sandbox from code | [Sandboxes](concepts/sandboxes.md#run-commands-directly) | [13](../samples/13-your-own-harness/README.md) |
 | Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../samples/05-choose-environments/README.md), [06](../samples/06-harness/README.md) |
 | Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../samples/01-first-agent/README.md), [06](../samples/06-harness/README.md) |
 | Give an agent an API key without putting it in the sandbox | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
