@@ -1264,9 +1264,11 @@ export class DurableActions implements ActionsService {
     if (!row) return undefined;
     if (runtimeRequestId(row) === requestId || row.generation > generation) return row;
     const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
-    const platform = platformTool !== undefined || row.responder_type === "platform";
+    // Only a registered platform tool can be run (or recovered) again; one that is not registered now stays uncertain
+    // with its claim, like a client's, until a rebuild finds it registered.
+    const platform = platformTool !== undefined;
     const answered = ANSWERED_STATES.includes(row.state);
-    const revived = row.state === "cancelled" || (platform && row.state === "needs_reconciliation");
+    const revived = row.state === "cancelled" || ((platform || row.responder_type === "platform") && row.state === "needs_reconciliation");
     const uncertain = revived && !platform && row.claimed_by !== null;
     const state: ActionState = revived ? (uncertain ? "needs_reconciliation" : "pending") : row.state;
     const reason = revived ? (uncertain ? RESTARTED_WHILE_RUNNING : null) : row.reason;

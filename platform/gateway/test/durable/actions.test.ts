@@ -1187,6 +1187,10 @@ describe("durable actions ledger", () => {
       actions = build();
       actions.recover();
       expect(states()).toEqual({ t1: "needs_reconciliation" });
+      // The restarted runtime asks again before the tool registers: still uncertain, never rerun later.
+      const early = toolEvent("t1-early", "bash");
+      await actions.onSessionEvent(input({ ...early, data: { ...early.data, toolCallId: "call-t1" } }));
+      expect(states()).toEqual({ "t1-early": "needs_reconciliation" });
       tools.set("bash", definition);
       const again = toolEvent("t1-rebuilt", "bash");
       await actions.onSessionEvent(input({ ...again, data: { ...again.data, toolCallId: "call-t1" } }));
