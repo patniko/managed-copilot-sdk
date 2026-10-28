@@ -18,7 +18,11 @@ export interface StoredConversation {
   createdAt: string;
   updatedAt: string;
   title?: string;
+  /** The orchestrator environment its coordinator session lives in (its execution style). */
+  environment?: string;
   settings: ConversationSettings;
+  /** Messages whose remaining commands the person approved at once. */
+  approvedRest?: number[];
   /** Messages sent from Dispatch: the ID `session.send` returned and a digest of the text. */
   own: { id?: string; digest: string }[];
   workers: Record<string, StoredWorker>;
@@ -71,12 +75,24 @@ export class Store {
   }
 
   /** The conversation's record, created with `defaults` if Dispatch hasn't seen it before. */
-  ensure(id: string, defaults: { settings: ConversationSettings; createdAt?: string; title?: string }): StoredConversation {
+  ensure(id: string, defaults: { settings: ConversationSettings; createdAt?: string; title?: string; environment?: string }): StoredConversation {
     let conversation = this.#data.conversations[id];
     if (!conversation) {
       const at = defaults.createdAt ?? new Date().toISOString();
-      conversation = { id, createdAt: at, updatedAt: at, settings: { ...defaults.settings }, own: [], workers: {}, ...(defaults.title ? { title: defaults.title } : {}) };
+      conversation = {
+        id,
+        createdAt: at,
+        updatedAt: at,
+        settings: { ...defaults.settings },
+        own: [],
+        workers: {},
+        ...(defaults.title ? { title: defaults.title } : {}),
+        ...(defaults.environment ? { environment: defaults.environment } : {}),
+      };
       this.#data.conversations[id] = conversation;
+      this.save();
+    } else if (defaults.environment && conversation.environment !== defaults.environment) {
+      conversation.environment = defaults.environment;
       this.save();
     }
     return conversation;

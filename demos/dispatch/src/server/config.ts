@@ -1,8 +1,14 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ApprovalMode } from "../shared/types.js";
+import type { ApprovalMode, ExecutionStyle } from "../shared/types.js";
 import { parseAttachUrl } from "./attach.js";
+
+export const STYLES: readonly ExecutionStyle[] = ["delegate", "direct", "mixed"];
+
+export function isStyle(value: unknown): value is ExecutionStyle {
+  return typeof value === "string" && (STYLES as readonly string[]).includes(value);
+}
 
 export interface DispatchConfig {
   readonly port: number;
@@ -18,8 +24,12 @@ export interface DispatchConfig {
   readonly repoRoot: string;
   /** Gateway URL for attach commands when users reach the platform at another address (`DISPATCH_ATTACH_URL`). */
   readonly attachUrl?: string;
-  /** The orchestrator environment conversations run in. */
+  /** The orchestrator environment conversations run in by default (the delegate style's). */
   readonly environment: string;
+  /** The orchestrator environment for each execution style. */
+  readonly environments: Readonly<Record<ExecutionStyle, string>>;
+  /** New conversations' style, when the person doesn't pick one. */
+  readonly style: ExecutionStyle;
   /** The coordinator's model. */
   readonly model: string;
   /** New conversations: ask before each new sandbox, or create them as the coordinator decides. */
@@ -43,6 +53,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
   const here = fileURLToPath(import.meta.url);
   const packageRoot = findPackageRoot(dirname(here));
   const attachUrl = parseAttachUrl(env.DISPATCH_ATTACH_URL);
+  const environment = env.DISPATCH_ENVIRONMENT?.trim() || "dispatch";
+  const style = env.DISPATCH_STYLE?.trim();
   return {
     port: Number(env.PORT ?? env.DISPATCH_PORT ?? 7470),
     host: env.HOST ?? "127.0.0.1",
@@ -52,7 +64,13 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     webRoot: join(packageRoot, "dist", "web"),
     repoRoot: resolve(packageRoot, "..", ".."),
     ...(attachUrl ? { attachUrl } : {}),
-    environment: env.DISPATCH_ENVIRONMENT?.trim() || "dispatch",
+    environment,
+    environments: {
+      delegate: environment,
+      direct: env.DISPATCH_DIRECT_ENVIRONMENT?.trim() || `${environment}-direct`,
+      mixed: env.DISPATCH_MIXED_ENVIRONMENT?.trim() || `${environment}-mixed`,
+    },
+    style: isStyle(style) ? style : "delegate",
     model: env.DISPATCH_MODEL?.trim() || "claude-sonnet-5",
     approvals: env.DISPATCH_APPROVALS === "auto" ? "auto" : "ask",
     healthIntervalMs: 15_000,

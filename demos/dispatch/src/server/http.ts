@@ -5,6 +5,7 @@ import { isManagedCopilotError } from "@managed-copilot/sdk";
 import type { ApiErrorBody, ApprovalAnswer, CreateConversationRequest, SendMessageRequest, SendMessageResponse, SettingsRequest } from "../shared/types.js";
 import { isValidSessionId, launchAttach } from "./attach.js";
 import type { DispatchConfig } from "./config.js";
+import { isStyle } from "./config.js";
 import { DispatchError } from "./errors.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
@@ -154,7 +155,8 @@ function buildRouter(ctx: ApiContext): Router {
   router.add("POST", "/api/conversations", async (req, res) => {
     const body = await readJson<Partial<CreateConversationRequest>>(req);
     if (body.approvals !== undefined && !approvalMode(body.approvals)) throw new DispatchError("invalid_request", 'approvals must be "ask" or "auto".');
-    sendJson(res, 201, await conversations.create(String(body.prompt ?? ""), approvalMode(body.approvals)));
+    if (body.style !== undefined && !isStyle(body.style)) throw new DispatchError("invalid_request", 'style must be "delegate", "direct", or "mixed".');
+    sendJson(res, 201, await conversations.create(String(body.prompt ?? ""), approvalMode(body.approvals), body.style));
   });
   router.add("GET", "/api/conversations/:id", async (_req, res, params) => sendJson(res, 200, await conversations.view(params.id!)));
   router.add("DELETE", "/api/conversations/:id", async (_req, res, params) => {
@@ -171,7 +173,8 @@ function buildRouter(ctx: ApiContext): Router {
     const body = await readJson<Partial<ApprovalAnswer>>(req);
     if (typeof body.approve !== "boolean") throw new DispatchError("invalid_request", "Pass approve: true or false.");
     if (body.reason !== undefined && (typeof body.reason !== "string" || body.reason.length > 1_000)) throw new DispatchError("invalid_request", "Keep the reason under 1,000 characters.");
-    conversations.answer(params.id!, params.approvalId!, body.approve, body.reason);
+    if (body.rest !== undefined && typeof body.rest !== "boolean") throw new DispatchError("invalid_request", "Pass rest: true or false.");
+    conversations.answer(params.id!, params.approvalId!, body.approve, body.reason, body.rest);
     res.writeHead(204).end();
   });
   router.add("PUT", "/api/conversations/:id/settings", async (req, res, params) => {
@@ -181,6 +184,7 @@ function buildRouter(ctx: ApiContext): Router {
     sendJson(res, 200, conversations.setSettings(params.id!, { approvals }));
   });
   router.add("GET", "/api/conversations/:id/workers/:workerId/files", async (_req, res, params) => sendJson(res, 200, await conversations.files(params.id!, params.workerId!)));
+  router.add("GET", "/api/conversations/:id/workers/:workerId/commands", async (_req, res, params) => sendJson(res, 200, await conversations.commands(params.id!, params.workerId!)));
   router.add("GET", "/api/conversations/:id/workers/:workerId/file", async (_req, res, params, url) => {
     const path = url.searchParams.get("path");
     if (!path) throw new DispatchError("invalid_request", "Pass the file's path.");

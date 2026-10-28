@@ -7,6 +7,7 @@ import { cx } from "../lib/cx.js";
 import { plural } from "../lib/format.js";
 import { conversationHref, type ConversationTab } from "../lib/router.js";
 import { deleteConversation, loadConversation, openInCli, useStore } from "../lib/store.js";
+import { STYLE_META } from "../lib/styles.js";
 import { Chat } from "./Chat.js";
 import { Environments } from "./Environments.js";
 import { Timeline } from "./Timeline.js";
@@ -56,13 +57,19 @@ export function ConversationPage({ id, tab, worker }: { readonly id: string; rea
 }
 
 function Conversation({ view, tab, worker }: { readonly view: View; readonly tab: ConversationTab; readonly worker?: string }) {
-  const blueprints = useStore((state) => state.blueprints);
-  const coordinator = useStore((state) => state.coordinator);
+  const allBlueprints = useStore((state) => state.blueprints);
+  const styles = useStore((state) => state.styles);
   const canLaunch = useStore((state) => state.canLaunchTerminal);
   const [pane, setPane] = useState<"chat" | "environments">("chat");
   const [deleting, setDeleting] = useState(false);
   const stats = conversationStats(view);
   const selected = view.workers.find((candidate) => candidate.id === worker);
+  const style = styles.find((candidate) => candidate.style === view.style);
+  const meta = STYLE_META[view.style];
+  const StyleGlyph = meta.icon;
+  // The blueprints this conversation's coordinator can use: its own sandbox's, and (delegate, mixed) its workers'.
+  const usable = style?.available ? new Set([...(style.handsEnvironment ? [style.handsEnvironment] : []), ...style.workers]) : undefined;
+  const blueprints = usable ? allBlueprints.filter((blueprint) => usable.has(blueprint.name)) : allBlueprints;
 
   const remove = async (): Promise<void> => {
     const confirmed = await confirmAction({
@@ -87,17 +94,35 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg-muted">
             <span className="Label Label--secondary" title="One coordinator session handles the whole conversation">
               <CopilotIcon size={12} />
-              Coordinator{coordinator ? ` · ${coordinator.environment} · ${coordinator.model}` : ""}
+              Coordinator · {view.environment}
+              {style?.coordinator ? ` · ${style.coordinator.model}` : ""}
+            </span>
+            <span className="Label Label--accent" title={`${meta.summary} A conversation keeps its style.`}>
+              <StyleGlyph size={12} />
+              {meta.short}
             </span>
             <span>{plural(stats.messages, "message")}</span>
-            <span aria-hidden>·</span>
-            <span>
-              <strong className="font-semibold text-fg">{stats.created}</strong> {stats.created === 1 ? "sandbox" : "sandboxes"} created
-            </span>
-            <span aria-hidden>·</span>
-            <span>
-              <strong className="font-semibold text-fg">{stats.reused}</strong> reused
-            </span>
+            {view.style !== "delegate" ? (
+              <>
+                <span aria-hidden>·</span>
+                <span>
+                  <strong className="font-semibold text-fg">{stats.commands}</strong> {stats.commands === 1 ? "command" : "commands"}
+                  {stats.subagents > 0 ? `, ${plural(stats.subagents, "sub-agent")}` : ""}
+                </span>
+              </>
+            ) : null}
+            {view.style !== "direct" ? (
+              <>
+                <span aria-hidden>·</span>
+                <span>
+                  <strong className="font-semibold text-fg">{stats.created}</strong> {stats.created === 1 ? "sandbox" : "sandboxes"} created
+                </span>
+                <span aria-hidden>·</span>
+                <span>
+                  <strong className="font-semibold text-fg">{stats.reused}</strong> reused
+                </span>
+              </>
+            ) : null}
             {stats.stopped > 0 ? (
               <>
                 <span aria-hidden>·</span>

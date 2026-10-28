@@ -16,6 +16,8 @@ const user = (content: string, index: number, messageId?: string): ChatMessage =
 function view(...messages: ChatMessage[]): ConversationView {
   return {
     id: "c",
+    style: "delegate",
+    environment: "dispatch",
     title: "t",
     createdAt: "",
     updatedAt: "",
@@ -27,6 +29,8 @@ function view(...messages: ChatMessage[]): ConversationView {
     workers: [],
     approvals: [],
     settings: { approvals: "ask" },
+    agents: {},
+    approvedRest: [],
     busy: false,
     attachCommand: "",
   };

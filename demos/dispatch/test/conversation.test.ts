@@ -234,15 +234,15 @@ describe("ConversationManager", () => {
   it("keeps a conversation started while discovery reads the list, and doesn't revive one deleted meanwhile", async () => {
     begin();
     const doomed = await manager.create("delete me", "ask");
-    let release: (sessions: Awaited<ReturnType<FakePlatform["listSessions"]>>) => void = () => undefined;
-    // The list is read before both changes below.
+    const releases: ((sessions: Awaited<ReturnType<FakePlatform["listSessions"]>>) => void)[] = [];
+    // The list is read before both changes below (one list per style's environment).
     const snapshot = [info(doomed.id)];
-    platform.listSessions = () => new Promise((resolve) => (release = resolve));
+    platform.listSessions = () => new Promise((resolve) => releases.push(resolve));
     const syncing = manager.sync();
     await settle();
     const fresh = await manager.create("new one", "ask");
     await manager.delete(doomed.id);
-    release(snapshot);
+    releases.forEach((release, index) => release(index === 0 ? snapshot : []));
     await syncing;
     expect(manager.summaries().map((summary) => summary.id)).toEqual([fresh.id]);
     // The deleted one wasn't brought back, not even briefly (it would be resumed, then found gone).
@@ -445,6 +445,126 @@ describe("ConversationManager", () => {
     await expect(manager.create("x".repeat(20_001), "ask")).rejects.toMatchObject({ code: "invalid_request" });
     platform.status = { state: "unavailable", message: "Managed Copilot isn't reachable yet." };
     await expect(manager.create("go", "ask")).rejects.toMatchObject({ code: "platform_unavailable", status: 503, message: "Managed Copilot isn't reachable yet." });
+  });
+
+  describe("execution styles", () => {
+    const SUB = "8bb791c7-bec7-4d7a-8e67-5cb4895760bf";
+    const HANDS = "33333333-3333-4333-8333-333333333333";
+    const bash = (toolCallId: string, command: string) => ({ kind: "custom-tool", toolName: "bash", toolCallId, toolDescription: "", args: { command } });
+
+    it("creates each conversation in its style's orchestrator environment, with that style's instructions", async () => {
+      begin();
+      const direct = await manager.create("Count primes", "ask", "direct");
+      const mixed = await manager.create("Count primes", "ask", "mixed");
+      const delegate = await manager.create("Count primes", "ask");
+      expect(platform.createdIn).toEqual(["dispatch-direct", "dispatch-mixed", "dispatch"]);
+      expect(platform.created[0]?.systemMessage?.content).toMatch(/working directly/);
+      expect(platform.created[0]?.systemMessage?.content).not.toMatch(/start_worker/);
+      expect(platform.created[1]?.systemMessage?.content).toMatch(/start_worker/);
+      expect(platform.created[2]?.systemMessage).toEqual({ content: SYSTEM_MESSAGE });
+      expect([direct, mixed, delegate].map((view) => [view.style, view.environment])).toEqual([
+        ["direct", "dispatch-direct"],
+        ["mixed", "dispatch-mixed"],
+        ["delegate", "dispatch"],
+      ]);
+      expect(manager.state()).toMatchObject({ defaults: { style: "delegate" }, styles: platform.styles });
+    });
+
+    it("refuses a style this deployment doesn't declare, saying why", async () => {
+      platform.styles = platform.styles.map((style) => (style.style === "mixed" ? { ...style, available: false, reason: 'This deployment has no "dispatch-mixed" environment.' } : style));
+      begin();
+      await expect(manager.create("go", "ask", "mixed")).rejects.toMatchObject({ code: "style_unavailable", status: 409, message: 'This deployment has no "dispatch-mixed" environment.' });
+    });
+
+    it("finds conversations in every style's environment after a restart and resumes them there", async () => {
+      const session = new FakeSession("direct-1", {} as SessionConfig);
+      session.history.push(user("go", "m1"), start("b1", "bash", { command: "ls" }), done("b1", "a.txt\n<exited with exit code 0; shellId: ex_1>"));
+      platform.sessions.set("direct-1", session);
+      platform.listed.set("direct-1", info("direct-1", { environment: "dispatch-direct" }));
+      begin();
+      await manager.sync();
+      const view = await manager.view("direct-1");
+      expect(view).toMatchObject({ style: "direct", environment: "dispatch-direct" });
+      expect(platform.resumed.at(-1)).toMatchObject({ sessionId: "direct-1", environment: "dispatch-direct" });
+      expect(view.messages[0]?.commands).toEqual([expect.objectContaining({ id: "b1", command: "ls", exitCode: 0, output: "a.txt" })]);
+      expect(store.get("direct-1")?.environment).toBe("dispatch-direct");
+    });
+
+    it("asks before each command, and approving the rest of a message covers its later commands only", async () => {
+      begin();
+      const view = await manager.create("go", "ask", "direct");
+      const session = platform.sessions.get(view.id)!;
+      session.emit(user("go", `${view.id}-message-1`));
+      session.emit(event("tool.execution_start", { toolCallId: "b1", toolName: "bash", arguments: { command: "python3 a.py" } }, { agentId: SUB }));
+      session.emit(start("b2", "bash", { command: "ls" }));
+      const first = session.ask(bash("b1", "python3 a.py"));
+      const second = session.ask(bash("b2", "ls"));
+      // Reading never asks.
+      await expect(session.ask({ kind: "custom-tool", toolName: "view", toolCallId: "v1", toolDescription: "", args: { path: "/workspace" } })).resolves.toEqual({ kind: "approve-once" });
+      await settle();
+      const asking = await manager.view(view.id);
+      expect(asking.status).toBe("asking");
+      expect(asking.approvals).toEqual([
+        expect.objectContaining({ id: "b1", kind: "command", tool: "bash", command: "python3 a.py", agentId: SUB, messageIndex: 1 }),
+        expect.objectContaining({ id: "b2", kind: "command", tool: "bash", command: "ls", messageIndex: 1 }),
+      ]);
+      expect(asking.messages[0]?.commands?.map((command) => command.status)).toEqual(["asking", "asking"]);
+
+      manager.answer(view.id, "b1", true, undefined, true);
+      await expect(first).resolves.toEqual({ kind: "approve-once", approvedInteractively: true });
+      await expect(second).resolves.toEqual({ kind: "approve-once", approvedInteractively: true });
+      expect(store.get(view.id)?.approvedRest).toEqual([1]);
+      expect((await manager.view(view.id)).approvedRest).toEqual([1]);
+      session.emit(start("b3", "create", { path: "/workspace/x.py", file_text: "print(1)" }));
+      await expect(session.ask({ kind: "custom-tool", toolName: "create", toolCallId: "b3", toolDescription: "", args: { path: "/workspace/x.py" } })).resolves.toEqual({ kind: "approve-once" });
+
+      // The next message asks again; declining tells the agent why.
+      session.emit(event("session.idle", {}, { ephemeral: true }));
+      session.emit(user("now delete it", `${view.id}-message-2`));
+      session.emit(start("b4", "bash", { command: "rm x.py" }));
+      const fourth = session.ask(bash("b4", "rm x.py"));
+      await settle();
+      expect((await manager.view(view.id)).approvals).toEqual([expect.objectContaining({ id: "b4", messageIndex: 2 })]);
+      manager.answer(view.id, "b4", false, "keep it");
+      await expect(fourth).resolves.toEqual({ kind: "reject", feedback: "The person declined this command: keep it" });
+      expect((await manager.view(view.id)).messages[1]?.commands?.[0]).toMatchObject({ status: "denied", outcome: "The person declined this command: keep it" });
+    });
+
+    it("runs commands without asking in auto mode", async () => {
+      begin();
+      const view = await manager.create("go", "auto", "direct");
+      await expect(platform.sessions.get(view.id)!.ask(bash("b1", "ls"))).resolves.toEqual({ kind: "approve-once" });
+    });
+
+    it("shows the coordinator's own sandbox, and lists the commands the platform recorded in it", async () => {
+      begin();
+      const view = await manager.create("go", "ask", "direct");
+      const session = platform.sessions.get(view.id)!;
+      session.emit(user("go", `${view.id}-message-1`));
+      session.emit(start("b1", "bash", { command: "ls" }));
+      platform.workerLists.set(view.id, [worker({ id: HANDS, name: "hands", role: "hands", coordinatorId: view.id, state: "idle", task: "Sandbox the coordinator works in directly.", messages: 0 })]);
+      platform.execLists.set(HANDS, [
+        { id: "ex_1", sessionId: HANDS, command: "ls", state: "completed", background: false, exitCode: 0, startedAt: "2026-10-27T10:00:07.000Z", finishedAt: "2026-10-27T10:00:08.000Z", outputBytes: 6, caller: { kind: "platform", name: "bash", agentId: SUB } },
+        { id: "ex_2", sessionId: HANDS, command: "pwd", state: "running", background: true, startedAt: "2026-10-27T10:00:09.000Z", outputBytes: 0, caller: { kind: "api", login: "octocat" } },
+      ]);
+      platform.workerEvent({ id: "p1", type: "worker.started", createdAt: "2026-10-27T10:00:05.000Z", sessionId: view.id, data: { workerId: HANDS, name: "hands", environment: "dispatch-python", state: "starting", role: "hands" } });
+      await settle(250);
+      const current = await manager.view(view.id);
+      expect(current.workers).toEqual([expect.objectContaining({ id: HANDS, role: "hands", createdBy: 1, sentWorkBy: [] })]);
+      await expect(manager.commands(view.id, HANDS)).resolves.toEqual([
+        { id: "ex_1", command: "ls", state: "completed", exitCode: 0, startedAt: "2026-10-27T10:00:07.000Z", finishedAt: "2026-10-27T10:00:08.000Z", background: false, tool: "bash", agentId: SUB },
+        { id: "ex_2", command: "pwd", state: "running", startedAt: "2026-10-27T10:00:09.000Z", background: true, tool: "api" },
+      ]);
+    });
+
+    it("only lists commands for the coordinator's own sandboxes", async () => {
+      begin();
+      const view = await manager.create("go", "ask", "mixed");
+      platform.workerLists.set(view.id, [worker({ id: WORKER_A, name: "py-bench", coordinatorId: view.id })]);
+      platform.workerEvent({ id: "p1", type: "worker.started", createdAt: "2026-10-27T10:00:05.000Z", sessionId: view.id, data: { workerId: WORKER_A, name: "py-bench", environment: "dispatch-python", state: "starting" } });
+      await settle(250);
+      await expect(manager.commands(view.id, WORKER_A)).rejects.toMatchObject({ code: "invalid_request" });
+    });
   });
 });
 

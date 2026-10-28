@@ -7,6 +7,7 @@ import { Spinner } from "./ui/Spinner.js";
 import { formatRelative, plural } from "../lib/format.js";
 import { conversationHref, homeHref } from "../lib/router.js";
 import { useStore } from "../lib/store.js";
+import { STYLE_META } from "../lib/styles.js";
 import { useNow } from "../lib/useNow.js";
 
 export interface SidebarProps {
@@ -100,7 +101,10 @@ function SidebarContent({ activeId, onNavigate, onClose }: { readonly activeId?:
 function StatusGlyph({ summary }: { readonly summary: ConversationSummary }) {
   if (summary.status === "working") return <Spinner size={16} className="mt-0.5 text-fg-attention" label="Working" />;
   if (summary.status === "asking") return <ShieldIcon size={16} className="mt-0.5 text-fg-attention" aria-label="Waiting for your approval" />;
-  return <CommentDiscussionIcon size={16} className="mt-0.5 text-fg-muted" />;
+  // Idle: how the conversation's coordinator works.
+  const meta = STYLE_META[summary.style ?? "delegate"];
+  const Glyph = summary.style && summary.style !== "delegate" ? meta.icon : CommentDiscussionIcon;
+  return <Glyph size={16} className="mt-0.5 text-fg-muted" aria-label={meta.label} />;
 }
 
 function ConversationItem({ summary, active, now, onNavigate }: { readonly summary: ConversationSummary; readonly active: boolean; readonly now: number; readonly onNavigate?: () => void }) {
@@ -114,6 +118,7 @@ function ConversationItem({ summary, active, now, onNavigate }: { readonly summa
           {summary.title}
         </span>
         <span id={`${id}-meta`} className="mt-0.5 block truncate text-xs font-normal text-fg-muted">
+          {summary.style && summary.style !== "delegate" ? `${STYLE_META[summary.style].short} · ` : ""}
           {plural(summary.messageCount, "message")} · <span className={summary.status === "asking" ? "font-semibold text-fg-attention" : undefined}>{state}</span>
         </span>
       </span>

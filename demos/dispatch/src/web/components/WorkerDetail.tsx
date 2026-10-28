@@ -1,7 +1,7 @@
 import { FileIcon, PackageDependentsIcon, SyncIcon, TerminalIcon, XIcon } from "@primer/octicons-react";
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { BLUEPRINT_LABELS } from "../../shared/catalog.js";
-import type { Blueprint, ConversationView, FileView, WorkerView } from "../../shared/types.js";
+import type { Blueprint, CommandRecord, ConversationView, FileView, WorkerView } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
 import { networkSummary, sizeSummary, WORKER_STATE } from "../lib/blueprints.js";
 import { blueprintFor, workGiven } from "../lib/conversation.js";
@@ -9,7 +9,8 @@ import { formatBytes, formatClock, formatRelative } from "../lib/format.js";
 import { conversationHref, navigate, type ConversationTab } from "../lib/router.js";
 import { openInCli, useStore } from "../lib/store.js";
 import { toast } from "../lib/toast.js";
-import { WorkerStateIcon } from "./Environments.js";
+import { AgentChip } from "./Commands.js";
+import { commandsIn, handsTitle, WorkerStateIcon } from "./Environments.js";
 import { FileDialog } from "./FileDialog.js";
 import { MarkdownView } from "./Markdown.js";
 import { Button, IconButton } from "./ui/Button.js";
@@ -34,7 +35,8 @@ export function WorkerDetail({ view, worker, blueprints, tab }: { readonly view:
   const [showAll, setShowAll] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const blueprint = blueprintFor(worker.environment, blueprints);
-  const work = workGiven(view, worker);
+  const hands = worker.role === "hands";
+  const work = hands ? [] : workGiven(view, worker);
   const listed = files && (!worker.filesAt || files.at >= worker.filesAt) ? files.files : (worker.files ?? []);
   const listedAt = files && (!worker.filesAt || files.at >= worker.filesAt) ? files.at : worker.filesAt;
   const stopped = worker.state === "stopped";
@@ -56,11 +58,9 @@ export function WorkerDetail({ view, worker, blueprints, tab }: { readonly view:
   return (
     <section aria-label={`${worker.name} details`} className="rounded-lg border border-line bg-canvas">
       <header className="flex items-center gap-2 border-b border-line-muted px-3 py-2">
-        <WorkerStateIcon worker={worker} size={16} />
-        <h3 className="text-sm font-semibold">{worker.name}</h3>
-        <span className="text-xs text-fg-muted">
-          {meta.label} · {meta.sandbox}
-        </span>
+        {hands ? <TerminalIcon size={16} className="text-fg-muted" /> : <WorkerStateIcon worker={worker} size={16} />}
+        <h3 className="text-sm font-semibold">{hands ? handsTitle(view, worker) : worker.name}</h3>
+        <span className="text-xs text-fg-muted">{hands ? (stopped ? "Deleted · no agent in it" : "No agent in it: the coordinator and its sub-agents work here") : `${meta.label} · ${meta.sandbox}`}</span>
         <span className="ml-auto" />
         <IconButton icon={XIcon} label="Close details" size="sm" onClick={() => navigate(conversationHref(view.id, { tab }), { replace: true })} />
       </header>
@@ -89,7 +89,7 @@ export function WorkerDetail({ view, worker, blueprints, tab }: { readonly view:
               {formatClock(worker.createdAt)}
               {worker.createdBy !== undefined ? <span className="text-fg-muted"> · for message #{worker.createdBy}</span> : null}
             </Fact>
-            {worker.model ? <Fact label="Model">{worker.model}</Fact> : null}
+            {worker.model && !hands ? <Fact label="Model">{worker.model}</Fact> : null}
           </dl>
 
           <div className="mt-3 flex items-center gap-2">
@@ -139,6 +139,10 @@ export function WorkerDetail({ view, worker, blueprints, tab }: { readonly view:
         </div>
 
         <div className="min-w-0">
+          {hands ? (
+            <HandsCommands view={view} worker={worker} />
+          ) : (
+            <>
           <h4 className="text-xs font-semibold tracking-wide text-fg-muted uppercase">Work it was given</h4>
           <ol className="mt-1.5 flex flex-col gap-1.5 text-sm">
             {work.map((item) => (
@@ -177,9 +181,80 @@ export function WorkerDetail({ view, worker, blueprints, tab }: { readonly view:
               ) : null}
             </div>
           ) : null}
+            </>
+          )}
         </div>
       </div>
       {preview ? <FileDialog conversationId={view.id} workerId={worker.id} path={preview} onClose={() => setPreview(undefined)} /> : null}
     </section>
+  );
+}
+
+/** Every command run in a hands sandbox, as the platform recorded it (`managed.exec.list`), with who ran it. */
+function HandsCommands({ view, worker }: { readonly view: ConversationView; readonly worker: WorkerView }) {
+  const [commands, setCommands] = useState<readonly CommandRecord[]>();
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const known = commandsIn(view, worker).length;
+  const stopped = worker.state === "stopped";
+
+  const load = useCallback(async (): Promise<void> => {
+    setLoading(true);
+    try {
+      setCommands(await api.commands(view.id, worker.id));
+      setError(undefined);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setLoading(false);
+    }
+  }, [view.id, worker.id]);
+
+  // Listed again whenever the conversation shows another command.
+  useEffect(() => {
+    if (!stopped) void load();
+  }, [load, known, stopped]);
+
+  return (
+    <>
+      <div className="flex items-center gap-2">
+        <h4 className="text-xs font-semibold tracking-wide text-fg-muted uppercase">Commands run here</h4>
+        {!stopped ? <IconButton icon={SyncIcon} label="List the commands again" size="sm" className="ml-auto" onClick={() => void load()} disabled={loading} /> : null}
+      </div>
+      <p className="mt-0.5 text-xs text-fg-muted">Recorded by the platform with the agent that ran each one, so this list survives restarts.</p>
+      {stopped ? (
+        <p className="mt-1.5 text-sm text-fg-muted">This sandbox was deleted, with its list of commands.</p>
+      ) : error ? (
+        <Callout tone="warning" compact className="mt-1.5">
+          {error}
+        </Callout>
+      ) : !commands ? (
+        <div className="SkeletonBox mt-1.5 h-16" aria-busy="true" />
+      ) : commands.length === 0 ? (
+        <p className="mt-1.5 text-sm text-fg-muted">No commands yet.</p>
+      ) : (
+        <ol className="mt-1.5 flex max-h-80 flex-col overflow-y-auto rounded-md border border-line-muted text-sm">
+          {commands.map((command) => (
+            <li key={command.id} className="grid grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)_auto] items-center gap-2 border-t border-line-muted px-2 py-1 first:border-t-0" title={command.command}>
+              {command.tool === "api" ? <span className="text-xs text-fg-muted">managed.exec</span> : <AgentChip view={view} agentId={command.agentId} />}
+              <span className="min-w-0 truncate font-mono text-xs">$ {command.command.replace(/\s+/g, " ")}</span>
+              <span className="flex shrink-0 items-center gap-1.5 text-xs text-fg-muted">
+                {formatClock(command.startedAt)}
+                {command.state === "running" ? (
+                  <span className="Label Label--accent">running</span>
+                ) : command.exitCode !== undefined ? (
+                  <span className={command.exitCode === 0 ? "Label Label--success" : "Label Label--danger"}>exit {command.exitCode}</span>
+                ) : (
+                  <span className="Label Label--secondary">{command.state.replace("_", " ")}</span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+      <p className="mt-3 text-xs text-fg-muted">
+        No agent runs in this sandbox, so there's nothing to open in Copilot CLI here. Open the conversation instead: its commands run here.
+      </p>
+    </>
   );
 }
