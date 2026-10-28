@@ -3,6 +3,7 @@ import { ROUTES, type AccountInfo, type ScheduleInfo, type SessionInfo } from "@
 import { ManagedCopilot } from "@managed-copilot/sdk";
 import { HttpClient, findCopilot, launchAttachedCli, resolveToken, resolveUrl, validateDeploymentUrl, type AttachedCliResult } from "@managed-copilot/sdk/internal";
 import { UsageError } from "./errors.js";
+import type { HostTools } from "./host.js";
 import { shortId, type Style } from "./output.js";
 
 /** The SDK surface the CLI uses. */
@@ -43,6 +44,8 @@ export interface Context {
   /** Opens a URL in the default browser (rejects when no browser could be started). */
   openUrl(url: string): Promise<void>;
   deployment(): Promise<Deployment>;
+  /** Local tools for commands that work on the AppHost rather than a deployment (`access`, `deploy`). */
+  readonly host: HostTools;
 }
 
 /** Connects with the same URL and token lookup as `ManagedCopilot.connect()`; the token never comes from argv. */

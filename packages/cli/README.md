@@ -16,6 +16,8 @@ npx managed-copilot exec 7f3a2c1 -- ls -la          # run a command in a session
 npx managed-copilot schedules [list|runs|pause|resume|delete|run] [schedule]
 npx managed-copilot console                         # the operator console in your browser (operators only)
 npx managed-copilot operator [sessions|sandboxes|...] # the operator overview and views in the terminal
+npx managed-copilot deploy                          # deploy the AppHost in this directory to Azure
+npx managed-copilot access [users|orgs|operators|operator-orgs|ips] [add|remove|set] [entries...]
 ```
 
 - **Deployment.** `--url`, then `MANAGED_COPILOT_URL`, then the discovery record a local gateway writes.
@@ -50,3 +52,39 @@ sign-in ticket with your GitHub sign-in and opens the console with it (`--no-ope
 once, within 60 seconds). `operator` prints the same views in the terminal: `overview` (the default), `infra`,
 `environments`, `sessions` (every owner's; `--owner`, `--environment`, `--state`), `sandboxes`, `schedules`, and
 `webhooks`. Operators see configuration with secrets redacted, never conversation content.
+
+## Deploy and share
+
+`deploy` and `access` work on the AppHost in the current directory (or `--apphost <path>`; `--name` if
+`addManagedCopilot` isn't named `copilot`), not on a running deployment. They read and write its user secrets with the
+Aspire CLI and never print secret values.
+
+```powershell
+npx managed-copilot deploy                                    # the Azure CLI's subscription, managed-copilot-dev, westus2
+npx managed-copilot deploy --resource-group demo --location eastus
+```
+
+`deploy` checks that the Aspire CLI, the Azure CLI (signed in), and Docker (running) are ready, then fills in what's
+missing: the subscription, region, and resource group, and, on a first deployment, you as a platform user and an
+operator. It shows the plan, asks before deploying (`--yes` skips the question), and runs `aspire deploy`. The published
+apps act as your GitHub sign-in: the token goes to `aspire deploy` in an environment variable, never on a command line.
+It won't deploy over a resource group that holds a deployment this AppHost didn't make: that deployment's generated
+keys are in Aspire's deployment record (`~/.aspire/deployments/<hash of the AppHost path>/`) for the checkout that made
+it. If that record is on this machine, it offers, in a terminal, to copy it to this AppHost so the deployment keeps its
+keys. When it's done, it prints the gateway URL.
+
+```powershell
+npx managed-copilot access                           # the lists, and each running app's allowlist
+npx managed-copilot access users add me alice bob    # who may use the platform ("me" is your GitHub sign-in)
+npx managed-copilot access orgs add contoso          # or whole organizations
+npx managed-copilot access operators add alice       # who may open the operator console
+npx managed-copilot access ips add me                # let this machine open the deployed apps
+npx managed-copilot access ips set 203.0.113.0/24    # replace the apps' allowlist
+npx managed-copilot access users remove bob
+```
+
+Each list is one setting (`Parameters:<name>-github-users`, `-github-orgs`, `-operator-users`, `-operator-orgs`, and
+`Parameters:app-allowed-ips`). User and operator changes take effect on the next `deploy`. Allowlist changes also apply
+to the running apps at once through the Azure CLI. An unset allowlist means the deploying machine's address, so the
+first `ips add` keeps that address. `ips set "*"` opens the apps to any address as your account; it asks first, and
+takes effect on the next deploy.

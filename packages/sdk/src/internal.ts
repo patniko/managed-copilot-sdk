@@ -4,4 +4,4 @@
  */
 export { HttpClient, type RequestOptions } from "./http.js";
 export { readDiscovery, resolveToken, resolveUrl, validateDeploymentUrl } from "./connection.js";
-export { findCopilot, launchAttachedCli, type AttachedCliResult, type AttachOutcome } from "./features/cli.js";
+export { copilotSpawnArguments as spawnArguments, findCopilot, findExecutable, launchAttachedCli, type AttachedCliResult, type AttachOutcome } from "./features/cli.js";

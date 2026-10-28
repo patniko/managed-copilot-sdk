@@ -122,6 +122,12 @@ export function findCopilot(explicit?: string): CopilotCommand {
   );
 }
 
+/** Finds any command the way the shell would (PATH, PATHEXT); undefined when it isn't installed. */
+export function findExecutable(command: string): CopilotCommand | undefined {
+  const file = resolveExecutable(command);
+  return file ? { file, shell: process.platform === "win32" && BATCH_FILE.test(file) } : undefined;
+}
+
 /** cmd.exe metacharacters, escaped with `^` so cmd passes them through literally. */
 const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
 

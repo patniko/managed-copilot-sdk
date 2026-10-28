@@ -6,9 +6,9 @@ click, and what you should see. Tick each box as you go.
 
 ```mermaid
 flowchart LR
-  A["1 · Local<br/>aspire run · pnpm gallery"] --> B["2 · Deploy<br/>aspire deploy"]
+  A["1 · Local<br/>aspire run · pnpm gallery"] --> B["2 · Deploy<br/>npx managed-copilot deploy"]
   B --> C["3 · Azure<br/>pnpm gallery --cloud"]
-  C --> D["4 · Share<br/>allow lists"]
+  C --> D["4 · Share<br/>npx managed-copilot access"]
 ```
 
 Run every command from the repository root in PowerShell. Keep three terminals: **T1** for `aspire run`, **T2** for the
@@ -157,50 +157,65 @@ Stopping the `aspire run` terminal alone leaves the gateway and demos holding th
 
 ## 2 · Deploy to Azure
 
-Full reference: [deploying to Azure](deployment.md). Settings are kept in the AppHost's user secrets, so you set them
-once; `aspire deploy` asks for anything missing.
+One command runs the whole flow from the repository root (full reference: [deploying to Azure](deployment.md)):
 
-### 2.1 Where it goes
+```powershell
+npx managed-copilot deploy
+```
+
+It checks that the Aspire CLI, the Azure CLI (signed in with `az login`), and Docker are ready, then shows the plan and
+asks before deploying:
+
+```text
+Deploying apphost.mts to Azure
+  Subscription    <your subscription> (<id>)
+  Resource group  managed-copilot-dev · westus2 · new deployment
+  Platform users  @your-login
+  Operators       @your-login
+  Apps act as     @your-login (your GitHub sign-in)
+  Apps open to    203.0.113.7/32 (this machine)
+  Added you (@your-login) to platform users and operators. Change with `npx managed-copilot access`.
+
+Deploy? [y/N]
+```
+
+- **Where it goes.** The Azure CLI's current subscription, `managed-copilot-dev`, and `westus2`, unless you've set them
+  before or pass `--subscription`, `--resource-group`, or `--location`. They're saved for next time.
+- **Who may use it.** A first deployment adds you as a platform user and an operator (the deployed console is off
+  without operators). Add others in part 4.
+- **The demo apps' account.** The deployed demos have no sign-in of their own: they act as your GitHub sign-in, passed
+  to `aspire deploy` in an environment variable, never on a command line.
+- **Who can open the apps.** Your machine's public address, unless you've set a list with
+  `npx managed-copilot access ips`.
+
+The first deploy builds and pushes the images (several minutes on ARM64). It ends with:
+
+```text
+✓ Deployed: https://copilot.<environment-domain>
+```
+
+- [ ] The deploy succeeds and prints the gateway URL.
+
+Run it again after any change (code, users, operators); it updates the same deployment. The deployment's generated
+keys live in Aspire's deployment record for the checkout that made it. From another checkout (a new clone or
+worktree), `deploy` stops and, if that record is on this machine, offers to copy it so the deployment keeps its keys.
+Say yes; deploying with new keys can leave the gateway unable to start.
+
+<details>
+<summary>The same steps by hand</summary>
 
 ```powershell
 aspire secret set Azure:SubscriptionId <subscription-id>
 aspire secret set Azure:Location westus2
 aspire secret set Azure:ResourceGroup managed-copilot-dev
-```
-
-### 2.2 Who may use it (required)
-
-```powershell
-aspire secret set Parameters:copilot-github-users "your-login"        # comma-separated, the whole list
-# or: aspire secret set Parameters:copilot-github-orgs "your-org"
-aspire secret set Parameters:copilot-operator-users "your-login"      # turns on the deployed operator console
-```
-
-### 2.3 The demo apps' account and who can open them
-
-The deployed demos have no sign-in of their own: they act as one GitHub account, so their ingress is limited to IP
-addresses. Pass the token through the environment so it never appears in a command line:
-
-```powershell
+aspire secret set Parameters:copilot-github-users "your-login"      # the whole list
+aspire secret set Parameters:copilot-operator-users "your-login"
 ${env:Parameters__app-github-token} = (gh auth token).Trim()
-aspire secret set Parameters:app-allowed-ips "203.0.113.7/32"   # optional; default is this machine's public IPv4
-```
-
-### 2.4 Deploy
-
-```powershell
 aspire deploy
 Remove-Item Env:Parameters__app-github-token
 ```
 
-The first deploy builds and pushes the images (several minutes on ARM64). It ends with:
-
-```text
-Managed Copilot: https://copilot.<environment-domain> (...)
-Apps open to: 203.0.113.7/32 (change with Parameters:app-allowed-ips)
-```
-
-- [ ] The deploy succeeds and prints the gateway URL and the apps' allowed addresses.
+</details>
 
 Find the URL again later with:
 
@@ -239,8 +254,8 @@ Repeat 1.4 to 1.7 with each card's **Azure** button. Differences to expect:
 - Sandboxes are Azure Container Apps microVMs (`Linux x86_64`), so the first one in a conversation takes a little
   longer to start.
 - "Open in Copilot CLI" commands include `--url https://copilot.<environment-domain>`.
-- The console button signs you in with a one-time link; it works only for accounts in
-  `Parameters:copilot-operator-users`.
+- The console button signs you in with a one-time link; it works only for operators (`npx managed-copilot access`
+  lists them).
 
 - [ ] Dispatch: π template with approvals, a reused follow-up, Copilot CLI follow-up.
 - [ ] Software factory: CSV ⇄ JSON toolkit, Agent-led, release with all tests passed.
@@ -260,10 +275,14 @@ Snippets 10 and 12 need a local webhook receiver, so they're left out against Az
 
 ### 3.4 If an Azure button is amber (403 "RBAC: access denied")
 
-Corporate VPNs and Global Secure Access send Azure traffic from different addresses than `aspire deploy` detected,
-often a rotating pool. Either:
+Corporate VPNs and Global Secure Access send Azure traffic from different addresses than `deploy` detected, often a
+rotating pool. `npx managed-copilot access` shows each running app's allowlist. Either:
 
-- Set `Parameters:app-allowed-ips` to your network's Azure egress ranges and `aspire deploy` again, or
+- Add your network's Azure egress ranges. This updates the running apps at once, no redeploy needed:
+
+  ```powershell
+  npx managed-copilot access ips add 203.0.113.0/24
+  ```
 - Run the demos on your machine against the Azure platform. The gateway needs no IP allowlist; it checks your GitHub
   sign-in. Stop any local `aspire run` first so the ports are free:
 
@@ -279,31 +298,44 @@ often a rotating pool. Either:
 
 ## 4 · Share it
 
-Three separate lists. Each setting holds the **whole** list (setting it replaces what was there), and each change takes
-effect on the next `aspire deploy`.
+`npx managed-copilot access` shows and changes three lists. Run it from the repository root:
 
-| Who | Setting | What it allows |
-| --- | --- | --- |
-| Platform users | `Parameters:copilot-github-users` (or `-github-orgs`) | Use the gateway with their own GitHub sign-in and Copilot plan: the CLI, samples, Copilot CLI, and demos they run themselves |
-| Operators | `Parameters:copilot-operator-users` (or `-operator-orgs`) | Open the operator console and operator API. Operators must also be platform users |
-| Deployed demo apps | `Parameters:app-allowed-ips` | Open the deployed Dispatch, factory, and assistant from those IP addresses, **acting as the account in `Parameters:app-github-token`** |
-
-```powershell
-aspire secret set Parameters:copilot-github-users "your-login,alice,bob"
-aspire secret set Parameters:copilot-operator-users "your-login,alice"
-${env:Parameters__app-github-token} = (gh auth token).Trim()
-aspire deploy
-Remove-Item Env:Parameters__app-github-token
+```text
+> npx managed-copilot access
+copilot · apphost.mts · managed-copilot-dev
+Platform users  @your-login
+Platform orgs   none
+Operators       @your-login
+Operator orgs   none
+Apps act as     @your-login (your GitHub sign-in when you deploy)
+Apps open to    203.0.113.7/32
+                dispatch now: 203.0.113.7/32
+                software-factory now: 203.0.113.7/32
+                assistant now: 203.0.113.7/32
 ```
 
+| List | Command | What it allows | Takes effect |
+| --- | --- | --- | --- |
+| Platform users | `access users add alice bob` (or `access orgs add contoso`) | Use the gateway with their own GitHub sign-in and Copilot plan: the CLI, samples, Copilot CLI, and demos they run themselves | Next `npx managed-copilot deploy` |
+| Operators | `access operators add alice` | Open the operator console and operator API. Operators must also be platform users | Next `npx managed-copilot deploy` |
+| Who can open the deployed apps | `access ips add 203.0.113.50` | Open the deployed Dispatch, factory, and assistant from those addresses, **acting as your account** | At once |
+
+`me` means you: `access users add me` adds your GitHub login, and `access ips add me` adds this machine's public
+address. Each list also takes `remove` and `set` (which replaces the whole list).
+
+```powershell
+npx managed-copilot access users add alice bob
+npx managed-copilot access operators add alice
+npx managed-copilot deploy                          # applies user and operator changes
+npx managed-copilot access ips add me               # applies at once, no deploy needed
+```
 **The deployed demos are not per-user.** There is no GitHub allow list for them: anyone who can reach them shares your
 account, your Copilot usage, and the same conversations. Pick one:
 
-- **Teammates use their own accounts (recommended).** Add them to `Parameters:copilot-github-users`. They clone the
+- **Teammates use their own accounts (recommended).** Add them with `access users add`, then `deploy`. They clone the
   repository, run `pnpm install; pnpm build`, and use the commands in 3.4 and 3.1 with your gateway URL. Their
   sessions are theirs, on their Copilot plan.
-- **Teammates open your deployed demos.** Add their addresses (or a shared network's range) to
-  `Parameters:app-allowed-ips`. Fine for a supervised demo, not for unsupervised use. `"*"` opens the apps to anyone
+- **Teammates open your deployed demos.** Add their addresses (or a shared network's range) with `access ips add`. Fine for a supervised demo, not for unsupervised use. `"*"` opens the apps to anyone
   on the Internet as you; don't.
 
 What to send a teammate who uses their own account:
@@ -320,7 +352,7 @@ pnpm --filter @managed-copilot/demo-dispatch start       # Dispatch on http://lo
 npx managed-copilot console                              # operators only
 ```
 
-A teammate who isn't on the list gets an access error from `status`; add them and redeploy.
+A teammate who isn't on the list gets an access error from `status`; add them with `access users add` and redeploy.
 
 ## 5 · Cost and teardown
 
@@ -332,4 +364,4 @@ its disks. To remove everything:
 az group delete --subscription <subscription-id> --name managed-copilot-dev --yes
 ```
 
-Your user secrets (allow lists, region) stay on your machine for the next `aspire deploy`.
+Your settings (lists, region) stay on your machine for the next `npx managed-copilot deploy`.
