@@ -34,7 +34,8 @@ export const LOGIN_HINT = "Sign in once with `npx managed-copilot login` so work
 const LOGOUT_REASON = "Signed out with `managed-copilot logout`.";
 const REJECTED_REASON = "GitHub no longer accepts the stored sign-in (it was revoked or expired). Run `npx managed-copilot login` again.";
 
-const context = (accountId: number) => `durable/background-credential/${accountId}`;
+export const credentialContext = (accountId: number) => `durable/background-credential/${accountId}`;
+const context = credentialContext;
 
 /**
  * Background sign-in (spec section 2): the caller's own GitHub credential, sealed at rest, verified again whenever

@@ -135,6 +135,17 @@ describe("ArtifactService", () => {
     expect(service.list(SESSION)).toEqual([]);
   });
 
+  it("refuses manifest paths that could escape a download folder", async () => {
+    for (const path of ["../escape.txt", "a//b.txt", "/abs.txt", "a\\b.txt", "./x.txt"]) {
+      agent.files.clear();
+      agent.files.set(path, "x");
+      service.turnStarted(SESSION, `turn-${path}`);
+      await service.publish(SESSION, service.turnsCompleted(SESSION, "completed"), "completed");
+      await expect(service.waitForPublication(SESSION, { turnId: `turn-${path}` })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "publication_failed") && /can't be published/.test((error as Error).message));
+    }
+    expect(service.list(SESSION)).toEqual([]);
+  });
+
   it("never opens a stored artifact whose digest is not a SHA-256 hex string", async () => {
     agent.files.set("report.md", "ok");
     await turn("turn-1");

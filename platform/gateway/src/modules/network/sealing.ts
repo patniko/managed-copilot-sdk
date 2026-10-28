@@ -28,14 +28,40 @@ export class Sealer {
 
   /**
    * `MANAGED_COPILOT_VAULT_KEY`, else a key file under `keyFile` created on first use (mode 0600). With a configured
-   * key, an existing key file is wrapped under it and its plaintext removed (`resolveKeyFile`).
+   * key, a key file that still opens `sealed` values is wrapped under it (`resolveKeyFile`).
    */
-  static load(options: { readonly envKey?: string; readonly keyFile: string }): Sealer {
+  static load(options: {
+    readonly envKey?: string;
+    readonly keyFile: string;
+    /** Values sealed under the current key, used to tell which key is in use when a key file and a configured key differ. */
+    readonly sealed?: () => readonly { readonly value: string; readonly aad: string }[];
+    readonly stamp?: string;
+    readonly warn?: (message: string, fields: Record<string, unknown>) => void;
+  }): Sealer {
+    const opens = (key: Buffer): boolean | undefined => {
+      const sealed = options.sealed?.() ?? [];
+      if (sealed.length === 0) return undefined;
+      const candidate = new Sealer(key);
+      return sealed.some(({ value, aad }) => {
+        try {
+          candidate.unseal(value, aad);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    };
+    const common = {
+      keyFile: options.keyFile,
+      decodeFile: decodeKey,
+      opens,
+      ...(options.stamp !== undefined ? { stamp: options.stamp } : {}),
+      ...(options.warn ? { warn: options.warn } : {}),
+    };
     if (options.envKey) {
-      const configured = { key: decodeKey(options.envKey), variable: "MANAGED_COPILOT_VAULT_KEY" };
-      return new Sealer(resolveKeyFile(options.keyFile, configured, decodeKey)!);
+      return new Sealer(resolveKeyFile({ ...common, configured: { key: decodeKey(options.envKey), variable: "MANAGED_COPILOT_VAULT_KEY" } })!);
     }
-    resolveKeyFile(options.keyFile, undefined, decodeKey);
+    resolveKeyFile(common);
     if (existsSync(options.keyFile)) return new Sealer(decodeKey(readFileSync(options.keyFile, "utf8")));
     mkdirSync(dirname(options.keyFile), { recursive: true });
     const key = randomBytes(32);

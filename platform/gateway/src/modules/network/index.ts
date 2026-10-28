@@ -85,7 +85,19 @@ export const networkModule: GatewayModule = {
     const log = app.log.child("network");
     const env = app.config.env;
     migrateNetwork(app.db);
-    const sealer = Sealer.load({ ...(env.MANAGED_COPILOT_VAULT_KEY ? { envKey: env.MANAGED_COPILOT_VAULT_KEY } : {}), keyFile: join(app.config.dataDir, "network", "vault.key") });
+    const sealer = Sealer.load({
+      ...(env.MANAGED_COPILOT_VAULT_KEY ? { envKey: env.MANAGED_COPILOT_VAULT_KEY } : {}),
+      keyFile: join(app.config.dataDir, "network", "vault.key"),
+      sealed: () => [
+        ...(app.db.prepare("SELECT key, value FROM network_state WHERE key IN ('egress_key', 'mcp_adapter_key')").all() as { key: string; value: string }[]).map((row) => ({
+          value: row.value,
+          aad: `network_state:${row.key}`,
+        })),
+        ...(app.db.prepare("SELECT id, sealed FROM network_vaults LIMIT 20").all() as { id: string; sealed: string }[]).map((row) => ({ value: row.sealed, aad: `network_vaults:${row.id}` })),
+      ],
+      ...(env.MANAGED_COPILOT_LEASE_STAMP ? { stamp: env.MANAGED_COPILOT_LEASE_STAMP } : {}),
+      warn: (message, fields) => log.warn(message, fields),
+    });
     const vaults = new VaultStore({ db: app.db, sealer, deployment: app.config.deployment, env, log: log.child("vaults") });
     const egressKey = sealedKey(app.db, sealer, "egress_key", env.MANAGED_COPILOT_EGRESS_KEY);
     const adapterKey = Buffer.from(sealedKey(app.db, sealer, "mcp_adapter_key", undefined), "base64url");

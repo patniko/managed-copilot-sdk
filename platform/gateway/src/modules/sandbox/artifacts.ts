@@ -7,7 +7,7 @@ import { createReadStream, createWriteStream, existsSync, promises as fs } from 
 import { extname, join } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { ManagedCopilotError, type ArtifactInfo, type PublicationResult } from "@managed-copilot/protocol";
+import { ManagedCopilotError, SANDBOX_LIMITS, type ArtifactInfo, type PublicationResult } from "@managed-copilot/protocol";
 import { transaction, type Database } from "../../db.js";
 import type { Logger } from "../../log.js";
 import type { SandboxAgentClient } from "./agent-client.js";
@@ -65,6 +65,13 @@ function ownFailure(message: string): ManagedCopilotError {
 type TurnOutcome = "completed" | "cancelled" | "failed";
 
 const isDigest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
+/** A relative POSIX path under outputs/: no empty, `.`, or `..` segments, backslashes, or control characters. */
+function isOutputPath(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4096 || value.startsWith("/")) return false;
+  if (/[\\\u0000-\u001f\u007f]/.test(value)) return false;
+  return value.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
 
 interface ArtifactRow {
   id: string;
@@ -279,8 +286,17 @@ export class ArtifactService implements ArtifactsService {
         throw ownFailure(`${manifest.rejected.length} output file${manifest.rejected.length === 1 ? "" : "s"} could not be published: ${listed}${manifest.rejected.length > 5 ? ", …" : ""}. Remove or fix them and run another turn.`);
       }
       await fs.mkdir(dir, { recursive: true });
-      // The manifest comes from inside the sandbox: its digest names a file in the gateway's artifact directory.
-      const malformed = manifest.files.find((file) => !isDigest(file.sha256) || !Number.isSafeInteger(file.size) || file.size < 0);
+      // The manifest comes from inside the sandbox: its digest names a file in the gateway's artifact directory, and
+      // its paths reach clients that may download to them.
+      const limits = SANDBOX_LIMITS.artifacts;
+      const badFile = manifest.files.find((file) => !isDigest(file.sha256) || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > limits.fileBytes || !isOutputPath(file.path));
+      if (badFile && typeof badFile.path === "string" && !isOutputPath(badFile.path) && isDigest(badFile.sha256)) {
+        throw ownFailure(`outputs/${JSON.stringify(badFile.path).slice(1, -1)} has a name that can't be published (empty, ".", or ".." segments, backslashes, or control characters). Rename it and run another turn.`);
+      }
+      const malformed =
+        badFile !== undefined ||
+        manifest.files.length > limits.count ||
+        manifest.files.reduce((total, file) => total + file.size, 0) > limits.totalBytes;
       if (malformed) throw ownFailure("The sandbox reported an invalid outputs manifest, so nothing was published.");
       const planned: { path: string; size: number; digest: string; reuse?: ArtifactRow; version: number }[] = [];
       for (const file of manifest.files) {
@@ -298,6 +314,7 @@ export class ArtifactService implements ArtifactsService {
           body.on("data", (chunk: Buffer) => {
             hash.update(chunk);
             size += chunk.length;
+            if (size > file.size) body.destroy(ownFailure(`outputs/${file.path} changed while it was being published. Wait for writers to finish, then run another turn.`));
           });
           try {
             await pipeline(body, createWriteStream(temp, { flags: "wx" }));

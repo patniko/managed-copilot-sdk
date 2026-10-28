@@ -175,18 +175,18 @@ describe("background credentials", () => {
       expect(second.seal.equals(first.seal)).toBe(true);
       expect(first.seal.equals(first.capability)).toBe(false);
       const configured = Buffer.alloc(32, 1).toString("base64");
-      const fromEnv = loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured });
-      expect(fromEnv.seal.equals(first.seal)).toBe(true);
+      // Nothing sealed yet: the configured key is used, as before.
+      expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(false);
+      // A stored credential sealed under the file key: the file key is wrapped and kept for this deployment.
+      const sealed = [{ value: seal(first.seal, "gho_token", "ctx"), context: "ctx" }];
+      const adopted = loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }, { sealed: () => sealed, stamp: "1" });
+      expect(unseal(adopted.seal, sealed[0]!.value, "ctx")).toBe("gho_token");
+      expect(adopted.capability.equals(first.capability)).toBe(true);
+      expect(existsSync(join(dir, "durable.key"))).toBe(true);
+      expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }, { sealed: () => sealed, stamp: "2" }).seal.equals(first.seal)).toBe(true);
       expect(existsSync(join(dir, "durable.key"))).toBe(false);
-      expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(true);
       expect(() => loadDurableKeys(dir, {})).toThrow(/wrapped under a configured key/);
       expect(() => loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: Buffer.alloc(32, 2).toString("base64") })).toThrow(/does not open/);
-      const fresh = mkdtempSync(join(tmpdir(), "mc-durable-keys-"));
-      try {
-        expect(loadDurableKeys(fresh, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(false);
-      } finally {
-        rmSync(fresh, { recursive: true, force: true });
-      }
       expect(() => loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: "short" })).toThrow(/32 bytes/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

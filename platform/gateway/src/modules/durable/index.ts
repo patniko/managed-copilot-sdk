@@ -7,7 +7,7 @@ import { DurableActions } from "./actions/service.js";
 import { registerActionRoutes } from "./actions/routes.js";
 import type { DurableEventsPort, DurablePlatformToolsPort, DurableSessionView, DurableSessionsPort, PlatformEventMeta } from "./contract.js";
 import { registerCredentialRoutes } from "./credentials/routes.js";
-import { DurableCredentials } from "./credentials/service.js";
+import { credentialContext, DurableCredentials } from "./credentials/service.js";
 import { incarnationOf, isGone } from "./ids.js";
 import { loadDurableKeys } from "./keys.js";
 import { DURABLE_MIGRATIONS, upgradeDurableSchema } from "./migrations.js";
@@ -52,7 +52,15 @@ export const durableModule: GatewayModule = {
     const log = app.log.child("durable");
     migrate(app.db, "durable", DURABLE_MIGRATIONS);
     upgradeDurableSchema(app.db);
-    const keys = loadDurableKeys(app.config.dataDir, app.config.env);
+    const keys = loadDurableKeys(app.config.dataDir, app.config.env, {
+      sealed: () =>
+        (app.db.prepare("SELECT account_id, sealed_token FROM durable_credentials WHERE sealed_token IS NOT NULL LIMIT 20").all() as { account_id: number; sealed_token: string }[]).map((row) => ({
+          value: row.sealed_token,
+          context: credentialContext(row.account_id),
+        })),
+      ...(app.config.env.MANAGED_COPILOT_LEASE_STAMP ? { stamp: app.config.env.MANAGED_COPILOT_LEASE_STAMP } : {}),
+      warn: (message, fields) => log.warn(message, fields),
+    });
     const deployment = app.config.deployment;
     const sessions = () => port<DurableSessionsPort>(app.services, "sessions");
     const events = () => port<DurableEventsPort>(app.services, "events");
