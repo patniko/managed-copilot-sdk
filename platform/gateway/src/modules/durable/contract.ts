@@ -468,10 +468,34 @@ export interface PlatformToolContext {
   readonly toolCallId: string;
   /** Stable across redelivery, resume, and restarts; use it for downstream idempotency. */
   readonly idempotencyKey: string;
+  /**
+   * The agent that called the tool: the runtime request's `agentId` (`ToolInvocation.agentId` in the stock SDK) for a
+   * sub-agent such as a `task` agent, undefined for the session's root agent. Recorded with the action, so a call
+   * recovered after a restart keeps it.
+   */
+  readonly agentId?: string;
+  /** The ledger action this call answers (durable path only). */
+  readonly actionId?: string;
+  /**
+   * Aborted when the call's answer can no longer matter or the gateway stops: the runtime stopped waiting for it (for
+   * example, its turn was cancelled), the session was deleted, its answer deadline passed, or the gateway is shutting
+   * down. `signal.reason` is a `ManagedCopilotError` describing which. Handlers that ignore it behave as before.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** Text for the model, or the stock SDK `ToolResultObject` shape. */
 export type PlatformToolResult = string | { readonly textResultForLlm: string; readonly resultType: "success" | "failure" | "rejected" | "denied"; readonly error?: string };
+
+/**
+ * Whether the actions ledger may run a platform tool's handler again for a call that was interrupted (the gateway
+ * restarted while it ran, or a restarted runtime asked again for a call whose earlier run was cut off).
+ * - `"always"` (default): the handler is idempotent by `idempotencyKey` and simply runs again.
+ * - `"never"`: the handler is never rerun for an interrupted call. The tool's `recover` hook answers it instead (for
+ *   example by reattaching to the work or reading its recorded outcome); without one, the call fails with an explicit
+ *   error saying the tool may have run.
+ */
+export type PlatformToolReplay = "always" | "never";
 
 export interface PlatformToolDefinition {
   readonly name: string;
@@ -481,6 +505,13 @@ export interface PlatformToolDefinition {
   /** Inject only into sessions whose environment passes (e.g. `scheduling: true`). */
   readonly enabledFor: (environment: string) => boolean;
   readonly handler: (args: unknown, context: PlatformToolContext) => Promise<PlatformToolResult>;
+  /** Defaults to `"always"`. */
+  readonly replay?: PlatformToolReplay;
+  /**
+   * With `replay: "never"`: answers an interrupted call instead of the handler, with the same arguments and context
+   * (same `idempotencyKey`, `actionId`, and `agentId`). Throw to fail the call; its message reaches the model.
+   */
+  readonly recover?: (args: unknown, context: PlatformToolContext) => Promise<PlatformToolResult>;
 }
 
 export interface DurablePlatformToolsPort {

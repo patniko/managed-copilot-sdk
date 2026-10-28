@@ -10,6 +10,7 @@ import type {
   DurableEventsPort,
   DurableSessionView,
   DurableSessionsPort,
+  PlatformToolContext,
   PlatformToolDefinition,
   PromptVisibilityInput,
   RuntimeSessionEvent,
@@ -1025,6 +1026,148 @@ describe("durable actions ledger", () => {
       await sleep(10);
       expect(calls).toBe(1);
       expect(sessions.answers()[0]!.params).toEqual({ sessionId: SESSION, requestId: "t1", result: `scheduled with ${SESSION}:call-t1` });
+    });
+
+    /** A platform tool whose runs wait until released (or aborted); records every context it got. */
+    function heldTool(name: string, extra: Partial<PlatformToolDefinition> = {}) {
+      const runs: { context: PlatformToolContext; release: (value: string) => void; aborted: Promise<unknown> }[] = [];
+      tools.set(name, {
+        name,
+        description: "",
+        parameters: {},
+        enabledFor: () => true,
+        handler: (_args, context) =>
+          new Promise<string>((resolve, reject) => {
+            const aborted = new Promise<unknown>((settle) => context.signal?.addEventListener("abort", () => settle(context.signal!.reason), { once: true }));
+            runs.push({ context, release: resolve, aborted });
+            context.signal?.addEventListener("abort", () => reject(context.signal!.reason), { once: true });
+          }),
+        ...extra,
+      });
+      return runs;
+    }
+
+    const subagentEvent = (requestId: string, toolName: string, agentId: string): RuntimeSessionEvent => ({ ...toolEvent(requestId, toolName, { command: "ls" }), agentId });
+
+    it("tells the handler which agent called it, and keeps that across a gateway restart", async () => {
+      const runs = heldTool("bash");
+      await actions.onSessionEvent(input(subagentEvent("t1", "bash", "agent-7")));
+      await actions.onSessionEvent(input(toolEvent("t2", "bash")));
+      await sleep(5);
+      const [sub, root] = runs;
+      expect(sub!.context).toMatchObject({ agentId: "agent-7", toolCallId: "call-t1", idempotencyKey: `${SESSION}:call-t1` });
+      expect(sub!.context.actionId).toBe(actions.list(SESSION).find((action) => action.requestId === "t1")!.id);
+      expect(sub!.context.signal?.aborted).toBe(false);
+      expect(root!.context.agentId).toBeUndefined();
+      // The gateway stops mid-run: the handlers are aborted as shutting down, and nothing is recorded as their outcome.
+      actions.stop();
+      expect(await sub!.aborted).toMatchObject({ code: "capability_unavailable" });
+      await sleep(5);
+      expect(states()).toEqual({ t1: "executing", t2: "executing" });
+      expect(sessions.answers()).toEqual([]);
+      // The next start runs them again (default replay), with the same agent and key.
+      actions = build();
+      actions.recover();
+      await sleep(5);
+      expect(runs.slice(2).map((run) => [run.context.agentId, run.context.idempotencyKey])).toEqual([
+        ["agent-7", `${SESSION}:call-t1`],
+        [undefined, `${SESSION}:call-t2`],
+      ]);
+      runs[2]!.release("ok");
+      await sleep(5);
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["t1", "ok"]]);
+    });
+
+    it("aborts the handler when the runtime stops waiting for the call or the session is deleted", async () => {
+      const runs = heldTool("bash");
+      await actions.onSessionEvent(input(toolEvent("t1", "bash")));
+      await actions.onSessionEvent(input(toolEvent("t2", "bash")));
+      await sleep(5);
+      // The turn is cancelled: the runtime completes its request without the gateway's answer.
+      await actions.onSessionEvent(input(completedEvent("external_tool.completed", "t1")));
+      expect(await runs[0]!.aborted).toMatchObject({ code: "conflict", message: expect.stringContaining("stopped waiting") });
+      expect(runs[1]!.context.signal?.aborted).toBe(false);
+      sessions.views.delete(SESSION);
+      actions.onSessionDeleted(SESSION, "inc-1");
+      expect(await runs[1]!.aborted).toMatchObject({ code: "not_found" });
+      await sleep(5);
+      expect(sessions.answers()).toEqual([]);
+    });
+
+    it("does not abort a call that finished, and keeps today's behavior for handlers that ignore the signal", async () => {
+      let seen: AbortSignal | undefined;
+      tools.set("schedule_task", {
+        name: "schedule_task",
+        description: "",
+        parameters: {},
+        enabledFor: () => true,
+        handler: async (_args, context) => {
+          seen = context.signal;
+          return "done";
+        },
+      });
+      await actions.onSessionEvent(input(toolEvent("t1", "schedule_task")));
+      await sleep(5);
+      await actions.onSessionEvent(input(completedEvent("external_tool.completed", "t1")));
+      expect(seen?.aborted).toBe(false);
+      expect(states()).toEqual({ t1: "completed" });
+    });
+
+    it('never reruns a replay: "never" tool after a restart: its recover hook answers with the same context', async () => {
+      const recovered: PlatformToolContext[] = [];
+      const runs = heldTool("bash", {
+        replay: "never",
+        recover: async (_args, context) => {
+          recovered.push(context);
+          return "reattached: exit 0";
+        },
+      });
+      await actions.onSessionEvent(input(subagentEvent("t1", "bash", "agent-7")));
+      await sleep(5);
+      actions.stop();
+      actions = build();
+      actions.recover();
+      await sleep(5);
+      expect(runs).toHaveLength(1);
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatchObject({ agentId: "agent-7", idempotencyKey: runs[0]!.context.idempotencyKey, actionId: runs[0]!.context.actionId });
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["t1", "reattached: exit 0"]]);
+    });
+
+    it('fails an interrupted replay: "never" tool without a recover hook as "may have run"', async () => {
+      const runs = heldTool("bash", { replay: "never" });
+      await actions.onSessionEvent(input(toolEvent("t1", "bash")));
+      await sleep(5);
+      actions.stop();
+      actions = build();
+      actions.recover();
+      await sleep(5);
+      expect(runs).toHaveLength(1);
+      expect(states()).toEqual({ t1: "failed" });
+      const [answer] = sessions.answers();
+      expect(answer!.params).toMatchObject({ requestId: "t1", error: expect.stringContaining("may have run") });
+      expect(String(answer!.params.error)).toContain("was not run again");
+    });
+
+    it('recovers instead of rerunning when a restarted runtime rebuilds a replay: "never" call that was cut off', async () => {
+      let recovers = 0;
+      const runs = heldTool("bash", {
+        replay: "never",
+        recover: async () => {
+          recovers++;
+          return "exit 137 (killed)";
+        },
+      });
+      await actions.onSessionEvent(input(toolEvent("t1", "bash")));
+      await sleep(5);
+      await actions.onSessionEvent(input(completedEvent("external_tool.completed", "t1")));
+      await runs[0]!.aborted;
+      const again = toolEvent("t1-rebuilt", "bash");
+      await actions.onSessionEvent(input({ ...again, data: { ...again.data, toolCallId: "call-t1" } }));
+      await sleep(10);
+      expect(runs).toHaveLength(1);
+      expect(recovers).toBe(1);
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["t1-rebuilt", "exit 137 (killed)"]]);
     });
   });
 

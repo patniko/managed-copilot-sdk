@@ -268,6 +268,8 @@ interface LiveSession {
    * its answers to the sealing calls): its output for this session is handoff, hidden from clients and history.
    */
   sealedSource: { readonly upstream: RuntimeUpstream; readonly settled: Promise<void> } | undefined;
+  /** Platform tool calls core runs itself (no actions ledger), by runtime request ID: aborted when the runtime stops waiting. */
+  readonly platformCalls: Map<string, AbortController>;
 }
 
 interface InflightWait {
@@ -2083,6 +2085,7 @@ export class SessionManager implements SessionsService {
       moves: 0,
       hidden: undefined,
       sealedSource: undefined,
+      platformCalls: new Map(),
     };
     this.#live.set(record.id, live);
     return live;
@@ -2944,6 +2947,15 @@ export class SessionManager implements SessionsService {
 
   async #deliverEvent(live: LiveSession, event: RuntimeSessionEvent, origin?: NotificationOrigin): Promise<void> {
     this.#track(live, event);
+    if (event.type === "external_tool.completed" && live.platformCalls.size > 0) {
+      // Core runs this call itself (no ledger) and has not answered it: the runtime stopped waiting (turn cancelled).
+      const requestId = String(event.data?.["requestId"] ?? "");
+      const call = live.platformCalls.get(requestId);
+      if (call) {
+        live.platformCalls.delete(requestId);
+        call.abort(new ManagedCopilotError("conflict", "The runtime stopped waiting for this tool call (for example, its turn was cancelled)"));
+      }
+    }
     // Sanitized for the placement that emitted it, which a cutover may have changed since.
     const sanitized = this.#scrub(live, this.#sanitizeEvent(live, event, origin?.placement), origin?.placement);
     // Only the owner's events after a seal complete the calls it caught; what the source said before it cannot.
@@ -3011,6 +3023,9 @@ export class SessionManager implements SessionsService {
     const tool = this.#options.platformTools.get(name);
     const requestId = event.data["requestId"];
     const toolCallId = String(event.data["toolCallId"] ?? requestId);
+    const call = new AbortController();
+    const key = String(requestId);
+    live.platformCalls.set(key, call);
     let answer: Record<string, unknown>;
     try {
       const result = await tool!.handler(event.data["arguments"], {
@@ -3021,13 +3036,20 @@ export class SessionManager implements SessionsService {
         idempotencyKey: `${live.id}:${toolCallId}`,
         type: record.type,
         placement: record.placement,
-        signal: AbortSignal.timeout(10 * 60_000),
+        ...(typeof event.agentId === "string" && event.agentId.length > 0 ? { agentId: event.agentId } : {}),
+        // The runtime stopped waiting (turn cancelled), the session was deleted, or the gateway is stopping; else 10 minutes.
+        signal: AbortSignal.any([call.signal, live.ending.signal, AbortSignal.timeout(10 * 60_000)]),
       });
       answer = { requestId, result };
     } catch (error) {
       answer = { requestId, error: error instanceof ManagedCopilotError ? error.message : `Platform tool ${name} failed` };
       this.#log.warn("Platform tool failed", { sessionId: live.id, tool: name, error: (error as Error).message });
+    } finally {
+      // Before answering, so the runtime's completion of this request does not abort the call that just finished.
+      if (live.platformCalls.get(key) === call) live.platformCalls.delete(key);
     }
+    // The runtime no longer waits for an answer.
+    if (call.signal.aborted) return;
     try {
       await this.request(live.id, "session.tools.handlePendingToolCall", answer, pinned(record));
     } catch (error) {

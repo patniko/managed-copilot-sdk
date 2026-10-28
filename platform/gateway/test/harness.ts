@@ -183,8 +183,8 @@ export class FakeRuntime {
     endpoint.transport.onClose(() => this.#endpoints.delete(endpoint));
   }
 
-  #emit(endpoint: RpcEndpoint, session: FakeSession, type: string, data: Record<string, unknown>): string {
-    const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data };
+  #emit(endpoint: RpcEndpoint, session: FakeSession, type: string, data: Record<string, unknown>, agentId?: string): string {
+    const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data, ...(agentId ? { agentId } : {}) };
     session.events.push(event);
     // Events follow the session to the connection that opened it last (a turn continues where it was resumed).
     (session.endpoint ?? endpoint).notify("session.event", { sessionId: session.id, event });
@@ -330,6 +330,12 @@ export class FakeRuntime {
         this.sessions.delete(String(sessionId));
         return { success: true };
       case "session.abort":
+        // Like the stock runtime: a turn waiting on a tool call stops waiting for it.
+        for (const [requestId, pending] of this.#pendingTools) {
+          if (pending.sessionId !== sessionId) continue;
+          this.#pendingTools.delete(requestId);
+          pending.resolve({ requestId, aborted: true });
+        }
         return {};
       case "ping":
         return { message: params["message"] ?? "pong", timestamp: Date.now(), protocolVersion: 3 };
@@ -354,17 +360,24 @@ export class FakeRuntime {
       return new Promise<string>(() => undefined);
     }
     // `tool:<name>` calls a tool, optionally with JSON arguments: `tool:web_fetch {"url":"https://example.com"}`.
+    // `agent:<id>` before it makes the call a sub-agent's (the request carries `agentId`, as a stock `task` agent's does).
     const call = /tool:([a-z_]+)(?:\s+(\{[\s\S]*\}))?/.exec(prompt);
     const tool = call?.[1];
+    const agentId = /agent:([\w-]+)/.exec(prompt)?.[1];
     let content = `echo: ${prompt}`;
     if (tool) {
       const requestId = randomUUID();
       const toolCallId = `call_${requestId}`;
       const args: unknown = call?.[2] ? JSON.parse(call[2]) : { id: "1234" };
       const answered = new Promise<Record<string, unknown>>((resolve) => this.#pendingTools.set(requestId, { sessionId: session.id, toolName: tool, toolCallId, arguments: args, resolve }));
-      this.#emit(endpoint, session, "external_tool.requested", { requestId, sessionId: session.id, toolCallId, toolName: tool, arguments: args, workingDirectory: "/platform/host/path" });
+      this.#emit(endpoint, session, "external_tool.requested", { requestId, sessionId: session.id, toolCallId, toolName: tool, arguments: args, workingDirectory: "/platform/host/path" }, agentId);
       const answer = await answered;
-      this.#emit(endpoint, session, "external_tool.completed", { requestId });
+      this.#emit(endpoint, session, "external_tool.completed", { requestId }, agentId);
+      // `session.abort` ended the turn while the call waited: the runtime stops waiting for it.
+      if (answer["aborted"] === true) {
+        this.#processing.delete(session.id);
+        return this.#emit(endpoint, session, "session.idle", { aborted: true });
+      }
       const result = answer["result"] as { textResultForLlm?: unknown } | string | undefined;
       content = `tool said: ${typeof result === "string" ? result : typeof result?.textResultForLlm === "string" ? result.textResultForLlm : JSON.stringify(result ?? answer["error"])}`;
     }

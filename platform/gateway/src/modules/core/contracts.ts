@@ -23,7 +23,7 @@ import type {
   ToolDeclaration,
 } from "@managed-copilot/protocol";
 import type { Principal } from "../../http.js";
-import type { AttachedResponder, PlatformToolDefinition, RuntimeSessionEvent } from "../durable/contract.js";
+import type { AttachedResponder, PlatformToolDefinition, PlatformToolReplay, RuntimeSessionEvent } from "../durable/contract.js";
 
 /** An environment resolved against the deployment for one client connection or internal request. */
 export interface ResolvedEnvironment {
@@ -404,7 +404,10 @@ export interface EventsService {
   subscribe(listener: (event: PlatformEvent, meta: PlatformEventMeta) => void): () => void;
 }
 
-/** Context passed to platform tool handlers. Durable's ledger supplies only the first five fields. */
+/**
+ * Context passed to platform tool handlers. Durable's ledger supplies the first five fields plus `agentId`,
+ * `actionId`, and `signal`; core's own path (no ledger) supplies everything but `actionId`.
+ */
 export interface PlatformToolCallContext {
   readonly sessionId: string;
   readonly ownerId: number;
@@ -414,6 +417,17 @@ export interface PlatformToolCallContext {
   readonly idempotencyKey: string;
   readonly type?: EnvironmentType;
   readonly placement?: Placement;
+  /**
+   * The calling agent: the runtime request's `agentId` for a sub-agent (for example a stock `task` agent), undefined
+   * for the root agent. Survives recovery (the ledger records it with the action).
+   */
+  readonly agentId?: string;
+  /** The ledger action this call answers (durable path only). */
+  readonly actionId?: string;
+  /**
+   * Aborted when the call's answer can no longer matter: the runtime stopped waiting for it (its turn was cancelled),
+   * the session was deleted, the gateway is stopping, or (core's own path) after 10 minutes. `signal.reason` says which.
+   */
   readonly signal?: AbortSignal;
 }
 
@@ -436,6 +450,14 @@ export interface PlatformToolInput {
   /** Inject based on environment type and placement. Evaluated in addition to `enabledFor`. */
   readonly appliesTo?: (context: { readonly environment: string; readonly type: EnvironmentType; readonly placement: Placement }) => boolean;
   readonly handler: (args: unknown, context: PlatformToolCallContext) => unknown | Promise<unknown>;
+  /**
+   * Whether the actions ledger may rerun the handler for an interrupted call (see durable's `PlatformToolReplay`).
+   * Default `"always"`: the handler is idempotent by `idempotencyKey`. Use `"never"` for tools with side effects
+   * that must not repeat (a shell command); `recover` then answers interrupted calls, or they fail as "may have run".
+   */
+  readonly replay?: PlatformToolReplay;
+  /** With `replay: "never"`: answers an interrupted call (reattach, or read the recorded outcome) instead of the handler. */
+  readonly recover?: (args: unknown, context: PlatformToolCallContext) => unknown | Promise<unknown>;
 }
 
 /** A registered tool, normalized so it also satisfies durable's `PlatformToolDefinition`. */
@@ -444,6 +466,7 @@ export interface RegisteredPlatformTool extends PlatformToolDefinition {
   readonly skipPermission: boolean;
   readonly appliesTo?: PlatformToolInput["appliesTo"];
   readonly handler: (args: unknown, context: PlatformToolCallContext) => Promise<PlatformToolResult>;
+  readonly recover?: (args: unknown, context: PlatformToolCallContext) => Promise<PlatformToolResult>;
 }
 
 export interface PlatformToolRegistry {
