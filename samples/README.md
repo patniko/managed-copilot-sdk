@@ -57,6 +57,9 @@ Then run any walkthrough by number, from the repository root or this folder:
 pnpm sample 01
 ```
 
+To browse them, with their output and a copyable command for your local platform or Azure, run `pnpm gallery`
+([demo gallery](../demos/gallery/README.md)).
+
 - **Where it runs.** Samples connect like any app: to your local `aspire run`, or to the deployment in
   `MANAGED_COPILOT_URL` ([walkthrough 10](10-azure/README.md)).
 - **Who you are.** Your GitHub sign-in: `gh auth login`, or `GH_TOKEN`. Model calls use your Copilot plan.
