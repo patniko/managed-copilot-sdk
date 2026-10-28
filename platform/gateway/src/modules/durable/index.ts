@@ -54,7 +54,7 @@ export const durableModule: GatewayModule = {
     upgradeDurableSchema(app.db);
     const keys = loadDurableKeys(app.config.dataDir, app.config.env, {
       sealed: () =>
-        (app.db.prepare("SELECT account_id, sealed_token FROM durable_credentials WHERE sealed_token IS NOT NULL LIMIT 20").all() as { account_id: number; sealed_token: string }[]).map((row) => ({
+        (app.db.prepare("SELECT account_id, sealed_token FROM durable_credentials WHERE sealed_token IS NOT NULL").all() as { account_id: number; sealed_token: string }[]).map((row) => ({
           value: row.sealed_token,
           context: credentialContext(row.account_id),
         })),

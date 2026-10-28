@@ -93,7 +93,7 @@ export const networkModule: GatewayModule = {
           value: row.value,
           aad: `network_state:${row.key}`,
         })),
-        ...(app.db.prepare("SELECT id, sealed FROM network_vaults LIMIT 20").all() as { id: string; sealed: string }[]).map((row) => ({ value: row.sealed, aad: `network_vaults:${row.id}` })),
+        ...(app.db.prepare("SELECT id, sealed FROM network_vaults").all() as { id: string; sealed: string }[]).map((row) => ({ value: row.sealed, aad: `network_vaults:${row.id}` })),
       ],
       ...(env.MANAGED_COPILOT_LEASE_STAMP ? { stamp: env.MANAGED_COPILOT_LEASE_STAMP } : {}),
       warn: (message, fields) => log.warn(message, fields),
