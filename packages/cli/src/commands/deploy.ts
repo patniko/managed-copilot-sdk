@@ -505,7 +505,16 @@ export async function deploy(ctx: Context): Promise<number | void> {
   await settings.set(usersKey, users.join(","));
   await settings.set(operatorsKey, operators.join(","));
 
-  const code = await host.stream("aspire", ["deploy", "--apphost", settings.path, ...(ctx.interactive ? [] : ["--non-interactive"])], { env: { [TOKEN_PARAMETER_ENV]: token } });
+  // `aspire deploy` runs the AppHost as Production, where user secrets aren't loaded, so the settings this command
+  // manages go in as environment variables (`Parameters:x` is `Parameters__x`). None of them is a secret.
+  const env: Record<string, string> = { [TOKEN_PARAMETER_ENV]: token };
+  const managed = ["Azure:SubscriptionId", "Azure:Location", "Azure:ResourceGroup", ...ACCESS_LISTS.map((list) => LISTS[list].key(name))];
+  for (const key of managed) {
+    const value = settings.get(key);
+    if (value) env[key.replaceAll(":", "__")] = value;
+  }
+
+  const code = await host.stream("aspire", ["deploy", "--apphost", settings.path, ...(ctx.interactive ? [] : ["--non-interactive"])], { env });
   if (code !== 0) throw new CommandError(`aspire deploy failed (exit ${code}).`, { hint: "Its output above says why. Fix that, then run `npx managed-copilot deploy` again." });
 
   const url = (await azure.gatewayUrl(name)) ?? existing;

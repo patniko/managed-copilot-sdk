@@ -105,6 +105,15 @@ flowchart LR
    # or: aspire secret set Parameters:copilot-github-orgs your-org
    ```
 
+   `aspire deploy` runs the AppHost as Production, and with Aspire CLI 13.6.4 it doesn't load user secrets there, so
+   these settings can be missed ("has no access rules" although `aspire secret list` shows them). Pass them in the
+   environment too, as `npx managed-copilot deploy` does (`:` becomes `__`):
+
+   ```powershell
+   ${env:Parameters__copilot-github-users} = "your-login"
+   ${env:Parameters__copilot-operator-users} = "your-login"
+   ```
+
 3. If the AppHost publishes apps (the root AppHost publishes both demos), set the account they act as. Their public
    address is restricted to this machine's public IPv4 address unless you choose the addresses (see "Who can open
    the apps"):
@@ -428,7 +437,9 @@ identities. Your AppHost's user secrets stay on your machine.
 
 ## Troubleshooting
 
-- **"has no access rules"**: set `Parameters:<name>-github-users` / `-github-orgs`, or add `access` to the AppHost.
+- **"has no access rules"**: set `Parameters:<name>-github-users` / `-github-orgs`, or add `access` to the AppHost. If
+  `aspire secret list` already shows them, `aspire deploy` didn't load user secrets: use `npx managed-copilot deploy`,
+  or set them as environment variables (`Parameters__<name>-github-users`).
 - **"This deployment names no operators, so its operator console is off"**: set `Parameters:<name>-operator-users` /
   `-operator-orgs` (or add `operators` to the AppHost) and deploy again.
 - **"acts as your GitHub account, so its public address must be restricted"**: this machine's public address could not

@@ -169,6 +169,23 @@ describe("addManagedCopilot", () => {
     expect(builder.apps).toHaveLength(0);
   });
 
+  it("reads deploy settings from the environment when configuration lacks them (aspire deploy skips user secrets)", async () => {
+    const builder = Object.assign(new FakeBuilder(appHost, true), {
+      getConfiguration: () => Promise.resolve({ exists: () => Promise.resolve(false), getConfigValue: () => Promise.resolve("") }),
+    });
+    process.env["Parameters__copilot-github-users"] = "octocat";
+    try {
+      const error = await addManagedCopilot(builder, "copilot", { gatewayDirectory, environments: { chat: { type: "shared" } } }).then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+      // It gets past the access check; the fake builder can't go further.
+      expect(String(error)).not.toMatch(/has no access rules/);
+    } finally {
+      delete process.env["Parameters__copilot-github-users"];
+    }
+  });
+
   it("rejects invalid resource names", async () => {
     const builder = new FakeBuilder(appHost);
     await expect(addManagedCopilot(builder, "Copilot_1", { gatewayDirectory, environments: { chat: { type: "shared" } } })).rejects.toThrow(/must start with a lowercase letter/);

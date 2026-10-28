@@ -286,7 +286,14 @@ describe("deploy", () => {
     });
     const deployCall = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!;
     expect(deployCall.args).toEqual(["deploy", "--apphost", join(process.cwd(), "apphost.mts"), "--non-interactive"]);
-    expect(deployCall.env).toEqual({ "Parameters__app-github-token": TOKEN });
+    expect(deployCall.env).toEqual({
+      "Parameters__app-github-token": TOKEN,
+      "Azure__SubscriptionId": SUBSCRIPTION,
+      "Azure__Location": "westus2",
+      "Azure__ResourceGroup": "managed-copilot-dev",
+      "Parameters__copilot-github-users": "patniko",
+      "Parameters__copilot-operator-users": "patniko",
+    });
     expect(host.calls.some((call) => call.args.some((arg) => arg.includes(TOKEN)))).toBe(false);
     expect(h.out()).toContain("Demo subscription");
     expect(h.out()).toContain("new deployment");
