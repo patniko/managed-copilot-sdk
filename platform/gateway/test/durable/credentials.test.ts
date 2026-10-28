@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -174,8 +174,19 @@ describe("background credentials", () => {
       const second = loadDurableKeys(dir, {});
       expect(second.seal.equals(first.seal)).toBe(true);
       expect(first.seal.equals(first.capability)).toBe(false);
-      const fromEnv = loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: Buffer.alloc(32, 1).toString("base64") });
-      expect(fromEnv.seal.equals(first.seal)).toBe(false);
+      const configured = Buffer.alloc(32, 1).toString("base64");
+      const fromEnv = loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured });
+      expect(fromEnv.seal.equals(first.seal)).toBe(true);
+      expect(existsSync(join(dir, "durable.key"))).toBe(false);
+      expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(true);
+      expect(() => loadDurableKeys(dir, {})).toThrow(/wrapped under a configured key/);
+      expect(() => loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: Buffer.alloc(32, 2).toString("base64") })).toThrow(/does not open/);
+      const fresh = mkdtempSync(join(tmpdir(), "mc-durable-keys-"));
+      try {
+        expect(loadDurableKeys(fresh, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(false);
+      } finally {
+        rmSync(fresh, { recursive: true, force: true });
+      }
       expect(() => loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: "short" })).toThrow(/32 bytes/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

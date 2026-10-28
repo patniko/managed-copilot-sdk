@@ -196,8 +196,11 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     [`${name}-durable-key`, "MANAGED_COPILOT_DURABLE_KEY"],
     [`${name}-vault-key`, "MANAGED_COPILOT_VAULT_KEY"],
   ] as const) {
-    // Optional (32 bytes, base64). Without them the gateway keeps generated keys in its data directory (the NFS share).
-    if (await setting(builder, `Parameters:${parameter}`)) gateway = gateway.withEnvironment(variable, await builder.addParameter(parameter, { secret: true }));
+    // Sealing keys live in secret parameters, not beside the sealed values on the NFS share. 43 alphanumeric
+    // characters decode to 32 bytes; an explicitly set Parameters:<parameter> (32 bytes, base64) is used instead.
+    // The gateway wraps a key file an earlier deployment generated in /data under this key, keeping its values readable.
+    const key = await builder.addParameterWithGeneratedValue(parameter, { minLength: 43, special: false }, { secret: true, persist: true });
+    gateway = gateway.withEnvironment(variable, key);
   }
   for (const secret of input.secrets) gateway = gateway.withEnvironment(secret.env, secret.value);
   const plan = Object.keys(prepared.sandboxImages).length > 0 ? planSandboxImages({

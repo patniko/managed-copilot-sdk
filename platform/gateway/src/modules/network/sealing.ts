@@ -8,6 +8,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { resolveKeyFile } from "../../key-files.js";
 
 const VERSION = "v1";
 
@@ -25,9 +26,16 @@ export class Sealer {
     this.#key = Buffer.from(key);
   }
 
-  /** `MANAGED_COPILOT_VAULT_KEY`, else a key file under `keyFile` created on first use (mode 0600). */
+  /**
+   * `MANAGED_COPILOT_VAULT_KEY`, else a key file under `keyFile` created on first use (mode 0600). With a configured
+   * key, an existing key file is wrapped under it and its plaintext removed (`resolveKeyFile`).
+   */
   static load(options: { readonly envKey?: string; readonly keyFile: string }): Sealer {
-    if (options.envKey) return new Sealer(decodeKey(options.envKey));
+    if (options.envKey) {
+      const configured = { key: decodeKey(options.envKey), variable: "MANAGED_COPILOT_VAULT_KEY" };
+      return new Sealer(resolveKeyFile(options.keyFile, configured, decodeKey)!);
+    }
+    resolveKeyFile(options.keyFile, undefined, decodeKey);
     if (existsSync(options.keyFile)) return new Sealer(decodeKey(readFileSync(options.keyFile, "utf8")));
     mkdirSync(dirname(options.keyFile), { recursive: true });
     const key = randomBytes(32);

@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { resolveKeyFile } from "../../key-files.js";
 
 /** Base64-encoded 32-byte master key; set it from a secret store (Key Vault in Azure). */
 export const DURABLE_KEY_ENV = "MANAGED_COPILOT_DURABLE_KEY";
@@ -27,17 +28,14 @@ export function loadDurableKeys(dataDir: string, env: Readonly<Record<string, st
 
 function readMasterKey(dataDir: string, env: Readonly<Record<string, string | undefined>>): Buffer {
   const fromEnv = env[DURABLE_KEY_ENV];
+  const file = join(dataDir, KEY_FILE);
   if (fromEnv) {
     const key = Buffer.from(fromEnv, "base64");
     if (key.length !== 32) throw new ManagedCopilotError("invalid_request", `${DURABLE_KEY_ENV} must be 32 bytes, base64 encoded`);
-    return key;
+    return resolveKeyFile(file, { key, variable: DURABLE_KEY_ENV }, (text) => decodeKeyFile(text, file))!;
   }
-  const file = join(dataDir, KEY_FILE);
-  if (existsSync(file)) {
-    const key = Buffer.from(readFileSync(file, "utf8").trim(), "base64");
-    if (key.length !== 32) throw new ManagedCopilotError("internal", `The durable key file ${file} is corrupt`);
-    return key;
-  }
+  resolveKeyFile(file, undefined, (text) => decodeKeyFile(text, file));
+  if (existsSync(file)) return decodeKeyFile(readFileSync(file, "utf8"), file);
   const key = randomBytes(32);
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, key.toString("base64"), { mode: 0o600, flag: "wx" });
@@ -46,6 +44,12 @@ function readMasterKey(dataDir: string, env: Readonly<Record<string, string | un
   } catch {
     // Windows ignores POSIX modes; the data directory's ACLs apply.
   }
+  return key;
+}
+
+function decodeKeyFile(text: string, file: string): Buffer {
+  const key = Buffer.from(text.trim(), "base64");
+  if (key.length !== 32) throw new ManagedCopilotError("internal", `The durable key file ${file} is corrupt`);
   return key;
 }
 
