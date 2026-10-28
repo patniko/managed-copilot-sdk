@@ -555,7 +555,37 @@ export class WorkerManager {
     return { record, sandboxId: await this.#pin(record) };
   }
 
-  async #ensureHands(coordinator: SessionRecord, config: EnvironmentConfig, agentId: string | undefined, options: { readonly slack?: number } = {}): Promise<WorkerRecord> {
+  /**
+   * The hands sandbox for a tool call that runs a command: bound to the call (by its key) before the command starts,
+   * so a replay or recovery of the call only ever reattaches in that sandbox. If that sandbox is gone, the call fails
+   * as "may have run" (`needs_reconciliation`); nothing is created or started in another one.
+   */
+  async handsForCall(context: PlatformToolCallContext): Promise<HandsSandbox> {
+    const bound = this.#store.handsCallFor(context.idempotencyKey);
+    if (bound === undefined) {
+      const hands = await this.hands(context);
+      const chosen = this.#store.bindHandsCall(context.idempotencyKey, hands.record.id);
+      if (chosen === hands.record.id) return hands;
+      return this.#boundHands(chosen, context);
+    }
+    return this.#boundHands(bound, context);
+  }
+
+  async #boundHands(id: string, context: PlatformToolCallContext): Promise<HandsSandbox> {
+    const { record: coordinator } = this.#coordinator(context);
+    const record = this.#store.get(id);
+    const gone = () =>
+      new ManagedCopilotError("needs_reconciliation", "The sandbox this command was started in no longer exists, so it may or may not have run. It was not run again: check its effect before retrying.");
+    if (!record || record.coordinatorId !== coordinator.id || record.coordinatorIncarnation !== coordinator.incarnation || record.state !== "idle" || !record.incarnation) throw gone();
+    try {
+      return { record, sandboxId: await this.#pin(record) };
+    } catch (error) {
+      if (isManagedCopilotError(error, "conflict")) throw gone();
+      throw error;
+    }
+  }
+
+  async #ensureHands(coordinator: SessionRecord, config: EnvironmentConfig, agentId: string | undefined): Promise<WorkerRecord> {
     const startKey = `hands:${coordinator.id}:${coordinator.incarnation}:${agentId ?? ""}`;
     for (let attempt = 0; attempt < 3; attempt++) {
       const existing = this.#store.byStartKey(startKey);
@@ -574,7 +604,7 @@ export class WorkerManager {
       }
       const environment = config.workers?.[0];
       if (!environment) throw new ManagedCopilotError("capability_unavailable", `Environment "${coordinator.environment}" names no worker environment for its sandbox.`);
-      const max = (config.maxWorkers ?? DEFAULT_MAX_WORKERS) + (options.slack ?? 0);
+      const max = config.maxWorkers ?? DEFAULT_MAX_WORKERS;
       const { record: admitted, created } = this.#store.admit(
         {
           id: randomUUID(),
@@ -597,7 +627,14 @@ export class WorkerManager {
       );
       if (!created) continue;
       this.#workers.add(admitted.id);
-      const launch = this.#launchHands(admitted, coordinator).finally(() => this.#handsLaunches.delete(admitted.id));
+      const launch = this.#launchHands(admitted, coordinator).finally(() => {
+        this.#handsLaunches.delete(admitted.id);
+        // Stopped while it started (its coordinator was deleted, or it failed after its session existed): what the
+        // start created goes now (after a shutdown, recovery does it).
+        if (this.#closed) return;
+        const latest = this.#store.get(admitted.id);
+        if (latest?.cleanup) void this.#cleanup(latest);
+      });
       this.#handsLaunches.set(admitted.id, launch);
       return launch;
     }
@@ -622,12 +659,8 @@ export class WorkerManager {
       if (!incarnation) throw new ManagedCopilotError("not_found", "The sandbox was deleted while it started");
       this.#store.setIncarnation(hands.id, incarnation);
       const ready = this.#store.update(hands.id, { state: "idle", error: null }, ["starting"]);
-      if (!ready) {
-        // Stopped meanwhile (its coordinator was deleted): what was created goes now.
-        const latest = this.#store.get(hands.id);
-        if (latest?.cleanup) void this.#cleanup(latest);
-        throw new ManagedCopilotError("conflict", "This session's sandbox was stopped while it started.");
-      }
+      // Stopped meanwhile (its coordinator was deleted): what was created goes when the start ends.
+      if (!ready) throw new ManagedCopilotError("conflict", "This session's sandbox was stopped while it started.");
       this.#emit("worker.started", ready);
       this.#log.info("Hands sandbox ready", { coordinatorId: coordinator.id, sandboxSessionId: hands.id, environment: hands.environment, agentId: hands.agentId });
       if (!this.#coordinatorCurrent(ready)) {
@@ -644,10 +677,7 @@ export class WorkerManager {
         this.#emit("worker.failed", failed);
         this.#store.retireStartKey(hands.id);
         if (failed.incarnation === undefined) this.#workers.delete(hands.id);
-        else {
-          const stopped = this.#markStopped(failed, reason);
-          if (stopped) void this.#cleanup(stopped);
-        }
+        else this.#markStopped(failed, reason);
       }
       this.#log.warn("A hands sandbox failed to start", { coordinatorId: coordinator.id, sandboxSessionId: hands.id, error: (error as Error).message });
       throw isManagedCopilotError(error) ? new ManagedCopilotError(error.code, reason, error.details) : new ManagedCopilotError("internal", reason);
@@ -710,10 +740,14 @@ export class WorkerManager {
       if (isManagedCopilotError(error, "not_found")) return;
       throw error;
     }
-    const files = entries.filter((entry) => entry.type === "file").slice(0, COPY_FILES);
-    if (files.length === 0 || !config || config.type !== "orchestrator") return;
-    // The root agent's sandbox may not exist yet; the finishing sub-agent's slot is freed right after.
-    const root = await this.#ensureHands(coordinator, config, undefined, { slack: 1 });
+    const files = entries.filter((entry) => entry.type === "file");
+    if (files.length === 0) return;
+    if (!config || config.type !== "orchestrator") throw new ManagedCopilotError("capability_unavailable", "The session's environment is no longer an orchestrator.");
+    // Kept rather than lose files: the copy is bounded like copy_worker_files.
+    if (files.length > COPY_FILES) throw new ManagedCopilotError("invalid_request", `it saved more than ${COPY_FILES} files under outputs`);
+    if (files.reduce((sum, file) => sum + file.size, 0) > COPY_BYTES) throw new ManagedCopilotError("invalid_request", `its outputs are larger than ${COPY_BYTES / (1024 * 1024)} MiB`);
+    // The root agent's sandbox, within maxWorkers (it may not exist yet; at the bound, this sandbox is kept).
+    const root = await this.#ensureHands(coordinator, config, undefined);
     const target = await this.#pin(root);
     const label = agentId.replace(/[^A-Za-z0-9_-]/g, "") || "agent";
     for (const file of files) {
@@ -771,6 +805,7 @@ export class WorkerManager {
    */
   async recover(): Promise<void> {
     const sessions = this.#app.service("sessions");
+    const orphans: WorkerRecord[] = [];
     for (const worker of this.#store.pendingCleanup()) {
       if (this.#closed) return;
       void this.#cleanup(worker);
@@ -789,6 +824,9 @@ export class WorkerManager {
       if (worker.role === "hands") {
         if (worker.state === "starting") this.#settleHands(worker);
         else if (worker.incarnation !== undefined && !own) this.#markStopped(worker, "Its sandbox no longer exists.", { sessionGone: true });
+        // A sub-agent of a turn the restart ended will never report its end: its sandbox is released now.
+        const coordinatorTurn = sessions.get(worker.coordinatorId)?.lastTurn;
+        if (worker.agentId && (coordinatorTurn === undefined || coordinatorTurn.completedAt !== undefined)) orphans.push(worker);
         continue;
       }
       if (worker.state === "starting") {
@@ -809,6 +847,10 @@ export class WorkerManager {
         continue;
       }
       if (worker.state === "working") this.#settleAfterRestart(worker, session);
+    }
+    for (const orphan of orphans) {
+      const latest = this.#store.get(orphan.id);
+      if (latest && latest.state === "idle" && latest.agentId) this.#releaseHands(latest.coordinatorId, latest.agentId);
     }
     const actions = this.#app.services.actions;
     if (!actions) return;
@@ -1061,7 +1103,7 @@ export class WorkerManager {
    * ends.
    */
   #cleanup(worker: WorkerRecord): Promise<CleanupOutcome> {
-    if (this.#launches.has(worker.id)) return Promise.resolve({ state: "deleting" });
+    if (this.#launches.has(worker.id) || this.#handsLaunches.has(worker.id)) return Promise.resolve({ state: "deleting" });
     const running = this.#cleanups.get(worker.id);
     if (running) return running;
     const done = this.#runCleanup(worker)
@@ -1279,7 +1321,7 @@ export class WorkerManager {
     const worker = this.#store.get(sessionId);
     if (worker?.incarnation !== undefined && sessions.get(sessionId)?.incarnation !== worker.incarnation) {
       if (worker.state !== "stopped") this.#markStopped(worker, "Its session was deleted.", { sessionGone: true });
-      else if (worker.cleanup && !this.#launches.has(worker.id)) this.#store.update(worker.id, { cleanup: false });
+      else if (worker.cleanup && !this.#launches.has(worker.id) && !this.#handsLaunches.has(worker.id)) this.#store.update(worker.id, { cleanup: false });
     }
     // A coordinator: its workers go with it.
     this.#reportedQueued.delete(sessionId);

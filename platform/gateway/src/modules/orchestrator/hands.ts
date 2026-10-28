@@ -191,7 +191,8 @@ export const HANDS_TOOL_DEFINITIONS: readonly HandsToolDefinition[] = [
       required: ["path"],
     },
     skipPermission: false,
-    replay: "always",
+    // An edit applied twice can change a file twice (when new_str contains old_str): it is never rerun.
+    replay: "never",
   },
   {
     name: HANDS_TOOLS.glob,
@@ -271,6 +272,10 @@ export class HandsTools {
   recoverers(): Record<string, Handler> {
     return {
       [HANDS_TOOLS.bash]: (args, context) => this.bash(args, context, { recovering: true }),
+      [HANDS_TOOLS.edit]: async (args) => {
+        const path = optionalString(record(args)["path"]) ?? "the file";
+        return `The platform restarted while this edit of ${path} was being made, so it may or may not have been applied. It was not made again: view the file before editing it again.`;
+      },
       [HANDS_TOOLS.writeBash]: async (args) => {
         const shellId = optionalString(record(args)["shellId"]) ?? "the command";
         return `The platform restarted while this input was being sent to ${shellId}, so it may or may not have been sent. It was not sent again: read the command's output with read_bash before sending it again.`;
@@ -287,7 +292,8 @@ export class HandsTools {
     const mode = input["mode"] === "async" ? "async" : "sync";
     const requested = typeof input["initial_wait"] === "number" && Number.isFinite(input["initial_wait"]) ? input["initial_wait"] : BASH_DEFAULT_WAIT_SECONDS;
     const waitSeconds = Math.min(Math.max(requested, 1), BASH_MAX_WAIT_SECONDS);
-    const hands = await this.#manager.hands(context);
+    // Bound to this call before the command starts: a replay reattaches there, never starts it elsewhere.
+    const hands = await this.#manager.handsForCall(context);
     const result = await this.#sandboxes().exec(hands.record.id, command, {
       // A replay of this call (after a restart) reattaches to the same command: it never runs twice.
       actionId: context.idempotencyKey,
@@ -363,7 +369,22 @@ export class HandsTools {
     const start = this.#offsets.get(key) ?? 0;
     const deadline = Date.now() + waitMs;
     let offset = start;
-    let output = "";
+    // Keeps what the result can show (its start and end), however long the command prints.
+    let head = "";
+    let tail = "";
+    let omitted = 0;
+    const append = (text: string) => {
+      if (head.length < OUTPUT_HEAD) {
+        const room = OUTPUT_HEAD - head.length;
+        head += text.slice(0, room);
+        text = text.slice(room);
+      }
+      tail += text;
+      if (tail.length > OUTPUT_TAIL) {
+        omitted += tail.length - OUTPUT_TAIL;
+        tail = tail.slice(-OUTPUT_TAIL);
+      }
+    };
     let skipped = 0;
     let result: ExecResult;
     for (;;) {
@@ -378,12 +399,19 @@ export class HandsTools {
         if (isManagedCopilotError(error, "not_found")) throw new ManagedCopilotError("not_found", `Your sandbox has no command ${execId}. list_bash shows its commands.`);
         throw error;
       }
-      output += result.output;
+      append(result.output);
       skipped += result.skippedBytes ?? 0;
+      const advanced = result.offset > offset;
       offset = result.offset;
-      if (result.state !== "running" || Date.now() >= deadline || signal?.aborted) break;
+      // An ended command's output is read to its end (one read returns at most a slice of it).
+      if (result.state !== "running") {
+        if (!advanced || offset >= result.outputBytes) break;
+        continue;
+      }
+      if (Date.now() >= deadline || signal?.aborted) break;
     }
     this.#offsets.set(key, offset);
+    const output = omitted > 0 ? `${head}\n[… ${omitted} characters of output omitted …]\n${tail}` : head + tail;
     return { ...result, output, offset, ...(skipped > 0 ? { skippedBytes: skipped } : {}) };
   }
 
@@ -487,13 +515,19 @@ export class HandsTools {
     const roots = rootsOf(input["paths"]);
     const script = [
       ROOT_CHECK,
-      "status=0",
-      ...roots.map((root) => `r=$(mc_root ${quote(root)}) || { printf "%s\\n" "$r"; exit 0; }; rg --files --no-messages --glob ${quote(pattern)} -- "$r" || status=$?`),
+      "roots=()",
+      ...roots.map((root) => `r=$(mc_root ${quote(root)}) || { printf "%s\\n" "$r"; exit 0; }; roots+=("$r")`),
+      `rg --files --no-messages --glob ${quote(pattern)} -- "\${roots[@]}" | head -n ${LISTING_LINES + 1}`,
+      'code=${PIPESTATUS[0]}',
+      'if [ "$code" != 0 ] && [ "$code" != 1 ] && [ "$code" != 141 ]; then echo "__MC_ERROR__ $code"; fi',
     ].join("\n");
-    const { output } = await this.#helper(HANDS_TOOLS.glob, `{\n${script}\n} | head -n ${LISTING_LINES + 1}`, context);
+    const { output } = await this.#helper(HANDS_TOOLS.glob, script, context);
     const lines = output.split("\n").filter(Boolean);
     const fail = lines[0] ? rootFailure(lines[0], roots.join(", ")) : undefined;
     if (fail) throw fail;
+    if (lines.some((line) => line.startsWith("__MC_ERROR__"))) {
+      throw new ManagedCopilotError("invalid_request", `ripgrep failed: ${clipLine(lines.filter((line) => !line.startsWith("__MC_ERROR__")).join(" ") || "check the pattern", 500)}`);
+    }
     if (lines.length === 0) return "No files matched the pattern.";
     return [...lines.slice(0, LISTING_LINES), ...(lines.length > LISTING_LINES ? ["… more files matched; narrow the pattern."] : [])].join("\n");
   }

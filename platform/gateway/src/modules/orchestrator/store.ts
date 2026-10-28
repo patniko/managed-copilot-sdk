@@ -54,6 +54,13 @@ export const ORCHESTRATOR_MIGRATIONS: readonly string[] = [
   // coordinator incarnation and agent: agent_id is the sub-agent's with `subagents: "own"`, NULL for the root agent's).
   `ALTER TABLE orchestrator_workers ADD COLUMN role TEXT NOT NULL DEFAULT 'worker';
    ALTER TABLE orchestrator_workers ADD COLUMN agent_id TEXT;`,
+  // The hands sandbox each command-running tool call (by its key) ran in, recorded before the command starts, so an
+  // interrupted call is only ever reattached in that sandbox, never started in another.
+  `CREATE TABLE orchestrator_hands_calls (
+     key TEXT PRIMARY KEY,
+     hands_id TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
 ];
 
 /** States in which a worker is busy: a wait for it continues. */
@@ -156,7 +163,8 @@ export class WorkerStore {
       const existing = this.byStartKey(worker.startKey);
       if (existing) return { record: existing, created: false };
       const active = this.forCoordinator(worker.coordinatorId, worker.coordinatorIncarnation).filter(occupiesSlot);
-      if (active.some((record) => record.name === worker.name)) {
+      // Names are unique among agents (start_worker refuses the hands names); hands sandboxes are unique by start key.
+      if (active.some((record) => record.role === (worker.role ?? "worker") && record.name === worker.name)) {
         throw new ManagedCopilotError("conflict", `A worker named "${worker.name}" already exists in this session. Pick another name, or use message_worker to give it more work.`);
       }
       if (active.length >= maxWorkers) {
@@ -298,6 +306,17 @@ export class WorkerStore {
   /** Forgets a message the runtime refused, so the coordinator's retry of the same call can send it. */
   abandonMessage(key: string): void {
     this.#db.prepare("DELETE FROM orchestrator_messages WHERE key = ? AND message_id IS NULL").run(key);
+  }
+
+  /** The hands sandbox a command-running tool call was bound to, if it got that far. */
+  handsCallFor(key: string): string | undefined {
+    return (this.#db.prepare("SELECT hands_id FROM orchestrator_hands_calls WHERE key = ?").get(key) as { hands_id: string } | undefined)?.hands_id;
+  }
+
+  /** Binds a command-running tool call to its hands sandbox; the first binding stays. Returns the bound sandbox. */
+  bindHandsCall(key: string, handsId: string): string {
+    this.#db.prepare("INSERT OR IGNORE INTO orchestrator_hands_calls (key, hands_id, created_at) VALUES (?, ?, ?)").run(key, handsId, new Date().toISOString());
+    return this.handsCallFor(key)!;
   }
 
   /** The worker a `stop_worker` tool call chose, so its replay stops that one and never a newer one with its name. */

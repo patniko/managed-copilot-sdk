@@ -314,6 +314,14 @@ describe("direct and mixed orchestrators", () => {
 
     // Its slot is free again.
     expect(await call(client, sessionId, "bash", { command: "echo b", description: "B" }, "agent-b")).toContain("ran: echo b");
+
+    // A sub-agent whose outputs can't all be copied keeps its sandbox rather than lose them.
+    const b = hands(sessionId).find((sandbox) => sandbox.agentId === "agent-b")!;
+    for (let index = 0; index < 501; index++) sandboxes.workspace(b.id).set(`outputs/f${index}.txt`, Buffer.from("x"));
+    runtime.emitEvent(sessionId, "subagent.completed", { toolCallId: "call_task_b", agentName: "general-purpose", agentDisplayName: "General" }, "agent-b");
+    await waitUntil(() => hands(sessionId).find((sandbox) => sandbox.id === b.id)?.error?.includes("more than 500 files") === true);
+    expect(hands(sessionId).find((sandbox) => sandbox.id === b.id)?.state).toBe("idle");
+    expect(sandboxes.ops(b.id)).not.toContain("delete");
   });
 
   it("refuses a sub-agent's call without attribution under subagents: \"own\"", async () => {
@@ -344,6 +352,19 @@ describe("direct and mixed orchestrators", () => {
     expect([...sandboxes.execs.values()].filter((entry) => entry.info.command === "make deploy")).toHaveLength(1);
     const input = await app().service("platformTools").get("write_bash", "operator")!.recover!({ shellId, input: "y" }, { sessionId, ownerId: 1001, environment: "operator", toolCallId: "t2", idempotencyKey: "k" });
     expect(input).toContain("may or may not have been sent");
+    const edit = app().service("platformTools").get("edit", "operator")!;
+    expect(edit.replay).toBe("never");
+    expect(await edit.recover!({ path: "/workspace/a.py" }, { sessionId, ownerId: 1001, environment: "operator", toolCallId: "t3", idempotencyKey: "k3" })).toContain("may or may not have been applied");
+
+    // The sandbox the command ran in is gone: recovery never starts it in a new one.
+    await sessions().delete(1001, sandbox!.id);
+    await waitUntil(() => hands(sessionId).find((entry) => entry.id === sandbox!.id)?.state === "stopped");
+    const execsBefore = sandboxes.log.filter((entry) => entry.op === "exec").length;
+    const gone = await bash.recover!({ command: "make deploy", description: "Deploy" }, { sessionId, ownerId: 1001, environment: "operator", toolCallId: "t", idempotencyKey: String(exec["actionId"]), actionId: "act_1" });
+    expect(gone).toMatchObject({ resultType: "failure" });
+    expect(JSON.stringify(gone)).toContain("may or may not have run");
+    expect(sandboxes.log.filter((entry) => entry.op === "exec").length).toBe(execsBefore);
+    expect(hands(sessionId).filter((entry) => entry.state !== "stopped")).toEqual([]);
   });
 
   it("lets a mixed coordinator use its own sandbox beside workers, and copy between them", async () => {

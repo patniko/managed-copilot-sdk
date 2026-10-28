@@ -1070,9 +1070,10 @@ and quickstart snippet 14).
     `context.agentId` whose tool call ID was reported as a sub-agent's fails with `capability_unavailable`. A
     sub-agent's `subagent.completed` or `subagent.failed` (event `agentId`, verified on 1.0.103 to equal the
     `ToolInvocation.agentId` of its calls) releases its sandbox: files under `/workspace/outputs` (at most 500) are
-    copied through the gateway into the root agent's sandbox under `outputs/<agentId>/` (creating it if needed, with one
-    slot of slack since the finishing sandbox is about to go), then the sandbox is stopped and deleted; one whose copy
-    failed is kept (with a note) until the coordinator goes.
+    copied through the gateway into the root agent's sandbox under `outputs/<agentId>/` (creating it if needed, within
+    `maxWorkers`), then the sandbox is stopped and deleted; one whose copy failed or would exceed 500 files or 64 MiB
+    is kept (with a note) until the coordinator goes. At startup, a sub-agent's sandbox whose coordinator turn has
+    ended (its sub-agent can no longer report its end) is released the same way.
   - *Commands.* `bash` calls `sandboxes.exec(hands, command, { actionId: idempotencyKey, background: mode === "async",
     stdin: "open", waitMs: initial_wait (async 0), signal (sync only), sandboxId, caller: { kind: "platform", name:
     "bash", agentId } })`; on core's own path (no ledger) waits are capped at 9 minutes, under its 10-minute call
@@ -1080,14 +1081,18 @@ and quickstart snippet 14).
     `shellId` (the exec ID; a model-chosen `shellId` is an in-memory alias). `read_bash` long-polls `readExec` from the
     last offset it returned (in memory per command) until the end or `delay`; `write_bash` translates `{enter}`,
     `{tab}`, arrows, `{ctrl+d}` (end of input) and refuses `{ctrl+c}`; `stop_bash` and `list_bash` (commands whose
-    caller is `bash`) complete the set. `bash` and `write_bash` are `replay: "never"`: `bash`'s `recover` calls exec with
-    the same `actionId` (the journal reattaches, never reruns) and says so; `write_bash`'s says the input may have been
-    sent.
+    caller is `bash`) complete the set. `bash`, `write_bash`, and `edit` are `replay: "never"`. Before its command starts, a
+    `bash` call is bound to its hands sandbox (`orchestrator_hands_calls`, keyed by the call's idempotency key), so its
+    `recover` calls exec with the same `actionId` in that sandbox only (the journal reattaches, never reruns); if that
+    sandbox is gone, the call fails as "may have run" (`needs_reconciliation`) and nothing is created or started.
+    `write_bash`'s recover says the input may have been sent, and `edit`'s that the edit may have been applied (an edit
+    whose `new_str` contains its `old_str` would otherwise apply twice). `read_bash` reads an ended command to its end
+    and keeps only the start and end of long output while it reads.
   - *Files.* `view`, `glob`, and `grep` run as exec helpers (`caller.name` is the tool; 60 s wait, 120 s timeout) whose
     bash resolves each path with `realpath -e` and refuses any outside `/workspace` (so links are followed only
     inside it). `view` numbers lines (`N. text`), honors `view_range` with `awk`, truncates at 20 KiB (256 KiB with a
     range or `forceReadLargeFiles`), detects binary files, and lists directories two levels deep without hidden
-    entries; `glob` is `rg --files --glob`, `grep` maps the stock options onto `rg` (default `--files-with-matches`).
+    entries; `glob` is `rg --files --glob` over every resolved root (ripgrep errors are refused as `invalid_request`), `grep` maps the stock options onto `rg` (default `--files-with-matches`).
     Arguments are single-quoted shell words. `create` writes with `overwrite: false` (the same content already there
     counts as created, for replays); `edit` reads the file (8 MiB, text only), requires exactly one match, and writes
     with `ifMatch` = the SHA-256 of what it read. sandboxd serializes writes per path and the file worker hashes the

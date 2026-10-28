@@ -1138,9 +1138,11 @@ for (const command of await managed.exec.list(hands.id)) console.log(command.cal
    (`{enter}`, `{tab}`, `{ctrl+d}`), `stop_bash` kills the process group, and `list_bash` lists the commands with their
    state. A cancelled sync call stops its command; async commands run on until stopped, the sandbox's idle stop, or
    deletion. Every command is recorded with the tool and the calling agent (`ExecInfo.caller`).
-11. **Never run twice.** `bash` and `write_bash` are never rerun after a gateway or runtime restart: an interrupted
-   `bash` reattaches to its command through the sandbox journal (or reports that it may have run), and an interrupted
-   `write_bash` reports that its input may have been sent.
+11. **Never run twice.** `bash`, `write_bash`, and `edit` are never rerun after a gateway or runtime restart: an
+   interrupted `bash` reattaches to its command in the sandbox it started in (or reports that it may have run, never
+   starting it elsewhere), an interrupted `write_bash` reports that its input may have been sent, and an interrupted
+   `edit` that it may have been applied. A sub-agent's sandbox whose outputs can't be copied (over 500 files or
+   64 MiB, or no room under `maxWorkers` for the coordinator's sandbox) is kept until the session is deleted.
 12. **Files.** Paths must be under `/workspace`. `view`, `glob`, and `grep` run as the workload identity and follow
    symbolic links only inside `/workspace`; `create` and `edit` write through the sandbox's file worker, which never
    follows links. `glob` and `grep` use ripgrep (hidden and ignored files are skipped).

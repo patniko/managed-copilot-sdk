@@ -766,7 +766,9 @@ export function admitOptionsUpdate(raw: unknown, context: AdmissionContext): Rec
       case "availableTools":
       case "excludedTools":
         if (shared) {
-          const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, context.allowMcp === true);
+          // A direct or mixed coordinator keeps its sub-agent tools (as admitted at create).
+          const hands = context.platformTools.some((tool) => tool.name === HANDS_TOOLS.bash && tool.overridesBuiltInTool === true);
+          const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, context.allowMcp === true, { hands });
           if (key === "availableTools") patch[key] = filters.availableTools;
           else patch[key] = filters.excludedTools ?? [];
         } else patch[key] = stringList(value, key);

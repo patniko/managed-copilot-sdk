@@ -70,6 +70,8 @@ describe.runIf(enabled)("hands tool commands in a real sandbox container", () =>
     expect(await tools.glob({ pattern: "*.md" }, context())).toBe("No files matched the pattern.");
     expect(await tools.glob({ pattern: "*.py", paths: "/workspace/src" }, context())).toBe("/workspace/src/main.py");
     await expect(tools.glob({ pattern: "*", paths: ["/workspace/outside"] }, context())).rejects.toMatchObject({ code: "forbidden" });
+    await expect(tools.glob({ pattern: "*", paths: ["/workspace/src", "/workspace/outside"] }, context())).rejects.toMatchObject({ code: "forbidden" });
+    await expect(tools.glob({ pattern: "[unclosed" }, context())).rejects.toMatchObject({ code: "invalid_request" });
 
     expect((await tools.grep({ pattern: "TODO" }, context())).split("\n").sort()).toEqual(["/workspace/src/main.py", "/workspace/src/pkg/util.ts"]);
     expect(await tools.grep({ pattern: "todo", "-i": true, output_mode: "content", "-n": true, type: "py" }, context())).toBe("/workspace/src/main.py:2:beta TODO");
