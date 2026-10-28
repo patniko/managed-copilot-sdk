@@ -551,6 +551,65 @@ describe("Sandboxes", () => {
     subject.stop();
   });
 
+  it("places a finish received on the subscription its listing was asked for on, though the stream reconnected since", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) }), card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(4), endedAt: at(5) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", messages: 2, updatedAt: at(5) });
+    const { subject, emit, state, reconnect } = sandboxes({ workers: [stats], cards });
+    let open!: () => void;
+    state.workersGate = new Promise((resolve) => (open = resolve));
+    const reading = subject.refresh();
+    await vi.waitFor(() => expect(state.workerLists).toBe(1));
+    // The follow-up's finish arrives on the same subscription, then the stream reconnects before the listing answers.
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(6));
+    reconnect();
+    state.workersGate = undefined;
+    open();
+    await reading;
+    emit("worker.stopped", { workerId: "w1", name: "stats", state: "stopped" }, at(7));
+    state.workers = [{ ...stats, state: "stopped", updatedAt: at(7) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(5), finishedAt: at(6), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("doesn't end a follow-up's work with the previous message's finish from the same millisecond", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    emit("worker.failed", { workerId: "w1", name: "stats", state: "failed" }, at(30));
+    // The agent sent the work again at once: by the platform's clock, the follow-up started in that same millisecond.
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(31), endedAt: at(31) }));
+    state.workers = [{ ...stats, state: "working", messages: 2, updatedAt: at(30) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(30), outcome: "failed" });
+    expect(subject.view.runs.c2).toMatchObject({ startedAt: at(31), finishedAt: undefined });
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(50));
+    state.workers = [{ ...stats, state: "idle", messages: 2, updatedAt: at(50) }];
+    await subject.refresh();
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(31), finishedAt: at(50), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("doesn't end a retried task with the failure of the delivery it replaced", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", messages: 1, updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    // Delivery failed: the platform takes the task back.
+    emit("worker.failed", { workerId: "w1", name: "stats", state: "failed" }, at(4));
+    state.workers = [{ ...stats, state: "failed", messages: 0, error: "Couldn't give it its task", updatedAt: at(4) }];
+    await subject.refresh();
+    // The agent sends it again, and the sandbox is stopped while it works on it, before anything lists it working.
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(5), endedAt: at(5) }));
+    emit("worker.stopped", { workerId: "w1", name: "stats", state: "stopped" }, at(6));
+    state.workers = [{ ...stats, state: "stopped", messages: 1, error: undefined, updatedAt: at(6) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(4), outcome: "failed" });
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(5), finishedAt: at(6), outcome: "stopped" });
+    subject.stop();
+  });
+
   it("ends a card's work when its sandbox finishes, though the platform's clock differs from the card's", async () => {
     const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(30) })];
     // The platform's clock is behind: by it, the task was sent at :26 and finished at :27, before the card's tool call

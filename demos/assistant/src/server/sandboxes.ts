@@ -197,8 +197,8 @@ export class Sandboxes {
     const { workerId, state } = event.data as { workerId?: unknown; state?: unknown };
     if (typeof workerId !== "string") return;
     // Events mostly prompt a fresh listing, which says how work ended. A finish is placed on a message only by a
-    // listing that saw the sandbox working on it, requested on this subscription (see #place); any other (for example
-    // one that arrives late, after the stream reconnected) is left to listings.
+    // listing that saw the sandbox working on it, asked for on the same subscription (see #place); any other (for
+    // example one that arrives late, after the stream reconnected) is left to listings.
     if (state === "idle" || state === "failed") {
       const facts = this.#factsOf(workerId);
       facts.reported.push({ at: iso(event.createdAt), state, epoch: this.#epoch });
@@ -442,15 +442,16 @@ export class Sandboxes {
   }
 
   /**
-   * A listing requested on the current subscription that saw the sandbox working on message m (since `at`) means m
-   * finished after the subscription began, so its finish event wasn't missed: m's is the first finish reported on
-   * this subscription since `at` (earlier messages finished before m started; later ones can't start before m ends).
-   * A listing requested earlier may predate finishes whose events were missed, so it places nothing.
+   * A listing that saw the sandbox working on message m (since `at`) was asked for after its event subscription began,
+   * and m was still unfinished then, so m's finish can't have been missed on that subscription: m's is the first
+   * finish reported on it after `at` (earlier messages finished before m started, and later ones can't start before
+   * m ends; one in the same millisecond as m's start is left to listings). Finishes received on another subscription
+   * can't be placed by it: events between subscriptions may be missed.
    */
   #place(facts: WorkerFacts, listed: Listed): void {
-    if (listed.epoch !== this.#epoch || listed.state !== "working" || listed.messages === 0 || facts.finished.has(listed.messages)) return;
+    if (listed.state !== "working" || listed.messages === 0 || facts.finished.has(listed.messages)) return;
     let first: Reported | undefined;
-    for (const finish of facts.reported) if (finish.epoch === listed.epoch && finish.at >= listed.at && (!first || finish.at < first.at)) first = finish;
+    for (const finish of facts.reported) if (finish.epoch === listed.epoch && finish.at > listed.at && (!first || finish.at < first.at)) first = finish;
     if (first) facts.finished.set(listed.messages, { at: first.at, state: first.state });
   }
 
@@ -464,12 +465,11 @@ export class Sandboxes {
     else if (worker.messages > 0 && (worker.state === "idle" || worker.state === "failed") && !facts.finished.has(worker.messages)) {
       facts.finished.set(worker.messages, { at, state: worker.state });
     }
-    // Stopped for good with a single message, of which one finish was ever reported: that finish ended the message,
-    // even if no listing saw it working (it finished and was stopped just after a restart or a reconnect).
-    const only = facts.reported.length === 1 ? facts.reported[0] : undefined;
-    if (only && worker.state === "stopped" && worker.messages === 1 && only.at <= at && !facts.finished.has(1)) {
-      facts.finished.set(1, { at: only.at, state: only.state });
-    }
+    // Stopped for good with a single message that an idle event reported finished: that ended the message, even if no
+    // listing saw it working (it finished and was stopped just after a restart or a reconnect). Only work that ran
+    // goes idle; a task the platform took back only fails, so an idle report can't be the delivery it replaced.
+    const idle = facts.reported.find((finish) => finish.state === "idle" && finish.at <= at);
+    if (idle && worker.state === "stopped" && worker.messages === 1 && !facts.finished.has(1)) facts.finished.set(1, { at: idle.at, state: "idle" });
     facts.last = { state: worker.state, messages: worker.messages, at, epoch };
     this.#place(facts, facts.last);
   }
