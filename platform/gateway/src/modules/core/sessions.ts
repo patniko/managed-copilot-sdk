@@ -48,6 +48,7 @@ import {
   type CliAttachment,
   type CliAttachOptions,
   type CreateSessionRequest,
+  type CreateWorkspaceRequest,
   type NetworkPolicyService,
   type PlacementCutover,
   type PlatformToolRegistry,
@@ -268,6 +269,8 @@ interface LiveSession {
    * its answers to the sealing calls): its output for this session is handoff, hidden from clients and history.
    */
   sealedSource: { readonly upstream: RuntimeUpstream; readonly settled: Promise<void> } | undefined;
+  /** Platform tool calls core runs itself (no actions ledger), by runtime request ID: aborted when the runtime stops waiting. */
+  readonly platformCalls: Map<string, AbortController>;
 }
 
 interface InflightWait {
@@ -598,6 +601,7 @@ export class SessionManager implements SessionsService {
       ...(record.lastTurn ? { lastTurn: record.lastTurn } : {}),
       ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),
       ...(record.parentSessionId ? { parentSessionId: record.parentSessionId } : {}),
+      ...(record.kind === "workspace" ? { kind: "workspace" as const } : {}),
     };
   }
 
@@ -614,6 +618,7 @@ export class SessionManager implements SessionsService {
       if (this.#interrupted(existing) && existing.ownerId === principal.accountId) {
         await this.#discardInterrupted(existing);
       } else {
+        if (existing.kind === "workspace" && existing.ownerId === principal.accountId) throw workspaceOnly(sessionId);
         if (existing.ownerId === principal.accountId && existing.state !== "deleted" && existing.state !== "deleting") return { sessionId, created: false, incarnation: existing.incarnation };
         throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
       }
@@ -652,6 +657,128 @@ export class SessionManager implements SessionsService {
     }
     const created = this.#ledger.get(sessionId)?.incarnation;
     return { sessionId, created: true, ...(created ? { incarnation: created } : {}) };
+  }
+
+  async createWorkspace(principal: Principal, request: CreateWorkspaceRequest): Promise<{ sessionId: string; created: boolean; incarnation?: string }> {
+    const sessionId = request.sessionId ?? randomUUID();
+    if (typeof sessionId !== "string" || !ID_PATTERN.test(sessionId)) throw new ManagedCopilotError("invalid_request", "sessionId must be 1 to 128 letters, digits, hyphens, or underscores");
+    const inflight = this.#creating.get(sessionId);
+    if (inflight) {
+      if (inflight.ownerId !== principal.accountId) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+      await inflight.done.catch(() => undefined);
+    }
+    const existing = this.#ledger.get(sessionId);
+    if (existing) {
+      if (this.#interrupted(existing) && existing.ownerId === principal.accountId) {
+        await this.#discardInterrupted(existing);
+      } else {
+        if (existing.ownerId === principal.accountId && existing.kind === "workspace" && existing.state !== "deleted" && existing.state !== "deleting") {
+          return { sessionId, created: false, incarnation: existing.incarnation };
+        }
+        throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+      }
+    }
+    const environment = this.#options.environments.resolve(request.environment);
+    if (environment.type !== "isolated") {
+      throw new ManagedCopilotError("invalid_request", `Environment "${environment.name}" is ${environment.type}; workspace-only sandboxes need an isolated environment.`, { environment: environment.name });
+    }
+    if (!this.#sandboxes) throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" needs isolated sandboxes, which this deployment does not provide yet`);
+    let parent: { readonly id: string; readonly incarnation: string } | undefined;
+    if (request.parentSessionId !== undefined) {
+      const record = this.getOwned(principal.accountId, request.parentSessionId);
+      if (record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${record.id} was not found`, { sessionId: record.id });
+      parent = { id: record.id, incarnation: record.incarnation };
+    }
+    if (this.#creating.has(sessionId) || this.#ledger.get(sessionId)) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+    const done = this.#createWorkspaceReserved(principal, environment, sessionId, parent, request.clientName);
+    this.#creating.set(sessionId, { ownerId: principal.accountId, done });
+    try {
+      await done;
+    } finally {
+      this.#creating.delete(sessionId);
+    }
+    const created = this.#ledger.get(sessionId)?.incarnation;
+    return { sessionId, created: true, ...(created ? { incarnation: created } : {}) };
+  }
+
+  /** Records the session, binds its network policy, and creates its sandbox without a runtime. Nothing is left on failure. */
+  async #createWorkspaceReserved(
+    principal: Principal,
+    environment: ResolvedEnvironment,
+    sessionId: string,
+    parent: { readonly id: string; readonly incarnation: string } | undefined,
+    clientName: string | undefined,
+  ): Promise<void> {
+    let network: NetworkPolicy = environment.network;
+    const policy = this.#policy;
+    if (policy) {
+      const bound = await policy.bindSession({
+        sessionId,
+        owner: principal.accountId,
+        environment: environment.inline ? undefined : environment.name,
+        type: environment.type,
+        requested: environment.request.network,
+        vaults: environment.request.vaults,
+      });
+      if (bound) network = bound;
+    }
+    let inserted = false;
+    try {
+      const record = this.#ledger.insert({
+        id: sessionId,
+        owner: accountInfo(principal),
+        environment: environment.name,
+        type: environment.type,
+        placement: "sandbox",
+        network,
+        environmentRequest: environment.request,
+        admitted: { params: {}, optionsPatch: {} },
+        kind: "workspace",
+        ...(clientName ? { clientName } : {}),
+        ...(parent ? { parentSessionId: parent.id, parentIncarnation: parent.incarnation } : {}),
+      });
+      inserted = true;
+      await this.#sandboxes!.create({
+        sessionId,
+        ownerId: principal.accountId,
+        environment: environment.name,
+        size: environment.config.size ?? "small",
+        network,
+        ...(environment.request.vaults ? { vaults: environment.request.vaults } : {}),
+        additions: {
+          ...(environment.request.files ? { files: environment.request.files } : {}),
+          ...(environment.request.packages ? { packages: environment.request.packages } : {}),
+          ...(environment.request.env ? { env: environment.request.env } : {}),
+        },
+        resolved: environment,
+        runtime: false,
+      });
+      this.#ledger.update(sessionId, { state: "ready" });
+      this.#options.events.emit("session.created", {
+        ownerId: principal.accountId,
+        sessionId,
+        environment: environment.name,
+        data: { placement: "sandbox", type: environment.type, kind: "workspace", incarnation: record.incarnation },
+      });
+      this.#log.info("Workspace-only session created", { sessionId, owner: principal.login, environment: environment.name });
+    } catch (error) {
+      if (inserted) {
+        this.#ledger.remove(sessionId);
+        await this.#sandboxes?.delete(sessionId).catch((cleanup: unknown) => this.#log.warn("Sandbox cleanup after failed create failed", { sessionId, error: (cleanup as Error).message }));
+      }
+      await Promise.resolve(this.#policy?.releaseSession?.(sessionId)).catch(() => undefined);
+      this.#log.warn("Workspace-only session creation failed", { sessionId, environment: environment.name, error: (error as Error).message });
+      throw error;
+    }
+  }
+
+  /** A workspace-only session's busy accounting: `running` while commands run in its sandbox, `idle` once none do. */
+  execActivity(sessionId: string, running: number): void {
+    const record = this.get(sessionId);
+    if (!record || record.kind !== "workspace") return;
+    if (record.state !== "ready" && record.state !== "idle" && record.state !== "running") return;
+    const state = running > 0 ? "running" : "idle";
+    if (record.state !== state) this.#ledger.update(sessionId, { state });
   }
 
   async send(principal: Principal, sessionId: string, input: { prompt: string; source?: string; mode?: string }, options: SessionSendOptions = {}): Promise<{ messageId: string }> {
@@ -1339,7 +1466,7 @@ export class SessionManager implements SessionsService {
       const present = !peer.closed;
       if (present) this.#checkHooksRegistration(live, peer, prepared);
       const previous = live.attachments.get(peer.id);
-      const change = present ? this.#inventoryChange(live, peer.id, previous, registrationOf(prepared, this.#options.platformTools)) : undefined;
+      const change = present ? this.#inventoryChange(live, peer.id, previous, registrationOf(prepared, this.#options.platformTools, live.environment.name)) : undefined;
       if (present) this.#attach(live, peer, admitted, prepared);
       const forwarded = this.#withRegistrations(live, prepared, change);
       let result: unknown;
@@ -1457,7 +1584,7 @@ export class SessionManager implements SessionsService {
           break;
         case "session.tools.set": {
           const admitted = admitToolsSet(params, context());
-          const declarations = clientDeclarations(admitted.params["tools"], this.#options.platformTools);
+          const declarations = clientDeclarations(admitted.params["tools"], this.#options.platformTools, live.environment.name);
           // The client's registration changes in the step that writes it: what runs while this call waits (a restore,
           // a cutover's destination) registers what is in effect, and a call that never reaches a runtime changes
           // nothing. What it withdraws is decided against the registration before this call (also on a retry).
@@ -1814,7 +1941,7 @@ export class SessionManager implements SessionsService {
     let live: LiveSession | undefined;
     try {
       await this.#checkRemoteMcp(admitted, sessionId, placement, network);
-      const registration = registrationOf(admitted.params, this.#options.platformTools);
+      const registration = registrationOf(admitted.params, this.#options.platformTools, environment.name);
       const stored: AdmittedConfig = {
         params: storedParams(admitted.params),
         // Without a client, the declarations are the service's own; a client's are its callback registrations.
@@ -2041,7 +2168,13 @@ export class SessionManager implements SessionsService {
         // Left out (for example its customizations were rejected): a worker started there fails with the reason.
       }
     }
-    return { workers, maxWorkers: environment.config.maxWorkers ?? DEFAULT_MAX_WORKERS };
+    const execution = environment.config.execution ?? "delegate";
+    return {
+      workers,
+      maxWorkers: environment.config.maxWorkers ?? DEFAULT_MAX_WORKERS,
+      execution,
+      ...(execution !== "delegate" ? { subagents: environment.config.subagents ?? "shared" } : {}),
+    };
   }
 
   #workingDirectory(placement: Placement, sessionId: string): string {
@@ -2083,6 +2216,7 @@ export class SessionManager implements SessionsService {
       moves: 0,
       hidden: undefined,
       sealedSource: undefined,
+      platformCalls: new Map(),
     };
     this.#live.set(record.id, live);
     return live;
@@ -2097,6 +2231,8 @@ export class SessionManager implements SessionsService {
     }
     const record = this.get(sessionId);
     if (!record || record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+    // Every agent operation (send, resume, abort, CLI attach, promotion) needs a runtime, and this session never has one.
+    if (record.kind === "workspace") throw workspaceOnly(sessionId);
     const environment = this.#options.environments.forSession(record);
     return this.#register(record, environment, `mc-${randomUUID()}`);
   }
@@ -2703,7 +2839,7 @@ export class SessionManager implements SessionsService {
       skillProvider: flag("hasSkillProvider"),
       transforms: Object.values(sections).some((section) => section?.action === "transform"),
       canvases: (Array.isArray(forwarded["canvases"]) && forwarded["canvases"].length > 0) || forwarded["requestCanvasRenderer"] !== undefined || forwarded["canvasProvider"] !== undefined,
-      declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]))),
+      declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]), live.environment.name)),
       flags: Object.fromEntries([...WIRE_FLAGS, "streaming"].filter((key) => forwarded[key] !== undefined).map((key) => [key, forwarded[key]])),
       registered: { tools: { ...before?.registered.tools }, flags: { ...before?.registered.flags } },
     });
@@ -2944,6 +3080,15 @@ export class SessionManager implements SessionsService {
 
   async #deliverEvent(live: LiveSession, event: RuntimeSessionEvent, origin?: NotificationOrigin): Promise<void> {
     this.#track(live, event);
+    if (event.type === "external_tool.completed" && live.platformCalls.size > 0) {
+      // Core runs this call itself (no ledger) and has not answered it: the runtime stopped waiting (turn cancelled).
+      const requestId = String(event.data?.["requestId"] ?? "");
+      const call = live.platformCalls.get(requestId);
+      if (call) {
+        live.platformCalls.delete(requestId);
+        call.abort(new ManagedCopilotError("conflict", "The runtime stopped waiting for this tool call (for example, its turn was cancelled)"));
+      }
+    }
     // Sanitized for the placement that emitted it, which a cutover may have changed since.
     const sanitized = this.#scrub(live, this.#sanitizeEvent(live, event, origin?.placement), origin?.placement);
     // Only the owner's events after a seal complete the calls it caught; what the source said before it cannot.
@@ -2986,7 +3131,7 @@ export class SessionManager implements SessionsService {
     const record = this.get(live.id);
     const actions = this.#actions;
     const toolName = event.type === "external_tool.requested" ? (event.data["toolName"] as string | undefined) : undefined;
-    const platformTool = toolName ? this.#options.platformTools.get(toolName) : undefined;
+    const platformTool = toolName ? this.#options.platformTools.get(toolName, live.environment.name) : undefined;
     if (actions && record) {
       // Events flushed after a cutover belong to the placement generation whose runtime emitted them.
       return actions.onSessionEvent({ sessionId: live.id, ...this.#incarnationOf(live.id), ownerId: record.ownerId, environment: record.environment, generation: generation ?? record.generation, event, attached: this.#responders(live) });
@@ -3008,9 +3153,12 @@ export class SessionManager implements SessionsService {
   }
 
   async #runPlatformTool(live: LiveSession, record: SessionRecord, event: RuntimeSessionEvent, name: string): Promise<void> {
-    const tool = this.#options.platformTools.get(name);
+    const tool = this.#options.platformTools.get(name, record.environment);
     const requestId = event.data["requestId"];
     const toolCallId = String(event.data["toolCallId"] ?? requestId);
+    const call = new AbortController();
+    const key = String(requestId);
+    live.platformCalls.set(key, call);
     let answer: Record<string, unknown>;
     try {
       const result = await tool!.handler(event.data["arguments"], {
@@ -3021,13 +3169,20 @@ export class SessionManager implements SessionsService {
         idempotencyKey: `${live.id}:${toolCallId}`,
         type: record.type,
         placement: record.placement,
-        signal: AbortSignal.timeout(10 * 60_000),
+        ...(typeof event.agentId === "string" && event.agentId.length > 0 ? { agentId: event.agentId } : {}),
+        // The runtime stopped waiting (turn cancelled), the session was deleted, or the gateway is stopping; else 10 minutes.
+        signal: AbortSignal.any([call.signal, live.ending.signal, AbortSignal.timeout(10 * 60_000)]),
       });
       answer = { requestId, result };
     } catch (error) {
       answer = { requestId, error: error instanceof ManagedCopilotError ? error.message : `Platform tool ${name} failed` };
       this.#log.warn("Platform tool failed", { sessionId: live.id, tool: name, error: (error as Error).message });
+    } finally {
+      // Before answering, so the runtime's completion of this request does not abort the call that just finished.
+      if (live.platformCalls.get(key) === call) live.platformCalls.delete(key);
     }
+    // The runtime no longer waits for an answer.
+    if (call.signal.aborted) return;
     try {
       await this.request(live.id, "session.tools.handlePendingToolCall", answer, pinned(record));
     } catch (error) {
@@ -3411,6 +3566,14 @@ export class SessionManager implements SessionsService {
 /** How the stock runtime reports a session it has no persisted state for. */
 const UNKNOWN_SESSION = /session not found|failed to load session events/i;
 
+function workspaceOnly(sessionId: string): ManagedCopilotError {
+  return new ManagedCopilotError(
+    "invalid_request",
+    `Session ${sessionId} is a workspace-only sandbox: it runs commands and holds files, but has no agent to send prompts to, resume, or attach Copilot CLI to. Use managed.exec and managed.files with it.`,
+    { sessionId, kind: "workspace" },
+  );
+}
+
 /** Whether an event is something `session.suspend` / `sessions.close` caused, rather than output already under way. */
 function isHandoffEvent(event: RuntimeSessionEvent): boolean {
   if (typeof event.type !== "string") return true;
@@ -3484,12 +3647,12 @@ function applyInventory(base: CallbackInventory | undefined, change: InventoryCh
 }
 
 /** The registration in create/resume params: the client's tool declarations (no platform tools) and handler flags. */
-function registrationOf(params: Record<string, unknown>, platformTools: PlatformToolRegistry): { tools: Record<string, unknown>[]; flags: Record<string, unknown> } {
-  return { tools: clientDeclarations(params["tools"], platformTools), flags: Object.fromEntries(WIRE_FLAGS.filter((key) => params[key] !== undefined).map((key) => [key, params[key]])) };
+function registrationOf(params: Record<string, unknown>, platformTools: PlatformToolRegistry, environment: string): { tools: Record<string, unknown>[]; flags: Record<string, unknown> } {
+  return { tools: clientDeclarations(params["tools"], platformTools, environment), flags: Object.fromEntries(WIRE_FLAGS.filter((key) => params[key] !== undefined).map((key) => [key, params[key]])) };
 }
 
-function clientDeclarations(tools: unknown, platformTools: PlatformToolRegistry): Record<string, unknown>[] {
-  return ((Array.isArray(tools) ? tools : []) as Record<string, unknown>[]).filter((tool) => !platformTools.has(String(tool["name"])));
+function clientDeclarations(tools: unknown, platformTools: PlatformToolRegistry, environment: string): Record<string, unknown>[] {
+  return ((Array.isArray(tools) ? tools : []) as Record<string, unknown>[]).filter((tool) => !platformTools.has(String(tool["name"]), environment));
 }
 
 function trueFlags(flags: Readonly<Record<string, unknown>>): Record<string, true> {

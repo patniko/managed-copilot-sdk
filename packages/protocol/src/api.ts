@@ -2,8 +2,10 @@
  * REST data transfer objects shared by the gateway, SDK, CLI, and demos.
  * All timestamps are ISO-8601 strings. All routes are owner-scoped by the authenticated GitHub account.
  */
-import type { EnvironmentType, SandboxSize, ToolDeclaration } from "./config.js";
+import type { EnvironmentRequest, EnvironmentType, SandboxSize, ToolDeclaration } from "./config.js";
 import type { NetworkPolicy } from "./network.js";
+import type { ExecState } from "./sandbox.js";
+import type { ExecutionStyle, SubagentSandboxes } from "./workers.js";
 
 export interface AccountInfo {
   /** Stable GitHub account ID; ownership binds to this, never to the mutable login. */
@@ -24,8 +26,16 @@ export interface EnvironmentInfo {
   /** Orchestrator environments: the isolated environments workers run in (the first is the default), and how many at once. */
   readonly workers?: readonly string[];
   readonly maxWorkers?: number;
+  /** Orchestrator environments: how the coordinator gets work done, and (direct and mixed) its sub-agents' sandboxes. */
+  readonly execution?: ExecutionStyle;
+  readonly subagents?: SubagentSandboxes;
   readonly scheduling: boolean;
   readonly agents: readonly string[];
+  /**
+   * Isolated environments: whether `managed.exec`, `managed.sandboxes.create`, and the exec routes work in this
+   * environment's sandboxes (operators turn them off with `exec: false`).
+   */
+  readonly exec?: boolean;
 }
 
 export interface DeploymentInfo {
@@ -111,6 +121,83 @@ export interface SessionInfo {
   readonly scheduleId?: string;
   /** Present on an orchestrator's workers: the coordinator session that started this one. */
   readonly parentSessionId?: string;
+  /**
+   * `workspace`: a workspace-only sandbox (`managed.sandboxes.create`): commands and files, no agent or runtime, so
+   * prompts, resume, and Copilot CLI attach are refused. Absent for agent sessions.
+   */
+  readonly kind?: "workspace";
+}
+
+/** `POST /v1/sandboxes`: a workspace-only sandbox of an isolated environment, owned by the caller. */
+export interface CreateSandboxRequest {
+  readonly environment: string | EnvironmentRequest;
+  /** Caller-chosen ID; the same ID again (same owner) answers with that sandbox. */
+  readonly sessionId?: string;
+}
+
+/** Who ran a command: the owner through the API (`managed.exec`, REST, CLI), or the platform (an orchestrator's tools). */
+export interface ExecCaller {
+  readonly kind: "api" | "platform";
+  readonly accountId?: number;
+  readonly login?: string;
+  /** Platform callers: what ran it, e.g. a tool name. */
+  readonly name?: string;
+  /** Platform callers: the sub-agent that called the tool (undefined for the root agent). */
+  readonly agentId?: string;
+}
+
+/** `POST /v1/sessions/:id/exec`. */
+export interface ExecRequest {
+  readonly command: string;
+  /** Idempotency key (`[A-Za-z0-9_-]{1,64}`): the same ID again answers with that command; it is never run twice. */
+  readonly id?: string;
+  /** Kills the command's process group after this long. Default: 10 minutes, none for `background` commands. */
+  readonly timeoutMs?: number;
+  /** Start it and answer at once (stdin stays open for `input`). */
+  readonly background?: boolean;
+  /** How long this call waits for the command to finish (at most 30 s; default 30 s, 0 for background). */
+  readonly waitMs?: number;
+  /** Default `closed` (`open` for background commands). */
+  readonly stdin?: "open" | "closed";
+}
+
+/** `POST /v1/sessions/:id/exec/:execId/input`. */
+export interface ExecInputRequest {
+  readonly data?: string;
+  /** Closes stdin after `data`. */
+  readonly eof?: boolean;
+}
+
+/** A command run directly in a sandbox, as the journal records it. */
+export interface ExecInfo {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly command: string;
+  /**
+   * `completed` (any exit code), `timed_out`, `stopped` (with a `reason`, e.g. an idle stop or a restart), `failed`
+   * (could not start), or `uncertain`: the platform lost track of it, so it may or may not have run. It is never run
+   * again by itself.
+   */
+  readonly state: ExecState;
+  readonly background: boolean;
+  readonly exitCode?: number;
+  readonly signal?: string;
+  readonly reason?: string;
+  readonly timeoutMs?: number;
+  readonly startedAt: string;
+  readonly finishedAt?: string;
+  readonly lastOutputAt?: string;
+  readonly outputBytes: number;
+  readonly caller?: ExecCaller;
+}
+
+/** A command and its output from an offset: what `POST .../exec` and `GET .../exec/:execId?offset=` answer. */
+export interface ExecResult extends ExecInfo {
+  readonly output: string;
+  /** Read from here next. */
+  readonly offset: number;
+  /** Output older than what the journal keeps (the newest 1 MiB), skipped by this read. */
+  readonly skippedBytes?: number;
 }
 
 export interface SessionListQuery {

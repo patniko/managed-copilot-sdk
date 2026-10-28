@@ -58,6 +58,8 @@ const MIGRATIONS = [
   `ALTER TABLE core_sessions ADD COLUMN parent_session_id TEXT;
    ALTER TABLE core_sessions ADD COLUMN parent_incarnation TEXT;
    CREATE INDEX core_sessions_parent ON core_sessions (parent_session_id);`,
+  // `workspace`: a workspace-only session (a sandbox for commands and files, no runtime).
+  `ALTER TABLE core_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent';`,
 ];
 
 interface SessionRow {
@@ -81,6 +83,7 @@ interface SessionRow {
   incarnation: string | null;
   parent_session_id: string | null;
   parent_incarnation: string | null;
+  kind: string | null;
   created_at: string;
   updated_at: string;
   login: string | null;
@@ -139,6 +142,7 @@ export interface NewSession {
   readonly webhook?: string;
   readonly parentSessionId?: string;
   readonly parentIncarnation?: string;
+  readonly kind?: "agent" | "workspace";
 }
 
 const SELECT = `SELECT s.*, a.login, a.name, a.avatar_url FROM core_sessions s LEFT JOIN core_accounts a ON a.id = s.owner_id`;
@@ -177,8 +181,8 @@ export class SessionLedger {
     this.upsertAccount(session.owner);
     this.#db
       .prepare(
-        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, parent_session_id, parent_incarnation, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, parent_session_id, parent_incarnation, created_at, updated_at, kind)
+         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -199,6 +203,7 @@ export class SessionLedger {
         session.parentIncarnation ?? null,
         now,
         now,
+        session.kind ?? "agent",
       );
     return this.get(session.id)!;
   }
@@ -421,6 +426,7 @@ function toRecord(row: SessionRow): SessionRecord {
     incarnation: row.incarnation ?? `inc_legacy_${row.id}_${row.created_at}`,
     ...(row.parent_session_id ? { parentSessionId: row.parent_session_id } : {}),
     ...(row.parent_incarnation ? { parentIncarnation: row.parent_incarnation } : {}),
+    ...(row.kind === "workspace" ? { kind: "workspace" as const } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

@@ -1,10 +1,10 @@
 // Fakes for Dispatch's platform seam: a stock-shaped coordinator session whose events and permission prompts the test
 // drives, and a platform that keeps sessions, workers, sandboxes, and files in memory.
 import type { MessageOptions, PermissionRequest, ResumeSessionConfig, SessionConfig, SessionEvent } from "@github/copilot-sdk";
-import type { ArtifactInfo, FileEntry, PlatformEvent, SessionInfo, WorkerInfo } from "@managed-copilot/sdk";
+import type { ArtifactInfo, ExecInfo, FileEntry, PlatformEvent, SessionInfo, WorkerInfo } from "@managed-copilot/sdk";
 import type { DispatchConfig } from "../src/server/config.js";
 import type { CoordinatorSession, DispatchPlatform } from "../src/server/platform.js";
-import type { Blueprint, CoordinatorInfo, PlatformStatus } from "../src/shared/types.js";
+import type { Blueprint, CoordinatorInfo, PlatformStatus, StyleInfo } from "../src/shared/types.js";
 
 let sequence = 0;
 const base = Date.parse("2026-10-27T10:00:00.000Z");
@@ -98,19 +98,27 @@ export function worker(overrides: Partial<WorkerInfo> & Pick<WorkerInfo, "id" | 
 
 export class FakePlatform implements DispatchPlatform {
   status: PlatformStatus = { state: "connected", url: "http://gateway.test", mode: "local", deployment: "test", account: { login: "octocat" } };
-  coordinator: CoordinatorInfo | undefined = { environment: "dispatch", model: "claude-sonnet-5", maxWorkers: 6 };
+  coordinator: CoordinatorInfo | undefined = { environment: "dispatch", model: "claude-sonnet-5", maxWorkers: 6, style: "delegate" };
+  styles: readonly StyleInfo[] = [
+    { style: "delegate", environment: "dispatch", available: true, workers: ["dispatch-python", "dispatch-node"] },
+    { style: "direct", environment: "dispatch-direct", available: true, handsEnvironment: "dispatch-python", subagents: "shared", workers: [] },
+    { style: "mixed", environment: "dispatch-mixed", available: true, handsEnvironment: "dispatch-python", subagents: "shared", workers: ["dispatch-python", "dispatch-node"] },
+  ];
   blueprints: readonly Blueprint[] = BLUEPRINTS;
   readonly sessions = new Map<string, FakeSession>();
-  /** Sessions that exist on the platform (listed in the orchestrator environment). */
+  /** Sessions that exist on the platform (listed in their orchestrator environment). */
   readonly listed = new Map<string, SessionInfo>();
   readonly workerLists = new Map<string, WorkerInfo[]>();
+  readonly execLists = new Map<string, ExecInfo[]>();
   readonly infos = new Map<string, SessionInfo>();
   readonly fileLists = new Map<string, FileEntry[]>();
   readonly fileContents = new Map<string, string>();
   readonly artifactLists = new Map<string, ArtifactInfo[]>();
   readonly deleted: string[] = [];
   readonly created: SessionConfig[] = [];
-  readonly resumed: { sessionId: string; config: ResumeSessionConfig }[] = [];
+  /** The environment each session was created in. */
+  readonly createdIn: string[] = [];
+  readonly resumed: { sessionId: string; config: ResumeSessionConfig; environment?: string }[] = [];
   /** Every resume tried, including ones that failed. */
   readonly resumeAttempts: string[] = [];
   /** Permission prompts the platform delivers again when a session is resumed. */
@@ -148,24 +156,25 @@ export class FakePlatform implements DispatchPlatform {
     for (const listener of this.#workers) listener(event);
   }
 
-  async createSession(config: SessionConfig): Promise<FakeSession> {
+  async createSession(config: SessionConfig, environment = "dispatch"): Promise<FakeSession> {
     this.#ids += 1;
     const id = `session-${this.#ids}`;
     const session = new FakeSession(id, config);
     this.sessions.set(id, session);
     this.created.push(config);
-    this.listed.set(id, info(id));
+    this.createdIn.push(environment);
+    this.listed.set(id, info(id, { environment }));
     return session;
   }
 
-  async resumeSession(sessionId: string, config: ResumeSessionConfig): Promise<FakeSession> {
+  async resumeSession(sessionId: string, config: ResumeSessionConfig, environment?: string): Promise<FakeSession> {
     this.resumeAttempts.push(sessionId);
     const session = this.sessions.get(sessionId);
     if (!session || !this.listed.has(sessionId)) throw Object.assign(new Error(`Session ${sessionId} not found`), { code: "not_found" });
     session.config = config;
     session.handlers = config;
     session.disconnected = false;
-    this.resumed.push({ sessionId, config });
+    this.resumed.push({ sessionId, config, ...(environment ? { environment } : {}) });
     // Prompts still waiting for an answer come to the new connection, as the gateway delivers them.
     for (const prompt of this.pendingPrompts.get(sessionId) ?? []) void session.ask(prompt);
     return session;
@@ -176,8 +185,8 @@ export class FakePlatform implements DispatchPlatform {
     this.listed.delete(sessionId);
   }
 
-  async listSessions(): Promise<SessionInfo[]> {
-    return [...this.listed.values()];
+  async listSessions(environment?: string): Promise<SessionInfo[]> {
+    return [...this.listed.values()].filter((session) => environment === undefined || session.environment === environment);
   }
 
   async sessionInfo(sessionId: string): Promise<SessionInfo> {
@@ -202,6 +211,10 @@ export class FakePlatform implements DispatchPlatform {
 
   async artifacts(sessionId: string): Promise<ArtifactInfo[]> {
     return [...(this.artifactLists.get(sessionId) ?? [])];
+  }
+
+  async execs(sessionId: string): Promise<ExecInfo[]> {
+    return [...(this.execLists.get(sessionId) ?? [])];
   }
 }
 
@@ -230,6 +243,8 @@ export function testConfig(dataDir: string, overrides: Partial<DispatchConfig> =
     webRoot: dataDir,
     repoRoot: dataDir,
     environment: "dispatch",
+    environments: { delegate: "dispatch", direct: "dispatch-direct", mixed: "dispatch-mixed" },
+    style: "delegate",
     model: "claude-sonnet-5",
     approvals: "ask",
     healthIntervalMs: 60_000,

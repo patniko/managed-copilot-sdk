@@ -1,6 +1,6 @@
 // Test harness: a fake runtime that speaks the stock runtime's JSON-RPC over TCP (LSP framing), a GitHub API stub,
 // a gateway wired to both, and a raw bridge-protocol client. Used by router/integration tests; never by demos.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -8,7 +8,7 @@ import { connect as connectTcp, createServer, type Server, type Socket } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, ManagedCopilotError, type EnvironmentRequest } from "@managed-copilot/protocol";
+import { BRIDGE_HELLO, BRIDGE_SUBPROTOCOL, ManagedCopilotError, type EnvironmentRequest, type ExecInfo, type ExecResult } from "@managed-copilot/protocol";
 import { WebSocket } from "ws";
 import { loadConfig } from "../src/config.js";
 import { RpcEndpoint, RpcError, streamTransport, webSocketTransport } from "../src/modules/core/rpc.js";
@@ -78,11 +78,11 @@ export class FakeRuntime {
     return this.requests.filter((request) => request.method === method);
   }
 
-  /** Emits a session event from the runtime, on the connection that owns the session (test hook). */
-  emitEvent(sessionId: string, type: string, data: Record<string, unknown> = {}): string {
+  /** Emits a session event from the runtime, on the connection that owns the session (test hook); `agentId` makes it a sub-agent's. */
+  emitEvent(sessionId: string, type: string, data: Record<string, unknown> = {}, agentId?: string): string {
     const session = this.sessions.get(sessionId);
     if (!session?.endpoint) throw new Error(`No open session ${sessionId}`);
-    return this.#emit(session.endpoint, session, type, data);
+    return this.#emit(session.endpoint, session, type, data, agentId);
   }
 
   /** Emits a session event on one runtime connection (1 = the first), whichever connection the session is open on (test hook). */
@@ -183,8 +183,8 @@ export class FakeRuntime {
     endpoint.transport.onClose(() => this.#endpoints.delete(endpoint));
   }
 
-  #emit(endpoint: RpcEndpoint, session: FakeSession, type: string, data: Record<string, unknown>): string {
-    const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data };
+  #emit(endpoint: RpcEndpoint, session: FakeSession, type: string, data: Record<string, unknown>, agentId?: string): string {
+    const event = { id: randomUUID(), timestamp: new Date().toISOString(), parentId: null, type, data, ...(agentId ? { agentId } : {}) };
     session.events.push(event);
     // Events follow the session to the connection that opened it last (a turn continues where it was resumed).
     (session.endpoint ?? endpoint).notify("session.event", { sessionId: session.id, event });
@@ -330,6 +330,12 @@ export class FakeRuntime {
         this.sessions.delete(String(sessionId));
         return { success: true };
       case "session.abort":
+        // Like the stock runtime: a turn waiting on a tool call stops waiting for it.
+        for (const [requestId, pending] of this.#pendingTools) {
+          if (pending.sessionId !== sessionId) continue;
+          this.#pendingTools.delete(requestId);
+          pending.resolve({ requestId, aborted: true });
+        }
         return {};
       case "ping":
         return { message: params["message"] ?? "pong", timestamp: Date.now(), protocolVersion: 3 };
@@ -354,17 +360,24 @@ export class FakeRuntime {
       return new Promise<string>(() => undefined);
     }
     // `tool:<name>` calls a tool, optionally with JSON arguments: `tool:web_fetch {"url":"https://example.com"}`.
+    // `agent:<id>` before it makes the call a sub-agent's (the request carries `agentId`, as a stock `task` agent's does).
     const call = /tool:([a-z_]+)(?:\s+(\{[\s\S]*\}))?/.exec(prompt);
     const tool = call?.[1];
+    const agentId = /agent:([\w-]+)/.exec(prompt)?.[1];
     let content = `echo: ${prompt}`;
     if (tool) {
       const requestId = randomUUID();
       const toolCallId = `call_${requestId}`;
       const args: unknown = call?.[2] ? JSON.parse(call[2]) : { id: "1234" };
       const answered = new Promise<Record<string, unknown>>((resolve) => this.#pendingTools.set(requestId, { sessionId: session.id, toolName: tool, toolCallId, arguments: args, resolve }));
-      this.#emit(endpoint, session, "external_tool.requested", { requestId, sessionId: session.id, toolCallId, toolName: tool, arguments: args, workingDirectory: "/platform/host/path" });
+      this.#emit(endpoint, session, "external_tool.requested", { requestId, sessionId: session.id, toolCallId, toolName: tool, arguments: args, workingDirectory: "/platform/host/path" }, agentId);
       const answer = await answered;
-      this.#emit(endpoint, session, "external_tool.completed", { requestId });
+      this.#emit(endpoint, session, "external_tool.completed", { requestId }, agentId);
+      // `session.abort` ended the turn while the call waited: the runtime stops waiting for it.
+      if (answer["aborted"] === true) {
+        this.#processing.delete(session.id);
+        return this.#emit(endpoint, session, "session.idle", { aborted: true });
+      }
       const result = answer["result"] as { textResultForLlm?: unknown } | string | undefined;
       content = `tool said: ${typeof result === "string" ? result : typeof result?.textResultForLlm === "string" ? result.textResultForLlm : JSON.stringify(result ?? answer["error"])}`;
     }
@@ -598,7 +611,12 @@ export class FakeSandboxes {
     return { entry: { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() }, body };
   }
 
-  async writeFile(sessionId: string, path: string, body: Readable, options: { readonly sandboxId?: string } = {}): Promise<{ path: string; type: "file"; size: number; modifiedAt: string }> {
+  async writeFile(
+    sessionId: string,
+    path: string,
+    body: Readable,
+    options: { readonly sandboxId?: string; readonly overwrite?: boolean; readonly ifMatch?: string } = {},
+  ): Promise<{ path: string; type: "file"; size: number; modifiedAt: string }> {
     this.#expect(sessionId, options.sandboxId);
     const failure = this.failNextWrite;
     this.failNextWrite = undefined;
@@ -606,8 +624,96 @@ export class FakeSandboxes {
     const chunks: Buffer[] = [];
     for await (const chunk of body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
     const content = Buffer.concat(chunks);
+    const existing = this.workspace(sessionId).get(path);
+    if (options.ifMatch !== undefined) {
+      if (!existing) throw new ManagedCopilotError("not_found", `"${path}" does not exist.`);
+      if (createHash("sha256").update(existing).digest("hex") !== options.ifMatch) throw new ManagedCopilotError("conflict", `"${path}" changed since it was read; read it again and retry.`);
+    } else if (options.overwrite === false && existing) {
+      throw new ManagedCopilotError("conflict", `"${path}" already exists; pass overwrite to replace it.`);
+    }
     this.workspace(sessionId).set(path, content);
     return { path, type: "file", size: content.length, modifiedAt: new Date(0).toISOString() };
+  }
+
+  // Commands: each runs at once through `execHandler` (default: prints "ran: <command>" and exits 0).
+
+  /** Answers a new command: its output and exit code, or `running: true` to leave it running (test hook). */
+  execHandler: (sessionId: string, command: string, options: Record<string, unknown>) => { output?: string; exitCode?: number; running?: boolean } = (_sessionId, command) => ({
+    output: `ran: ${command}\n`,
+    exitCode: 0,
+  });
+  readonly execs = new Map<string, { info: ExecInfo; output: string; input: string; options: Record<string, unknown> }>();
+  readonly published: { sessionId: string; turnId: string }[] = [];
+
+  #execRecord(sessionId: string, execId: string) {
+    const entry = this.execs.get(`${sessionId}:${execId}`);
+    if (!entry) throw new ManagedCopilotError("not_found", `Command ${execId} was not found.`);
+    return entry;
+  }
+
+  async exec(sessionId: string, command: string, options: Record<string, unknown> = {}): Promise<ExecResult> {
+    this.#expect(sessionId, options["sandboxId"] as string | undefined);
+    this.log.push({ op: "exec", sessionId, detail: { command, ...options } });
+    const id = (options["id"] as string | undefined) ?? (typeof options["actionId"] === "string" ? `ex_${createHash("sha256").update(options["actionId"]).digest("hex").slice(0, 32)}` : `ex_${randomUUID()}`);
+    let entry = this.execs.get(`${sessionId}:${id}`);
+    if (!entry) {
+      const answer = this.execHandler(sessionId, command, options);
+      const output = answer.output ?? "";
+      const now = new Date().toISOString();
+      entry = {
+        info: {
+          id,
+          sessionId,
+          command,
+          state: answer.running ? "running" : "completed",
+          background: options["background"] === true,
+          ...(answer.running ? {} : { exitCode: answer.exitCode ?? 0, finishedAt: now }),
+          startedAt: now,
+          outputBytes: Buffer.byteLength(output),
+          ...(options["caller"] ? { caller: options["caller"] as ExecInfo["caller"] } : {}),
+        },
+        output,
+        input: "",
+        options,
+      };
+      this.execs.set(`${sessionId}:${id}`, entry);
+    }
+    return { ...entry.info, output: entry.output, offset: Buffer.byteLength(entry.output) };
+  }
+
+  /** Appends output to a running command, and ends it with `exitCode` when given (test hook). */
+  feedExec(sessionId: string, execId: string, output: string, exitCode?: number): void {
+    const entry = this.#execRecord(sessionId, execId);
+    entry.output += output;
+    entry.info = { ...entry.info, outputBytes: Buffer.byteLength(entry.output), ...(exitCode !== undefined ? { state: "completed", exitCode, finishedAt: new Date().toISOString() } : {}) };
+  }
+
+  async readExec(sessionId: string, execId: string, options: { readonly offset?: number } = {}): Promise<ExecResult> {
+    const entry = this.#execRecord(sessionId, execId);
+    const bytes = Buffer.from(entry.output);
+    const offset = Math.min(options.offset ?? 0, bytes.length);
+    return { ...entry.info, output: bytes.subarray(offset).toString("utf8"), offset: bytes.length };
+  }
+
+  async writeExec(sessionId: string, execId: string, input: { readonly data?: string; readonly eof?: boolean }): Promise<ExecInfo> {
+    const entry = this.#execRecord(sessionId, execId);
+    if (entry.info.state !== "running") throw new ManagedCopilotError("conflict", "It ended.");
+    entry.input += input.data ?? "";
+    return entry.info;
+  }
+
+  async stopExec(sessionId: string, execId: string, options: { readonly reason?: string } = {}): Promise<ExecInfo> {
+    const entry = this.#execRecord(sessionId, execId);
+    if (entry.info.state === "running") entry.info = { ...entry.info, state: "stopped", ...(options.reason ? { reason: options.reason } : {}), finishedAt: new Date().toISOString() };
+    return entry.info;
+  }
+
+  listExecs(sessionId: string): ExecInfo[] {
+    return [...this.execs.values()].filter((entry) => entry.info.sessionId === sessionId).map((entry) => entry.info);
+  }
+
+  async publishOutputs(sessionId: string, turnId: string): Promise<void> {
+    this.published.push({ sessionId, turnId });
   }
 }
 

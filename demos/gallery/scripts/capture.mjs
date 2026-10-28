@@ -75,6 +75,8 @@ const WALKTHROUGHS = [
   // A guide: show it running walkthroughs 01 and 03 against Azure.
   ["10", "10-azure", { section: "3. Run the samples", outputs: 2 }],
   ["11", "11-orchestrator"],
+  ["12", "12-direct-execution"],
+  ["13", "13-your-own-harness"],
 ];
 
 /** Fenced blocks with their language and the `## ` section they sit in. Handles ```` fences that contain ```. */

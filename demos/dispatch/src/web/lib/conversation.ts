@@ -1,5 +1,5 @@
 import { blueprintKind } from "../../shared/catalog.js";
-import type { Blueprint, BlueprintKind, ConversationView, Decision, WorkerView } from "../../shared/types.js";
+import type { Blueprint, BlueprintKind, ConversationView, WorkerView } from "../../shared/types.js";
 import { parseTime } from "./format.js";
 
 export function blueprintFor(environment: string, blueprints: readonly Blueprint[]): Blueprint | undefined {
@@ -17,15 +17,25 @@ export interface ConversationStats {
   readonly reused: number;
   readonly stopped: number;
   readonly live: number;
+  /** Commands the coordinator and its sub-agents ran in their own sandbox. */
+  readonly commands: number;
+  /** Sub-agents it started. */
+  readonly subagents: number;
 }
 
 export function conversationStats(view: ConversationView): ConversationStats {
   let reused = 0;
+  let commands = 0;
+  let subagents = 0;
   for (const message of view.messages) {
     for (const decision of message.decisions ?? []) if (decision.kind === "message" && (decision.status === "done" || decision.status === "running")) reused += 1;
+    commands += (message.commands ?? []).filter((command) => command.kind === "run" && command.status !== "denied" && command.status !== "asking").length;
+    subagents += message.subagents?.length ?? 0;
   }
   const stopped = view.workers.filter((worker) => worker.state === "stopped").length;
-  return { messages: view.messageCount, created: view.workers.length, reused, stopped, live: view.workers.length - stopped };
+  // A coordinator's own sandbox is reused when later messages ran more commands in it.
+  for (const worker of view.workers) if (worker.role === "hands") reused += worker.sentWorkBy.length;
+  return { messages: view.messageCount, created: view.workers.length, reused, stopped, live: view.workers.length - stopped, commands, subagents };
 }
 
 export interface WorkItem {
@@ -51,10 +61,10 @@ export function workGiven(view: ConversationView, worker: WorkerView): WorkItem[
   return items;
 }
 
-/** How long the coordinator took over a message: from the message to its last recorded step. */
-export function handlingTime(at: string, decisions: readonly Decision[], now: number, current: boolean): number {
+/** How long the coordinator took over a message: from the message to its last recorded step (decision, command, sub-agent). */
+export function handlingTime(at: string, steps: readonly { readonly at: string; readonly endedAt?: string }[], now: number, current: boolean): number {
   const start = parseTime(at) ?? now;
   if (current) return Math.max(0, now - start);
-  const ends = decisions.map((decision) => parseTime(decision.endedAt) ?? parseTime(decision.at) ?? start);
+  const ends = steps.map((step) => parseTime(step.endedAt) ?? parseTime(step.at) ?? start);
   return Math.max(0, Math.max(start, ...ends) - start);
 }

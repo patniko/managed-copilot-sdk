@@ -1,6 +1,6 @@
-import { CheckCircleFillIcon, CircleSlashIcon, ContainerIcon, ShieldIcon, XCircleFillIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, CircleSlashIcon, ContainerIcon, ShieldIcon, TerminalIcon, XCircleFillIcon } from "@primer/octicons-react";
 import type { CSSProperties } from "react";
-import type { Approval, Blueprint, ConversationView, WorkerView } from "../../shared/types.js";
+import type { Approval, Blueprint, Command, ConversationView, WorkerView } from "../../shared/types.js";
 import { KIND_ICON, KIND_LANE, networkSummary, sizeSummary, WORKER_STATE } from "../lib/blueprints.js";
 import { kindOf } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
@@ -32,6 +32,7 @@ function lastChange(worker: WorkerView): string {
 
 export function MessageChips({ worker }: { readonly worker: WorkerView }) {
   if (worker.createdBy === undefined && worker.sentWorkBy.length === 0) return null;
+  const hands = worker.role === "hands";
   return (
     <div className="mt-1.5 flex flex-wrap gap-1">
       {worker.createdBy !== undefined ? (
@@ -40,17 +41,20 @@ export function MessageChips({ worker }: { readonly worker: WorkerView }) {
         </span>
       ) : null}
       {worker.sentWorkBy.map((index) => (
-        <span key={index} className="Label Label--accent" title={`Message #${index} sent it more work`}>
-          #{index} reused
+        <span key={index} className="Label Label--accent" title={hands ? `Message #${index} ran more commands in it` : `Message #${index} sent it more work`}>
+          #{index} {hands ? "used" : "reused"}
         </span>
       ))}
     </div>
   );
 }
 
-function WorkerCard({ conversationId, worker, selected, now }: { readonly conversationId: string; readonly worker: WorkerView; readonly selected: boolean; readonly now: number }) {
+function WorkerCard({ view, worker, selected, now }: { readonly view: ConversationView; readonly worker: WorkerView; readonly selected: boolean; readonly now: number }) {
+  const conversationId = view.id;
   const meta = WORKER_STATE[worker.state];
   const active = worker.state === "starting" || worker.state === "working";
+  const hands = worker.role === "hands";
+  const ran = hands ? commandsIn(view, worker).length : 0;
   return (
     <button
       type="button"
@@ -59,19 +63,22 @@ function WorkerCard({ conversationId, worker, selected, now }: { readonly conver
       className={cx(
         "w-56 rounded-lg border p-2 text-left text-xs transition-shadow",
         worker.state === "stopped" ? "border-line bg-canvas-muted" : "border-line bg-canvas hover:shadow-sm",
+        hands && worker.state !== "stopped" && "border-dashed",
         selected && "border-transparent shadow-[0_0_0_2px_var(--bgColor-accent-emphasis)]",
         active && !selected && "border-[var(--borderColor-accent-emphasis)]",
       )}
     >
       <span className="flex items-center gap-1.5 text-sm font-semibold">
-        <WorkerStateIcon worker={worker} size={14} />
-        <span className="min-w-0 truncate">{worker.name}</span>
-        <span className="ml-auto shrink-0 font-mono text-xs font-normal text-fg-muted tabular-nums">
-          {active ? formatDuration(between(lastChange(worker), undefined, now)) : plural(worker.tasks, "task")}
-        </span>
+        {hands ? <TerminalIcon size={14} className="shrink-0 text-fg-muted" /> : <WorkerStateIcon worker={worker} size={14} />}
+        <span className="min-w-0 truncate">{hands ? handsTitle(view, worker) : worker.name}</span>
+        {hands ? null : (
+          <span className="ml-auto shrink-0 font-mono text-xs font-normal text-fg-muted tabular-nums">
+            {active ? formatDuration(between(lastChange(worker), undefined, now)) : plural(worker.tasks, "task")}
+          </span>
+        )}
       </span>
-      <span className={cx("mt-0.5 block font-medium", worker.state === "idle" ? "text-fg-success" : worker.state === "failed" ? "text-fg-danger" : "text-fg-muted")}>
-        {meta.label} · {meta.sandbox}
+      <span className={cx("mt-0.5 block font-medium", hands ? "text-fg-muted" : worker.state === "idle" ? "text-fg-success" : worker.state === "failed" ? "text-fg-danger" : "text-fg-muted")}>
+        {hands ? (worker.state === "stopped" ? "Deleted · no agent in it" : `${plural(ran, "command")} · no agent in it`) : `${meta.label} · ${meta.sandbox}`}
       </span>
       {worker.sandbox ? (
         <span className="mt-1 flex items-center gap-1 text-fg-muted">
@@ -82,6 +89,18 @@ function WorkerCard({ conversationId, worker, selected, now }: { readonly conver
       <MessageChips worker={worker} />
     </button>
   );
+}
+
+/** A hands sandbox's title: the coordinator's own, or one sub-agent's (`subagents: "own"`). */
+export function handsTitle(view: Pick<ConversationView, "agents">, worker: WorkerView): string {
+  if (!worker.agentId) return "Coordinator's sandbox";
+  return `${view.agents[worker.agentId] ?? "Sub-agent"}'s sandbox`;
+}
+
+/** The commands run in a hands sandbox, from the conversation's messages. */
+export function commandsIn(view: ConversationView, worker: WorkerView): Command[] {
+  const own = view.workers.some((candidate) => candidate.role === "hands" && candidate.agentId !== undefined);
+  return view.messages.flatMap((message) => (message.commands ?? []).filter((command) => command.kind === "run" && command.status !== "denied" && command.status !== "asking" && (!own || command.agentId === worker.agentId)));
 }
 
 function AskingCard({ conversationId, approval }: { readonly conversationId: string; readonly approval: Approval }) {
@@ -148,7 +167,7 @@ function BlueprintRow({
       </div>
       <div className="flex min-w-0 flex-wrap items-start gap-2">
         {workers.map((worker) => (
-          <WorkerCard key={worker.id} conversationId={view.id} worker={worker} selected={worker.id === selected} now={now} />
+          <WorkerCard key={worker.id} view={view} worker={worker} selected={worker.id === selected} now={now} />
         ))}
         {approvals.map((approval) => (
           <AskingCard key={approval.id} conversationId={view.id} approval={approval} />
@@ -163,8 +182,11 @@ export function Environments({ view, blueprints, selected }: { readonly view: Co
   const active = view.workers.some((worker) => worker.state === "starting" || worker.state === "working");
   const now = useNow(active);
   const known = new Set(blueprints.map((blueprint) => blueprint.name));
-  // Workers from environments that aren't (or are no longer) among the coordinator's blueprints.
-  const others = [...new Set(view.workers.map((worker) => worker.environment).filter((environment) => !known.has(environment)))];
+  const sandboxApprovals = view.approvals.filter((approval) => approval.kind !== "command");
+  // Workers (and requests for them) from environments that aren't, or are no longer, among the coordinator's blueprints.
+  const others = [
+    ...new Set([...view.workers.map((worker) => worker.environment), ...sandboxApprovals.map((approval) => approval.environment ?? "")].filter((environment) => environment && !known.has(environment))),
+  ];
   return (
     <div className="flex flex-col gap-2.5">
       {blueprints.map((blueprint) => (
@@ -173,7 +195,7 @@ export function Environments({ view, blueprints, selected }: { readonly view: Co
           view={view}
           blueprint={blueprint}
           workers={view.workers.filter((worker) => worker.environment === blueprint.name)}
-          approvals={view.approvals.filter((approval) => approval.environment === blueprint.name)}
+          approvals={sandboxApprovals.filter((approval) => approval.environment === blueprint.name)}
           selected={selected}
           now={now}
         />
@@ -186,7 +208,7 @@ export function Environments({ view, blueprints, selected }: { readonly view: Co
             view={view}
             blueprint={{ name: environment, kind, label: "Sandbox", size: "", network: { access: "disabled", hosts: [] } }}
             workers={view.workers.filter((worker) => worker.environment === environment)}
-            approvals={view.approvals.filter((approval) => approval.environment === environment)}
+            approvals={sandboxApprovals.filter((approval) => approval.environment === environment)}
             selected={selected}
             now={now}
           />

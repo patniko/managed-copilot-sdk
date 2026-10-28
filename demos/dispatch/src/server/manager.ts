@@ -2,7 +2,7 @@
 // Copilot after every connection, so the list survives Dispatch restarts (and losing its data directory).
 import type { SessionInfo } from "@managed-copilot/sdk";
 import { TEMPLATES } from "../shared/catalog.js";
-import type { ApprovalMode, ConversationSettings, ConversationSummary, ConversationView, DispatchState, ServerEvent } from "../shared/types.js";
+import type { ApprovalMode, ConversationSettings, ConversationSummary, ConversationView, DispatchState, ExecutionStyle, ServerEvent } from "../shared/types.js";
 import { attachCommandTemplate, canLaunchTerminal } from "./attach.js";
 import type { DispatchConfig } from "./config.js";
 import { Conversation, type ConversationHost } from "./conversation.js";
@@ -90,7 +90,9 @@ export class ConversationManager implements ConversationHost {
     const before = new Set(this.#conversations.values());
     let sessions: SessionInfo[] | undefined;
     try {
-      sessions = await this.platform.listSessions(this.config.environment);
+      // Every style's orchestrator environment: a conversation is a session of one of them.
+      const lists = await Promise.all(this.#environments().map((environment) => this.platform.listSessions(environment)));
+      sessions = lists.flat();
     } catch (error) {
       log.warn("Couldn't list conversations on Managed Copilot", { error: errorText(error) });
     }
@@ -110,8 +112,8 @@ export class ConversationManager implements ConversationHost {
       }
       for (const session of existing.values()) {
         if (this.#conversations.has(session.id) || this.#removed.has(session.id)) continue;
-        this.store.ensure(session.id, { settings: { approvals: this.config.approvals }, createdAt: session.createdAt, ...(session.title ? { title: session.title } : {}) });
-        this.#conversations.set(session.id, new Conversation(this, session.id));
+        this.store.ensure(session.id, { settings: { approvals: this.config.approvals }, createdAt: session.createdAt, environment: session.environment, ...(session.title ? { title: session.title } : {}) });
+        this.#conversations.set(session.id, new Conversation(this, session.id, session.environment));
       }
     }
     this.#publishList();
@@ -123,6 +125,19 @@ export class ConversationManager implements ConversationHost {
 
   #sorted(): Conversation[] {
     return [...this.#conversations.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /** The orchestrator environments conversations can live in: each available style's. */
+  #environments(): string[] {
+    const available = this.platform.styles.filter((style) => style.available).map((style) => style.environment);
+    return available.length ? [...new Set(available)] : [this.config.environment];
+  }
+
+  /** New conversations' style: the configured one when this deployment has it, else the first it has. */
+  #defaultStyle(): ExecutionStyle {
+    const styles = this.platform.styles;
+    if (styles.length === 0 || styles.some((style) => style.style === this.config.style && style.available)) return this.config.style;
+    return styles.find((style) => style.available)?.style ?? this.config.style;
   }
 
   /** Whether a session is definitely gone: not found, or being deleted. An error that says neither keeps it. */
@@ -143,10 +158,11 @@ export class ConversationManager implements ConversationHost {
     return {
       platform: this.platform.status,
       ...(this.platform.coordinator ? { coordinator: this.platform.coordinator } : {}),
+      styles: this.platform.styles,
       blueprints: this.platform.blueprints,
       conversations: this.summaries(),
       templates: TEMPLATES,
-      defaults: { approvals: this.config.approvals },
+      defaults: { approvals: this.config.approvals, style: this.#defaultStyle() },
       attachCommand: attachCommandTemplate(this.config.attachUrl),
       canLaunchTerminal: canLaunchTerminal(),
     };
@@ -158,7 +174,13 @@ export class ConversationManager implements ConversationHost {
   }
 
   #platformEvent(): ServerEvent {
-    return { type: "platform", platform: this.platform.status, ...(this.platform.coordinator ? { coordinator: this.platform.coordinator } : {}), blueprints: this.platform.blueprints };
+    return {
+      type: "platform",
+      platform: this.platform.status,
+      ...(this.platform.coordinator ? { coordinator: this.platform.coordinator } : {}),
+      styles: this.platform.styles,
+      blueprints: this.platform.blueprints,
+    };
   }
 
   #require(id: string): Conversation {
@@ -171,11 +193,14 @@ export class ConversationManager implements ConversationHost {
     if (this.platform.status.state !== "connected") throw new DispatchError("platform_unavailable", this.platform.status.message ?? "Managed Copilot isn't connected yet.", 503);
   }
 
-  async create(prompt: string, approvals: ApprovalMode | undefined): Promise<ConversationView> {
+  async create(prompt: string, approvals: ApprovalMode | undefined, style?: ExecutionStyle): Promise<ConversationView> {
     this.#requireConnected();
     const text = validPrompt(prompt);
     const settings: ConversationSettings = { approvals: approvals ?? this.config.approvals };
-    const conversation = new Conversation(this);
+    const chosen = style ?? this.#defaultStyle();
+    const declared = this.platform.styles.find((candidate) => candidate.style === chosen);
+    if (declared && !declared.available) throw new DispatchError("style_unavailable", declared.reason ?? `This deployment has no environment for the ${chosen} style.`, 409);
+    const conversation = new Conversation(this, "", declared?.environment ?? this.config.environments[chosen]);
     try {
       await conversation.start(text, settings, (started) => this.#conversations.set(started.id, started));
     } catch (error) {
@@ -202,8 +227,8 @@ export class ConversationManager implements ConversationHost {
     return this.#require(id).send(validPrompt(prompt));
   }
 
-  answer(id: string, approvalId: string, approve: boolean, reason?: string): void {
-    this.#require(id).answer(approvalId, approve, reason);
+  answer(id: string, approvalId: string, approve: boolean, reason?: string, rest?: boolean): void {
+    this.#require(id).answer(approvalId, approve, reason, rest);
   }
 
   setSettings(id: string, settings: ConversationSettings): ConversationView {
@@ -227,6 +252,11 @@ export class ConversationManager implements ConversationHost {
   async readFile(id: string, workerId: string, path: string) {
     this.#requireConnected();
     return this.#require(id).readFile(workerId, path);
+  }
+
+  async commands(id: string, workerId: string) {
+    this.#requireConnected();
+    return this.#require(id).commands(workerId);
   }
 
   /** Whether a session may be attached from Dispatch: a conversation's coordinator or one of its workers. */

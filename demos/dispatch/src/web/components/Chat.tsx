@@ -1,12 +1,17 @@
 import { AlertIcon, CopilotIcon, HourglassIcon, ShieldIcon, TerminalIcon, ZapIcon } from "@primer/octicons-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Blueprint, ChatMessage, ConversationView } from "../../shared/types.js";
+import { handlingTime } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { between, formatClock, formatDuration } from "../lib/format.js";
-import { dismissOutgoing, sendMessage, setApprovals, useStore, type Outgoing } from "../lib/store.js";
+import { homeHref, navigate } from "../lib/router.js";
+import { dismissOutgoing, sendMessage, setApprovals, setDraft, useStore, type Outgoing } from "../lib/store.js";
+import { STYLE_META } from "../lib/styles.js";
 import { useNow } from "../lib/useNow.js";
+import { CommandsCard } from "./Commands.js";
 import { Composer } from "./Composer.js";
 import { ApprovalCard, DecisionCard } from "./Decisions.js";
+import { StyleChoice } from "./Home.js";
 import { MarkdownView } from "./Markdown.js";
 import { Callout } from "./ui/Feedback.js";
 import { Spinner } from "./ui/Spinner.js";
@@ -20,6 +25,7 @@ export function Chat({ view, blueprints }: { readonly view: ConversationView; re
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
   const lastUser = [...view.messages].reverse().find((message) => message.role === "user");
+  const sandboxApprovals = view.approvals.filter((approval) => approval.kind !== "command");
 
   // Follow new content while the person is at the bottom; leave them be when they scrolled up to read.
   useLayoutEffect(() => {
@@ -41,12 +47,12 @@ export function Chat({ view, blueprints }: { readonly view: ConversationView; re
       >
         <div className="mx-auto flex max-w-3xl flex-col gap-3">
           {view.messages.map((message) => (
-            <MessageItem key={message.id} message={message} current={view.busy && message.id === lastUser?.id} now={now} />
+            <MessageItem key={message.id} view={view} message={message} current={view.busy && message.id === lastUser?.id} now={now} />
           ))}
           {outgoing.map((item) => (
             <OutgoingItem key={item.key} conversationId={view.id} item={item} />
           ))}
-          <ApprovalCard conversationId={view.id} approvals={view.approvals} blueprints={blueprints} now={now} />
+          <ApprovalCard conversationId={view.id} approvals={sandboxApprovals} blueprints={blueprints} now={now} />
           <WorkingRow view={view} now={now} />
         </div>
       </div>
@@ -55,8 +61,12 @@ export function Chat({ view, blueprints }: { readonly view: ConversationView; re
   );
 }
 
-function MessageItem({ message, current, now }: { readonly message: ChatMessage; readonly current: boolean; readonly now: number }) {
+function MessageItem({ view, message, current, now }: { readonly view: ConversationView; readonly message: ChatMessage; readonly current: boolean; readonly now: number }) {
   if (message.role === "user") {
+    const decisions = message.decisions ?? [];
+    const commands = message.commands ?? [];
+    const subagents = message.subagents ?? [];
+    const took = formatDuration(handlingTime(message.at, [...decisions, ...commands, ...subagents], now, current));
     return (
       <>
         <div className="flex flex-col items-end gap-1">
@@ -75,7 +85,8 @@ function MessageItem({ message, current, now }: { readonly message: ChatMessage;
             {message.delivery ? <span title="Sent while the agent was working; it answered between steps">· while it worked</span> : null}
           </div>
         </div>
-        {message.decisions?.length ? <DecisionCard decisions={message.decisions} at={message.at} current={current} now={now} /> : null}
+        {decisions.length ? <DecisionCard decisions={decisions} took={took} now={now} /> : null}
+        {commands.length || subagents.length ? <CommandsCard view={view} commands={commands} subagents={subagents} now={now} {...(decisions.length ? {} : { took })} /> : null}
       </>
     );
   }
@@ -142,20 +153,24 @@ function WorkingRow({ view, now }: { readonly view: ConversationView; readonly n
       </div>
     );
   }
+  const working = [...view.messages].reverse().find((message) => message.role === "user");
+  const hands = working?.commands?.some((command) => command.status === "running") || working?.subagents?.some((subagent) => subagent.status === "running");
   return (
     <div role="status" className="flex items-center gap-2 pl-9 text-sm text-fg-muted">
       <Spinner size={14} className="text-fg-accent" />
-      Deciding what to do…
+      {hands ? "Working in its sandbox…" : view.style === "direct" ? "Working…" : "Deciding what to do…"}
     </div>
   );
 }
 
 function ChatComposer({ view }: { readonly view: ConversationView }) {
   const platform = useStore((state) => state.platform);
+  const styles = useStore((state) => state.styles);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const unavailable = view.problem ?? (platform?.state !== "connected" ? (platform?.message ?? "Managed Copilot isn't connected.") : undefined);
   const ask = view.settings.approvals === "ask";
+  const labels = STYLE_META[view.style].approvals;
 
   useEffect(() => setText(""), [view.id]);
 
@@ -186,18 +201,31 @@ function ChatComposer({ view }: { readonly view: ConversationView }) {
           disabled={Boolean(unavailable)}
           minRows={1}
           footer={
-            <button
-              type="button"
-              className="btn btn-invisible btn-sm m-0 shrink-0 gap-1 px-1.5 text-xs font-normal whitespace-nowrap text-fg-muted"
-              onClick={() => void setApprovals(view.id, ask ? "auto" : "ask")}
-              title={`${ask ? "Click to let the agent create sandboxes without asking." : "Click to approve each new sandbox yourself."} Work sent to sandboxes it already has never asks.`}
-              aria-label={ask ? "New sandboxes ask you first. Switch to creating freely" : "New sandboxes start without asking. Switch to asking first"}
-            >
-              {ask ? <ShieldIcon size={14} /> : <ZapIcon size={14} className="text-fg-attention" />}
-              {ask ? "New sandboxes ask you first" : "New sandboxes start without asking"}
-            </button>
+            <>
+              <StyleChoice
+                value={view.style}
+                styles={styles}
+                onChange={(style) => {
+                  if (style === view.style) return;
+                  // A conversation keeps its style: another style starts a new conversation, with this message.
+                  setDraft({ style, text });
+                  navigate(homeHref());
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn-invisible btn-sm m-0 shrink-0 gap-1 px-1.5 text-xs font-normal whitespace-nowrap text-fg-muted"
+                onClick={() => void setApprovals(view.id, ask ? "auto" : "ask")}
+                title={`${ask ? labels.auto.title : labels.ask.title}. Click to switch.${view.style === "delegate" ? " Work sent to sandboxes it already has never asks." : ""}`}
+                aria-label={`${ask ? labels.ask.state : labels.auto.state}. Switch to: ${ask ? labels.auto.label : labels.ask.label}`}
+              >
+                {ask ? <ShieldIcon size={14} /> : <ZapIcon size={14} className="text-fg-attention" />}
+                {ask ? labels.ask.state : labels.auto.state}
+              </button>
+            </>
           }
         />
+        <p className="mt-1 px-1 text-xs text-fg-muted">This conversation keeps its style. Picking another starts a new conversation with your message.</p>
       </div>
     </div>
   );

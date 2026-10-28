@@ -361,6 +361,7 @@ export class CoreOperator {
         scheduling: config.scheduling === true,
         ...(config.promoteTo ? { promoteTo: config.promoteTo } : {}),
         ...(config.workers ? { workers: config.workers, maxWorkers: config.maxWorkers ?? DEFAULT_MAX_WORKERS } : {}),
+        ...(config.type === "orchestrator" ? { execution: config.execution ?? "delegate", ...(config.execution && config.execution !== "delegate" ? { subagents: config.subagents ?? "shared" } : {}) } : {}),
         ...(config.idleTimeoutSeconds !== undefined ? { idleTimeoutSeconds: config.idleTimeoutSeconds } : {}),
         ...(config.warm !== undefined ? { warm: config.warm } : {}),
         ...(config.inference ? { inference: config.inference } : {}),

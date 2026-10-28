@@ -4,14 +4,18 @@
  *
  * | Environment       | Type         | Size   | Network                                   | What it's for                          |
  * | ----------------- | ------------ | ------ | ----------------------------------------- | -------------------------------------- |
- * | `dispatch`        | orchestrator | n/a    | the deployment default                    | the coordinator you talk to            |
+ * | `dispatch`        | orchestrator | n/a    | the deployment default                    | the coordinator you talk to: delegates to workers |
+ * | `dispatch-direct` | orchestrator | n/a    | the deployment default                    | the same, working directly (with its sub-agents) in a Python lab sandbox |
+ * | `dispatch-mixed`  | orchestrator | n/a    | the deployment default                    | the same, choosing per task: its own Python lab sandbox, or workers |
  * | `dispatch-python` | isolated     | medium | off                                       | calculations, data, simulations, charts |
  * | `dispatch-node`   | isolated     | small  | the npm registry only                     | building and testing JavaScript        |
  * | `dispatch-web`    | isolated     | small  | a short allowlist of documentation sites  | research with sources                  |
  * | `dispatch-writer` | isolated     | small  | off                                       | reports and charts from other workers' files |
  *
  * The coordinator's instructions list the worker environments with their descriptions, so the descriptions below are
- * how it decides which kind of sandbox a part of a request needs.
+ * how it decides which kind of sandbox a part of a request needs. The three orchestrator environments share the worker
+ * environments and differ only in their execution style (spec section 17): Dispatch's switch picks which one a new
+ * conversation is created in.
  *
  * Wire it into the root AppHost:
  *
@@ -29,8 +33,15 @@ import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { EnvironmentConfig } from "@managed-copilot/protocol";
 
-/** The orchestrator environment conversations run in. */
+/** The orchestrator environment conversations run in by default: a coordinator that delegates to workers. */
 export const DISPATCH_ENVIRONMENT = "dispatch";
+
+/** One orchestrator environment per execution style, over the same worker environments. */
+export const DISPATCH_STYLES = {
+  delegate: DISPATCH_ENVIRONMENT,
+  direct: "dispatch-direct",
+  mixed: "dispatch-mixed",
+} as const;
 
 /** The worker environments ("blueprints") the coordinator creates sandboxes from, in the order it is told about them. */
 export const DISPATCH_BLUEPRINTS = {
@@ -112,6 +123,20 @@ export function dispatch(options: DispatchOptions = {}): DispatchFragment {
     [DISPATCH_ENVIRONMENT]: {
       type: "orchestrator",
       description: "Dispatch: a coordinator that plans each request and creates the sandboxes it needs, or sends work to the ones it has",
+      workers: [DISPATCH_BLUEPRINTS.python, DISPATCH_BLUEPRINTS.node, DISPATCH_BLUEPRINTS.web, DISPATCH_BLUEPRINTS.writer],
+      maxWorkers: 6,
+    },
+    [DISPATCH_STYLES.direct]: {
+      type: "orchestrator",
+      description: "Dispatch, working directly: the coordinator and its sub-agents run commands and edit files themselves, in one Python lab sandbox",
+      execution: "direct",
+      workers: [DISPATCH_BLUEPRINTS.python],
+      maxWorkers: 6,
+    },
+    [DISPATCH_STYLES.mixed]: {
+      type: "orchestrator",
+      description: "Dispatch, mixed: the coordinator works in its own Python lab sandbox, and creates workers for the parts that need another environment or should run on their own",
+      execution: "mixed",
       workers: [DISPATCH_BLUEPRINTS.python, DISPATCH_BLUEPRINTS.node, DISPATCH_BLUEPRINTS.web, DISPATCH_BLUEPRINTS.writer],
       maxWorkers: 6,
     },

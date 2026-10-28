@@ -16,7 +16,6 @@ import { useState, type ReactNode } from "react";
 import type { Approval, Blueprint, Decision } from "../../shared/types.js";
 import { BLUEPRINT_LABELS } from "../../shared/catalog.js";
 import { networkSummary, sizeSummary } from "../lib/blueprints.js";
-import { handlingTime } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { between, formatDuration, oneLine, plural } from "../lib/format.js";
 import { answerApproval } from "../lib/store.js";
@@ -85,6 +84,9 @@ function describe(decision: Decision, now: number): RowParts {
       return { icon: CommentIcon, iconClass: "text-fg-accent", text: <>Sent the follow-up to <Name>{worker}</Name></>, tag: <Tag tone="reused">reused</Tag>, ...(decision.task ? { title: decision.task } : {}) };
     case "copy": {
       const what = decision.paths?.length ? decision.paths.join(", ") : "files";
+      // A mixed coordinator calls its own sandbox `self`.
+      const from = decision.from === "self" ? "its own sandbox" : decision.from;
+      const to = decision.to === "self" ? "its own sandbox" : decision.to;
       if (failed) return { icon: XCircleIcon, iconClass: "text-fg-danger", text: <>Couldn't copy {what}{detail}</>, tag: <Tag tone="danger">failed</Tag> };
       return {
         icon: FileMovedIcon,
@@ -92,7 +94,7 @@ function describe(decision: Decision, now: number): RowParts {
         spin: running,
         text: (
           <>
-            Copied <span className="font-mono text-xs">{oneLine(what, 60)}</span> from <Name>{decision.from}</Name> to <Name>{decision.to}</Name>
+            Copied <span className="font-mono text-xs">{oneLine(what, 60)}</span> from <Name>{from}</Name> to <Name>{to}</Name>
           </>
         ),
       };
@@ -126,17 +128,16 @@ function describe(decision: Decision, now: number): RowParts {
       };
     }
     case "read":
-      return { icon: FileIcon, iconClass: "text-fg-muted", spin: running, text: <>Read <span className="font-mono text-xs">{decision.path}</span> from <Name>{worker}</Name></> };
+      return { icon: FileIcon, iconClass: "text-fg-muted", spin: running, text: <>Read <span className="font-mono text-xs">{decision.path}</span> from <Name>{decision.worker === "self" ? "its own sandbox" : worker}</Name></> };
     case "list":
       return { icon: ListUnorderedIcon, iconClass: "text-fg-muted", spin: running, text: <>Checked on its workers</> };
   }
 }
 
-export function DecisionCard({ decisions, at, current, now }: { readonly decisions: readonly Decision[]; readonly at: string; readonly current: boolean; readonly now: number }) {
+export function DecisionCard({ decisions, took, now }: { readonly decisions: readonly Decision[]; readonly took: string; readonly now: number }) {
   const created = decisions.filter((decision) => decision.kind === "create" && (decision.status === "done" || decision.status === "running")).length;
   const askingCount = decisions.filter((decision) => decision.status === "asking").length;
   const asking = askingCount > 0;
-  const took = formatDuration(handlingTime(at, decisions, now, current));
   const summary = [created > 0 ? plural(created, "new sandbox", "new sandboxes") : asking ? "" : "No new sandboxes", asking ? `${askingCount} asking you` : ""].filter(Boolean).join(", ");
   return (
     <section aria-label="What the agent did" className={cx("overflow-hidden rounded-lg border bg-canvas", asking ? "border-[var(--borderColor-attention-emphasis)]" : "border-line")}>

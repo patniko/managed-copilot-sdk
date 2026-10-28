@@ -7,6 +7,7 @@ import { cx } from "../lib/cx.js";
 import { formatClock, formatDuration, parseTime } from "../lib/format.js";
 import { conversationHref, navigate } from "../lib/router.js";
 import { useNow } from "../lib/useNow.js";
+import { handsTitle } from "./Environments.js";
 import { EmptyState } from "./ui/Feedback.js";
 
 const STEPS = [10, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14_400].map((seconds) => seconds * 1000);
@@ -135,10 +136,10 @@ export function Timeline({ view, blueprints, selected }: { readonly view: Conver
                   onClick={() => navigate(conversationHref(view.id, { tab: "timeline", ...(worker.id === selected ? {} : { worker: worker.id }) }), { replace: true })}
                   className={cx("flex min-w-0 items-center gap-1.5 rounded-md px-1 text-left hover:bg-canvas-muted", worker.id === selected && "bg-accent-muted")}
                   style={{ "--lane": KIND_LANE[kind] } as CSSProperties}
-                  title={`${worker.name} in ${worker.environment}: ${WORKER_STATE[worker.state].label}`}
+                  title={`${worker.role === "hands" ? handsTitle(view, worker) : worker.name} in ${worker.environment}: ${worker.role === "hands" ? "no agent in it" : WORKER_STATE[worker.state].label}`}
                 >
                   <Glyph size={14} className="lane-icon shrink-0" />
-                  <span className="min-w-0 truncate font-semibold">{worker.name}</span>
+                  <span className="min-w-0 truncate font-semibold">{worker.role === "hands" ? handsTitle(view, worker) : worker.name}</span>
                 </button>
                 <Track users={users.map((message) => parseTime(message.at) ?? start)} x={x} style={{ "--lane": KIND_LANE[kind] } as CSSProperties}>
                   {segments.map((segment) => (

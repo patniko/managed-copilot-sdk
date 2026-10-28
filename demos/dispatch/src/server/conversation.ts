@@ -4,27 +4,67 @@
 // approve each new sandbox.
 import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import type { PlatformEvent, WorkerInfo } from "@managed-copilot/sdk";
-import type { Approval, ConversationSettings, ConversationStatus, ConversationSummary, ConversationView, FileView, WorkerState, WorkerView } from "../shared/types.js";
+import type {
+  Approval,
+  CommandRecord,
+  ConversationSettings,
+  ConversationStatus,
+  ConversationSummary,
+  ConversationView,
+  ExecutionStyle,
+  FileView,
+  WorkerState,
+  WorkerView,
+} from "../shared/types.js";
 import { attachCommand } from "./attach.js";
 import type { DispatchConfig } from "./config.js";
 import { DispatchError, errorText, isMissingSession } from "./errors.js";
 import { log } from "./log.js";
 import type { CoordinatorSession, DispatchPlatform } from "./platform.js";
-import { mergeHistory, Transcript, type CoordinatorEvent } from "./projection.js";
+import { ASKING_TOOLS, mergeHistory, Transcript, type CoordinatorEvent } from "./projection.js";
 import { digest, type Store } from "./store.js";
 
-/** Added to the platform's coordinator instructions: how Dispatch's UI shows the coordinator's work. */
-export const SYSTEM_MESSAGE = [
+const COMMON = [
+  "- Answer briefly when the work is done: a few short paragraphs or a table, saying where each result came from.",
+  "- The person may decline something you ask to do, sometimes saying why. Follow their reason; without one, don't try it again unless they ask, and carry on another way or say what you'd need.",
+];
+
+const DELEGATE = [
   "You are Dispatch's coordinator. The person watches your workers live: each worker appears as a card with its sandbox, files, and state.",
   "- Give each worker a short, descriptive kebab-case name, such as `py-bench`, `node-bench`, or `report-writer`.",
   "- Always pass `environment` to start_worker: the environment whose tools and network the task needs (JavaScript needs the Node.js one, web lookups the one with web access). Don't rely on the default.",
   "- For a follow-up, prefer an existing worker whose sandbox already has the files and tools it needs. Start a new worker when the work needs another environment, should run in parallel, or would disturb a worker's state.",
   "- The person may decline a new sandbox, sometimes saying why. Follow their reason; without one, don't start it again unless they ask, and carry on with the workers you have or say what you'd need.",
   "- Answer briefly when the work is done: a few short paragraphs or a table, saying which worker produced what.",
-].join("\n");
+];
+
+const DIRECT = [
+  "You are Dispatch's coordinator, working directly. The person watches live: every command you and your sub-agents run, and every file you create or edit, is listed under their message.",
+  "- Do the work yourself with your shell and file tools. For independent parts that can run at the same time, start sub-agents with the task tool, in parallel, and give each a short, descriptive name.",
+  "- Your sandbox keeps its files between messages: for a follow-up, build on what is already there.",
+  "- Save deliverables (reports, charts, data) under /workspace/outputs so the person can open them.",
+  ...COMMON,
+];
+
+const MIXED = [
+  "You are Dispatch's coordinator. You can work directly in your own sandbox (with your shell and file tools, and sub-agents started with the task tool), or create workers in other environments. The person watches both live: your commands and files are listed under their message, and each worker appears as a card with its sandbox.",
+  "- Give workers and sub-agents short, descriptive names. Always pass `environment` to start_worker.",
+  "- Save deliverables under /workspace/outputs.",
+  ...COMMON,
+];
+
+/** Added to the platform's coordinator instructions: how Dispatch's UI shows the coordinator's work, by execution style. */
+export function systemMessage(style: ExecutionStyle): string {
+  return (style === "direct" ? DIRECT : style === "mixed" ? MIXED : DELEGATE).join("\n");
+}
+
+/** The delegate style's addition (the original Dispatch coordinator). */
+export const SYSTEM_MESSAGE = systemMessage("delegate");
 
 /** What the person sees when they decline a sandbox, and what the coordinator is told. */
 const DECLINED = "Declined in Dispatch. Don't start this worker again unless the person asks; continue with the workers you have, or say what you need.";
+/** The same for a command or file change in the coordinator's own sandbox. */
+const DECLINED_COMMAND = "Declined in Dispatch. Don't run this again unless the person asks; continue another way, or say what you need.";
 
 const ACTIVE: ReadonlySet<WorkerState> = new Set(["starting", "working"]);
 /** Workspace paths not worth showing as a worker's files. */
@@ -65,6 +105,7 @@ export function visibleFiles(entries: readonly { path: string; type: string; siz
 export class Conversation {
   readonly #host: ConversationHost;
   #id: string;
+  #environment: string | undefined;
   #state: AttachState = "detached";
   #problem: string | undefined;
   #session: CoordinatorSession | undefined;
@@ -85,14 +126,29 @@ export class Conversation {
   #poll: NodeJS.Timeout | undefined;
   #filesAt = 0;
 
-  constructor(host: ConversationHost, id = "") {
+  constructor(host: ConversationHost, id = "", environment?: string) {
     this.#host = host;
     this.#id = id;
+    this.#environment = environment;
     this.#transcript = this.#newTranscript();
   }
 
   get id(): string {
     return this.#id;
+  }
+
+  /** The orchestrator environment its coordinator session lives in. */
+  get environment(): string {
+    return this.#environment ?? this.#host.store.get(this.#id)?.environment ?? this.#host.config.environment;
+  }
+
+  /** Its execution style: the style of the environment it was created in. */
+  get style(): ExecutionStyle {
+    const environment = this.environment;
+    const known = this.#host.platform.styles.find((candidate) => candidate.environment === environment)?.style;
+    if (known) return known;
+    const entry = Object.entries(this.#host.config.environments).find(([, name]) => name === environment);
+    return (entry?.[0] as ExecutionStyle | undefined) ?? "delegate";
   }
 
   get settings(): ConversationSettings {
@@ -123,7 +179,7 @@ export class Conversation {
       streaming: true,
       onEvent,
       onPermissionRequest: (request: PermissionRequest) => this.#onPermission(request, generation),
-      systemMessage: { content: SYSTEM_MESSAGE },
+      systemMessage: { content: systemMessage(this.style) },
     };
   }
 
@@ -134,19 +190,23 @@ export class Conversation {
   async start(prompt: string, settings: ConversationSettings, registered: (conversation: Conversation) => void): Promise<void> {
     const generation = ++this.#generation;
     this.#state = "attaching";
-    const session = await this.#host.platform.createSession({
-      ...this.#handlers(generation, (event) => {
-        if (generation === this.#generation) this.#onEvent(event);
-      }),
-      model: this.#host.config.model,
-    });
+    const environment = this.environment;
+    const session = await this.#host.platform.createSession(
+      {
+        ...this.#handlers(generation, (event) => {
+          if (generation === this.#generation) this.#onEvent(event);
+        }),
+        model: this.#host.config.model,
+      },
+      environment,
+    );
     this.#id = session.sessionId;
     this.#session = session;
     this.#state = "live";
     this.#workersLoaded = true;
-    this.#host.store.ensure(this.#id, { settings, title: titleFrom(prompt) });
+    this.#host.store.ensure(this.#id, { settings, title: titleFrom(prompt), environment });
     registered(this);
-    log.info("Started a conversation", { sessionId: this.#id, approvals: settings.approvals });
+    log.info("Started a conversation", { sessionId: this.#id, environment, approvals: settings.approvals });
     try {
       await this.send(prompt);
     } catch (error) {
@@ -185,7 +245,7 @@ export class Conversation {
     };
     let session: CoordinatorSession | undefined;
     try {
-      session = await this.#host.platform.resumeSession(this.#id, { ...this.#handlers(generation, onEvent), continuePendingWork: true, suppressResumeEvent: true });
+      session = await this.#host.platform.resumeSession(this.#id, { ...this.#handlers(generation, onEvent), continuePendingWork: true, suppressResumeEvent: true }, this.environment);
       if (generation !== this.#generation) return void (await session.disconnect().catch(() => undefined));
       const [history, info] = await Promise.all([session.getEvents(), this.#host.platform.sessionInfo(this.#id).catch(() => undefined)]);
       if (generation !== this.#generation) return void (await session.disconnect().catch(() => undefined));
@@ -200,6 +260,8 @@ export class Conversation {
       this.#problem = undefined;
       // Prompts delivered again while the history loaded may have been answered elsewhere meanwhile.
       this.#reconcileApprovals();
+      // Requests held while it loaded, for a message whose remaining commands the person approved: answer them now.
+      this.#applyApprovedRest();
       log.info("Attached to a conversation", { sessionId: this.#id, events: history.length });
     } catch (error) {
       await session?.disconnect().catch(() => undefined);
@@ -286,17 +348,38 @@ export class Conversation {
     }
   }
 
-  /** Answers a sandbox request. A reason for declining goes to the coordinator, so it can try another way. */
-  answer(approvalId: string, approve: boolean, reason?: string): void {
+  /**
+   * Answers a request: a sandbox, or a command or file change. A reason for declining goes to the coordinator, so it can
+   * try another way. `rest` (commands) also approves every later command and file change for the same message.
+   */
+  answer(approvalId: string, approve: boolean, reason?: string, rest = false): void {
     const pending = this.#approvals.get(approvalId);
-    if (!pending) throw new DispatchError("not_actionable", "This sandbox request was already answered.", 409);
+    if (!pending) throw new DispatchError("not_actionable", "This request was already answered.", 409);
     this.#approvals.delete(approvalId);
+    const command = pending.approval.kind === "command";
     const why = reason?.replace(/\s+/g, " ").trim();
-    const feedback = why ? `The person declined this sandbox: ${why}` : DECLINED;
+    const feedback = why ? `The person declined this ${command ? (pending.approval.tool === "bash" || pending.approval.tool === "write_bash" ? "command" : "file change") : "sandbox"}: ${why}` : command ? DECLINED_COMMAND : DECLINED;
     this.#transcript.markDecision(pending.approval.decisionId, approve ? "running" : "denied", approve ? undefined : feedback);
     pending.resolve(approve ? { kind: "approve-once", approvedInteractively: true } : { kind: "reject", feedback });
-    log.info(approve ? "Approved a sandbox" : "Declined a sandbox", { sessionId: this.#id, worker: pending.approval.worker, environment: pending.approval.environment, reason: why ? "given" : undefined });
+    log.info(approve ? "Approved a request" : "Declined a request", {
+      sessionId: this.#id,
+      kind: pending.approval.kind,
+      ...(command ? { tool: pending.approval.tool } : { worker: pending.approval.worker, environment: pending.approval.environment }),
+      reason: why ? "given" : undefined,
+    });
+    const index = this.#indexOf(pending.approval);
+    if (approve && rest && command && index !== undefined) {
+      this.#host.store.update(this.#id, (stored) => {
+        stored.approvedRest = [...new Set([...(stored.approvedRest ?? []), index])].slice(-50);
+      });
+      for (const [id, other] of [...this.#approvals]) if (other.approval.kind === "command" && this.#indexOf(other.approval) === index) this.answer(id, true);
+    }
     this.#changed();
+  }
+
+  /** The user message a request serves, with the transcript as it is now. */
+  #indexOf(approval: Approval): number | undefined {
+    return this.#transcript.messageIndexOf(approval.decisionId) ?? approval.messageIndex;
   }
 
   setSettings(settings: ConversationSettings): void {
@@ -307,32 +390,61 @@ export class Conversation {
     this.#changed();
   }
 
-  /** The coordinator wants to start a worker: ask the person, unless this conversation creates sandboxes freely. */
+  /**
+   * The coordinator wants to start a worker, or (direct, mixed) it or a sub-agent wants to run a command or change a
+   * file: ask the person, unless this conversation lets it go ahead freely.
+   */
   async #onPermission(request: PermissionRequest, generation: number): Promise<PermissionRequestResult> {
-    // Only `start_worker` asks (spec section 17); the coordinator's other tools are its own platform tools.
-    if (request.kind !== "custom-tool" || request.toolName !== "start_worker") return { kind: "approve-once" };
+    // Only `start_worker` and the hands tools that run or change something ask (spec section 17); the coordinator's
+    // other tools are its own platform tools.
+    const sandbox = request.kind === "custom-tool" && request.toolName === "start_worker";
+    const command = request.kind === "custom-tool" && typeof request.toolName === "string" && ASKING_TOOLS.has(request.toolName);
+    if (!sandbox && !command) return { kind: "approve-once" };
     if (generation !== this.#generation) return { kind: "no-result" };
     // Already answered elsewhere (for example in Copilot CLI): nothing to ask.
     if (this.#transcript.isSettled(request.toolCallId)) return { kind: "no-result" };
     if (this.settings.approvals === "auto") return { kind: "approve-once" };
     const args = (request.args ?? {}) as Record<string, unknown>;
     const id = request.toolCallId ?? `request-${Date.now().toString(36)}`;
+    // The message a request serves is only trusted when the transcript knows its call: while a resume replays history,
+    // the latest message seen may not be the one it serves, so "approve the rest" of it must not answer it.
+    const known = this.#transcript.messageIndexOf(request.toolCallId);
+    const index = known ?? this.#transcript.currentIndex;
+    if (command && known !== undefined && this.#state === "live" && this.#host.store.get(this.#id)?.approvedRest?.includes(known)) return { kind: "approve-once" };
     // Redelivered (for example after a reconnection): the newest callback is the one that answers.
     this.#approvals.get(id)?.resolve({ kind: "no-result" });
     return await new Promise<PermissionRequestResult>((resolve) => {
-      const environment = str(args["environment"]) ?? this.#host.platform.blueprints[0]?.name ?? "";
-      const index = this.#transcript.messageIndexOf(request.toolCallId) ?? this.#transcript.currentIndex;
-      const approval: Approval = {
+      const common = {
         id,
         ...(request.toolCallId ? { decisionId: request.toolCallId } : {}),
-        worker: str(args["name"]) ?? "worker",
-        environment,
-        task: str(args["task"]) ?? "",
-        ...(str(args["agent"]) ? { agent: str(args["agent"]) } : {}),
-        ...(str(args["model"]) ? { model: str(args["model"]) } : {}),
         requestedAt: new Date().toISOString(),
         ...(index !== undefined ? { messageIndex: index } : {}),
       };
+      let approval: Approval;
+      if (command) {
+        const tool = String(request.toolName);
+        const known = this.#transcript.command(request.toolCallId);
+        const text = tool === "write_bash" ? (typeof args["input"] === "string" ? args["input"] : undefined) : str(args["command"]);
+        approval = {
+          ...common,
+          kind: "command",
+          tool,
+          ...(text !== undefined ? { command: text } : {}),
+          ...(str(args["path"]) ? { path: str(args["path"]) } : {}),
+          ...(known?.agentId ? { agentId: known.agentId } : {}),
+        };
+      } else {
+        const environment = str(args["environment"]) ?? this.#host.platform.blueprints[0]?.name ?? "";
+        approval = {
+          ...common,
+          kind: "sandbox",
+          worker: str(args["name"]) ?? "worker",
+          environment,
+          task: str(args["task"]) ?? "",
+          ...(str(args["agent"]) ? { agent: str(args["agent"]) } : {}),
+          ...(str(args["model"]) ? { model: str(args["model"]) } : {}),
+        };
+      }
       this.#approvals.set(id, { approval, resolve });
       this.#transcript.markDecision(request.toolCallId, "asking");
       this.#changed();
@@ -359,8 +471,21 @@ export class Conversation {
     return changed;
   }
 
+  /** Approves held command requests whose message (as the current transcript places them) the person approved the rest of. */
+  #applyApprovedRest(): void {
+    const approved = this.#host.store.get(this.#id)?.approvedRest ?? [];
+    if (approved.length === 0) return;
+    for (const [id, pending] of [...this.#approvals]) {
+      if (pending.approval.kind !== "command") continue;
+      const index = this.#transcript.messageIndexOf(pending.approval.decisionId);
+      if (index !== undefined && approved.includes(index)) this.answer(id, true);
+    }
+  }
+
   #onEvent(event: SessionEvent): void {
     let changed = this.#transcript.apply(event as unknown as CoordinatorEvent);
+    // A request that arrived before its call was known can now be placed in its message.
+    if ((event.type === "tool.execution_start" || event.type === "permission.requested") && this.#approvals.size > 0) this.#applyApprovedRest();
     if (event.type === "permission.completed" && this.#reconcileApprovals()) changed = true;
     // The turn ended: no request of it is waiting for an answer anymore.
     if ((event.type === "session.idle" || event.type === "abort") && this.#approvals.size > 0) {
@@ -368,7 +493,20 @@ export class Conversation {
       changed = true;
     }
     if (changed && (event.type === "tool.execution_start" || event.type === "tool.execution_complete")) this.#scheduleRefresh(200);
-    if (event.type === "session.idle") this.#scheduleRefresh(100);
+    if (event.type === "session.idle") {
+      this.#scheduleRefresh(100);
+      // A coordinator's own sandboxes publish their outputs at the end of each of its turns, just after it goes idle.
+      for (const delay of [0, 2_000, 6_000]) {
+        const timer = setTimeout(() => {
+          for (const worker of this.#workers) {
+            if (this.#closed || worker.role !== "hands" || worker.state === "stopped") continue;
+            void this.#loadOutputs(worker.id);
+            void this.#loadFiles(worker.id);
+          }
+        }, delay);
+        timer.unref?.();
+      }
+    }
     if (changed) this.#changed();
     this.#updatePolling();
   }
@@ -547,9 +685,33 @@ export class Conversation {
     return worker;
   }
 
-  /** Whether `sessionId` is this conversation's coordinator or one of its workers. */
+  /** Every command run in one of the coordinator's own sandboxes, as the platform recorded them (`managed.exec.list`). */
+  async commands(workerId: string): Promise<CommandRecord[]> {
+    const worker = this.#worker(workerId);
+    if (worker.role !== "hands") throw new DispatchError("invalid_request", "Only the coordinator's own sandboxes keep a list of commands; workers run theirs as agents.");
+    if (worker.state === "stopped") throw new DispatchError("sandbox_deleted", "This sandbox was deleted, with its list of commands.", 410);
+    let execs;
+    try {
+      execs = await this.#host.platform.execs(workerId);
+    } catch (error) {
+      throw new DispatchError("commands_unavailable", `Couldn't list the commands: ${errorText(error)}`, 502);
+    }
+    return execs.map((exec) => ({
+      id: exec.id,
+      command: exec.command,
+      state: exec.state,
+      ...(exec.exitCode !== undefined ? { exitCode: exec.exitCode } : {}),
+      startedAt: exec.startedAt,
+      ...(exec.finishedAt ? { finishedAt: exec.finishedAt } : {}),
+      background: exec.background,
+      tool: exec.caller?.kind === "platform" ? (exec.caller.name ?? "bash") : "api",
+      ...(exec.caller?.agentId ? { agentId: exec.caller.agentId } : {}),
+    }));
+  }
+
+  /** Whether `sessionId` is this conversation's coordinator or one of its workers (hands sandboxes have no agent to attach to). */
   owns(sessionId: string): boolean {
-    return sessionId === this.#id || this.#workers.some((worker) => worker.id === sessionId);
+    return sessionId === this.#id || this.#workers.some((worker) => worker.id === sessionId && worker.role !== "hands");
   }
 
   #status(): ConversationStatus {
@@ -566,6 +728,8 @@ export class Conversation {
     const title = this.#transcript.title ?? stored?.title;
     return {
       id: this.#id,
+      style: this.style,
+      environment: this.environment,
       title: title ? titleFrom(title) : "New conversation",
       createdAt,
       updatedAt: this.#transcript.updatedAt ?? stored?.updatedAt ?? createdAt,
@@ -581,17 +745,25 @@ export class Conversation {
     const waiting = transcript.waiting;
     // Approvals redelivered while resuming were registered before the rebuilt transcript was in place: link them now.
     const approvals = [...this.#approvals.values()].map(({ approval }): Approval => {
-      const decision = approval.decisionId ? transcript.decision(approval.decisionId) : undefined;
+      const decision = approval.decisionId ? (approval.kind === "command" ? transcript.command(approval.decisionId) : transcript.decision(approval.decisionId)) : undefined;
       const index = transcript.messageIndexOf(approval.decisionId) ?? approval.messageIndex ?? transcript.currentIndex;
-      return { ...approval, ...(decision ? { requestedAt: decision.at } : {}), ...(index !== undefined ? { messageIndex: index } : {}) };
+      const agentId = approval.agentId ?? (approval.kind === "command" ? transcript.command(approval.decisionId)?.agentId : undefined);
+      return { ...approval, ...(decision ? { requestedAt: decision.at } : {}), ...(index !== undefined ? { messageIndex: index } : {}), ...(agentId ? { agentId } : {}) };
     });
-    const resolved = transcript.resolveWorkers(this.#workers);
+    const hands = this.#workers.filter((worker) => worker.role === "hands");
+    const workers = this.#workers.filter((worker) => worker.role !== "hands");
+    const resolved = transcript.resolveWorkers(workers);
+    const own = this.#host.platform.styles.find((style) => style.environment === this.environment)?.subagents === "own" || hands.some((worker) => worker.agentId !== undefined);
     return {
       ...this.summary(),
       messages: transcript.messages(resolved),
-      workers: this.#workers.map((worker) => this.#workerView(worker, transcript.attribution(worker.id, resolved))),
+      workers: this.#workers.map((worker) =>
+        this.#workerView(worker, worker.role === "hands" ? transcript.handsAttribution(worker.agentId, own) : transcript.attribution(worker.id, resolved)),
+      ),
       approvals,
       settings: this.settings,
+      agents: transcript.agentNames(),
+      approvedRest: [...(this.#host.store.get(this.#id)?.approvedRest ?? [])],
       busy: transcript.busy,
       ...(waiting ? { waiting: { workers: [...waiting.workers], since: waiting.since } } : {}),
       ...(this.#problem ? { problem: this.#problem } : {}),
@@ -604,6 +776,8 @@ export class Conversation {
     const files = this.#files.get(worker.id);
     return {
       id: worker.id,
+      role: worker.role === "hands" ? "hands" : "worker",
+      ...(worker.agentId ? { agentId: worker.agentId } : {}),
       name: worker.name,
       environment: worker.environment,
       state: worker.state,

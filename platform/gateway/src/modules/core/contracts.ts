@@ -23,7 +23,7 @@ import type {
   ToolDeclaration,
 } from "@managed-copilot/protocol";
 import type { Principal } from "../../http.js";
-import type { AttachedResponder, PlatformToolDefinition, RuntimeSessionEvent } from "../durable/contract.js";
+import type { AttachedResponder, PlatformToolDefinition, PlatformToolReplay, RuntimeSessionEvent } from "../durable/contract.js";
 
 /** An environment resolved against the deployment for one client connection or internal request. */
 export interface ResolvedEnvironment {
@@ -78,6 +78,11 @@ export interface SessionRecord {
    */
   readonly parentSessionId?: string;
   readonly parentIncarnation?: string;
+  /**
+   * `workspace`: a workspace-only session, a sandbox for commands and files with no runtime. Core never opens a
+   * runtime for it and refuses agent operations (send, resume, CLI attach) with `invalid_request`. Absent: an agent.
+   */
+  readonly kind?: "workspace";
   readonly network: NetworkPolicy;
   readonly environmentRequest: EnvironmentRequest;
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
@@ -134,6 +139,8 @@ export interface SandboxCreateRequest {
   readonly additions: { readonly files?: Readonly<Record<string, string>>; readonly packages?: EnvironmentRequest["packages"]; readonly env?: Readonly<Record<string, string>> };
   /** The resolved environment (image, setup, customizations). */
   readonly resolved: ResolvedEnvironment;
+  /** False: a workspace-only sandbox that never starts the Copilot runtime. */
+  readonly runtime?: boolean;
 }
 
 /** A connection to one sandbox runtime. The sandbox module implements credential brokering; core relays. */
@@ -224,6 +231,16 @@ export interface CreateSessionRequest {
   readonly parentSessionId?: string;
 }
 
+/** A workspace-only session: a sandbox of an isolated environment for commands and files, with no runtime. */
+export interface CreateWorkspaceRequest {
+  /** Caller-chosen ID. An existing workspace-only session of the same owner returns `{ created: false }`. */
+  readonly sessionId?: string;
+  readonly environment: string | EnvironmentRequest;
+  /** The owner's session that starts this one (an orchestrator's coordinator, for its hands sandbox); same owner only. */
+  readonly parentSessionId?: string;
+  readonly clientName?: string;
+}
+
 export interface CliAttachOptions {
   /** The responder ID the actions ledger sees for this CLI (unique per attachment). */
   readonly connectionId: string;
@@ -298,6 +315,12 @@ export interface SessionsService {
    * created, or the existing session's when `created` is false.
    */
   create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
+  /**
+   * Creates a workspace-only session (`kind: "workspace"`) as `principal`: a sandbox of an isolated environment, set
+   * up like any other (network rules, vaults, setup), where no runtime ever starts. Commands run in it with
+   * `sandboxes.exec`; files, artifacts, and delete work as for any sandbox session.
+   */
+  createWorkspace?(principal: Principal, request: CreateWorkspaceRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
   /**
    * Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. Settles in the same chain of
    * promise steps as the runtime's answer (no I/O in between), so a caller sees the close of the connection that
@@ -404,7 +427,10 @@ export interface EventsService {
   subscribe(listener: (event: PlatformEvent, meta: PlatformEventMeta) => void): () => void;
 }
 
-/** Context passed to platform tool handlers. Durable's ledger supplies only the first five fields. */
+/**
+ * Context passed to platform tool handlers. Durable's ledger supplies the first five fields plus `agentId`,
+ * `actionId`, and `signal`; core's own path (no ledger) supplies everything but `actionId`.
+ */
 export interface PlatformToolCallContext {
   readonly sessionId: string;
   readonly ownerId: number;
@@ -414,6 +440,17 @@ export interface PlatformToolCallContext {
   readonly idempotencyKey: string;
   readonly type?: EnvironmentType;
   readonly placement?: Placement;
+  /**
+   * The calling agent: the runtime request's `agentId` for a sub-agent (for example a stock `task` agent), undefined
+   * for the root agent. Survives recovery (the ledger records it with the action).
+   */
+  readonly agentId?: string;
+  /** The ledger action this call answers (durable path only). */
+  readonly actionId?: string;
+  /**
+   * Aborted when the call's answer can no longer matter: the runtime stopped waiting for it (its turn was cancelled),
+   * the session was deleted, the gateway is stopping, or (core's own path) after 10 minutes. `signal.reason` says which.
+   */
   readonly signal?: AbortSignal;
 }
 
@@ -436,20 +473,36 @@ export interface PlatformToolInput {
   /** Inject based on environment type and placement. Evaluated in addition to `enabledFor`. */
   readonly appliesTo?: (context: { readonly environment: string; readonly type: EnvironmentType; readonly placement: Placement }) => boolean;
   readonly handler: (args: unknown, context: PlatformToolCallContext) => unknown | Promise<unknown>;
+  /**
+   * Whether the actions ledger may rerun the handler for an interrupted call (see durable's `PlatformToolReplay`).
+   * Default `"always"`: the handler is idempotent by `idempotencyKey`. Use `"never"` for tools with side effects
+   * that must not repeat (a shell command); `recover` then answers interrupted calls, or they fail as "may have run".
+   */
+  readonly replay?: PlatformToolReplay;
+  /** With `replay: "never"`: answers an interrupted call (reattach, or read the recorded outcome) instead of the handler. */
+  readonly recover?: (args: unknown, context: PlatformToolCallContext) => unknown | Promise<unknown>;
+  /**
+   * The name is the platform's only in environments where `enabledFor` holds (`get`/`has` with that environment); in
+   * any other session a client's tool of the same name stays the client's. For tools named like built-ins (`bash`).
+   */
+  readonly scoped?: boolean;
 }
 
 /** A registered tool, normalized so it also satisfies durable's `PlatformToolDefinition`. */
 export interface RegisteredPlatformTool extends PlatformToolDefinition {
   readonly overridesBuiltInTool?: boolean;
+  readonly scoped?: boolean;
   readonly skipPermission: boolean;
   readonly appliesTo?: PlatformToolInput["appliesTo"];
   readonly handler: (args: unknown, context: PlatformToolCallContext) => Promise<PlatformToolResult>;
+  readonly recover?: (args: unknown, context: PlatformToolCallContext) => Promise<PlatformToolResult>;
 }
 
 export interface PlatformToolRegistry {
   register(definition: PlatformToolInput): () => void;
-  get(name: string): RegisteredPlatformTool | undefined;
-  has(name: string): boolean;
+  /** The tool by name; a `scoped` tool only with an `environment` it is enabled for. */
+  get(name: string, environment?: string): RegisteredPlatformTool | undefined;
+  has(name: string, environment?: string): boolean;
   /** Tools injected into sessions of this environment and placement. */
   forSession(context: { readonly environment: string; readonly type: EnvironmentType; readonly placement: Placement }): readonly RegisteredPlatformTool[];
 }

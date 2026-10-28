@@ -48,7 +48,11 @@ export async function sessions(ctx: Context): Promise<void> {
   }
   const rows = list.map((session) => [
     style.bold(shortId(session.id)),
-    session.parentSessionId ? `${session.environment} ${style.dim(`(worker of ${shortId(session.parentSessionId)})`)}` : session.environment,
+    session.parentSessionId
+      ? `${session.environment} ${style.dim(`(${session.kind === "workspace" ? "sandbox" : "worker"} of ${shortId(session.parentSessionId)})`)}`
+      : session.kind === "workspace"
+        ? `${session.environment} ${style.dim("(sandbox)")}`
+        : session.environment,
     session.placement === "sandbox" && session.sandbox ? `sandbox ${style.dim(session.sandbox.state)}` : session.placement,
     describeSession(session, style),
     truncate(session.title ?? style.dim("untitled"), 40, style.ellipsis),
@@ -90,7 +94,7 @@ export async function workers(ctx: Context): Promise<void> {
     return;
   }
   const rows = found.map((worker) => [
-    style.bold(worker.name),
+    worker.role === "hands" ? `${style.bold(worker.name)} ${style.dim("(own sandbox)")}` : style.bold(worker.name),
     shortId(worker.id),
     worker.environment,
     paintWorker(worker.state, style),
@@ -99,7 +103,15 @@ export async function workers(ctx: Context): Promise<void> {
   ]);
   ctx.out(table(["NAME", "ID", "ENVIRONMENT", "STATE", "LATEST", "UPDATED"], rows, style));
   ctx.out();
-  ctx.out(style.dim(`  ${found.length} worker${found.length === 1 ? "" : "s"} · each is a session with its own sandbox: npx managed-copilot attach <ID>`));
+  const hands = found.filter((worker) => worker.role === "hands").length;
+  const agents = found.length - hands;
+  ctx.out(
+    style.dim(
+      `  ${agents} worker${agents === 1 ? "" : "s"}${agents > 0 ? " · each is a session with its own sandbox: npx managed-copilot attach <ID>" : ""}${
+        hands > 0 ? `${agents > 0 ? "\n  " : " · "}${hands} sandbox${hands === 1 ? "" : "es"} the coordinator works in itself (no agent): npx managed-copilot exec <ID> -- <command>` : ""
+      }`,
+    ),
+  );
 }
 
 /** Fails before anything is created or resolved when there is no Copilot CLI to open. */
@@ -194,7 +206,11 @@ export async function newSession(ctx: Context): Promise<number> {
       : environment.type === "promotable"
         ? "shared, promotable"
         : environment.type === "orchestrator"
-          ? "shared, starts workers in sandboxes"
+          ? environment.execution === "direct"
+            ? "shared, works in a sandbox itself"
+            : environment.execution === "mixed"
+              ? "shared, works in a sandbox itself and starts workers"
+              : "shared, starts workers in sandboxes"
           : "shared";
   ctx.err(`${style.cyan(style.dot)} Starting a new ${style.bold(environment.name)} session ${style.dim(`· ${placement}${shownModel ? ` · ${shownModel}` : ""}`)}`);
   if (environment.type === "isolated") ctx.err(style.dim(`  Setting up its sandbox${style.ellipsis}`));

@@ -20,6 +20,7 @@ checks after it.
 | `12-schedules.ts` | §13 Run on a schedule |
 | `13-attach.ts` | §14 Open a session in Copilot CLI |
 | `14-orchestrator.ts` | §17 Orchestrator: a coordinator with workers |
+| `15-direct-execution.ts` | §17 Execution styles: a direct coordinator's hands in a sandbox |
 
 ## Run
 

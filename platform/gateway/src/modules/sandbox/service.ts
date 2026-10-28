@@ -14,6 +14,8 @@ import {
   SANDBOXD_ROUTES,
   type EnvironmentConfig,
   type ErrorCode,
+  type ExecInfo,
+  type ExecResult,
   type FileEntry,
   type InfraFact,
   type OperatorSandbox,
@@ -28,9 +30,12 @@ import { OUTPUT_TAIL_MARKER, redactText } from "../../redaction.js";
 import { SandboxAgentClient } from "./agent-client.js";
 import type { ArtifactService } from "./artifacts.js";
 import { InferenceBroker, isProviderTaken } from "./broker.js";
+import { SandboxExecs } from "./execs.js";
 import type {
   CreateSandboxRequest,
   EgressRegistration,
+  ExecOptions,
+  ExecReadOptions,
   FileCallOptions,
   FileDownload,
   FileWriteOptions,
@@ -45,7 +50,7 @@ import type {
 } from "./contract.js";
 import type { SandboxOperationOptions, SandboxProvider, SandboxSpec } from "./providers/types.js";
 import { deferAgentSelection, rewriteSessionParams } from "./params.js";
-import type { SandboxRow, SandboxStore } from "./store.js";
+import type { ExecRow, SandboxRow, SandboxStore } from "./store.js";
 
 const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.requested", "elicitation.requested"]);
 const ACTION_COMPLETED = new Set(["external_tool.completed", "permission.completed", "elicitation.completed"]);
@@ -186,10 +191,27 @@ export class SandboxService implements SandboxesService {
   #stoppingCompute = false;
   /** Deletes requested through `delete()` that have not finished: the sandbox each targets (undefined = the current one). */
   readonly #pendingDeletes = new Map<string, (string | undefined)[]>();
+  /** Commands run directly in sandboxes. */
+  readonly #execs: SandboxExecs;
+  /** Sessions whose sandbox is being stopped (their commands' ends publish nothing). */
+  readonly #stoppingSessions = new Set<string>();
 
   constructor(options: SandboxServiceOptions) {
     this.#options = options;
     for (const row of options.store.all()) if (row.state !== "deleted") this.#active.add(row.sessionId);
+    this.#execs = new SandboxExecs({
+      store: options.store,
+      log: options.log,
+      row: (sessionId) => this.#row(sessionId),
+      expectSandbox: (sessionId, sandboxId, row) => this.#expectSandbox(sessionId, sandboxId, row),
+      agentFor: (sessionId, sandboxId) => this.agentFor(sessionId, sandboxId),
+      agentOf: (row) => this.#agent(row),
+      track: (sessionId, work) => this.track(sessionId, work),
+      touch: (sessionId) => this.touch(sessionId),
+      ended: (row) => this.#execEnded(row),
+      activity: (sessionId) => this.#execActivity(sessionId),
+      shutdown: this.#shutdown.signal,
+    });
   }
 
   attachArtifacts(artifacts: ArtifactService): void {
@@ -344,6 +366,9 @@ export class SandboxService implements SandboxesService {
       }
       if (live ? this.#durablyBusy(sessionId, live) : this.#hasOpenActions(sessionId)) {
         throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is waiting on actions (tool calls or prompts), or on a turn that was running when the gateway restarted. Stop it once the session is idle.`, { sandboxId: row.id });
+      }
+      if (this.#options.store.liveExecs(row.id).length > 0) {
+        throw new ManagedCopilotError("session_busy", `Sandbox ${row.id} is running commands. Stop it once they finish (or its owner stops them).`, { sandboxId: row.id });
       }
       const activity = this.#sessions()?.runtimeActivity?.(sessionId);
       if (activity?.busy) throw new ManagedCopilotError("session_busy", `Sandbox ${row.id}'s session is busy: ${activity.busy}. Stop it once the session is idle.`, { sandboxId: row.id });
@@ -581,6 +606,7 @@ export class SandboxService implements SandboxesService {
       ...(environment.customizations ? { customizations: environment.customizations } : {}),
       workloadEnv,
       idleTimeoutSeconds: environment.config.idleTimeoutSeconds ?? this.#options.defaultIdleSeconds,
+      runtime: request.runtime !== false,
     });
     this.#active.add(request.sessionId);
     this.#log.info("Creating sandbox", { sessionId: row.sessionId, sandboxId: row.id, environment: row.environment, size: row.size, network: row.network.access });
@@ -595,7 +621,7 @@ export class SandboxService implements SandboxesService {
       const agent = this.#agent(row);
       await agent.waitHealthy(this.#startTimeoutMs);
       const final = await agent.start(
-        { mode: "create", setup: plan, platformEnv: egress.env, workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}) },
+        { mode: "create", setup: plan, platformEnv: egress.env, workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}), ...(row.runtime ? {} : { runtime: false }) },
         (event) => {
           if (event.type === "progress") store.update(row.sessionId, { setup: event.setup });
         },
@@ -645,7 +671,7 @@ export class SandboxService implements SandboxesService {
         if (await provider.isRunning(row.id)) {
           try {
             const status = await this.#agent(row).health();
-            if (status.state === "ready" && status.runtime.state === "running") return this.#handle(row);
+            if (status.state === "ready" && (!row.runtime || status.runtime.state === "running")) return this.#handle(row);
           } catch {
             // fall through and restart it
           }
@@ -680,7 +706,10 @@ export class SandboxService implements SandboxesService {
       await this.#pinAddress(row);
       const agent = this.#agent(row);
       await agent.waitHealthy(this.#startTimeoutMs);
-      const final = await agent.start({ mode: "resume", platformEnv: egress.env, workloadEnv: row.workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}) }, () => undefined);
+      const final = await agent.start(
+        { mode: "resume", platformEnv: egress.env, workloadEnv: row.workloadEnv, ...(egress.caCertificate ? { caCertificate: egress.caCertificate } : {}), ...(row.runtime ? {} : { runtime: false }) },
+        () => undefined,
+      );
       if (final.type === "failed") throw new ManagedCopilotError(final.code === "internal" ? "internal" : "state_restore_failed", final.message, { sandboxId: row.id });
       store.update(sessionId, { state: "running", startedAt: new Date().toISOString(), errorCode: null, error: null });
       row = this.#row(sessionId);
@@ -699,6 +728,7 @@ export class SandboxService implements SandboxesService {
 
   async openRuntime(sessionId: string, options: OpenRuntimeOptions): Promise<SandboxRuntime> {
     const row = this.#row(sessionId);
+    if (!row.runtime) throw new ManagedCopilotError("invalid_request", `Session ${sessionId} is a workspace-only sandbox; it has no agent or Copilot runtime.`, { sessionId });
     if (row.state !== "running") throw new ManagedCopilotError("capability_unavailable", `The session's sandbox is ${row.state}; resume the session first.`, { sandboxId: row.id });
     const agent = this.#agent(row);
     // Which runtime process this connection reaches: a different one than before ended the turn the old one was running.
@@ -912,6 +942,14 @@ export class SandboxService implements SandboxesService {
     if (!row || row.state !== "running") return;
     const live = this.#live.get(sessionId);
     if (idle && live && (live.turnRunning || live.pending.size > 0 || live.busy > 0 || this.#durablyBusy(sessionId, live) || Date.now() - live.lastActivity < row.idleTimeoutSeconds * 1000)) return;
+    // Commands still writing output keep the sandbox up, until they are quiet for the idle timeout.
+    if (idle && (await this.#execs.holdsIdle(row, row.idleTimeoutSeconds * 1000))) return;
+    this.#stoppingSessions.add(sessionId);
+    try {
+      await this.#execs.sandboxStopping(row, idle ? `The sandbox stopped after ${Math.round(row.idleTimeoutSeconds / 60) || 1} min without activity, so this command was stopped.` : `The sandbox stopped (${reason}), so this command was stopped.`);
+    } finally {
+      this.#stoppingSessions.delete(sessionId);
+    }
     store.update(sessionId, { state: "stopping" });
     for (const runtime of [...(live?.runtimes ?? [])]) runtime.close();
     try {
@@ -997,6 +1035,7 @@ export class SandboxService implements SandboxesService {
       await this.#artifacts?.deleteSession(sessionId);
       store.update(sessionId, { state: "deleted", errorCode: null, error: null });
       store.scrub(sessionId);
+      store.deleteExecs(sessionId);
       this.#live.delete(sessionId);
       this.#active.delete(sessionId);
       this.#log.info("Sandbox deleted", { sessionId, sandboxId: row.id });
@@ -1061,8 +1100,69 @@ export class SandboxService implements SandboxesService {
       throw new ManagedCopilotError("invalid_request", `Uploads are limited to ${Math.round(SANDBOX_LIMITS.uploadBytes / (1024 * 1024))} MiB.`);
     }
     const agent = await this.agentFor(sessionId, options.sandboxId);
-    const entry = await this.track(sessionId, agent.writeFile(path, body, { overwrite: options.overwrite !== false, ...(options.size !== undefined ? { size: options.size } : {}) }));
+    const entry = await this.track(
+      sessionId,
+      agent.writeFile(path, body, { overwrite: options.overwrite !== false, ...(options.size !== undefined ? { size: options.size } : {}), ...(options.ifMatch ? { ifMatch: options.ifMatch } : {}) }),
+    );
     return { path: entry.path, type: entry.type, size: entry.size, modifiedAt: entry.modifiedAt };
+  }
+
+  // Commands -----------------------------------------------------------------------------------------------------
+
+  exec(sessionId: string, command: string, options: ExecOptions = {}): Promise<ExecResult> {
+    return this.#execs.exec(sessionId, command, options);
+  }
+
+  readExec(sessionId: string, execId: string, options: ExecReadOptions = {}): Promise<ExecResult> {
+    return this.#execs.read(sessionId, execId, options);
+  }
+
+  writeExec(sessionId: string, execId: string, input: { readonly data?: string; readonly eof?: boolean }, options: FileCallOptions = {}): Promise<ExecInfo> {
+    return this.#execs.write(sessionId, execId, input, options);
+  }
+
+  stopExec(sessionId: string, execId: string, options: FileCallOptions & { readonly reason?: string } = {}): Promise<ExecInfo> {
+    return this.#execs.stop(sessionId, execId, options);
+  }
+
+  listExecs(sessionId: string, options: FileCallOptions = {}): ExecInfo[] {
+    return this.#execs.list(sessionId, options);
+  }
+
+  async publishOutputs(sessionId: string, turnId: string): Promise<void> {
+    const artifacts = this.#artifacts;
+    if (!artifacts) return;
+    this.#row(sessionId);
+    artifacts.turnStarted(sessionId, turnId);
+    const turnIds = artifacts.turnsCompleted(sessionId, "completed");
+    if (turnIds.length > 0) await artifacts.publish(sessionId, turnIds, "completed");
+  }
+
+  /** A command ended: a standalone workspace-only sandbox publishes its outputs (each command is its "turn"). */
+  #execEnded(row: ExecRow): void {
+    this.#execActivity(row.sessionId);
+    const live = this.#live.get(row.sessionId);
+    if (live) live.lastActivity = Date.now();
+    const session = this.#sessions()?.get(row.sessionId);
+    if (session?.kind !== "workspace" || session.parentSessionId !== undefined) return;
+    const sandbox = this.#options.store.bySession(row.sessionId);
+    // Never restart a sandbox that is stopping just to publish what a command left.
+    if (sandbox?.id !== row.sandboxId || sandbox.state !== "running" || this.#stoppingSessions.has(row.sessionId) || this.#stopping) return;
+    const artifacts = this.#artifacts;
+    if (!artifacts) return;
+    artifacts.turnStarted(row.sessionId, row.id);
+    const outcome = row.state === "completed" ? "completed" : "cancelled";
+    const turnIds = artifacts.turnsCompleted(row.sessionId, outcome);
+    if (turnIds.length === 0) return;
+    void artifacts.publish(row.sessionId, turnIds, outcome).catch((error: unknown) => this.#log.warn("Publishing a command's outputs failed", { sessionId: row.sessionId, error: (error as Error).message }));
+  }
+
+  #execActivity(sessionId: string): void {
+    try {
+      this.#sessions()?.execActivity?.(sessionId, this.#execs.liveCount(sessionId));
+    } catch (error) {
+      this.#log.warn("Could not report command activity", { sessionId, error: (error as Error).message });
+    }
   }
 
   // Events, idle stop, and reconciliation --------------------------------------------------------------------------
@@ -1201,6 +1301,8 @@ export class SandboxService implements SandboxesService {
         this.#log.warn("Sandbox reconciliation step failed", { sessionId: row.sessionId, sandboxId: row.id, state: row.state, error: (error as Error).message });
       }
     }
+    // Commands of sandboxes still running are followed again; those of stopped sandboxes stopped with them.
+    await this.#execs.recover().catch((error: unknown) => this.#log.warn("Command recovery failed", { error: (error as Error).message }));
     try {
       for (const id of await provider.inventory()) {
         // Decide on current ownership: a sandbox created while this sweep ran already has its row.
@@ -1255,6 +1357,7 @@ export class SandboxService implements SandboxesService {
     await Promise.all(
       running.map((row) =>
         this.#withLock(row.sessionId, async () => {
+          await this.#execs.sandboxStopping(row, "The platform stopped, so the sandbox stopped while this command was running.");
           await this.#options.provider.stop(row.id).catch(() => undefined);
           await this.#unregisterEgress(row);
           this.#options.store.update(row.sessionId, { state: "stopped", stoppedAt: new Date().toISOString() });

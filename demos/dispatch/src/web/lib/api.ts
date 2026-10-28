@@ -1,4 +1,4 @@
-import type { ApprovalMode, AttachResponse, ConversationView, DispatchState, FileView, SendMessageResponse } from "../../shared/types.js";
+import type { ApprovalMode, AttachResponse, CommandRecord, ConversationView, DispatchState, ExecutionStyle, FileView, SendMessageResponse } from "../../shared/types.js";
 
 /** A failed API call with the server's friendly message (never a stack trace). */
 export class ApiError extends Error {
@@ -77,13 +77,14 @@ export interface FileContent {
 export const api = {
   state: () => json<DispatchState>("GET", "/api/state"),
   conversation: (id: string) => json<ConversationView>("GET", conversationUrl(id)),
-  create: (prompt: string, approvals: ApprovalMode) => json<ConversationView>("POST", "/api/conversations", { prompt, approvals }),
+  create: (prompt: string, approvals: ApprovalMode, style?: ExecutionStyle) => json<ConversationView>("POST", "/api/conversations", { prompt, approvals, ...(style ? { style } : {}) }),
   send: (id: string, prompt: string) => json<SendMessageResponse | undefined>("POST", `${conversationUrl(id)}/messages`, { prompt }),
-  answer: (id: string, approvalId: string, approve: boolean, reason?: string) =>
-    json<undefined>("POST", `${conversationUrl(id)}/approvals/${enc(approvalId)}`, { approve, ...(reason?.trim() ? { reason: reason.trim() } : {}) }),
+  answer: (id: string, approvalId: string, approve: boolean, reason?: string, rest?: boolean) =>
+    json<undefined>("POST", `${conversationUrl(id)}/approvals/${enc(approvalId)}`, { approve, ...(reason?.trim() ? { reason: reason.trim() } : {}), ...(rest ? { rest: true } : {}) }),
   settings: (id: string, approvals: ApprovalMode) => json<ConversationView>("PUT", `${conversationUrl(id)}/settings`, { approvals }),
   delete: (id: string) => json<undefined>("DELETE", conversationUrl(id)),
   files: (id: string, workerId: string) => json<{ files: FileView[]; at: string }>("GET", `${conversationUrl(id)}/workers/${enc(workerId)}/files`),
+  commands: (id: string, workerId: string) => json<CommandRecord[]>("GET", `${conversationUrl(id)}/workers/${enc(workerId)}/commands`),
   file: (id: string, workerId: string, path: string) => json<FileContent>("GET", `${conversationUrl(id)}/workers/${enc(workerId)}/file?path=${enc(path)}`),
   attach: (sessionId: string) => json<AttachResponse>("POST", `/api/sessions/${enc(sessionId)}/attach`),
 };

@@ -1,6 +1,6 @@
 import { parseConfig } from "@managed-copilot/protocol";
 import { describe, expect, it } from "vitest";
-import { DISPATCH_BLUEPRINTS, DISPATCH_DEFAULT_PORT, DISPATCH_ENVIRONMENT, DISPATCH_WEB_HOSTS, dispatch } from "../apphost.mts";
+import { DISPATCH_BLUEPRINTS, DISPATCH_DEFAULT_PORT, DISPATCH_ENVIRONMENT, DISPATCH_STYLES, DISPATCH_WEB_HOSTS, dispatch } from "../apphost.mts";
 import { blueprintKind, TEMPLATES } from "../src/shared/catalog.js";
 
 describe("AppHost fragment", () => {
@@ -8,13 +8,22 @@ describe("AppHost fragment", () => {
 
   it("declares an orchestrator and its worker environments that the protocol schema accepts", () => {
     const config = parseConfig({ environments: fragment.environments });
-    expect(Object.keys(config.environments).sort()).toEqual(["dispatch", "dispatch-node", "dispatch-python", "dispatch-web", "dispatch-writer"]);
+    expect(Object.keys(config.environments).sort()).toEqual(["dispatch", "dispatch-direct", "dispatch-mixed", "dispatch-node", "dispatch-python", "dispatch-web", "dispatch-writer"]);
     expect(config.environments[DISPATCH_ENVIRONMENT]).toMatchObject({
       type: "orchestrator",
       workers: ["dispatch-python", "dispatch-node", "dispatch-web", "dispatch-writer"],
       maxWorkers: 6,
     });
     for (const name of Object.values(DISPATCH_BLUEPRINTS)) expect(config.environments[name]).toMatchObject({ type: "isolated" });
+  });
+
+  it("declares one orchestrator per execution style over the same worker environments", () => {
+    const config = parseConfig({ environments: fragment.environments });
+    expect(DISPATCH_STYLES).toEqual({ delegate: "dispatch", direct: "dispatch-direct", mixed: "dispatch-mixed" });
+    expect(config.environments[DISPATCH_STYLES.delegate]?.execution ?? "delegate").toBe("delegate");
+    // Direct works in a sandbox of exactly one environment; mixed works in the first and can start workers in any.
+    expect(config.environments[DISPATCH_STYLES.direct]).toMatchObject({ type: "orchestrator", execution: "direct", workers: [DISPATCH_BLUEPRINTS.python] });
+    expect(config.environments[DISPATCH_STYLES.mixed]).toMatchObject({ type: "orchestrator", execution: "mixed", workers: config.environments[DISPATCH_STYLES.delegate]?.workers });
   });
 
   it("gives each blueprint the network its work needs, and no more", () => {

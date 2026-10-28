@@ -29,7 +29,7 @@ describe("describeDeployment", () => {
     ]);
     const described = describeDeployment(info, "dispatch", "claude-sonnet-5");
     expect(described.problem).toBeUndefined();
-    expect(described.coordinator).toEqual({ environment: "dispatch", model: "claude-sonnet-5", maxWorkers: 6, description: "Coordinator" });
+    expect(described.coordinator).toEqual({ environment: "dispatch", model: "claude-sonnet-5", maxWorkers: 6, description: "Coordinator", style: "delegate" });
     expect(described.blueprints).toEqual([
       { name: "dispatch-node", kind: "node", label: "Node workshop", size: "small", cpus: 1, memoryGiB: 2, network: { access: "restricted", hosts: ["registry.npmjs.org"] }, agents: [], isDefault: true },
       { name: "dispatch-python", kind: "python", label: "Python lab", description: "Python lab", size: "medium", cpus: 2, memoryGiB: 4, network: { access: "disabled", hosts: [] }, agents: [], isDefault: false },
@@ -42,6 +42,28 @@ describe("describeDeployment", () => {
     const notReady = describeDeployment(deployment([env("dispatch", { type: "orchestrator", workers: [] })], ["shared"]), "dispatch", "m");
     expect(notReady.problem).toMatch(/aren't available/);
     expect(notReady.coordinator?.maxWorkers).toBe(4);
+  });
+
+  it("reads each execution style's environment, and says why one isn't available", () => {
+    const info = deployment([
+      env("dispatch", { type: "orchestrator", workers: ["dispatch-python", "dispatch-node"], execution: "delegate" }),
+      env("dispatch-direct", { type: "orchestrator", workers: ["dispatch-python"], execution: "direct", subagents: "own" }),
+      env("dispatch-mixed", { type: "orchestrator", workers: ["dispatch-python", "dispatch-node"], execution: "delegate" }),
+      env("dispatch-python", { size: "medium" }),
+      env("dispatch-node"),
+    ]);
+    const described = describeDeployment(info, { delegate: "dispatch", direct: "dispatch-direct", mixed: "dispatch-mixed" }, "m");
+    expect(described.problem).toBeUndefined();
+    expect(described.styles).toEqual([
+      expect.objectContaining({ style: "delegate", environment: "dispatch", available: true, workers: ["dispatch-python", "dispatch-node"] }),
+      expect.objectContaining({ style: "direct", environment: "dispatch-direct", available: true, handsEnvironment: "dispatch-python", subagents: "own", workers: [] }),
+      expect.objectContaining({ style: "mixed", available: false, reason: expect.stringMatching(/execution "delegate", not "mixed"/) }),
+    ]);
+    expect(described.blueprints.map((blueprint) => blueprint.name)).toEqual(["dispatch-python", "dispatch-node"]);
+    // Only direct declared: it is the default, and still not a problem.
+    const directOnly = describeDeployment(deployment([env("dispatch-direct", { type: "orchestrator", workers: ["dispatch-python"], execution: "direct" }), env("dispatch-python")]), "dispatch", "m");
+    expect(directOnly.problem).toBeUndefined();
+    expect(directOnly.coordinator).toMatchObject({ environment: "dispatch-direct", style: "direct" });
   });
 });
 

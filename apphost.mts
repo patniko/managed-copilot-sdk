@@ -52,6 +52,10 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
     // A coordinator on the shared runtime that starts workers, each a session of `coder` in its own sandbox (section 17).
     team: { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
+    // The same brain acting directly: it and its sub-agents run commands and edit files in a `coder` sandbox, no agent in it.
+    operator: { type: "orchestrator", workers: ["coder"], execution: "direct" },
+    // Both: its own `coder` sandbox for quick work, and workers for big independent parts. The model chooses.
+    lead: { type: "orchestrator", workers: ["coder"], execution: "mixed", maxWorkers: 3 },
     ...factory.environments,
     ...assistant.environments,
     ...dispatchDemo.environments,

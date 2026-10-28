@@ -1,7 +1,7 @@
 // The orchestrator ledger (`orchestrator_*` tables): each orchestrator session's workers, and the coordinator's
 // messages to them and stops keyed by tool call, so a replayed tool call never starts a worker, delivers a message
 // twice, or stops a different worker.
-import { ManagedCopilotError, type WorkerInfo, type WorkerState } from "@managed-copilot/protocol";
+import { ManagedCopilotError, type WorkerInfo, type WorkerRole, type WorkerState } from "@managed-copilot/protocol";
 import { migrate, transaction, type Database } from "../../db.js";
 
 /** The `orchestrator` module's migrations, in order (exported for upgrade tests). */
@@ -50,6 +50,17 @@ export const ORCHESTRATOR_MIGRATIONS: readonly string[] = [
   // session is already gone again is harmless.
   `UPDATE orchestrator_workers SET cleanup = 1 WHERE state = 'stopped' AND cleanup = 0;
    UPDATE orchestrator_workers SET sent_at = updated_at WHERE state = 'working' AND sent_at IS NULL;`,
+  // role: `worker` (an agent) or `hands` (a direct or mixed coordinator's own workspace-only sandbox, one per
+  // coordinator incarnation and agent: agent_id is the sub-agent's with `subagents: "own"`, NULL for the root agent's).
+  `ALTER TABLE orchestrator_workers ADD COLUMN role TEXT NOT NULL DEFAULT 'worker';
+   ALTER TABLE orchestrator_workers ADD COLUMN agent_id TEXT;`,
+  // The hands sandbox each command-running tool call (by its key) ran in, recorded before the command starts, so an
+  // interrupted call is only ever reattached in that sandbox, never started in another.
+  `CREATE TABLE orchestrator_hands_calls (
+     key TEXT PRIMARY KEY,
+     hands_id TEXT NOT NULL,
+     created_at TEXT NOT NULL
+   );`,
 ];
 
 /** States in which a worker is busy: a wait for it continues. */
@@ -82,6 +93,8 @@ interface Row {
   start_key: string;
   sent_at: string | null;
   cleanup: number;
+  role: string;
+  agent_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -108,6 +121,10 @@ export interface WorkerRecord {
   readonly sentAt?: string;
   /** Stopped, and its session may still exist: deleting it is outstanding. */
   readonly cleanup: boolean;
+  /** `hands`: a workspace-only sandbox the coordinator (or one of its sub-agents) acts in; no agent runs in it. */
+  readonly role: WorkerRole;
+  /** Hands of a sub-agent (`subagents: "own"`). */
+  readonly agentId?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -123,6 +140,8 @@ export interface NewWorker {
   readonly agent?: string;
   readonly task: string;
   readonly startKey: string;
+  readonly role?: WorkerRole;
+  readonly agentId?: string;
 }
 
 export type WorkerUpdate = Partial<{ state: WorkerState; result: string | null; error: string | null; cleanup: boolean }>;
@@ -139,28 +158,44 @@ export class WorkerStore {
    * Admits a worker in one transaction: the same tool call returns the worker it already started; otherwise the
    * coordinator incarnation must have fewer than `maxWorkers` active workers and no active worker with the same name.
    */
-  admit(worker: NewWorker, maxWorkers: number): { readonly record: WorkerRecord; readonly created: boolean } {
+  admit(worker: NewWorker, maxWorkers: number, options: { readonly hint?: string } = {}): { readonly record: WorkerRecord; readonly created: boolean } {
     return transaction(this.#db, () => {
       const existing = this.byStartKey(worker.startKey);
       if (existing) return { record: existing, created: false };
       const active = this.forCoordinator(worker.coordinatorId, worker.coordinatorIncarnation).filter(occupiesSlot);
-      if (active.some((record) => record.name === worker.name)) {
+      // Names are unique among agents (start_worker refuses the hands names); hands sandboxes are unique by start key.
+      if (active.some((record) => record.role === (worker.role ?? "worker") && record.name === worker.name)) {
         throw new ManagedCopilotError("conflict", `A worker named "${worker.name}" already exists in this session. Pick another name, or use message_worker to give it more work.`);
       }
       if (active.length >= maxWorkers) {
         throw new ManagedCopilotError(
           "policy_violation",
-          `This session already has ${active.length} workers, the most it can have at once (${maxWorkers}). Stop a worker you no longer need with stop_worker, then start this one.`,
+          options.hint ?? `This session already has ${active.length} workers, the most it can have at once (${maxWorkers}). Stop a worker you no longer need with stop_worker, then start this one.`,
           { maxWorkers },
         );
       }
       const now = new Date().toISOString();
       this.#db
         .prepare(
-          `INSERT INTO orchestrator_workers (id, coordinator_id, coordinator_incarnation, owner_id, name, environment, model, agent, task, state, messages, start_key, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', 0, ?, ?, ?)`,
+          `INSERT INTO orchestrator_workers (id, coordinator_id, coordinator_incarnation, owner_id, name, environment, model, agent, task, state, messages, start_key, role, agent_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'starting', 0, ?, ?, ?, ?, ?)`,
         )
-        .run(worker.id, worker.coordinatorId, worker.coordinatorIncarnation, worker.ownerId, worker.name, worker.environment, worker.model ?? null, worker.agent ?? null, worker.task, worker.startKey, now, now);
+        .run(
+          worker.id,
+          worker.coordinatorId,
+          worker.coordinatorIncarnation,
+          worker.ownerId,
+          worker.name,
+          worker.environment,
+          worker.model ?? null,
+          worker.agent ?? null,
+          worker.task,
+          worker.startKey,
+          worker.role ?? "worker",
+          worker.agentId ?? null,
+          now,
+          now,
+        );
       return { record: this.get(worker.id)!, created: true };
     });
   }
@@ -223,6 +258,14 @@ export class WorkerStore {
     return Number(result.changes) > 0 ? this.get(id) : undefined;
   }
 
+  /**
+   * Frees a start key a failed hands sandbox held, so the next call that needs a sandbox for that agent creates a new
+   * one (a worker's key stays: it answers the tool call that started it).
+   */
+  retireStartKey(id: string): void {
+    this.#db.prepare("UPDATE orchestrator_workers SET start_key = start_key || '#retired:' || id, updated_at = ? WHERE id = ? AND instr(start_key, '#retired:') = 0").run(new Date().toISOString(), id);
+  }
+
   /** Records the worker's session incarnation, once: a session the worker already has is never replaced. */
   setIncarnation(id: string, incarnation: string): void {
     this.#db.prepare("UPDATE orchestrator_workers SET incarnation = ?, updated_at = ? WHERE id = ? AND incarnation IS NULL").run(incarnation, new Date().toISOString(), id);
@@ -265,6 +308,17 @@ export class WorkerStore {
     this.#db.prepare("DELETE FROM orchestrator_messages WHERE key = ? AND message_id IS NULL").run(key);
   }
 
+  /** The hands sandbox a command-running tool call was bound to, if it got that far. */
+  handsCallFor(key: string): string | undefined {
+    return (this.#db.prepare("SELECT hands_id FROM orchestrator_hands_calls WHERE key = ?").get(key) as { hands_id: string } | undefined)?.hands_id;
+  }
+
+  /** Binds a command-running tool call to its hands sandbox; the first binding stays. Returns the bound sandbox. */
+  bindHandsCall(key: string, handsId: string): string {
+    this.#db.prepare("INSERT OR IGNORE INTO orchestrator_hands_calls (key, hands_id, created_at) VALUES (?, ?, ?)").run(key, handsId, new Date().toISOString());
+    return this.handsCallFor(key)!;
+  }
+
   /** The worker a `stop_worker` tool call chose, so its replay stops that one and never a newer one with its name. */
   stopFor(key: string): string | undefined {
     return (this.#db.prepare("SELECT worker_id FROM orchestrator_stops WHERE key = ?").get(key) as { worker_id: string } | undefined)?.worker_id;
@@ -301,6 +355,8 @@ function toRecord(row: Row): WorkerRecord {
     startKey: row.start_key,
     ...(row.sent_at ? { sentAt: row.sent_at } : {}),
     cleanup: Number(row.cleanup) === 1,
+    role: row.role === "hands" ? "hands" : "worker",
+    ...(row.agent_id ? { agentId: row.agent_id } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -310,6 +366,8 @@ function toRecord(row: Row): WorkerRecord {
 export function toWorkerInfo(record: WorkerRecord): WorkerInfo {
   return {
     id: record.id,
+    role: record.role,
+    ...(record.agentId ? { agentId: record.agentId } : {}),
     name: record.name,
     coordinatorId: record.coordinatorId,
     environment: record.environment,

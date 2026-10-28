@@ -2,7 +2,7 @@
 // the coordinator's replies, and what it did with its worker tools for each message (sandboxes created, work sent to
 // existing ones, files copied, stops). Pure and replayable: the same events give the same transcript, whether they
 // arrive live or from the session's history after a restart.
-import type { ChatMessage, Decision, DecisionKind, DecisionStatus } from "../shared/types.js";
+import type { ChatMessage, Command, CommandKind, CommandStatus, Decision, DecisionKind, DecisionStatus, SubAgent } from "../shared/types.js";
 
 /** A coordinator session event as the stock SDK delivers it: the fields Dispatch reads. */
 export interface CoordinatorEvent {
@@ -26,9 +26,65 @@ export const WORKER_TOOLS: Readonly<Record<string, DecisionKind>> = {
   list_workers: "list",
 };
 
+/**
+ * A direct or mixed coordinator's hands tools (spec section 17): the stock shell and file tools' names, acting in its
+ * own sandbox. Its sub-agents call them too; their calls carry the sub-agent's `agentId`.
+ */
+export const HANDS_TOOLS: Readonly<Record<string, CommandKind>> = {
+  bash: "run",
+  write_bash: "input",
+  read_bash: "output",
+  stop_bash: "stop",
+  list_bash: "list",
+  view: "view",
+  create: "create",
+  edit: "edit",
+  glob: "search",
+  grep: "search",
+};
+
+/** Hands tools that ask for permission, once per call: they run something or change a file. */
+export const ASKING_TOOLS: ReadonlySet<string> = new Set(["bash", "write_bash", "create", "edit"]);
+
+/** Events a sub-agent's work is followed through: its hands tool calls and their permission prompts, and its start and end. */
+const SUBAGENT_EVENTS: ReadonlySet<string> = new Set([
+  "tool.execution_start",
+  "tool.execution_complete",
+  "permission.requested",
+  "permission.completed",
+  "subagent.started",
+  "subagent.completed",
+  "subagent.failed",
+]);
+
+/** The output kept for a command: its end, which is what usually matters. */
+const OUTPUT_KEPT = 2_000;
+
+/**
+ * The status line the platform's `bash` and `read_bash` end their answer with: `<exited with exit code 0; shellId: …>`,
+ * `<command with shellId: … is still running …>`, or `<command started in the background with shellId: …>`.
+ */
+const STATUS_LINE = /\n?<((?:exited with exit code|killed by|timed out|stopped|could not start|outcome unknown|command with shellId|command started in the background)[^\n]*)>\s*$/;
+
+/** A bash answer's outcome, exit code, and output (without the status line). */
+export function parseCommandResult(content: string): { output: string; outcome?: string; exitCode?: number; shellId?: string; running?: boolean } {
+  const match = STATUS_LINE.exec(content);
+  const output = (match ? content.slice(0, match.index) : content).replace(/\s+$/, "");
+  const kept = output.length > OUTPUT_KEPT ? `…${output.slice(-OUTPUT_KEPT)}` : output;
+  if (!match) return { output: kept };
+  const status = match[1]!;
+  const shellId = /shellId: ([^\s;>.]+)/.exec(status)?.[1];
+  const code = /exited with exit code (-?\d+)/.exec(status)?.[1];
+  const running = /^command with shellId: .* is still running|^command started in the background/.test(status);
+  const outcome = code !== undefined ? `exit code ${code}` : running ? (status.startsWith("command started") ? "started in the background" : "still running") : status.replace(/;\s*shellId:.*$/, "");
+  return { output: kept, outcome, ...(code !== undefined ? { exitCode: Number(code) } : {}), ...(shellId ? { shellId } : {}), ...(running ? { running } : {}) };
+}
+
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type DecisionRecord = Mutable<Decision> & { workerId?: string };
-type MessageRecord = Mutable<ChatMessage> & { decisionIds?: string[] };
+type CommandRecord = Mutable<Command>;
+type SubAgentRecord = Mutable<SubAgent>;
+type MessageRecord = Mutable<ChatMessage> & { decisionIds?: string[]; commandIds?: string[]; subagentIds?: string[] };
 
 const record = (value: unknown): Record<string, unknown> => (value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 const text = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value : undefined);
@@ -99,10 +155,18 @@ export class Transcript {
   readonly #workerIds = new Map<string, string>();
   /** Assistant messages already complete: a late delta (live delivery overlapping history) must not reopen them. */
   readonly #completed = new Set<string>();
-  /** Permission request IDs to the `start_worker` call they gate. */
+  /** Permission request IDs to the `start_worker` call (or hands tool call) they gate. */
   readonly #requests = new Map<string, string>();
-  /** `start_worker` calls whose permission prompt was answered or withdrawn (`permission.completed`). */
+  /** Tool calls whose permission prompt was answered or withdrawn (`permission.completed`). */
   readonly #settled = new Set<string>();
+  /** Hands tool calls, by tool call ID. */
+  readonly #commands = new Map<string, CommandRecord>();
+  /** Sub-agents, by the `task` call that started them. */
+  readonly #subagents = new Map<string, SubAgentRecord>();
+  /** Sub-agents by ID, for labelling their commands (including ones started for earlier messages). */
+  readonly #agentNames = new Map<string, string>();
+  /** Sub-agents the end of a turn marked interrupted: their own end, arriving later, still counts. */
+  readonly #cutShort = new Set<string>();
   #users = 0;
   #current: MessageRecord | undefined;
   title: string | undefined;
@@ -131,7 +195,8 @@ export class Transcript {
 
   /** Applies one event; returns whether anything a person would see changed. */
   apply(event: CoordinatorEvent): boolean {
-    if (event.agentId) return false;
+    // A sub-agent's own messages and reasoning stay its own; its hands work and its start and end are shown.
+    if (event.agentId && !SUBAGENT_EVENTS.has(event.type)) return false;
     if (!event.ephemeral) {
       if (this.#seen.has(event.id)) return false;
       this.#seen.add(event.id);
@@ -152,6 +217,10 @@ export class Transcript {
         return this.#permissionRequested(event, data);
       case "permission.completed":
         return this.#permissionCompleted(event, data);
+      case "subagent.started":
+      case "subagent.completed":
+      case "subagent.failed":
+        return this.#subagent(event, data);
       case "session.idle":
         return this.#idle(event);
       case "abort":
@@ -192,6 +261,8 @@ export class Transcript {
       ...(messageId ? { messageId } : {}),
       ...(delivery ? { delivery } : {}),
       decisionIds: [],
+      commandIds: [],
+      subagentIds: [],
     };
     this.#messages.push(message);
     this.#current = message;
@@ -244,7 +315,11 @@ export class Transcript {
   }
 
   #toolStart(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
-    const kind = WORKER_TOOLS[String(data["toolName"] ?? "")];
+    const toolName = String(data["toolName"] ?? "");
+    if (toolName in HANDS_TOOLS) return this.#commandStart(event, data);
+    if (toolName === "task") return this.#taskStart(event, data);
+    if (event.agentId) return false;
+    const kind = WORKER_TOOLS[toolName];
     const id = text(data["toolCallId"]);
     if (!kind || !id) return false;
     const existing = this.#decisions.get(id);
@@ -295,6 +370,8 @@ export class Transcript {
 
   #toolEnd(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
     const id = text(data["toolCallId"]);
+    if (id && this.#commands.has(id)) return this.#commandEnd(event, data, this.#commands.get(id)!);
+    if (id && this.#subagents.has(id)) return this.#taskEnd(event, data, this.#subagents.get(id)!);
     const decision = id ? this.#decisions.get(id) : undefined;
     if (!decision) return false;
     const result = record(data["result"]);
@@ -324,10 +401,151 @@ export class Transcript {
     Object.assign(decision, { ...(name ? { worker: name } : {}), ...(environment ? { environment } : {}), ...(task ? { task } : {}) });
   }
 
-  /** The coordinator asked to start a worker: the session's permission prompt for `start_worker`. */
+  /** A hands tool call, by the coordinator or a sub-agent (known first from its permission prompt, or from its start). */
+  #command(id: string, toolName: string, args: Record<string, unknown>, event: CoordinatorEvent, status: CommandStatus): CommandRecord {
+    const kind = HANDS_TOOLS[toolName]!;
+    const command: CommandRecord = { id, tool: toolName, kind, status, at: event.timestamp, ...(event.agentId ? { agentId: event.agentId } : {}) };
+    const shellId = text(args["shellId"]);
+    switch (kind) {
+      case "run":
+        Object.assign(command, { ...(text(args["command"]) ? { command: String(args["command"]) } : {}), ...(text(args["description"]) ? { description: String(args["description"]) } : {}) });
+        break;
+      case "input":
+        Object.assign(command, { ...(typeof args["input"] === "string" ? { command: args["input"] } : {}), ...(shellId ? { shellId } : {}) });
+        break;
+      case "output":
+      case "stop":
+        if (shellId) command.shellId = shellId;
+        break;
+      case "search": {
+        const paths = text(args["path"]) ?? (texts(args["paths"]).join(", ") || text(args["paths"]));
+        Object.assign(command, { ...(text(args["pattern"]) ? { pattern: String(args["pattern"]) } : {}), ...(paths ? { path: paths } : {}) });
+        break;
+      }
+      case "view":
+      case "create":
+      case "edit":
+        if (text(args["path"])) command.path = String(args["path"]);
+        break;
+      case "list":
+        break;
+    }
+    this.#commands.set(id, command);
+    this.#current?.commandIds?.push(id);
+    this.updatedAt = event.timestamp;
+    return command;
+  }
+
+  #commandStart(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
+    const id = text(data["toolCallId"]);
+    if (!id) return false;
+    const existing = this.#commands.get(id);
+    if (existing) {
+      // Known from its permission prompt: it runs once that prompt is answered (which may come before or after this).
+      if (existing.status !== "asking" || !this.#settled.has(id)) return false;
+      existing.status = "running";
+      return true;
+    }
+    this.#command(id, String(data["toolName"]), record(data["arguments"]), event, "running");
+    return true;
+  }
+
+  #commandEnd(event: CoordinatorEvent, data: Record<string, unknown>, command: CommandRecord): boolean {
+    const result = record(data["result"]);
+    const error = record(data["error"]);
+    const content = text(result["content"]) ?? text(result["textResultForLlm"]);
+    const failed = data["success"] === false;
+    command.endedAt = event.timestamp;
+    if (command.status === "denied") return true;
+    if (failed) {
+      command.status = "failed";
+      const why = firstLine(text(error["message"]) ?? content);
+      if (why) command.outcome = why;
+      this.updatedAt = event.timestamp;
+      return true;
+    }
+    command.status = "done";
+    if (command.kind === "run" || command.kind === "output" || command.kind === "input" || command.kind === "stop") {
+      const parsed = parseCommandResult(content ?? "");
+      if (parsed.output) command.output = parsed.output;
+      if (parsed.outcome) command.outcome = parsed.outcome;
+      if (parsed.exitCode !== undefined) command.exitCode = parsed.exitCode;
+      if (parsed.shellId && !command.shellId) command.shellId = parsed.shellId;
+      // Timed out, killed, couldn't start, or lost track of: the call succeeded, the command didn't.
+      if (command.kind === "run" && parsed.outcome && parsed.exitCode === undefined && !parsed.running) command.status = "failed";
+    } else {
+      const line = firstLine(content, 160);
+      if (line) command.outcome = line;
+    }
+    this.updatedAt = event.timestamp;
+    return true;
+  }
+
+  /** The coordinator (or a sub-agent) started a sub-agent with the stock `task` tool. */
+  #taskStart(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
+    const id = text(data["toolCallId"]);
+    if (!id || this.#subagents.has(id)) return false;
+    const args = record(data["arguments"]);
+    const description = text(args["description"]);
+    const subagent: SubAgentRecord = {
+      toolCallId: id,
+      name: text(args["name"]) ?? description ?? "sub-agent",
+      ...(description ? { description } : {}),
+      ...(text(args["agent_type"]) ? { type: String(args["agent_type"]) } : {}),
+      status: "running",
+      at: event.timestamp,
+    };
+    this.#subagents.set(id, subagent);
+    this.#current?.subagentIds?.push(id);
+    this.updatedAt = event.timestamp;
+    return true;
+  }
+
+  #taskEnd(event: CoordinatorEvent, data: Record<string, unknown>, subagent: SubAgentRecord): boolean {
+    // A sub-agent ends with `subagent.completed` or `subagent.failed`: a background one's `task` call returns at once.
+    // The call itself ends it only when it failed, or when the sub-agent never started.
+    const failed = data["success"] === false;
+    if (subagent.status !== "running" || (!failed && subagent.id)) return false;
+    subagent.status = failed ? "failed" : "done";
+    subagent.endedAt = event.timestamp;
+    if (failed) {
+      const why = firstLine(text(record(data["error"])["message"]));
+      if (why) subagent.detail = why;
+    }
+    this.updatedAt = event.timestamp;
+    return true;
+  }
+
+  /** `subagent.started`, `subagent.completed`, `subagent.failed`: its ID (the `agentId` on its calls) and how it ended. */
+  #subagent(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
+    const toolCallId = text(data["toolCallId"]);
+    const subagent = toolCallId ? this.#subagents.get(toolCallId) : undefined;
+    const name = text(data["agentDisplayName"]) ?? text(data["agentName"]);
+    if (event.agentId && (name ?? subagent?.name)) this.#agentNames.set(event.agentId, (subagent?.name ?? name)!);
+    if (!subagent) return event.type === "subagent.started" && event.agentId !== undefined;
+    if (event.agentId) subagent.id = event.agentId;
+    if (event.type === "subagent.started") {
+      if (!subagent.type && text(data["agentType"])) subagent.type = String(data["agentType"]);
+    } else if (subagent.status === "running" || this.#cutShort.has(subagent.toolCallId)) {
+      // Its own end, even after its coordinator's turn ended (a background sub-agent can outlive it).
+      this.#cutShort.delete(subagent.toolCallId);
+      subagent.status = event.type === "subagent.failed" ? "failed" : "done";
+      subagent.endedAt = event.timestamp;
+      const why = event.type === "subagent.failed" ? firstLine(text(data["error"])) : data["cancelled"] === true ? "Cancelled before it finished." : undefined;
+      if (why) subagent.detail = why;
+      else delete subagent.detail;
+    }
+    this.updatedAt = event.timestamp;
+    return true;
+  }
+
+  /** The coordinator asked to start a worker, or (direct, mixed) it or a sub-agent asked to run a command or change a file. */
   #permissionRequested(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
     const request = record(data["permissionRequest"]);
-    if (request["kind"] !== "custom-tool" || request["toolName"] !== "start_worker" || data["resolvedByHook"] === true) return false;
+    const toolName = String(request["toolName"] ?? "");
+    if (request["kind"] !== "custom-tool" || data["resolvedByHook"] === true) return false;
+    if (ASKING_TOOLS.has(toolName)) return this.#commandAsked(event, data, request, toolName);
+    if (toolName !== "start_worker" || event.agentId) return false;
     const requestId = text(data["requestId"]);
     const id = text(request["toolCallId"]) ?? requestId;
     if (!id) return false;
@@ -346,14 +564,46 @@ export class Transcript {
     return true;
   }
 
+  #commandAsked(event: CoordinatorEvent, data: Record<string, unknown>, request: Record<string, unknown>, toolName: string): boolean {
+    const requestId = text(data["requestId"]);
+    const id = text(request["toolCallId"]) ?? requestId;
+    if (!id) return false;
+    if (requestId) this.#requests.set(requestId, id);
+    const existing = this.#commands.get(id);
+    if (existing) {
+      if (existing.status !== "running") return false;
+      existing.status = "asking";
+      return true;
+    }
+    this.#command(id, toolName, record(request["args"]), event, "asking");
+    return true;
+  }
+
   #permissionCompleted(event: CoordinatorEvent, data: Record<string, unknown>): boolean {
     const requestId = text(data["requestId"]);
     const id = text(data["toolCallId"]) ?? (requestId ? this.#requests.get(requestId) : undefined);
     if (id) this.#settled.add(id);
-    const decision = id ? this.#decisions.get(id) : undefined;
-    if (!decision || decision.kind !== "create") return false;
     const result = record(data["result"]);
     const kind = String(result["kind"] ?? "");
+    const command = id ? this.#commands.get(id) : undefined;
+    if (command) {
+      if (kind.startsWith("approved")) {
+        command.approvedAt ??= event.timestamp;
+        if (command.status !== "asking") return true;
+        command.status = "running";
+        return true;
+      }
+      const status: CommandStatus = kind === "cancelled" ? "failed" : "denied";
+      const outcome = kind === "cancelled" ? "Cancelled before anyone answered." : (firstLine(text(result["feedback"])) ?? "Declined.");
+      if (command.status === status && command.outcome === outcome) return false;
+      command.status = status;
+      command.endedAt ??= event.timestamp;
+      command.outcome = outcome;
+      this.updatedAt = event.timestamp;
+      return true;
+    }
+    const decision = id ? this.#decisions.get(id) : undefined;
+    if (!decision || decision.kind !== "create") return false;
     if (kind.startsWith("approved")) {
       if (decision.status !== "asking") return false;
       decision.status = "running";
@@ -394,16 +644,40 @@ export class Transcript {
       decision.endedAt ??= at;
       changed = true;
     }
+    for (const command of this.#commands.values()) {
+      if (command.status !== "running" && command.status !== "asking") continue;
+      if (command.status === "asking") this.#settled.add(command.id);
+      command.outcome = command.status === "asking" ? "Cancelled before anyone answered." : "Interrupted: the turn ended before this finished.";
+      command.status = "failed";
+      command.endedAt ??= at;
+      changed = true;
+    }
+    for (const subagent of this.#subagents.values()) {
+      if (subagent.status !== "running") continue;
+      subagent.status = "failed";
+      subagent.detail = "Interrupted: the turn ended before it finished.";
+      subagent.endedAt ??= at;
+      this.#cutShort.add(subagent.toolCallId);
+      changed = true;
+    }
     return changed;
   }
 
-  /** Whether the permission prompt for `start_worker` call `toolCallId` was answered or withdrawn, here or elsewhere. */
+  /** Whether the permission prompt for tool call `toolCallId` was answered or withdrawn, here or elsewhere. */
   isSettled(toolCallId: string | undefined): boolean {
     return toolCallId !== undefined && this.#settled.has(toolCallId);
   }
 
-  /** Marks the `start_worker` call an approval gates (`asking`, then `running` or `denied`). */
+  /** Marks the `start_worker` call or hands tool call an approval gates (`asking`, then `running` or `denied`). */
   markDecision(decisionId: string | undefined, status: DecisionStatus, detail?: string): boolean {
+    const command = decisionId ? this.#commands.get(decisionId) : undefined;
+    if (command) {
+      if (command.status === status && (detail === undefined || command.outcome === detail)) return false;
+      if (command.status === "asking" && status === "running") command.approvedAt ??= new Date().toISOString();
+      command.status = status;
+      if (detail !== undefined) command.outcome = detail;
+      return true;
+    }
     const decision = decisionId ? this.#decisions.get(decisionId) : undefined;
     if (!decision || (decision.status === status && (detail === undefined || decision.detail === detail))) return false;
     decision.status = status;
@@ -411,10 +685,40 @@ export class Transcript {
     return true;
   }
 
-  /** The user message (number) the decision for `decisionId` serves. */
+  /** The user message (number) the decision or command `decisionId` serves. */
   messageIndexOf(decisionId: string | undefined): number | undefined {
     if (!decisionId) return undefined;
-    return this.#messages.find((message) => message.decisionIds?.includes(decisionId))?.index;
+    return this.#messages.find((message) => message.decisionIds?.includes(decisionId) || message.commandIds?.includes(decisionId))?.index;
+  }
+
+  /** A hands tool call, for its approval (who asks, and what it would run). */
+  command(id: string | undefined): Command | undefined {
+    return id ? this.#commands.get(id) : undefined;
+  }
+
+  /** Sub-agents' names by ID. */
+  agentNames(): Record<string, string> {
+    return Object.fromEntries(this.#agentNames);
+  }
+
+  /**
+   * Which user messages created a hands sandbox and ran more commands in it. `agentId` is the sub-agent the sandbox
+   * belongs to (`subagents: "own"`); `own` says whether sub-agents have sandboxes of their own (else every command of
+   * the conversation ran in the one sandbox).
+   */
+  handsAttribution(agentId: string | undefined, own: boolean): { createdBy?: number; sentWorkBy: number[] } {
+    const used: number[] = [];
+    for (const message of this.#messages) {
+      if (message.index === undefined || !message.commandIds?.length) continue;
+      const ran = message.commandIds.some((id) => {
+        const command = this.#commands.get(id);
+        if (!command || command.status === "denied" || command.outcome === "Cancelled before anyone answered.") return false;
+        return !own || command.agentId === agentId;
+      });
+      if (ran) used.push(message.index);
+    }
+    const [createdBy, ...rest] = used;
+    return { ...(createdBy !== undefined ? { createdBy } : {}), sentWorkBy: rest };
   }
 
   /**
@@ -469,15 +773,19 @@ export class Transcript {
   /** The transcript as the UI shows it: each user message carries the decisions made for it, with their workers. */
   messages(resolved: ReadonlyMap<string, string> = new Map()): ChatMessage[] {
     return this.#messages.map((message) => {
-      const { decisionIds, ...rest } = message;
+      const { decisionIds, commandIds, subagentIds, ...rest } = message;
       if (message.role !== "user") return { ...rest };
       const decisions = (decisionIds ?? []).map((id) => this.#decisions.get(id)).filter((decision): decision is DecisionRecord => decision !== undefined);
+      const commands = (commandIds ?? []).map((id) => this.#commands.get(id)).filter((command): command is CommandRecord => command !== undefined);
+      const subagents = (subagentIds ?? []).map((id) => this.#subagents.get(id)).filter((subagent): subagent is SubAgentRecord => subagent !== undefined);
       return {
         ...rest,
         decisions: decisions.map(({ workerId: _workerId, ...decision }) => {
           const workerId = resolved.get(decision.id);
           return { ...decision, ...(workerId ? { workerId } : {}) };
         }),
+        ...(commands.length ? { commands: commands.map((command) => ({ ...command })) } : {}),
+        ...(subagents.length ? { subagents: subagents.map((subagent) => ({ ...subagent })) } : {}),
       };
     });
   }

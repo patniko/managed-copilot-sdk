@@ -2,12 +2,14 @@ import { useSyncExternalStore } from "react";
 import type {
   ApprovalMode,
   Blueprint,
-  ConversationSettings,
+  ConversationDefaults,
   ConversationSummary,
   ConversationView,
   CoordinatorInfo,
+  ExecutionStyle,
   PlatformStatus,
   ServerEvent,
+  StyleInfo,
   Template,
 } from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
@@ -32,6 +34,7 @@ export interface StoreState {
   readonly connection: Connection;
   readonly platform?: PlatformStatus;
   readonly coordinator?: CoordinatorInfo;
+  readonly styles: readonly StyleInfo[];
   readonly blueprints: readonly Blueprint[];
   /** Most recently updated first. */
   readonly conversations: readonly ConversationSummary[];
@@ -39,21 +42,36 @@ export interface StoreState {
   readonly viewErrors: Readonly<Record<string, string>>;
   readonly outgoing: Readonly<Record<string, readonly Outgoing[]>>;
   readonly templates: readonly Template[];
-  readonly defaults: ConversationSettings;
+  readonly defaults: ConversationDefaults;
+  /** The style the person picked for new conversations (kept across visits), and a message carried to the home page. */
+  readonly draft: { readonly style?: ExecutionStyle; readonly text?: string };
   readonly attachCommand: string;
   readonly canLaunchTerminal: boolean;
+}
+
+const STYLE_KEY = "dispatch.style";
+
+function savedStyle(): ExecutionStyle | undefined {
+  try {
+    const value = globalThis.localStorage?.getItem(STYLE_KEY);
+    return value === "delegate" || value === "direct" || value === "mixed" ? value : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const initialState: StoreState = {
   phase: "loading",
   connection: "connecting",
+  styles: [],
   blueprints: [],
   conversations: [],
   views: {},
   viewErrors: {},
   outgoing: {},
   templates: [],
-  defaults: { approvals: "ask" },
+  defaults: { approvals: "ask", style: "delegate" },
+  draft: { ...(savedStyle() ? { style: savedStyle() } : {}) },
   attachCommand: "",
   canLaunchTerminal: false,
 };
@@ -99,6 +117,7 @@ async function loadState(): Promise<void> {
       phase: "ready",
       platform: loaded.platform,
       ...(loaded.coordinator ? { coordinator: loaded.coordinator } : {}),
+      styles: loaded.styles ?? [],
       blueprints: loaded.blueprints,
       conversations: loaded.conversations,
       templates: loaded.templates,
@@ -144,6 +163,7 @@ function handleServerEvent(event: ServerEvent): void {
       setState((current) => ({
         ...current,
         platform: event.platform,
+        styles: event.styles ?? current.styles,
         blueprints: event.blueprints,
         ...(event.coordinator ? { coordinator: event.coordinator } : {}),
       }));
@@ -266,14 +286,25 @@ export function startDispatch(): void {
 
 // ─── Actions ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-export async function createConversation(prompt: string, approvals: ApprovalMode): Promise<ConversationView> {
-  const view = await api.create(prompt, approvals);
+export async function createConversation(prompt: string, approvals: ApprovalMode, style?: ExecutionStyle): Promise<ConversationView> {
+  const view = await api.create(prompt, approvals, style);
   setState((current) => ({
     ...current,
     views: { ...current.views, [view.id]: view },
     conversations: current.conversations.some((summary) => summary.id === view.id) ? current.conversations : [view, ...current.conversations],
+    draft: { ...(current.draft.style ? { style: current.draft.style } : {}) },
   }));
   return view;
+}
+
+/** Picks the style for new conversations (remembered in this browser). `text` carries a message to the home page. */
+export function setDraft(draft: { style?: ExecutionStyle; text?: string }): void {
+  try {
+    if (draft.style) globalThis.localStorage?.setItem(STYLE_KEY, draft.style);
+  } catch {
+    // Private browsing: the choice lasts for this page only.
+  }
+  setState((current) => ({ ...current, draft: { ...current.draft, ...draft } }));
 }
 
 let outgoingKey = 0;
@@ -311,9 +342,9 @@ export function dismissOutgoing(id: string, key: number): void {
   });
 }
 
-export async function answerApproval(id: string, approvalId: string, approve: boolean, reason?: string): Promise<void> {
+export async function answerApproval(id: string, approvalId: string, approve: boolean, reason?: string, rest?: boolean): Promise<void> {
   try {
-    await api.answer(id, approvalId, approve, reason);
+    await api.answer(id, approvalId, approve, reason, rest);
   } catch (error) {
     toast.error("Couldn't answer the request", errorMessage(error));
     void loadConversation(id);

@@ -17,7 +17,7 @@ flowchart LR
 | I'm… | Read | Then run |
 | --- | --- | --- |
 | **Evaluating it** | [How it works](concepts/how-it-works.md), then [environments](concepts/environments.md) | [01 · Your first agent](../samples/01-first-agent/README.md) |
-| **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../samples/README.md), and [11](../samples/11-orchestrator/README.md) for multi-agent jobs |
+| **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../samples/README.md), and [11](../samples/11-orchestrator/README.md) to [13](../samples/13-your-own-harness/README.md) for multi-agent jobs and direct execution |
 | **Running the platform** | [Local and Azure](concepts/local-and-azure.md), then [identity and access](concepts/identity.md) | [10 · Azure from your laptop](../samples/10-azure/README.md) |
 
 ## Concepts
@@ -47,6 +47,8 @@ Each page answers one question, diagram first.
 | Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../samples/03-sandbox/README.md) |
 | Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../samples/04-promotion/README.md) |
 | Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../samples/11-orchestrator/README.md) |
+| Have a coordinator and its sub-agents run commands in a sandbox themselves, or choose between that and workers | [Orchestrator](concepts/orchestrator.md#three-ways-to-get-work-done) | [12](../samples/12-direct-execution/README.md) |
+| Run my own agent loop with its hands in a sandbox, or run commands in a sandbox from code | [Sandboxes](concepts/sandboxes.md#run-commands-directly) | [13](../samples/13-your-own-harness/README.md) |
 | Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../samples/05-choose-environments/README.md), [06](../samples/06-harness/README.md) |
 | Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../samples/01-first-agent/README.md), [06](../samples/06-harness/README.md) |
 | Give an agent an API key without putting it in the sandbox | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
@@ -88,6 +90,7 @@ Each page answers one question, diagram first.
 | [Video tour](tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Developer experience spec](spec/developer-experience.md) | The customer contract: every API, decision, and delivery gate |
 | [Architecture](architecture.md) | How it's built: topology, protocol facts, and each module |
+| [Proposal: direct execution](proposals/direct-execution.md) | Research, not built: one brain whose tools and sub-agents act inside sandboxes, beside today's delegating orchestrator |
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../packages/cli/README.md) | Every command |
 | [Quickstart](../demos/quickstart/README.md) | Every spec snippet as an automated acceptance check |

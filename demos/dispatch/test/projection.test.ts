@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { firstLine, mergeHistory, Transcript, type CoordinatorEvent } from "../src/server/projection.js";
+import { firstLine, mergeHistory, parseCommandResult, Transcript, type CoordinatorEvent } from "../src/server/projection.js";
 import { event } from "./fakes.js";
 
 const WORKER_A = "11111111-1111-4111-8111-111111111111";
@@ -195,7 +195,7 @@ describe("Transcript", () => {
     expect(t.isSettled(undefined)).toBe(false);
   });
 
-  it("leaves out autopilot continuations, skill prompts, subagents, and other tools", () => {
+  it("leaves out autopilot continuations, skill prompts, sub-agents' messages, and other tools", () => {
     const t = transcript();
     const results = apply(
       t,
@@ -203,7 +203,7 @@ describe("Transcript", () => {
       user("Skill text", undefined, { source: "skill-review" }),
       event("assistant.message", { messageId: "s1", content: "sub" }, { agentId: "sub-agent" }),
       user("real"),
-      start("x1", "bash", { command: "ls" }),
+      start("x1", "report_intent", { intent: "Exploring" }),
     );
     expect(results).toEqual([false, false, false, true, false]);
     expect(t.userMessages).toBe(1);
@@ -303,5 +303,153 @@ describe("Transcript assistant messages", () => {
     t.apply(event("session.idle", {}, { ephemeral: true }) as unknown as CoordinatorEvent);
     t.apply(event("assistant.message", { messageId: "a", content: "Here it is." }) as unknown as CoordinatorEvent);
     expect(t.messages().filter((message) => message.role === "assistant")).toEqual([expect.objectContaining({ id: "assistant:a", content: "Here it is.", streaming: false })]);
+  });
+});
+
+describe("Commands (direct and mixed)", () => {
+  const SUB_A = "8bb791c7-bec7-4d7a-8e67-5cb4895760bf";
+  const SUB_B = "f730da91-3fc7-4552-b5f4-d56337cd5ade";
+  const asked = (toolCallId: string, toolName: string, args: Record<string, unknown>, agentId?: string) =>
+    event("permission.requested", { requestId: `r-${toolCallId}`, permissionRequest: { kind: "custom-tool", toolName, toolCallId, args } }, agentId ? { agentId } : {});
+  const answered = (toolCallId: string, kind: string, agentId?: string, feedback?: string) =>
+    event("permission.completed", { requestId: `r-${toolCallId}`, toolCallId, result: { kind, ...(feedback ? { feedback } : {}) } }, agentId ? { agentId } : {});
+  const sub = (type: string, toolCallId: string, agentId: string, name: string) => event(type, { toolCallId, agentName: "general-purpose", agentDisplayName: name, agentDescription: "d" }, { agentId });
+  const subStart = (toolCallId: string, toolName: string, args: Record<string, unknown>, agentId: string) => event("tool.execution_start", { toolCallId, toolName, arguments: args }, { agentId });
+  const subDone = (toolCallId: string, content: string, agentId: string) => event("tool.execution_complete", { toolCallId, success: true, result: { content } }, { agentId });
+
+  it("lists the commands the coordinator and its sub-agents ran, with who ran them, exit codes, and output", () => {
+    const t = transcript();
+    apply(
+      t,
+      user("Count primes and Fibonacci digits"),
+      start("task-1", "task", { name: "count primes", description: "Count primes", agent_type: "general-purpose", prompt: "..." }),
+      start("task-2", "task", { name: "fibonacci digits", prompt: "..." }),
+      sub("subagent.started", "task-1", SUB_A, "count primes"),
+      sub("subagent.started", "task-2", SUB_B, "fibonacci digits"),
+      subStart("b1", "bash", { command: "python3 primes.py", description: "Count primes" }, SUB_A),
+      asked("b1", "bash", { command: "python3 primes.py" }, SUB_A),
+      answered("b1", "approved", SUB_A),
+      subStart("b2", "bash", { command: "node -e 'x'" }, SUB_B),
+      subDone("b1", "5133\n<exited with exit code 0; shellId: ex_1>", SUB_A),
+      subDone("b2", "SyntaxError\n<exited with exit code 1; shellId: ex_2>", SUB_B),
+      // Their own messages and reasoning stay theirs.
+      event("assistant.message", { messageId: "s", content: "done" }, { agentId: SUB_A }),
+      sub("subagent.completed", "task-1", SUB_A, "count primes"),
+      sub("subagent.failed", "task-2", SUB_B, "fibonacci digits"),
+      done("task-1", "5133"),
+      start("c1", "create", { path: "/workspace/outputs/answers.md", file_text: "# Answers" }),
+      done("c1", "Created file /workspace/outputs/answers.md with 9 characters."),
+      start("c2", "bash", { command: "sleep 600", mode: "async" }),
+      done("c2", "<command started in the background with shellId: ex_3. Use read_bash to read its output.>"),
+      event("session.idle", {}, { ephemeral: true }),
+    );
+    const [message] = t.messages();
+    expect(message?.decisions).toEqual([]);
+    expect(message?.subagents).toEqual([
+      expect.objectContaining({ id: SUB_A, toolCallId: "task-1", name: "count primes", description: "Count primes", type: "general-purpose", status: "done" }),
+      expect.objectContaining({ id: SUB_B, toolCallId: "task-2", name: "fibonacci digits", status: "failed" }),
+    ]);
+    expect(message?.commands).toEqual([
+      expect.objectContaining({ id: "b1", tool: "bash", kind: "run", agentId: SUB_A, command: "python3 primes.py", description: "Count primes", status: "done", exitCode: 0, output: "5133", shellId: "ex_1" }),
+      expect.objectContaining({ id: "b2", agentId: SUB_B, status: "done", exitCode: 1, output: "SyntaxError", outcome: "exit code 1" }),
+      expect.objectContaining({ id: "c1", tool: "create", kind: "create", path: "/workspace/outputs/answers.md", status: "done" }),
+      expect.objectContaining({ id: "c2", kind: "run", outcome: "started in the background", shellId: "ex_3" }),
+    ]);
+    expect(message?.commands?.[2]).not.toHaveProperty("agentId");
+    expect(t.agentNames()).toEqual({ [SUB_A]: "count primes", [SUB_B]: "fibonacci digits" });
+    expect(t.handsAttribution(undefined, false)).toEqual({ createdBy: 1, sentWorkBy: [] });
+  });
+
+  it("follows a command's permission prompt: asking, approved, declined with a reason, or cut short", () => {
+    const t = transcript();
+    apply(t, user("go"), start("b1", "bash", { command: "rm -rf build" }), asked("b1", "bash", { command: "rm -rf build" }));
+    expect(t.messages()[0]?.commands?.[0]).toMatchObject({ status: "asking" });
+    expect(t.messageIndexOf("b1")).toBe(1);
+    expect(t.isSettled("b1")).toBe(false);
+    apply(t, answered("b1", "denied-interactively-by-user", undefined, "Don't delete the build"));
+    expect(t.messages()[0]?.commands?.[0]).toMatchObject({ status: "denied", outcome: "Don't delete the build" });
+    expect(t.isSettled("b1")).toBe(true);
+    // A request known only from its prompt (the start comes later), then the turn ends unanswered.
+    apply(t, asked("e1", "edit", { path: "/workspace/a.py", old_str: "x", new_str: "y" }), event("session.idle", {}, { ephemeral: true }));
+    expect(t.messages()[0]?.commands?.[1]).toMatchObject({ id: "e1", kind: "edit", path: "/workspace/a.py", status: "failed", outcome: "Cancelled before anyone answered." });
+    expect(t.isSettled("e1")).toBe(true);
+    // Denied and unanswered calls don't count as using the sandbox.
+    expect(t.handsAttribution(undefined, false)).toEqual({ sentWorkBy: [] });
+  });
+
+  it("rebuilds the same commands from history (sub-agent events are persisted)", () => {
+    const events = [
+      user("go"),
+      start("task-1", "task", { name: "worker one", prompt: "p" }),
+      sub("subagent.started", "task-1", SUB_A, "worker one"),
+      subStart("b1", "bash", { command: "ls" }, SUB_A),
+      subDone("b1", "a.txt\n<exited with exit code 0; shellId: ex_1>", SUB_A),
+      sub("subagent.completed", "task-1", SUB_A, "worker one"),
+      done("task-1", "ok"),
+    ];
+    const live = transcript();
+    apply(live, ...events);
+    const rebuilt = transcript();
+    apply(rebuilt, ...events, ...events);
+    expect(rebuilt.messages()).toEqual(live.messages());
+  });
+
+  it("attributes each sub-agent's own sandbox to the messages it ran commands for", () => {
+    const t = transcript();
+    apply(t, user("one"), start("task-1", "task", { name: "a", prompt: "p" }), sub("subagent.started", "task-1", SUB_A, "a"), subStart("b1", "bash", { command: "ls" }, SUB_A), subDone("b1", "<exited with exit code 0; shellId: x>", SUB_A));
+    apply(t, user("two"), start("b2", "bash", { command: "pwd" }), done("b2", "/workspace\n<exited with exit code 0; shellId: y>"));
+    expect(t.handsAttribution(SUB_A, true)).toEqual({ createdBy: 1, sentWorkBy: [] });
+    expect(t.handsAttribution(undefined, true)).toEqual({ createdBy: 2, sentWorkBy: [] });
+    expect(t.handsAttribution(undefined, false)).toEqual({ createdBy: 1, sentWorkBy: [2] });
+  });
+
+  it("keeps a command asking when its prompt arrives before its start, until the prompt is answered", () => {
+    const t = transcript();
+    apply(t, user("go"), asked("c1", "create", { path: "/workspace/a.js" }, SUB_A), subStart("c1", "create", { path: "/workspace/a.js" }, SUB_A));
+    expect(t.messages()[0]?.commands?.[0]).toMatchObject({ status: "asking", agentId: SUB_A });
+    apply(t, answered("c1", "approved", SUB_A));
+    expect(t.messages()[0]?.commands?.[0]).toMatchObject({ status: "running" });
+  });
+
+  it("follows a background sub-agent to its own end, even after its coordinator's turn ended", () => {
+    const t = transcript();
+    apply(
+      t,
+      user("go"),
+      start("task-1", "task", { name: "bg", prompt: "p", mode: "background" }),
+      sub("subagent.started", "task-1", SUB_A, "bg"),
+      // A background task call returns at once.
+      done("task-1", "Agent started in background with agent_id: bg"),
+    );
+    expect(t.messages()[0]?.subagents?.[0]).toMatchObject({ status: "running" });
+    apply(t, event("session.idle", {}, { ephemeral: true }));
+    expect(t.messages()[0]?.subagents?.[0]).toMatchObject({ status: "failed", detail: expect.stringMatching(/Interrupted/) });
+    apply(t, sub("subagent.completed", "task-1", SUB_A, "bg"));
+    expect(t.messages()[0]?.subagents?.[0]).toMatchObject({ status: "done" });
+    expect(t.messages()[0]?.subagents?.[0]).not.toHaveProperty("detail");
+  });
+
+  it("marks a command that timed out or couldn't start as failed, and reads a search's paths", () => {
+    const t = transcript();
+    apply(
+      t,
+      user("go"),
+      start("b1", "bash", { command: "sleep 9999" }),
+      done("b1", "partial\n<timed out; shellId: ex_1>"),
+      start("g1", "grep", { pattern: "TODO", paths: ["/workspace/src", "/workspace/test"] }),
+      done("g1", "no matches"),
+    );
+    expect(t.messages()[0]?.commands).toEqual([
+      expect.objectContaining({ id: "b1", status: "failed", outcome: "timed out", output: "partial" }),
+      expect.objectContaining({ id: "g1", kind: "search", pattern: "TODO", path: "/workspace/src, /workspace/test", status: "done" }),
+    ]);
+  });
+
+  it("parses the platform's command status lines", () => {
+    expect(parseCommandResult("out\n<exited with exit code 3; shellId: ex_9>")).toEqual({ output: "out", outcome: "exit code 3", exitCode: 3, shellId: "ex_9" });
+    expect(parseCommandResult("partial\n<command with shellId: ex_1 is still running after 120 seconds. It keeps running: use read_bash.>")).toMatchObject({ output: "partial", outcome: "still running", running: true, shellId: "ex_1" });
+    expect(parseCommandResult("<timed out; shellId: ex_2>")).toMatchObject({ outcome: "timed out", shellId: "ex_2" });
+    expect(parseCommandResult("just text")).toEqual({ output: "just text" });
+    expect(parseCommandResult(`${"x".repeat(3000)}\n<exited with exit code 0; shellId: e>`).output.length).toBeLessThanOrEqual(2001);
   });
 });

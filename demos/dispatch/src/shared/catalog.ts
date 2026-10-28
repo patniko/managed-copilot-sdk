@@ -51,7 +51,7 @@ export const TEMPLATES: readonly Template[] = [
     icon: "graph",
     description: "Monte Carlo, Leibniz, and Nilakantha in parallel; compare how fast they converge.",
     prompt:
-      "Estimate π three ways in parallel, each in its own sandbox: a Monte Carlo simulation, the Leibniz series, and the Nilakantha series. Report each estimate and its error after 10, 1,000, and 1,000,000 steps, and say which converges fastest.",
+      "Estimate π three ways in parallel: a Monte Carlo simulation, the Leibniz series, and the Nilakantha series. Report each estimate and its error after 10, 1,000, and 1,000,000 steps, and say which converges fastest.",
     uses: [{ kind: "python", count: 3 }],
     minutes: 2,
     followUps: ["Run the Monte Carlo one again with 10 million samples.", "Chart the error of all three as the steps grow."],

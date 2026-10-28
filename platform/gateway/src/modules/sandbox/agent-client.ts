@@ -5,9 +5,13 @@ import type { Duplex, Readable } from "node:stream";
 import {
   ManagedCopilotError,
   SANDBOXD_ROUTES,
+  sandboxdExecRoute,
   type ErrorCode,
   type FileEntry,
   type SandboxdStatus,
+  type SandboxExecRead,
+  type SandboxExecRecord,
+  type SandboxExecRequest,
   type SandboxOutputsManifest,
   type SandboxStartEvent,
   type SandboxStartRequest,
@@ -36,16 +40,30 @@ interface SendOptions {
   signal?: AbortSignal;
 }
 
+/** Errors sandboxd itself answered (a refusal), as opposed to a request that may not have reached it or lost its answer. */
+const ANSWERED = new WeakSet<object>();
+
+/** True when sandboxd answered the request with this error, so it acted on it as it says (for a refusal: not at all). */
+export function answeredBySandbox(error: unknown): boolean {
+  return typeof error === "object" && error !== null && ANSWERED.has(error);
+}
+
 async function errorFrom(res: IncomingMessage, fallback: string): Promise<ManagedCopilotError> {
   const chunks: Buffer[] = [];
   for await (const chunk of res) chunks.push(chunk as Buffer);
+  let error: ManagedCopilotError;
   try {
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { error?: { code?: string; message?: string } };
     const code = CODE_MAP[body.error?.code ?? ""] ?? "internal";
-    return new ManagedCopilotError(code, body.error?.message ?? fallback);
+    error = new ManagedCopilotError(code, body.error?.message ?? fallback);
   } catch {
+    // Not sandboxd's own answer (a proxy or ingress in between, for example).
     return new ManagedCopilotError(res.statusCode === 503 ? "capability_unavailable" : "internal", `${fallback} (HTTP ${res.statusCode})`);
   }
+  ANSWERED.add(error);
+  // A relay's 502/504 means the connection to sandboxd broke or timed out: the request may have reached it.
+  if (res.statusCode === 502 || res.statusCode === 504) ANSWERED.delete(error);
+  return error;
 }
 
 export class SandboxAgentClient {
@@ -160,9 +178,9 @@ export class SandboxAgentClient {
     return { size: Number(res.headers["content-length"] ?? 0), modifiedAt: String(res.headers["x-file-modified-at"] ?? new Date().toISOString()), body: res };
   }
 
-  writeFile(path: string, body: Readable | Buffer, options: { overwrite: boolean; size?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256?: string }> {
+  writeFile(path: string, body: Readable | Buffer, options: { overwrite: boolean; size?: number; ifMatch?: string; signal?: AbortSignal }): Promise<FileEntry & { sha256?: string }> {
     return this.#json("PUT", SANDBOXD_ROUTES.fileContent, {
-      query: { path, overwrite: String(options.overwrite) },
+      query: { path, overwrite: String(options.overwrite), ...(options.ifMatch ? { ifMatch: options.ifMatch } : {}) },
       body,
       headers: { "content-type": "application/octet-stream", ...(options.size !== undefined ? { "content-length": String(options.size) } : { "transfer-encoding": "chunked" }) },
       ...(options.signal ? { signal: options.signal } : {}),
@@ -192,6 +210,39 @@ export class SandboxAgentClient {
 
   async abortRuntimeImport(staging: string): Promise<void> {
     await this.#json("POST", SANDBOXD_ROUTES.runtimeImportAbort, { query: { staging } });
+  }
+
+  // Commands (`SANDBOXD_ROUTES.exec`) ------------------------------------------------------------------------------
+
+  startExec(request: SandboxExecRequest): Promise<SandboxExecRecord> {
+    return this.#json("POST", SANDBOXD_ROUTES.exec, { body: Buffer.from(JSON.stringify(request)), headers: { "content-type": "application/json" }, timeoutMs: 30_000 });
+  }
+
+  listExecs(timeoutMs = 15_000): Promise<SandboxExecRecord[]> {
+    return this.#json("GET", SANDBOXD_ROUTES.exec, { timeoutMs });
+  }
+
+  /** Output from `offset`, waiting up to `waitMs` for more. */
+  readExec(id: string, offset: number, waitMs: number, signal?: AbortSignal): Promise<SandboxExecRead> {
+    return this.#json("GET", sandboxdExecRoute(id), { query: { offset: String(offset), waitMs: String(waitMs) }, timeoutMs: waitMs + 15_000, ...(signal ? { signal } : {}) });
+  }
+
+  /** Waits up to `waitMs` for the command to end (no output). */
+  async waitExec(id: string, waitMs: number, signal?: AbortSignal): Promise<SandboxExecRecord> {
+    const read = await this.#json<SandboxExecRead>("GET", sandboxdExecRoute(id), { query: { output: "false", waitMs: String(waitMs) }, timeoutMs: waitMs + 15_000, ...(signal ? { signal } : {}) });
+    return read.exec;
+  }
+
+  execInput(id: string, data: string | undefined, eof: boolean): Promise<SandboxExecRecord> {
+    return this.#json("POST", sandboxdExecRoute(id, "input"), { body: Buffer.from(JSON.stringify({ ...(data !== undefined ? { data } : {}), eof })), headers: { "content-type": "application/json" }, timeoutMs: 30_000 });
+  }
+
+  stopExec(id: string, reason?: string): Promise<SandboxExecRecord> {
+    return this.#json("POST", sandboxdExecRoute(id, "stop"), { ...(reason ? { query: { reason } } : {}), timeoutMs: 30_000 });
+  }
+
+  stopAllExecs(reason: string): Promise<SandboxExecRecord[]> {
+    return this.#json("POST", SANDBOXD_ROUTES.execStopAll, { query: { reason }, timeoutMs: 30_000 });
   }
 
   /**

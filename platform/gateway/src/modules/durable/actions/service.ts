@@ -29,6 +29,7 @@ import {
   type DurableSessionsPort,
   type GenerationChangeOptions,
   type PlatformEventMeta,
+  type PlatformToolContext,
   type PlatformToolDefinition,
   type PromptVisibility,
   type PromptVisibilityInput,
@@ -119,6 +120,7 @@ const MOVED_WHILE_RUNNING =
   "The session moved to a new placement while this tool was running; it may have run. Check its effect with the idempotency key, then answer it with a reconcile claim.";
 const RESTARTED_WHILE_RUNNING =
   "The runtime restarted while this tool was being handled; it may have run. Check its effect with the idempotency key, then answer it with a reconcile claim.";
+const SHUTTING_DOWN = () => new ManagedCopilotError("capability_unavailable", "The gateway is shutting down; try again shortly");
 
 const str = (value: unknown): string | undefined => (typeof value === "string" && value.length > 0 ? value : undefined);
 /** The runtime event an action was recorded from. */
@@ -328,6 +330,9 @@ export class DurableActions implements ActionsService {
   readonly #placements = new Map<string, number>();
   /** `promptVisibility` calls waiting for core's event stream to record a request, per session. */
   readonly #recordWaiters = new Map<string, Set<() => void>>();
+  /** Platform tool calls running in this process, by action ID, with the claim they run under. */
+  readonly #running = new Map<string, { readonly seq: number; readonly controller: AbortController }>();
+  #stopping = false;
   #sweeper: NodeJS.Timeout | undefined;
   #sweeping = false;
 
@@ -387,6 +392,9 @@ export class DurableActions implements ActionsService {
   }
 
   stop(): void {
+    this.#stopping = true;
+    for (const { controller } of this.#running.values()) controller.abort(SHUTTING_DOWN());
+    this.#running.clear();
     if (this.#sweeper) clearInterval(this.#sweeper);
     this.#sweeper = undefined;
     for (const timer of this.#notifyTimers.values()) clearTimeout(timer);
@@ -400,16 +408,27 @@ export class DurableActions implements ActionsService {
 
   /**
    * After a restart no live connection survives. A tool a client may have been running becomes uncertain; prompts
-   * (no external effect) return to `pending`. Gateway-executed platform tools are idempotent by key and run again.
+   * (no external effect) return to `pending`. Gateway-executed platform tools are idempotent by key and run again,
+   * except tools registered with `replay: "never"`: their `recover` hook answers, or the call fails as "may have run".
    */
   recover(): void {
     const now = this.#now();
     for (const row of this.#store.listLiveClaims()) this.#orphan(row, "The gateway restarted while a client was handling this action", now);
     for (const row of this.#store.listOwnedBy("platform")) {
+      const definition = row.tool ? this.#deps.platformTools()?.get?.(row.tool, row.environment) : undefined;
+      if (!definition) {
+        // Nothing can run or recover it now: it stays uncertain (keeping its platform claim, so a restarted runtime
+        // that asks again once the tool is registered gets its recover path, never a blind rerun).
+        const reason = `The gateway restarted while platform tool ${row.tool ?? "(unknown)"} was running and it is not registered now; it may have run.`;
+        if (this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "needs_reconciliation", reason, now })) {
+          this.#log.warn("Platform tool interrupted by a restart is not registered; it needs reconciliation", { actionId: row.id, tool: row.tool ?? undefined });
+          this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
+        }
+        continue;
+      }
       if (this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "pending", clearClaim: true, now })) {
         const latest = this.#store.get(row.id);
-        const definition = latest?.tool ? this.#deps.platformTools()?.get?.(latest.tool) : undefined;
-        if (latest && definition) this.#startPlatformTool(latest, definition);
+        if (latest) this.#startPlatformTool(latest, definition, "The gateway restarted");
       }
     }
     this.#announceUnnotified(now);
@@ -418,7 +437,7 @@ export class DurableActions implements ActionsService {
   /** Pending actions whose `session.action_required` never went out (a crash inside the debounce window). */
   #announceUnnotified(now: number, olderThanMs = 0): void {
     for (const row of this.#store.listUnnotifiedPending(now - olderThanMs)) {
-      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool, row.environment)) continue;
       // Only the session's current incarnation is ever announced (older ones are closed at startup).
       if (this.#current(row.session_id)?.incarnation !== row.incarnation) continue;
       if (!this.#notifyTimers.has(row.session_id)) this.#scheduleNotify(row);
@@ -516,7 +535,7 @@ export class DurableActions implements ActionsService {
       return { actionId: row.id, withhold: everyEligible };
     }
 
-    const platformTool = parsed.kind === "tool" && parsed.tool ? this.#deps.platformTools()?.get?.(parsed.tool) : undefined;
+    const platformTool = parsed.kind === "tool" && parsed.tool ? this.#deps.platformTools()?.get?.(parsed.tool, row.environment) : undefined;
     if (platformTool) {
       this.#startPlatformTool(row, platformTool);
       return { actionId: row.id, withhold: everyEligible };
@@ -638,7 +657,7 @@ export class DurableActions implements ActionsService {
     const replay: RuntimeSessionEvent[] = [];
     for (const row of this.#store.listBySession(input.sessionId, attached.incarnation, ["pending"])) {
       if (!isEligible(input.responder, { kind: row.kind, tool: row.tool })) continue;
-      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) continue;
+      if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool, row.environment)) continue;
       if (input.responder.kind === "sdk" && lacksRawRequest(row)) continue;
       if (heldBefore(row, input.responder.connectionId)) continue;
       if (this.#claimLive(row, input.responder)) {
@@ -837,7 +856,7 @@ export class DurableActions implements ActionsService {
     }
     const from: ActionState[] = row.state === "needs_reconciliation" && options.reconcile ? ["needs_reconciliation"] : ["pending"];
     if (!from.includes(row.state)) throw conflict(describeUnclaimable(row), row);
-    if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool)) {
+    if (row.kind === "tool" && row.tool && this.#deps.platformTools()?.get?.(row.tool, row.environment)) {
       throw new ManagedCopilotError("forbidden", `${row.tool} is a platform tool; the gateway answers it`);
     }
     const label =
@@ -1013,7 +1032,7 @@ export class DurableActions implements ActionsService {
         });
         if (row.incarnation !== incarnation || !created) continue;
         this.#log.info("Recorded a waiting tool call the ledger had not seen", { sessionId, actionId: row.id, tool: toolName });
-        const platformTool = this.#deps.platformTools()?.get?.(toolName);
+        const platformTool = this.#deps.platformTools()?.get?.(toolName, row.environment);
         if (platformTool) this.#startPlatformTool(row, platformTool);
         else this.#scheduleNotify(row);
       }
@@ -1237,16 +1256,19 @@ export class DurableActions implements ActionsService {
    * twice: a recorded answer is delivered again under the new ID, and an action cancelled when the old runtime stopped
    * comes back as uncertain if someone held it (it may have run) or as waiting if nobody did. The gateway's own
    * platform tools are idempotent by key and nobody else can reconcile them, so one the old runtime stopped waiting for
-   * runs again. A call the ledger already tracks under a newer placement is returned unchanged (never a second action).
+   * runs again (or, registered with `replay: "never"`, is answered by its recover hook or fails as "may have run").
+   * A call the ledger already tracks under a newer placement is returned unchanged (never a second action).
    */
   #rebind(sessionId: string, incarnation: string, toolCallId: string, requestId: string, event: RuntimeSessionEvent, generation: number, now: number): ActionRow | undefined {
     const row = this.#store.findByToolCall(sessionId, incarnation, toolCallId);
     if (!row) return undefined;
     if (runtimeRequestId(row) === requestId || row.generation > generation) return row;
-    const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
-    const platform = platformTool !== undefined || row.responder_type === "platform";
+    const platformTool = row.tool ? this.#deps.platformTools()?.get?.(row.tool, row.environment) : undefined;
+    // Only a registered platform tool can be run (or recovered) again; one that is not registered now stays uncertain
+    // with its claim, like a client's, until a rebuild finds it registered.
+    const platform = platformTool !== undefined;
     const answered = ANSWERED_STATES.includes(row.state);
-    const revived = row.state === "cancelled" || (platform && row.state === "needs_reconciliation");
+    const revived = row.state === "cancelled" || ((platform || row.responder_type === "platform") && row.state === "needs_reconciliation");
     const uncertain = revived && !platform && row.claimed_by !== null;
     const state: ActionState = revived ? (uncertain ? "needs_reconciliation" : "pending") : row.state;
     const reason = revived ? (uncertain ? RESTARTED_WHILE_RUNNING : null) : row.reason;
@@ -1275,7 +1297,8 @@ export class DurableActions implements ActionsService {
     });
     const latest = this.#store.get(row.id)!;
     if (answered) void this.#forward(row.id).catch(() => undefined);
-    else if (latest.state === "pending" && platformTool) this.#startPlatformTool(latest, platformTool);
+    // A platform run the old runtime stopped waiting for was cut off: tools that must not repeat recover instead.
+    else if (latest.state === "pending" && platformTool) this.#startPlatformTool(latest, platformTool, row.claimed_by !== null ? "The runtime restarted" : undefined);
     else if (state === "pending" && revived) this.#scheduleNotify(latest);
     else if (uncertain) this.#emit({ type: "pending", sessionId, actionId: row.id });
     return this.#store.get(row.id)!;
@@ -1308,7 +1331,7 @@ export class DurableActions implements ActionsService {
     return { actionId: row.id, withhold: [] };
   }
 
-  #startPlatformTool(row: ActionRow, definition: PlatformToolDefinition): void {
+  #startPlatformTool(row: ActionRow, definition: PlatformToolDefinition, interrupted?: string): void {
     const claimToken = newId("mct", 24);
     const tokenHash = hashSecret(claimToken);
     const claimed = this.#store.claim(
@@ -1318,28 +1341,75 @@ export class DurableActions implements ActionsService {
     );
     if (!claimed) return;
     const seq = row.claim_seq + 1;
+    const controller = new AbortController();
+    if (this.#stopping) controller.abort(SHUTTING_DOWN());
+    this.#running.set(row.id, { seq, controller });
+    // A tool that must not repeat answers an interrupted call through its recover hook, or fails as "may have run".
+    const recovering = interrupted !== undefined && definition.replay === "never";
     void (async () => {
       let outcome: Omit<Outcome, "resultHash" | "now">;
       try {
-        const result = await definition.handler(parseJson(row.arguments) ?? {}, {
+        const args = parseJson(row.arguments) ?? {};
+        const context: PlatformToolContext = {
           sessionId: row.session_id,
           ownerId: row.owner_id,
           environment: row.environment,
           toolCallId: row.tool_call_id ?? row.request_id,
           idempotencyKey: row.idempotency_key,
-        });
+          ...(row.agent_id ? { agentId: row.agent_id } : {}),
+          actionId: row.id,
+          signal: controller.signal,
+        };
+        if (recovering && !definition.recover) {
+          throw new ManagedCopilotError("needs_reconciliation", `${interrupted} while ${definition.name} was running, so it may have run. It was not run again: check its effect before retrying.`, {
+            actionId: row.id,
+          });
+        }
+        if (recovering) this.#log.info("Recovering an interrupted platform tool call without rerunning it", { actionId: row.id, tool: definition.name });
+        const result = recovering ? await definition.recover!(args, context) : await definition.handler(args, context);
         outcome = { state: "completed", result: normalizeToolResult(result) };
       } catch (error) {
         const message = error instanceof ManagedCopilotError ? error.message : "The platform tool failed";
-        if (!(error instanceof ManagedCopilotError)) this.#log.error("Platform tool failed", { tool: definition.name, error: (error as Error)?.stack ?? String(error) });
+        if (!(error instanceof ManagedCopilotError) && !this.#stopping) this.#log.error("Platform tool failed", { tool: definition.name, error: (error as Error)?.stack ?? String(error) });
         outcome = { state: "failed", error: message };
       }
+      if (this.#running.get(row.id)?.controller === controller) this.#running.delete(row.id);
+      // Settled after shutdown began (the ledger may already be closed): nothing is recorded, so the action stays
+      // executing and the next start recovers it (replays it, or its recover hook answers).
+      if (this.#stopping) {
+        this.#log.info("Platform tool settled during shutdown; it is recovered at the next start", { actionId: row.id, tool: definition.name });
+        return;
+      }
       const now = this.#now();
-      if (this.#store.complete(row.id, { seq, tokenHash }, { ...outcome, resultHash: canonicalJson({ result: outcome.result, error: outcome.error }), now })) {
-        this.#emit({ type: "resolved", sessionId: row.session_id, actionId: row.id });
-        await this.#forward(row.id).catch(() => undefined);
+      try {
+        if (this.#store.complete(row.id, { seq, tokenHash }, { ...outcome, resultHash: canonicalJson({ result: outcome.result, error: outcome.error }), now })) {
+          this.#emit({ type: "resolved", sessionId: row.session_id, actionId: row.id });
+          await this.#forward(row.id).catch(() => undefined);
+        }
+      } catch (error) {
+        this.#log.error("Recording a platform tool's outcome failed", { actionId: row.id, tool: definition.name, error: (error as Error).message });
       }
     })();
+  }
+
+  /**
+   * Aborts a running platform tool whose action left its run (cancelled, expired, deleted, or claimed again): its
+   * answer can no longer reach the runtime.
+   */
+  #abortIfDetached(actionId: string): void {
+    const running = this.#running.get(actionId);
+    if (!running) return;
+    const row = this.#store.get(actionId);
+    if (row && row.state === "executing" && row.claim_seq === running.seq) return;
+    this.#running.delete(actionId);
+    const current = row ? this.#current(row.session_id) : undefined;
+    const reason =
+      !row || !current || current.incarnation !== row.incarnation
+        ? new ManagedCopilotError("not_found", `Session ${row?.session_id ?? "(unknown)"} was deleted`, { actionId })
+        : row.state === "expired"
+          ? new ManagedCopilotError("timeout", "The tool call's answer deadline passed", { actionId })
+          : new ManagedCopilotError("conflict", "The runtime stopped waiting for this tool call (for example, its turn was cancelled)", { actionId });
+    running.controller.abort(reason);
   }
 
   #outcomeFromLiveAnswer(kind: ActionKind, params: Record<string, unknown>): Outcome {
@@ -1564,6 +1634,7 @@ export class DurableActions implements ActionsService {
   }
 
   #emit(change: ActionChange): void {
+    if (change.type === "resolved") this.#abortIfDetached(change.actionId);
     for (const listener of this.#listeners) {
       try {
         listener(change);
