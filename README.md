@@ -125,7 +125,9 @@ More in [environments](docs/concepts/environments.md), [sandboxes](docs/concepts
 
 ## The demos
 
-All three demos run under `aspire run` with real models, and the same AppHost publishes them to Azure.
+All three demos run under `aspire run` with real models, and the same AppHost publishes them to Azure. For a live
+demo, start with the [demo gallery](demos/gallery/README.md): `pnpm gallery` opens one page with every app and
+walkthrough, with Local and Azure links and their status.
 
 ### AI software factory
 
@@ -194,6 +196,7 @@ npx managed-copilot new chat           # a new session in the chat environment, 
 npx managed-copilot sessions           # your sessions
 npx managed-copilot attach 7f3a2c1     # Copilot CLI on a live session (any unique ID prefix)
 npx managed-copilot console            # the operator console: health, sessions, harness configuration
+pnpm gallery                           # every demo and walkthrough on one page, local and Azure
 ```
 
 To run every snippet from the spec against your platform, start **quickstart** in the Aspire dashboard, or run
@@ -277,6 +280,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
 | `samples` | The walkthroughs' code: small, commented scripts you run with `pnpm sample <number>` |
 | `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
+| `demos/gallery` | `pnpm gallery`: every demo and walkthrough on one page, with local and Azure links |
 | `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |
 
 ## Develop
