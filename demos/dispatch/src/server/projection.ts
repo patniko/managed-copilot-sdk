@@ -417,9 +417,11 @@ export class Transcript {
       case "stop":
         if (shellId) command.shellId = shellId;
         break;
-      case "search":
-        Object.assign(command, { ...(text(args["pattern"]) ? { pattern: String(args["pattern"]) } : {}), ...(text(args["path"]) ? { path: String(args["path"]) } : {}) });
+      case "search": {
+        const paths = text(args["path"]) ?? (texts(args["paths"]).join(", ") || text(args["paths"]));
+        Object.assign(command, { ...(text(args["pattern"]) ? { pattern: String(args["pattern"]) } : {}), ...(paths ? { path: paths } : {}) });
         break;
+      }
       case "view":
       case "create":
       case "edit":
@@ -469,6 +471,8 @@ export class Transcript {
       if (parsed.outcome) command.outcome = parsed.outcome;
       if (parsed.exitCode !== undefined) command.exitCode = parsed.exitCode;
       if (parsed.shellId && !command.shellId) command.shellId = parsed.shellId;
+      // Timed out, killed, couldn't start, or lost track of: the call succeeded, the command didn't.
+      if (command.kind === "run" && parsed.outcome && parsed.exitCode === undefined && !parsed.running) command.status = "failed";
     } else {
       const line = firstLine(content, 160);
       if (line) command.outcome = line;
@@ -669,6 +673,7 @@ export class Transcript {
     const command = decisionId ? this.#commands.get(decisionId) : undefined;
     if (command) {
       if (command.status === status && (detail === undefined || command.outcome === detail)) return false;
+      if (command.status === "asking" && status === "running") command.approvedAt ??= new Date().toISOString();
       command.status = status;
       if (detail !== undefined) command.outcome = detail;
       return true;

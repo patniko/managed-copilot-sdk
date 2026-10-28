@@ -217,6 +217,9 @@ export class Platform implements DispatchPlatform {
   async stop(): Promise<void> {
     this.#stopped = true;
     if (this.#timer) clearTimeout(this.#timer);
+    const clients = [...this.#clients.values()];
+    this.#clients = new Map();
+    await Promise.all(clients.map((client) => deadline(client.forceStop(), 5_000, "Stopping a client").catch(() => undefined)));
     await this.#managed?.close().catch(() => undefined);
   }
 

@@ -138,7 +138,7 @@ function Outcome({ command, now }: { readonly command: Command; readonly now: nu
     case "failed":
       return (
         <span className="Label Label--danger shrink-0" title={command.outcome}>
-          failed
+          {command.outcome && command.outcome.length <= 24 ? command.outcome : "failed"}
         </span>
       );
     case "done": {

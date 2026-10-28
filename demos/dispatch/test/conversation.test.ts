@@ -530,6 +530,25 @@ describe("ConversationManager", () => {
       expect((await manager.view(view.id)).messages[1]?.commands?.[0]).toMatchObject({ status: "denied", outcome: "The person declined this command: keep it" });
     });
 
+    it("doesn't let 'approve the rest' of one message answer a request redelivered for a later one", async () => {
+      begin();
+      const view = await manager.create("go", "ask", "direct");
+      const session = platform.sessions.get(view.id)!;
+      session.emit(user("go", `${view.id}-message-1`));
+      session.emit(start("b1", "bash", { command: "ls" }));
+      const first = session.ask(bash("b1", "ls"));
+      await settle();
+      manager.answer(view.id, "b1", true, undefined, true);
+      await first;
+      // While Dispatch is away, message #2 starts and asks; the platform delivers the prompt again on resume.
+      session.history.push(event("session.idle"), user("now delete it", "m2"), start("b2", "bash", { command: "rm -rf out" }));
+      platform.pendingPrompts.set(view.id, [bash("b2", "rm -rf out")]);
+      platform.connect();
+      await settle(50);
+      const current = await manager.view(view.id);
+      expect(current.approvals).toEqual([expect.objectContaining({ id: "b2", kind: "command", messageIndex: 2 })]);
+    });
+
     it("runs commands without asking in auto mode", async () => {
       begin();
       const view = await manager.create("go", "auto", "direct");

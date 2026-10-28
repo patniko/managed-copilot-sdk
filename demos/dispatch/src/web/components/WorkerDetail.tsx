@@ -1,5 +1,5 @@
 import { FileIcon, PackageDependentsIcon, SyncIcon, TerminalIcon, XIcon } from "@primer/octicons-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { BLUEPRINT_LABELS } from "../../shared/catalog.js";
 import type { Blueprint, CommandRecord, ConversationView, FileView, WorkerView } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
@@ -195,25 +195,40 @@ function HandsCommands({ view, worker }: { readonly view: ConversationView; read
   const [commands, setCommands] = useState<readonly CommandRecord[]>();
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(false);
-  const known = commandsIn(view, worker).length;
+  const latest = useRef(0);
+  // Changes whenever a command in this sandbox starts or ends, so the list follows each one to its outcome.
+  const known = commandsIn(view, worker)
+    .map((command) => `${command.id}:${command.status}`)
+    .join(",");
   const stopped = worker.state === "stopped";
+  const running = commands?.some((command) => command.state === "running") ?? false;
 
   const load = useCallback(async (): Promise<void> => {
+    const request = ++latest.current;
     setLoading(true);
     try {
-      setCommands(await api.commands(view.id, worker.id));
+      const listed = await api.commands(view.id, worker.id);
+      // A slower, older answer never replaces a newer one.
+      if (request !== latest.current) return;
+      setCommands(listed);
       setError(undefined);
     } catch (failure) {
-      setError(errorMessage(failure));
+      if (request === latest.current) setError(errorMessage(failure));
     } finally {
-      setLoading(false);
+      if (request === latest.current) setLoading(false);
     }
   }, [view.id, worker.id]);
 
-  // Listed again whenever the conversation shows another command.
   useEffect(() => {
     if (!stopped) void load();
   }, [load, known, stopped]);
+
+  // Background commands can run on after their call returned: keep listing while any does.
+  useEffect(() => {
+    if (stopped || !running) return;
+    const timer = setInterval(() => void load(), 4_000);
+    return () => clearInterval(timer);
+  }, [load, running, stopped]);
 
   return (
     <>

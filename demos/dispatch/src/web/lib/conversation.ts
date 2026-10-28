@@ -33,6 +33,8 @@ export function conversationStats(view: ConversationView): ConversationStats {
     subagents += message.subagents?.length ?? 0;
   }
   const stopped = view.workers.filter((worker) => worker.state === "stopped").length;
+  // A coordinator's own sandbox is reused when later messages ran more commands in it.
+  for (const worker of view.workers) if (worker.role === "hands") reused += worker.sentWorkBy.length;
   return { messages: view.messageCount, created: view.workers.length, reused, stopped, live: view.workers.length - stopped, commands, subagents };
 }
 

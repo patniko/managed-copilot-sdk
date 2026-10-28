@@ -260,6 +260,8 @@ export class Conversation {
       this.#problem = undefined;
       // Prompts delivered again while the history loaded may have been answered elsewhere meanwhile.
       this.#reconcileApprovals();
+      // Requests held while it loaded, for a message whose remaining commands the person approved: answer them now.
+      this.#applyApprovedRest();
       log.info("Attached to a conversation", { sessionId: this.#id, events: history.length });
     } catch (error) {
       await session?.disconnect().catch(() => undefined);
@@ -404,8 +406,11 @@ export class Conversation {
     if (this.settings.approvals === "auto") return { kind: "approve-once" };
     const args = (request.args ?? {}) as Record<string, unknown>;
     const id = request.toolCallId ?? `request-${Date.now().toString(36)}`;
-    const index = this.#transcript.messageIndexOf(request.toolCallId) ?? this.#transcript.currentIndex;
-    if (command && index !== undefined && this.#host.store.get(this.#id)?.approvedRest?.includes(index)) return { kind: "approve-once" };
+    // The message a request serves is only trusted when the transcript knows its call: while a resume replays history,
+    // the latest message seen may not be the one it serves, so "approve the rest" of it must not answer it.
+    const known = this.#transcript.messageIndexOf(request.toolCallId);
+    const index = known ?? this.#transcript.currentIndex;
+    if (command && known !== undefined && this.#state === "live" && this.#host.store.get(this.#id)?.approvedRest?.includes(known)) return { kind: "approve-once" };
     // Redelivered (for example after a reconnection): the newest callback is the one that answers.
     this.#approvals.get(id)?.resolve({ kind: "no-result" });
     return await new Promise<PermissionRequestResult>((resolve) => {
@@ -466,8 +471,21 @@ export class Conversation {
     return changed;
   }
 
+  /** Approves held command requests whose message (as the current transcript places them) the person approved the rest of. */
+  #applyApprovedRest(): void {
+    const approved = this.#host.store.get(this.#id)?.approvedRest ?? [];
+    if (approved.length === 0) return;
+    for (const [id, pending] of [...this.#approvals]) {
+      if (pending.approval.kind !== "command") continue;
+      const index = this.#transcript.messageIndexOf(pending.approval.decisionId);
+      if (index !== undefined && approved.includes(index)) this.answer(id, true);
+    }
+  }
+
   #onEvent(event: SessionEvent): void {
     let changed = this.#transcript.apply(event as unknown as CoordinatorEvent);
+    // A request that arrived before its call was known can now be placed in its message.
+    if ((event.type === "tool.execution_start" || event.type === "permission.requested") && this.#approvals.size > 0) this.#applyApprovedRest();
     if (event.type === "permission.completed" && this.#reconcileApprovals()) changed = true;
     // The turn ended: no request of it is waiting for an answer anymore.
     if ((event.type === "session.idle" || event.type === "abort") && this.#approvals.size > 0) {

@@ -182,8 +182,11 @@ export function Environments({ view, blueprints, selected }: { readonly view: Co
   const active = view.workers.some((worker) => worker.state === "starting" || worker.state === "working");
   const now = useNow(active);
   const known = new Set(blueprints.map((blueprint) => blueprint.name));
-  // Workers from environments that aren't (or are no longer) among the coordinator's blueprints.
-  const others = [...new Set(view.workers.map((worker) => worker.environment).filter((environment) => !known.has(environment)))];
+  const sandboxApprovals = view.approvals.filter((approval) => approval.kind !== "command");
+  // Workers (and requests for them) from environments that aren't, or are no longer, among the coordinator's blueprints.
+  const others = [
+    ...new Set([...view.workers.map((worker) => worker.environment), ...sandboxApprovals.map((approval) => approval.environment ?? "")].filter((environment) => environment && !known.has(environment))),
+  ];
   return (
     <div className="flex flex-col gap-2.5">
       {blueprints.map((blueprint) => (
@@ -192,7 +195,7 @@ export function Environments({ view, blueprints, selected }: { readonly view: Co
           view={view}
           blueprint={blueprint}
           workers={view.workers.filter((worker) => worker.environment === blueprint.name)}
-          approvals={view.approvals.filter((approval) => approval.environment === blueprint.name)}
+          approvals={sandboxApprovals.filter((approval) => approval.environment === blueprint.name)}
           selected={selected}
           now={now}
         />
@@ -205,7 +208,7 @@ export function Environments({ view, blueprints, selected }: { readonly view: Co
             view={view}
             blueprint={{ name: environment, kind, label: "Sandbox", size: "", network: { access: "disabled", hosts: [] } }}
             workers={view.workers.filter((worker) => worker.environment === environment)}
-            approvals={view.approvals.filter((approval) => approval.environment === environment)}
+            approvals={sandboxApprovals.filter((approval) => approval.environment === environment)}
             selected={selected}
             now={now}
           />

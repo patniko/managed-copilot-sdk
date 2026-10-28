@@ -429,6 +429,22 @@ describe("Commands (direct and mixed)", () => {
     expect(t.messages()[0]?.subagents?.[0]).not.toHaveProperty("detail");
   });
 
+  it("marks a command that timed out or couldn't start as failed, and reads a search's paths", () => {
+    const t = transcript();
+    apply(
+      t,
+      user("go"),
+      start("b1", "bash", { command: "sleep 9999" }),
+      done("b1", "partial\n<timed out; shellId: ex_1>"),
+      start("g1", "grep", { pattern: "TODO", paths: ["/workspace/src", "/workspace/test"] }),
+      done("g1", "no matches"),
+    );
+    expect(t.messages()[0]?.commands).toEqual([
+      expect.objectContaining({ id: "b1", status: "failed", outcome: "timed out", output: "partial" }),
+      expect.objectContaining({ id: "g1", kind: "search", pattern: "TODO", path: "/workspace/src, /workspace/test", status: "done" }),
+    ]);
+  });
+
   it("parses the platform's command status lines", () => {
     expect(parseCommandResult("out\n<exited with exit code 3; shellId: ex_9>")).toEqual({ output: "out", outcome: "exit code 3", exitCode: 3, shellId: "ex_9" });
     expect(parseCommandResult("partial\n<command with shellId: ex_1 is still running after 120 seconds. It keeps running: use read_bash.>")).toMatchObject({ output: "partial", outcome: "still running", running: true, shellId: "ex_1" });
