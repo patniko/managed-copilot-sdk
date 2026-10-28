@@ -1169,6 +1169,60 @@ describe("durable actions ledger", () => {
       expect(recovers).toBe(1);
       expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["t1-rebuilt", "exit 137 (killed)"]]);
     });
+
+    it("keeps an interrupted call uncertain when its tool is not registered at restart, and recovers it once it is", async () => {
+      let recovers = 0;
+      const runs = heldTool("bash", {
+        replay: "never",
+        recover: async () => {
+          recovers++;
+          return "reattached";
+        },
+      });
+      const definition = tools.get("bash")!;
+      await actions.onSessionEvent(input(toolEvent("t1", "bash")));
+      await sleep(5);
+      actions.stop();
+      tools.delete("bash");
+      actions = build();
+      actions.recover();
+      expect(states()).toEqual({ t1: "needs_reconciliation" });
+      tools.set("bash", definition);
+      const again = toolEvent("t1-rebuilt", "bash");
+      await actions.onSessionEvent(input({ ...again, data: { ...again.data, toolCallId: "call-t1" } }));
+      await sleep(10);
+      expect(runs).toHaveLength(1);
+      expect(recovers).toBe(1);
+      expect(sessions.answers().map((sent) => [sent.params.requestId, sent.params.result])).toEqual([["t1-rebuilt", "reattached"]]);
+    });
+
+    it("records nothing for a call that settles after shutdown began, even once the ledger is closed", async () => {
+      let finish!: () => void;
+      tools.set("bash", {
+        name: "bash",
+        description: "",
+        parameters: {},
+        enabledFor: () => true,
+        // Cleans up after the abort, then resolves.
+        handler: (_args, context) => new Promise<string>((resolve) => context.signal?.addEventListener("abort", () => (finish = () => resolve("cleaned up")), { once: true })),
+      });
+      await actions.onSessionEvent(input(toolEvent("t1", "bash")));
+      await sleep(5);
+      actions.stop();
+      expect(states()).toEqual({ t1: "executing" });
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+      const other = openDatabase(":memory:");
+      const closed = db;
+      db = other;
+      closed.close();
+      finish();
+      await sleep(20);
+      process.off("unhandledRejection", onUnhandled);
+      expect(unhandled).toEqual([]);
+      expect(sessions.answers()).toEqual([]);
+    });
   });
 
   describe("session incarnations", () => {

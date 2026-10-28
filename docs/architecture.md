@@ -516,14 +516,16 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
     waiting for the call (`external_tool.completed` without the gateway's answer, as when its turn is aborted:
     `conflict`), the session was deleted (`not_found`), the answer deadline passed (`timeout`), or the gateway is
     stopping (`capability_unavailable`). Core alone also keeps its 10-minute limit. A call the runtime stopped
-    waiting for is not answered; one stopped by shutdown records no outcome (it stays `executing` and is recovered
-    at the next start). Handlers that ignore the signal behave as before.
+    waiting for is not answered; one that settles after shutdown began records no outcome (it stays `executing` and
+    is recovered at the next start). Handlers that ignore the signal behave as before.
   - **No blind replay.** By default (`replay: "always"`) an interrupted call (the gateway restarted while it ran, or
     a restarted runtime rebuilt a call whose run was cut off) runs the handler again. A tool registered with
     `replay: "never"` (a shell command: it may have pushed, paid, or deleted) is never rerun: its `recover(args,
     context)` hook answers instead, with the same context (reattach to the work, or read its recorded outcome), and
     without one the call fails with "… may have run. It was not run again: check its effect before retrying." Core
     alone has no ledger, so nothing is recovered there. `recover` without `replay: "never"` is refused at register.
+    A call interrupted by a restart whose tool is not registered at the next start becomes `needs_reconciliation`
+    (keeping its platform claim, so a rebuilt request after the tool registers takes the recover path).
 - **Session incarnations.** Session IDs are reusable after deletion, so every action belongs to the incarnation that
   asked (`SessionRecord.incarnation`; until core reports one, the session's creation time stands in and is re-keyed
   at startup once it does). Listing, claiming, answering, capabilities (`inc` claim), replay, delivery,

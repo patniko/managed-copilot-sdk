@@ -415,10 +415,20 @@ export class DurableActions implements ActionsService {
     const now = this.#now();
     for (const row of this.#store.listLiveClaims()) this.#orphan(row, "The gateway restarted while a client was handling this action", now);
     for (const row of this.#store.listOwnedBy("platform")) {
+      const definition = row.tool ? this.#deps.platformTools()?.get?.(row.tool) : undefined;
+      if (!definition) {
+        // Nothing can run or recover it now: it stays uncertain (keeping its platform claim, so a restarted runtime
+        // that asks again once the tool is registered gets its recover path, never a blind rerun).
+        const reason = `The gateway restarted while platform tool ${row.tool ?? "(unknown)"} was running and it is not registered now; it may have run.`;
+        if (this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "needs_reconciliation", reason, now })) {
+          this.#log.warn("Platform tool interrupted by a restart is not registered; it needs reconciliation", { actionId: row.id, tool: row.tool ?? undefined });
+          this.#emit({ type: "pending", sessionId: row.session_id, actionId: row.id });
+        }
+        continue;
+      }
       if (this.#store.transition(row.id, { states: OWNED_STATES, seq: row.claim_seq }, { state: "pending", clearClaim: true, now })) {
         const latest = this.#store.get(row.id);
-        const definition = latest?.tool ? this.#deps.platformTools()?.get?.(latest.tool) : undefined;
-        if (latest && definition) this.#startPlatformTool(latest, definition, "The gateway restarted");
+        if (latest) this.#startPlatformTool(latest, definition, "The gateway restarted");
       }
     }
     this.#announceUnnotified(now);
@@ -1357,22 +1367,25 @@ export class DurableActions implements ActionsService {
         const result = recovering ? await definition.recover!(args, context) : await definition.handler(args, context);
         outcome = { state: "completed", result: normalizeToolResult(result) };
       } catch (error) {
-        // Stopped by shutdown: the action stays executing, and the next start recovers it.
-        if (controller.signal.aborted && this.#stopping) {
-          this.#log.info("Platform tool stopped by shutdown; it is recovered at the next start", { actionId: row.id, tool: definition.name });
-          if (this.#running.get(row.id)?.controller === controller) this.#running.delete(row.id);
-          return;
-        }
         const message = error instanceof ManagedCopilotError ? error.message : "The platform tool failed";
-        if (!(error instanceof ManagedCopilotError)) this.#log.error("Platform tool failed", { tool: definition.name, error: (error as Error)?.stack ?? String(error) });
+        if (!(error instanceof ManagedCopilotError) && !this.#stopping) this.#log.error("Platform tool failed", { tool: definition.name, error: (error as Error)?.stack ?? String(error) });
         outcome = { state: "failed", error: message };
       }
-      // Removed first, so the "resolved" change below does not abort the call that just finished.
       if (this.#running.get(row.id)?.controller === controller) this.#running.delete(row.id);
+      // Settled after shutdown began (the ledger may already be closed): nothing is recorded, so the action stays
+      // executing and the next start recovers it (replays it, or its recover hook answers).
+      if (this.#stopping) {
+        this.#log.info("Platform tool settled during shutdown; it is recovered at the next start", { actionId: row.id, tool: definition.name });
+        return;
+      }
       const now = this.#now();
-      if (this.#store.complete(row.id, { seq, tokenHash }, { ...outcome, resultHash: canonicalJson({ result: outcome.result, error: outcome.error }), now })) {
-        this.#emit({ type: "resolved", sessionId: row.session_id, actionId: row.id });
-        await this.#forward(row.id).catch(() => undefined);
+      try {
+        if (this.#store.complete(row.id, { seq, tokenHash }, { ...outcome, resultHash: canonicalJson({ result: outcome.result, error: outcome.error }), now })) {
+          this.#emit({ type: "resolved", sessionId: row.session_id, actionId: row.id });
+          await this.#forward(row.id).catch(() => undefined);
+        }
+      } catch (error) {
+        this.#log.error("Recording a platform tool's outcome failed", { actionId: row.id, tool: definition.name, error: (error as Error).message });
       }
     })();
   }
