@@ -10,6 +10,7 @@ import { GitHubAuthenticator } from "../../src/modules/core/auth.js";
 import type { SchedulesService } from "../../src/modules/durable/contract.js";
 import { DurableCredentials } from "../../src/modules/durable/credentials/service.js";
 import { loadDurableKeys, seal, unseal } from "../../src/modules/durable/keys.js";
+import { markKeyFileServed } from "../../src/key-files.js";
 import { DURABLE_MIGRATIONS } from "../../src/modules/durable/migrations.js";
 
 const silent: Logger = { debug() {}, info() {}, warn() {}, error() {}, child: () => silent };
@@ -175,14 +176,16 @@ describe("background credentials", () => {
       expect(second.seal.equals(first.seal)).toBe(true);
       expect(first.seal.equals(first.capability)).toBe(false);
       const configured = Buffer.alloc(32, 1).toString("base64");
-      // Nothing sealed yet: the configured key is used, as before.
-      expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(false);
-      // A stored credential sealed under the file key: the file key is wrapped and kept for this deployment.
+      // Nothing sealed yet: the key file is adopted (wrapped), so the previous revision and this one agree.
+      expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }).seal.equals(first.seal)).toBe(true);
+      expect(existsSync(join(dir, "durable.key.wrapped"))).toBe(true);
+      // A stored credential sealed under the file key stays readable; the plaintext is kept for this deployment.
       const sealed = [{ value: seal(first.seal, "gho_token", "ctx"), context: "ctx" }];
       const adopted = loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }, { sealed: () => sealed, stamp: "1" });
       expect(unseal(adopted.seal, sealed[0]!.value, "ctx")).toBe("gho_token");
       expect(adopted.capability.equals(first.capability)).toBe(true);
       expect(existsSync(join(dir, "durable.key"))).toBe(true);
+      markKeyFileServed(join(dir, "durable.key"), "1");
       expect(loadDurableKeys(dir, { MANAGED_COPILOT_DURABLE_KEY: configured }, { sealed: () => sealed, stamp: "2" }).seal.equals(first.seal)).toBe(true);
       expect(existsSync(join(dir, "durable.key"))).toBe(false);
       expect(() => loadDurableKeys(dir, {})).toThrow(/wrapped under a configured key/);

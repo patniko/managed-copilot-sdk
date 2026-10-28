@@ -3,8 +3,9 @@
 // under the configured key, so the data directory alone no longer opens what it sealed, and values sealed before the
 // key was configured stay readable.
 //
-// The plaintext file is retired only by a later deployment (a different MANAGED_COPILOT_LEASE_STAMP) than the one that
-// wrapped it: until then the previous revision, which reads only the plaintext file, may still reclaim the lease.
+// The plaintext file is retired only once a gateway that reads the wrapped key has served a deployment for a while
+// (recorded in `<file>.served`) and a later deployment starts: until then the previous revision, which reads only the
+// plaintext file, may still be the one that reclaims the lease after a failed rollout.
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { basename, dirname } from "node:path";
@@ -27,16 +28,48 @@ export interface KeyFileOptions {
   readonly opens: (key: Buffer) => boolean | undefined;
   /** This deployment's `MANAGED_COPILOT_LEASE_STAMP`; without one (no lease supervisor) a later start retires the file. */
   readonly stamp?: string;
+  /** How long this gateway must run before its deployment counts as served (default 15 minutes). */
+  readonly servedAfterMs?: number;
   readonly warn?: (message: string, fields: Record<string, unknown>) => void;
+}
+
+const SERVED_AFTER_MS = 15 * 60_000;
+
+/** Records that a gateway reading the wrapped key served `stamp`, so a later deployment may retire the plaintext. */
+export function markKeyFileServed(keyFile: string, stamp: string): void {
+  if (!existsSync(`${keyFile}.wrapped`) || !existsSync(keyFile)) return;
+  const served = servedStamps(keyFile);
+  if (served.includes(stamp)) return;
+  writeAtomically(`${keyFile}.served`, [...served, stamp].join("\n"));
+}
+
+function servedStamps(keyFile: string): string[] {
+  const file = `${keyFile}.served`;
+  return existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+}
+
+function scheduleServed(options: KeyFileOptions): void {
+  const stamp = options.stamp;
+  if (stamp === undefined) return;
+  const timer = setTimeout(() => {
+    try {
+      markKeyFileServed(options.keyFile, stamp);
+    } catch (error) {
+      options.warn?.("Could not record that this deployment can read the wrapped key", { keyFile: options.keyFile, error: (error as Error).message });
+    }
+  }, options.servedAfterMs ?? SERVED_AFTER_MS);
+  timer.unref();
 }
 
 /**
  * Resolves the key that seals data:
  * - Not configured: `undefined` (the caller reads or creates the plaintext file); a wrapped file fails explicitly.
  * - Configured, with a wrapped file: the wrapped key (the configured key must open it).
- * - Configured, with a plaintext file that seals the stored data: that key, wrapped under the configured key.
+ * - Configured, with a plaintext file that seals the stored data (or nothing is sealed yet): that key, wrapped.
  * - Configured, with no key file: the configured key, recorded as a wrapped file so another key (or none) fails later.
- * - Otherwise the configured key, as before wrapping existed (a plaintext file it replaced is left in place).
+ * - Configured, with a stale plaintext file (the configured key opens the stored data): the configured key, recorded;
+ *   the stale file is renamed `<file>.replaced`.
+ * - Neither key opens the stored data: an explicit failure.
  */
 export function resolveKeyFile(options: KeyFileOptions): Buffer | undefined {
   const { keyFile, configured } = options;
@@ -54,9 +87,20 @@ export function resolveKeyFile(options: KeyFileOptions): Buffer | undefined {
     const wrapped = unwrap(configured, readFileSync(wrappedFile, "utf8").trim(), context, wrappedFile);
     if (existsSync(keyFile)) {
       if (!options.decodeFile(readFileSync(keyFile, "utf8")).equals(wrapped.key)) {
-        throw new ManagedCopilotError("capability_unavailable", `${keyFile} and ${wrappedFile} hold different keys. Remove the one this deployment did not use.`);
+        // A stale file whose setting-aside was interrupted: the wrapped key is the one that opens the stored data.
+        if (options.opens(wrapped.key) !== true) {
+          throw new ManagedCopilotError("capability_unavailable", `${keyFile} and ${wrappedFile} hold different keys. Remove the one this deployment did not use.`);
+        }
+        renameSync(keyFile, `${keyFile}.replaced`);
+        return wrapped.key;
       }
-      if (options.stamp === undefined || wrapped.stamp !== stamp) rmSync(keyFile, { force: true });
+      const retire = options.stamp === undefined || servedStamps(keyFile).some((served) => served !== stamp);
+      if (retire) {
+        rmSync(keyFile, { force: true });
+        rmSync(`${keyFile}.served`, { force: true });
+      } else {
+        scheduleServed(options);
+      }
     }
     return wrapped.key;
   }
@@ -68,15 +112,23 @@ export function resolveKeyFile(options: KeyFileOptions): Buffer | undefined {
     return configured.key;
   }
   const fileKey = options.decodeFile(readFileSync(keyFile, "utf8"));
-  if (options.opens(fileKey) !== true) {
-    // Nothing the file sealed is stored (the configured key already replaced it, or nothing is sealed yet).
-    options.warn?.("A key file in the data directory seals no stored data; the configured key is used. Delete the file once no older deployment needs it.", { keyFile });
+  const configuredOpens = fileKey.equals(configured.key) ? undefined : options.opens(configured.key);
+  if (configuredOpens === true) {
+    // The configured key already replaced the file before wrapping existed: record it, and set the stale file aside.
+    writeAtomically(wrappedFile, wrap(configured.key, configured.key, context, stamp));
+    renameSync(keyFile, `${keyFile}.replaced`);
+    options.warn?.("A key file in the data directory was not the key in use; it was renamed. Delete it once nothing needs the values it sealed.", { keyFile: `${keyFile}.replaced` });
     return configured.key;
   }
+  if (options.opens(fileKey) === false) {
+    throw new ManagedCopilotError("capability_unavailable", `Neither ${configured.variable} nor ${keyFile} opens the secrets stored in the data directory. Set the key this deployment was configured with.`);
+  }
+  // The file seals the stored data, or nothing is sealed yet (the previous revision keeps using the file either way).
   writeAtomically(wrappedFile, wrap(configured.key, fileKey, context, stamp));
   if (!unwrap(configured, readFileSync(wrappedFile, "utf8").trim(), context, wrappedFile).key.equals(fileKey)) {
     throw new ManagedCopilotError("internal", `${wrappedFile} could not be verified after it was written.`);
   }
+  scheduleServed(options);
   return fileKey;
 }
 
