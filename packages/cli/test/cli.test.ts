@@ -179,6 +179,33 @@ describe("managed-copilot", () => {
     expect(JSON.parse(out())).toHaveLength(2);
   });
 
+  it("runs a command in a session's sandbox, streams its output, and exits with its code", async () => {
+    const managed = new FakeManaged();
+    const runs: { session: string; command: string; options: Record<string, unknown> }[] = [];
+    const result = (exitCode: number, output: string) => ({ id: "ex_1", sessionId: "8a11b2c3-0000-4000-8000-000000000000", command: "", state: "completed" as const, exitCode, background: true, startedAt: "", outputBytes: output.length, output, offset: output.length });
+    (managed as unknown as { exec: unknown }).exec = async (session: string, command: string, options: Record<string, unknown>) => {
+      runs.push({ session, command, options });
+      if (!options.background) return result(0, "json\n");
+      return {
+        id: "ex_1",
+        output: (async function* () {
+          yield "line 1\n";
+          yield "line 2\n";
+        })(),
+        result: Promise.resolve(result(3, "line 1\nline 2\n")),
+        stop: async () => ({}),
+      };
+    };
+    const { io, out, err } = harness(managed);
+    expect(await run(["exec", "8a11b2c3", "--", "ls", "-la", "|", "wc"], io)).toBe(3);
+    expect(out()).toBe("line 1\nline 2\n");
+    expect(runs[0]).toMatchObject({ session: "8a11b2c3-0000-4000-8000-000000000000", command: "ls -la | wc", options: { background: true, stdin: "closed" } });
+    expect(await run(["exec", "8a11b2c3", "--timeout", "5", "--json", "--", "echo json"], io)).toBe(0);
+    expect(runs[1]).toMatchObject({ command: "echo json", options: { timeoutMs: 5000 } });
+    expect(await run(["exec", "8a11b2c3"], io)).toBe(2);
+    expect(err()).toContain("Pass the command after `--`");
+  });
+
   it("lists an orchestrator session's workers, and marks workers in the session list", async () => {
     const managed = new FakeManaged();
     const coordinator = session("c0ffee00-0000-4000-8000-000000000000", { environment: "team", type: "orchestrator" });
