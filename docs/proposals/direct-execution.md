@@ -45,7 +45,7 @@ rules, vaults, and idle stop are shared.
 // apphost.mts
 environments: {
   python: { type: "isolated", size: "medium", setup: { packages: { python: ["pandas"] } } },
-  coder:  { type: "isolated", size: "large" },
+  coder:  { type: "isolated", size: "large", exec: false },  // operators: no managed.exec in this environment's sandboxes
 
   // Delegate: each part of the job goes to a worker agent in its own sandbox (today's behavior, the default).
   team: { type: "orchestrator", workers: ["python"] },
@@ -97,7 +97,7 @@ console.log(await managed.files(hands).list());   // primes.py, fib.py, outputs/
 | --- | --- |
 | `delegate` (today) | `start_worker`, `wait_for_workers`, `message_worker`, `list_workers`, `read_worker_file`, `copy_worker_files`, `stop_worker`. No shell or files of its own; sub-agents off |
 | `direct` | `bash`, `read_bash`, `write_bash`, `stop_bash`, `list_bash`, `view`, `create`, `edit`, `glob`, `grep` (the built-in names and shapes models already know), plus the stock sub-agent tools `task`, `read_agent`, `write_agent`, `list_agents`. Each sub-agent's calls run in the sandbox too (its own sandbox with `subagents: "own"`) |
-| `mixed` | Both sets. The environment section tells the model when to do the work itself (quick, interactive, needs the conversation's context) and when to start a worker (long, independent, or another environment); `copy_worker_files` also copies between its own sandbox and a worker's |
+| `mixed` | Both sets. The environment section describes both options neutrally (its own sandbox, and each worker environment with its description, size, network, and agents) and leaves the choice to the model, without rules for when to use which; `copy_worker_files` also copies between its own sandbox and a worker's |
 
 ### Long commands
 
@@ -137,6 +137,9 @@ await managed.sessions.delete(sandbox.id);        // deletes the sandbox and its
 ```
 
 These handlers run in your process, so they stop when your app does; platform direct mode runs them in the gateway.
+
+In an environment with `exec: false`, `managed.sandboxes.create` and `managed.exec` fail with `policy_violation`
+("Running commands directly is turned off for environment coder."), and `/v1/info` reports it so apps can check first.
 
 ## When to use which
 
@@ -183,7 +186,7 @@ shows a coordinator choosing between them (see [Demos](#demos)).
 | core admission | Direct- and mixed-mode tool filters (the hands tools, the sub-agent built-ins, and in `mixed` the worker tools) and environment sections; validation that `direct` names exactly one worker environment |
 | REST and SDK | `POST /v1/sandboxes` (a workspace-only session of an isolated environment, owned by the caller), `POST /v1/sessions/:id/exec` and the matching read, input, stop, and list routes; `managed.sandboxes.create`, `managed.exec` (result, or a background handle with `output`, `result`, `write`, `stop`). They work on any sandbox session the caller owns: an isolated session, a worker, or a hands sandbox. Every exec is recorded in the actions ledger with its caller |
 | CLI | `npx managed-copilot exec <session> -- <command>` for debugging |
-| protocol | Additive: `OrchestratorEnvironment.execution`, `.subagents`, `WorkerInfo.role`, `ExecResult`, `ExecInfo`, and the new routes |
+| protocol | Additive: `EnvironmentConfig` gains `execution` and `subagents` (orchestrator) and `exec` (isolated), `EnvironmentInfo` reports `exec`; plus `WorkerInfo.role`, `ExecResult`, `ExecInfo`, and the new routes |
 | docs and samples | Spec section 17 extension and a new section for `managed.exec`, concept page sections, walkthroughs 12 and 13, a mode switch in Dispatch |
 
 Sandbox creation is lazy: the first tool call that needs a sandbox creates it (seconds on Docker, longer on Azure),
@@ -205,14 +208,14 @@ The probe proves the mechanism; these are what make it a platform feature rather
 | **Sub-agent sandboxes under `"own"`** | Each `task` call is a new `agentId`, so sandboxes would pile up against `maxWorkers`, and their files would be stranded | A sub-agent's sandbox is released when its `subagent.completed`/`failed` event arrives, after its `/workspace/outputs` is copied into the root agent's sandbox under `outputs/<agent>/`. A call over the bound fails with `policy_violation`, as `start_worker` does |
 | **File-tool fidelity** | The model expects the built-in shapes (`view` with `view_range`, `edit` with `old_str`/`new_str`, `grep`/`glob` options). The file worker refuses symbolic links, which `bash` (for example `npm install`) creates freely | Mirror the built-in schemas exactly (taken from `rpc.tools.list`). `view`, `glob`, and `grep` run as uid-10001 subprocesses like `bash`, following links inside `/workspace` only; writes go through the file worker, which keeps refusing links |
 | **Async commands and idle stop** | A sandbox stopped for idleness would kill a 20-minute test suite, and one that never stops costs money | A running exec counts as activity, up to the environment's idle timeout after its last output; `list_bash` shows each command's state, and a command killed by an idle stop or a restart reads as `stopped`, with the reason |
-| **`managed.exec` is a new trust surface** | Any owner's code can run commands in its sandboxes without an agent turn or an approval prompt | It is the owner acting directly, like `managed.files().write()` today: owner-scoped, recorded in the actions ledger, and bounded by the sandbox's network rules and vaults. Operators can turn it off per environment (`exec: false`) |
+| **`managed.exec` is a new trust surface** | Any owner's code can run commands in its sandboxes without an agent turn or an approval prompt | It is the owner acting directly, like `managed.files().write()` today: owner-scoped, recorded in the actions ledger, and bounded by the sandbox's network rules and vaults. Operators turn it off per environment with `exec: false` |
 
 ## Demos
 
 - **Walkthrough 12 · Direct execution**, the twin of walkthrough 11: the same primes and Fibonacci prompt against
   `team` and then `operator`, printing which agent ran which command, how many sandboxes and model loops each used,
-  and the wall time. One script shows both shapes, then a `lead` (mixed) session runs a long test suite in a worker
-  while it fixes a quick bug itself.
+  and the wall time. One script shows both shapes, then a `lead` (mixed) session gets a job with a long test suite and
+  a quick fix, and the script prints which parts the model chose to do itself and which it gave to a worker.
 - **Walkthrough 13 · Your own harness**: `managed.sandboxes.create`, `managed.exec` with a background command, and
   a stock client whose overridden `bash` and file tools run through `managed.exec`: the probe, on the platform.
 - **Dispatch**: a three-way switch beside the composer, "Delegate to workers" / "Work directly" / "Mixed". The
@@ -253,7 +256,7 @@ events, so they should).
 
 ## Decisions
 
-Agreed in review on 2026-10-27; open items are marked.
+Agreed in review on 2026-10-27.
 
 | # | Decision | Status |
 | --- | --- | --- |
@@ -263,5 +266,5 @@ Agreed in review on 2026-10-27; open items are marked.
 | 4 | `subagents: "shared"` by default; `"own"` gives each sub-agent its own sandbox | Decided |
 | 5 | Long commands: stock-shaped `bash` with `mode`/`initial_wait`, plus `read_bash`, `write_bash`, `stop_bash`, `list_bash`, in the first cut | Decided |
 | 6 | Public `managed.sandboxes.create` and `managed.exec` (with background handles) in the first cut | Decided |
-| 7 | How `mixed` mode's environment section guides the choice between doing and delegating | Open: calibrate with walkthrough 12 |
-| 8 | Whether operators can disable `managed.exec` per environment (`exec: false`) | Open: proposed above |
+| 7 | `mixed` mode informs the model of both options (its own sandbox and the worker environments) and lets it decide; no platform rules for when to delegate | Decided |
+| 8 | Operators turn off `managed.exec` per environment with `exec: false` (default `true`). It governs `managed.exec` and the exec REST routes only; a `direct` or `mixed` coordinator's own hands tools still work in that environment's sandboxes | Decided |
