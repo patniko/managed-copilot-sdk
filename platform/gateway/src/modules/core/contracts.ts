@@ -78,6 +78,11 @@ export interface SessionRecord {
    */
   readonly parentSessionId?: string;
   readonly parentIncarnation?: string;
+  /**
+   * `workspace`: a workspace-only session, a sandbox for commands and files with no runtime. Core never opens a
+   * runtime for it and refuses agent operations (send, resume, CLI attach) with `invalid_request`. Absent: an agent.
+   */
+  readonly kind?: "workspace";
   readonly network: NetworkPolicy;
   readonly environmentRequest: EnvironmentRequest;
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
@@ -134,6 +139,8 @@ export interface SandboxCreateRequest {
   readonly additions: { readonly files?: Readonly<Record<string, string>>; readonly packages?: EnvironmentRequest["packages"]; readonly env?: Readonly<Record<string, string>> };
   /** The resolved environment (image, setup, customizations). */
   readonly resolved: ResolvedEnvironment;
+  /** False: a workspace-only sandbox that never starts the Copilot runtime. */
+  readonly runtime?: boolean;
 }
 
 /** A connection to one sandbox runtime. The sandbox module implements credential brokering; core relays. */
@@ -224,6 +231,16 @@ export interface CreateSessionRequest {
   readonly parentSessionId?: string;
 }
 
+/** A workspace-only session: a sandbox of an isolated environment for commands and files, with no runtime. */
+export interface CreateWorkspaceRequest {
+  /** Caller-chosen ID. An existing workspace-only session of the same owner returns `{ created: false }`. */
+  readonly sessionId?: string;
+  readonly environment: string | EnvironmentRequest;
+  /** The owner's session that starts this one (an orchestrator's coordinator, for its hands sandbox); same owner only. */
+  readonly parentSessionId?: string;
+  readonly clientName?: string;
+}
+
 export interface CliAttachOptions {
   /** The responder ID the actions ledger sees for this CLI (unique per attachment). */
   readonly connectionId: string;
@@ -298,6 +315,12 @@ export interface SessionsService {
    * created, or the existing session's when `created` is false.
    */
   create(principal: Principal, request: CreateSessionRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
+  /**
+   * Creates a workspace-only session (`kind: "workspace"`) as `principal`: a sandbox of an isolated environment, set
+   * up like any other (network rules, vaults, setup), where no runtime ever starts. Commands run in it with
+   * `sandboxes.exec`; files, artifacts, and delete work as for any sandbox session.
+   */
+  createWorkspace?(principal: Principal, request: CreateWorkspaceRequest): Promise<{ readonly sessionId: string; readonly created: boolean; readonly incarnation?: string }>;
   /**
    * Sends a prompt as the owner with `mode: "enqueue"`, resuming placement when needed. Settles in the same chain of
    * promise steps as the runtime's answer (no I/O in between), so a caller sees the close of the connection that

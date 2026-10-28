@@ -132,6 +132,11 @@ export const EnvironmentConfigSchema = z
     github: z.object({ publish: z.boolean().optional() }).strict().optional(),
     /** Idle seconds before a sandbox may stop compute (after pending work drains). */
     idleTimeoutSeconds: z.number().int().positive().optional(),
+    /**
+     * Isolated only. Default true. False turns off `managed.exec`, `managed.sandboxes.create`, and the exec routes for
+     * this environment's sandboxes (`policy_violation`); a direct or mixed orchestrator's own tools still work in them.
+     */
+    exec: z.boolean().optional(),
   })
   .strict();
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
@@ -240,6 +245,9 @@ export const ManagedCopilotConfigSchema = z
       }
       if (!sandboxedType(env.type) && (env.image || env.size || env.warm || env.setupCommands || env.packages || env.env)) {
         ctx.addIssue({ code: "custom", path: ["environments", name], message: `${env.type} environments have no sandbox: image, size, warm, packages, setupCommands, and env are not allowed` });
+      }
+      if (env.exec !== undefined && env.type !== "isolated") {
+        ctx.addIssue({ code: "custom", path: ["environments", name, "exec"], message: "exec is only valid on isolated environments" });
       }
       for (const vault of env.vaults ?? []) {
         const credentials = vaults[vault];

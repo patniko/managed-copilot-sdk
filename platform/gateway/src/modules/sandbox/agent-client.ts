@@ -5,9 +5,13 @@ import type { Duplex, Readable } from "node:stream";
 import {
   ManagedCopilotError,
   SANDBOXD_ROUTES,
+  sandboxdExecRoute,
   type ErrorCode,
   type FileEntry,
   type SandboxdStatus,
+  type SandboxExecRead,
+  type SandboxExecRecord,
+  type SandboxExecRequest,
   type SandboxOutputsManifest,
   type SandboxStartEvent,
   type SandboxStartRequest,
@@ -192,6 +196,39 @@ export class SandboxAgentClient {
 
   async abortRuntimeImport(staging: string): Promise<void> {
     await this.#json("POST", SANDBOXD_ROUTES.runtimeImportAbort, { query: { staging } });
+  }
+
+  // Commands (`SANDBOXD_ROUTES.exec`) ------------------------------------------------------------------------------
+
+  startExec(request: SandboxExecRequest): Promise<SandboxExecRecord> {
+    return this.#json("POST", SANDBOXD_ROUTES.exec, { body: Buffer.from(JSON.stringify(request)), headers: { "content-type": "application/json" }, timeoutMs: 30_000 });
+  }
+
+  listExecs(timeoutMs = 15_000): Promise<SandboxExecRecord[]> {
+    return this.#json("GET", SANDBOXD_ROUTES.exec, { timeoutMs });
+  }
+
+  /** Output from `offset`, waiting up to `waitMs` for more. */
+  readExec(id: string, offset: number, waitMs: number, signal?: AbortSignal): Promise<SandboxExecRead> {
+    return this.#json("GET", sandboxdExecRoute(id), { query: { offset: String(offset), waitMs: String(waitMs) }, timeoutMs: waitMs + 15_000, ...(signal ? { signal } : {}) });
+  }
+
+  /** Waits up to `waitMs` for the command to end (no output). */
+  async waitExec(id: string, waitMs: number, signal?: AbortSignal): Promise<SandboxExecRecord> {
+    const read = await this.#json<SandboxExecRead>("GET", sandboxdExecRoute(id), { query: { output: "false", waitMs: String(waitMs) }, timeoutMs: waitMs + 15_000, ...(signal ? { signal } : {}) });
+    return read.exec;
+  }
+
+  execInput(id: string, data: string | undefined, eof: boolean): Promise<SandboxExecRecord> {
+    return this.#json("POST", sandboxdExecRoute(id, "input"), { body: Buffer.from(JSON.stringify({ ...(data !== undefined ? { data } : {}), eof })), headers: { "content-type": "application/json" }, timeoutMs: 30_000 });
+  }
+
+  stopExec(id: string, reason?: string): Promise<SandboxExecRecord> {
+    return this.#json("POST", sandboxdExecRoute(id, "stop"), { ...(reason ? { query: { reason } } : {}), timeoutMs: 30_000 });
+  }
+
+  stopAllExecs(reason: string): Promise<SandboxExecRecord[]> {
+    return this.#json("POST", SANDBOXD_ROUTES.execStopAll, { query: { reason }, timeoutMs: 30_000 });
   }
 
   /**

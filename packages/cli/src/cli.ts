@@ -3,6 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { TOKEN_ENVS, URL_ENV } from "@managed-copilot/protocol";
 import { artifacts } from "./commands/artifacts.js";
+import { exec } from "./commands/exec.js";
 import { login, logout, status } from "./commands/account.js";
 import { consoleCommand, OPERATOR_VIEWS, operatorCommand } from "./commands/operator.js";
 import { schedules, SCHEDULE_ACTIONS } from "./commands/schedules.js";
@@ -30,6 +31,7 @@ const COMMANDS: Readonly<Record<string, Command>> = {
   promote: { usage: "promote <session>", summary: "Move a promotable session into its own sandbox", options: [], run: promote },
   workers: { usage: "workers <session>", summary: "List an orchestrator session's workers and their reports", options: [], run: workers },
   artifacts: { usage: "artifacts <session> [--download <dir>] [--all]", summary: "List or download a session's published files", options: ["download", "all"], run: artifacts },
+  exec: { usage: "exec <session> [--timeout <seconds>] -- <command>", summary: "Run a command in a session's sandbox and stream its output", options: ["timeout"], run: exec },
   schedules: {
     usage: `schedules [${SCHEDULE_ACTIONS.join("|")}] [schedule]`,
     summary: "List schedules, show runs, pause, resume, delete, or run now",
@@ -61,6 +63,7 @@ const OPTIONS = {
   limit: { type: "string" },
   download: { type: "string" },
   all: { type: "boolean" },
+  timeout: { type: "string" },
   "no-open": { type: "boolean" },
 } as const;
 
@@ -172,6 +175,7 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     args,
     now: io.now ?? Date.now,
     out: (line = "") => void io.stdout.write(`${line}\n`),
+    write: (text) => void io.stdout.write(text),
     err: (line = "") => void io.stderr.write(`${line}\n`),
     confirm: io.confirm ?? confirmOnTerminal,
     openUrl: io.openUrl ?? ((url) => openInBrowser(url)),

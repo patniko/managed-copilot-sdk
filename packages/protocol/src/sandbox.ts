@@ -47,7 +47,21 @@ export const SANDBOXD_ROUTES = {
    * provider connection even after it closed, so a new gateway connection can only become the provider of a new process.
    */
   runtimeRestart: "/v1/runtime/restart",
+  /**
+   * `POST` (`SandboxExecRequest`) starts a command, idempotent by its ID (an ID it already has answers with that
+   * command); `GET` lists the journaled commands (`SandboxExecRecord[]`). Per command: `GET /v1/exec/<id>?offset=&waitMs=`
+   * reads (`SandboxExecRead`), `POST /v1/exec/<id>/input` (`{ data?, eof? }`) writes to its stdin, `POST
+   * /v1/exec/<id>/stop?reason=` kills its process group.
+   */
+  exec: "/v1/exec",
+  /** `POST ?reason=` stops every running command (before an idle stop); answers with the commands it stopped. */
+  execStopAll: "/v1/exec-stop",
 } as const;
+
+/** A command's sandboxd route (`SANDBOXD_ROUTES.exec`), with an optional `input` or `stop` action. */
+export function sandboxdExecRoute(id: string, action?: "input" | "stop"): string {
+  return `${SANDBOXD_ROUTES.exec}/${encodeURIComponent(id)}${action ? `/${action}` : ""}`;
+}
 
 /** Fixed paths inside every sandbox. */
 export const SANDBOX_PATHS = {
@@ -117,6 +131,12 @@ export const SANDBOX_LIMITS = {
   /** Entries returned by one recursive listing. */
   listEntries: 10_000,
   setupCommandTimeoutSeconds: 15 * 60,
+  /**
+   * Commands run directly in a sandbox (`managed.exec`): the output each one keeps (the newest bytes; older output is
+   * skipped), the most one read returns, how many run at once, how many finished ones are journaled, the command's
+   * size, one stdin write, and how long one call may wait.
+   */
+  exec: { outputBytes: 1024 * 1024, readBytes: 256 * 1024, running: 32, retained: 200, commandBytes: 128 * 1024, inputBytes: 1024 * 1024, maxWaitMs: 30_000 },
 } as const;
 
 /** Setup admitted for one sandbox: the environment's declaration plus caller additions (spec section 5). */
@@ -166,6 +186,54 @@ export interface SandboxStartRequest {
   readonly workloadEnv: Readonly<Record<string, string>>;
   /** PEM of the egress proxy's CA, installed into the system trust store before anything runs. */
   readonly caCertificate?: string;
+  /**
+   * Default true. False: a workspace-only sandbox (commands and files only), where sandboxd never starts the Copilot
+   * runtime and reports ready once setup succeeded.
+   */
+  readonly runtime?: boolean;
+}
+
+/** `POST SANDBOXD_ROUTES.exec`: runs `bash -c <command>` as the workload identity in `/workspace`. */
+export interface SandboxExecRequest {
+  /** The command's journal ID (`[A-Za-z0-9_-]{1,64}`); a start with an ID sandboxd already has answers with that command. */
+  readonly id: string;
+  readonly command: string;
+  /** Kills the command's process group after this long (none: runs until it ends, is stopped, or the sandbox stops). */
+  readonly timeoutMs?: number;
+  /** `closed` (default): stdin is at end of file from the start. `open`: write to it with the input route. */
+  readonly stdin?: "open" | "closed";
+}
+
+/** How a command ended: `failed` means it could not be started; `uncertain` (gateway only) that its outcome is unknown. */
+export type ExecState = "running" | "completed" | "failed" | "timed_out" | "stopped" | "uncertain";
+
+/** sandboxd's journal entry for one command. */
+export interface SandboxExecRecord {
+  readonly id: string;
+  readonly command: string;
+  readonly state: Exclude<ExecState, "uncertain">;
+  readonly stdin: "open" | "closed";
+  readonly exitCode?: number;
+  readonly signal?: string;
+  /** Why it was stopped, timed out, or failed. */
+  readonly reason?: string;
+  readonly timeoutMs?: number;
+  readonly startedAt: string;
+  readonly finishedAt?: string;
+  readonly lastOutputAt?: string;
+  /** Bytes of combined stdout and stderr the command wrote so far (offsets count these). */
+  readonly outputBytes: number;
+}
+
+/** `GET` of one command: its record and its output from `offset` on. */
+export interface SandboxExecRead {
+  readonly exec: SandboxExecRecord;
+  /** UTF-8 output from the requested offset (at most `SANDBOX_LIMITS.exec.readBytes`). */
+  readonly output: string;
+  /** The offset to read from next. */
+  readonly offset: number;
+  /** Bytes between the requested offset and the oldest output the journal still keeps, which this read skipped. */
+  readonly skippedBytes?: number;
 }
 
 export type SandboxStartEvent =

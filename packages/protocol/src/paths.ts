@@ -30,6 +30,17 @@ export const ROUTES = {
   files: (id: string) => `/v1/sessions/${e(id)}/files`,
   fileContent: (id: string) => `/v1/sessions/${e(id)}/files/content`,
 
+  /** `POST` (`CreateSandboxRequest`) creates a workspace-only sandbox session (`SessionInfo` with `kind: "workspace"`). */
+  sandboxes: "/v1/sandboxes",
+  /** `POST` (`ExecRequest`) runs a command in the session's sandbox (`ExecResult`); `GET` lists its commands (`ExecInfo[]`). */
+  exec: (id: string) => `/v1/sessions/${e(id)}/exec`,
+  /** `GET ?offset=&waitMs=` reads a command's output from `offset` (`ExecResult`), waiting up to `waitMs` for more. */
+  execItem: (id: string, execId: string) => `/v1/sessions/${e(id)}/exec/${e(execId)}`,
+  /** `POST` (`ExecInputRequest`) writes to a command's stdin. */
+  execInput: (id: string, execId: string) => `/v1/sessions/${e(id)}/exec/${e(execId)}/input`,
+  /** `POST` kills a command's process group (`ExecInfo`). */
+  execStop: (id: string, execId: string) => `/v1/sessions/${e(id)}/exec/${e(execId)}/stop`,
+
   /** `GET ?versions=all|latest` */
   artifacts: (id: string) => `/v1/sessions/${e(id)}/artifacts`,
   /** `GET ?turnId=&timeoutMs=` waits for a turn's publication manifest. */

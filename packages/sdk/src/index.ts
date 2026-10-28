@@ -1,15 +1,20 @@
-export { ManagedCopilot } from "./managed.js";
+export { ManagedCopilot, type ManagedExec } from "./managed.js";
 export { verifyWebhook, type VerifiedWebhookEvent, type VerifyWebhookOptions, type WebhookRequestLike } from "./features/webhooks.js";
 export type {
   ActionHandlers,
   ConnectOptions,
+  CreateSandboxOptions,
   CreateScheduleOptions,
   EnvironmentDescriptor,
   EnvironmentSelector,
+  ExecHandle,
+  ExecOptions,
   ManagedArtifacts,
   ManagedClientOptions,
   ManagedFiles,
   ManagedResumeConfig,
+  ManagedSandbox,
+  ManagedSandboxes,
   ManagedSchedules,
   ManagedSessionConfig,
   ManagedSessions,
@@ -29,6 +34,9 @@ export {
   type EnvironmentInfo,
   type EnvironmentRequest,
   type ErrorCode,
+  type ExecInfo,
+  type ExecResult,
+  type ExecState,
   type FileEntry,
   type NetworkSetting,
   type PendingAction,

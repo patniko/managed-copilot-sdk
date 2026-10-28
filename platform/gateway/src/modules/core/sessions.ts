@@ -48,6 +48,7 @@ import {
   type CliAttachment,
   type CliAttachOptions,
   type CreateSessionRequest,
+  type CreateWorkspaceRequest,
   type NetworkPolicyService,
   type PlacementCutover,
   type PlatformToolRegistry,
@@ -598,6 +599,7 @@ export class SessionManager implements SessionsService {
       ...(record.lastTurn ? { lastTurn: record.lastTurn } : {}),
       ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),
       ...(record.parentSessionId ? { parentSessionId: record.parentSessionId } : {}),
+      ...(record.kind === "workspace" ? { kind: "workspace" as const } : {}),
     };
   }
 
@@ -614,6 +616,7 @@ export class SessionManager implements SessionsService {
       if (this.#interrupted(existing) && existing.ownerId === principal.accountId) {
         await this.#discardInterrupted(existing);
       } else {
+        if (existing.kind === "workspace" && existing.ownerId === principal.accountId) throw workspaceOnly(sessionId);
         if (existing.ownerId === principal.accountId && existing.state !== "deleted" && existing.state !== "deleting") return { sessionId, created: false, incarnation: existing.incarnation };
         throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
       }
@@ -652,6 +655,128 @@ export class SessionManager implements SessionsService {
     }
     const created = this.#ledger.get(sessionId)?.incarnation;
     return { sessionId, created: true, ...(created ? { incarnation: created } : {}) };
+  }
+
+  async createWorkspace(principal: Principal, request: CreateWorkspaceRequest): Promise<{ sessionId: string; created: boolean; incarnation?: string }> {
+    const sessionId = request.sessionId ?? randomUUID();
+    if (typeof sessionId !== "string" || !ID_PATTERN.test(sessionId)) throw new ManagedCopilotError("invalid_request", "sessionId must be 1 to 128 letters, digits, hyphens, or underscores");
+    const inflight = this.#creating.get(sessionId);
+    if (inflight) {
+      if (inflight.ownerId !== principal.accountId) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+      await inflight.done.catch(() => undefined);
+    }
+    const existing = this.#ledger.get(sessionId);
+    if (existing) {
+      if (this.#interrupted(existing) && existing.ownerId === principal.accountId) {
+        await this.#discardInterrupted(existing);
+      } else {
+        if (existing.ownerId === principal.accountId && existing.kind === "workspace" && existing.state !== "deleted" && existing.state !== "deleting") {
+          return { sessionId, created: false, incarnation: existing.incarnation };
+        }
+        throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+      }
+    }
+    const environment = this.#options.environments.resolve(request.environment);
+    if (environment.type !== "isolated") {
+      throw new ManagedCopilotError("invalid_request", `Environment "${environment.name}" is ${environment.type}; workspace-only sandboxes need an isolated environment.`, { environment: environment.name });
+    }
+    if (!this.#sandboxes) throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" needs isolated sandboxes, which this deployment does not provide yet`);
+    let parent: { readonly id: string; readonly incarnation: string } | undefined;
+    if (request.parentSessionId !== undefined) {
+      const record = this.getOwned(principal.accountId, request.parentSessionId);
+      if (record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${record.id} was not found`, { sessionId: record.id });
+      parent = { id: record.id, incarnation: record.incarnation };
+    }
+    if (this.#creating.has(sessionId) || this.#ledger.get(sessionId)) throw new ManagedCopilotError("conflict", `Session ${sessionId} already exists`);
+    const done = this.#createWorkspaceReserved(principal, environment, sessionId, parent, request.clientName);
+    this.#creating.set(sessionId, { ownerId: principal.accountId, done });
+    try {
+      await done;
+    } finally {
+      this.#creating.delete(sessionId);
+    }
+    const created = this.#ledger.get(sessionId)?.incarnation;
+    return { sessionId, created: true, ...(created ? { incarnation: created } : {}) };
+  }
+
+  /** Records the session, binds its network policy, and creates its sandbox without a runtime. Nothing is left on failure. */
+  async #createWorkspaceReserved(
+    principal: Principal,
+    environment: ResolvedEnvironment,
+    sessionId: string,
+    parent: { readonly id: string; readonly incarnation: string } | undefined,
+    clientName: string | undefined,
+  ): Promise<void> {
+    let network: NetworkPolicy = environment.network;
+    const policy = this.#policy;
+    if (policy) {
+      const bound = await policy.bindSession({
+        sessionId,
+        owner: principal.accountId,
+        environment: environment.inline ? undefined : environment.name,
+        type: environment.type,
+        requested: environment.request.network,
+        vaults: environment.request.vaults,
+      });
+      if (bound) network = bound;
+    }
+    let inserted = false;
+    try {
+      const record = this.#ledger.insert({
+        id: sessionId,
+        owner: accountInfo(principal),
+        environment: environment.name,
+        type: environment.type,
+        placement: "sandbox",
+        network,
+        environmentRequest: environment.request,
+        admitted: { params: {}, optionsPatch: {} },
+        kind: "workspace",
+        ...(clientName ? { clientName } : {}),
+        ...(parent ? { parentSessionId: parent.id, parentIncarnation: parent.incarnation } : {}),
+      });
+      inserted = true;
+      await this.#sandboxes!.create({
+        sessionId,
+        ownerId: principal.accountId,
+        environment: environment.name,
+        size: environment.config.size ?? "small",
+        network,
+        ...(environment.request.vaults ? { vaults: environment.request.vaults } : {}),
+        additions: {
+          ...(environment.request.files ? { files: environment.request.files } : {}),
+          ...(environment.request.packages ? { packages: environment.request.packages } : {}),
+          ...(environment.request.env ? { env: environment.request.env } : {}),
+        },
+        resolved: environment,
+        runtime: false,
+      });
+      this.#ledger.update(sessionId, { state: "ready" });
+      this.#options.events.emit("session.created", {
+        ownerId: principal.accountId,
+        sessionId,
+        environment: environment.name,
+        data: { placement: "sandbox", type: environment.type, kind: "workspace", incarnation: record.incarnation },
+      });
+      this.#log.info("Workspace-only session created", { sessionId, owner: principal.login, environment: environment.name });
+    } catch (error) {
+      if (inserted) {
+        this.#ledger.remove(sessionId);
+        await this.#sandboxes?.delete(sessionId).catch((cleanup: unknown) => this.#log.warn("Sandbox cleanup after failed create failed", { sessionId, error: (cleanup as Error).message }));
+      }
+      await Promise.resolve(this.#policy?.releaseSession?.(sessionId)).catch(() => undefined);
+      this.#log.warn("Workspace-only session creation failed", { sessionId, environment: environment.name, error: (error as Error).message });
+      throw error;
+    }
+  }
+
+  /** A workspace-only session's busy accounting: `running` while commands run in its sandbox, `idle` once none do. */
+  execActivity(sessionId: string, running: number): void {
+    const record = this.get(sessionId);
+    if (!record || record.kind !== "workspace") return;
+    if (record.state !== "ready" && record.state !== "idle" && record.state !== "running") return;
+    const state = running > 0 ? "running" : "idle";
+    if (record.state !== state) this.#ledger.update(sessionId, { state });
   }
 
   async send(principal: Principal, sessionId: string, input: { prompt: string; source?: string; mode?: string }, options: SessionSendOptions = {}): Promise<{ messageId: string }> {
@@ -2097,6 +2222,8 @@ export class SessionManager implements SessionsService {
     }
     const record = this.get(sessionId);
     if (!record || record.state === "deleting") throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+    // Every agent operation (send, resume, abort, CLI attach, promotion) needs a runtime, and this session never has one.
+    if (record.kind === "workspace") throw workspaceOnly(sessionId);
     const environment = this.#options.environments.forSession(record);
     return this.#register(record, environment, `mc-${randomUUID()}`);
   }
@@ -3410,6 +3537,14 @@ export class SessionManager implements SessionsService {
 
 /** How the stock runtime reports a session it has no persisted state for. */
 const UNKNOWN_SESSION = /session not found|failed to load session events/i;
+
+function workspaceOnly(sessionId: string): ManagedCopilotError {
+  return new ManagedCopilotError(
+    "invalid_request",
+    `Session ${sessionId} is a workspace-only sandbox: it runs commands and holds files, but has no agent to send prompts to, resume, or attach Copilot CLI to. Use managed.exec and managed.files with it.`,
+    { sessionId, kind: "workspace" },
+  );
+}
 
 /** Whether an event is something `session.suspend` / `sessions.close` caused, rather than output already under way. */
 function isHandoffEvent(event: RuntimeSessionEvent): boolean {

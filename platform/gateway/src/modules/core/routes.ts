@@ -11,7 +11,7 @@ const SESSION_STATES: readonly SessionState[] = ["creating", "ready", "running",
 
 /** Capability strings advertised in `/v1/info`, keyed by the service that provides them. */
 const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
-  sandboxes: ["isolated", "files"],
+  sandboxes: ["isolated", "files", "exec"],
   artifacts: ["artifacts"],
   vaults: ["vaults"],
   actions: ["actions"],

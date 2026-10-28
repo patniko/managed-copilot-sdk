@@ -281,6 +281,7 @@ export class Environments implements EnvironmentResolver {
         ...(env.workers ? { workers: env.workers, maxWorkers: env.maxWorkers ?? DEFAULT_MAX_WORKERS } : {}),
         scheduling: env.scheduling === true,
         agents: bundle?.agents.map((agent) => agent.name) ?? [],
+        ...(env.type === "isolated" ? { exec: env.exec !== false } : {}),
       };
     });
   }

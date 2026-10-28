@@ -6,7 +6,7 @@ import { UsageError } from "./errors.js";
 import { shortId, type Style } from "./output.js";
 
 /** The SDK surface the CLI uses. */
-export type ManagedApi = Pick<ManagedCopilot, "url" | "info" | "account" | "sessions" | "schedules" | "artifacts" | "promote" | "workers" | "createSession" | "close">;
+export type ManagedApi = Pick<ManagedCopilot, "url" | "info" | "account" | "sessions" | "schedules" | "artifacts" | "promote" | "workers" | "createSession" | "close" | "exec">;
 
 /** A connected deployment. Commands connect lazily so `--help` never needs the network. */
 export interface Deployment {
@@ -36,6 +36,8 @@ export interface Context {
   readonly args: readonly string[];
   readonly now: () => number;
   out(line?: string): void;
+  /** Writes `text` to stdout as is (streamed command output). */
+  write(text: string): void;
   err(line?: string): void;
   confirm(question: string): Promise<boolean>;
   /** Opens a URL in the default browser (rejects when no browser could be started). */
