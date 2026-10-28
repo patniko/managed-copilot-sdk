@@ -1,0 +1,20 @@
+# Build context for demos/gallery/Dockerfile (the repository root): only what the gallery build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!packages/protocol/**
+!packages/sdk/**
+!packages/cli/**
+!packages/github-theme/**
+!demos/gallery/**
+!deploy/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+demos/gallery/docs
+deploy/azure/hosting
+deploy/azure/sandbox

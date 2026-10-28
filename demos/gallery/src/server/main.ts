@@ -15,7 +15,10 @@ Opens a gallery of every demo and walkthrough, linked to your local platform and
                   isn't local, then the \`copilot\` container app the signed-in Azure CLI finds.
   --port <port>   Port for the gallery (default ${GALLERY_PORT}, plus MANAGED_COPILOT_PORT_OFFSET).
   --no-open       Don't open a browser.
-  --no-azure      Don't ask the Azure CLI for a deployment.`;
+  --no-azure      Don't ask the Azure CLI for a deployment.
+
+Hosted (GALLERY_HOSTED=1, as \`aspire deploy\` publishes it): the Azure deployment in MANAGED_COPILOT_URL only, on HOST
+and PORT, answering the names in GALLERY_ALLOWED_HOSTS; the console opens from each operator's terminal.`;
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -39,12 +42,19 @@ if (args.help) {
   process.exit(0);
 }
 
+const hosted = process.env.GALLERY_HOSTED === "1";
 const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
 if (!Number.isInteger(offset) || offset < 0 || offset > 50_000) fail(`MANAGED_COPILOT_PORT_OFFSET must be a whole number from 0 to 50000 (got "${process.env.MANAGED_COPILOT_PORT_OFFSET}").`);
-const port = args.port === undefined ? GALLERY_PORT + offset : Number(args.port);
+const portSetting = args.port ?? (hosted ? process.env.PORT : undefined);
+const port = portSetting === undefined ? GALLERY_PORT + offset : Number(portSetting);
 if (!Number.isInteger(port) || port < 1 || port > 65_535) fail(`--port must be a port number (got "${args.port}").`);
 
 async function lookupCloud(): Promise<CloudLookup> {
+  if (hosted) {
+    const deployed = process.env.MANAGED_COPILOT_URL;
+    if (!deployed || isLocalUrl(deployed)) fail("A hosted gallery needs MANAGED_COPILOT_URL set to the deployment's public gateway URL.");
+    return { url: normalizeGatewayUrl(deployed), note: "This deployment." };
+  }
   if (args.cloud) {
     try {
       return { url: normalizeGatewayUrl(args.cloud), note: "From --cloud." };
@@ -84,6 +94,7 @@ async function openConsole(gatewayUrl: string): Promise<ConsoleLink> {
 
 /** The repository's GitHub URL for README links, from the git remote. */
 async function repoUrl(): Promise<string> {
+  if (process.env.GALLERY_REPO_URL) return process.env.GALLERY_REPO_URL;
   const remote = (await capture("git", ["-C", packageRoot, "remote", "get-url", "origin"], 5_000))?.trim();
   const match = remote?.match(/github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
   return `https://github.com/${match?.[1] ?? "patniko/managed-copilot-sdk"}/blob/main/`;
@@ -105,6 +116,7 @@ const handler = createGallery({
   shotsDir: fileURLToPath(new URL("../../shots", import.meta.url)),
   repoUrl: await repoUrl(),
   openConsole,
+  ...(hosted ? { hosted: { allowedHosts: (process.env.GALLERY_ALLOWED_HOSTS ?? "").split(",").map((host) => host.trim()).filter(Boolean) } } : {}),
 });
 const server = createServer(handler);
 
@@ -113,7 +125,7 @@ const listening = await new Promise<boolean>((resolve) => {
     if (error.code === "EADDRINUSE") return resolve(false);
     fail(`Couldn't start the gallery: ${error.message}`);
   });
-  server.listen(port, "127.0.0.1", () => resolve(true));
+  server.listen(port, hosted ? (process.env.HOST ?? "0.0.0.0") : "127.0.0.1", () => resolve(true));
 });
 
 if (!listening) {
@@ -125,8 +137,8 @@ if (!listening) {
   process.exit(0);
 }
 
-process.stdout.write(`✓ Demo gallery: ${address}\n  Ctrl+C to stop.\n`);
-if (!args["no-open"]) openInBrowser(address);
+process.stdout.write(`✓ Demo gallery: ${address}${hosted ? " (hosted)" : ""}\n  Ctrl+C to stop.\n`);
+if (!args["no-open"] && !hosted) openInBrowser(address);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {

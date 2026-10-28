@@ -127,6 +127,19 @@ if (await configuration.exists("Parameters:google-client-id")) {
     .withEnvironment("GOOGLE_CLIENT_SECRET", await builder.addParameter("google-client-secret", { secret: true }));
 }
 
+// The demo gallery: every demo and walkthrough of this deployment on one page, at https://gallery.<environment-domain>.
+// Deployed only (locally, `pnpm gallery`). It holds no GitHub token, and opens from the same addresses as the demos.
+if (publishing) {
+  await publishApp(builder, copilot, {
+    name: "gallery",
+    dockerfile: "demos/gallery/Dockerfile",
+    port: 7460,
+    healthPath: "/api/health",
+    allowedHostsEnv: "GALLERY_ALLOWED_HOSTS",
+    githubToken: false,
+  });
+}
+
 // Every spec snippet as an acceptance check against this platform. Start it from the dashboard. Local only: against
 // Azure, run it from your machine with MANAGED_COPILOT_URL set to the deployed gateway.
 if (!publishing) await builder
