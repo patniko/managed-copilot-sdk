@@ -912,10 +912,11 @@ and quickstart snippet 14).
     in the SDK permission handler for the person: the webhook and the poller never answer permission requests, so a
     scheduled run's request waits until they're back. The server copies each published image as soon as it publishes
     (charts outlive their worker) and times each sandbox card from worker listings, matched to the worker's messages
-    by number rather than across clocks; a finish reported before a worker's first listing waits for that listing to
-    place it. A conversation created before the environment became an orchestrator can't start sandboxes and offers
-    Start over. Verified live locally (approval, a reused sandbox, a second kind of sandbox, approval after the tab
-    was closed); not yet on Azure.
+    by number rather than across clocks. A finish event ends a message only when a listing requested on the current
+    event subscription saw the worker working on it (so no finish since was missed), or when the worker was stopped
+    with that single message and it was the only finish reported. A conversation created before the environment
+    became an orchestrator can't start sandboxes and offers Start over. Verified live locally (approval, a reused
+    sandbox, a second kind of sandbox, approval after the tab was closed); not yet on Azure.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
