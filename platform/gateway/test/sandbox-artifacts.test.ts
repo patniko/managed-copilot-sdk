@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -117,6 +117,30 @@ describe("ArtifactService", () => {
     agent.mutate = undefined;
     await turn("turn-3", "cancelled");
     await expect(service.waitForPublication(SESSION, { turnId: "turn-3" })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "publication_failed") && /cancelled/.test((error as Error).message));
+  });
+
+  it("refuses manifests whose digests could name files outside the artifact store", async () => {
+    writeFileSync(join(dir, "gateway-secret"), "do not serve");
+    const honest = agent.outputsManifest.bind(agent);
+    agent.files.set("report.md", "ok");
+    for (const sha256 of ["../../gateway-secret", `${"a".repeat(63)}/`, "A".repeat(64)]) {
+      agent.outputsManifest = async () => {
+        const manifest = await honest();
+        return { ...manifest, files: manifest.files.map((file) => ({ ...file, sha256 })) };
+      };
+      service.turnStarted(SESSION, `turn-${sha256}`);
+      await service.publish(SESSION, service.turnsCompleted(SESSION, "completed"), "completed");
+      await expect(service.waitForPublication(SESSION, { turnId: `turn-${sha256}` })).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "publication_failed") && /invalid outputs manifest/.test((error as Error).message));
+    }
+    expect(service.list(SESSION)).toEqual([]);
+  });
+
+  it("never opens a stored artifact whose digest is not a SHA-256 hex string", async () => {
+    agent.files.set("report.md", "ok");
+    await turn("turn-1");
+    const [artifact] = (await service.waitForPublication(SESSION)).artifacts;
+    db.prepare("UPDATE sandbox_artifacts SET digest = ? WHERE id = ?").run("../../gateway-secret", artifact!.id);
+    await expect(service.open(SESSION, artifact!.id)).rejects.toSatisfy((error: unknown) => isManagedCopilotError(error, "internal") && /invalid stored digest/.test((error as Error).message));
   });
 
   it("waits for a running turn and reports timeouts and unknown turns explicitly", async () => {

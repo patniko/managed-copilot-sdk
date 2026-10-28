@@ -64,6 +64,8 @@ function ownFailure(message: string): ManagedCopilotError {
 
 type TurnOutcome = "completed" | "cancelled" | "failed";
 
+const isDigest = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
 interface ArtifactRow {
   id: string;
   session_id: string;
@@ -277,6 +279,9 @@ export class ArtifactService implements ArtifactsService {
         throw ownFailure(`${manifest.rejected.length} output file${manifest.rejected.length === 1 ? "" : "s"} could not be published: ${listed}${manifest.rejected.length > 5 ? ", …" : ""}. Remove or fix them and run another turn.`);
       }
       await fs.mkdir(dir, { recursive: true });
+      // The manifest comes from inside the sandbox: its digest names a file in the gateway's artifact directory.
+      const malformed = manifest.files.find((file) => !isDigest(file.sha256) || !Number.isSafeInteger(file.size) || file.size < 0);
+      if (malformed) throw ownFailure("The sandbox reported an invalid outputs manifest, so nothing was published.");
       const planned: { path: string; size: number; digest: string; reuse?: ArtifactRow; version: number }[] = [];
       for (const file of manifest.files) {
         const latest = db.prepare("SELECT * FROM sandbox_artifacts WHERE session_id = ? AND path = ? ORDER BY version DESC LIMIT 1").get(sessionId, file.path) as ArtifactRow | undefined;
@@ -497,6 +502,7 @@ export class ArtifactService implements ArtifactsService {
   async open(sessionId: string, artifactId: string): Promise<{ info: ArtifactInfo; body: Readable }> {
     const row = this.#options.db.prepare("SELECT * FROM sandbox_artifacts WHERE id = ? AND session_id = ? AND state = 'published'").get(artifactId, sessionId) as ArtifactRow | undefined;
     if (!row) throw new ManagedCopilotError("not_found", `Artifact ${artifactId} was not found in this session.`, { artifactId });
+    if (!isDigest(row.digest)) throw new ManagedCopilotError("internal", `Artifact ${artifactId} has an invalid stored digest.`, { artifactId });
     const blob = join(this.#dir(sessionId), row.digest);
     if (!existsSync(blob)) throw new ManagedCopilotError("internal", `Artifact ${artifactId} is recorded but its stored content is missing.`, { artifactId });
     return { info: toInfo(row), body: createReadStream(blob) };
