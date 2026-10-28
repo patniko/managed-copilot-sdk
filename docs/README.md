@@ -87,6 +87,7 @@ Each page answers one question, diagram first.
 | | |
 | --- | --- |
 | [README](../README.md) | The project in one page, with screenshots of the demos |
+| [Demo walkthrough](walkthrough.md) | A checklist to run every demo locally, deploy, run them again in Azure, and let teammates in |
 | [Video tour](tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Developer experience spec](spec/developer-experience.md) | The customer contract: every API, decision, and delivery gate |
 | [Architecture](architecture.md) | How it's built: topology, protocol facts, and each module |

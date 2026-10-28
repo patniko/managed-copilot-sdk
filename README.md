@@ -253,6 +253,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | | |
 | --- | --- |
 | [Start here](docs/README.md) | A learning path, ten visual concept pages, an "I want to…" index, and a glossary |
+| [Demo walkthrough](docs/walkthrough.md) | Every demo locally, then deployed to Azure, then shared with teammates: commands and what to check |
 | [Walkthroughs](samples/README.md) | Ten hands-on walkthroughs with runnable code (`pnpm sample 01`) and real output |
 | [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |

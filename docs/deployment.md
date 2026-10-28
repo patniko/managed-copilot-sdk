@@ -82,6 +82,12 @@ flowchart LR
 
 ## Deploy
 
+> **Shortcut.** From the repository root, `npx managed-copilot deploy` runs the steps below: it checks the tools, fills
+> in the subscription, region, resource group, and (on a first deployment) you as a user and operator, passes your
+> GitHub sign-in as the apps' token without putting it on a command line, and runs `aspire deploy`.
+> `npx managed-copilot access` shows and changes who may use it, operate it, and open its apps
+> ([CLI reference](../packages/cli/README.md#deploy-and-share)). The manual steps:
+
 1. Choose where it goes (stored in the AppHost's user secrets; `aspire deploy` prompts for anything missing):
 
    ```powershell

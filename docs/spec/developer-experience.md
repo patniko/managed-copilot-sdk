@@ -1251,6 +1251,29 @@ the console with the ticket in the URL fragment, which never reaches server logs
 HttpOnly, `SameSite=Strict` session cookie that lasts 8 hours (1 hour idle) and re-verifies the operator's GitHub
 credential on every request. Scripts call the same operator API (`/v1/operator/*`) with a GitHub bearer token.
 
+Deploy and manage who's in from the AppHost's directory. These edit the AppHost's deploy-time settings (its user
+secrets) and run `aspire deploy`; they don't call the gateway:
+
+```powershell
+npx managed-copilot deploy                       # checks Aspire, Azure CLI, and Docker; fills in missing settings; deploys
+npx managed-copilot access                       # platform users, operators, and who can open the published apps
+npx managed-copilot access users add me alice    # Parameters:<name>-github-users ("me" is your GitHub sign-in)
+npx managed-copilot access operators add alice   # Parameters:<name>-operator-users
+npx managed-copilot access ips add me            # Parameters:app-allowed-ips, applied to the running apps at once
+```
+
+`deploy` targets `Azure:SubscriptionId`, `Azure:Location`, and `Azure:ResourceGroup` (defaults: the Azure CLI's
+subscription, `westus2`, `managed-copilot-dev`, or `--subscription`, `--location`, `--resource-group`). A first
+deployment with no access rules or operators adds the caller to both. The published apps' token is the caller's
+GitHub sign-in, passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. It asks before
+deploying (`--yes` skips the question). If the resource group already holds a deployment, it deploys only when this
+AppHost's Aspire deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it;
+otherwise, in a terminal, it offers to adopt another checkout's record for that target so the deployment keeps its
+generated keys. User and operator changes take effect on the next deploy. Allowlist changes also update the running apps'
+`allow-<n>` ingress rules through the Azure CLI, adding before removing and leaving the platform subnet's rule and
+any hand-made rule alone; `*` (any address) waits for the next deploy. A failed live update keeps the saved list and
+exits non-zero.
+
 ## 17. Orchestrator: a coordinator with workers
 
 An `orchestrator` environment runs a coordinator agent that splits work across **workers**. The coordinator runs on

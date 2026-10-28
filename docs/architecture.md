@@ -88,7 +88,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | Protocol | `packages/protocol` | library | AppHost config schema, REST DTOs, errors, events, bridge constants, network policy math |
 | SDK | `packages/sdk` | library | `ManagedCopilot` API; stock `CopilotClient` over the bridge; REST features |
 | Aspire integration | `packages/aspire` | library | `addManagedCopilot(builder, name, options)` for TypeScript AppHosts |
-| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator` |
+| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator`, `deploy`, `access` |
 | Gateway | `platform/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
 | Console | `platform/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
 | GitHub theme | `packages/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
@@ -1667,8 +1667,17 @@ sequenceDiagram
   `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the
   sign-in link; `--no-open` prints it), and `operator [overview|infra|environments|sessions|sandboxes|schedules|webhooks]`. It uses
   the SDK and `@managed-copilot/sdk/internal` (first-party only:
-  `HttpClient`, URL/token resolution, `findCopilot`, `launchAttachedCli`). Tokens never come from argv. Errors print the
-  stable code and a hint; usage errors exit 2.
+  `HttpClient`, URL/token resolution, `findCopilot`, `findExecutable`, `spawnArguments`, `launchAttachedCli`). Tokens never come from argv.
+  Errors print the stable code and a hint; usage errors exit 2.
+- `deploy` and `access` (`src/commands/deploy.ts`, local tools in `src/host.ts`) work on the AppHost, not the gateway:
+  they read and write its user secrets with `aspire secret` (`Azure:*`, `Parameters:<name>-github-users|-github-orgs|
+  -operator-users|-operator-orgs`, `Parameters:app-allowed-ips`), then `deploy` runs `aspire deploy` with the caller's
+  token in `Parameters__app-github-token`. `access ips` also rewrites the running published apps' `allow-<n>` ingress
+  rules with `az containerapp ingress access-restriction` (set before remove; `platform` and hand-made rules stay; only
+  apps in the gateway's own environment; a failed lookup or update exits 1). `deploy` refuses to deploy over an existing
+  gateway unless this AppHost's Aspire deployment record (`~/.aspire/deployments/<SHA-256 of lowercased AppHost path>/
+  production.json`, which holds the generated keys) targets the same subscription and resource group; in a terminal it
+  offers to copy another checkout's matching record.
 - `new <environment> [--model <id>]` is `managed.createSession` plus `attach`: it checks `attach.cli` in `/v1/info` and
   that Copilot CLI is installed, creates the session through normal admission with a permission handler that answers
   nothing (`{ kind: "no-result" }`, so the inventory records `requestPermission` and prompts reach the `cli`

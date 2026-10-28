@@ -3,6 +3,7 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { TOKEN_ENVS, URL_ENV } from "@managed-copilot/protocol";
 import { artifacts } from "./commands/artifacts.js";
+import { ACCESS_LISTS, access, deploy } from "./commands/deploy.js";
 import { exec } from "./commands/exec.js";
 import { login, logout, status } from "./commands/account.js";
 import { consoleCommand, OPERATOR_VIEWS, operatorCommand } from "./commands/operator.js";
@@ -10,6 +11,7 @@ import { schedules, SCHEDULE_ACTIONS } from "./commands/schedules.js";
 import { attach, newSession, promote, sessions, workers } from "./commands/sessions.js";
 import { connectDeployment, openInBrowser, type Context, type Deployment, type Writer } from "./context.js";
 import { describeError, UsageError } from "./errors.js";
+import { systemHost, type HostTools } from "./host.js";
 import { createStyle, type Style } from "./output.js";
 
 export { connectDeployment, type Deployment, type ManagedApi } from "./context.js";
@@ -18,6 +20,7 @@ interface Command {
   readonly usage: string;
   readonly summary: string;
   readonly options: readonly string[];
+  readonly examples?: readonly string[];
   readonly run: (ctx: Context) => Promise<number | void>;
 }
 
@@ -45,6 +48,29 @@ const COMMANDS: Readonly<Record<string, Command>> = {
     options: ["environment", "state", "owner", "limit"],
     run: operatorCommand,
   },
+  access: {
+    usage: `access [${ACCESS_LISTS.join("|")}] [add|remove|set] [entries...] [--apphost <path>] [--name <resource>]`,
+    summary: "Show or change who may use a deployment, operate it, and open its apps",
+    options: ["apphost", "name", "yes"],
+    examples: [
+      "npx managed-copilot access                          # the current lists, and the running apps' allowlists",
+      "npx managed-copilot access users add me alice       # platform users (\"me\" is your GitHub sign-in)",
+      "npx managed-copilot access operators add alice      # who may open the operator console",
+      "npx managed-copilot access ips add me               # let this machine open the deployed apps, applied now",
+      "npx managed-copilot access ips set 203.0.113.0/24   # replace the apps' allowlist",
+    ],
+    run: access,
+  },
+  deploy: {
+    usage: "deploy [--subscription <id>] [--location <region>] [--resource-group <name>] [--apphost <path>] [--name <resource>] [--yes]",
+    summary: "Deploy the AppHost to Azure: checks tools, fills in settings, runs aspire deploy",
+    options: ["apphost", "name", "subscription", "location", "resource-group", "yes"],
+    examples: [
+      "npx managed-copilot deploy                                   # managed-copilot-dev in westus2 on your az subscription",
+      "npx managed-copilot deploy --resource-group demo --location eastus",
+    ],
+    run: deploy,
+  },
 };
 
 const GLOBAL_OPTIONS = ["url", "json", "no-color", "help", "version"];
@@ -65,6 +91,11 @@ const OPTIONS = {
   all: { type: "boolean" },
   timeout: { type: "string" },
   "no-open": { type: "boolean" },
+  apphost: { type: "string" },
+  name: { type: "string" },
+  subscription: { type: "string" },
+  location: { type: "string" },
+  "resource-group": { type: "string" },
 } as const;
 
 function version(): string {
@@ -104,7 +135,14 @@ function help(style: Style): string {
 }
 
 function commandHelp(name: string, command: Command, style: Style): string {
-  return [`${style.bold("Usage")}  npx managed-copilot ${command.usage}`, "", command.summary, "", style.dim("Global options: --url <url>, --json, --no-color")].join("\n");
+  return [
+    `${style.bold("Usage")}  npx managed-copilot ${command.usage}`,
+    "",
+    command.summary,
+    ...(command.examples ? ["", style.bold("Examples"), ...command.examples.map((example) => `  ${example}`)] : []),
+    "",
+    style.dim("Global options: --url <url>, --json, --no-color"),
+  ].join("\n");
 }
 
 export interface CliIo {
@@ -116,6 +154,7 @@ export interface CliIo {
   readonly confirm?: (question: string) => Promise<boolean>;
   readonly openUrl?: (url: string) => Promise<void>;
   readonly now?: () => number;
+  readonly host?: HostTools;
 }
 
 async function confirmOnTerminal(question: string): Promise<boolean> {
@@ -179,6 +218,7 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     err: (line = "") => void io.stderr.write(`${line}\n`),
     confirm: io.confirm ?? confirmOnTerminal,
     openUrl: io.openUrl ?? ((url) => openInBrowser(url)),
+    host: io.host ?? systemHost,
     deployment: () => (deployment ??= (io.connect ?? connectDeployment)({ ...(typeof values.url === "string" ? { url: values.url } : {}) })),
   };
   try {
