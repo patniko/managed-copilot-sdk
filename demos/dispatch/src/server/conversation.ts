@@ -477,11 +477,16 @@ export class Conversation {
     if (changed && (event.type === "tool.execution_start" || event.type === "tool.execution_complete")) this.#scheduleRefresh(200);
     if (event.type === "session.idle") {
       this.#scheduleRefresh(100);
-      // A coordinator's own sandboxes publish their outputs at the end of each of its turns.
-      for (const worker of this.#workers) {
-        if (worker.role !== "hands" || worker.state === "stopped") continue;
-        void this.#loadOutputs(worker.id);
-        void this.#loadFiles(worker.id);
+      // A coordinator's own sandboxes publish their outputs at the end of each of its turns, just after it goes idle.
+      for (const delay of [0, 2_000, 6_000]) {
+        const timer = setTimeout(() => {
+          for (const worker of this.#workers) {
+            if (this.#closed || worker.role !== "hands" || worker.state === "stopped") continue;
+            void this.#loadOutputs(worker.id);
+            void this.#loadFiles(worker.id);
+          }
+        }, delay);
+        timer.unref?.();
       }
     }
     if (changed) this.#changed();
@@ -686,9 +691,9 @@ export class Conversation {
     }));
   }
 
-  /** Whether `sessionId` is this conversation's coordinator or one of its workers. */
+  /** Whether `sessionId` is this conversation's coordinator or one of its workers (hands sandboxes have no agent to attach to). */
   owns(sessionId: string): boolean {
-    return sessionId === this.#id || this.#workers.some((worker) => worker.id === sessionId);
+    return sessionId === this.#id || this.#workers.some((worker) => worker.id === sessionId && worker.role !== "hands");
   }
 
   #status(): ConversationStatus {

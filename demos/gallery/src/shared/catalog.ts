@@ -50,8 +50,8 @@ export const APPS: readonly AppEntry[] = [
     title: "Dispatch",
     tagline: "One conversation, as many sandboxes as the work needs",
     description:
-      "Chat with an orchestrator agent. For every message it decides whether to create new sandboxes or send the work to ones it already has, and shows each decision live.",
-    tryIt: "Estimate π three ways in parallel, each in its own sandbox, then ask for a chart.",
+      "Chat with an orchestrator agent, and pick how it works: delegate each part to a worker in its own sandbox, work directly in a sandbox with its sub-agents, or mix the two. Every decision and every command shows live.",
+    tryIt: "Estimate π three ways in parallel, then try the same job with Work directly.",
     app: "dispatch",
     port: 7470,
     healthPath: "/api/health",
@@ -96,6 +96,15 @@ export const WALKTHROUGHS: readonly Walkthrough[] = [
   { id: "09", folder: "09-schedules", title: "Run on a schedule", youSee: "A weekday schedule, run now, with the agent's reply", minutes: 1, runnable: true },
   { id: "10", folder: "10-azure", title: "Your agent in Azure, from your laptop", youSee: "The same samples against Azure, and a sandbox in Copilot CLI", minutes: 5, runnable: false },
   { id: "11", folder: "11-orchestrator", title: "Split a job across workers", youSee: "A coordinator starts two workers in their own sandboxes and puts their reports together", minutes: 1, runnable: true },
+  {
+    id: "12",
+    folder: "12-direct-execution",
+    title: "Direct execution",
+    youSee: "The same job delegated to workers and done directly by a coordinator and its sub-agents, then a coordinator that can do both",
+    minutes: 2,
+    runnable: true,
+  },
+  { id: "13", folder: "13-your-own-harness", title: "Your own harness", youSee: "Commands run directly in a sandbox, and a stock client whose sub-agents' hands are there", minutes: 1, runnable: true },
 ];
 
 /** Screenshot file for an app or walkthrough, served at /shots/<file>. */

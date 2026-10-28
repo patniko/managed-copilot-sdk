@@ -1,6 +1,6 @@
 # Proposal: direct execution (one brain, hands in sandboxes)
 
-> **Status: built** (except the Dispatch mode switch). `managed.exec` and the `direct` and `mixed` orchestrator styles
+> **Status: built**, including the Dispatch mode switch. `managed.exec` and the `direct` and `mixed` orchestrator styles
 > are built and verified live on the stock SDK and runtime (see [What the platform needs to build](#what-the-platform-needs-to-build)
 > and [Evidence](#evidence)); the contract is [spec section 17](../spec/developer-experience.md#execution-styles-delegate-direct-mixed).
 
@@ -187,7 +187,7 @@ shows a coordinator choosing between them (see [Demos](#demos)).
 | REST and SDK | **Built.** `POST /v1/sandboxes` (a workspace-only session of an isolated environment, owned by the caller), `POST /v1/sessions/:id/exec` and the matching read, input, stop, and list routes; `managed.sandboxes.create`, `managed.exec` (result, or a background handle with `output`, `result`, `write`, `stop`). They work on any sandbox session the caller owns: an isolated session, a worker, or a hands sandbox. Every exec is recorded in the actions ledger with its caller |
 | CLI | **Built.** `npx managed-copilot exec <session> -- <command>` for debugging |
 | protocol | **Built.** Additive: `EnvironmentConfig` gains `execution` and `subagents` (orchestrator) and `exec` (isolated), `EnvironmentInfo` reports `exec`; plus `WorkerInfo.role`, `ExecResult`, `ExecInfo`, and the new routes |
-| docs and samples | **Built** except the Dispatch mode switch: spec sections 17 (execution styles) and 18, the orchestrator and sandboxes concept pages, walkthroughs 12 and 13, quickstart snippet 15 |
+| docs and samples | **Built**, with the Dispatch mode switch ([demos/dispatch](../../demos/dispatch/README.md#three-ways-to-get-the-work-done)): spec sections 17 (execution styles) and 18, the orchestrator and sandboxes concept pages, walkthroughs 12 and 13, quickstart snippet 15 |
 
 Sandbox creation is lazy: the first tool call that needs a sandbox creates it (seconds on Docker, longer on Azure),
 reported with the existing `worker.started` event.
@@ -218,7 +218,7 @@ The probe proves the mechanism; these are what make it a platform feature rather
   a quick fix, and the script prints which parts the model chose to do itself and which it gave to a worker.
 - **Walkthrough 13 · Your own harness** ([built](../../samples/13-your-own-harness/README.md)): `managed.sandboxes.create`, `managed.exec` with a background command, and
   a stock client whose overridden `bash` and file tools run through `managed.exec`: the probe, on the platform.
-- **Dispatch**: a three-way switch beside the composer, "Delegate to workers" / "Work directly" / "Mixed". The
+- **Dispatch** ([built](../../demos/dispatch/README.md#three-ways-to-get-the-work-done)): a three-way switch beside the composer, "Delegate to workers" / "Work directly" / "Mixed". The
   message's sandbox cards stay the same; direct work lists the commands the brain and its sub-agents ran.
 
 ## Evidence

@@ -21,7 +21,7 @@ It opens http://localhost:7460 in your browser.
   - The operator console buttons sign you in with your GitHub sign-in, like `npx managed-copilot console`: the gallery
     asks the gateway for a one-time link and redirects to it. A deployment's console stays off until it names operators;
     the gallery says so instead of opening a broken page.
-- **Walkthroughs**: the eleven [samples](../../samples/README.md), each with its real output. Copy its **Local** or
+- **Walkthroughs**: the thirteen [samples](../../samples/README.md), each with its real output. Copy its **Local** or
   **Azure** command: `pnpm sample 01` after setting `MANAGED_COPILOT_URL` to that gateway. The variable stays set in
   that terminal, so each copy names its target.
 

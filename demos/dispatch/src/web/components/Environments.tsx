@@ -71,12 +71,14 @@ function WorkerCard({ view, worker, selected, now }: { readonly view: Conversati
       <span className="flex items-center gap-1.5 text-sm font-semibold">
         {hands ? <TerminalIcon size={14} className="shrink-0 text-fg-muted" /> : <WorkerStateIcon worker={worker} size={14} />}
         <span className="min-w-0 truncate">{hands ? handsTitle(view, worker) : worker.name}</span>
-        <span className="ml-auto shrink-0 font-mono text-xs font-normal text-fg-muted tabular-nums">
-          {hands ? plural(ran, "command") : active ? formatDuration(between(lastChange(worker), undefined, now)) : plural(worker.tasks, "task")}
-        </span>
+        {hands ? null : (
+          <span className="ml-auto shrink-0 font-mono text-xs font-normal text-fg-muted tabular-nums">
+            {active ? formatDuration(between(lastChange(worker), undefined, now)) : plural(worker.tasks, "task")}
+          </span>
+        )}
       </span>
       <span className={cx("mt-0.5 block font-medium", hands ? "text-fg-muted" : worker.state === "idle" ? "text-fg-success" : worker.state === "failed" ? "text-fg-danger" : "text-fg-muted")}>
-        {hands ? (worker.state === "stopped" ? "Deleted · no agent in it" : "No agent in it · the coordinator works here") : `${meta.label} · ${meta.sandbox}`}
+        {hands ? (worker.state === "stopped" ? "Deleted · no agent in it" : `${plural(ran, "command")} · no agent in it`) : `${meta.label} · ${meta.sandbox}`}
       </span>
       {worker.sandbox ? (
         <span className="mt-1 flex items-center gap-1 text-fg-muted">

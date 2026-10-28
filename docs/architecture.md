@@ -1011,6 +1011,17 @@ and quickstart snippet 14).
     Dispatch and cancelled from the CLI, and a declined request whose reason the coordinator followed. On Azure
     (2026-10-27), the deployed app ran two approved workers in their own sandboxes, an attached Copilot CLI's
     follow-up reused one, and deleting the conversation deleted all three sessions.
+    Execution styles: the fragment declares `dispatch-direct` (`execution: "direct"`, the Python lab only) and
+    `dispatch-mixed` (`execution: "mixed"`, all four) beside `dispatch`; Dispatch keeps one stock client per style's
+    environment (each `managed.client(env)`), and its composer switch picks which one a new conversation is created
+    in. Direct and mixed messages list the hands tool calls of the coordinator and its sub-agents (events with
+    `agentId`, named by `subagent.started`; persisted, so they rebuild from history; the exit code is parsed from
+    `bash`'s status line), `bash`/`write_bash`/`create`/`edit` ask in the message's list with "approve the rest of this
+    message", and the `role: "hands"` sandbox shows `managed.exec.list` with each command's agent. Verified live
+    (2026-10-28, local): all three styles with real models; two background sub-agents in one hands sandbox with
+    per-command approvals; a mixed coordinator that started two workers and then worked in its own sandbox; a
+    Dispatch restart that rebuilt the same commands; and a message typed in an attached Copilot CLI whose `bash` call
+    Dispatch approved.
   - *Assistant* (`demos/assistant`). The `assistant` environment is an orchestrator (scheduling on, network off,
     `maxWorkers` 3) with workers `assistant-python` (the default: medium, no network) and `assistant-web` (small,
     `github.com` and `api.github.com` only). Its agent keeps the app's own tools (mail, calendar, reminders) and
@@ -1778,7 +1789,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **attach** (was devloop) | `packages/aspire/**` (except `src/publish/**`, azure), `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
-| **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent that shows each sandbox it creates or reuses |
+| **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page linking every demo and walkthrough locally and in Azure, with live status and screenshots |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |

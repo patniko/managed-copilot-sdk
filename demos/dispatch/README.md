@@ -1,17 +1,20 @@
 # Dispatch
 
 Talk to one agent, and watch it build the environments your request needs. Dispatch is a chat with an
-**orchestrator** agent on **Managed Copilot** ([spec section 17](../../docs/spec/developer-experience.md)). For every
-message, the coordinator decides whether to create new sandboxes for the work or to send it to sandboxes it already
-has. Dispatch shows each decision and each sandbox as it happens. The app is ordinary Node code built on the stock
+**orchestrator** agent on **Managed Copilot** ([spec section 17](../../docs/spec/developer-experience.md)). A switch
+beside the message box picks how the coordinator gets the work done: **Delegate to workers** (it creates worker agents,
+each in a sandbox of its own, or sends work to the ones it has), **Work directly** (it and its sub-agents run commands
+and edit files themselves, in one sandbox with no agent in it), or **Mixed** (either, as it sees fit). Dispatch shows
+each decision, each sandbox, and each command as it happens. The app is ordinary Node code built on the stock
 `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-![A conversation after two messages: the first created three Python sandboxes in parallel; the second reused one of them and created a writer's sandbox for a chart](docs/screenshots/conversation.png)
+![A delegating conversation after two messages: the first created three Python sandboxes in parallel; the second created a fourth for a chart of their errors](docs/screenshots/conversation.png)
 
-*Estimating π three ways. Message #1 started three workers, each in its own Python sandbox. Message #2 sent more work
-to `monte-carlo-pi` (**#2 reused**) and created `pi-error-chart` in the writer's sandbox (**#2 created**). Each
-message's **What the agent did** card lists the coordinator's decisions; the right pane groups the sandboxes by the
-blueprint they were made from.*
+*Delegate to workers: estimating π three ways. Message #1 started three workers, each in its own Python sandbox
+(**#1 created**). For message #2 the coordinator started `pi-error-chart` to chart all three (**#2 created**); a
+follow-up that needs a worker's files goes to that worker instead (**#2 reused**). Each message's **What the agent
+did** card lists the coordinator's decisions; the right pane groups the sandboxes by the blueprint they were made
+from.*
 
 ```mermaid
 flowchart LR
@@ -61,6 +64,38 @@ Select a sandbox to see its blueprint, size, network policy, and sandbox ID; its
 it) and published outputs; every task it was given, with the message it came from; its latest report; and the command
 that opens it in Copilot CLI.
 
+## Three ways to get the work done
+
+A multi-tenant harness doesn't always want an agent per sandbox: sometimes it wants its own agent and sub-agents to act
+in a sandbox directly. Dispatch shows both, side by side, on the same worker environments. The switch beside the
+message box picks the style of the **next new conversation**; a conversation keeps the style it was created with
+(picking another one in a conversation starts a new conversation with your message).
+
+| Style | Environment | What the coordinator does | What a message's card shows |
+| --- | --- | --- | --- |
+| **Delegate to workers** | `dispatch` | Creates worker agents in sandboxes of the four blueprints, and sends follow-ups to the ones it has | **What the agent did**: sandboxes created and reused, files copied, waits |
+| **Work directly** | `dispatch-direct` | Runs `bash`, `create`, `edit`, `view`, … itself in one Python lab sandbox (Python and Node, no network), and starts stock sub-agents with `task` for parallel parts; they share the sandbox | **What it ran in its sandbox**: every command and file change, by the coordinator or a named sub-agent, with exit codes and output |
+| **Mixed** | `dispatch-mixed` | Works in its own Python lab sandbox, and creates workers in any blueprint when a part needs another environment or should run on its own; the model decides | Both cards |
+
+![Working directly: two sub-agents benchmarked sorts in Python and JavaScript in one sandbox; the card lists every command with who ran it and its exit code, and the right pane shows the coordinator's sandbox with the commands the platform recorded](docs/screenshots/direct.png)
+
+*Work directly. The coordinator generated the data, then two sub-agents (**python-benchmark** and **js-benchmark**, each
+with its color) wrote and ran their benchmarks in the same sandbox, and the coordinator wrote the report. Click a row
+for its output. The right pane shows the **coordinator's sandbox**: no agent runs in it, so it has no task or report;
+instead it lists the commands the platform recorded there (`managed.exec.list`), with the agent that ran each one.*
+
+In direct and mixed conversations, every `bash`, `write_bash`, `create`, and `edit` asks first (reading files and
+output never asks). There can be many per message, so the request shows inline, in the message's list, with
+**Approve this command**, **Approve the rest of #N** (this one and every later command and file change for the same
+message), and **Deny…** with an optional reason the agent is told. **Run freely** skips the questions.
+
+<img src="docs/screenshots/direct-approval.png" alt="Two sub-agents each asking to run a command; each row has Approve this command, Approve the rest of #1, and Deny, and the card's header has Approve the rest of #1" width="900">
+
+![Mixed: message 1 started two workers (a Python one and a web research one); message 2 asked the coordinator to work itself, and it ran the command in its own sandbox, which sits next to the worker in the Python lab row](docs/screenshots/mixed.png)
+
+*Mixed. For message #1 the coordinator chose two workers, one with web access; for #2 it ran the longer series itself, in
+its own sandbox, and published `summary.md`.*
+
 ## Run it
 
 Everything runs locally against real models. You need the repository's prerequisites (see
@@ -72,11 +107,12 @@ pnpm build
 aspire run          # the platform, sandboxes, and the demos; open the "dispatch" resource
 ```
 
-Dispatch opens at <http://localhost:7470>. Pick a template, such as **Estimate π three ways**, and send it. Then try
-its follow-ups to watch the coordinator reuse its sandboxes. Measured live on a local deployment: estimating π three
-ways (three Python sandboxes in parallel) took 49 seconds from message to answer, approvals included; its chart
-follow-up (one sandbox reused, a writer's sandbox created) took 87 seconds; and the sorting showdown's insertion sort
-follow-up, which reused all three of its sandboxes, took 57 seconds.
+Dispatch opens at <http://localhost:7470>. Pick a style with the switch, pick a template, such as **Estimate π three
+ways**, and send it. Then try its follow-ups to watch the coordinator reuse its sandboxes. Measured live on a local
+deployment: estimating π three ways (three Python sandboxes in parallel) took 49 seconds from message to answer,
+approvals included; its chart follow-up (one sandbox reused, a writer's sandbox created) took 87 seconds; and the
+sorting showdown's insertion sort follow-up, which reused all three of its sandboxes, took 57 seconds. Working directly,
+two sub-agents counting primes and Fibonacci digits in one sandbox took 17 seconds once approved.
 
 ### Against another deployment
 
@@ -96,29 +132,39 @@ Copilot CLI reused one of them, and deleting the conversation deleted all three 
 
 ## How it works
 
-- **The conversation is the coordinator session.** Dispatch creates it with `client.createSession` on a stock
-  `CopilotClient` for the `dispatch` environment, with streaming on and a short addition to the coordinator's
-  instructions (name workers clearly, always choose an environment, prefer reusing a sandbox that has what the work
-  needs). The platform supplies the worker tools and the list of worker environments.
+- **The conversation is the coordinator session.** Dispatch keeps one stock `CopilotClient` per style's orchestrator
+  environment (`dispatch`, `dispatch-direct`, `dispatch-mixed`; `/v1/info` reports each one's `execution`) and creates
+  the conversation with `client.createSession` on the chosen one, with streaming on and a short addition to the
+  coordinator's instructions for that style (name workers and sub-agents clearly, always choose an environment, save
+  deliverables in `outputs/`). The platform supplies the worker or hands tools and the list of worker environments.
+  After a restart, conversations are rediscovered in all three environments and resumed on their own client.
 - **Decisions come from the session's own events.** `tool.execution_start` and `tool.execution_complete` for the
   worker tools, and `permission.requested` and `permission.completed` for sandbox requests, are projected into the
-  card under the message that caused them. The projection is replayable: after a restart, Dispatch resumes each
+  card under the message that caused them. In direct and mixed conversations, the hands tools' calls (`bash`,
+  `create`, `edit`, `view`, …) are projected the same way, including sub-agents' (their events carry the sub-agent's
+  `agentId`; `subagent.started`, `subagent.completed`, and `subagent.failed` name it and say when it ended), and each
+  `bash` result's status line gives the exit code. Sub-agents' events are persisted, so the commands rebuild from
+  history too. The projection is replayable: after a restart, Dispatch resumes each
   session and rebuilds the same view from `session.getEvents()`. History never contains `session.idle` (it's
   ephemeral), so a turn counts as over when the next one starts or when the platform reports it finished, and events
   that arrive while the history loads are placed by their timestamps. Each decision is resolved to its worker's session
   ID, so a name the coordinator reuses after stopping a worker never mixes the two up.
-- **Approvals use the SDK's permission handler.** Only `start_worker` asks for permission. Dispatch holds the
-  handler's promise until you answer and resolves it with `approve-once` or `reject` (with your reason as feedback). If
+- **Approvals use the SDK's permission handler.** `start_worker` asks for permission, and so (direct and mixed) do
+  `bash`, `write_bash`, `create`, and `edit`, as `custom-tool` requests with the tool's arguments. Dispatch holds the
+  handler's promise until you answer and resolves it with `approve-once` or `reject` (with your reason as feedback);
+  **Approve the rest of #N** is recorded in Dispatch's file and answers that message's later requests at once. If
   the request ends some other way (its turn is cancelled, or it was answered while Dispatch was away), Dispatch lets go
   as soon as `permission.completed` or the turn's end arrives. If Dispatch restarts first, it releases the handler
   without answering; the platform keeps the prompt and asks again when the session is resumed.
 - **Workers come from the platform.** `managed.workers(session).list()` gives each worker's state, task, and report,
-  and the `worker.*` platform events say when to look again. `managed.sessions.get(worker)` gives its sandbox,
-  `managed.files(worker)` its workspace (listed every few seconds while it works), and `managed.artifacts(worker)` its
-  published outputs.
+  and the `worker.*` platform events say when to look again. A direct or mixed coordinator's own sandbox is listed
+  there too, with `role: "hands"`; it has no task, report, or agent to attach to, and its outputs publish at the end
+  of each coordinator turn. `managed.exec.list(hands)` gives every command run in it, with the calling agent.
+  `managed.sessions.get(worker)` gives a sandbox, `managed.files(worker)` its workspace (listed every few seconds while
+  it works), and `managed.artifacts(worker)` its published outputs.
 - **State is the platform's.** Conversations are the orchestrator environment's sessions, rediscovered after every
   connection, so a lost data directory loses nothing that matters. Dispatch's own file (`.data/dispatch.json`) keeps
-  each conversation's approval setting, which messages it sent (so others can be labeled), and what it saw of each
+  each conversation's approval setting and orchestrator environment, the messages whose remaining commands were approved, which messages it sent (so others can be labeled), and what it saw of each
   worker (its state changes and outputs) for the timeline.
 - **Outages pause the view, not the work.** The connection is checked every 15 seconds and re-established with
   jittered backoff. Conversations and their workers keep running on the platform meanwhile; Dispatch resumes them
@@ -131,9 +177,12 @@ Copilot CLI reused one of them, and deleting the conversation deleted all three 
 | `PORT` | `7470` | HTTP port for the UI and API |
 | `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `DISPATCH_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
-| `DISPATCH_ENVIRONMENT` | `dispatch` | The orchestrator environment conversations run in |
+| `DISPATCH_ENVIRONMENT` | `dispatch` | The delegate style's orchestrator environment |
+| `DISPATCH_DIRECT_ENVIRONMENT` | `<DISPATCH_ENVIRONMENT>-direct` | The direct style's orchestrator environment |
+| `DISPATCH_MIXED_ENVIRONMENT` | `<DISPATCH_ENVIRONMENT>-mixed` | The mixed style's orchestrator environment |
+| `DISPATCH_STYLE` | `delegate` | New conversations' style when the person hasn't picked one: `delegate`, `direct`, or `mixed` |
 | `DISPATCH_MODEL` | `claude-sonnet-5` | The coordinator's model |
-| `DISPATCH_APPROVALS` | `ask` | New conversations' default: `ask` before each new sandbox, or `auto` |
+| `DISPATCH_APPROVALS` | `ask` | New conversations' default: `ask` before each new sandbox (and, direct and mixed, each command), or `auto` |
 | `DISPATCH_DATA_DIR` | `.data` | Dispatch's small record of settings and what it saw |
 | `DISPATCH_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 | `DISPATCH_ATTACH_URL` | none | Gateway URL added to "Open in Copilot CLI" commands (`--url`) when users reach the platform at another address, as in a cloud deployment |
@@ -143,7 +192,7 @@ Copilot CLI reused one of them, and deleting the conversation deleted all three 
 
 | Path | Contents |
 | --- | --- |
-| `apphost.mts` | AppHost fragment: the orchestrator environment, its four worker environments, and the app resource |
+| `apphost.mts` | AppHost fragment: the three orchestrator environments (one per execution style), their four worker environments, and the app resource |
 | `src/server` | Platform connection, conversations (one coordinator session each), the event projection, REST and server-sent events |
 | `src/shared` | Types shared with the UI, blueprint labels, and templates |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`packages/github-theme`](../../packages/github-theme); light and dark follow the OS) |

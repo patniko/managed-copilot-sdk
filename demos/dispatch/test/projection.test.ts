@@ -403,6 +403,32 @@ describe("Commands (direct and mixed)", () => {
     expect(t.handsAttribution(undefined, false)).toEqual({ createdBy: 1, sentWorkBy: [2] });
   });
 
+  it("keeps a command asking when its prompt arrives before its start, until the prompt is answered", () => {
+    const t = transcript();
+    apply(t, user("go"), asked("c1", "create", { path: "/workspace/a.js" }, SUB_A), subStart("c1", "create", { path: "/workspace/a.js" }, SUB_A));
+    expect(t.messages()[0]?.commands?.[0]).toMatchObject({ status: "asking", agentId: SUB_A });
+    apply(t, answered("c1", "approved", SUB_A));
+    expect(t.messages()[0]?.commands?.[0]).toMatchObject({ status: "running" });
+  });
+
+  it("follows a background sub-agent to its own end, even after its coordinator's turn ended", () => {
+    const t = transcript();
+    apply(
+      t,
+      user("go"),
+      start("task-1", "task", { name: "bg", prompt: "p", mode: "background" }),
+      sub("subagent.started", "task-1", SUB_A, "bg"),
+      // A background task call returns at once.
+      done("task-1", "Agent started in background with agent_id: bg"),
+    );
+    expect(t.messages()[0]?.subagents?.[0]).toMatchObject({ status: "running" });
+    apply(t, event("session.idle", {}, { ephemeral: true }));
+    expect(t.messages()[0]?.subagents?.[0]).toMatchObject({ status: "failed", detail: expect.stringMatching(/Interrupted/) });
+    apply(t, sub("subagent.completed", "task-1", SUB_A, "bg"));
+    expect(t.messages()[0]?.subagents?.[0]).toMatchObject({ status: "done" });
+    expect(t.messages()[0]?.subagents?.[0]).not.toHaveProperty("detail");
+  });
+
   it("parses the platform's command status lines", () => {
     expect(parseCommandResult("out\n<exited with exit code 3; shellId: ex_9>")).toEqual({ output: "out", outcome: "exit code 3", exitCode: 3, shellId: "ex_9" });
     expect(parseCommandResult("partial\n<command with shellId: ex_1 is still running after 120 seconds. It keeps running: use read_bash.>")).toMatchObject({ output: "partial", outcome: "still running", running: true, shellId: "ex_1" });

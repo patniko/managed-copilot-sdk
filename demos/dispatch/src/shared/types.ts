@@ -115,6 +115,8 @@ export interface Command {
   readonly kind: CommandKind;
   readonly status: CommandStatus;
   readonly at: string;
+  /** When it was approved, for commands that asked: its run time starts here. */
+  readonly approvedAt?: string;
   readonly endedAt?: string;
   /** The sub-agent that made the call; absent for the coordinator itself. */
   readonly agentId?: string;

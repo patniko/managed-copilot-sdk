@@ -180,7 +180,7 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
             </ul>
             <div className="ml-auto flex items-center gap-2 text-xs text-fg-muted max-2xl:hidden">
               <span className="Label Label--success">#1</span> created by message 1
-              <span className="Label Label--accent">#2</span> sent work by message 2
+              <span className="Label Label--accent">#2</span> {view.style === "direct" ? "used by message 2" : "sent work by message 2"}
             </div>
           </nav>
           <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">

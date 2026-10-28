@@ -130,7 +130,7 @@ function Outcome({ command, now }: { readonly command: Command; readonly now: nu
       return (
         <span className="inline-flex shrink-0 items-center gap-1 font-mono text-xs text-fg-muted tabular-nums">
           <Spinner size={12} className="text-fg-accent" />
-          {formatDuration(between(command.at, undefined, now))}
+          {formatDuration(between(command.approvedAt ?? command.at, undefined, now))}
         </span>
       );
     case "denied":
@@ -142,7 +142,8 @@ function Outcome({ command, now }: { readonly command: Command; readonly now: nu
         </span>
       );
     case "done": {
-      const took = command.endedAt ? formatDuration(between(command.at, command.endedAt, now)) : undefined;
+      // How long it ran (from its approval, when it asked); file changes and reads take no time worth showing.
+      const took = command.endedAt && command.kind === "run" ? formatDuration(between(command.approvedAt ?? command.at, command.endedAt, now)) : undefined;
       if (command.exitCode !== undefined) {
         return (
           <span className="inline-flex shrink-0 items-center gap-1.5 text-xs">
@@ -289,13 +290,15 @@ export function CommandsCard({
   const [all, setAll] = useState(false);
   const approvals = new Map(view.approvals.filter((approval) => approval.kind === "command" && approval.decisionId).map((approval) => [approval.decisionId!, approval]));
   const asking = commands.filter((command) => command.status === "asking" && approvals.has(command.id));
-  const ran = commands.filter((command) => command.kind === "run").length;
+  const ran = commands.filter((command) => command.kind === "run" && command.status !== "asking" && command.status !== "denied").length;
   const changed = new Set(commands.filter((command) => (command.kind === "create" || command.kind === "edit") && command.status === "done").map((command) => command.path)).size;
   const failed = commands.filter((command) => command.status === "failed" || (command.exitCode !== undefined && command.exitCode !== 0)).length;
   const hidden = !all && commands.length > SHOWN ? commands.length - SHOWN : 0;
   const shown = hidden ? commands.filter((command, index) => index >= hidden || approvals.has(command.id)) : commands;
   const first = asking[0] ? approvals.get(asking[0].id) : undefined;
-  const summary = [plural(ran, "command"), changed ? plural(changed, "file changed", "files changed") : "", failed ? `${failed} failed` : "", asking.length ? `${asking.length} asking you` : ""].filter(Boolean).join(" · ");
+  const summary =
+    [ran ? plural(ran, "command") : "", changed ? plural(changed, "file changed", "files changed") : "", failed ? `${failed} failed` : "", asking.length ? `${asking.length} asking you` : ""].filter(Boolean).join(" · ") ||
+    "nothing run yet";
   return (
     <section aria-label="What it ran in its sandbox" className={cx("overflow-hidden rounded-lg border bg-canvas", asking.length ? "border-[var(--borderColor-attention-emphasis)]" : "border-line")}>
       <header className={cx("flex items-center gap-2 px-3 py-1.5 text-xs font-semibold", asking.length ? "bg-attention-muted text-fg-attention" : "bg-canvas-muted text-fg-muted")}>

@@ -163,8 +163,10 @@ export class Transcript {
   readonly #commands = new Map<string, CommandRecord>();
   /** Sub-agents, by the `task` call that started them. */
   readonly #subagents = new Map<string, SubAgentRecord>();
-  /** Sub-agent names by their ID. */
+  /** Sub-agents by ID, for labelling their commands (including ones started for earlier messages). */
   readonly #agentNames = new Map<string, string>();
+  /** Sub-agents the end of a turn marked interrupted: their own end, arriving later, still counts. */
+  readonly #cutShort = new Set<string>();
   #users = 0;
   #current: MessageRecord | undefined;
   title: string | undefined;
@@ -437,8 +439,8 @@ export class Transcript {
     if (!id) return false;
     const existing = this.#commands.get(id);
     if (existing) {
-      // Known from its permission prompt: running means it was approved.
-      if (existing.status !== "asking") return false;
+      // Known from its permission prompt: it runs once that prompt is answered (which may come before or after this).
+      if (existing.status !== "asking" || !this.#settled.has(id)) return false;
       existing.status = "running";
       return true;
     }
@@ -496,8 +498,10 @@ export class Transcript {
   }
 
   #taskEnd(event: CoordinatorEvent, data: Record<string, unknown>, subagent: SubAgentRecord): boolean {
-    if (subagent.status !== "running") return false;
+    // A sub-agent ends with `subagent.completed` or `subagent.failed`: a background one's `task` call returns at once.
+    // The call itself ends it only when it failed, or when the sub-agent never started.
     const failed = data["success"] === false;
+    if (subagent.status !== "running" || (!failed && subagent.id)) return false;
     subagent.status = failed ? "failed" : "done";
     subagent.endedAt = event.timestamp;
     if (failed) {
@@ -518,11 +522,14 @@ export class Transcript {
     if (event.agentId) subagent.id = event.agentId;
     if (event.type === "subagent.started") {
       if (!subagent.type && text(data["agentType"])) subagent.type = String(data["agentType"]);
-    } else if (subagent.status === "running") {
+    } else if (subagent.status === "running" || this.#cutShort.has(subagent.toolCallId)) {
+      // Its own end, even after its coordinator's turn ended (a background sub-agent can outlive it).
+      this.#cutShort.delete(subagent.toolCallId);
       subagent.status = event.type === "subagent.failed" ? "failed" : "done";
       subagent.endedAt = event.timestamp;
       const why = event.type === "subagent.failed" ? firstLine(text(data["error"])) : data["cancelled"] === true ? "Cancelled before it finished." : undefined;
       if (why) subagent.detail = why;
+      else delete subagent.detail;
     }
     this.updatedAt = event.timestamp;
     return true;
@@ -577,7 +584,8 @@ export class Transcript {
     const command = id ? this.#commands.get(id) : undefined;
     if (command) {
       if (kind.startsWith("approved")) {
-        if (command.status !== "asking") return false;
+        command.approvedAt ??= event.timestamp;
+        if (command.status !== "asking") return true;
         command.status = "running";
         return true;
       }
@@ -645,6 +653,7 @@ export class Transcript {
       subagent.status = "failed";
       subagent.detail = "Interrupted: the turn ended before it finished.";
       subagent.endedAt ??= at;
+      this.#cutShort.add(subagent.toolCallId);
       changed = true;
     }
     return changed;
