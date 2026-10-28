@@ -29,7 +29,7 @@ flowchart LR
   subgraph VNet["Virtual network (default 10.42.0.0/16)"]
     subgraph Platform["platform subnet /23 — Container Apps environment"]
       GW["copilot (gateway)<br/>1 replica, lease supervisor"]
-      Apps["your apps<br/>(assistant, software-factory, dispatch)"]
+      Apps["your apps<br/>(assistant, software-factory, dispatch, gallery)"]
     end
     subgraph EgressNet["egress subnet /24 — internal Container Apps environment"]
       EP["egress proxy<br/>TCP 3128, internal only"]
@@ -61,7 +61,7 @@ flowchart LR
 | Storage account (FileStorage, Premium SSD v2) + NFS share `managed-copilot` (32 GiB) | Durable state: the gateway at `gateway/`, each app at `apps/<name>/`, proxy CA at `egress/`. NFS 4.1, reachable only from the trusted `platform` and `egress` subnets, not the sandbox subnet; shared-key access disabled. |
 | Container registry + pull identity | Holds the gateway, app, egress proxy, and sandbox images. |
 | `copilot` container app | The gateway: external HTTPS ingress, exactly one replica, Single revision mode, `/data` on the NFS share, startup/liveness over TCP and readiness over HTTP. |
-| One container app per `publishApp` | Your apps (the demos): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. |
+| One container app per `publishApp` | Your apps (the demos, and the demo gallery at `https://gallery.<environment-domain>`): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. The gallery gets no GitHub token. |
 | `copilot-gateway-identity` | User-assigned identity of the gateway. Its roles: **Container Apps SandboxGroup Data Owner** on the sandbox group, and **AcrPull** on the registry (for the registry tokens it hands to disk-image imports). |
 | Sandboxes group (`Microsoft.App/sandboxGroups`) + VNet connection | Isolated placement. Created only when the AppHost declares isolated environments. |
 | Internal Container Apps environment `mc-egress-<suffix>` + `egress` container app | The sandboxes' only way out: the platform's egress proxy (`platform/egress`, external mode) on TCP 3128 of the environment's internal load balancer, one replica, linked to the gateway over HTTPS. Created with the sandbox group. |
@@ -407,14 +407,14 @@ check your subscription's rates and discounts before deploying.
 
 | Item | Idle | Notes |
 | --- | --- | --- |
-| Gateway, 3 demo apps, and the egress proxy (Container Apps Consumption, 0.5 vCPU / 1 GiB each, always one replica) | ~$79/month at idle rates; ~$276/month continuously active | Before the subscription's shared free grant. Observed meters: $0.000034/vCPU-second active, $0.000004/vCPU-second idle, $0.000004/GiB-second. Both environments are Consumption-only. Each demo app you don't publish saves about a fifth. |
+| Gateway, 3 demo apps, the demo gallery, and the egress proxy (Container Apps Consumption, 0.5 vCPU / 1 GiB each, always one replica) | ~$95/month at idle rates; ~$331/month continuously active | Before the subscription's shared free grant. Observed meters: $0.000034/vCPU-second active, $0.000004/vCPU-second idle, $0.000004/GiB-second. Both environments are Consumption-only. Each demo app you don't publish saves about a sixth. |
 | Azure Files NFS (Premium SSD v2, 32 GiB provisioned) | ~$5–10/month | Live share: 3,032 IOPS and 129 MiB/s. Capacity plus provisioned performance above included baselines; snapshots are extra. See [Azure Files cost guidance](https://learn.microsoft.com/en-us/azure/storage/files/file-estimate-cost). |
 | Container registry (Basic) | ~$5/month | |
 | Log Analytics | ~$0–10/month | Per GB ingested. |
 | Sandboxes (per isolated session) | Usage-based | microVM time while a sandbox runs, plus its data disks while they exist. Delete sessions you no longer need; idle stop keeps only disks. Check the resource group in Cost Management for actual figures. |
 
 Standing WebSocket/SSE connections and background work can keep replicas at active rates even without a browser open.
-The five apps alone cost roughly $0.11/hour at idle rates or $0.38/hour when active, before free grants. These are
+The six apps alone cost roughly $0.13/hour at idle rates or $0.45/hour when active, before free grants. These are
 estimates, not a spending cap: sandbox usage, additional network/bandwidth charges, and model usage billed to the
 authorized GitHub account are separate.
 

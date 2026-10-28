@@ -350,6 +350,11 @@ export interface PublishAppOptions {
   readonly allowedHostsEnv?: string;
   /** More environment variables that receive the gateway's public URL (`MANAGED_COPILOT_URL` is always set). */
   readonly gatewayUrlEnv?: readonly string[];
+  /**
+   * Whether the app gets the deployment's GitHub token (`MANAGED_COPILOT_GITHUB_TOKEN`) to act as that account. Default
+   * true; set false for an app that never calls the platform as a user (a static page). It stays IP-restricted.
+   */
+  readonly githubToken?: boolean;
 }
 
 /**
@@ -367,7 +372,8 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   deployment.allowedSources ??= await appAllowedSources(publisher);
   const allowed = deployment.allowedSources;
   deployment.appsByPort.set(app.port, app.name);
-  deployment.appToken ??= await publisher.addParameter("app-github-token", appTokenParameterOptions());
+  const actsAsAccount = app.githubToken !== false;
+  if (actsAsAccount) deployment.appToken ??= await publisher.addParameter("app-github-token", appTokenParameterOptions());
 
   const dataDirectory = app.dataDirectory ?? "/data";
   let container = amd64(publisher.addDockerfile(app.name, deployment.context, { dockerfilePath: app.dockerfile }).withBuildArg("NPM_REGISTRY", deployment.npmRegistry))
@@ -378,8 +384,8 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
     // For the lease supervisor the app's image starts with (see demos/*/Dockerfile).
     .withEnvironment("MANAGED_COPILOT_DATA_DIR", dataDirectory)
     .withEnvironment("MANAGED_COPILOT_LEASE_STAMP", deployment.stamp)
-    .withEnvironment("MANAGED_COPILOT_URL", gatewayUrl)
-    .withEnvironment("MANAGED_COPILOT_GITHUB_TOKEN", deployment.appToken);
+    .withEnvironment("MANAGED_COPILOT_URL", gatewayUrl);
+  if (actsAsAccount) container = container.withEnvironment("MANAGED_COPILOT_GITHUB_TOKEN", deployment.appToken!);
   for (const variable of app.gatewayUrlEnv ?? []) container = container.withEnvironment(variable, gatewayUrl);
   // Descriptors written for `aspire run` carry local values (for example a localhost public URL) for variables set here.
   const managed = new Set([

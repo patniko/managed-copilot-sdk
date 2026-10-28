@@ -15,14 +15,15 @@ export function localUrls(offset = 0): { readonly gatewayUrl: string; readonly a
  * Deployed URLs from the gateway's. `aspire deploy` gives every app https://<app>.<environment-domain>, and the gateway
  * is the `copilot` app, so the apps share its domain.
  */
-export function cloudUrls(gatewayUrl: string): { readonly gatewayUrl: string; readonly apps: Readonly<Record<string, string>> } {
+export function cloudUrls(gatewayUrl: string, options: { readonly console?: boolean } = {}): { readonly gatewayUrl: string; readonly apps: Readonly<Record<string, string>> } {
   const gateway = new URL(gatewayUrl);
   const [first, ...rest] = gateway.hostname.split(".");
   const domain = first === GATEWAY_APP && rest.length > 0 ? rest.join(".") : undefined;
   const apps: Record<string, string> = {};
   for (const app of APPS) {
-    if (app === CONSOLE) apps[app.id] = consoleRoute("cloud");
-    else if (domain) apps[app.id] = `${gateway.protocol}//${app.app}.${domain}`;
+    if (app === CONSOLE) {
+      if (options.console !== false) apps[app.id] = consoleRoute("cloud");
+    } else if (domain) apps[app.id] = `${gateway.protocol}//${app.app}.${domain}`;
   }
   return { gatewayUrl: gateway.origin, apps };
 }

@@ -136,8 +136,11 @@ export interface TargetState {
 }
 
 export interface GalleryState {
-  readonly local: TargetState;
+  /** Absent on a hosted gallery, whose visitors' machines it can't see. */
+  readonly local?: TargetState;
   readonly cloud: TargetState;
+  /** Served from the deployment itself (`aspire deploy`): Azure only, and the console opens from each operator's terminal. */
+  readonly hosted?: boolean;
   /** Base URL for repository files (README links). */
   readonly repoUrl: string;
   readonly checkedAt: string;

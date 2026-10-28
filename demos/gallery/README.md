@@ -43,6 +43,22 @@ The page checks every link every 15 seconds; the header shows whether the local 
 pnpm gallery [--cloud <gateway url>] [--port <port>] [--no-open] [--no-azure]
 ```
 
+## Deployed
+
+`aspire deploy` (or `npx managed-copilot deploy`) also publishes the gallery at `https://gallery.<environment-domain>`,
+a link you can share. The deployed copy shows that deployment only:
+
+- **Azure links only.** There's no Local column: it can't see visitors' machines.
+- **No console sign-in.** Locally, the console button signs you in with your GitHub sign-in. Deployed, that would sign
+  every visitor in as one account, so the console card copies `npx managed-copilot console --url <gateway>` instead,
+  which each operator runs with their own sign-in. The gallery holds no GitHub token (`publishApp`'s
+  `githubToken: false`).
+- **Same audience as the demos.** It opens only from `Parameters:app-allowed-ips` (`npx managed-copilot access ips`).
+  It checks the apps from inside the deployment, which the allowlist always admits, so its dots say whether an app is
+  up, not whether a visitor's network may open it; the page says so.
+
+The image is [`Dockerfile`](Dockerfile) (`GALLERY_HOSTED=1`; `GALLERY_ALLOWED_HOSTS` names the host names it answers).
+
 ## Screenshots
 
 The cards' screenshots are in [`shots/`](shots). Each app's is the real app on a local platform, after a real run;

@@ -192,6 +192,7 @@ The first deploy builds and pushes the images (several minutes on ARM64). It end
 
 ```text
 ✓ Deployed: https://copilot.<environment-domain>
+  Demo gallery: https://gallery.<environment-domain>
 ```
 
 - [ ] The deploy succeeds and prints the gateway URL.
@@ -237,16 +238,23 @@ npx managed-copilot login        # once per deployment, so schedules and offline
 - [ ] `Capabilities` includes `isolated` (if not, see [troubleshooting](deployment.md#troubleshooting): the role
       assignment can take a few minutes; the gateway re-checks every 30 seconds).
 
-### 3.2 Open the gallery with the Azure column (T2)
+### 3.2 Open the gallery
+
+The deployment has its own gallery, at the address `deploy` printed: **https://gallery.&lt;environment-domain&gt;**.
+That's the link to share. It shows the Azure apps only, and its console card copies the command each operator runs
+(`npx managed-copilot console --url …`).
+
+- [ ] The deployed gallery opens and its header shows Azure as up.
+- [ ] Each app card's **Azure** dot is green, and each app opens.
+
+From your laptop, the local gallery shows both columns side by side (T2):
 
 ```powershell
 pnpm gallery --cloud https://copilot.<environment-domain>
 ```
 
-Without `--cloud`, the gallery finds the `copilot` container app through `az login`.
-
-- [ ] Header shows the Azure gateway as up.
-- [ ] Each app card's **Azure** dot is green. **Amber** means the app refused your network address (see 3.4).
+Without `--cloud`, it finds the `copilot` container app through `az login`. Here an **amber** dot means the app refused
+your network address (see 3.4); the deployed gallery can't tell, because the apps always admit it.
 
 ### 3.3 The demos and console in Azure
 
@@ -319,7 +327,7 @@ Apps open to    203.0.113.7/32
 | --- | --- | --- | --- |
 | Platform users | `access users add alice bob` (or `access orgs add contoso`) | Use the gateway with their own GitHub sign-in and Copilot plan: the CLI, samples, Copilot CLI, and demos they run themselves | Next `npx managed-copilot deploy` |
 | Operators | `access operators add alice` | Open the operator console and operator API. Operators must also be platform users | Next `npx managed-copilot deploy` |
-| Who can open the deployed apps | `access ips add 203.0.113.50` | Open the deployed Dispatch, factory, and assistant from those addresses, **acting as your account** | At once |
+| Who can open the deployed apps | `access ips add 203.0.113.50` | Open the deployed gallery, Dispatch, factory, and assistant from those addresses, **acting as your account** (except the gallery, which holds no account) | At once |
 
 `me` means you: `access users add me` adds your GitHub login, and `access ips add me` adds this machine's public
 address. Each list also takes `remove` and `set` (which replaces the whole list).

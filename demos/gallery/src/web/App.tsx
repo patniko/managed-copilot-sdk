@@ -11,7 +11,7 @@ import {
   TerminalIcon,
 } from "@primer/octicons-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { APPS, shotFile, WALKTHROUGHS, type AppEntry, type GalleryState, type Health, type Link, type Target, type TargetState, type Walkthrough } from "../shared/catalog.js";
+import { APPS, CONSOLE, shotFile, WALKTHROUGHS, type AppEntry, type GalleryState, type Health, type Link, type Target, type TargetState, type Walkthrough } from "../shared/catalog.js";
 
 const POLL_MS = 15_000;
 const TARGET_NAME: Record<Target, string> = { local: "Local", cloud: "Azure" };
@@ -52,14 +52,15 @@ function Dot({ health }: { readonly health?: Health }) {
   return <span className={`dot ${health ? `dot-${health}` : ""}`} aria-hidden />;
 }
 
-function healthTitle(target: Target, link: Link | undefined, state: TargetState | undefined): string {
+function healthTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted?: boolean): string {
+  if (link && hosted && link.health === "online") return `${link.url} is up. It opens from allowed networks only (npx managed-copilot access ips).`;
   if (!link) return target === "cloud" ? (state?.searching ? "Looking for your Azure deployment…" : (state?.note ?? "No Azure deployment")) : "Not available";
   if (link.health === "restricted") return `${link.url} refused this network: its ingress only allows the addresses in Parameters:app-allowed-ips.`;
   if (link.health === "offline") return target === "local" ? `${link.url} isn't answering. Start the platform with aspire run.` : `${link.url} isn't answering.`;
   return link.url;
 }
 
-function TargetButton({ target, link, state, primary }: { readonly target: Target; readonly link?: Link; readonly state?: TargetState; readonly primary?: boolean }) {
+function TargetButton({ target, link, state, primary, hosted }: { readonly target: Target; readonly link?: Link; readonly state?: TargetState; readonly primary?: boolean; readonly hosted?: boolean }) {
   const Icon = target === "local" ? DeviceDesktopIcon : CloudIcon;
   const label = (
     <>
@@ -68,7 +69,7 @@ function TargetButton({ target, link, state, primary }: { readonly target: Targe
       <Dot health={link?.health} />
     </>
   );
-  const title = healthTitle(target, link, state);
+  const title = healthTitle(target, link, state, hosted);
   if (!link) {
     return (
       <button type="button" className="btn btn-sm inline-flex items-center gap-2" disabled title={title}>
@@ -126,7 +127,8 @@ function Shot({ id, alt, href }: { readonly id: string; readonly alt: string; re
 }
 
 function AppCard({ app, state }: { readonly app: AppEntry; readonly state?: GalleryState }) {
-  const local = state?.local.links[app.id];
+  const hosted = state?.hosted === true;
+  const local = state?.local?.links[app.id];
   const cloud = state?.cloud.links[app.id];
   const best = [local, cloud].find((link) => link?.health === "online");
   return (
@@ -144,8 +146,13 @@ function AppCard({ app, state }: { readonly app: AppEntry; readonly state?: Gall
         </p>
       </div>
       <div className="px-4 pb-4 flex flex-wrap items-center gap-2">
-        <TargetButton target="local" link={local} state={state?.local} primary />
-        <TargetButton target="cloud" link={cloud} state={state?.cloud} primary={local?.health !== "online"} />
+        {hosted ? null : <TargetButton target="local" link={local} state={state?.local} primary />}
+        {hosted && app === CONSOLE ? (
+          // The console signs each operator in with their own GitHub account, from their terminal.
+          state?.cloud.gatewayUrl ? <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy command" /> : null
+        ) : (
+          <TargetButton target="cloud" link={cloud} state={state?.cloud} primary={local?.health !== "online"} hosted={hosted} />
+        )}
         <a className="btn btn-sm btn-invisible inline-flex items-center gap-2 ml-auto" href={`${state?.repoUrl ?? ""}${app.readme}`} target="_blank" rel="noreferrer">
           <BookIcon size={16} />
           <span>README</span>
@@ -160,7 +167,7 @@ function WalkthroughCard({ walkthrough, state }: { readonly walkthrough: Walkthr
   // Both copies name their gateway: MANAGED_COPILOT_URL outlives the command in that terminal, and an AppHost with a
   // port offset writes no discovery record.
   const withUrl = (url: string) => `$env:MANAGED_COPILOT_URL = "${url}"; ${command}`;
-  const localUrl = state?.local.gatewayUrl;
+  const localUrl = state?.local?.gatewayUrl;
   const cloudUrl = state?.cloud.gatewayUrl;
   const readme = `${state?.repoUrl ?? ""}samples/${walkthrough.folder}/README.md`;
   return (
@@ -219,7 +226,8 @@ const renderCode = (text: string) => text.split(/`([^`]+)`/).map((part, i) => (i
 
 export function App() {
   const { state, error, refreshing, refresh } = useGallery();
-  const localDown = state && state.local.gateway !== "online";
+  const hosted = state?.hosted === true;
+  const localDown = state?.local && state.local.gateway !== "online";
   const cloudMissing = state && !state.cloud.searching && !state.cloud.gatewayUrl;
   return (
     <div className="min-h-screen bg-canvas text-fg">
@@ -236,7 +244,7 @@ export function App() {
             <span className="AppHeader-context-item AppHeader-context-item--current">Demo gallery</span>
           </nav>
           <div className="AppHeader-actions gap-4">
-            <TargetStatus target="local" state={state?.local} />
+            {hosted ? null : <TargetStatus target="local" state={state?.local} />}
             <TargetStatus target="cloud" state={state?.cloud} />
             <button type="button" className="AppHeader-button" aria-label="Check again" title="Check again" onClick={refresh} disabled={refreshing}>
               <SyncIcon size={16} className={refreshing ? "animate-spin" : ""} />
@@ -249,20 +257,28 @@ export function App() {
         <div className="mx-auto max-w-[1280px] px-6 py-10">
           <h1 className="text-2xl font-semibold">Demo gallery</h1>
           <p className="mt-2 max-w-3xl text-base text-fg-muted">
-            Every demo and walkthrough in one place, on this machine and in your Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from
-            real runs.
+            {hosted
+              ? "Every demo and walkthrough in this Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."
+              : "Every demo and walkthrough in one place, on this machine and in your Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."}
           </p>
         </div>
       </section>
 
       <main className="mx-auto max-w-[1280px] px-6 py-8 flex flex-col gap-10">
-        {error || localDown || cloudMissing ? (
+        {error || localDown || cloudMissing || hosted ? (
           <div className="flex flex-col gap-3">
             {error ? <Notice tone="warn">{error}</Notice> : null}
+            {hosted ? (
+              <Notice tone="neutral">
+                {renderCode(
+                  "The apps open only from allowed networks. If one answers `403 RBAC: access denied`, ask the deployment's owner to add your address with `npx managed-copilot access ips add <your address>`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.",
+                )}
+              </Notice>
+            ) : null}
             {localDown ? (
               <Notice tone="warn">
                 <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <span>The local platform isn't running at {state.local.gatewayUrl}. Start it from the repository root, then the Local buttons light up.</span>
+                  <span>The local platform isn't running at {state.local!.gatewayUrl}. Start it from the repository root, then the Local buttons light up.</span>
                   <CopyButton text="aspire run" label="aspire run" />
                 </div>
               </Notice>
@@ -280,7 +296,9 @@ export function App() {
             <h2 id="apps" className="Subhead-heading">
               Apps
             </h2>
-            <div className="Subhead-description">{renderCode("Web apps for live demos. Local runs with `aspire run`; Azure is what `aspire deploy` published.")}</div>
+            <div className="Subhead-description">
+              {renderCode(hosted ? "Web apps for live demos, running in this deployment." : "Web apps for live demos. Local runs with `aspire run`; Azure is what `aspire deploy` published.")}
+            </div>
           </div>
           <div className="grid gap-6 md:grid-cols-2">
             {APPS.map((app) => (
@@ -294,7 +312,10 @@ export function App() {
             <h2 id="walkthroughs" className="Subhead-heading inline-flex items-center gap-2">
               <TerminalIcon size={20} /> Walkthroughs
             </h2>
-            <div className="Subhead-description">Short scripts from {renderCode("`samples/`")}. Copy the Local or Azure command and run it from the repository root; each sets {renderCode("`MANAGED_COPILOT_URL`")} to that gateway first.</div>
+            <div className="Subhead-description">
+              Short scripts from {renderCode("`samples/`")}. Copy {hosted ? "the Azure" : "the Local or Azure"} command and run it from the repository root; each sets {renderCode("`MANAGED_COPILOT_URL`")}{" "}
+              to that gateway first.
+            </div>
           </div>
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {WALKTHROUGHS.map((walkthrough) => (

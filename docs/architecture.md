@@ -1799,7 +1799,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
-| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page linking every demo and walkthrough locally and in Azure, with live status and screenshots |
+| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page linking every demo and walkthrough locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |

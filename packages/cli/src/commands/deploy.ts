@@ -518,8 +518,10 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (code !== 0) throw new CommandError(`aspire deploy failed (exit ${code}).`, { hint: "Its output above says why. Fix that, then run `npx managed-copilot deploy` again." });
 
   const url = (await azure.gatewayUrl(name)) ?? existing;
+  const gallery = await azure.gatewayUrl("gallery");
   ctx.out();
   ctx.out(`${style.green(style.ok)} Deployed${url ? `: ${style.bold(url)}` : ""}`);
+  if (gallery) ctx.out(`  Demo gallery: ${style.bold(gallery)}`);
   if (url) {
     ctx.out(style.dim(`  $env:MANAGED_COPILOT_URL = "${url}"`));
     ctx.out(style.dim("  npx managed-copilot status      # check it, then `npx managed-copilot login` once for background work"));

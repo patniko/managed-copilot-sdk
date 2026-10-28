@@ -37,6 +37,10 @@ describe("links", () => {
     expect(urls.apps.console).toBe("/open/console?target=cloud");
   });
 
+  it("leaves the console out when asked (a hosted gallery)", () => {
+    expect(cloudUrls("https://copilot.d.io", { console: false }).apps).toEqual({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io" });
+  });
+
   it("offers only the console for a gateway on a custom host", () => {
     expect(cloudUrls("https://agents.example.com").apps).toEqual({ console: "/open/console?target=cloud" });
   });
@@ -105,9 +109,10 @@ describe("gallery server", () => {
     expect((await fetch(`${url}/shots/..%2F..%2Fpackage.json`)).status).toBe(404);
 
     const state = (await (await fetch(`${url}/api/gallery?refresh`)).json()) as GalleryState;
-    expect(state.local.gatewayUrl).toBe("http://localhost:47400");
-    expect(state.local.gateway).toBe("offline");
-    expect(state.local.links.dispatch).toEqual({ url: "http://localhost:47470", health: "offline" });
+    expect(state.local?.gatewayUrl).toBe("http://localhost:47400");
+    expect(state.local?.gateway).toBe("offline");
+    expect(state.local?.links.dispatch).toEqual({ url: "http://localhost:47470", health: "offline" });
+    expect(state.hosted).toBeUndefined();
     expect(state.cloud).toEqual({ links: {}, note: "No deployment." });
     expect(state.repoUrl).toBe("https://github.com/o/r/blob/main/");
   });
@@ -151,5 +156,53 @@ describe("gallery server", () => {
     const noCloud = await fetch(`${url}/open/console?target=cloud`, { redirect: "manual" });
     expect(noCloud.status).toBe(502);
     expect(await noCloud.text()).toContain("No Azure deployment");
+  });
+  describe("hosted", () => {
+    const request = async (url: string, path: string, host: string) => {
+      const { request: send } = await import("node:http");
+      return new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = send(`${url}${path}`, { headers: { host } }, (res) => {
+          let body = "";
+          res.setEncoding("utf8").on("data", (chunk: string) => (body += chunk));
+          res.once("end", () => resolve({ status: res.statusCode ?? 0, body }));
+        });
+        req.once("error", reject);
+        req.end();
+      });
+    };
+
+    it("answers the deployment's host names and shows only the Azure target, without the console link", async () => {
+      const url = await gallery({
+        cloud: Promise.resolve<CloudLookup>({ url: "https://copilot.d.invalid", note: "This deployment." }),
+        hosted: { allowedHosts: ["gallery.d.invalid", "gallery"] },
+      });
+      expect((await request(url, "/api/health", "gallery.d.invalid")).status).toBe(200);
+      expect((await request(url, "/api/health", "GALLERY")).status).toBe(200);
+      expect((await request(url, "/api/health", "evil.example")).status).toBe(421);
+
+      const state = JSON.parse((await request(url, "/api/gallery?refresh", "gallery.d.invalid")).body) as GalleryState;
+      expect(state.hosted).toBe(true);
+      expect(state.local).toBeUndefined();
+      expect(state.cloud.gatewayUrl).toBe("https://copilot.d.invalid");
+      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "software-factory"]);
+    });
+
+    it("never mints a console sign-in link, and says how to open it", async () => {
+      const asked: string[] = [];
+      const url = await gallery({
+        cloud: Promise.resolve<CloudLookup>({ url: "https://copilot.d.invalid", note: "This deployment." }),
+        hosted: { allowedHosts: ["gallery.d.invalid"] },
+        openConsole: async (gatewayUrl) => {
+          asked.push(gatewayUrl);
+          return { url: "https://copilot.d.invalid/console/signin#ticket=t" };
+        },
+      });
+      for (const target of ["cloud", "local"]) {
+        const response = await request(url, `/open/console?target=${target}`, "gallery.d.invalid");
+        expect(response.status).toBe(404);
+        expect(response.body).toContain("<code>npx managed-copilot console --url https://copilot.d.invalid</code>");
+      }
+      expect(asked).toEqual([]);
+    });
   });
 });
