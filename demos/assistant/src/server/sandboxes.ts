@@ -444,15 +444,16 @@ export class Sandboxes {
   /**
    * A listing that saw the sandbox working on message m (since `at`) was asked for after its event subscription began,
    * and m was still unfinished then, so m's finish can't have been missed on that subscription: m's is the first
-   * finish reported on it after `at` (earlier messages finished before m started, and later ones can't start before
-   * m ends; one in the same millisecond as m's start is left to listings). Finishes received on another subscription
-   * can't be placed by it: events between subscriptions may be missed.
+   * finish reported on it from `at` on (earlier messages finished before m started, and later ones can't start before
+   * m ends). If that first one is from the very millisecond m started, it may be the previous message's, so which is
+   * m's is left to listings. Finishes received on another subscription can't be placed by it: events between
+   * subscriptions may be missed.
    */
   #place(facts: WorkerFacts, listed: Listed): void {
     if (listed.state !== "working" || listed.messages === 0 || facts.finished.has(listed.messages)) return;
     let first: Reported | undefined;
-    for (const finish of facts.reported) if (finish.epoch === listed.epoch && finish.at > listed.at && (!first || finish.at < first.at)) first = finish;
-    if (first) facts.finished.set(listed.messages, { at: first.at, state: first.state });
+    for (const finish of facts.reported) if (finish.epoch === listed.epoch && finish.at >= listed.at && (!first || finish.at < first.at)) first = finish;
+    if (first && first.at > listed.at) facts.finished.set(listed.messages, { at: first.at, state: first.state });
   }
 
   /** Remembers what a listing shows about a sandbox's messages: which one's work finished, when, and how. */

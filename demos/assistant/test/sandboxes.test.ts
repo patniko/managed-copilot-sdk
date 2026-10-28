@@ -591,6 +591,28 @@ describe("Sandboxes", () => {
     subject.stop();
   });
 
+  it("leaves a message to listings when a finish shares the millisecond it started, and places no later finish on it", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const { subject, emit, state } = sandboxes({ workers: [stats], cards });
+    let open!: () => void;
+    state.workersGate = new Promise((resolve) => (open = resolve));
+    const reading = subject.refresh();
+    await vi.waitFor(() => expect(state.workerLists).toBe(1));
+    // Before the listing answers: the first message finishes in the millisecond it started, then the follow-up fails.
+    emit("worker.idle", { workerId: "w1", name: "stats", state: "idle" }, at(3));
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(4), endedAt: at(5) }));
+    emit("worker.failed", { workerId: "w1", name: "stats", state: "failed" }, at(6));
+    state.workers = [{ ...stats, state: "failed", messages: 2, error: "Python crashed", updatedAt: at(6) }];
+    state.workersGate = undefined;
+    open();
+    await reading;
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(5), outcome: "idle" });
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(5), finishedAt: at(6), outcome: "failed" });
+    subject.stop();
+  });
+
   it("doesn't end a retried task with the failure of the delivery it replaced", async () => {
     const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
     const stats = worker({ id: "w1", name: "stats", state: "working", messages: 1, updatedAt: at(3) });
