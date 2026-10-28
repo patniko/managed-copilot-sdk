@@ -8,8 +8,8 @@ see what the platform refuses.
 
 ```mermaid
 flowchart LR
-  A["&quot;coder&quot;"] --> S1["sbx_2c0c… (medium)"]
-  B["&quot;coder&quot; + files, packages, env"] --> S2["sbx_4ab5… (medium)<br/>notes/brief.md · tabulate · TEAM"]
+  A["#quot;coder#quot;"] --> S1["sbx_2c0c… (medium)"]
+  B["#quot;coder#quot; + files, packages, env"] --> S2["sbx_4ab5… (medium)<br/>notes/brief.md · tabulate · TEAM"]
   C["{ type: isolated, size: small }"] --> S3["sbx_c18b… (small)<br/>inline-isolated-small"]
   D["{ type: isolated, size: large }"] -. "refused" .-x X["environment_not_found"]
 ```
