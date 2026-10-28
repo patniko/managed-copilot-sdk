@@ -1560,10 +1560,14 @@ runtime 1.0.103, where the runtime APIs it relies on are marked experimental.
   requests at startup, on TTL expiry, and after a 401, and their answer window; that with the gateway's interest
   registered, no server starts the runtime's own OAuth; that a server in `disabledMcpServers` stays out of the tool
   list without failing session creation, and `startServer` later brings it up with headers; what an `error` answer
-  does to a running server and its calls; that a running agent sees tools that load mid-turn; and that local (stdio)
-  servers the runtime starts in a sandbox see connector variables. If any of these
-  fails, connector servers fail with `capability_unavailable` and the gap joins the [upstream gaps](#upstream-gaps);
-  the platform never falls back to giving the runtime a token.
+  does to a running server and its calls; that a running agent sees tools that load mid-turn; that local (stdio)
+  servers the runtime starts in a sandbox see connector variables; and that the connector's credential reaches
+  GitHub's MCP endpoint. The runtime adds its own GitHub credential (here a placeholder) to GitHub MCP endpoints. An
+  explicit `Authorization` header in the server's configuration takes precedence over it, but the runtime documents
+  that dynamic headers don't replace SDK-managed request headers, so isolated sessions may need the placeholder as a
+  configured header, as vault MCP credentials already use. If any of these fails, connector servers fail with
+  `capability_unavailable` and the gap joins the [upstream gaps](#upstream-gaps); the platform never falls back to
+  giving the runtime a token.
 
 ### Errors and recovery
 
