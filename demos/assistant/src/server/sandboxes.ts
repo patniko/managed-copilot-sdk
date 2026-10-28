@@ -55,19 +55,27 @@ interface Finish {
 interface Listed {
   readonly state: string;
   readonly messages: number;
+  /** When it last changed state (a working sandbox: when it started on its latest message). */
   readonly at: string;
+  /** The event subscription it was requested on: it can be older than events received on a later one. */
+  readonly epoch: number;
 }
 
-/** What listings (and events right after them) showed about one sandbox. */
+/** A finish a `worker.idle` or `worker.failed` event reported, and the event subscription it arrived on. */
+interface Reported extends Finish {
+  readonly epoch: number;
+}
+
+/** What listings (and the events they place) showed about one sandbox. */
 interface WorkerFacts {
   /** How the work for each message ended (by message number, from 1), as first seen. */
   readonly finished: Map<number, Finish>;
   /** Its task never reached it: it failed or was stopped while starting. */
   undelivered?: Finish;
-  /** The latest listing: it places a finish event that follows it. */
+  /** The latest listing: it places the finish events that follow it. */
   last?: Listed;
-  /** Finishes reported before the sandbox was first listed (just after a restart or a reconnect), oldest first. */
-  early?: Finish[];
+  /** Every finish its events reported, in the order they arrived. */
+  readonly reported: Reported[];
 }
 
 export interface SandboxesDeps {
@@ -135,6 +143,8 @@ export class Sandboxes {
   #retries = 0;
   /** Changes when the conversation is replaced, so work begun for the old one writes nothing afterwards. */
   #generation = 0;
+  /** Changes on every subscription to worker events: events sent between two subscriptions may be missed. */
+  #epoch = 0;
   #listeners: (() => void)[] = [];
   #stopped = false;
 
@@ -172,6 +182,7 @@ export class Sandboxes {
   /** Follows worker events on this connection (call again after reconnecting: closing a connection drops them). */
   listen(managed: ManagedCopilot): void {
     for (const off of this.#listeners.splice(0)) off();
+    this.#epoch++;
     // Events missed while disconnected (a publication, a finished run) are found by reading every sandbox again.
     this.#inspected.clear();
     this.#awaited.clear();
@@ -185,14 +196,13 @@ export class Sandboxes {
     if (!sessionId || event.sessionId !== sessionId) return;
     const { workerId, state } = event.data as { workerId?: unknown; state?: unknown };
     if (typeof workerId !== "string") return;
-    // Events mostly prompt a fresh listing, which says how work ended. A finish just after a listing that saw the
-    // sandbox working is that message's. One reported before the sandbox was ever listed waits for its first listing
-    // to place it; any other (for example one that arrives late, after the stream reconnected) is left to listings.
+    // Events mostly prompt a fresh listing, which says how work ended. A finish is placed on a message only by a
+    // listing that saw the sandbox working on it, requested on this subscription (see #place); any other (for example
+    // one that arrives late, after the stream reconnected) is left to listings.
     if (state === "idle" || state === "failed") {
       const facts = this.#factsOf(workerId);
-      const finish: Finish = { at: iso(event.createdAt), state };
-      if (facts.last) this.#finishedAfter(facts, facts.last, finish);
-      else (facts.early ??= []).push(finish);
+      facts.reported.push({ at: iso(event.createdAt), state, epoch: this.#epoch });
+      if (facts.last) this.#place(facts, facts.last);
       this.#awaitPublication(workerId);
     }
     this.#dirty.add(workerId);
@@ -318,10 +328,11 @@ export class Sandboxes {
         this.#workers = [];
         return this.#set({ ...base, enabled: false, unavailable: { reason: SANDBOXES_LEGACY, startOver: true }, workers: [], runs: {} });
       }
+      const epoch = this.#epoch;
       const workers = await managed.workers(sessionId).list();
       if (!current()) return;
       this.#workers = workers;
-      for (const worker of workers) this.#observe(worker);
+      for (const worker of workers) this.#observe(worker, epoch);
       await Promise.all(workers.map((worker) => this.#inspect(managed, sessionId, worker, current)));
       if (!current()) return;
       this.#track(sessionId, workers);
@@ -426,19 +437,25 @@ export class Sandboxes {
 
   #factsOf(workerId: string): WorkerFacts {
     let facts = this.#facts.get(workerId);
-    if (!facts) this.#facts.set(workerId, (facts = { finished: new Map() }));
+    if (!facts) this.#facts.set(workerId, (facts = { finished: new Map(), reported: [] }));
     return facts;
   }
 
-  /** A finish reported after a listing that saw the sandbox working ended that listing's message. */
-  #finishedAfter(facts: WorkerFacts, listed: Listed, finish: Finish): boolean {
-    if (listed.state !== "working" || listed.messages === 0 || finish.at < listed.at || facts.finished.has(listed.messages)) return false;
-    facts.finished.set(listed.messages, finish);
-    return true;
+  /**
+   * A listing requested on the current subscription that saw the sandbox working on message m (since `at`) means m
+   * finished after the subscription began, so its finish event wasn't missed: m's is the first finish reported on
+   * this subscription since `at` (earlier messages finished before m started; later ones can't start before m ends).
+   * A listing requested earlier may predate finishes whose events were missed, so it places nothing.
+   */
+  #place(facts: WorkerFacts, listed: Listed): void {
+    if (listed.epoch !== this.#epoch || listed.state !== "working" || listed.messages === 0 || facts.finished.has(listed.messages)) return;
+    let first: Reported | undefined;
+    for (const finish of facts.reported) if (finish.epoch === listed.epoch && finish.at >= listed.at && (!first || finish.at < first.at)) first = finish;
+    if (first) facts.finished.set(listed.messages, { at: first.at, state: first.state });
   }
 
   /** Remembers what a listing shows about a sandbox's messages: which one's work finished, when, and how. */
-  #observe(worker: WorkerInfo): void {
+  #observe(worker: WorkerInfo, epoch: number): void {
     const facts = this.#factsOf(worker.id);
     const at = iso(worker.updatedAt);
     // A message the platform took back (it couldn't be delivered) never ran: forget what was said about it.
@@ -447,18 +464,14 @@ export class Sandboxes {
     else if (worker.messages > 0 && (worker.state === "idle" || worker.state === "failed") && !facts.finished.has(worker.messages)) {
       facts.finished.set(worker.messages, { at, state: worker.state });
     }
-    const listed: Listed = { state: worker.state, messages: worker.messages, at };
-    // Finishes reported before this first listing count as if reported just after it. A sandbox it shows stopped
-    // with a single message, of which one finish was reported, ended that message then: the stop came after.
-    const early = facts.early;
-    if (early) {
-      delete facts.early;
-      const only = early.length === 1 ? early[0] : undefined;
-      if (!early.some((finish) => this.#finishedAfter(facts, listed, finish)) && only && worker.state === "stopped" && worker.messages === 1 && only.at <= at && !facts.finished.has(1)) {
-        facts.finished.set(1, only);
-      }
+    // Stopped for good with a single message, of which one finish was ever reported: that finish ended the message,
+    // even if no listing saw it working (it finished and was stopped just after a restart or a reconnect).
+    const only = facts.reported.length === 1 ? facts.reported[0] : undefined;
+    if (only && worker.state === "stopped" && worker.messages === 1 && only.at <= at && !facts.finished.has(1)) {
+      facts.finished.set(1, { at: only.at, state: only.state });
     }
-    facts.last = listed;
+    facts.last = { state: worker.state, messages: worker.messages, at, epoch };
+    this.#place(facts, facts.last);
   }
 
   /**

@@ -278,6 +278,9 @@ function sandboxes(options: FakeOptions = {}) {
     sessionId: options.sessionId ?? COORDINATOR,
     /** While set, listing outputs waits for it. */
     listGate: undefined as Promise<void> | undefined,
+    /** While set, listing the sandboxes waits for it, then answers with them as they were when asked. */
+    workersGate: undefined as Promise<void> | undefined,
+    workerLists: 0,
   };
   const managed = {
     info: { environments: options.environments ?? ENVIRONMENTS, capabilities: options.capabilities ?? ["orchestrator"] } as unknown as DeploymentInfo,
@@ -295,7 +298,14 @@ function sandboxes(options: FakeOptions = {}) {
         return { id, type: "isolated", sandbox: { id: `sbx-${id}`, state: "running" } };
       },
     },
-    workers: () => ({ list: async () => state.workers }),
+    workers: () => ({
+      list: async () => {
+        state.workerLists++;
+        const snapshot = state.workers;
+        if (state.workersGate) await state.workersGate;
+        return snapshot;
+      },
+    }),
     artifacts: (id: string) => ({
       list: async () => {
         state.lists++;
@@ -499,6 +509,45 @@ describe("Sandboxes", () => {
     state.workers = [{ ...stats, state: "stopped", updatedAt: at(600) }];
     await subject.refresh();
     expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(25), outcome: "idle" });
+    subject.stop();
+  });
+
+  it("doesn't place a follow-up's finish on the first message by a listing asked for before the stream reconnected", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const { subject, emit, state, reconnect } = sandboxes({ workers: [stats], cards });
+    let open!: () => void;
+    state.workersGate = new Promise((resolve) => (open = resolve));
+    // Listed at work on its first message, but the answer is slow.
+    const reading = subject.refresh();
+    await vi.waitFor(() => expect(state.workerLists).toBe(1));
+    // Meanwhile the event stream drops, so the first message's finish is missed; then the follow-up fails.
+    reconnect();
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(4), endedAt: at(5) }));
+    emit("worker.failed", { workerId: "w1", name: "stats", state: "failed" }, at(6));
+    state.workers = [{ ...stats, state: "failed", messages: 2, error: "Python crashed", updatedAt: at(6) }];
+    state.workersGate = undefined;
+    open();
+    await reading;
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(5), outcome: "idle" });
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(5), finishedAt: at(6), outcome: "failed" });
+    subject.stop();
+  });
+
+  it("doesn't place a finish received after the stream reconnected by a listing from before it", async () => {
+    const cards = [card({ id: "c1", workerId: "w1", worker: "stats", endedAt: at(2) })];
+    const stats = worker({ id: "w1", name: "stats", state: "working", updatedAt: at(3) });
+    const { subject, emit, state, reconnect } = sandboxes({ workers: [stats], cards });
+    await subject.refresh();
+    // The stream drops, so the first message's finish is missed; the follow-up fails after it reconnects.
+    reconnect();
+    cards.push(card({ id: "c2", action: "message", workerId: "w1", worker: "stats", at: at(4), endedAt: at(5) }));
+    emit("worker.failed", { workerId: "w1", name: "stats", state: "failed" }, at(6));
+    state.workers = [{ ...stats, state: "failed", messages: 2, error: "Python crashed", updatedAt: at(6) }];
+    await subject.refresh();
+    expect(subject.view.runs.c1).toEqual({ workerId: "w1", startedAt: at(2), finishedAt: at(5), outcome: "idle" });
+    expect(subject.view.runs.c2).toEqual({ workerId: "w1", startedAt: at(5), finishedAt: at(6), outcome: "failed" });
     subject.stop();
   });
 
