@@ -208,8 +208,9 @@ Say yes; deploying with new keys can leave the gateway unable to start.
 aspire secret set Azure:SubscriptionId <subscription-id>
 aspire secret set Azure:Location westus2
 aspire secret set Azure:ResourceGroup managed-copilot-dev
-aspire secret set Parameters:copilot-github-users "your-login"      # the whole list
-aspire secret set Parameters:copilot-operator-users "your-login"
+# aspire deploy doesn't load user secrets for the AppHost, so the lists go in the environment:
+${env:Parameters__copilot-github-users} = "your-login"           # the whole list
+${env:Parameters__copilot-operator-users} = "your-login"
 ${env:Parameters__app-github-token} = (gh auth token).Trim()
 aspire deploy
 Remove-Item Env:Parameters__app-github-token

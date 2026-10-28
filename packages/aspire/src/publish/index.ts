@@ -83,7 +83,11 @@ function hostNpmRegistry(): string {
 
 async function setting(builder: PublishBuilder, key: string): Promise<string | undefined> {
   const configuration = await builder.getConfiguration();
-  return (await configuration.exists(key)) ? (await configuration.getConfigValue(key)).trim() : undefined;
+  if (await configuration.exists(key)) return (await configuration.getConfigValue(key)).trim();
+  // `aspire deploy` runs the AppHost as Production, without user secrets; `npx managed-copilot deploy` passes its
+  // settings in this process's environment instead (`Parameters:x` as `Parameters__x`).
+  const value = process.env[key.replaceAll(":", "__")]?.trim();
+  return value ? value : undefined;
 }
 
 function gatewayDirectory(options: ManagedCopilotOptions, appHostDirectory: string): string {
