@@ -1561,6 +1561,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
 | Demo ports | 7470, 7480, 7490, 7485 | Dispatch, software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
+| Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
 | `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
@@ -1595,6 +1596,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent that shows each sandbox it creates or reuses |
+| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page linking every demo and walkthrough locally and in Azure, with live status and screenshots |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |

@@ -13,7 +13,8 @@
     "test": "pnpm -r --if-present run test",
     "clean": "pnpm -r --if-present run clean",
     "dev": "aspire run",
-    "sample": "pnpm --silent --filter @managed-copilot/samples sample"
+    "sample": "pnpm --silent --filter @managed-copilot/samples sample",
+    "gallery": "pnpm --silent --filter @managed-copilot/demo-gallery start"
   },
   "devDependencies": {
     "@managed-copilot/aspire": "workspace:*",
