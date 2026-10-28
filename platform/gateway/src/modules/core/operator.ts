@@ -6,10 +6,12 @@ import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, real
 import { isAbsolute, join, relative, sep } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import {
+  DEFAULT_MAX_WORKERS,
   ManagedCopilotError,
   NETWORK_ENABLED,
   normalizeNetwork,
   SANDBOX_SIZES,
+  sandboxedType,
   type AccountInfo,
   type CustomizationFile,
   type CustomizationFileInfo,
@@ -341,8 +343,8 @@ export class CoreOperator {
     const list: OperatorEnvironment[] = Object.entries(deployment.environments).map(([name, config]) => {
       const state = environments.customizations(name);
       const network = environments.ceiling(config);
-      const size = config.type !== "shared" ? (config.size ?? "small") : undefined;
-      const image = config.image ? this.#appHostRelative(config.image) : config.type !== "shared" ? (azureImages[name] ?? azureImages["*"]) : undefined;
+      const size = sandboxedType(config.type) ? (config.size ?? "small") : undefined;
+      const image = config.image ? this.#appHostRelative(config.image) : sandboxedType(config.type) ? (azureImages[name] ?? azureImages["*"]) : undefined;
       return {
         name,
         type: config.type,
@@ -358,6 +360,8 @@ export class CoreOperator {
         vaults: (config.vaults ?? []).map((vault) => this.#vaultRef(vault)),
         scheduling: config.scheduling === true,
         ...(config.promoteTo ? { promoteTo: config.promoteTo } : {}),
+        ...(config.workers ? { workers: config.workers, maxWorkers: config.maxWorkers ?? DEFAULT_MAX_WORKERS } : {}),
+        ...(config.type === "orchestrator" ? { execution: config.execution ?? "delegate", ...(config.execution && config.execution !== "delegate" ? { subagents: config.subagents ?? "shared" } : {}) } : {}),
         ...(config.idleTimeoutSeconds !== undefined ? { idleTimeoutSeconds: config.idleTimeoutSeconds } : {}),
         ...(config.warm !== undefined ? { warm: config.warm } : {}),
         ...(config.inference ? { inference: config.inference } : {}),
@@ -533,6 +537,7 @@ function summaryOf(record: SessionRecord, snapshot: LiveSessionSnapshot | undefi
     ...(record.agent ? { agent: record.agent } : {}),
     ...(record.clientName ? { clientName: record.clientName } : {}),
     ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),
+    ...(record.parentSessionId ? { parentSessionId: record.parentSessionId } : {}),
     ...(record.lastTurn ? { lastTurn: record.lastTurn } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,

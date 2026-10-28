@@ -9,6 +9,7 @@ import {
   type ActivityItem,
   type ArtifactIndex,
   type AttachResponse,
+  type CreateWorkOrderRequest,
   type FactoryState,
   type ServerEvent,
   type Station,
@@ -16,7 +17,7 @@ import {
   type WorkOrder,
   type WorkOrderSummary,
 } from "../../shared/types.js";
-import { createFixtures, ENVIRONMENTS, PREVIEW_FILE_CONTENTS, type FixtureFile, type Fixtures } from "./fixtures.js";
+import { createFixtures, ENVIRONMENTS, PREVIEW_FILE_CONTENTS, withPreviewCoordinator, type FixtureFile, type Fixtures } from "./fixtures.js";
 
 const VARIANTS = ["", "empty", "offline", "platform-down", "misconfigured", "connecting", "flaky"] as const;
 
@@ -31,8 +32,8 @@ function failure(status: number, code: string, message: string): Response {
 }
 
 function toSummary(workOrder: WorkOrder): WorkOrderSummary {
-  const { id, number, title, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error } = workOrder;
-  return { id, number, title, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error };
+  const { id, number, title, mode, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error } = workOrder;
+  return { id, number, title, mode, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error };
 }
 
 const ACTIVE = new Set(["queued", "planning", "building", "releasing"]);
@@ -163,16 +164,18 @@ class PreviewServer {
   }
 
   private create(body: unknown): Response {
-    const request = typeof body === "string" ? (JSON.parse(body) as { title?: string; brief?: string; templateId?: string; maxReviewRounds?: number }) : {};
+    const request = typeof body === "string" ? (JSON.parse(body) as Partial<CreateWorkOrderRequest>) : {};
     const title = request.title?.trim() ?? "";
     const brief = request.brief?.trim() ?? "";
     if (!title) return failure(400, "invalid_request", "Give the work order a title.");
     if (brief.length < 40) return failure(400, "invalid_request", "The brief is too short. Describe what to build in a few sentences.");
+    if (request.mode !== undefined && request.mode !== "agent" && request.mode !== "classic") return failure(400, "invalid_request", "Choose Agent-led or Classic.");
     const now = new Date().toISOString();
-    const workOrder: WorkOrder = {
+    const workOrder = withPreviewCoordinator({
       id: `wo_${Date.now().toString(36)}`,
       number: this.nextNumber++,
       title,
+      mode: request.mode ?? "agent",
       status: "queued",
       createdAt: now,
       updatedAt: now,
@@ -182,7 +185,7 @@ class PreviewServer {
       maxReviewRounds: request.maxReviewRounds ?? 2,
       owner: { login: "mona" },
       stations: [],
-    };
+    });
     this.workOrders.push(workOrder);
     this.emit({ type: "workOrder", workOrder });
     void this.startPlanning(workOrder.id, 1500);
@@ -242,7 +245,7 @@ class PreviewServer {
     const index = this.workOrders.findIndex((candidate) => candidate.id === id);
     const current = this.workOrders[index];
     if (!current) return undefined;
-    const next = { ...update(current), updatedAt: new Date().toISOString() };
+    const next = withPreviewCoordinator({ ...update(current), updatedAt: new Date().toISOString() });
     this.workOrders[index] = next;
     this.emit({ type: "workOrder", workOrder: next });
     return next;

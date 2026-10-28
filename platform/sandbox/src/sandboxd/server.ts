@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { SandboxStartEvent, SandboxStartRequest } from "@managed-copilot/protocol";
+import type { SandboxExecRequest, SandboxStartEvent, SandboxStartRequest } from "@managed-copilot/protocol";
 import { LIMITS, PATHS, ROUTES, SANDBOX_RUNTIME_PORT, SANDBOXD_PORT } from "../shared/constants.js";
 import type { Log } from "../shared/log.js";
 import { normalizeWorkspacePath, PathError } from "../shared/paths.js";
@@ -90,8 +90,23 @@ export function createSandboxdServer(options: ServerOptions): Server {
       sendJson(res, 401, { error: { code: "authentication_required", message: "A valid sandbox key is required." } });
       return;
     }
+    const execRoute = /^\/v1\/exec\/([^/]+)(?:\/(input|stop))?$/.exec(url.pathname);
+    if (execRoute) {
+      await handleExec(req, res, url, decodeURIComponent(execRoute[1]!), execRoute[2] as "input" | "stop" | undefined);
+      return;
+    }
     const route = `${req.method} ${url.pathname}`;
     switch (route) {
+      case `POST ${ROUTES.exec}`:
+        sendJson(res, 200, await agent.execs.start(await readJson<SandboxExecRequest>(req, LIMITS.exec.commandBytes + 64 * 1024)));
+        return;
+      case `GET ${ROUTES.exec}`:
+        sendJson(res, 200, agent.execs.list());
+        return;
+      case `POST ${ROUTES.execStopAll}`:
+        req.resume();
+        sendJson(res, 200, await agent.execs.stopAll(url.searchParams.get("reason") || "The sandbox is stopping."));
+        return;
       case `GET ${ROUTES.health}`:
       case `GET ${ROUTES.status}`:
         sendJson(res, 200, agent.status());
@@ -120,7 +135,13 @@ export function createSandboxdServer(options: ServerOptions): Server {
         const length = uploadLength(req);
         const controller = new AbortController();
         req.on("aborted", () => controller.abort());
-        const entry = await agent.writeFile(relative, req, { overwrite: url.searchParams.get("overwrite") !== "false", ...(length !== undefined ? { expectedBytes: length } : {}), signal: controller.signal });
+        const ifMatch = url.searchParams.get("ifMatch") ?? undefined;
+        const entry = await agent.writeFile(relative, req, {
+          overwrite: url.searchParams.get("overwrite") !== "false",
+          ...(length !== undefined ? { expectedBytes: length } : {}),
+          ...(ifMatch ? { ifMatch } : {}),
+          signal: controller.signal,
+        });
         sendJson(res, 201, entry);
         return;
       }
@@ -154,6 +175,38 @@ export function createSandboxdServer(options: ServerOptions): Server {
       default:
         sendJson(res, 404, { error: { code: "not_found", message: `No route for ${req.method} ${url.pathname}` } });
     }
+  }
+
+  /** One command: `GET` reads (or with `output=false` waits for its end), `POST input` writes stdin, `POST stop` kills it. */
+  async function handleExec(req: IncomingMessage, res: ServerResponse, url: URL, id: string, action: "input" | "stop" | undefined): Promise<void> {
+    if (action === undefined && req.method === "GET") {
+      const controller = new AbortController();
+      const onClose = () => controller.abort();
+      res.on("close", onClose);
+      try {
+        const waitMs = Number(url.searchParams.get("waitMs") ?? 0) || 0;
+        if (url.searchParams.get("output") === "false") {
+          sendJson(res, 200, { exec: await agent.execs.wait(id, { waitMs, signal: controller.signal }), output: "", offset: 0 });
+          return;
+        }
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        sendJson(res, 200, await agent.execs.read(id, offset, { waitMs, signal: controller.signal }));
+      } finally {
+        res.off("close", onClose);
+      }
+      return;
+    }
+    if (action === "input" && req.method === "POST") {
+      const body = await readJson<{ data?: string; eof?: boolean }>(req, LIMITS.exec.inputBytes * 2 + 1024);
+      sendJson(res, 200, await agent.execs.input(id, body.data, body.eof === true));
+      return;
+    }
+    if (action === "stop" && req.method === "POST") {
+      req.resume();
+      sendJson(res, 200, await agent.execs.stop(id, url.searchParams.get("reason") ?? undefined));
+      return;
+    }
+    sendJson(res, 404, { error: { code: "not_found", message: `No route for ${req.method} ${url.pathname}` } });
   }
 
   /** Streams a file read by the workload identity; a file that changes mid-read ends the response early. */

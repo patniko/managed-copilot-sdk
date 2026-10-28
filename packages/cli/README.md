@@ -10,7 +10,9 @@ npx managed-copilot sessions [--environment chat]   # your sessions
 npx managed-copilot new chat [--model <id>]         # a new session in that environment, opened in Copilot CLI
 npx managed-copilot attach 7f3a2c1                  # Copilot CLI on a live session
 npx managed-copilot promote 7f3a2c1                 # move a promotable session into its own sandbox
+npx managed-copilot workers 7f3a2c1                 # an orchestrator session's workers and their latest reports
 npx managed-copilot artifacts 7f3a2c1 --download .\out
+npx managed-copilot exec 7f3a2c1 -- ls -la          # run a command in a session's sandbox; exits with its code
 npx managed-copilot schedules [list|runs|pause|resume|delete|run] [schedule]
 npx managed-copilot console                         # the operator console in your browser (operators only)
 npx managed-copilot operator [sessions|sandboxes|...] # the operator overview and views in the terminal
@@ -22,7 +24,7 @@ npx managed-copilot operator [sessions|sandboxes|...] # the operator overview an
 - **IDs.** Sessions resolve from any unique prefix of four or more characters; schedules by ID, name, or prefix.
 - **Output.** Tables with relative times; `--json` for scripts; colors and symbols degrade on non-interactive or
   legacy consoles (`--no-color` or `NO_COLOR`). Errors show the stable error code and a hint. Exit codes: 0 success,
-  1 failure, 2 usage error.
+  1 failure, 2 usage error; `exec` exits with the command's own code (124 when it timed out, 130 when stopped).
 
 ## Attach
 

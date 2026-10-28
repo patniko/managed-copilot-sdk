@@ -6,6 +6,8 @@ export interface ComposerProps {
   disabled: boolean;
   disabledReason?: string;
   busy: boolean;
+  /** What always asks first, shown under the message box. */
+  hint?: string;
   onSend(text: string): void;
   onStop(): void;
   /** Text to place in the box (e.g. from a suggestion), with a nonce so the same text can be set twice. */
@@ -13,7 +15,7 @@ export interface ComposerProps {
 }
 
 /** The message box, like Copilot Chat's on github.com: a bordered field with a toolbar and a send button. */
-export function Composer({ disabled, disabledReason, busy, onSend, onStop, draft }: ComposerProps) {
+export function Composer({ disabled, disabledReason, busy, hint = "Sending mail and changing your calendar always asks you first", onSend, onStop, draft }: ComposerProps) {
   const [text, setText] = useState("");
   const area = useRef<HTMLTextAreaElement>(null);
   const ready = !disabled && text.trim().length > 0;
@@ -75,7 +77,7 @@ export function Composer({ disabled, disabledReason, busy, onSend, onStop, draft
         <div className="flex items-center gap-2 px-2 pb-2" onMouseDown={focusBox}>
           <span className="ml-1 hidden min-w-0 items-center gap-1.5 truncate text-xs text-fg-muted sm:inline-flex">
             <ShieldIcon size={12} />
-            <span className="truncate">Sending mail and changing your calendar always asks you first</span>
+            <span className="truncate">{hint}</span>
           </span>
           <div className="ml-auto flex items-center gap-1">
             {busy && (

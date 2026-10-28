@@ -20,7 +20,7 @@ export interface FactoryConfig {
   /** Gateway URL for attach commands when users reach the platform at another address (`FACTORY_ATTACH_URL`). */
   readonly attachUrl?: string;
   readonly modelOverrides: Partial<Record<StationRole, string>>;
-  /** Isolated sessions (sandboxes) the factory runs at once, across all work orders. */
+  /** Isolated sessions (sandboxes) the factory runs at once, across all classic work orders. */
   readonly maxSandboxes: number;
   readonly turnTimeoutMs: Readonly<Record<StationRole, number>>;
   readonly publicationTimeoutMs: number;
@@ -61,6 +61,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
       ...(env.FACTORY_MODEL_BUILDER ? { builder: env.FACTORY_MODEL_BUILDER } : {}),
       ...(env.FACTORY_MODEL_REVIEWER ? { reviewer: env.FACTORY_MODEL_REVIEWER } : {}),
       ...(env.FACTORY_MODEL_RELEASE ? { release: env.FACTORY_MODEL_RELEASE } : {}),
+      ...(env.FACTORY_MODEL_COORDINATOR ? { coordinator: env.FACTORY_MODEL_COORDINATOR } : {}),
     },
     maxSandboxes: Number.isInteger(maxSandboxes) && maxSandboxes > 0 ? maxSandboxes : 4,
     turnTimeoutMs: {
@@ -68,6 +69,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
       builder: minutes(env.FACTORY_BUILD_TIMEOUT_MINUTES, 20),
       reviewer: minutes(env.FACTORY_REVIEW_TIMEOUT_MINUTES, 6),
       release: minutes(env.FACTORY_RELEASE_TIMEOUT_MINUTES, 20),
+      // An agent-led coordinator's turn covers the whole job: every build, review, and the release.
+      coordinator: minutes(env.FACTORY_COORDINATE_TIMEOUT_MINUTES, 60),
     },
     publicationTimeoutMs: 120_000,
     healthIntervalMs: 10_000,

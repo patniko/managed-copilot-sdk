@@ -31,7 +31,7 @@ const status = (): PlatformStatus => ({
   ...(ready ? {} : { message: "The Managed Copilot platform isn't running.", hint: "Start it with `aspire run`." }),
   environments: [],
   missingEnvironments: [],
-  features: { runs: ready, isolated: ready, artifacts: ready, files: ready, attach: false },
+  features: { runs: ready, agentLed: ready, isolated: ready, artifacts: ready, files: ready, attach: false },
   checkedAt: new Date().toISOString(),
 });
 
@@ -62,7 +62,7 @@ beforeAll(async () => {
     platform,
     readiness: () => ({ ready, reason: "The Managed Copilot platform isn't running." }),
     account: () => ({ login: "octocat" }),
-    config: { maxSandboxes: 2, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000 }, publicationTimeoutMs: 1_000 },
+    config: { maxSandboxes: 2, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 5_000 }, publicationTimeoutMs: 1_000 },
   });
   const config = { ...loadConfig({}), webRoot: "Z:/nonexistent-web-root" };
   const fakePlatform = { get status() { return status(); } } as unknown as Platform;
@@ -122,10 +122,11 @@ describe("factory HTTP API", () => {
   });
 
   it("runs a work order and serves its activity, artifacts, and release", async () => {
-    const created = await post("/api/work-orders", { title: "Tiny", brief: "Build a tiny library with tests, please." });
+    const created = await post("/api/work-orders", { title: "Tiny", brief: "Build a tiny library with tests, please.", mode: "classic" });
     expect(created.status).toBe(201);
     const wo = await waitFor((created.body as WorkOrder).id);
     expect(wo.status).toBe("completed");
+    expect(wo.mode).toBe("classic");
 
     const activity = await json<unknown[]>(`/api/work-orders/${wo.id}/activity?stationId=plan`);
     expect(activity.body.length).toBeGreaterThan(0);
@@ -178,6 +179,7 @@ describe("factory HTTP API", () => {
     const notJson = await fetch(`${base}/api/work-orders`, { method: "POST", headers: { "content-type": "text/plain" }, body: "hi" });
     expect(notJson.status).toBe(415);
     expect((await post("/api/work-orders", { title: "x", brief: "y" })).status).toBe(400);
+    expect((await post("/api/work-orders", { title: "Valid", brief: "A brief long enough to submit a work order.", mode: "invalid" })).status).toBe(400);
     expect((await fetch(`${base}/api/nope`)).status).toBe(404);
     expect((await fetch(`${base}/api/work-orders`, { method: "PATCH" })).status).toBe(405);
     expect((await post("/api/sessions/not-ours/attach", {})).status).toBe(404);

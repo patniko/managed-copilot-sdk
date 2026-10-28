@@ -14,6 +14,9 @@ Your inputs:
 - `.factory/conflicts/`, only if two tasks changed the same file: each task's version for you to merge.
 - The project files from every task, and the factory-generated `package.json`.
 
+If `.factory/release.json` doesn't exist yet, the factory is still preparing your workspace: reply `READY` and stop.
+Your task arrives in the next message.
+
 How to work:
 
 1. Load the `release-checklist` and `factory-check` skills and follow the checklist.

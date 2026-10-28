@@ -14,6 +14,8 @@ import type {
   CreateVaultRequest,
   DeploymentInfo,
   EnvironmentRequest,
+  ExecInfo,
+  ExecResult,
   FileEntry,
   HandleActionResult,
   NetworkSetting,
@@ -25,6 +27,7 @@ import type {
   SessionInfo,
   SessionListQuery,
   VaultInfo,
+  WorkerInfo,
 } from "@managed-copilot/protocol";
 import type { HttpClient } from "./http.js";
 
@@ -73,8 +76,8 @@ export interface ManagedClientOptions
   files?: Record<string, string | Uint8Array>;
 }
 
-/** A session object or its ID. */
-export type SessionRef = CopilotSession | string;
+/** A session object, a sandbox from `managed.sandboxes.create`, or a session ID. */
+export type SessionRef = CopilotSession | { readonly sessionId: string } | string;
 
 export interface ManagedSessionConfig extends SessionConfig {
   /** Environment for this one session; per-session `files`, `packages`, and `env` apply only to it. */
@@ -120,6 +123,17 @@ export interface ManagedArtifacts {
   download(path: string, localPath: string, options?: { version?: number }): Promise<void>;
 }
 
+/**
+ * An orchestrator session's workers. Each is an ordinary session in its own sandbox: pass `worker.id` to
+ * `managed.files`, `managed.artifacts`, `managed.resumeSession`, or `managed-copilot attach`.
+ */
+export interface ManagedWorkers {
+  /** Every worker the session started, oldest first, stopped ones included. */
+  list(): Promise<WorkerInfo[]>;
+  /** One worker, by its ID or its name. */
+  get(worker: string): Promise<WorkerInfo>;
+}
+
 /** Act for a specific GitHub user (for example a backend serving signed-in users); defaults to this connection's account. */
 export interface VaultCallOptions {
   gitHubToken?: string;
@@ -149,6 +163,66 @@ export interface ManagedSchedules {
   delete(scheduleId: string): Promise<void>;
   /** Pass a retry-stable `invocationId` so a retried call never starts a second run. */
   runNow(scheduleId: string, options?: { invocationId?: string }): Promise<ScheduleRun>;
+}
+
+/** A workspace-only sandbox (`kind: "workspace"`): pass it to `managed.exec`, `managed.files`, or `managed.artifacts`. */
+export interface ManagedSandbox extends SessionInfo {
+  /** The same as `id`, so the sandbox works wherever a session is expected. */
+  readonly sessionId: string;
+}
+
+export interface CreateSandboxOptions {
+  /** An isolated environment: its image, setup, network rules, and vaults apply. Per-sandbox `files`, `packages`, and `env` too. */
+  environment: EnvironmentSelector;
+  /** Your own ID for it; creating the same ID again answers with that sandbox. */
+  sessionId?: string;
+  signal?: AbortSignal;
+}
+
+/**
+ * Workspace-only sandboxes: isolated machines with no agent in them, for your own harness to run commands and move
+ * files in (`managed.exec`, `managed.files`). Delete one with `managed.sessions.delete(sandbox.id)`.
+ */
+export interface ManagedSandboxes {
+  /** Creates one; resolves once its setup finished. Fails with `policy_violation` where the operator turned `exec` off. */
+  create(options: CreateSandboxOptions): Promise<ManagedSandbox>;
+  /** Your workspace-only sandboxes, most recently used first. */
+  list(): Promise<ManagedSandbox[]>;
+}
+
+export interface ExecOptions {
+  /**
+   * Kills the command's process group after this long. Default: 10 minutes, and no limit for `background` commands
+   * (they run until they end, you stop them, or the sandbox stops).
+   */
+  timeoutMs?: number;
+  /** Start it and get a handle at once: read its output as it goes, write to its stdin, wait for its result, or stop it. */
+  background?: boolean;
+  /** Your own ID for the command (`[A-Za-z0-9_-]{1,64}`): the same ID again answers with that command; it never runs twice. */
+  id?: string;
+  /** Default `closed`, `open` for background commands (write to it with the handle). */
+  stdin?: "open" | "closed";
+  /** Stops a command that is not `background` (its process group is killed) and resolves with its record. */
+  signal?: AbortSignal;
+}
+
+/** A background command (`managed.exec(..., { background: true })`). */
+export interface ExecHandle {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly command: string;
+  /** Its output (stdout and stderr together) from the start, as it is written; ends when the command ends. */
+  readonly output: AsyncIterable<string>;
+  /** Resolves when it ends: its exit code (state `completed`), or why it ended otherwise, and its output. */
+  readonly result: Promise<ExecResult>;
+  /** Writes to its stdin. */
+  write(data: string): Promise<void>;
+  /** Closes its stdin (after `data`, if given). */
+  end(data?: string): Promise<void>;
+  /** Kills its process group; resolves with its record. */
+  stop(): Promise<ExecInfo>;
+  /** Its current record. */
+  info(): Promise<ExecInfo>;
 }
 
 export interface OpenCliOptions {

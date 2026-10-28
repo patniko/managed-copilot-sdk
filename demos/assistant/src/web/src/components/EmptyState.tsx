@@ -1,4 +1,4 @@
-import { BellIcon, CalendarIcon, CopilotIcon, InboxIcon, IterationsIcon, LockIcon, PeopleIcon } from "@primer/octicons-react";
+import { BeakerIcon, BellIcon, CalendarIcon, CopilotIcon, InboxIcon, IterationsIcon, LockIcon, PeopleIcon } from "@primer/octicons-react";
 import type { BackgroundView } from "../../../shared/protocol";
 import { firstName, greeting } from "../format";
 import { schedulingBlockedReason } from "./Rail";
@@ -11,6 +11,14 @@ export const SUGGESTIONS = [
   { icon: PeopleIcon, title: "Meet with Sam", text: "Sam asked for 30 minutes to go over the Q3 launch plan. Find a time in the next few days that works and send the invite." },
   { icon: IterationsIcon, title: "Daily briefing", text: "Every weekday at 8am, brief me on my calendar and the important unread mail.", scheduling: true },
 ];
+
+/** Shown when the assistant can start sandboxes: hands-on work that runs in one (after you approve it). */
+export const SANDBOX_SUGGESTION = {
+  icon: BeakerIcon,
+  title: "Chart my meeting load",
+  text: "How did my meeting load change over the last four weeks? A chart would help.",
+  scheduling: false,
+};
 
 /** The short note on a scheduling suggestion that waits for background work, or undefined once it's confirmed on. */
 function schedulingNote(background: BackgroundView | undefined): string | undefined {
@@ -35,6 +43,7 @@ export function EmptyState({
   timeZone,
   demo,
   background,
+  sandboxes = false,
   onPick,
   onNeedBackground,
 }: {
@@ -44,9 +53,12 @@ export function EmptyState({
   demo: boolean;
   /** Scheduling suggestions wait until background work is confirmed on. */
   background?: BackgroundView;
+  /** The assistant can start sandboxes, so a hands-on suggestion is offered too. */
+  sandboxes?: boolean;
   onPick(text: string): void;
   onNeedBackground?(): void;
 }) {
+  const suggestions = sandboxes ? [...SUGGESTIONS.slice(0, 4), SANDBOX_SUGGESTION, ...SUGGESTIONS.slice(4)] : SUGGESTIONS;
   return (
     <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col items-center justify-center px-4 py-10 text-center md:px-6">
       <CopilotIcon size={48} className="text-fg" />
@@ -54,7 +66,8 @@ export function EmptyState({
         {greeting(timeZone)}, {firstName(name, login)}
       </h1>
       <p className="mt-2 max-w-lg text-fg-muted">
-        I keep an eye on your inbox and calendar, and I keep working on a schedule even when this tab is closed. Ask me anything, or start with one of these.
+        I keep an eye on your inbox and calendar, and I keep working on a schedule even when this tab is closed.
+        {sandboxes ? " For number crunching, charts, or research, I can start a sandbox (I'll ask you first)." : ""} Ask me anything, or start with one of these.
       </p>
       {demo && (
         <p className="mt-3 max-w-2xl text-xs text-fg-muted">
@@ -63,7 +76,7 @@ export function EmptyState({
         </p>
       )}
       <div className="mt-8 grid w-full gap-2 sm:grid-cols-2">
-        {SUGGESTIONS.map(({ icon: Icon, title, text, scheduling }, index) => {
+        {suggestions.map(({ icon: Icon, title, text, scheduling }, index) => {
           const note = scheduling ? schedulingNote(background) : undefined;
           const blocked = note !== undefined;
           // While it's off, the suggestion leads to the consent card; in other states it simply waits.
@@ -79,7 +92,7 @@ export function EmptyState({
               title={blocked ? schedulingBlockedReason(background) : undefined}
               className={cx(
                 "flex items-start gap-3 rounded-md border border-line bg-canvas p-3 text-left transition-colors duration-100 enabled:hover:bg-canvas-muted disabled:cursor-not-allowed",
-                index === SUGGESTIONS.length - 1 && "sm:col-span-2",
+                index === suggestions.length - 1 && suggestions.length % 2 === 1 && "sm:col-span-2",
               )}
             >
               <Icon className={cx("mt-0.5", blocked ? "text-fg-disabled" : "text-fg-muted")} />

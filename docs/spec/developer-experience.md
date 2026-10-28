@@ -1,11 +1,13 @@
 # Managed Copilot SDK: developer experience
 
-> **Status: built, and qualified within the limits recorded below (2026-10-24).** The SDK, Aspire integration, CLI,
-> gateway, sandbox image, and egress proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime
-> 1.0.103, unmodified. They run locally with `aspire run` and on Azure with `aspire deploy`. The 13 customer snippets
-> run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
-> [software factory](../../demos/software-factory) and [assistant](../../demos/assistant) demos use the platform end
-> to end with real models. The six OpenAI gaps are implemented and exercised; that is not a claim of full parity. The
+> **Status: built, and qualified within the limits recorded below (2026-10-24; orchestrator environments on
+> 2026-10-26, and on Azure on 2026-10-27).** The SDK, Aspire integration, CLI, gateway, sandbox image, and egress
+> proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime 1.0.103, unmodified. They run
+> locally with `aspire run` and on Azure with `aspire deploy`, orchestrator environments included. The 14 customer
+> snippets run as acceptance checks in [`demos/quickstart`](../../demos/quickstart), and the
+> [software factory](../../demos/software-factory), [assistant](../../demos/assistant), and
+> [Dispatch](../../demos/dispatch) demos use the platform end to end with real models. The six OpenAI gaps are
+> implemented and exercised; that is not a claim of full parity. The
 > [delivery gates](#delivery-gates) record what each gate proved and what it did not, and the
 > [decision tracker](#decision-tracker) separates user decisions from their delivery state.
 > [architecture.md](../architecture.md) and [deployment.md](../deployment.md) describe the system as built.
@@ -78,7 +80,7 @@ const session = await managed.createSession({ environment: "chat", model: "claud
 | `shared` | One runtime shared by many sessions | Session-safe tools, approved remote MCP, and filtered web access; no workload filesystem or subprocess tools | No per-session container allocation | Per-session state and identity in a shared process | Chat, support, Q&A, high volume |
 | `isolated` | A fresh Linux **sandbox** (container) for each session | Policy-approved shell, files, git, and image toolchain | Cold start or warm allocation; latency to measure | A container per session | Coding and data agents |
 | `promotable` | Starts `shared`, then moves once into its own fresh sandbox | Shared tools, then the admitted sandbox tools | Shared start plus an explicit cutover | Shared, then a container | Assistants that occasionally need a shell |
-| `orchestrator` *(later)* | A shared coordinator that starts workers in dynamic containers | Per worker | | A container per worker | Parallel and multi-agent work |
+| `orchestrator` | A shared coordinator that starts workers, each a session with its own sandbox ([section 17](#17-orchestrator-a-coordinator-with-workers)) | Coordinator: session-safe tools and worker tools; workers: their environment's sandbox tools | Shared start; each worker starts like an isolated session | Shared coordinator; a container per worker | Parallel and multi-agent work |
 
 ## 1. Declare your environments
 
@@ -519,7 +521,7 @@ const client = await managed.client("coder", { vaults: [vault.id] });
 
 ### Connect any MCP server
 
-> **Proposed, not built** ([decisions 37–40](#decision-tracker), gate G6). Everything else in this section is built.
+> **Proposed, not built** ([decisions 37–40](#decision-tracker), gate G7). Everything else in this section is built.
 
 Agents get tools from MCP servers: GitHub's MCP server, Work IQ for Microsoft 365, Slack, or any other. A
 **connector** is one of those servers plus the credential it needs. You declare it once, and each person connects
@@ -1249,6 +1251,259 @@ the console with the ticket in the URL fragment, which never reaches server logs
 HttpOnly, `SameSite=Strict` session cookie that lasts 8 hours (1 hour idle) and re-verifies the operator's GitHub
 credential on every request. Scripts call the same operator API (`/v1/operator/*`) with a GitHub bearer token.
 
+## 17. Orchestrator: a coordinator with workers
+
+An `orchestrator` environment runs a coordinator agent that splits work across **workers**. The coordinator runs on
+the shared runtime. Each worker is an ordinary session of one of your isolated environments, with its own sandbox.
+
+```ts
+// apphost.mts
+environments: {
+  coder: { type: "isolated", size: "medium" },
+  team: {
+    type: "orchestrator",
+    workers: ["coder"], // isolated environments its workers run in; the first is the default
+    maxWorkers: 3,      // workers one session can have at once (default 4, at most 16)
+  },
+},
+```
+
+```ts
+managed.on("worker.started", (e) => console.log(`${e.data.name} started in ${e.data.environment}`));
+
+const client = await managed.client("team");
+const session = await client.createSession({ model: "claude-sonnet-5", onPermissionRequest: approveAll });
+
+// The coordinator starts workers, waits for their reports, and answers: one sendAndWait covers the whole job.
+const reply = await session.sendAndWait(
+  {
+    prompt:
+      "In parallel, use one worker to compute the sum of the integers from 1 to 1000 with Python and another to compute 20 factorial with Python. Report both numbers.",
+  },
+  25 * 60_000,
+);
+console.log(reply?.data.content);
+
+for (const worker of await managed.workers(session).list()) {
+  console.log(worker.name, worker.environment, worker.state, worker.result);
+}
+```
+
+The coordinator manages its workers with platform tools that only orchestrator sessions get:
+
+| Tool | What it does |
+| --- | --- |
+| `start_worker` | Starts a worker in a worker environment with a name and a self-contained task, and optionally a custom `agent` and `model`. Returns at once while the sandbox starts. Asks for the session's permission |
+| `wait_for_workers` | Waits until the named workers (by default, every busy one) finish, then returns each one's state and final report. Uses no model time. Returns early when a message from the user is waiting, and after at most an hour; the coordinator calls it again to keep waiting |
+| `message_worker` | Sends a follow-up to a worker that finished or failed its current work. A working worker is waited for first (`session_busy`) |
+| `list_workers` | The worker environments and their agents, and each worker's state and latest report |
+| `read_worker_file` | Reads a text file from a worker's `/workspace`, or lists a directory |
+| `copy_worker_files` | Copies files or directories from one worker's `/workspace` to another's, through the gateway |
+| `stop_worker` | Cancels a worker's work and deletes its session and sandbox |
+
+### Orchestrator contract
+
+1. **Workers are sessions.** A worker is a session of a declared isolated environment, owned by the coordinator's
+   owner, in its own sandbox with that environment's image, setup, network policy, vaults, and idle stop. Its
+   `SessionInfo.parentSessionId` names the coordinator. `managed.files(worker.id)`, `managed.artifacts(worker.id)`,
+   `managed.resumeSession(worker.id)`, and `npx managed-copilot attach <worker>` work on it unchanged, and
+   `npx managed-copilot workers <session>` lists a coordinator's workers.
+2. **One approval per worker.** `start_worker` asks the coordinator session's permission: your `onPermissionRequest`,
+   or the person in an attached Copilot CLI. Approving it approves the worker's work in its sandbox. The platform then
+   answers the worker's own permission prompts once each, as `approveAll` does, and records each answer in the actions
+   ledger as `platform:orchestrator`. Whether managed policy reserves a prompt for a person is the ledger's decision
+   (read as the stock SDK documents it); those prompts wait for one (attach Copilot CLI to the worker), the
+   coordinator's reports say a worker is waiting for a person, and a client attached to a worker answers that worker's
+   prompts itself. The coordinator's model never approves anything.
+3. **No polling, and a conversation stays responsive.** `wait_for_workers` holds the coordinator's turn open without
+   model calls, so one `sendAndWait` covers the whole job. Pass a timeout longer than the work (the stock default is
+   60 seconds). A message the user sends while the coordinator waits ends the wait early so it can answer, and the
+   workers keep working: one sent with `mode: "immediate"` reaches it in the same turn, and a queued one once it ends
+   its turn (it is told to). A worker run that reports an error fails when it ends, as `sendAndWait` reports it.
+   Before it reports, `wait_for_workers` waits up to 30 seconds for finished workers' outputs to publish. Worker
+   reports are clipped to a bounded size and reach the coordinator marked as data from another agent, never as
+   instructions.
+4. **Workers run as the owner, within the coordinator's limits.** While a worker has no client of its own, the
+   coordinator's connected client serves its model calls, then the owner's background sign-in
+   (`npx managed-copilot login`), from the worker's creation on: a credential taken from a connection never serves a
+   worker after that connection closes, even while a message to the worker is being sent. Nothing broadens: a worker
+   uses the coordinator's model when its environment allows it (otherwise the environment's own), a client's network
+   narrowing of the coordinator applies to its workers, and workers cannot start workers.
+5. **Bounded and cleaned up.** A session has at most `maxWorkers` workers at once. Stopped workers, and starts that
+   failed before a session existed, don't count. `stop_worker`, or deleting the coordinator, deletes workers with
+   their sandboxes and files; a deletion that fails, or that another deletion still has under way, is reported and
+   followed up until the session is gone, also after a restart. Tool calls are idempotent, and a call a gateway
+   shutdown interrupts runs again after the restart: a replayed `stop_worker` stops the worker it chose, never a newer
+   one with the same name, and a replayed `message_worker` never sends twice. After a gateway restart, a start the
+   restart interrupted fails, a worker turn it cut ends, and a message that never started a run fails the worker with
+   the earlier report kept, so waits finish.
+6. **Files move through the gateway.** Workers don't share a disk, so the same tools work on Docker and on Azure:
+   `read_worker_file` returns up to 64,000 characters of text, and `copy_worker_files` copies at most 500 files and
+   64 MiB per call. File calls are pinned to the worker's own sandbox, so they never reach a newer session that reuses
+   a deleted worker's ID. A worker's `/workspace/outputs` publishes as that worker's artifacts.
+
+Platform events report workers on the coordinator's session: `worker.started`, `worker.idle`, `worker.failed`, and
+`worker.stopped`, with `data: { workerId, name, environment, state, error?, role?, agentId? }` (`role: "hands"` for a
+direct or mixed coordinator's own sandbox, below).
+
+Not in this delivery: delivering worker results to an idle coordinator as new turns (the coordinator waits instead),
+steering a worker in the middle of its work, relaying each worker prompt to your `onPermissionRequest`, a shared
+volume between workers, nested workers, and worker environments written by the model.
+
+### Execution styles: delegate, direct, mixed
+
+One knob on the orchestrator type chooses how the coordinator gets work done. Every style uses the same worker
+environments, so image, size, setup, network rules, vaults, and idle stop are shared.
+
+```ts
+// apphost.mts
+environments: {
+  coder: { type: "isolated", size: "medium" },
+  team: { type: "orchestrator", workers: ["coder"] },                          // delegate (default)
+  operator: { type: "orchestrator", workers: ["coder"], execution: "direct" }, // exactly one environment
+  crew: { type: "orchestrator", workers: ["coder"], execution: "direct", subagents: "own" },
+  lead: { type: "orchestrator", workers: ["coder", "python"], execution: "mixed" },
+},
+```
+
+```ts
+const client = await managed.client("operator");
+const session = await client.createSession({
+  model: "claude-sonnet-5",
+  // bash, write_bash, create, and edit ask here, once per call; view, glob, grep, read_bash, list_bash, and stop_bash don't.
+  onPermissionRequest: approveAll,
+});
+session.on("tool.execution_start", (e) => console.log(`${e.agentId ?? "root"} → ${e.data.toolName}`));
+await session.sendAndWait({ prompt: "Use two sub-agents in parallel: one counts primes below 100,000 in Python, the other finds the digits of the 1,000th Fibonacci number." }, 10 * 60_000);
+
+const [hands] = (await managed.workers(session).list()).filter((w) => w.role === "hands");
+console.log(await managed.files(hands.id).list());                        // the files its agents made
+for (const command of await managed.exec.list(hands.id)) console.log(command.caller?.agentId ?? "root", command.command);
+```
+
+| Style | The coordinator's tools |
+| --- | --- |
+| `delegate` (default) | The worker tools above. No shell or files of its own; the stock sub-agent tools are off |
+| `direct` | `bash`, `read_bash`, `write_bash`, `stop_bash`, `list_bash`, `view`, `create`, `edit`, `glob`, `grep` (the built-in names and argument shapes, acting on a sandbox of its one worker environment), and the stock sub-agent tools `task`, `read_agent`, `write_agent`, `list_agents`. No worker tools |
+| `mixed` | Both sets. Its own sandbox is in the first worker environment, and it can start workers in any. `copy_worker_files` and `read_worker_file` call its own sandbox `self` |
+
+#### Execution styles contract
+
+7. **Validation.** `execution` and `subagents` are valid only on orchestrator environments; `direct` needs exactly one
+   worker environment, and `subagents` applies only to `direct` and `mixed`. `/v1/info` reports `execution` (and
+   `subagents`) for orchestrators. `delegate` is unchanged.
+8. **Hands sandboxes.** The coordinator's hands run in a **hands sandbox**: a workspace-only sandbox (section 18) of
+   the environment, owned by the session's owner, with no runtime, agent, or credential in it. It is created the first
+   time an agent needs it, counts against `maxWorkers` (over the bound, `policy_violation`, like `start_worker`), is
+   listed by `managed.workers(session).list()` with `role: "hands"` (and `agentId` for a sub-agent's), is announced
+   with `worker.started`, and is deleted with the coordinator. `wait_for_workers`, `message_worker`, and
+   `stop_worker` refuse it, and worker recovery skips it. Its `/workspace/outputs` publishes as its artifacts at the
+   end of each of the coordinator's turns. `exec: false` on the environment governs only `managed.exec` and its routes,
+   never a coordinator's own tools.
+9. **Sub-agents.** `subagents: "shared"` (default): the coordinator and every sub-agent use one sandbox; `edit` is an
+   atomic compare-and-replace that fails with `conflict` if the file changed underneath it, and commands are not
+   otherwise synchronized. `subagents: "own"`: each sub-agent (by its `agentId`) gets its own sandbox; when its
+   `subagent.completed` or `subagent.failed` arrives, the files it saved under `/workspace/outputs` are copied into the
+   coordinator's sandbox under `outputs/<agentId>/` and its sandbox is deleted. A call the runtime reported as a
+   sub-agent's that arrives without its `agentId` fails with `capability_unavailable`; it never falls back to the
+   root agent's sandbox.
+10. **Commands.** Each `bash` call runs `bash -c` in a fresh process as the workload identity in `/workspace` (no state
+   carries over between calls). `mode: "sync"` (default) waits up to `initial_wait` seconds (default 120, at most
+   1,800), then returns the output so far and a `shellId` while the command keeps running; `mode: "async"` returns at
+   once. `read_bash` returns output since the last read (waiting up to `delay` seconds), `write_bash` sends input
+   (`{enter}`, `{tab}`, `{ctrl+d}`), `stop_bash` kills the process group, and `list_bash` lists the commands with their
+   state. A cancelled sync call stops its command; async commands run on until stopped, the sandbox's idle stop, or
+   deletion. Every command is recorded with the tool and the calling agent (`ExecInfo.caller`).
+11. **Never run twice.** `bash`, `write_bash`, and `edit` are never rerun after a gateway or runtime restart: an
+   interrupted `bash` reattaches to its command in the sandbox it started in (or reports that it may have run, never
+   starting it elsewhere), an interrupted `write_bash` reports that its input may have been sent, and an interrupted
+   `edit` that it may have been applied. A sub-agent's sandbox whose outputs can't be copied (over 500 files or
+   64 MiB, or no room under `maxWorkers` for the coordinator's sandbox) is kept until the session is deleted.
+12. **Files.** Paths must be under `/workspace`. `view`, `glob`, and `grep` run as the workload identity and follow
+   symbolic links only inside `/workspace`; `create` and `edit` write through the sandbox's file worker, which never
+   follows links. `glob` and `grep` use ripgrep (hidden and ignored files are skipped).
+13. **Mixed is the model's choice.** A mixed coordinator's environment section describes its own sandbox and each
+   worker environment neutrally; the platform sets no rule for when to delegate.
+14. **Untrusted output.** Command output and files are ordinary tool results that enter the same context that can
+   call your `defineTool` tools; the environment section marks them as data. Decide approvals of your own tools with
+   that in mind.
+
+A tool your app defines with a hands tool's name (`bash`, `view`, …) is refused in direct and mixed sessions
+(`conflict`) and stays your own tool everywhere else.
+
+## 18. Run commands directly: `managed.exec`
+
+For a harness that already runs its own agent loop and only wants its hands somewhere isolated: create a sandbox with
+no agent in it, and run commands and move files in it from your code. It works on any sandbox you own.
+
+```ts
+// A workspace-only sandbox of an isolated environment: setup, network rules, and vaults apply; no agent runs in it.
+const sandbox = await managed.sandboxes.create({ environment: "python" });
+
+const result = await managed.exec(sandbox, "python3 -c 'print(6 * 7)'", { timeoutMs: 60_000 });
+console.log(result.exitCode, result.output);      // 0 "42\n"
+
+// Long-running: start it, read as it goes, stop it.
+const job = await managed.exec(sandbox, "pytest -q", { background: true });
+for await (const chunk of job.output) process.stdout.write(chunk);
+console.log((await job.result).exitCode);         // or: await job.stop()
+
+// Your own harness: override the stock tools so your agent's hands (and its sub-agents') are in the sandbox.
+const bash = defineTool("bash", {
+  description: "Run a bash command in the Linux workspace (/workspace).",
+  parameters: z.object({ command: z.string() }),
+  overridesBuiltInTool: true,
+  handler: async ({ command }) => (await managed.exec(sandbox, command)).output,
+});
+
+await managed.sessions.delete(sandbox.id);        // deletes the sandbox and its files
+```
+
+```ts
+// apphost.mts: operators turn it off per isolated environment (default true).
+coder: { type: "isolated", size: "large", exec: false },
+```
+
+```powershell
+npx managed-copilot exec 7f3a2c1 -- python3 --version
+```
+
+### `managed.exec` contract
+
+1. **Workspace-only sandboxes.** `managed.sandboxes.create({ environment })` creates a session of an isolated
+   environment, owned by the caller, with `kind: "workspace"`: its image, setup, network policy, vaults, and idle stop
+   apply, and no Copilot runtime starts in it (no inference, no placeholder credential). Prompts, resume, and Copilot
+   CLI attach are refused with `invalid_request`; `managed.files`, `managed.artifacts`, `managed.exec`, and
+   `managed.sessions.delete` work. Its state is `running` while commands run and `idle` otherwise. `/workspace/outputs`
+   publishes after each command ends, with the command's ID as the turn ID.
+2. **Commands.** `managed.exec(session, command)` runs `bash -c <command>` in `/workspace` as the sandbox's
+   unprivileged user, with the environment's variables, proxy settings, and vault placeholders, never a GitHub token,
+   in its own process group, starting a stopped sandbox. It resolves when the command ends with an `ExecResult`:
+   `state` (`completed` with any `exitCode`, `timed_out`, `stopped` with a `reason`, `failed` if it could not start, or
+   `uncertain`), and the newest 1 MiB of combined output (`skippedBytes` counts what was dropped). A non-zero exit is a
+   result, not an error. Default `timeoutMs`: 10 minutes; a timeout or `stop` kills the whole process group; stdin is
+   closed. It works on any sandbox the caller owns: a workspace-only sandbox, an isolated session's, or a worker's.
+3. **Background commands.** `{ background: true }` resolves at once with a handle: `output` (an async iterable of the
+   output from the start), `result`, `write`/`end` (stdin, open by default), `stop`, and `info`. No timeout unless you
+   set one. A running command holds off its sandbox's idle stop for up to the environment's idle timeout after its
+   last output; an idle stop, sandbox stop, or platform restart stops it, and it then reads as `stopped` with the
+   reason. Processes a command detached itself run until the sandbox stops.
+4. **Never run twice.** Each command is journaled by ID in the sandbox before it runs, and recorded by the platform
+   with who ran it (`managed.exec.list(session)`, `caller`). Passing your own `id` makes a call idempotent: the same ID
+   again answers with that command. A command whose outcome the platform lost reads as `uncertain` and is never run
+   again by itself.
+5. **Owner-scoped and policy-bound.** Only the session's owner can run commands, like `managed.files().write()`;
+   commands run within the sandbox's network rules and vaults. Operators turn it off per isolated environment with
+   `exec: false`: then `managed.sandboxes.create` and `managed.exec` fail with `policy_violation` ("Running commands
+   directly is turned off for environment <name>."), and `EnvironmentInfo.exec` reports `false` so apps can check
+   first. It governs these customer APIs only.
+
+REST: `POST /v1/sandboxes`, `POST|GET /v1/sessions/:id/exec`, `GET /v1/sessions/:id/exec/:execId?offset=&waitMs=`,
+`POST .../exec/:execId/input`, and `POST .../exec/:execId/stop`.
+
+Not in this delivery: the orchestrator's `direct` and `mixed` styles, whose coordinator tools are built on the same
+platform service ([proposal](../proposals/direct-execution.md)).
+
 ## What runs where
 
 This is the intended trust topology, not a deployed system. The bridge is transport code on the customer's
@@ -1267,8 +1522,8 @@ flowchart LR
     GW["Authenticated gateway<br/>routing and admission"]
     Owner["Session owner<br/>action claims, webhooks, schedules"]
     Identity["Credential / inference broker"]
-    Shared["Shared runtime<br/>shared and promotable sessions"]
-    Sbx["Sandboxes<br/>one per isolated or promoted session"]
+    Shared["Shared runtime<br/>shared, promotable, and orchestrator sessions"]
+    Sbx["Sandboxes<br/>one per isolated or promoted session, or worker"]
     Egress["Egress proxy<br/>network rules and vault secrets"]
     Store[("Durable session / action ledger<br/>state and artifact storage")]
   end
@@ -1285,6 +1540,7 @@ flowchart LR
   Owner --> Store
   Owner --> Identity
   Shared -. "promote" .-> Sbx
+  Shared -. "start_worker" .-> Sbx
   Shared --> Egress
   Sbx --> Egress
   Egress --> Web
@@ -1300,12 +1556,13 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 
 | Piece | What it is | Status |
 | --- | --- | --- |
-| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
+| `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `workers`, `openCli`, and `verifyWebhook` | Built: `packages/sdk` |
 | `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `packages/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
-| `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
+| `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console`, and `operator` | Built: `packages/cli`, plus `status` |
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `platform/gateway`, `platform/sandbox`, `platform/egress` |
+| Orchestrator environments | A shared coordinator with worker tools, workers as sessions in their own sandboxes, approvals within each worker's start, and cleanup (section 17) | Built: gateway `modules/orchestrator`, with real models locally and on Azure |
 | Operator console | Web console and operator API for health, deployed state, sessions, harness configuration, and guarded actions (section 16) | Built: `platform/console`, served by the gateway at `/console` |
-| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, and same-session CLI attachment | Built: `demos/quickstart` (13 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` |
+| Samples | Local and Azure acceptance examples for shared chat, isolated coding, promotion, deployed agents, vaults, offline handlers, schedules, same-session CLI attachment, and orchestrator workers | Built: `demos/quickstart` (14 snippets; on Azure, 10 and 12 need the local webhook receiver), `demos/software-factory`, `demos/assistant` (which asks before starting Python or web research sandboxes for hands-on work), and `demos/dispatch` (a chat with an orchestrator that shows each sandbox it creates or reuses) |
 
 ## Comparison with OpenAI's Agents API
 
@@ -1340,7 +1597,7 @@ limitations or unresolved gates, not reasons to claim feature parity.
 | Secrets | Vaults for sandbox requests and MCP, including documented credential types | Target placeholders and scoped MCP credentials; header/TLS support is bounded. Connectors for any MCP server, with OAuth sign-in and refresh, are proposed (section 8), not built |
 | Your functions while you're away | `required_actions` wait for a `tool_result`, and webhooks notify you | Durable actions with claims, replay reconciliation, signed webhooks, and polling; no blanket hook or process-resumption guarantee |
 | Schedules | Automations start/continue sessions; agents can request schedules | Same intended journeys, with stored tool declarations, authorized handler routes, and idempotent occurrences |
-| Multi-agent | Subagents with their own context in the same environment | Native SDK subagents are a candidate within admitted policy; their crash/suspend recovery is not established. Container-worker orchestration remains later |
+| Multi-agent | Subagents with their own context in the same environment | `orchestrator` environments: a coordinator starts workers, each a session with its own sandbox (section 17). Native SDK subagents remain a candidate within admitted policy; their crash/suspend recovery is not established |
 
 ### Where they differ by design
 
@@ -1413,7 +1670,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 25 | Background credential | Supported refreshable GitHub user authorization, current entitlement, revocation, and pause/error behavior | Partly validated | Sealed sign-in, re-verification, revocation, and visible pauses work; no refresh, so an expired token needs `login` again |
 | 26 | Suspended waits | Qualify root-agent checkpoints independently; no promise for subagent or OS-process survival | Validated | Root-agent waits on durable actions outlast the app and gateway restarts; other interrupted turns end visibly as failed (G2) |
 | 27 | Entra ID for app backends | Managed identity as an alternative to GitHub tokens for service callers | Later | Not built |
-| 28 | `orchestrator` environments | A coordinator with workers in dynamic containers | Later | Not built |
+| 28 | `orchestrator` environments | A shared coordinator whose workers are sessions of declared isolated environments, each in its own sandbox; one approval per worker at `start_worker` covers its prompts (as `approveAll`); waits without polling (section 17) | Decided | Built with Docker sandboxes and real models (G6), and run on Azure Container Apps Sandboxes |
 | 29 | GitHub App registration | Operator-owned registration versus a supported shared registration, including callback setup and tenant separation | Needs decision | Not built: callers use their own GitHub sign-in (`gh` or `GH_TOKEN`) |
 | 30 | Active-wait cost policy | Proposed resident waits until a qualified checkpoint; exact limits and cancel/recovery behavior need agreement | Needs decision | Interim: waits stay resident until the 24-hour answer deadline |
 | 31 | Background callback scope | Reject unsupported required hooks rather than bypass them; decide release scope after G2 without claiming full SDK callback parity | Needs decision | Interim: while a session's hook handler is away, new turns on it, unattended ones included, are refused (`background_callback_unsupported`). A turn already running when the handler leaves runs hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` without it |
@@ -1422,7 +1679,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | Validated | Container Apps Sandboxes with retained data disks; gateway state on Azure Files NFS; one gateway replica (G3) |
 | 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate | MCP OAuth proposed as connectors (rows 37–40); other request and auth formats not designed |
 | 36 | Operator control plane | A gateway-served web console, operator API, and CLI; operators named in the AppHost (every account on a loopback local gateway that names none); configuration with secrets redacted but no conversation content; a few guarded, audited actions and no deletes | Decided | Built (section 16) |
-| 37 | Any MCP server through connectors | Agents use any MCP server through one mechanism, such as GitHub's MCP server, Work IQ, Slack, and others, remote or local; each person connects their own account once per deployment (OAuth sign-in or token), the platform keeps and refreshes the credential outside every runtime, and an agent that needs a missing connection can be unblocked instead of failing (mechanism in row 39) | Decided | Not built: proposed in section 8, gate G6 |
+| 37 | Any MCP server through connectors | Agents use any MCP server through one mechanism, such as GitHub's MCP server, Work IQ, Slack, and others, remote or local; each person connects their own account once per deployment (OAuth sign-in or token), the platform keeps and refreshes the credential outside every runtime, and an agent that needs a missing connection can be unblocked instead of failing (mechanism in row 39) | Decided | Not built: proposed in section 8, gate G7 |
 | 38 | Independence from GitHub | Connecting a service needs neither GitHub's connector service nor the platform's GitHub sign-in: the customer's own OAuth client (in the AppHost, in code, or automatic MCP registration), a token, or a grant their app imports, with consent, callback, and credentials at the service and the deployment. GitHub's MCP server is one more connector; GitHub stays the platform identity that owns personal connections (principle 5) | Decided | Not built |
 | 39 | Connector API shape | AppHost `connectors` (`mcpServer`, `oauth`, `token`, `env`, `account: "user"` or `"service"`), environment `connectors` that join every session, and `connectorReturnUrls`; `connect` (with `--token`), `connectors` (with `import`), and `disconnect` in the CLI; `managed.connectors` (`connect`, `complete`, `list`, `create`, `disconnect`, `delete`); `sign_in` actions and the `request_sign_in` platform tool; runtime credentials only through host-answered MCP headers | Proposed | Not built |
 | 40 | GitHub Connectors as a source | Optionally use connections made on GitHub once the stock runtime can use them without a GitHub token in the sandbox; never required | Later | Not built: sandboxes hold only a placeholder GitHub token |
@@ -1490,7 +1747,7 @@ not prevent overlap during deployment; leases/generations must fence old and rep
 
 ### Connector contract
 
-Proposed with [connectors](#connect-any-mcp-server). Gate G6 qualifies it on the pinned SDK 1.0.26 and
+Proposed with [connectors](#connect-any-mcp-server). Gate G7 qualifies it on the pinned SDK 1.0.26 and
 runtime 1.0.103, where the runtime APIs it relies on are marked experimental.
 
 - **Admission.** Each environment's connectors join every session in it as MCP servers named after them; a person's
@@ -1507,6 +1764,11 @@ runtime 1.0.103, where the runtime APIs it relies on are marked experimental.
   `env` but no server is refused in purely shared environments. Variable names the runtime reads for its own identity
   (`COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`) are refused. A server that answers without a credential is
   used without one, for everyone.
+- **Workers and workspaces.** An orchestrator worker ([section 17](#17-orchestrator-a-coordinator-with-workers)) is a
+  session of its isolated environment owned by the coordinator's owner, so that environment's connectors join it with
+  the owner's credentials, as its vaults do. A workspace sandbox
+  ([section 18](#18-run-commands-directly-managedexec)) starts no runtime, so it gets a connector's `env` placeholders
+  but none of its servers.
 - **Answers.** The gateway registers its own interest in `mcp.headers_refresh_required` and `mcp.oauth_required` on
   every create and resume, and clients' `registerInterest` and `releaseInterest` calls don't change it. For connector
   servers, header requests (`session.mcp.headers.handlePendingHeadersRefreshRequest`) get `headers` carrying the
@@ -1607,23 +1869,23 @@ integration; their findings were fixed before merge.
 | Scheduled tools lacked schemas and concurrency rules | Astra; Argon | Stored declarations/handler routes, input deduplication, and collision policies | G2 |
 | Per-session files were awkwardly expressed as client defaults | Argon | Equivalent per-session descriptor and streaming file transfer | G1, G3 |
 | Vault protocol and shared-process credential semantics were too broad | Argon | Typed credential use, exact destinations, explicit TLS/header limits and no global secrets | G4 |
-| A forwarded sign-in link could attach someone else's service account (connection fixation) | Both | A sign-in finishes only in the browser that opened its link, for the account and app session that started it; links return only to loopback or `connectorReturnUrls` | G6 |
-| The gateway's own OAuth requests (discovery, registration, tokens) sat outside network policy | Both | Destination checks with pinned DNS at every hop, issuer-bound registrations, and an environment check before contacting a user's server | G6 |
-| Runtime OAuth and header answers were conflated, and shared startup without a grant was unspecified | Both | One answer mapping per protocol, gateway-owned event interest, and servers without a grant starting disabled | G6 |
-| Refresh and reconnection could lose a rotated token or replay work | Both | Refresh where tokens are resolved, 401s scoped to the token generation they used, recorded attempts and fencing, `needs_sign_in` on unknown outcomes, no restart of connected servers or replay of failed calls | G6 |
-| Several connectors could match one URL, and service grants lacked an operator check | Both | `conflict` for ambiguous matches; only operators manage service grants, and service-grant sign-ins are routed to them | G6 |
-| General support left gaps: secret-bearing URLs on import, local client IDs, servers without credentials, credential-only connectors, and the runtime's identity variables | Both | Import sends only confirmed clean URLs; no-credential and `env`-only connectors; `env` only in sandboxes; identity variable names refused; narrowed sessions leave out connectors they block | G6 |
-| Provider specifics: Entra v2.0 refuses `resource`, GitHub Apps use installations rather than scopes, Slack limits app distribution, Work IQ needs licensing | Both | `resource` only where accepted, `oauth.parameters`, documented prerequisites, and `needs_setup` for failures no sign-in fixes | G6 |
+| A forwarded sign-in link could attach someone else's service account (connection fixation) | Both | A sign-in finishes only in the browser that opened its link, for the account and app session that started it; links return only to loopback or `connectorReturnUrls` | G7 |
+| The gateway's own OAuth requests (discovery, registration, tokens) sat outside network policy | Both | Destination checks with pinned DNS at every hop, issuer-bound registrations, and an environment check before contacting a user's server | G7 |
+| Runtime OAuth and header answers were conflated, and shared startup without a grant was unspecified | Both | One answer mapping per protocol, gateway-owned event interest, and servers without a grant starting disabled | G7 |
+| Refresh and reconnection could lose a rotated token or replay work | Both | Refresh where tokens are resolved, 401s scoped to the token generation they used, recorded attempts and fencing, `needs_sign_in` on unknown outcomes, no restart of connected servers or replay of failed calls | G7 |
+| Several connectors could match one URL, and service grants lacked an operator check | Both | `conflict` for ambiguous matches; only operators manage service grants, and service-grant sign-ins are routed to them | G7 |
+| General support left gaps: secret-bearing URLs on import, local client IDs, servers without credentials, credential-only connectors, and the runtime's identity variables | Both | Import sends only confirmed clean URLs; no-credential and `env`-only connectors; `env` only in sandboxes; identity variable names refused; narrowed sessions leave out connectors they block | G7 |
+| Provider specifics: Entra v2.0 refuses `resource`, GitHub Apps use installations rather than scopes, Slack limits app distribution, Work IQ needs licensing | Both | `resource` only where accepted, `oauth.parameters`, documented prerequisites, and `needs_setup` for failures no sign-in fixes | G7 |
 
 The network-off package exception, blanket sandbox safety of `approveAll`, and unqualified latency/parity claims
 were also removed or bounded. The approved network-on default and one-line off switch are unchanged.
 
 ## Delivery gates
 
-Gates G1–G5 were run against the platform with real models: locally on Windows ARM64 with Docker sandboxes, and on
-Azure Container Apps in westus2. G6 belongs to the proposed connectors and has not run. The [results](#gate-results)
-follow the table. Gate failures must be visible in
-supported-capability reporting; a local result alone does not qualify Azure.
+Gates G1–G6 were run against the platform with real models: locally on Windows ARM64 with Docker sandboxes, and on
+Azure Container Apps in westus2. G7 belongs to the proposed connectors and has not run. The [results](#gate-results)
+follow the table. Gate failures must be visible in supported-capability reporting; a local result alone does not
+qualify Azure.
 
 | Gate | Bounded objective and acceptance evidence | Prerequisites |
 | --- | --- | --- |
@@ -1632,7 +1894,8 @@ supported-capability reporting; a local result alone does not qualify Azure.
 | G3: Azure substrate and persistence | On the chosen Azure backend, create two isolated sessions, verify private assignment, replace compute, and recover files, declared package environment, HOME, and native runtime state. Test actual native locking/recovery and old-owner overlap. Demonstrate warm assignment only if advertised. Unsupported subprocess/subagent suspension fails visibly; no blind replay of setup effects | G1 |
 | G4: Identity, isolation, and egress | Two GitHub users cannot cross-read/list/attach/answer. Real user-attributed inference, refresh, expiry, and revocation work through the broker without exposing provider/platform tokens in the sandbox. Network-on works; false blocks session-time packages and shell/MCP/web egress while scoped inference still works. Shared attribution, direct-IP/DNS/redirect bypasses, and supported TLS vault clients are exercised locally and on the chosen Azure backend | G1, G3 for Azure qualification |
 | G5: Promotion and attached-session continuity | Preserve the same client/session identity, native caller-visible operation, history, and ordered outcomes through promotion. Inject pre/post-commit failures and stale responses; only one owner executes. Caller network restrictions remain. A real interactive CLI reconnects to that same session. App/relay support is a separate acceptance result, not inferred from CLI success | G2, G3, G4 |
-| G6: Connectors | Two accounts connect the same connector, and in shared and isolated placement each session uses only its owner's grant. No access token, refresh token, or client secret appears in a sandbox's environment, files, runtime state, events, or logs, and the runtime never starts its own OAuth. Refresh before expiry and after a 401, with rotation, holds under concurrent sessions, and late or duplicate 401s never discard a newer token; a crash around a refresh or a callback leaves a usable grant or `needs_sign_in`, never a reused refresh token; disconnect and revocation stop new requests at once. A call that fails for want of a grant fails explicitly and is not replayed, and connecting never restarts a connected server. An agent waiting on `request_sign_in` outlasts an app disconnect and a gateway restart, then continues after sign-in, including a non-operator owner's session resumed by a separate operator's service sign-in. A link forwarded to another person, a replayed link, a callback in a browser other than the one that opened the link, a completion by another account or app session, a `returnTo` outside the allowed list, two connectors for one URL, and gateway OAuth requests to protected addresses are all refused. Import never sends a URL with user info or a query string, or a local client registration, and a setup failure such as missing admin consent shows `needs_setup` rather than asking for another sign-in. Run with GitHub's MCP server (GitHub App sign-in and a personal access token), Work IQ (Entra sign-in with admin consent), Slack, a server that registers automatically, a server that needs no credential, and a local server using an `env` placeholder in an isolated sandbox, locally and on Azure | G2, G4 |
+| G6: Orchestrator workers | A coordinator starts workers in their own sandboxes only through the session's permission policy; one `sendAndWait` covers waiting for their reports without polling; worker prompts are answered within that approval and never on a person's behalf; files move between workers; workers are deleted with their coordinator; a restart settles interrupted starts and turns | G1, G2, G3 for Azure qualification |
+| G7: Connectors | Two accounts connect the same connector, and in shared and isolated placement each session uses only its owner's grant. No access token, refresh token, or client secret appears in a sandbox's environment, files, runtime state, events, or logs, and the runtime never starts its own OAuth. Refresh before expiry and after a 401, with rotation, holds under concurrent sessions, and late or duplicate 401s never discard a newer token; a crash around a refresh or a callback leaves a usable grant or `needs_sign_in`, never a reused refresh token; disconnect and revocation stop new requests at once. A call that fails for want of a grant fails explicitly and is not replayed, and connecting never restarts a connected server. An agent waiting on `request_sign_in` outlasts an app disconnect and a gateway restart, then continues after sign-in, including a non-operator owner's session resumed by a separate operator's service sign-in. A link forwarded to another person, a replayed link, a callback in a browser other than the one that opened the link, a completion by another account or app session, a `returnTo` outside the allowed list, two connectors for one URL, and gateway OAuth requests to protected addresses are all refused. Import never sends a URL with user info or a query string, or a local client registration, and a setup failure such as missing admin consent shows `needs_setup` rather than asking for another sign-in. Run with GitHub's MCP server (GitHub App sign-in and a personal access token), Work IQ (Entra sign-in with admin consent), Slack, a server that registers automatically, a server that needs no credential, and a local server using an `env` placeholder in an isolated sandbox, locally and on Azure | G2, G4 |
 
 ### Gate results
 
@@ -1647,12 +1910,14 @@ was shown except for the items in the last column, which fail explicitly or are 
 | G3 | Passed with limits | Docker sandbox e2e (idle stop and resume with workspace and tools intact); gateway rollover e2e 3/3 | Container Apps Sandboxes: idle/recreate probe 8/8; a compute replacement kept data disks, workspace, HOME, the declared Python package, and native history. NFS storage 10/10 with cross-host lease exclusion; revision canaries. Interrupted factory work recovered by explicit Retry (9 files, 44/44 tests) | Warm assignment (`warm > 0` is refused); more than one gateway replica; partition-tolerant recovery |
 | G4 | Passed with limits | Egress Docker suite 11/11, 7 cases in sandbox-like client containers and 4 in real sandboxes: `network: false` blocks curl, pip, npm, git, and raw sockets; host lists; metadata, private, direct-IP, port, and peer destinations blocked; vault substitution scoped to session, host, and header. Sandboxes hold no GitHub token. Gated SDK e2e keeps another account's sessions invisible | Network-denied CONNECT returns 403 while inference works; allowed hosts return 200; vault substitution and response redaction pass | A live check with two real GitHub accounts (tests use distinct identities); refresh of expiring user tokens |
 | G5 | Passed for Copilot CLI | Promotion e2e and snippet 08: same session object and ID, ordered outcomes, published artifact. The stock Copilot CLI attached live: one responder per prompt, `ask_user`, no host paths, and promotion of an attached session with the CLI reconnecting by itself | Explicit promotion and continuation; non-interactive AHP probe for shared and isolated sessions | GitHub Copilot app publication (refused with `transport_unsupported`); an interactive terminal check on Azure |
-| G6 | Not run | — | — | Connectors are proposed, not built |
+| G6 | Passed (locally 2026-10-26, again after review fixes 2026-10-27; Azure 2026-10-27) | Snippet 14: the coordinator started two workers in parallel in Docker sandboxes, approved through `approveAll`, and reported both results in one `sendAndWait`; their Python prompts were answered as `platform:orchestrator`, and deleting the coordinator deleted both sandboxes. A live run of every coordinator tool: a builder's files read and copied to a reviewer, a follow-up message, and a stop. After the review fixes: snippet 14 and walkthrough 11 again, and a live run in which `message_worker` refused a working worker and the model waited and sent it again, a copy and read went through pinned sandboxes, `wait_for_workers` listed a published output, and two stops deleted their sessions. Gateway integration and restart tests cover limits, prompts a person must answer, the credential fallback, replays, and cleanup. Three apps run on coordinators: Dispatch (approvals held in the app, a declined request's reason followed, a pending approval resumed after a hard restart, and a follow-up typed in an interactive Copilot CLI attached to the coordinator), the factory's agent-led mode (builders reused for fixes, and a factory restart mid-build that kept the coordinator and its workers), and the assistant (a sandbox started only after the person approved, a follow-up sent to the same sandbox, a second kind of sandbox, and an approval that waited while the tab was closed) | Passed (westus2, 2026-10-27): snippet 14 and walkthrough 11, each worker in its own Container Apps sandbox. A run of every coordinator tool passed 10/10 checks: a builder's script read, copied to a second worker's sandbox and run there after a follow-up message, worker prompts answered as `platform:orchestrator`, a stop that deleted the builder's session, and deleting the coordinator deleting the other worker. Dispatch: two approved workers, and a follow-up from an interactive Copilot CLI attached to the coordinator that reused one. The agent-led factory: a 47-test release built from three sandboxes | A gateway restart during worker runs on Azure (covered by local restart tests); the assistant's sandboxes on Azure; an interactive Copilot CLI attached to a worker |
+| G7 | Not run | — | — | Connectors are proposed, not built |
 
 The demos run end to end on both targets. The software factory completed work orders locally (most recently the
 two-builder CSV ⇄ JSON toolkit on the final build: reviewed, fixed, and released with 40/40 tests) and on Azure (9
 files, 37/37 tests), and recovered interrupted Azure work through explicit checkpoint Retry. The assistant's
-triage, approvals, reminders, and background work passed locally and on Azure with its labelled demo Google data.
+triage, approvals, reminders, and background work passed locally and on Azure with its labelled demo Google data;
+its sandboxes, on an orchestrator, passed locally.
 Its real Gmail and Google Calendar provider is implemented, but it needs the operator's own Google OAuth client and
 was not run against real accounts.
 

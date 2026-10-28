@@ -2,6 +2,7 @@ import {
   CheckCircleFillIcon,
   ClockIcon,
   CodeReviewIcon,
+  CopilotIcon,
   DotFillIcon,
   FileDiffIcon,
   GitMergeIcon,
@@ -122,6 +123,7 @@ export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "pl
 
 export const KIND_ICONS: Readonly<Record<StationKind, Icon>> = {
   plan: TasklistIcon,
+  coordinate: CopilotIcon,
   build: ToolsIcon,
   review: CodeReviewIcon,
   release: PackageIcon,
@@ -129,6 +131,7 @@ export const KIND_ICONS: Readonly<Record<StationKind, Icon>> = {
 
 export const KIND_LABELS: Readonly<Record<StationKind, string>> = {
   plan: "Plan",
+  coordinate: "Coordinator",
   build: "Build",
   review: "Review",
   release: "Release",
@@ -136,6 +139,7 @@ export const KIND_LABELS: Readonly<Record<StationKind, string>> = {
 
 export const ROLE_LABELS: Readonly<Record<StationRole, string>> = {
   planner: "Planner",
+  coordinator: "Coordinator",
   builder: "Builder",
   reviewer: "Reviewer",
   release: "Release",
@@ -199,6 +203,8 @@ export function pipelineStations(workOrder: WorkOrder): Station[] {
   const ordered: Station[] = [];
   const plan = workOrder.stations.find((station) => station.kind === "plan");
   if (plan) ordered.push(plan);
+  const coordinator = workOrder.stations.find((station) => station.kind === "coordinate");
+  if (coordinator) ordered.push(coordinator);
   for (const row of taskRows(workOrder)) {
     if (row.build) ordered.push(row.build);
     if (row.review) ordered.push(row.review);

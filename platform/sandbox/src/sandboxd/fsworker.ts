@@ -4,7 +4,7 @@
 // opened relative to that verified directory with O_NOFOLLOW. A symlink swapped in at any moment therefore cannot
 // redirect an operation outside the root.
 //
-//   node fsworker.js write <scope> <relative> <overwrite 0|1> <maxBytes> [expectedBytes]   (content on stdin)
+//   node fsworker.js write <scope> <relative> <overwrite 0|1> <maxBytes> <expectedBytes|-> [ifMatchSha256]   (content on stdin)
 //   node fsworker.js mkdir <scope> <relative>
 //   node fsworker.js read <scope> <relative>          → one JSON header line, then the bytes
 //   node fsworker.js list <scope> <relative> <recursive 0|1> <limit>
@@ -111,9 +111,27 @@ function splitParent(relative: string): { parent: string[]; name: string } {
   return { parent: segments, name };
 }
 
-async function write(scope: Scope, relative: string, overwrite: boolean, maxBytes: number, expected: number | undefined): Promise<void> {
+/** The SHA-256 of a regular file in the current (verified) directory, or undefined when it does not exist. */
+async function hashHere(name: string, display: string): Promise<string | undefined> {
+  let opened: { handle: FileHandle; stat: Stats };
+  try {
+    opened = await openHere(name, display);
+  } catch (error) {
+    if (error instanceof PathError && error.code === "not_found") return undefined;
+    throw error;
+  }
+  const hash = createHash("sha256");
+  try {
+    for await (const chunk of opened.handle.createReadStream({ autoClose: false })) hash.update(chunk as Buffer);
+  } finally {
+    await opened.handle.close();
+  }
+  return hash.digest("hex");
+}
+
+async function write(scope: Scope, relative: string, overwrite: boolean, maxBytes: number, expected: number | undefined, ifMatch?: string): Promise<void> {
   const { parent, name } = splitParent(relative);
-  enter(scope.base, [...scope.prefix, ...parent], true, relative);
+  enter(scope.base, [...scope.prefix, ...parent], ifMatch === undefined, relative);
   try {
     const existing = lstatSync(name);
     if (existing.isSymbolicLink()) throw new PathError("forbidden", `"${relative}" is a symbolic link; refusing to replace it.`);
@@ -139,6 +157,13 @@ async function write(scope: Scope, relative: string, overwrite: boolean, maxByte
     await handle.sync();
   } finally {
     await handle.close();
+  }
+  if (ifMatch !== undefined) {
+    // Compare-and-replace: sandboxd serializes writes to one path, so only a command changing the file between this
+    // check and the rename can slip in.
+    const current = await hashHere(name, relative);
+    if (current === undefined) throw new PathError("not_found", `"${relative}" does not exist.`);
+    if (current !== ifMatch) throw new PathError("conflict", `"${relative}" changed since it was read; read it again and retry.`);
   }
   if (overwrite) {
     await fs.rename(tempName, name);
@@ -374,8 +399,9 @@ async function main(): Promise<void> {
       await importAbort(rest[0] ?? "");
       return;
     case "write": {
-      const [rawPath, overwrite, maxBytes, expected] = rest;
-      await write(scope, normalizeWorkspacePath(rawPath, { root }), overwrite === "1", Number(maxBytes), expected && expected !== "-" ? Number(expected) : undefined);
+      const [rawPath, overwrite, maxBytes, expected, ifMatch] = rest;
+      if (ifMatch !== undefined && !/^[0-9a-f]{64}$/.test(ifMatch)) throw new PathError("invalid_request", "ifMatch must be a SHA-256 hex digest.");
+      await write(scope, normalizeWorkspacePath(rawPath, { root }), overwrite === "1", Number(maxBytes), expected && expected !== "-" ? Number(expected) : undefined, ifMatch);
       return;
     }
     case "mkdir":

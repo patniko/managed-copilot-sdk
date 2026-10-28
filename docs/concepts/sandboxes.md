@@ -56,6 +56,42 @@ flowchart LR
   downloads stream files of any size. Small files passed when creating a session: up to 64, 1 MiB each, 8 MiB in
   total.
 
+## Run commands directly
+
+Your code can run commands in any sandbox you own, without an agent turn: an isolated session's, a worker's, or a
+**workspace-only sandbox** that has no agent in it at all. That's how a harness that runs its own agent loop puts its
+hands in a sandbox.
+
+```mermaid
+flowchart LR
+  App["your code<br/>managed.exec · managed.files"] --> S[("workspace-only sandbox<br/>no agent")]
+  H["your harness's agent<br/>bash · view · create · edit"] -- "overridesBuiltInTool" --> App
+```
+
+```ts
+const sandbox = await managed.sandboxes.create({ environment: "coder" }); // setup, network rules, and vaults apply
+
+const result = await managed.exec(sandbox, "python3 -c 'print(6 * 7)'");
+console.log(result.exitCode, result.output);      // 0 "42\n"
+
+const job = await managed.exec(sandbox, "pytest -q", { background: true });
+for await (const chunk of job.output) process.stdout.write(chunk);
+console.log((await job.result).exitCode);         // or: await job.stop()
+```
+
+- Commands run as `bash -c` in `/workspace` as the unprivileged user, with the sandbox's network rules and vault
+  placeholders, never a GitHub token. A timeout (default 10 minutes; none for background commands) or `stop` kills the
+  command's whole process group.
+- Every command is journaled by ID with who ran it (`managed.exec.list(sandbox)`). Pass your own `id` to make a call
+  safe to retry: the same ID answers with that command and never runs it twice. A command the platform lost track of
+  reads as `uncertain`, never as a reason to run it again.
+- A running command keeps an idle sandbox up until it has been quiet for the idle timeout; an idle stop or a platform
+  restart stops it, and it then reads as `stopped` with the reason.
+- A workspace-only sandbox publishes `/workspace/outputs` after each command; prompts, resume, and Copilot CLI attach
+  are refused (`invalid_request`). From a terminal: `npx managed-copilot exec <session> -- ls -la`.
+- Operators turn this off per isolated environment with `exec: false`; then these calls fail with
+  `policy_violation`, and `managed.info.environments` reports `exec: false`.
+
 ## Local and Azure sandboxes
 
 | | Local (`aspire run`) | Azure (`aspire deploy`) |
@@ -76,13 +112,16 @@ The operator console lists every sandbox with its state. Here, two are running a
 
 > [!TIP]
 > **Try it:** [walkthrough 03](../../samples/03-sandbox/README.md) uploads a CSV, gets a report back as an artifact,
-> and shows that a second session gets a second sandbox.
+> and shows that a second session gets a second sandbox. [Walkthrough 13](../../samples/13-your-own-harness/README.md)
+> runs commands directly and gives a stock Copilot client hands in a sandbox.
 
 <details>
 <summary><strong>Under the hood</strong></summary>
 
 - [Architecture: isolated placement](../architecture.md#isolated-placement): sandboxd, the workload user, images,
   setup, idle stop, and artifacts.
+- [Architecture: commands run directly in sandboxes](../architecture.md#commands-run-directly-in-sandboxes-as-built):
+  the command journal, workspace-only sessions, and recovery.
 - [Deploying to Azure: isolated placement on Azure](../deployment.md#isolated-placement-on-azure): microVMs, disk
   sizes, and egress.
 - [Spec sections 4 to 6](../spec/developer-experience.md#4-isolated-a-coding-agent-in-its-own-sandbox): the contract

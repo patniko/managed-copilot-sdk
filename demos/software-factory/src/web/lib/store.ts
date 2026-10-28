@@ -126,6 +126,7 @@ export function toSummary(workOrder: WorkOrder): WorkOrderSummary {
     id: workOrder.id,
     number: workOrder.number,
     title: workOrder.title,
+    mode: workOrder.mode,
     status: workOrder.status,
     createdAt: workOrder.createdAt,
     updatedAt: workOrder.updatedAt,

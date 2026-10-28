@@ -1,6 +1,6 @@
 // Operator views of harness configuration: what a session's runtime was told to run with (its stored admitted
 // configuration), and what an environment's sessions may use. Secrets are masked; none of this is conversation.
-import type { EnvironmentConfig, NetworkPolicy, OperatorCustomAgent, OperatorHarness, OperatorHarnessTool, OperatorMcpServer, OperatorToolPolicy, Placement } from "@managed-copilot/protocol";
+import { DEFAULT_MAX_WORKERS, type EnvironmentConfig, type NetworkPolicy, type OperatorCustomAgent, type OperatorHarness, type OperatorHarnessTool, type OperatorMcpServer, type OperatorToolPolicy, type Placement } from "@managed-copilot/protocol";
 import { REDACTED, looksSecret, redactText, redactUrl, redactValue, scrubArgs } from "../../redaction.js";
 import { isRecord, sharedBuiltins } from "./admission.js";
 import type { CustomizationBundle, PlatformToolRegistry, RegisteredPlatformTool, ResolvedEnvironment } from "./contracts.js";
@@ -207,6 +207,15 @@ const SANDBOX_RULES = [
   "Vault credentials reach the sandbox only as placeholders the proxy swaps on allowed hosts",
 ];
 
+/** What an orchestrator's coordinator may do with workers. */
+function orchestratorRules(config: EnvironmentConfig): string[] {
+  return [
+    `Workers run as sessions of ${(config.workers ?? []).join(", ")}, each in its own sandbox under that environment's policy`,
+    `At most ${config.maxWorkers ?? DEFAULT_MAX_WORKERS} workers at once per session; workers cannot start workers`,
+    "Starting a worker needs the session's permission; once approved, the platform approves the worker's own prompts once each, except prompts reserved for a person",
+  ];
+}
+
 /** What sessions of an environment may use, as admission enforces it. */
 export function toolPolicyOf(
   name: string,
@@ -215,7 +224,7 @@ export function toolPolicyOf(
   customizations: CustomizationBundle | undefined,
   platformTools: PlatformToolRegistry,
 ): OperatorToolPolicy {
-  const placements: Placement[] = config.type === "shared" ? ["shared"] : config.type === "isolated" ? ["sandbox"] : ["shared", "sandbox"];
+  const placements: Placement[] = config.type === "isolated" ? ["sandbox"] : config.type === "promotable" ? ["shared", "sandbox"] : ["shared"];
   const platform = new Map<string, { name: string; description: string; placements: Placement[] }>();
   for (const placement of placements) {
     for (const tool of platformTools.forSession({ environment: name, type: config.type, placement })) {
@@ -225,7 +234,14 @@ export function toolPolicyOf(
     }
   }
   const resolved = { name, type: config.type, inline: false, config, network, request: { name }, ...(customizations ? { customizations } : {}) } as ResolvedEnvironment;
-  const enforced = config.type === "isolated" ? SANDBOX_RULES : config.type === "shared" ? SHARED_RULES : [...SHARED_RULES.map((rule) => `Before promotion: ${rule}`), ...SANDBOX_RULES.map((rule) => `After promotion: ${rule}`)];
+  const enforced =
+    config.type === "isolated"
+      ? SANDBOX_RULES
+      : config.type === "promotable"
+        ? [...SHARED_RULES.map((rule) => `Before promotion: ${rule}`), ...SANDBOX_RULES.map((rule) => `After promotion: ${rule}`)]
+        : config.type === "orchestrator"
+          ? [...SHARED_RULES, ...orchestratorRules(config)]
+          : SHARED_RULES;
   return {
     builtins: config.type === "isolated" ? "all" : sharedBuiltins(resolved, network),
     platform: [...platform.values()].sort((a, b) => a.name.localeCompare(b.name)),

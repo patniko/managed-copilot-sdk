@@ -10,6 +10,7 @@ export const MODEL_PREFERENCES: Readonly<Record<StationRole, readonly string[]>>
   builder: ["claude-sonnet-5", "claude-sonnet-5.5", "gpt-5.6-sol", "claude-opus-5"],
   reviewer: ["gpt-5.6-terra", "gpt-6-luna", "gpt-5.6-sol", "gpt-6-sol", "claude-opus-5"],
   release: ["claude-sonnet-5", "claude-sonnet-5.5", "gpt-5.6-sol", "claude-opus-5"],
+  coordinator: ["claude-sonnet-5", "claude-sonnet-5.5", "gpt-5.6-sol", "claude-opus-5"],
 };
 
 export interface AvailableModel {
@@ -48,5 +49,6 @@ export function chooseModels(
     builder,
     reviewer: pick("reviewer", family(builder)),
     release: pick("release"),
+    coordinator: pick("coordinator"),
   };
 }

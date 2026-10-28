@@ -22,6 +22,8 @@ export const ROUTES = {
   runtimeImportCommit: "/v1/runtime-import/commit",
   runtimeImportAbort: "/v1/runtime-import/abort",
   runtimeRestart: "/v1/runtime/restart",
+  exec: "/v1/exec",
+  execStopAll: "/v1/exec-stop",
 } as const;
 
 export const PATHS = {
@@ -43,6 +45,7 @@ export const LIMITS = {
   artifacts: { count: 256, fileBytes: 100 * 1024 * 1024, totalBytes: 512 * 1024 * 1024 },
   listEntries: 10_000,
   setupCommandTimeoutSeconds: 15 * 60,
+  exec: { outputBytes: 1024 * 1024, readBytes: 256 * 1024, running: 32, retained: 200, commandBytes: 128 * 1024, inputBytes: 1024 * 1024, maxWaitMs: 30_000 },
 } as const;
 
 export const RESERVED_ENV = [

@@ -1,26 +1,32 @@
 import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
-import type { AccountInfo, DeploymentInfo, PlatformEventType, PromoteResult } from "@managed-copilot/protocol";
+import type { AccountInfo, DeploymentInfo, ExecInfo, ExecResult, PlatformEventType, PromoteResult } from "@managed-copilot/protocol";
 import { createContext, type ManagedState } from "./connection.js";
 import { createArtifactsApi } from "./features/artifacts.js";
 import { openCli } from "./features/cli.js";
 import { createClient, createManagedSession, resumeManagedSession } from "./features/client.js";
 import { ensureEventStream } from "./features/events.js";
+import { createSandboxesApi, listExecs, runExec } from "./features/exec.js";
 import { createFilesApi } from "./features/files.js";
 import { promoteSession } from "./features/promote.js";
 import { createSchedulesApi } from "./features/schedules.js";
 import { createSessionsApi } from "./features/sessions.js";
 import { createVaultsApi } from "./features/vaults.js";
+import { createWorkersApi } from "./features/workers.js";
 import type {
   ConnectOptions,
   EnvironmentSelector,
+  ExecHandle,
+  ExecOptions,
   ManagedArtifacts,
   ManagedClientOptions,
   ManagedFiles,
   ManagedResumeConfig,
+  ManagedSandboxes,
   ManagedSchedules,
   ManagedSessionConfig,
   ManagedSessions,
   ManagedVaults,
+  ManagedWorkers,
   OpenCliOptions,
   PlatformEventHandler,
   SessionRef,
@@ -28,6 +34,19 @@ import type {
 
 function sessionIdOf(session: SessionRef): string {
   return typeof session === "string" ? session : session.sessionId;
+}
+
+/** Commands run directly in a sandbox: `managed.exec(...)`, plus `managed.exec.list(...)`. */
+export interface ManagedExec {
+  /** Starts a background command and answers with its handle at once (see `ExecHandle`). */
+  (session: SessionRef, command: string, options: ExecOptions & { background: true }): Promise<ExecHandle>;
+  /**
+   * Runs `bash -c <command>` in the session's sandbox (`/workspace`, the sandbox's network rules and vault
+   * placeholders) and resolves when it ends, with its exit code and output. A non-zero exit is a result, not an error.
+   */
+  (session: SessionRef, command: string, options?: ExecOptions & { background?: false }): Promise<ExecResult>;
+  /** The commands run in the session's sandbox, oldest first, with who ran them. */
+  list(session: SessionRef): Promise<ExecInfo[]>;
 }
 
 /**
@@ -43,12 +62,23 @@ export class ManagedCopilot {
   readonly sessions: ManagedSessions;
   readonly vaults: ManagedVaults;
   readonly schedules: ManagedSchedules;
+  /** Workspace-only sandboxes for your own harness: commands and files, no agent. */
+  readonly sandboxes: ManagedSandboxes;
+  /**
+   * Runs a command directly in any sandbox you own: a workspace-only sandbox, an isolated session's, or a worker's.
+   * Fails with `policy_violation` where the operator turned `exec` off for the environment.
+   */
+  readonly exec: ManagedExec;
 
   private constructor(ctx: ManagedState) {
     this.#ctx = ctx;
     this.sessions = createSessionsApi(ctx);
     this.vaults = createVaultsApi(ctx);
     this.schedules = createSchedulesApi(ctx);
+    this.sandboxes = createSandboxesApi(ctx);
+    const exec = ((session: SessionRef, command: string, options?: ExecOptions) => runExec(ctx, sessionIdOf(session), command, options)) as ManagedExec;
+    exec.list = (session: SessionRef) => listExecs(ctx, sessionIdOf(session));
+    this.exec = exec;
   }
 
   /** Connects to a deployment: explicit `url`, `MANAGED_COPILOT_URL`, or the running local AppHost. */
@@ -93,6 +123,11 @@ export class ManagedCopilot {
 
   promote(session: SessionRef): Promise<PromoteResult> {
     return promoteSession(this.#ctx, sessionIdOf(session));
+  }
+
+  /** An orchestrator session's workers: each one's state, task, and latest report, and its own session ID. */
+  workers(session: SessionRef): ManagedWorkers {
+    return createWorkersApi(this.#ctx, sessionIdOf(session));
   }
 
   /** Runs Copilot CLI in this terminal, attached to the live session. Resolves with the CLI's exit code. */

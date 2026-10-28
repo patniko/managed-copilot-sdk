@@ -12,6 +12,11 @@ export const PLATFORM_EVENT_TYPES = [
   "schedule.run_completed",
   /** A shared session's outbound request was blocked by network policy (`{ host, port, reason }`; no credentials). */
   "network.blocked",
+  /** An orchestrator session's worker started, finished its turn, failed, or stopped (`data: WorkerEventData`). */
+  "worker.started",
+  "worker.idle",
+  "worker.failed",
+  "worker.stopped",
 ] as const;
 export type PlatformEventType = (typeof PLATFORM_EVENT_TYPES)[number];
 

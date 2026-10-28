@@ -14,6 +14,9 @@ export const ROUTES = {
   sessions: "/v1/sessions",
   session: (id: string) => `/v1/sessions/${e(id)}`,
   promote: (id: string) => `/v1/sessions/${e(id)}/promote`,
+  /** `GET`: an orchestrator session's workers (`WorkerInfo[]`); `.../workers/:workerId` one of them. */
+  workers: (id: string) => `/v1/sessions/${e(id)}/workers`,
+  worker: (id: string, workerId: string) => `/v1/sessions/${e(id)}/workers/${e(workerId)}`,
   /** `POST` returns short-lived `AttachMaterial` for Copilot CLI attach (spec section 14). */
   attach: (id: string) => `/v1/sessions/${e(id)}/attach`,
   /** WebSocket (AHP) upgrade for an attach ticket: `Authorization: Bearer <ticket>` or `?tkn=<ticket>`. */
@@ -26,6 +29,17 @@ export const ROUTES = {
   /** `GET ?path=dir` lists; `GET .../content?path=` downloads; `PUT .../content?path=` uploads (streamed). */
   files: (id: string) => `/v1/sessions/${e(id)}/files`,
   fileContent: (id: string) => `/v1/sessions/${e(id)}/files/content`,
+
+  /** `POST` (`CreateSandboxRequest`) creates a workspace-only sandbox session (`SessionInfo` with `kind: "workspace"`). */
+  sandboxes: "/v1/sandboxes",
+  /** `POST` (`ExecRequest`) runs a command in the session's sandbox (`ExecResult`); `GET` lists its commands (`ExecInfo[]`). */
+  exec: (id: string) => `/v1/sessions/${e(id)}/exec`,
+  /** `GET ?offset=&waitMs=` reads a command's output from `offset` (`ExecResult`), waiting up to `waitMs` for more. */
+  execItem: (id: string, execId: string) => `/v1/sessions/${e(id)}/exec/${e(execId)}`,
+  /** `POST` (`ExecInputRequest`) writes to a command's stdin. */
+  execInput: (id: string, execId: string) => `/v1/sessions/${e(id)}/exec/${e(execId)}/input`,
+  /** `POST` kills a command's process group (`ExecInfo`). */
+  execStop: (id: string, execId: string) => `/v1/sessions/${e(id)}/exec/${e(execId)}/stop`,
 
   /** `GET ?versions=all|latest` */
   artifacts: (id: string) => `/v1/sessions/${e(id)}/artifacts`,

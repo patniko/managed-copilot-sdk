@@ -115,6 +115,8 @@ function applyServerEvent(state: AssistantState, event: ServerEvent): AssistantS
       return { ...state, snapshot: { ...snapshot, offline: event.offline } };
     case "agenda":
       return { ...state, snapshot: { ...snapshot, agenda: event.agenda } };
+    case "sandboxes":
+      return { ...state, snapshot: { ...snapshot, sandboxes: event.sandboxes } };
     case "settings":
       return { ...state, snapshot: { ...snapshot, settings: event.settings } };
     case "read":

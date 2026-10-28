@@ -23,9 +23,10 @@ import {
   ZapIcon,
 } from "@primer/octicons-react";
 import { useId, useState, type ReactNode } from "react";
-import type { AccountView, AgendaView, BackgroundView, ConnectionsView, OfflineView, PlatformStatus, ScheduleView } from "../../../shared/protocol";
+import type { AccountView, AgendaView, BackgroundView, ConnectionsView, OfflineView, PlatformStatus, SandboxesView, SandboxWorkerView, ScheduleView } from "../../../shared/protocol";
 import { dayLabel, fullDate, relativeTime, timeOf, timeRange, whenLabel } from "../format";
 import type { AssistantActions } from "../useAssistant";
+import { capitalize, SANDBOX_ICONS } from "./Sandbox";
 import { cx, Menu, Spinner } from "./ui";
 
 /** Shown on scheduling controls that need background work. */
@@ -442,6 +443,127 @@ function StatusItem({ icon, children }: { icon: ReactNode; children: ReactNode }
   );
 }
 
+/** Where a sandbox is, in a few words: "idle · sandbox kept", "working…", "stopped · sandbox deleted". */
+export function sandboxStatus(worker: SandboxWorkerView): string {
+  switch (worker.state) {
+    case "starting":
+      return "starting its sandbox…";
+    case "working":
+      return "working…";
+    case "idle":
+      return worker.sandboxState === "stopped" ? "idle · sandbox paused, files kept" : "idle · sandbox kept";
+    case "failed":
+      return "its last task failed · sandbox kept";
+    case "stopped":
+      return "stopped · sandbox deleted";
+  }
+}
+
+const MAX_SANDBOX_ROWS = 6;
+
+/**
+ * The conversation's sandboxes: each one's kind, state, and number of tasks, newest first with stopped ones last.
+ * Starting one always asks first; this panel only shows them (the assistant stops them, or Start over deletes them).
+ */
+export function SandboxesCard({ sandboxes, onOpen, onOpenSettings }: { sandboxes?: SandboxesView; onOpen(workerId: string): void; onOpenSettings(): void }) {
+  if (!sandboxes || (sandboxes.environments.length === 0 && !sandboxes.unavailable)) return null;
+  const kinds = new Map(sandboxes.environments.map((environment) => [environment.name, environment]));
+  const byRecent = (a: SandboxWorkerView, b: SandboxWorkerView) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt);
+  const workers = [...sandboxes.workers.filter((worker) => worker.state !== "stopped").sort(byRecent), ...sandboxes.workers.filter((worker) => worker.state === "stopped").sort(byRecent)];
+  const shown = workers.slice(0, MAX_SANDBOX_ROWS);
+  return (
+    <Section title="Sandboxes" counter={workers.length > 0 ? workers.length : undefined}>
+      {sandboxes.unavailable ? (
+        <div className="flash flash-sm flash-warn" data-testid="sandboxes-unavailable">
+          <AlertIcon />
+          <div className="flash-content">
+            {sandboxes.unavailable.reason}
+            {sandboxes.unavailable.startOver && (
+              <button type="button" className="btn btn-sm mt-2 block" onClick={onOpenSettings}>
+                Open settings
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="Box" data-testid="sandboxes">
+          {sandboxes.error && (
+            <div className="flex items-center gap-1.5 border-b border-line-muted px-3 py-2 text-xs text-fg-attention">
+              <AlertIcon size={12} className="shrink-0" />
+              <span className="min-w-0 truncate" title={sandboxes.error}>
+                {sandboxes.error}
+              </span>
+            </div>
+          )}
+          {workers.length === 0 ? (
+            <div className="p-3 text-fg-muted">
+              <p>When something needs real number crunching, a chart, or research on the web, your assistant can start a sandbox for it:</p>
+              <ul className="mt-2 space-y-1.5 text-xs">
+                {sandboxes.environments.map((environment) => {
+                  const KindIcon = SANDBOX_ICONS[environment.kind];
+                  return (
+                    <li key={environment.name} className="flex items-start gap-2">
+                      <KindIcon size={12} className="mt-0.5 shrink-0" />
+                      <span>
+                        <span className="font-semibold text-fg">{capitalize(environment.label)}</span>
+                        {[environment.size, environment.network].filter(Boolean).map((part) => ` · ${part}`)}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : (
+            <ul>
+              {shown.map((worker) => {
+                const environment = kinds.get(worker.environment);
+                const KindIcon = SANDBOX_ICONS[environment?.kind ?? "general"];
+                const busy = worker.state === "starting" || worker.state === "working";
+                const stopped = worker.state === "stopped";
+                return (
+                  <li key={worker.id} className="Box-row p-0" data-testid="sandbox-row" data-worker={worker.name} data-state={worker.state}>
+                    <button
+                      type="button"
+                      className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-canvas-muted"
+                      onClick={() => onOpen(worker.id)}
+                      title={`Show ${worker.name} in the chat`}
+                    >
+                      <KindIcon className={cx("mt-0.5 shrink-0", stopped ? "text-fg-disabled" : "text-fg-accent")} />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className={cx("truncate font-semibold", stopped && "text-fg-muted")}>{worker.name}</span>
+                          {stopped ? (
+                            <span className="Label Label--secondary ml-auto shrink-0">stopped</span>
+                          ) : (
+                            <span className="Label Label--accent ml-auto shrink-0">
+                              {worker.messages} task{worker.messages === 1 ? "" : "s"}
+                            </span>
+                          )}
+                        </span>
+                        <span className={cx("mt-0.5 flex min-w-0 items-center gap-1 text-xs", worker.state === "failed" ? "text-fg-danger" : "text-fg-muted")}>
+                          {busy && <Spinner size={12} className="text-fg-attention" />}
+                          <span className="truncate" title={worker.error}>
+                            {worker.environment} · {sandboxStatus(worker)}
+                          </span>
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {workers.length > shown.length && <div className="border-t border-line-muted px-3 py-1.5 text-xs text-fg-muted">and {workers.length - shown.length} older</div>}
+          <div className="Box-footer flex items-center gap-1.5 px-3 py-2 text-xs text-fg-muted">
+            <ShieldIcon size={12} className="shrink-0" />
+            <span>New sandboxes ask you first</span>
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
 export function AwayCard({ offline, platform, background }: { offline?: OfflineView; platform?: PlatformStatus; background?: BackgroundView }) {
   const ready = platform?.state === "ready";
   return (
@@ -600,9 +722,12 @@ export function Rail(props: {
   account?: AccountView;
   platform?: PlatformStatus;
   connections?: ConnectionsView;
+  sandboxes?: SandboxesView;
   timeZone: string;
   highlightSchedule?: string;
   actions: AssistantActions;
+  onOpenSandbox(workerId: string): void;
+  onOpenSettings(): void;
 }) {
   const ready = props.platform?.state === "ready";
   const demo = props.connections?.provider !== "google";
@@ -613,6 +738,7 @@ export function Rail(props: {
         <BackgroundOffNotice background={props.background} account={props.account} ready={ready} highlight={props.highlightSchedule === "background"} actions={props.actions} />
       )}
       <TodayCard agenda={props.agenda} timeZone={props.timeZone} demo={demo} />
+      <SandboxesCard sandboxes={props.sandboxes} onOpen={props.onOpenSandbox} onOpenSettings={props.onOpenSettings} />
       <AutomationsCard
         schedules={props.schedules}
         error={props.schedulesError}

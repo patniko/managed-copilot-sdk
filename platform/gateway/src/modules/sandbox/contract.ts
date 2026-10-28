@@ -34,6 +34,9 @@ import type { Duplex, Readable } from "node:stream";
 import type {
   ArtifactInfo,
   EnvironmentConfig,
+  ExecCaller,
+  ExecInfo,
+  ExecResult,
   FileEntry,
   NetworkPolicy,
   PlatformEvent,
@@ -67,6 +70,11 @@ export interface CreateSandboxRequest {
   };
   /** Core's resolved environment: its configuration and the pinned customizations bundle (mounted read-only). */
   readonly resolved?: { readonly config?: EnvironmentConfig; readonly customizations?: { readonly root?: string } };
+  /**
+   * Default true. False: a workspace-only sandbox for commands and files (`exec`, the files API). sandboxd never starts
+   * the Copilot runtime in it, `openRuntime` refuses it, and health checks ignore the runtime.
+   */
+  readonly runtime?: boolean;
   readonly signal?: AbortSignal;
 }
 
@@ -122,13 +130,74 @@ export interface SandboxRuntime {
 export interface FileWriteOptions {
   /** Default true: atomically replace an existing file (last writer wins). False: fail with `conflict` if it exists. */
   readonly overwrite?: boolean;
+  /**
+   * Compare-and-replace: the SHA-256 (hex) of the content the caller read. The file is replaced only if it still has
+   * that content; otherwise the write fails with `conflict` (`not_found` when it is gone). Writes to one path are
+   * serialized in the sandbox, so two such edits of one file never both succeed.
+   */
+  readonly ifMatch?: string;
   /** Declared size when known; uploads larger than the limit fail before streaming. */
   readonly size?: number;
+  /** See `FileCallOptions.sandboxId`. */
+  readonly sandboxId?: string;
+}
+
+export interface FileCallOptions {
+  /**
+   * The sandbox (from `get(sessionId).id`) the call is for: it fails with `not_found`, before and after starting a
+   * stopped sandbox, unless that is still the session's sandbox, so a call made for one session never reaches a newer
+   * session that reuses its ID.
+   */
+  readonly sandboxId?: string;
 }
 
 export interface FileDownload {
   readonly entry: FileEntry;
   readonly body: Readable;
+}
+
+/** Options of `sandboxes.exec`. */
+export interface ExecOptions {
+  /** The command's journal ID (`[A-Za-z0-9_-]{1,64}`). The same ID again reattaches to that command; it never runs twice. */
+  readonly id?: string;
+  /**
+   * A durable identity for the call that runs it (a tool call's idempotency key), when `id` is not given: the command's
+   * ID derives from it, so a replay of the call after a gateway restart reattaches instead of running it again.
+   */
+  readonly actionId?: string;
+  /** Answer once it started (or after `waitMs`); it runs on after the call. Stdin defaults to open. */
+  readonly background?: boolean;
+  /** Kills its process group after this long. None by default. */
+  readonly timeoutMs?: number;
+  /**
+   * How long the call waits for it to end: default until it ends (0 for `background`). A command still running then is
+   * answered with `state: "running"` and its output so far; read the rest with `readExec`.
+   */
+  readonly waitMs?: number;
+  /** Default `closed` (`open` for background commands). */
+  readonly stdin?: "open" | "closed";
+  /**
+   * Cancels the call (the runtime cancelled the tool call, the session is being deleted, the gateway is stopping). A
+   * command that is not `background` is stopped with it (its process group killed); the call answers with its record.
+   */
+  readonly signal?: AbortSignal;
+  /**
+   * Aborted when the caller went away (an HTTP request closed): a command not yet started by then never starts. Unlike
+   * `signal`, it never stops a command that started.
+   */
+  readonly startSignal?: AbortSignal;
+  /** See `FileCallOptions.sandboxId`. */
+  readonly sandboxId?: string;
+  /** Recorded with the command: the owner through the API, or the platform tool that ran it (and the calling sub-agent). */
+  readonly caller?: ExecCaller;
+}
+
+export interface ExecReadOptions extends FileCallOptions {
+  /** Output from this byte offset (default 0). */
+  readonly offset?: number;
+  /** Waits up to this long (at most 30 s) for output past `offset`, or for the end. */
+  readonly waitMs?: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface SandboxesService {
@@ -165,9 +234,29 @@ export interface SandboxesService {
   /** Records activity that should postpone idle stop. */
   touch(sessionId: string): void;
   setupRecord(sessionId: string): SandboxSetupRecord | undefined;
-  listFiles(sessionId: string, path: string, options?: { readonly recursive?: boolean }): Promise<FileEntry[]>;
-  readFile(sessionId: string, path: string): Promise<FileDownload>;
+  listFiles(sessionId: string, path: string, options?: FileCallOptions & { readonly recursive?: boolean }): Promise<FileEntry[]>;
+  readFile(sessionId: string, path: string, options?: FileCallOptions): Promise<FileDownload>;
   writeFile(sessionId: string, path: string, body: Readable, options?: FileWriteOptions): Promise<FileEntry>;
+  /**
+   * Runs `bash -c <command>` in the session's sandbox as the workload identity (cwd `/workspace`, egress settings and
+   * vault placeholders, never a GitHub token), starting a stopped sandbox. Every command is journaled with its caller
+   * and pinned to the sandbox like file calls. Works on any sandbox: an isolated session's, a worker's, or a
+   * workspace-only one. Callers own any policy (the exec REST routes check the environment's `exec`).
+   */
+  exec(sessionId: string, command: string, options?: ExecOptions): Promise<ExecResult>;
+  /** A command's record and output from `offset`. A command the platform lost track of reads as `uncertain`. */
+  readExec(sessionId: string, execId: string, options?: ExecReadOptions): Promise<ExecResult>;
+  /** Writes to a running command's stdin (`conflict` once it ended or its stdin is closed); `eof` closes it. */
+  writeExec(sessionId: string, execId: string, input: { readonly data?: string; readonly eof?: boolean }, options?: FileCallOptions): Promise<ExecInfo>;
+  /** Kills a running command's process group; an ended command answers with its record. */
+  stopExec(sessionId: string, execId: string, options?: FileCallOptions & { readonly reason?: string }): Promise<ExecInfo>;
+  /** The commands of the session's current sandbox, oldest first. */
+  listExecs(sessionId: string, options?: FileCallOptions): ExecInfo[];
+  /**
+   * Publishes `/workspace/outputs` as the artifacts of `turnId` (a workspace-only sandbox has no turns of its own:
+   * standalone ones publish after each command; an orchestrator publishes its hands sandbox on its coordinator's turns).
+   */
+  publishOutputs(sessionId: string, turnId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -210,6 +299,10 @@ export interface SandboxSessionView {
   readonly lastTurn?: { readonly turnId: string; readonly status: string };
   /** Which life of a reused session ID this is; durable actions are scoped to it. */
   readonly incarnation?: string;
+  /** `workspace`: a workspace-only session (a sandbox and no runtime). */
+  readonly kind?: "agent" | "workspace";
+  /** The session that started this one (an orchestrator's coordinator). */
+  readonly parentSessionId?: string;
 }
 
 /** From core: `sessions`. `subscribe` listeners run synchronously, in order, before fan-out to clients. */
@@ -221,6 +314,8 @@ export interface SandboxSessionsPort {
    * and `lastRequestAt` is when a call to the runtime last started or settled.
    */
   runtimeActivity?(sessionId: string): { readonly busy?: string; readonly lastRequestAt?: number } | undefined;
+  /** How many commands run in a workspace-only session's sandbox now (its busy accounting). */
+  execActivity?(sessionId: string, running: number): void;
 }
 
 /** From core: `events`. */

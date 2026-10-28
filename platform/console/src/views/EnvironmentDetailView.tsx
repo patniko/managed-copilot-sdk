@@ -16,6 +16,7 @@ import {
   KeyIcon,
   McpIcon,
   PackageIcon,
+  PeopleIcon,
   SandboxIcon,
   SparkleFillIcon,
   StackIcon,
@@ -121,7 +122,7 @@ export function EnvironmentDetailView({ name, query }: { readonly name: string; 
 // Policy
 
 function PolicyTab({ environment }: { readonly environment: OperatorEnvironment }) {
-  const sandboxed = environment.type !== "shared";
+  const sandboxed = environment.type === "isolated" || environment.type === "promotable";
   const env = Object.entries(environment.env ?? {});
   return (
     <div className="space-y-6">
@@ -139,51 +140,72 @@ function PolicyTab({ environment }: { readonly environment: OperatorEnvironment 
         </Card>
       </div>
 
-      <Card title="Sandbox" icon={SandboxIcon} description={sandboxed ? "What each session's sandbox is built from." : undefined}>
-        {sandboxed ? (
-          <div className="space-y-6">
-            <FieldGrid columns={4}>
-              <Field label="Size">{formatSize(environment.size, environment.resources)}</Field>
-              <Field label="Idle timeout" hint="Before an idle sandbox may stop compute">
-                {environment.idleTimeoutSeconds !== undefined ? formatDuration(environment.idleTimeoutSeconds) : <span className="text-fg-muted">Backend default</span>}
-              </Field>
-              <Field label="Warm instances">{environment.warm !== undefined ? formatNumber(environment.warm) : <span className="text-fg-muted">None</span>}</Field>
-              <Field label="Inference">{environment.inference ? <span className="font-mono text-xs">Foundry: {environment.inference.foundry}</span> : <span className="text-fg-muted">Through GitHub Copilot</span>}</Field>
-              <Field label="Image" wide>
-                {environment.image ? (
-                  <span className="inline-flex max-w-full items-center gap-1">
-                    <span className="min-w-0 font-mono text-xs break-all">{environment.image}</span>
-                    <CopyButton text={environment.image} label="Copy image" className="size-6" />
-                  </span>
+      {environment.type === "orchestrator" ? (
+        <Card title="Workers" icon={PeopleIcon} description="Coordinators run on the shared runtime and start workers, each a session of a worker environment in its own sandbox.">
+          <FieldGrid columns={2}>
+            <Field label="Worker environments" hint="The first is the default">
+              {environment.workers && environment.workers.length > 0 ? (
+                <span className="flex flex-wrap items-center gap-2">
+                  {environment.workers.map((worker) => (
+                    <Link key={worker} href={hrefs.environment(worker)} className="Link font-mono text-xs">
+                      {worker}
+                    </Link>
+                  ))}
+                </span>
+              ) : undefined}
+            </Field>
+            <Field label="At once per session" hint="Stopped workers don't count">
+              {environment.maxWorkers !== undefined ? formatNumber(environment.maxWorkers) : undefined}
+            </Field>
+          </FieldGrid>
+        </Card>
+      ) : (
+        <Card title="Sandbox" icon={SandboxIcon} description={sandboxed ? "What each session's sandbox is built from." : undefined}>
+          {sandboxed ? (
+            <div className="space-y-6">
+              <FieldGrid columns={4}>
+                <Field label="Size">{formatSize(environment.size, environment.resources)}</Field>
+                <Field label="Idle timeout" hint="Before an idle sandbox may stop compute">
+                  {environment.idleTimeoutSeconds !== undefined ? formatDuration(environment.idleTimeoutSeconds) : <span className="text-fg-muted">Backend default</span>}
+                </Field>
+                <Field label="Warm instances">{environment.warm !== undefined ? formatNumber(environment.warm) : <span className="text-fg-muted">None</span>}</Field>
+                <Field label="Inference">{environment.inference ? <span className="font-mono text-xs">Foundry: {environment.inference.foundry}</span> : <span className="text-fg-muted">Through GitHub Copilot</span>}</Field>
+                <Field label="Image" wide>
+                  {environment.image ? (
+                    <span className="inline-flex max-w-full items-center gap-1">
+                      <span className="min-w-0 font-mono text-xs break-all">{environment.image}</span>
+                      <CopyButton text={environment.image} label="Copy image" className="size-6" />
+                    </span>
+                  ) : (
+                    <span className="text-fg-muted">The platform&apos;s default sandbox image</span>
+                  )}
+                </Field>
+              </FieldGrid>
+              <div className="grid gap-5 border-t border-line-muted pt-4 lg:grid-cols-3">
+                <PackageList label="Python packages" items={environment.packages?.python} />
+                <PackageList label="npm packages" items={environment.packages?.npm} />
+                <PackageList label="System packages" items={environment.packages?.system} hint="Installed when the image is prepared" />
+              </div>
+              <div className="border-t border-line-muted pt-4">
+                {environment.setupCommands && environment.setupCommands.length > 0 ? (
+                  <CodeBlock text={environment.setupCommands.join("\n")} label="Setup commands" copyLabel="Copy setup commands" maxHeight="sm" />
                 ) : (
-                  <span className="text-fg-muted">The platform&apos;s default sandbox image</span>
+                  <>
+                    <SectionLabel className="mb-2">Setup commands</SectionLabel>
+                    <p className="text-fg-muted">None.</p>
+                  </>
                 )}
-              </Field>
-            </FieldGrid>
-            <div className="grid gap-5 border-t border-line-muted pt-4 lg:grid-cols-3">
-              <PackageList label="Python packages" items={environment.packages?.python} />
-              <PackageList label="npm packages" items={environment.packages?.npm} />
-              <PackageList label="System packages" items={environment.packages?.system} hint="Installed when the image is prepared" />
+              </div>
+              <div className="border-t border-line-muted pt-4">
+                <SectionLabel className="mb-2">Environment variables</SectionLabel>
+                {env.length > 0 ? <KeyValueTable label="Environment variables" rows={env.map(([key, value]) => [key, value] as const)} /> : <p className="text-fg-muted">None. Secrets belong in vaults.</p>}
+              </div>
             </div>
-            <div className="border-t border-line-muted pt-4">
-              {environment.setupCommands && environment.setupCommands.length > 0 ? (
-                <CodeBlock text={environment.setupCommands.join("\n")} label="Setup commands" copyLabel="Copy setup commands" maxHeight="sm" />
-              ) : (
-                <>
-                  <SectionLabel className="mb-2">Setup commands</SectionLabel>
-                  <p className="text-fg-muted">None.</p>
-                </>
-              )}
-            </div>
-            <div className="border-t border-line-muted pt-4">
-              <SectionLabel className="mb-2">Environment variables</SectionLabel>
-              {env.length > 0 ? <KeyValueTable label="Environment variables" rows={env.map(([key, value]) => [key, value] as const)} /> : <p className="text-fg-muted">None. Secrets belong in vaults.</p>}
-            </div>
-          </div>
-        ) : (
-          <p className="text-fg-muted">Shared environments have no sandbox: their sessions run on the shared runtime.</p>
-        )}
-      </Card>
+          ) : (
+            <p className="text-fg-muted">Shared environments have no sandbox: their sessions run on the shared runtime.</p>
+          )}
+        </Card>
+      )}
 
       <VaultsCard vaults={environment.vaults} />
 

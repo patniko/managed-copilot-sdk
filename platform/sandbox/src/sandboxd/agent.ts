@@ -8,7 +8,9 @@ import type { FileEntry, SandboxdStatus, SandboxOutputsManifest, SandboxSetupRec
 import { LIMITS, PATHS, SANDBOX_GID, SANDBOX_RUNTIME_PORT, SANDBOX_UID } from "../shared/constants.js";
 import type { Log } from "../shared/log.js";
 import { PathError, type PathErrorCode } from "../shared/paths.js";
+import { AgentError } from "./errors.js";
 import { asWorkload, redact, type Identity } from "./exec.js";
+import { ExecManager } from "./execs.js";
 import { runtimeEnvironment, secretValues, workloadEnvironment, type EnvironmentInput } from "./env.js";
 import { RuntimeSupervisor } from "./runtime.js";
 import { emptyRecord, runSetup } from "./setup.js";
@@ -22,13 +24,8 @@ export interface AgentConfig {
   readonly stateDir: string;
 }
 
-export class AgentError extends Error {
-  readonly code: PathErrorCode | "internal" | "unavailable";
-  constructor(code: PathErrorCode | "internal" | "unavailable", message: string) {
-    super(message);
-    this.code = code;
-  }
-}
+export { AgentError } from "./errors.js";
+
 
 const WORKER = fileURLToPath(new URL("./fsworker.js", import.meta.url));
 const IDENTITY: Identity = { uid: SANDBOX_UID, gid: SANDBOX_GID };
@@ -45,6 +42,14 @@ export class SandboxAgent {
   #secrets: string[] = [];
   #envKey: string | undefined;
   #persisting: Promise<void> = Promise.resolve();
+  /** The write in progress per workspace path (writes to one path are serialized). */
+  readonly #writes = new Map<string, Promise<void>>();
+  /** What commands run with (`execs`), set by each start; undefined until the first start. */
+  #workloadEnv: Record<string, string> | undefined;
+  /** False for a workspace-only sandbox: the runtime is never started. */
+  #runtimeWanted = true;
+  /** Commands run directly in the workspace (`SANDBOXD_ROUTES.exec`). */
+  readonly execs: ExecManager;
 
   constructor(config: AgentConfig, log: Log) {
     this.#config = config;
@@ -56,6 +61,12 @@ export class SandboxAgent {
       cwd: PATHS.workspace,
       log,
       secrets: () => this.#secrets,
+    });
+    this.execs = new ExecManager({
+      dir: posix.join(config.stateDir, "exec"),
+      log,
+      launch: (command, env) => asWorkload(IDENTITY, PATHS.workspace, "/bin/bash", ["-c", command], env),
+      env: () => (this.#state === "ready" ? this.#workloadEnv : undefined),
     });
   }
 
@@ -76,6 +87,7 @@ export class SandboxAgent {
       this.#setup = { ...this.#setup, state: "failed", error: this.#setup.error ?? "Setup was interrupted before it finished." };
       await this.#persist(this.#setup);
     }
+    await this.execs.load();
   }
 
   /**
@@ -117,6 +129,7 @@ export class SandboxAgent {
     if (this.#starting || this.#state !== "ready") {
       throw new AgentError("conflict", `The sandbox is ${this.#starting ? "starting" : this.#state}; its runtime can only be restarted once it is ready.`);
     }
+    if (!this.#runtimeWanted) throw new AgentError("conflict", "This is a workspace-only sandbox; it has no Copilot runtime.");
     const previous = this.runtime.instance;
     try {
       await this.runtime.restart();
@@ -173,6 +186,14 @@ export class SandboxAgent {
         return;
       }
 
+      this.#workloadEnv = workloadEnvironment(input);
+      this.#runtimeWanted = request.runtime !== false;
+      if (!this.#runtimeWanted) {
+        if (this.runtime.state !== "stopped") await this.runtime.stop();
+        this.#state = "ready";
+        emit({ type: "ready", setup: this.#setup ?? emptyRecord(), runtimePort: 0 });
+        return;
+      }
       const env = runtimeEnvironment(input, this.#config.runtimeToken);
       const envKey = JSON.stringify(Object.entries(env).sort(([a], [b]) => (a < b ? -1 : 1)));
       if (this.runtime.state === "running" && this.#envKey !== envKey) await this.runtime.stop();
@@ -204,10 +225,26 @@ export class SandboxAgent {
     return JSON.parse(result) as FileEntry;
   }
 
-  /** Writes a workspace file atomically as the workload identity. */
-  async writeFile(relative: string, body: Buffer | Readable, options: { overwrite: boolean; expectedBytes?: number; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
-    const args = ["write", "workspace", relative, options.overwrite ? "1" : "0", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
-    return JSON.parse(await this.#worker(args, body, options.signal)) as FileEntry & { sha256: string };
+  /**
+   * Writes a workspace file atomically as the workload identity. With `ifMatch` (the SHA-256 it was read with), it
+   * replaces the file only if it is still that content (`conflict` otherwise). Writes to one path run one at a time,
+   * so two compare-and-replace edits of one file never both succeed.
+   */
+  async writeFile(relative: string, body: Buffer | Readable, options: { overwrite: boolean; expectedBytes?: number; ifMatch?: string; signal?: AbortSignal }): Promise<FileEntry & { sha256: string }> {
+    const args = ["write", "workspace", relative, options.overwrite || options.ifMatch !== undefined ? "1" : "0", String(LIMITS.uploadBytes), options.expectedBytes === undefined ? "-" : String(options.expectedBytes)];
+    if (options.ifMatch !== undefined) args.push(options.ifMatch);
+    const previous = this.#writes.get(relative) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => this.#worker(args, body, options.signal));
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#writes.set(relative, settled);
+    try {
+      return JSON.parse(await run) as FileEntry & { sha256: string };
+    } finally {
+      if (this.#writes.get(relative) === settled) this.#writes.delete(relative);
+    }
   }
 
   /** Lists workspace entries as the workload identity. */
@@ -327,6 +364,6 @@ export class SandboxAgent {
   }
 
   async shutdown(): Promise<void> {
-    await this.runtime.stop();
+    await Promise.all([this.execs.shutdown(), this.runtime.stop()]);
   }
 }

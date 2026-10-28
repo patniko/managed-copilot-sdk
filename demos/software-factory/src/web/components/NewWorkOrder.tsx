@@ -4,6 +4,7 @@ import {
   ClockIcon,
   CodeIcon,
   CodeReviewIcon,
+  CopilotIcon,
   FileCodeIcon,
   InfoIcon,
   PackageIcon,
@@ -14,7 +15,7 @@ import {
   type Icon,
 } from "@primer/octicons-react";
 import { useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { formatWorkOrderNumber, type WorkOrderTemplate } from "../../shared/types.js";
+import { formatWorkOrderNumber, type WorkOrderMode, type WorkOrderTemplate } from "../../shared/types.js";
 import { toErrorInfo, type ErrorInfo } from "../lib/api.js";
 import { confirmAction } from "../lib/confirm.js";
 import { cx } from "../lib/cx.js";
@@ -29,9 +30,10 @@ interface Draft {
   readonly title: string;
   readonly brief: string;
   readonly rounds: number;
+  readonly mode: WorkOrderMode;
 }
 
-const EMPTY_DRAFT: Draft = { title: "", brief: "", rounds: 2 };
+const EMPTY_DRAFT: Draft = { title: "", brief: "", rounds: 2, mode: "agent" };
 /** Survives navigating away and back within the session. */
 let savedDraft: Draft = EMPTY_DRAFT;
 
@@ -56,7 +58,7 @@ export function NewWorkOrder() {
     [templates, draft.brief],
   );
 
-  const blocked = runsBlockedReason(platform);
+  const blocked = runsBlockedReason(platform, draft.mode);
   const missingFields = !draft.title.trim() || !draft.brief.trim();
   const canSubmit = !blocked && !missingFields && !submitting;
 
@@ -89,6 +91,7 @@ export function NewWorkOrder() {
         brief: draft.brief.trim(),
         templateId: matchingTemplate?.id,
         maxReviewRounds: draft.rounds,
+        mode: draft.mode,
       });
       savedDraft = EMPTY_DRAFT;
       toast.success(`${formatWorkOrderNumber(workOrder.number)} is on the floor`, "The planner is picking it up now.");
@@ -139,6 +142,28 @@ export function NewWorkOrder() {
         </div>
 
         <div className="mt-4 space-y-5">
+          <fieldset>
+            <legend className="FormControl-label">Execution mode</legend>
+            <div className="mt-2 grid gap-3 sm:grid-cols-2">
+              {(["agent", "classic"] as const).map((mode) => (
+                <label key={mode} className={cx("Box flex cursor-pointer items-start gap-3 p-3", draft.mode === mode && "border-line-accent ring-1 ring-line-accent")}>
+                  <input type="radio" name="execution-mode" value={mode} checked={draft.mode === mode} onChange={() => setDraft({ ...draft, mode })} className="mt-1 accent-accent-emphasis" />
+                  <span>
+                    <span className="flex items-center gap-1.5 font-semibold">
+                      {mode === "agent" ? <CopilotIcon size={16} className="text-fg-done" /> : <ToolsIcon size={16} />}
+                      {mode === "agent" ? "Agent-led" : "Classic"}
+                      {mode === "agent" ? <span className="Label Label--done">Default</span> : null}
+                    </span>
+                    <span className="mt-1 block text-xs text-fg-muted">
+                      {mode === "agent"
+                        ? "A coordinator creates builder and release sandboxes, reuses builders for fixes, and explains each decision. The factory checks the work."
+                        : "The app runs the original plan, parallel builds, review loops, and release pipeline."}
+                    </span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </fieldset>
           <div className="FormControl">
             <label htmlFor="wo-title" className="FormControl-label">
               Title
@@ -215,8 +240,8 @@ function Intro() {
       <h1 className="Subhead-heading">What should the factory build?</h1>
       <div className="Subhead-description">
         <p className="max-w-2xl">
-          Describe the software you need. Copilot agents plan it, build each task in its own sandbox, review the work with a
-          second model, and ship a tested release.
+          Describe the software you need. A coordinator agent creates the sandboxes the plan needs and reuses them for
+          fixes. The factory validates the plan, reviews on a second model, and accepts only a tested release.
         </p>
         <ol className="mt-3 mb-1 flex flex-wrap items-center gap-x-2 gap-y-1.5" aria-label="Pipeline">
           {steps.map((step, index) => (

@@ -7,6 +7,8 @@ import {
   ChevronRightIcon,
   ClockIcon,
   CopilotIcon,
+  CopyIcon,
+  FileIcon,
   InfoIcon,
   IterationsIcon,
   MailIcon,
@@ -16,10 +18,11 @@ import {
   StopIcon,
   SyncIcon,
   ToolsIcon,
+  TrashIcon,
   XIcon,
   type Icon,
 } from "@primer/octicons-react";
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import type { AssistantItem, NoticeItem, ToolIcon, ToolItem, ToolStatus, TriggerItem } from "../../../shared/protocol";
 import { timeOf } from "../format";
 import type { PendingMessage } from "../useAssistant";
@@ -37,6 +40,9 @@ const TOOL_ICONS: Record<ToolIcon, Icon> = {
   clock: ClockIcon,
   repeat: IterationsIcon,
   bell: BellIcon,
+  file: FileIcon,
+  copy: CopyIcon,
+  trash: TrashIcon,
   tool: ToolsIcon,
 };
 
@@ -92,7 +98,8 @@ export function UserBubble({ text, at, timeZone, pending }: { text: string; at: 
   );
 }
 
-export function AssistantMessage({ item, timeZone, scheduleLabel }: { item: AssistantItem; timeZone: string; scheduleLabel?: string }) {
+/** A reply; `children` (a turn's sandbox images) show under its text. */
+export function AssistantMessage({ item, timeZone, scheduleLabel, children }: { item: AssistantItem; timeZone: string; scheduleLabel?: string; children?: ReactNode }) {
   return (
     <div className="flex animate-slide-up gap-3" data-testid="assistant-message" data-streaming={item.streaming ? "true" : "false"} data-proactive={item.proactive ? "true" : "false"}>
       <AssistantAvatar />
@@ -110,6 +117,7 @@ export function AssistantMessage({ item, timeZone, scheduleLabel }: { item: Assi
           </time>
         </div>
         <Markdown text={item.text} streaming={item.streaming} />
+        {children}
       </div>
     </div>
   );

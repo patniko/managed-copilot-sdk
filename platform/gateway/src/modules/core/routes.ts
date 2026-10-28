@@ -11,7 +11,7 @@ const SESSION_STATES: readonly SessionState[] = ["creating", "ready", "running",
 
 /** Capability strings advertised in `/v1/info`, keyed by the service that provides them. */
 const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
-  sandboxes: ["isolated", "files"],
+  sandboxes: ["isolated", "files", "exec"],
   artifacts: ["artifacts"],
   vaults: ["vaults"],
   actions: ["actions"],
@@ -21,7 +21,7 @@ const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
 };
 
 /** Module capabilities (`app.capabilities`) that need a working sandbox backend. */
-const SANDBOX_BACKED_CAPABILITIES: ReadonlySet<string> = new Set(["promotion"]);
+const SANDBOX_BACKED_CAPABILITIES: ReadonlySet<string> = new Set(["promotion", "orchestrator"]);
 
 export function deploymentInfo(app: GatewayApp, environments: Environments, runtime: SharedRuntime | undefined): DeploymentInfo {
   const capabilities = new Set<string>(["events"]);

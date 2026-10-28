@@ -34,7 +34,7 @@ const PLAN = {
   integration: "Round trip csv2json and json2csv.",
 };
 
-const CREATE = { title: "CSV ⇄ JSON toolkit", brief: "Build two command-line tools that convert between CSV and JSON, with tests." };
+const CREATE = { title: "CSV ⇄ JSON toolkit", brief: "Build two command-line tools that convert between CSV and JSON, with tests.", mode: "classic" as const };
 
 function taskOf(platform: FakePlatform, session: FakeSession): { id: string; files: string[] } {
   return JSON.parse(platform.workspaces.get(session.sessionId)!.get(".factory/task.json")!) as { id: string; files: string[] };
@@ -108,7 +108,7 @@ function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingS
     platform,
     readiness: () => ({ ready: true }),
     account: () => ({ login: "octocat" }),
-    config: { maxSandboxes: 4, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000 }, publicationTimeoutMs: 1_000 },
+    config: { maxSandboxes: 4, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 5_000 }, publicationTimeoutMs: 1_000 },
     pollMs: 10,
     ...overrides,
   });
