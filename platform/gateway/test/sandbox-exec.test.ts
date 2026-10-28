@@ -79,6 +79,12 @@ class FakeSandboxd {
   readonly startBodies: Record<string, unknown>[] = [];
   /** Answers the next start by dropping the connection after running it. */
   dropNextStartAnswer = false;
+  /** With `dropNextStartAnswer`: the dropped command's journal entry is lost too. */
+  forgetDropped = false;
+  /** Refuses the next start (409), running nothing. */
+  refuseNextStart = false;
+  /** Every read of a running command returns new output at once. */
+  chatty = false;
   runtime: "running" | "stopped" = "running";
   server!: Server;
   url = "";
@@ -137,6 +143,10 @@ class FakeSandboxd {
     if (req.method === "POST" && url.pathname === "/v1/outputs/manifest") return this.#json(res, 200, { files: [], rejected: [] });
     if (req.method === "POST" && url.pathname === "/v1/exec") {
       const body = (await this.#body(req)) as { id: string; command: string; stdin?: "open" | "closed"; timeoutMs?: number };
+      if (this.refuseNextStart) {
+        this.refuseNextStart = false;
+        return this.#json(res, 409, { error: { code: "conflict", message: "This sandbox already runs 32 commands." } });
+      }
       let exec = this.execs.get(body.id);
       if (!exec) {
         this.starts.push(body.id);
@@ -150,6 +160,7 @@ class FakeSandboxd {
       }
       if (this.dropNextStartAnswer) {
         this.dropNextStartAnswer = false;
+        if (this.forgetDropped) this.execs.delete(body.id);
         return void req.socket.destroy();
       }
       return this.#json(res, 200, exec.record);
@@ -183,6 +194,7 @@ class FakeSandboxd {
     }
     const waitMs = Number(url.searchParams.get("waitMs") ?? 0);
     const outputOnly = url.searchParams.get("output") !== "false";
+    if (this.chatty && outputOnly && exec.record.state === "running") this.emit(exec.record.id, "more\n");
     let offset = Math.min(Number(url.searchParams.get("offset") ?? 0), exec.record.outputBytes);
     const pending = () => exec.record.state === "running" && (!outputOnly || offset >= exec.record.outputBytes);
     if (pending() && waitMs > 0) {
@@ -289,6 +301,33 @@ describe("SandboxService commands", () => {
     const result = await service.exec(row.sessionId, "echo survived", { id: "dropped" });
     expect(result).toMatchObject({ state: "completed", output: "survived\n" });
     expect(sandboxd.starts).toEqual(["dropped"]);
+  });
+
+  it("reports a start whose answer was lost and whose journal entry is gone as uncertain, and never runs it again", async () => {
+    const row = await create();
+    sandboxd.dropNextStartAnswer = true;
+    sandboxd.forgetDropped = true;
+    expect(await service.exec(row.sessionId, "echo maybe", { id: "lost" })).toMatchObject({ state: "uncertain", reason: UNCONFIRMED });
+    expect(await service.exec(row.sessionId, "echo maybe", { id: "lost" })).toMatchObject({ state: "uncertain" });
+    expect(sandboxd.starts).toEqual(["lost"]);
+  });
+
+  it("forgets a start sandboxd refused, so it can be run again once it can be", async () => {
+    const row = await create();
+    sandboxd.refuseNextStart = true;
+    await expect(service.exec(row.sessionId, "echo later", { id: "refused" })).rejects.toMatchObject({ code: "conflict" });
+    expect(service.listExecs(row.sessionId)).toEqual([]);
+    expect(await service.exec(row.sessionId, "echo later", { id: "refused" })).toMatchObject({ state: "completed", output: "later\n" });
+  });
+
+  it("answers at its deadline while a command keeps printing", async () => {
+    const row = await create();
+    sandboxd.chatty = true;
+    const started = Date.now();
+    const job = await service.exec(row.sessionId, "run", { id: "loud", background: true });
+    expect(job.state).toBe("running");
+    expect(Date.now() - started).toBeLessThan(2000);
+    sandboxd.chatty = false;
   });
 
   it("reports a never-confirmed start as uncertain and a lost journal entry as uncertain, never rerunning them", async () => {

@@ -196,9 +196,16 @@ export class ExecManager {
       [],
     );
     this.#entries.set(entry.record.id, entry);
-    // Journaled before it runs: a crash from here on leaves a record that reads as stopped, never a silent rerun.
+    // Journaled before it runs: a crash from here on leaves a record that reads as stopped, never a silent rerun. A
+    // command that could not be journaled does not run.
     entry.dirty = true;
-    await this.#persist(entry);
+    try {
+      await this.#persist(entry, true);
+    } catch (error) {
+      this.#entries.delete(entry.record.id);
+      await fs.rm(this.#file(entry.record.id), { force: true }).catch(() => undefined);
+      throw new AgentError("internal", `The command could not be journaled, so it was not started: ${(error as Error).message}`);
+    }
     this.#spawn(entry, env);
     await this.#prune();
     return entry.record;
@@ -328,20 +335,27 @@ export class ExecManager {
   }
 
   /**
-   * Output from `offset`. With `waitMs`, waits that long for output past `offset` (or for the command's end) when
-   * there is none yet. Output older than the kept tail is skipped and reported as `skippedBytes`.
+   * Output from `offset`. With `waitMs`, waits that long for output past `offset` that can be delivered whole (a
+   * character split across writes waits for its last byte), or for the command's end. An offset past the output's end
+   * waits for the end only. Output older than the kept tail is skipped and reported as `skippedBytes`.
    */
   async read(id: string, offset: number, options: { waitMs?: number; signal?: AbortSignal } = {}): Promise<SandboxExecRead> {
     const entry = this.#get(id);
     if (!Number.isInteger(offset) || offset < 0) throw new AgentError("invalid_request", "offset must be a non-negative whole number.");
     const waitMs = Math.min(Math.max(options.waitMs ?? 0, 0), this.#limits.maxWaitMs);
     const deadline = Date.now() + waitMs;
-    while (entry.record.state === "running" && offset >= entry.record.outputBytes && Date.now() < deadline && !options.signal?.aborted) {
+    const pastEnd = offset > entry.record.outputBytes;
+    for (;;) {
+      // An ended command's final record is written before readers see it as ended.
+      if (entry.record.state !== "running") {
+        await entry.finished;
+        return this.#slice(entry, offset);
+      }
+      const slice = this.#slice(entry, offset);
+      const progress = !pastEnd && (slice.output !== "" || slice.offset !== offset || slice.skippedBytes !== undefined);
+      if (progress || Date.now() >= deadline || options.signal?.aborted) return slice;
       await this.#changed(entry, deadline - Date.now(), options.signal);
     }
-    // An ended command's final record is written before readers see it as ended.
-    if (entry.record.state !== "running") await entry.finished;
-    return this.#slice(entry, offset);
   }
 
   /** Waits up to `waitMs` for the command to end (no output). */
@@ -433,7 +447,15 @@ export class ExecManager {
     entry.persistTimer.unref();
   }
 
-  async #persist(entry: Entry): Promise<void> {
+  /** Saves the entry after any save already under way, so an older snapshot never replaces a newer one. */
+  #persist(entry: Entry, strict = false): Promise<void> {
+    const next = entry.persisting.then(() => this.#save(entry, strict));
+    entry.persisting = next.catch(() => undefined);
+    return next;
+  }
+
+  /** `strict`: a failure is thrown (a command that could not be journaled must not run), not only logged. */
+  async #save(entry: Entry, strict: boolean): Promise<void> {
     if (!entry.dirty) return;
     entry.dirty = false;
     const file = this.#file(entry.record.id);
@@ -446,6 +468,7 @@ export class ExecManager {
       entry.dirty = true;
       await fs.rm(temp, { force: true }).catch(() => undefined);
       this.#options.log.warn("Could not save a command journal entry", { id: entry.record.id, error: (error as Error).message });
+      if (strict) throw error;
     }
   }
 

@@ -12,6 +12,7 @@ import {
 } from "@managed-copilot/protocol";
 import type { Logger } from "../../log.js";
 import type { SandboxAgentClient } from "./agent-client.js";
+import { answeredBySandbox } from "./agent-client.js";
 import type { ExecOptions, ExecReadOptions, FileCallOptions } from "./contract.js";
 import type { ExecPatch, ExecRow, SandboxRow, SandboxStore } from "./store.js";
 
@@ -215,21 +216,23 @@ export class SandboxExecs {
   }
 
   /**
-   * A start that failed: sandboxd either refused it, never got it, or ran it and the answer was lost. Its journal
-   * decides: a command it has is reattached; one it lacks never ran, so the record goes and the error stands; when it
-   * cannot be asked, the command stays unconfirmed (`uncertain` on its next read).
+   * A start that failed: sandboxd either refused it, never got it, or ran it and the answer was lost. A refusal
+   * sandboxd answered itself means it never ran: the record goes and the error stands. Otherwise its journal decides:
+   * a command it has is reattached; one it lacks may still have run (its journal could have been lost since), so it
+   * is `uncertain`; when it cannot be asked, the command stays unconfirmed and is decided on its next read.
    */
   async #afterFailedStart(agent: SandboxAgentClient, row: ExecRow, error: unknown): Promise<ExecRow> {
     const failure = toManaged(error);
+    if (answeredBySandbox(error)) {
+      this.#deps.store.deleteExec(row.sandboxId, row.id);
+      this.#deps.activity(row.sessionId);
+      throw failure;
+    }
     try {
       const read = await agent.readExec(row.id, 0, 0);
       return this.#sync(row, read.exec);
     } catch (lookup) {
-      if (isManagedCopilotError(lookup, "not_found")) {
-        this.#deps.store.deleteExec(row.sandboxId, row.id);
-        this.#deps.activity(row.sessionId);
-        throw failure;
-      }
+      if (isManagedCopilotError(lookup, "not_found")) return this.#settle(row, "uncertain", UNCONFIRMED);
     }
     throw new ManagedCopilotError(failure.code === "invalid_request" ? "internal" : failure.code, `${failure.message} Whether command ${row.id} started is not known yet; read it again with its ID before running it again.`, { execId: row.id });
   }
@@ -296,8 +299,8 @@ export class SandboxExecs {
         if (read.output === "" || offset >= row.outputBytes) break;
         continue;
       }
-      if (Date.now() >= deadline && read.output === "") break;
-      if (Date.now() >= deadline + POLL_MS) break;
+      // A running command is answered at the deadline with what it printed so far, however much more it prints.
+      if (Date.now() >= deadline) break;
     }
     let output = chunks.join("");
     if (collected > COLLECT_BYTES) {

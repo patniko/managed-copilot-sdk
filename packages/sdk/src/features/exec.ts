@@ -118,13 +118,26 @@ export async function runExec(ctx: ManagedContext, sessionId: string, command: s
   const http = ctx.httpFor(sessionId);
   const id = options.id ?? `ex_${randomBytes(12).toString("hex")}`;
   const background = options.background === true;
-  const first = await start(http, sessionId, command, id, options, background);
+  let first: ExecResult;
+  let stopped = false;
+  try {
+    first = await start(http, sessionId, command, id, options, background);
+  } catch (error) {
+    // Cancelled while starting: the command may have started anyway, so it is stopped by its ID and its record returned.
+    if (background || !options.signal?.aborted) throw error;
+    stopped = true;
+    await http.post<ExecInfo>(ROUTES.execStop(sessionId, id), {}, { timeoutMs: ANSWER_MS }).catch(() => undefined);
+    try {
+      first = await read(http, sessionId, id, 0, 0);
+    } catch {
+      throw error;
+    }
+  }
   if (background) return backgroundHandle(http, sessionId, first);
 
   const collected = new Collected();
   collected.add(first.output, first.skippedBytes);
   let last = first;
-  let stopped = false;
   while (last.state === "running") {
     if (options.signal?.aborted && !stopped) {
       stopped = true;

@@ -40,16 +40,30 @@ interface SendOptions {
   signal?: AbortSignal;
 }
 
+/** Errors sandboxd itself answered (a refusal), as opposed to a request that may not have reached it or lost its answer. */
+const ANSWERED = new WeakSet<object>();
+
+/** True when sandboxd answered the request with this error, so it acted on it as it says (for a refusal: not at all). */
+export function answeredBySandbox(error: unknown): boolean {
+  return typeof error === "object" && error !== null && ANSWERED.has(error);
+}
+
 async function errorFrom(res: IncomingMessage, fallback: string): Promise<ManagedCopilotError> {
   const chunks: Buffer[] = [];
   for await (const chunk of res) chunks.push(chunk as Buffer);
+  let error: ManagedCopilotError;
   try {
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { error?: { code?: string; message?: string } };
     const code = CODE_MAP[body.error?.code ?? ""] ?? "internal";
-    return new ManagedCopilotError(code, body.error?.message ?? fallback);
+    error = new ManagedCopilotError(code, body.error?.message ?? fallback);
   } catch {
+    // Not sandboxd's own answer (a proxy or ingress in between, for example).
     return new ManagedCopilotError(res.statusCode === 503 ? "capability_unavailable" : "internal", `${fallback} (HTTP ${res.statusCode})`);
   }
+  ANSWERED.add(error);
+  // A relay's 502/504 means the connection to sandboxd broke or timed out: the request may have reached it.
+  if (res.statusCode === 502 || res.statusCode === 504) ANSWERED.delete(error);
+  return error;
 }
 
 export class SandboxAgentClient {

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -127,6 +127,36 @@ describe("sandboxd command journal", () => {
     }
     expect(text).toBe("a".repeat(44) + "b".repeat(20));
     await small.shutdown();
+  });
+
+  it("waits for the rest of a character split across writes instead of answering with nothing", async () => {
+    await execs.start({ id: "euro", command: "process.stdout.write(Buffer.from([0xe2])); setTimeout(() => process.stdout.write(Buffer.from([0x82, 0xac])), 400)" });
+    const started = Date.now();
+    const read = await execs.read("euro", 0, { waitMs: 5000 });
+    expect(read.output).toBe("€");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(300);
+  });
+
+  it("waits only for the end when reading past the output", async () => {
+    await execs.start({ id: "end", command: "console.log('a'); setTimeout(() => console.log('b'), 300)" });
+    const read = await execs.read("end", Number.MAX_SAFE_INTEGER, { waitMs: 5000 });
+    expect(read.exec.state).toBe("completed");
+    expect(read.output).toBe("");
+  });
+
+  it("refuses to run a command it could not journal", async () => {
+    const broken = mkdtempSync(join(tmpdir(), "mc-execs-broken-"));
+    const journal = join(broken, "exec");
+    const unjournaled = manager(journal);
+    await unjournaled.load();
+    rmSync(journal, { recursive: true, force: true });
+    writeFileSync(journal, "not a directory");
+    const marker = join(broken, "ran.txt");
+    await expect(unjournaled.start({ id: "nope", command: `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'x')` })).rejects.toMatchObject({ code: "internal" });
+    expect(unjournaled.list()).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(existsSync(marker)).toBe(false);
+    rmSync(broken, { recursive: true, force: true });
   });
 
   it("never splits a UTF-8 character between reads", () => {

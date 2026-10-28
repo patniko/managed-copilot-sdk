@@ -392,11 +392,14 @@ session kind in `core/sessions.ts`, `packages/sdk/src/features/exec.ts`, and `pa
   `bash -c <command>` through `asWorkload` (uid/gid 10001, `no_new_privs`, empty capability sets) in `/workspace` with
   the workload environment of the latest start (customer `env`, proxy settings, vault placeholders, CA variables; never
   `COPILOT_CONNECTION_TOKEN` or a GitHub token), in its own process group (`detached`). Each command is journaled by ID
-  in root-only `/var/lib/managed-copilot/sandboxd/exec/<id>.json` **before** it is spawned (the record, then the
-  newest 1 MiB of combined stdout/stderr, saved every 2 s while output changes and at the end). A start with an ID the
-  journal has answers with that command and runs nothing. `GET /v1/exec/<id>?offset=&waitMs=` reads output from a byte
-  offset (at most 256 KiB, never splitting a UTF-8 character; older output than the kept tail is reported as
-  `skippedBytes`), long-polling up to 30 s for new output or the end; `?output=false` waits for the end only.
+  in root-only `/var/lib/managed-copilot/sandboxd/exec/<id>.json` **before** it is spawned (a command that cannot be
+  journaled is refused and never runs; saves of one entry are serialized, so an older snapshot never replaces a newer
+  one; the record, then the newest 1 MiB of combined stdout/stderr, saved every 2 s while output changes and at the
+  end). A start with an ID the journal has answers with that command and runs nothing. `GET
+  /v1/exec/<id>?offset=&waitMs=` reads output from a byte offset (at most 256 KiB, never splitting a UTF-8 character:
+  a character split across writes waits for its last byte; older output than the kept tail is reported as
+  `skippedBytes`), long-polling up to 30 s for new output or the end; an offset past the end, or `?output=false`, waits
+  for the end only.
   `POST .../input` writes stdin (`{ data?, eof? }`; stdin is closed from the start unless `stdin: "open"`),
   `POST .../stop?reason=` and timeouts send SIGTERM to the group and SIGKILL after 3 s, `GET /v1/exec` lists, and
   `POST /v1/exec-stop?reason=` stops every running command. A command counts as ended at exit plus 250 ms for its
@@ -414,11 +417,13 @@ session kind in `core/sessions.ts`, `packages/sdk/src/features/exec.ts`, and `pa
   waitMs?, stdin?, signal?, sandboxId?, caller? })` starts the sandbox if it is stopped, records the command in
   `sandbox_execs` (keyed by sandbox and ID, with the session, owner, command, `caller` `{ kind: "api" | "platform",
   accountId?, login?, name?, agentId? }`, state, exit, reason, and output size) as `starting`, then asks sandboxd. The
-  ID is the caller's, `ex_` + SHA-256 of `actionId` (so a replayed tool call reattaches), or random. A start whose
-  answer was lost is looked up in sandboxd's journal: found, it is reattached; absent, it never ran and the error
-  stands; unreachable, it stays `starting`. A `starting` command the gateway did not see confirmed (it restarted) is
-  looked up the same way and, absent, becomes `uncertain`; a `running` one sandboxd no longer has becomes `uncertain`
-  too. `uncertain` is final and is never rerun. The call then collects output until the end, `waitMs`, or `signal`
+  ID is the caller's, `ex_` + SHA-256 of `actionId` (so a replayed tool call reattaches), or random. A start sandboxd
+  refused itself (an error it answered, not a relay's 502/504) never ran: the record goes and the error stands. A start
+  whose answer was lost is looked up in sandboxd's journal: found, it is reattached; absent, it is `uncertain` (the
+  journal could have been lost since); unreachable, it stays `starting`. A `starting` command the gateway did not see
+  confirmed (it restarted) is looked up the same way and, absent, becomes `uncertain`; a `running` one sandboxd no
+  longer has becomes `uncertain` too. `uncertain` is final and is never rerun. The call then collects output until the
+  end, `waitMs` (a running command is answered at its deadline however much it prints), or `signal`
   (which stops a command that is not `background`), answering an `ExecResult` (`ExecInfo` plus the newest 1 MiB of
   output, `offset`, `skippedBytes`). `readExec`, `writeExec`, `stopExec`, `listExecs`, and `publishOutputs` complete
   the API; every call is pinned to the sandbox like file calls (`sandboxId`). The session's deletion deletes its
@@ -450,7 +455,8 @@ session kind in `core/sessions.ts`, `packages/sdk/src/features/exec.ts`, and `pa
   platform tools use. `EnvironmentInfo.exec` reports it, and `/v1/info` advertises `exec` with `isolated`.
 - **SDK and CLI.** `managed.sandboxes.create({ environment, sessionId? })` returns the `SessionInfo` plus `sessionId`
   (so it works as a `SessionRef`); `managed.exec(ref, command, { timeoutMs?, background?, id?, stdin?, signal? })`
-  starts with a client-chosen ID (a start whose answer was lost is read back by it) and long-polls reads, resolving an
+  starts with a client-chosen ID (a start whose answer was lost is read back by it; one cancelled while starting is
+  stopped by it) and long-polls reads, resolving an
   `ExecResult`; with `background: true` it resolves an `ExecHandle` (`output` async iterable, `result`, `write`, `end`,
   `stop`, `info`). `managed.exec.list(ref)` lists. `npx managed-copilot exec <session> [--timeout <s>] -- <command>`
   streams output and exits with the command's code (124 timed out, 130 stopped).
