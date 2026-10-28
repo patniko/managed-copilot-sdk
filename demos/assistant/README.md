@@ -1,16 +1,21 @@
 # Long-running assistant
 
 A personal assistant that lives on Managed Copilot. You chat with it like a bot; it reads your mail, manages your
-calendar, schedules its own reminders and recurring jobs, and **keeps working when no browser is open**. It is built
-only from the stock `@github/copilot-sdk` and `@managed-copilot/sdk`.
+calendar, schedules its own reminders and recurring jobs, and **keeps working when no browser is open**. For hands-on
+work (number crunching, charts, research on the web) it starts **sandboxes**: separate agents in their own isolated
+environments, created on demand once you approve them and reused for follow-ups. It is built only from the stock
+`@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-![The assistant booking a meeting after you approve the invite](docs/screenshots/meeting.png)
+![The assistant charting your meeting load in a Python sandbox it started after you approved it](docs/screenshots/sandbox.png)
 
 | What you see | How it works | Spec |
 | --- | --- | --- |
 | One conversation that survives restarts of this app and of the platform | A durable session per person: `client.resumeSession(id, …)` with `session.getEvents()` to rebuild the chat, and `managed.sessions.list()` to recover it if local state is lost | [§11](../../docs/spec/developer-experience.md#11-come-back-later) |
 | Gmail and Google Calendar | Standard `defineTool` tools whose handlers run in this server, so Google tokens never leave it. Real Google OAuth, or a clearly labeled demo workspace | [Principle 4](../../docs/spec/developer-experience.md#principles), [§3](../../docs/spec/developer-experience.md#3-shared-a-chat-agent-with-your-own-tools) |
 | "Send this email?" cards | Sending mail and creating, changing, or deleting events raise the SDK's native custom-tool permission request; the person approves in chat | [§12](../../docs/spec/developer-experience.md#callback-support-and-disconnection) |
+| "Start a Python sandbox?" cards | The `assistant` environment is an `orchestrator`: its agent can start workers (`start_worker`), and starting one asks the SDK's permission handler first. Only the person answers, in chat; a scheduled run's request waits until they're back | [§17](../../docs/spec/developer-experience.md#17-orchestrator-a-coordinator-with-workers) |
+| "Created a Python sandbox · new", "Sent the follow-up · reused" | Each sandbox is a worker: its own session of an isolated environment (`assistant-python` with no network, `assistant-web` limited to GitHub). Follow-ups go to the same worker (`message_worker`). The app follows them with `managed.workers(session)`, `managed.on("worker.*")`, and `managed.sessions.get(worker.id)` | [§17](../../docs/spec/developer-experience.md#17-orchestrator-a-coordinator-with-workers) |
+| Charts under the reply | What a sandbox saves in `/workspace/outputs` publishes as its artifacts (`managed.artifacts(worker.id)`); this server keeps a copy of each image, so charts stay after the sandbox is deleted | [§6](../../docs/spec/developer-experience.md#6-get-results-out) |
 | "Remind me at 4pm to call Sam" | The agent uses the platform's `schedule_task`, `list_schedules`, and `cancel_schedule` tools (`scheduling: true`); the side panel pauses, runs, and deletes them with `managed.schedules` | [§13](../../docs/spec/developer-experience.md#13-run-on-a-schedule) |
 | Proactive messages, unread badges, notifications | Scheduled runs deliver their prompt with `source: "system"`; the reply arrives in the chat as a proactive message | [§13](../../docs/spec/developer-experience.md#13-run-on-a-schedule) |
 | "Handled while you were away" | With no tab open the server detaches; a scheduled run's tool calls reach it through the signed webhook (`verifyWebhook` + `event.handleActions`), with polling as a safety net | [§12](../../docs/spec/developer-experience.md#12-keep-working-while-your-app-is-offline) |
@@ -18,15 +23,23 @@ only from the stock `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/approval.png" alt="An approval card for a calendar invite"></td>
-    <td width="50%"><img src="docs/screenshots/reminder.png" alt="A reminder firing as a proactive message"></td>
+    <td width="50%"><img src="docs/screenshots/sandbox-approval.png" alt="The assistant asking to start a Python sandbox, with its size, network, and exact task"></td>
+    <td width="50%"><img src="docs/screenshots/sandbox-reused.png" alt="A follow-up sent to the same sandbox, marked reused, with a breakdown by meeting type"></td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/sandbox-research.png" alt="A new web research sandbox for different work, next to the reused Python sandbox in the side panel"></td>
+    <td><img src="docs/screenshots/meeting.png" alt="The assistant booking a meeting after you approve the invite"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/reminder.png" alt="A reminder firing as a proactive message"></td>
     <td><img src="docs/screenshots/offline.png" alt="A scheduled check-in whose calendar lookup was handled while no tab was open"></td>
-    <td><img src="docs/screenshots/background.png" alt="The side panel asking to turn on background work, with what that means"></td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/background.png" alt="The side panel asking to turn on background work, with what that means"></td>
     <td><img src="docs/screenshots/dark.png" alt="The assistant in dark mode"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/approval.png" alt="An approval card for a calendar invite"></td>
     <td><img src="docs/screenshots/mobile.png" alt="The assistant on a phone"></td>
   </tr>
 </table>
@@ -48,9 +61,11 @@ Open **http://localhost:7490**. The assistant signs in to Managed Copilot as you
 without Google credentials. On a new deployment the side panel first asks you to **Turn on background work**, so
 reminders and briefings can run as you while the tab is closed (or run `npx managed-copilot login` once instead).
 
-The AppHost wiring comes from [`apphost.mts`](apphost.mts): a `shared` environment named `assistant` with
-`scheduling: true` and `network: false` (its tools run here, so the agent needs no Internet access), the `assistant`
-webhook pointing at `http://localhost:7490/api/copilot-events`, and the parameters below.
+The AppHost wiring comes from [`apphost.mts`](apphost.mts): an `orchestrator` environment named `assistant` with
+`scheduling: true` and `network: false` (its tools run here, so the agent needs no Internet access); the two isolated
+environments its sandboxes run in, `assistant-python` (medium, no network: Python's standard library, charts as SVG)
+and `assistant-web` (small, only `github.com` and `api.github.com`); the `assistant` webhook pointing at
+`http://localhost:7490/api/copilot-events`; and the parameters below.
 
 ### Without Aspire
 
@@ -145,17 +160,32 @@ while Google is connected.
    webhook to answer the tool call.
 6. Optional: add the **Weekday morning briefing** from the side panel, or ask *"Every weekday at 8am, brief me on my
    calendar and important unread mail."*
+7. Ask *"How did my meeting load change over the last four weeks? A chart would help."* (in a new conversation, it's
+   the **Chart my meeting load** suggestion). The assistant reads four weeks of your calendar, then asks **Start a
+   Python sandbox?**, showing the sandbox's name, size, network (off), and the exact task, events included. Click
+   **Start sandbox**: a card shows the new sandbox at work, the chart appears under the reply, and the side panel lists
+   it under **Sandboxes**.
+8. Ask *"Which day of the week is the busiest? Chart that too."* The follow-up goes to the same sandbox, marked
+   **reused**, with no new approval: it still has the events.
+9. Ask *"Also check what the candidate in my next interview works on in open source."* That's different work, so the
+   assistant asks to start a **web research sandbox**, which can reach only `github.com` and `api.github.com`. The side
+   panel lists both sandboxes with their state and number of tasks. The assistant stops a sandbox once it can't help
+   any more, and the panel keeps listing it as stopped.
 
 The same journey runs automatically against the live platform, in your installed Microsoft Edge:
 
 ```powershell
 pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --enable-background
-pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --enable-background --screenshots docs/screenshots
+pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --skip-basics --sandbox --sandbox-away
+pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --sandbox --enable-background --screenshots docs/screenshots
 ```
 
 `--fresh` starts a new conversation and resets the demo workspace (also available as **Settings → Start over**).
 `--enable-background` clicks **Turn on background work** if it's off: passing it is your consent, as the button's
 explanation describes. Without it, the reminder and offline steps stop with a message when background work is off.
+`--sandbox` runs steps 7 to 9, approving each sandbox in the chat. `--sandbox-away` starts a new conversation, closes
+the tab while a new sandbox waits for approval, checks that nothing started, reopens the tab to approve it there, and
+asks something else while the sandbox works.
 
 ## How it works
 
@@ -168,21 +198,30 @@ flowchart LR
     API["HTTP API + SSE"]
     Conv["Conversation<br/>stock CopilotClient / CopilotSession"]
     Tools["defineTool handlers<br/>Gmail · Calendar · demo workspace"]
+    Sbx["Sandboxes<br/>managed.workers · artifacts · worker events"]
     Hook["/api/copilot-events<br/>verifyWebhook + handleActions"]
-    State[("SQLite: conversation pointer,<br/>sealed Google tokens, demo data")]
+    State[("SQLite: conversation pointer,<br/>sealed Google tokens, demo data,<br/>sandbox images")]
   end
   subgraph Platform["Managed Copilot"]
-    GW["Gateway: sessions, durable actions,<br/>schedules, webhooks"]
-    RT["Shared runtime"]
+    GW["Gateway: sessions, durable actions,<br/>schedules, webhooks, workers"]
+    RT["Shared runtime<br/>the assistant (orchestrator)"]
+    Py["assistant-python sandbox<br/>no network"]
+    Web["assistant-web sandbox<br/>github.com only"]
   end
   Google["Gmail / Calendar APIs"]
   UI <--> API
   API --> Conv
+  API --> Sbx
   Conv -- "bridge (WSS)" --> GW --> RT
   Conv --> Tools
+  RT -- "start_worker, after you approve" --> GW
+  GW --> Py
+  GW --> Web
+  Sbx -- "REST + events" --> GW
   GW -- "signed webhook" --> Hook --> Tools
   Tools --> Google
   Tools --> State
+  Sbx --> State
 ```
 
 **The conversation.** Each person has one session in the `assistant` environment. While a browser tab is open the
@@ -195,7 +234,36 @@ and reattaches. `session.idle` isn't persisted, so the timeline derives "still w
 so the runtime asks the client before running them. The UI shows exactly what will be sent or changed (for updates,
 the event as it is today), and your note on a denial goes back to the model. Read-only tools skip the prompt. Every
 side effect is recorded by tool call ID before it runs, so a replayed or duplicated call returns the recorded result
-instead of sending twice, and an interrupted call is reported as uncertain rather than retried blindly.
+instead of sending twice, and an interrupted call is reported as uncertain rather than retried blindly. Starting a
+sandbox asks the same way (see **Sandboxes**).
+
+**Sandboxes.** The `assistant` environment is an `orchestrator` (spec section 17), so besides this app's tools its
+agent has the platform's worker tools. A sandbox is a worker: its own session of one of the declared isolated
+environments, in its own sandbox. It can't see the conversation or use this app's tools, so the agent passes it the
+data it needs in its task (for example the calendar events, as CSV). The agent's instructions keep sandboxes for
+hands-on work (computation, charts and files, research on the web), send follow-ups on a sandbox's work to that same
+sandbox (`message_worker`, shown as **reused**), and start a new one only for independent work or another kind of
+sandbox, which the platform's own prompt describes from each environment's `description`. It keeps a sandbox after it
+answers, since follow-ups are common, and stops one (`stop_worker`) once it can't help any more: a web research sandbox
+after its report, a topic the person moved on from, or the least useful one when it needs room for another.
+
+- **Asking first.** `start_worker` asks for permission, because approving it approves what the sandbox does in its
+  sandbox. This app shows it as an approval card with the sandbox's environment, size, network, and exact task, and
+  only the person answers it: the webhook and the poller never answer permission requests, so a sandbox a scheduled
+  run wants waits until you're back (the platform keeps the request and delivers it again when the app resumes the
+  conversation). The platform then answers the sandbox's own shell and file prompts within that approval.
+- **Following them.** The server uses public SDK calls only, and never attaches a client to a sandbox (an attached
+  client would answer its prompts): `managed.workers(session).list()`, `managed.on("worker.started" | "worker.idle"
+  | "worker.failed" | "worker.stopped")`, `managed.sessions.get(worker.id)` for its sandbox, and
+  `managed.artifacts(worker.id)` for the files it published from `/workspace/outputs`. The events prompt a fresh
+  listing, and each card's time comes from those listings, matched to the sandbox's messages by number rather than by
+  comparing clocks (an event can arrive late after a reconnect); times are kept in the server's store. Images are
+  copied there too, so a chart stays in the chat after its sandbox is deleted; the route that serves them answers only
+  this app's pages and sends a sandboxing Content Security Policy.
+- **Talking while they work.** While a turn runs (for example while the agent waits for a sandbox), new messages are
+  sent with `mode: "immediate"`, so the assistant answers them right away; the sandbox keeps working.
+- **Older conversations.** A conversation created before the environment was an orchestrator can't start sandboxes;
+  the side panel says so and points to **Settings → Start over**, and the app refuses a start without asking.
 
 **Schedules.** The agent creates reminders and recurring jobs with the platform's scheduling tools; they always target
 this conversation. When one fires, the platform delivers its prompt with `source: "system"`, which the UI shows as a
@@ -222,8 +290,8 @@ durable action and the platform POSTs `session.action_required` to the webhook. 
 checks that the event is for **its own conversation** (a webhook serves an environment, which other people's sessions
 share), and calls `event.handleActions({ tools })`. It also polls `managed.sessions.get()` /
 `managed.sessions.handleActions()` on startup and every minute while detached, to catch anything a webhook missed.
-Neither path answers permission requests, so a send or calendar change waits for you; it shows up as an approval card
-when you return.
+Neither path answers permission requests, so a send, a calendar change, or a new sandbox waits for you; it shows up
+as an approval card when you return.
 
 **Untrusted content.** Email bodies are data, not instructions: the system prompt says so, and every consequential
 action still needs your approval, with the full message or event in front of you.
@@ -242,9 +310,11 @@ logs. Google tokens are sealed with AES-256-GCM and bound to their purpose.
 | [`src/server/timeline.ts`](src/server/timeline.ts) | SDK session events → chat timeline |
 | [`src/server/offline.ts`](src/server/offline.ts) | Webhook handler and polling reconciliation |
 | [`src/server/schedules.ts`](src/server/schedules.ts) | `managed.schedules` for the side panel |
+| [`src/server/sandboxes.ts`](src/server/sandboxes.ts) | The conversation's sandboxes: their state, outputs (images kept), each card's timing, and the output route |
+| [`src/server/environments.ts`](src/server/environments.ts) | The kinds of sandbox, from the deployment's worker environments |
 | [`src/server/background.ts`](src/server/background.ts) | Background work status, one-click turn on and off (`/v1/credentials/background`) |
 | [`src/server/tools/`](src/server/tools) | Tools, Google OAuth and REST clients, the demo workspace, free-time search |
-| [`src/web/`](src/web) | The web UI, styled with [`@managed-copilot/github-theme`](../../packages/github-theme) (Primer tokens, components, and Octicons); `src/web/src/dev/` is the development-only preview |
+| [`src/web/`](src/web) | The web UI, styled with [`@managed-copilot/github-theme`](../../packages/github-theme) (Primer tokens, components, and Octicons); sandbox cards are in `src/web/src/components/Sandbox.tsx` and `src/web/src/sandboxCards.ts`; `src/web/src/dev/` is the development-only preview |
 | [`scripts/happy-path.ts`](scripts/happy-path.ts) | The automated journey and screenshot capture |
 | [`test/`](test) | Unit tests (`pnpm --filter @managed-copilot/demo-assistant test`) |
 
@@ -252,4 +322,10 @@ logs. Google tokens are sealed with AES-256-GCM and bound to their purpose.
 
 - It's a personal assistant: one person per server, signed in as the GitHub account the server runs with.
 - Browser notifications need an open tab; there is no web push.
-- The demo workspace is sample data for a fictional company; nothing in it is delivered anywhere.
+- The demo workspace is sample data for a fictional company; nothing in it is delivered anywhere. The upcoming
+  interview's candidate points at [@octocat](https://github.com/octocat), GitHub's own public demo account.
+- Sandboxes can't use your mail or calendar; the assistant passes them what they need. The Python sandbox has no network
+  and only Python's standard library, so it draws charts as SVG.
+- At most three sandboxes exist at once, idle ones included; the assistant stops the ones it no longer needs.
+- Images are copied the moment a sandbox publishes them, so they stay in the chat after it is deleted; a sandbox
+  stopped in that same moment can still take a chart with it. Other files are available only while the sandbox exists.

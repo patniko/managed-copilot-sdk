@@ -46,6 +46,9 @@ const PEOPLE = {
   alex: { name: "Alex Chen", email: "alex.chen@example.org" },
 } as const;
 
+/** The upcoming interview's candidate (fictional). The GitHub handle is GitHub's own public demo account. */
+export const CANDIDATE = { name: "Robin Okafor", github: "@octocat" } as const;
+
 function firstName(name: string): string {
   return name.trim().split(/\s+/)[0] || "there";
 }
@@ -274,7 +277,14 @@ export function seedWorkspace(now: Date, timeZone: string, owner: SeedOwner): { 
 
   events.push(
     event({ title: "Design review: onboarding", start: at(b1, 10, 0), end: at(b1, 11, 0), location: "Room 2.1", attendees: [PEOPLE.morgan.email, PEOPLE.sam.email], organizer: PEOPLE.morgan.email }),
-    event({ title: "Interview: Senior Backend Engineer", start: at(b1, 14, 0), end: at(b1, 14, 45), location: "Video call" }),
+    event({
+      title: "Interview: Senior Backend Engineer",
+      start: at(b1, 14, 0),
+      end: at(b1, 14, 45),
+      location: "Video call",
+      attendees: [PEOPLE.morgan.email],
+      description: `Candidate: ${CANDIDATE.name} (GitHub: ${CANDIDATE.github}). Panel: you and Morgan. Focus: distributed systems and API design. Resume and scorecard are in the recruiting portal.`,
+    }),
     event({ title: "Customer call: Fabrikam", start: at(b2, 13, 0), end: at(b2, 14, 0), location: "Video call", attendees: [PEOPLE.taylor.email], organizer: PEOPLE.taylor.email }),
     event({ title: "Sprint planning", start: at(b2, 15, 0), end: at(b2, 16, 0), attendees: [PEOPLE.sam.email, PEOPLE.morgan.email] }),
     event({ title: "Roadmap sync", start: at(b3, 11, 0), end: at(b3, 12, 0), attendees: [PEOPLE.priya.email, PEOPLE.sam.email], organizer: PEOPLE.priya.email }),
@@ -284,5 +294,61 @@ export function seedWorkspace(now: Date, timeZone: string, owner: SeedOwner): { 
   );
 
   events.sort((a, b) => a.start.getTime() - b.start.getTime());
-  return { mail: mails, events };
+  return { mail: mails, events: [...pastMeetings(now, timeZone, event), ...events] };
+}
+
+/**
+ * The last four weeks of meetings, so questions about meeting load have history to work with. Each week (the seven
+ * days ending yesterday, the seven before, ...) has the same recurring meetings (9 hours); hiring adds interviews and
+ * debriefs: none four weeks ago, then one, three, and five, plus a hiring sync last week (9, 10, 12, and 15 hours).
+ */
+function pastMeetings(now: Date, timeZone: string, event: (entry: Omit<SeedEvent, "id" | "allDay" | "attendees"> & Partial<Pick<SeedEvent, "attendees">>) => SeedEvent): SeedEvent[] {
+  const at = (day: Date, hour: number, minute = 0) => atTime(day, hour, minute, timeZone);
+  const team = [PEOPLE.sam.email, PEOPLE.morgan.email];
+  const interviewsPerWeek = [5, 3, 1, 0];
+  const roles = ["Senior Backend Engineer", "Frontend Engineer", "Product Designer", "Senior Backend Engineer", "Site Reliability Engineer"];
+  const meetings: SeedEvent[] = [];
+  for (let week = 0; week < 4; week++) {
+    // The weekdays among days 1-7 (week 0), 8-14 (week 1), ... before today, oldest first.
+    const weekdays: Date[] = [];
+    for (let daysAgo = week * 7 + 7; daysAgo > week * 7; daysAgo--) {
+      const day = addDays(now, -daysAgo, timeZone);
+      const weekday = zonedParts(day, timeZone).weekday;
+      if (weekday !== 0 && weekday !== 6) weekdays.push(day);
+    }
+    for (const day of weekdays) {
+      const weekday = zonedParts(day, timeZone).weekday;
+      meetings.push(event({ title: "Team standup", start: at(day, 9, 30), end: at(day, 9, 45), location: "Video call", attendees: team, organizer: PEOPLE.priya.email }));
+      switch (weekday) {
+        case 1:
+          meetings.push(event({ title: "Weekly planning", start: at(day, 10, 0), end: at(day, 11, 0), attendees: team }));
+          break;
+        case 2:
+          meetings.push(event({ title: "1:1 with Priya", start: at(day, 11, 0), end: at(day, 11, 30), attendees: [PEOPLE.priya.email], organizer: PEOPLE.priya.email }));
+          meetings.push(event({ title: "Customer call: Fabrikam", start: at(day, 13, 0), end: at(day, 14, 0), location: "Video call", attendees: [PEOPLE.taylor.email], organizer: PEOPLE.taylor.email }));
+          break;
+        case 3:
+          meetings.push(event({ title: "Roadmap sync", start: at(day, 11, 0), end: at(day, 12, 0), attendees: [PEOPLE.priya.email, PEOPLE.sam.email], organizer: PEOPLE.priya.email }));
+          meetings.push(event({ title: "Sprint planning", start: at(day, 15, 0), end: at(day, 16, 0), attendees: team }));
+          break;
+        case 4:
+          meetings.push(event({ title: "Design review", start: at(day, 10, 0), end: at(day, 11, 0), location: "Room 2.1", attendees: team, organizer: PEOPLE.morgan.email }));
+          meetings.push(event({ title: "Architecture office hours", start: at(day, 14, 0), end: at(day, 15, 15), location: "Room 4.2" }));
+          break;
+        case 5:
+          meetings.push(event({ title: "Demo day", start: at(day, 15, 0), end: at(day, 16, 0), attendees: team }));
+          break;
+      }
+    }
+    // Interviews (45 minutes) with a 15-minute debrief, on different days late in the afternoon.
+    const order = [1, 3, 0, 2, 4];
+    for (let index = 0; index < interviewsPerWeek[week]!; index++) {
+      const day = weekdays[order[index]! % weekdays.length]!;
+      const role = roles[(week * 2 + index) % roles.length]!;
+      meetings.push(event({ title: `Interview: ${role}`, start: at(day, 16, 15), end: at(day, 17, 0), location: "Video call", attendees: [PEOPLE.morgan.email] }));
+      meetings.push(event({ title: "Interview debrief", start: at(day, 17, 0), end: at(day, 17, 15), attendees: [PEOPLE.morgan.email], organizer: PEOPLE.morgan.email }));
+    }
+    if (week === 0) meetings.push(event({ title: "Hiring sync", start: at(weekdays[0]!, 14, 0), end: at(weekdays[0]!, 15, 0), attendees: [PEOPLE.priya.email, PEOPLE.morgan.email], organizer: PEOPLE.priya.email }));
+  }
+  return meetings.sort((a, b) => a.start.getTime() - b.start.getTime());
 }

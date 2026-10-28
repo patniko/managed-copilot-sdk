@@ -2,6 +2,7 @@ import { CheckIcon, ClockIcon, CommentIcon, LocationIcon, PeopleIcon, ShieldChec
 import { useState, type ReactNode } from "react";
 import type { ApprovalItem, ApprovalPreview, ToolItem } from "../../../shared/protocol";
 import { dayLabel, timeOf, timeRange } from "../format";
+import { SANDBOX_ICONS } from "./Sandbox";
 import { cx, Spinner } from "./ui";
 
 const LABELS: Record<string, { approve: string; deny: string }> = {
@@ -9,6 +10,7 @@ const LABELS: Record<string, { approve: string; deny: string }> = {
   create_event: { approve: "Add to calendar", deny: "Don't add" },
   update_event: { approve: "Save changes", deny: "Keep as is" },
   delete_event: { approve: "Cancel event", deny: "Keep event" },
+  start_worker: { approve: "Start sandbox", deny: "Don't start" },
 };
 
 function when(start: string | undefined, end: string | undefined, timeZone: string): string | undefined {
@@ -125,6 +127,38 @@ const RESOLVED = {
   expired: { label: "No longer waiting", className: "Label--secondary", icon: ClockIcon },
 } as const;
 
+/** Starting a sandbox: which kind, what it can reach, and the exact task it gets. */
+function SandboxPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "sandbox" }> }) {
+  const KindIcon = SANDBOX_ICONS[preview.kind];
+  const reach =
+    preview.network === "network off"
+      ? "It runs in its own sandbox with no network, and can't use your mail or calendar."
+      : preview.network?.startsWith("can reach")
+        ? "It runs in its own sandbox, can reach only the hosts above, and can't use your mail or calendar."
+        : "It runs in its own sandbox and can't use your mail or calendar.";
+  return (
+    <div className="space-y-2" data-testid="sandbox-approval">
+      <div className="flex items-start gap-2">
+        <KindIcon className="mt-0.5 shrink-0 text-fg-muted" />
+        <div className="min-w-0 break-words">
+          <span className="font-semibold">{preview.worker}</span>
+          {[preview.environment, preview.size, preview.network, preview.agent ? `agent ${preview.agent}` : undefined, preview.model].filter(Boolean).map((part) => (
+            <span key={part} className="text-fg-muted">
+              {" · "}
+              {part}
+            </span>
+          ))}
+        </div>
+      </div>
+      <Well className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+        <span className="text-fg-muted">Task: </span>
+        {preview.task || "(no task given)"}
+      </Well>
+      <p className="text-xs text-fg-muted">{reach} Approving lets it run code and save files there until your assistant stops it.</p>
+    </div>
+  );
+}
+
 /**
  * "Allow this action?": a consequential tool call (sending mail, changing the calendar) waits here for the person,
  * like a pull request's merge box. Resolved cards keep the decision and the call's outcome.
@@ -169,6 +203,7 @@ export function ApprovalCard({
         <div className="Box-body p-3">
           {item.preview.type === "email" && <EmailPreview preview={item.preview} />}
           {item.preview.type === "event" && <EventPreview preview={item.preview} pending={pending} />}
+          {item.preview.type === "sandbox" && <SandboxPreview preview={item.preview} />}
           {item.preview.type === "generic" && (
             <Well className="overflow-x-auto">
               <pre className="font-mono text-xs">{item.preview.summary}</pre>

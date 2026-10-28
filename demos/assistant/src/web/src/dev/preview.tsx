@@ -6,9 +6,23 @@
  */
 import { BeakerIcon, TriangleDownIcon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
-import type { ApprovalItem, BackgroundView, ConversationStatus, ScheduleView, ServerEvent, Snapshot, TimelineItem, ToolIcon, ToolItem } from "../../../shared/protocol";
+import type {
+  ApprovalItem,
+  ApprovalPreview,
+  BackgroundView,
+  ConversationStatus,
+  SandboxState,
+  SandboxWorkerView,
+  ScheduleView,
+  ServerEvent,
+  Snapshot,
+  TimelineItem,
+  ToolIcon,
+  ToolItem,
+  WorkerItem,
+} from "../../../shared/protocol";
 import { Menu } from "../components/ui";
-import { createSnapshot, PREVIEW_REPLY, VARIANTS, type Variant } from "./fixtures";
+import { chartDataUrl, createSnapshot, PREVIEW_REPLY, VARIANTS, type Variant } from "./fixtures";
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const nowIso = () => new Date().toISOString();
@@ -166,6 +180,9 @@ class PreviewServer {
       case "offline":
         this.#snapshot = { ...snapshot, offline: event.offline };
         return;
+      case "sandboxes":
+        this.#snapshot = { ...snapshot, sandboxes: event.sandboxes };
+        return;
       case "notify":
         return;
     }
@@ -213,10 +230,17 @@ class PreviewServer {
     if (method === "POST" && path === "/api/demo/reset") return json({ ok: true });
     if (method === "POST" && path === "/api/conversation/reset") {
       this.#cancelAll(true);
-      const { conversation } = this.#snapshot;
+      const { conversation, sandboxes } = this.#snapshot;
       this.#emit({
         type: "snapshot",
-        snapshot: { ...this.#snapshot, timeline: [], lastReadAt: undefined, conversation: { ...conversation, busy: false, sessionId: undefined }, schedules: [] },
+        snapshot: {
+          ...this.#snapshot,
+          timeline: [],
+          lastReadAt: undefined,
+          conversation: { ...conversation, busy: false, sessionId: undefined },
+          schedules: [],
+          sandboxes: { ...sandboxes, enabled: sandboxes.environments.length > 0, unavailable: undefined, workers: [], runs: {} },
+        },
       });
       return json({ ok: true });
     }
@@ -304,6 +328,10 @@ class PreviewServer {
       })();
     } else {
       this.#emit({ type: "item", item: { ...item, status: "approved", actionable: false, decidedAt: nowIso() } });
+      if (item.preview.type === "sandbox") {
+        void this.#runSandbox(turn, item, item.preview);
+        return json({ ok: true });
+      }
       void (async () => {
         const outcome = outcomeFor(item);
         const tool: ToolItem = { kind: "tool", id: id.replace(/^approval:/, ""), at: nowIso(), name: outcome.name, icon: outcome.icon, title: outcome.running, status: "running" };
@@ -316,6 +344,54 @@ class PreviewServer {
       })();
     }
     return json({ ok: true });
+  }
+
+  /** An approved sandbox: its card, then the sandbox starting, working, and finishing with a report (and a chart). */
+  async #runSandbox(turn: Turn, approval: ApprovalItem, preview: Extract<ApprovalPreview, { type: "sandbox" }>): Promise<void> {
+    const cardId = approval.id.replace(/^approval:/, "");
+    const workerId = `wk-${++this.#seq}`;
+    const existing = this.#snapshot.timeline.find((entry): entry is WorkerItem => entry.kind === "worker" && entry.id === cardId);
+    const card: WorkerItem = existing ?? { kind: "worker", id: cardId, at: approval.at, action: "start", worker: preview.worker, environment: preview.environment, text: preview.task, status: "running" };
+    await delay(500);
+    if (turn.cancelled) return;
+    const endedAt = nowIso();
+    this.#emit({ type: "item", item: { ...card, status: "succeeded", workerId, endedAt } });
+    const sandboxes = () => this.#snapshot.sandboxes;
+    const update = (state: SandboxState, extra: Partial<SandboxWorkerView> = {}) => {
+      const current = sandboxes();
+      const others = current.workers.filter((worker) => worker.id !== workerId);
+      const previous = current.workers.find((worker) => worker.id === workerId);
+      const worker: SandboxWorkerView = {
+        id: workerId,
+        name: preview.worker,
+        environment: preview.environment,
+        messages: 1,
+        createdAt: previous?.createdAt ?? endedAt,
+        outputs: [],
+        ...previous,
+        ...extra,
+        state,
+        updatedAt: nowIso(),
+      };
+      return { ...current, workers: [...others, worker] };
+    };
+    this.#emit({ type: "sandboxes", sandboxes: { ...update("starting", { sandboxState: "provisioning" }), runs: { ...sandboxes().runs, [cardId]: { workerId, startedAt: endedAt } } } });
+    await delay(1500);
+    if (turn.cancelled) return;
+    this.#emit({ type: "sandboxes", sandboxes: update("working", { sandboxState: "running" }) });
+    await delay(3500);
+    if (turn.cancelled) return;
+    const finishedAt = nowIso();
+    const chart =
+      preview.kind === "python"
+        ? [{ id: `art-${++this.#seq}`, path: "chart.svg", version: 1, size: 2048, contentType: "image/svg+xml", publishedAt: finishedAt, image: true, url: chartDataUrl("Preview chart", ["A", "B", "C"], [{ name: "Values", color: "#0969da", values: [3, 5, 4] }]) }]
+        : [];
+    this.#emit({
+      type: "sandboxes",
+      sandboxes: { ...update("idle", { outputs: chart }), runs: { ...sandboxes().runs, [cardId]: { workerId, startedAt: endedAt, finishedAt, outcome: "idle" } } },
+    });
+    await this.#stream(turn, preview.kind === "python" ? "This is **preview data**: in the running app, the sandbox's report and chart (**chart.svg**) would be here." : "This is **preview data**: in the running app, the sandbox's research report would be summarized here.");
+    this.#end(turn);
   }
 
   #retry(): Response {
