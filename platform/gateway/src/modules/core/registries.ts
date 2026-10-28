@@ -33,7 +33,9 @@ export class PlatformTools implements PlatformToolRegistry {
   register(definition: PlatformToolInput): () => void {
     if (!TOOL_NAME.test(definition.name)) throw new Error(`Invalid platform tool name "${definition.name}"`);
     if (this.#tools.has(definition.name)) throw new Error(`Platform tool "${definition.name}" is already registered`);
+    if (definition.recover && definition.replay !== "never") throw new Error(`Platform tool "${definition.name}" has a recover hook, which only applies with replay: "never"`);
     const handler = definition.handler;
+    const recover = definition.recover;
     const tool: RegisteredPlatformTool = {
       name: definition.name,
       description: definition.description,
@@ -41,6 +43,8 @@ export class PlatformTools implements PlatformToolRegistry {
       skipPermission: definition.skipPermission ?? true,
       ...(definition.overridesBuiltInTool ? { overridesBuiltInTool: true } : {}),
       ...(definition.appliesTo ? { appliesTo: definition.appliesTo } : {}),
+      ...(definition.replay ? { replay: definition.replay } : {}),
+      ...(recover ? { recover: async (args: unknown, context: PlatformToolCallContext) => toToolResult(await recover(args, context)) } : {}),
       enabledFor: definition.enabledFor ?? (() => true),
       handler: async (args: unknown, context: PlatformToolCallContext) => toToolResult(await handler(args, context)),
     };
