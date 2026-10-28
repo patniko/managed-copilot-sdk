@@ -154,6 +154,7 @@ export function registerSandboxRoutes(app: GatewayApp, options: { service: Sandb
       waitMs,
       ...(body.stdin !== undefined ? { stdin: body.stdin } : {}),
       caller: caller(ctx),
+      startSignal: closed(ctx),
     });
   });
 

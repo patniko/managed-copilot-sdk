@@ -152,6 +152,8 @@ export class SandboxExecs {
     const background = options.background === true;
     this.#deps.expectSandbox(sessionId, options.sandboxId);
     const agent = await this.#deps.agentFor(sessionId, options.sandboxId);
+    // A caller that went away while the sandbox started never starts the command.
+    if (options.startSignal?.aborted || options.signal?.aborted) throw new ManagedCopilotError("invalid_request", "The call that would run this command was cancelled before it started; it was not run.", { execId: id });
     const sandbox = this.#deps.row(sessionId);
     const key = `${sandbox.id}\0${id}`;
     await this.#starting.get(key)?.catch(() => undefined);
@@ -362,7 +364,13 @@ export class SandboxExecs {
   }
 
   async stop(sessionId: string, execId: string, options: FileCallOptions & { readonly reason?: string } = {}): Promise<ExecInfo> {
-    const row = this.#current(sessionId, execId, options);
+    let row = this.#current(sessionId, execId, options);
+    // A start in flight finishes first, so the stop reaches the command it started rather than racing it.
+    const starting = this.#starting.get(`${row.sandboxId}\0${row.id}`);
+    if (starting) {
+      await starting.catch(() => undefined);
+      row = this.#deps.store.exec(row.sandboxId, row.id) ?? row;
+    }
     if (!live(row.state)) return execInfo(row);
     const sandbox = this.#deps.row(sessionId);
     // A stopped sandbox stopped its commands; nothing to start for it.

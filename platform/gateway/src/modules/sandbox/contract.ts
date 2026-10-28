@@ -175,6 +175,11 @@ export interface ExecOptions {
    * command that is not `background` is stopped with it (its process group killed); the call answers with its record.
    */
   readonly signal?: AbortSignal;
+  /**
+   * Aborted when the caller went away (an HTTP request closed): a command not yet started by then never starts. Unlike
+   * `signal`, it never stops a command that started.
+   */
+  readonly startSignal?: AbortSignal;
   /** See `FileCallOptions.sandboxId`. */
   readonly sandboxId?: string;
   /** Recorded with the command: the owner through the API, or the platform tool that ran it (and the calling sub-agent). */

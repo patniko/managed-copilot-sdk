@@ -320,6 +320,15 @@ describe("SandboxService commands", () => {
     expect(await service.exec(row.sessionId, "echo later", { id: "refused" })).toMatchObject({ state: "completed", output: "later\n" });
   });
 
+  it("never starts a command whose caller went away while its sandbox started", async () => {
+    const row = await create();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(service.exec(row.sessionId, "echo never", { id: "gone-caller", startSignal: controller.signal })).rejects.toMatchObject({ code: "invalid_request" });
+    expect(sandboxd.starts).toEqual([]);
+    expect(service.listExecs(row.sessionId)).toEqual([]);
+  });
+
   it("answers at its deadline while a command keeps printing", async () => {
     const row = await create();
     sandboxd.chatty = true;
