@@ -65,6 +65,8 @@ pnpm gallery            # opens http://localhost:7460; add --no-azure to hide th
 ```
 
 - [ ] Header shows the local gateway as up.
+- [ ] The **Patterns** row shows the three building blocks and six pattern cards; each card's walkthrough link jumps
+  to its walkthrough below.
 - [ ] Dispatch, Software factory, Assistant, and Operator console cards each have a green **Local** dot.
 
 Open each app from its **Local** button and run the checks below.

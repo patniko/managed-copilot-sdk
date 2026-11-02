@@ -22,6 +22,7 @@ flowchart LR
   end
   subgraph Many["Many agents"]
     W11["11 · workers in parallel"]
+    W12["12 · direct and mixed"]
     W13["13 · your own harness"]
   end
   Basics --> Where --> Build --> Cloud

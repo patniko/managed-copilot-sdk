@@ -1,10 +1,11 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { APPS, WALKTHROUGHS, type GalleryState } from "../src/shared/catalog.js";
+import { APPS, BUILDING_BLOCKS, PATTERNS, WALKTHROUGHS, type GalleryState } from "../src/shared/catalog.js";
 import { createGallery, type CloudLookup, type GalleryOptions } from "../src/server/gallery.js";
 import { capture, cloudUrls, isLocalUrl, localUrls, normalizeGatewayUrl, probe } from "../src/server/targets.js";
 
@@ -57,6 +58,37 @@ describe("links", () => {
   it("has a unique id for every app and walkthrough", () => {
     const ids = [...APPS.map((app) => app.id), ...WALKTHROUGHS.map((w) => `sample-${w.id}`)];
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe("patterns", () => {
+  const apphost = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
+  /** An environment's declaration in the root AppHost: one line, or a block closed at the same indent. */
+  const declaration = (name: string) => apphost.match(new RegExp(`^( +)${name}: \\{(?:[^\\n]*\\},?|[\\s\\S]*?\\n\\1\\},?)`, "m"))?.[0];
+
+  it("lists the six patterns, made of the three building blocks", () => {
+    expect(PATTERNS.map((pattern) => pattern.id)).toEqual(["isolated", "shared", "promotable", "direct", "delegate", "mixed"]);
+    expect(new Set(PATTERNS.flatMap((pattern) => pattern.blocks))).toEqual(new Set(Object.keys(BUILDING_BLOCKS)));
+  });
+
+  it("links runnable walkthroughs and the gallery's apps", () => {
+    for (const pattern of PATTERNS) {
+      expect(WALKTHROUGHS.find((walkthrough) => walkthrough.id === pattern.walkthrough)?.runnable, pattern.id).toBe(true);
+      for (const demo of pattern.demos) expect(APPS.map((app) => app.id), pattern.id).toContain(demo.app);
+    }
+  });
+
+  it("names environments the root AppHost declares with each pattern's settings", () => {
+    expect(declaration("coder")).toBe('    coder: { type: "isolated", size: "medium" },');
+    for (const pattern of PATTERNS) {
+      const declared = declaration(pattern.environment);
+      expect(declared, pattern.environment).toBeDefined();
+      for (const setting of pattern.settings) expect(declared, pattern.environment).toContain(setting);
+      // A coordinator with no execution setting delegates, the default.
+      if (pattern.settings.includes('type: "orchestrator"') && !pattern.settings.some((setting) => setting.startsWith("execution:"))) {
+        expect(declared, pattern.environment).not.toContain("execution:");
+      }
+    }
   });
 });
 

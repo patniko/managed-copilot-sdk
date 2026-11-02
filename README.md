@@ -44,9 +44,10 @@ on your machine, and `aspire deploy` puts the same AppHost on Azure Container Ap
 `CopilotClient` and `CopilotSession` objects, standard session events, and `defineTool` tools. What works today, end
 to end with real models:
 
-- **Shared, isolated, promotable, and orchestrator environments.** Chat on a shared runtime, coding agents in their
-  own sandboxes with setup, files, and artifacts, sessions that start cheap and move into a sandbox when they need
-  one, and coordinators that split work across workers, each in its own sandbox.
+- **Six patterns from three building blocks.** Single containers, a multi-tenant shared runtime, and container
+  orchestration combine into coding agents in their own sandboxes, chat on a shared runtime, sessions that start
+  cheap and move into a sandbox when they need one, and coordinators that drive a sandbox themselves, delegate to new
+  agents in sandboxes of their own, or do both.
 - **Policy you can see.** Per-environment network allowlists, and vault credentials applied at the egress proxy so
   secrets never enter a sandbox.
 - **Work that continues without you.** Tool calls wait durably and are answered later by your webhook or a poller;
@@ -79,49 +80,73 @@ to end with real models:
 
 More in [docs/architecture.md](docs/architecture.md): topology, protocol facts, and each module.
 
-## Environments
+## Three building blocks, six patterns
 
-| Type | What a session gets | Good for |
-| --- | --- | --- |
-| `shared` | A lightweight session on the shared runtime; its tools run inside your app | Chat agents and assistants |
-| `isolated` | Its own sandbox: a workspace, a shell, the packages you set up, and network rules you control | Coding agents, builds, data work |
-| `promotable` | Starts on the shared runtime, then moves into a sandbox as the same session when it needs one | Chats that sometimes need to run code |
-| `orchestrator` | A coordinator on the shared runtime that starts workers, each a session with its own sandbox, and waits for their reports | Parallel and multi-agent work |
+Every way the platform runs an agent comes from three building blocks: **single containers** (a sandbox per
+session), a **virtualized multi-tenant** runtime (one shared runtime process hosting many sessions), and **container
+orchestration** (sandboxes created, reused, and deleted while a session runs). Each pattern puts an agent's brain, its
+model loop, and its hands, the tools that act, in a different place:
+
+```mermaid
+flowchart LR
+  subgraph B["Three building blocks"]
+    direction TB
+    C["Single container<br/>a sandbox per session"]
+    MT["Virtualized multi-tenant<br/>the shared runtime"]
+    O["Container orchestration<br/>sandboxes created on demand"]
+  end
+  subgraph P["Six patterns"]
+    direction TB
+    I["Isolated"]
+    S["Shared"]
+    PR["Promotable"]
+    D["Direct"]
+    DL["Delegate"]
+    M["Mixed"]
+  end
+  C --> I
+  MT --> S
+  MT --> PR
+  C --> PR
+  MT --> D
+  MT --> DL
+  MT --> M
+  O --> D
+  O --> DL
+  O --> M
+```
+
+| Pattern | Its brain runs | Its hands act | Good for |
+| --- | --- | --- | --- |
+| **Isolated** | In its own sandbox | In the same sandbox: a workspace, a shell, your packages, your network rules | Coding agents, builds, data work |
+| **Shared** | On the shared runtime, beside other sessions | In your app: your tools, web fetches, remote MCP servers | Chat agents and assistants at volume |
+| **Promotable** | On the shared runtime, then once in its own sandbox, as the same session | In your app, then in that sandbox | Chats that sometimes need to run code |
+| **Direct** | On the shared runtime, with the stock sub-agents it starts | In a sandbox with no agent in it | Harnesses with their own planning that must not run code on their host |
+| **Delegate** | On the shared runtime, as a coordinator | Through new agent sessions, each in its own sandbox | Parallel, long-running parts: factories, research |
+| **Mixed** | On the shared runtime, as a coordinator | In its own sandbox, and through new agent sessions; the model picks for each part | One conversation with quick work and big work |
 
 ```ts
-// apphost.mts: declared once, picked by name with managed.client("coder")
+// apphost.mts: one environment per pattern, picked by name with managed.client("lead")
 await addManagedCopilot(builder, "copilot", {
   environments: {
-    chat:   { type: "shared", network: ["learn.microsoft.com"] },
-    coder:  { type: "isolated", size: "medium" },
-    helper: { type: "promotable", promoteTo: "coder" },
-    team:   { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
+    coder:    { type: "isolated", size: "medium" },
+    chat:     { type: "shared", network: ["learn.microsoft.com"] },
+    helper:   { type: "promotable", promoteTo: "coder" },
+    operator: { type: "orchestrator", workers: ["coder"], execution: "direct" },
+    team:     { type: "orchestrator", workers: ["coder"], maxWorkers: 3 },
+    lead:     { type: "orchestrator", workers: ["coder"], execution: "mixed", maxWorkers: 3 },
   },
 });
 ```
 
 An environment is a template; a client only picks one. Every `chat` session shares one runtime, every `coder` session
-gets its own new sandbox, a `helper` session moves once into a sandbox when it needs one, and a `team` session starts
-workers that each get a sandbox of their own. From live runs:
+gets its own new sandbox, and a `helper` session moves once into a sandbox when it needs one. `operator`, `team`, and
+`lead` sessions are coordinators that get sandboxes as their work needs them: one for their own hands, one per
+worker, or both.
 
-```mermaid
-flowchart LR
-  subgraph GW["Gateway"]
-    RT["Shared runtime<br/>(one process)"]
-  end
-  C1["chat session A"] --> RT
-  C2["chat session B"] --> RT
-  H["helper session"] -- "until promoted" --> RT
-  H -. "moves once" .-> S3["its own new sandbox<br/>(coder's image, size, setup)"]
-  K1["coder session 1"] --> S1["sandbox sbx_96fd…"]
-  K2["coder session 2"] --> S2["sandbox sbx_1635…"]
-  T["team session<br/>(coordinator)"] --> RT
-  T -. "start_worker" .-> W1["worker prime-counter<br/>sandbox sbx_85a3…"]
-  T -. "start_worker" .-> W2["worker fib-digits<br/>sandbox sbx_602b…"]
-```
-
-More in [environments](docs/concepts/environments.md), [sandboxes](docs/concepts/sandboxes.md), and the
-[orchestrator](docs/concepts/orchestrator.md).
+More in [patterns](docs/concepts/patterns.md) (how to choose, and the scenarios each one fits),
+[environments](docs/concepts/environments.md), [sandboxes](docs/concepts/sandboxes.md),
+[promotion](docs/concepts/promotion.md), and the [orchestrator](docs/concepts/orchestrator.md).
 
 ## The demos
 
@@ -237,7 +262,9 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 - **Every example in the spec runs as an automated check** against the real platform with real models. The first 13
   pass locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass. The orchestrator
-  example (14) passes locally and on Azure.
+  example (14) passes locally and on Azure. The direct-execution example (15) passes locally.
+- **All six patterns run with real models locally.** Isolated, shared, promotable, and delegate have also run on
+  Azure. Direct and mixed have not yet run there ([deployment](docs/deployment.md#live-qualification)).
 - **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
   sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
 - **The demos run end to end, locally and on Azure.** The factory runs in both modes: the classic pipeline, and the
@@ -252,10 +279,10 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 | | |
 | --- | --- |
-| [Start here](docs/README.md) | A learning path, ten visual concept pages, an "I want to…" index, and a glossary |
+| [Start here](docs/README.md) | A learning path, twelve visual concept pages, an "I want to…" index, and a glossary |
 | [Demo walkthrough](docs/walkthrough.md) | Every demo locally, then deployed to Azure, then shared with teammates: commands and what to check |
-| [Walkthroughs](samples/README.md) | Ten hands-on walkthroughs with runnable code (`pnpm sample 01`) and real output |
-| [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
+| [Walkthroughs](samples/README.md) | Thirteen hands-on walkthroughs with runnable code (`pnpm sample 01`) and real output |
+| [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and two demos running for real. Recorded before the direct, delegate, and mixed patterns and Dispatch |
 | [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
 | [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail, Google Calendar, and sandboxes for hands-on work |

@@ -110,6 +110,118 @@ export const WALKTHROUGHS: readonly Walkthrough[] = [
 /** Screenshot file for an app or walkthrough, served at /shots/<file>. */
 export const shotFile = (id: string): string => `${id}.png`;
 
+/** The three building blocks every pattern is made of. */
+export type BuildingBlock = "container" | "multi-tenant" | "orchestration";
+
+export interface BuildingBlockEntry {
+  readonly title: string;
+  readonly description: string;
+}
+
+export const BUILDING_BLOCKS: Readonly<Record<BuildingBlock, BuildingBlockEntry>> = {
+  container: { title: "Single container", description: "A sandbox per session: a workspace, a shell, files, packages, and its own network rules." },
+  "multi-tenant": { title: "Virtualized multi-tenant", description: "The shared runtime: one process hosting many sessions, each with its own state and identity." },
+  orchestration: { title: "Container orchestration", description: "Sandboxes created, reused, and deleted on demand while a session runs." },
+};
+
+export interface PatternDemo {
+  /** An entry of APPS. */
+  readonly app: string;
+  /** Where in that app the pattern shows. */
+  readonly where: string;
+}
+
+export interface Pattern {
+  readonly id: string;
+  readonly title: string;
+  /** Where the agent's brain, its model loop, runs. */
+  readonly brain: string;
+  /** Where its hands, the tools that act, run. */
+  readonly hands: string;
+  readonly blocks: readonly BuildingBlock[];
+  /** The root AppHost's environment for this pattern: the only name that changes in code. */
+  readonly environment: string;
+  /** That environment's settings that make it this pattern, as `key: value` pairs from apphost.mts. */
+  readonly settings: readonly string[];
+  /** The walkthrough (an entry of WALKTHROUGHS) that runs it. */
+  readonly walkthrough: string;
+  readonly demos: readonly PatternDemo[];
+}
+
+/** The six patterns, in the order the docs present them (docs/concepts/patterns.md). */
+export const PATTERNS: readonly Pattern[] = [
+  {
+    id: "isolated",
+    title: "Isolated",
+    brain: "In its own sandbox",
+    hands: "In the same sandbox",
+    blocks: ["container"],
+    environment: "coder",
+    settings: ['type: "isolated"'],
+    walkthrough: "03",
+    demos: [{ app: "software-factory", where: "Classic mode" }],
+  },
+  {
+    id: "shared",
+    title: "Shared",
+    brain: "On the shared runtime, beside other sessions",
+    hands: "In your app: your tools, web fetches, remote MCP servers",
+    blocks: ["multi-tenant"],
+    environment: "chat",
+    settings: ['type: "shared"'],
+    walkthrough: "02",
+    demos: [{ app: "software-factory", where: "its planner and reviewer" }],
+  },
+  {
+    id: "promotable",
+    title: "Promotable",
+    brain: "On the shared runtime, then once in its own sandbox",
+    hands: "In your app, then in that sandbox",
+    blocks: ["multi-tenant", "container"],
+    environment: "helper",
+    settings: ['type: "promotable"', 'promoteTo: "coder"'],
+    walkthrough: "04",
+    demos: [],
+  },
+  {
+    id: "direct",
+    title: "Direct",
+    brain: "On the shared runtime, with the stock sub-agents it starts",
+    hands: "In a sandbox with no agent in it",
+    blocks: ["multi-tenant", "orchestration", "container"],
+    environment: "operator",
+    settings: ['type: "orchestrator"', 'execution: "direct"'],
+    walkthrough: "12",
+    demos: [{ app: "dispatch", where: "Work directly" }],
+  },
+  {
+    id: "delegate",
+    title: "Delegate",
+    brain: "On the shared runtime, as a coordinator",
+    hands: "Through new agent sessions, each in its own sandbox",
+    blocks: ["multi-tenant", "orchestration", "container"],
+    environment: "team",
+    settings: ['type: "orchestrator"'],
+    walkthrough: "11",
+    demos: [
+      { app: "dispatch", where: "Delegate to workers" },
+      { app: "software-factory", where: "Agent-led mode" },
+      { app: "assistant", where: "its sandboxes" },
+    ],
+  },
+  {
+    id: "mixed",
+    title: "Mixed",
+    brain: "On the shared runtime, as a coordinator",
+    hands: "In its own sandbox, and through new agent sessions; the model picks for each part",
+    blocks: ["multi-tenant", "orchestration", "container"],
+    environment: "lead",
+    settings: ['type: "orchestrator"', 'execution: "mixed"'],
+    walkthrough: "12",
+    demos: [{ app: "dispatch", where: "Mixed" }],
+  },
+];
+
 export type Target = "local" | "cloud";
 
 /**
