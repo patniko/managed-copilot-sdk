@@ -51,8 +51,8 @@ runs.
 | Pattern | Its brain runs | Its hands act | Built from | Declare it |
 | --- | --- | --- | --- | --- |
 | **Isolated** | In its own sandbox | In the same sandbox | Container | `{ type: "isolated" }` |
-| **Shared** | On the shared runtime, beside other sessions | In your app: your tools, web fetches, remote MCP servers | Multi-tenant | `{ type: "shared" }` |
-| **Promotable** | On the shared runtime, then once in its own sandbox | In your app, then in that sandbox | Multi-tenant, then a container | `{ type: "promotable", promoteTo: "coder" }` |
+| **Shared** | On the shared runtime, beside other sessions | Your tools in your app; web fetches and remote MCP servers through the gateway | Multi-tenant | `{ type: "shared" }` |
+| **Promotable** | On the shared runtime, then once in its own sandbox | Your tools in your app throughout, plus a shell and files once it moves | Multi-tenant, then a container | `{ type: "promotable", promoteTo: "coder" }` |
 | **Direct** | On the shared runtime, with the stock sub-agents it starts | In a sandbox with no agent in it | All three | `{ type: "orchestrator", workers: ["coder"], execution: "direct" }` |
 | **Delegate** | On the shared runtime, as a coordinator | Through new agent sessions, each in its own sandbox | All three | `{ type: "orchestrator", workers: ["coder"] }` |
 | **Mixed** | On the shared runtime, as a coordinator | In its own sandbox, and through new agent sessions in theirs; the model picks for each part | All three | `{ type: "orchestrator", workers: ["coder"], execution: "mixed" }` |
@@ -106,9 +106,10 @@ flowchart TD
 
 - **The same code.** `managed.client("<environment>")` returns a stock `CopilotClient`. Changing the pattern changes
   the environment name, not your code.
-- **The same sandbox, whatever created it.** A sandbox gets its environment's image, size, setup, network rules,
-  vaults, and idle timeout, whether a session was placed in it, moved into it, uses it as hands, or runs in it as a
-  worker.
+- **The same sandboxes, and permissions that never broaden.** Every sandbox gets its environment's image, size, and
+  setup, whether a session was placed in it, moved into it, uses it as hands, or runs in it as a worker. Network rules
+  and vaults only ever narrow: a worker or hands sandbox gets its environment's, and a promoted session keeps the ones
+  it started with, narrowed by its target's ([promotion](promotion.md)).
 - **The same controls.** Your `onPermissionRequest` approves the moves that cost or act: a promotion, a new worker, a
   command in a hands sandbox. The [operator console](local-and-azure.md#watch-it-run) and
   [Copilot CLI](copilot-cli.md) show and join sessions of every pattern.

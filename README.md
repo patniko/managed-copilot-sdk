@@ -119,8 +119,8 @@ flowchart LR
 | Pattern | Its brain runs | Its hands act | Good for |
 | --- | --- | --- | --- |
 | **Isolated** | In its own sandbox | In the same sandbox: a workspace, a shell, your packages, your network rules | Coding agents, builds, data work |
-| **Shared** | On the shared runtime, beside other sessions | In your app: your tools, web fetches, remote MCP servers | Chat agents and assistants at volume |
-| **Promotable** | On the shared runtime, then once in its own sandbox, as the same session | In your app, then in that sandbox | Chats that sometimes need to run code |
+| **Shared** | On the shared runtime, beside other sessions | Your tools in your app; web fetches and remote MCP servers through the gateway | Chat agents and assistants at volume |
+| **Promotable** | On the shared runtime, then once in its own sandbox, as the same session | Your tools in your app throughout, plus a shell and files once it moves | Chats that sometimes need to run code |
 | **Direct** | On the shared runtime, with the stock sub-agents it starts | In a sandbox with no agent in it | Harnesses with their own planning that must not run code on their host |
 | **Delegate** | On the shared runtime, as a coordinator | Through new agent sessions, each in its own sandbox | Parallel, long-running parts: factories, research |
 | **Mixed** | On the shared runtime, as a coordinator | In its own sandbox, and through new agent sessions; the model picks for each part | One conversation with quick work and big work |

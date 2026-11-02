@@ -26,7 +26,7 @@ The sandbox IDs come from a live run: two `coder` sessions created by one client
 | `shared` | In the one shared runtime, next to other sessions | Your app's tools, web fetches, and remote MCP servers; no shell, no files | Chat agents, assistants, high volume |
 | `isolated` | In its own new sandbox | A shell, files, packages, git, plus your app's tools | Coding agents, builds, data work |
 | `promotable` | Shared at first, then once in its own sandbox | Shared tools, then sandbox tools after the move | Chats that sometimes need to run code |
-| `orchestrator` | A coordinator on the shared runtime. Its `execution` setting picks how it works: it starts workers, each in its own sandbox (`delegate`, the default), acts in a sandbox itself (`direct`), or does both (`mixed`) | Tools to start, message, wait for, and stop workers; with `direct` or `mixed`, `bash`, `view`, `create`, and `edit` acting on its own sandbox | Jobs with parts that can run in parallel, and harnesses that must not run code on their host |
+| `orchestrator` | A coordinator on the shared runtime. Its `execution` setting picks how it works: it starts workers, each in its own sandbox (`delegate`, the default), acts in a sandbox itself (`direct`), or does both (`mixed`) | With `delegate` or `mixed`, tools to start, message, wait for, and stop workers; with `direct` or `mixed`, `bash`, `view`, `create`, `edit`, and the other built-in shell and file tools, acting on its own sandbox | Jobs with parts that can run in parallel, and harnesses that must not run code on their host |
 
 Four types and three execution styles make the six [patterns](patterns.md): isolated, shared, promotable, direct,
 delegate, and mixed.
