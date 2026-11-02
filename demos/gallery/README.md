@@ -1,7 +1,7 @@
 # Demo gallery
 
-One page with every demo and walkthrough, linked to your local platform and your Azure deployment. Use it as the
-starting point for a live demo.
+One page with the six patterns, every demo, and every walkthrough, linked to your local platform and your Azure
+deployment. Use it as the starting point for a live demo.
 
 ```powershell
 pnpm gallery
@@ -9,10 +9,15 @@ pnpm gallery
 
 It opens http://localhost:7460 in your browser.
 
-![The demo gallery: four app cards with Local and Azure buttons, and the walkthroughs below](docs/gallery.png)
+![The gallery's first row: the three building blocks, then six pattern cards, each with the managed.client call that picks it, where its brain and hands run, the apps that show it, and its walkthrough](docs/gallery.png)
 
 ## What's on it
 
+- **Patterns**: the three building blocks (single container, virtualized multi-tenant, container orchestration) and
+  the six patterns made from them: isolated, shared, promotable, direct, delegate, and mixed
+  ([patterns](../../docs/concepts/patterns.md)). Each card shows the `managed.client("<environment>")` call that picks
+  it in this repository's AppHost, where its brain and hands run, which apps show it (opened when they're up, their
+  README otherwise), and a link to its walkthrough below.
 - **Apps**: Dispatch, the software factory, the assistant, and the operator console. Each card has a **Local** and an
   **Azure** button with a live status dot, plus its README.
   - Green: it answered. Amber: **IP-restricted**: the deployed app refused this network, because its ingress allows
@@ -79,5 +84,6 @@ pnpm --filter @managed-copilot/demo-gallery build
 pnpm --filter @managed-copilot/demo-gallery test
 ```
 
-`src/shared/catalog.ts` lists the apps and walkthroughs. Add a demo there (with its Aspire resource name, local port,
-and health path), then capture its screenshot.
+`src/shared/catalog.ts` lists the patterns, apps, and walkthroughs. Add a demo there (with its Aspire resource name,
+local port, and health path), then capture its screenshot. A pattern names an environment of the root AppHost and the
+settings that make it that pattern; the tests check both against `apphost.mts`.

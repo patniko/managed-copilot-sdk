@@ -7,11 +7,28 @@ import {
   DeviceDesktopIcon,
   LinkExternalIcon,
   MarkGithubIcon,
+  StackIcon,
   SyncIcon,
   TerminalIcon,
 } from "@primer/octicons-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { APPS, CONSOLE, shotFile, WALKTHROUGHS, type AppEntry, type GalleryState, type Health, type Link, type Target, type TargetState, type Walkthrough } from "../shared/catalog.js";
+import {
+  APPS,
+  BUILDING_BLOCKS,
+  CONSOLE,
+  PATTERNS,
+  shotFile,
+  WALKTHROUGHS,
+  type AppEntry,
+  type BuildingBlock,
+  type GalleryState,
+  type Health,
+  type Link,
+  type Pattern,
+  type Target,
+  type TargetState,
+  type Walkthrough,
+} from "../shared/catalog.js";
 
 const POLL_MS = 15_000;
 const TARGET_NAME: Record<Target, string> = { local: "Local", cloud: "Azure" };
@@ -171,7 +188,7 @@ function WalkthroughCard({ walkthrough, state }: { readonly walkthrough: Walkthr
   const cloudUrl = state?.cloud.gatewayUrl;
   const readme = `${state?.repoUrl ?? ""}samples/${walkthrough.folder}/README.md`;
   return (
-    <article className="card Box overflow-hidden flex flex-col">
+    <article id={`walkthrough-${walkthrough.id}`} className="card Box overflow-hidden flex flex-col scroll-mt-6">
       <Shot id={`sample-${walkthrough.id}`} alt={`Walkthrough ${walkthrough.id}: ${walkthrough.title}`} href={readme} />
       <div className="p-4 flex flex-col gap-1 grow">
         <div className="flex items-center gap-2 text-fg-muted text-xs">
@@ -195,6 +212,78 @@ function WalkthroughCard({ walkthrough, state }: { readonly walkthrough: Walkthr
           <BookIcon size={16} />
           <span>README</span>
         </a>
+      </div>
+    </article>
+  );
+}
+
+const BLOCK_ORDER = Object.keys(BUILDING_BLOCKS) as BuildingBlock[];
+const BLOCK_LABEL: Record<BuildingBlock, string> = { container: "Label--accent", "multi-tenant": "Label--success", orchestration: "Label--done" };
+
+function BlockLabel({ block }: { readonly block: BuildingBlock }) {
+  return (
+    <span className={`Label ${BLOCK_LABEL[block]}`} title={BUILDING_BLOCKS[block].description}>
+      {BUILDING_BLOCKS[block].title}
+    </span>
+  );
+}
+
+/** The app's running copy (local first), or its README when neither target answers. */
+function appHref(app: AppEntry, state?: GalleryState): { readonly href: string; readonly online: boolean } {
+  const online = [state?.local?.links[app.id], state?.cloud.links[app.id]].find((link) => link?.health === "online");
+  return online ? { href: online.url, online: true } : { href: `${state?.repoUrl ?? ""}${app.readme}`, online: false };
+}
+
+function PatternCard({ pattern, state }: { readonly pattern: Pattern; readonly state?: GalleryState }) {
+  const blocks = BLOCK_ORDER.filter((block) => pattern.blocks.includes(block));
+  return (
+    <article className="card Box p-4 flex flex-col gap-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-base font-semibold leading-snug">{pattern.title}</h3>
+        <code className="inline-code text-xs" title={`apphost.mts: ${pattern.environment}: { ${pattern.settings.join(", ")}, … }`}>
+          managed.client("{pattern.environment}")
+        </code>
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt className="text-fg-muted">Brain</dt>
+        <dd>{pattern.brain}</dd>
+        <dt className="text-fg-muted">Hands</dt>
+        <dd>{pattern.hands}</dd>
+      </dl>
+      <div className="flex flex-wrap gap-1">
+        {blocks.map((block) => (
+          <BlockLabel key={block} block={block} />
+        ))}
+      </div>
+      <div className="mt-auto flex flex-col gap-3 pt-1">
+        {pattern.demos.length > 0 ? (
+          <p className="text-sm text-fg-muted">
+            See it in{" "}
+            {pattern.demos.map((demo, index) => {
+              const app = APPS.find((entry) => entry.id === demo.app);
+              if (!app) return null;
+              const { href, online } = appHref(app, state);
+              return (
+                <span key={`${demo.app}-${demo.where}`}>
+                  {index === 0 ? null : index < pattern.demos.length - 1 ? ", " : pattern.demos.length === 2 ? " and " : ", and "}
+                  <a className="Link" href={href} target="_blank" rel="noreferrer" title={online ? `Open ${app.title}` : `${app.title} isn't answering; this opens its README`}>
+                    {app.title}
+                  </a>{" "}
+                  ({demo.where})
+                </span>
+              );
+            })}
+            .
+          </p>
+        ) : (
+          <p className="text-sm text-fg-muted">A walkthrough for now; no demo app uses it yet.</p>
+        )}
+        <div>
+          <a className="btn btn-sm inline-flex items-center gap-2" href={`#walkthrough-${pattern.walkthrough}`} title={`Walkthrough ${pattern.walkthrough}: its commands are below`}>
+            <TerminalIcon size={16} />
+            <span>Walkthrough {pattern.walkthrough}</span>
+          </a>
+        </div>
       </div>
     </article>
   );
@@ -258,8 +347,8 @@ export function App() {
           <h1 className="text-2xl font-semibold">Demo gallery</h1>
           <p className="mt-2 max-w-3xl text-base text-fg-muted">
             {hosted
-              ? "Every demo and walkthrough in this Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."
-              : "Every demo and walkthrough in one place, on this machine and in your Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."}
+              ? "The six patterns, and every demo and walkthrough in this Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."
+              : "The six patterns, and every demo and walkthrough, in one place: on this machine and in your Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."}
           </p>
         </div>
       </section>
@@ -290,6 +379,33 @@ export function App() {
             ) : null}
           </div>
         ) : null}
+
+        <section aria-labelledby="patterns">
+          <div className="Subhead">
+            <h2 id="patterns" className="Subhead-heading inline-flex items-center gap-2">
+              <StackIcon size={20} /> Patterns
+            </h2>
+            <div className="Subhead-description">
+              Three building blocks make six ways to run an agent. Each pattern is one environment in the AppHost, so your code changes only the name it passes to{" "}
+              {renderCode("`managed.client`")}.
+            </div>
+          </div>
+          <div className="mb-5 grid gap-5 md:grid-cols-3">
+            {BLOCK_ORDER.map((block) => (
+              <div key={block} className="Box p-3 flex flex-col gap-2">
+                <div>
+                  <BlockLabel block={block} />
+                </div>
+                <p className="text-sm text-fg-muted">{BUILDING_BLOCKS[block].description}</p>
+              </div>
+            ))}
+          </div>
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+            {PATTERNS.map((pattern) => (
+              <PatternCard key={pattern.id} pattern={pattern} state={state} />
+            ))}
+          </div>
+        </section>
 
         <section aria-labelledby="apps">
           <div className="Subhead">

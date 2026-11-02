@@ -82,6 +82,10 @@ const session = await managed.createSession({ environment: "chat", model: "claud
 | `promotable` | Starts `shared`, then moves once into its own fresh sandbox | Shared tools, then the admitted sandbox tools | Shared start plus an explicit cutover | Shared, then a container | Assistants that occasionally need a shell |
 | `orchestrator` | A shared coordinator that starts workers, each a session with its own sandbox ([section 17](#17-orchestrator-a-coordinator-with-workers)) | Coordinator: session-safe tools and worker tools; workers: their environment's sandbox tools | Shared start; each worker starts like an isolated session | Shared coordinator; a container per worker | Parallel and multi-agent work |
 
+An orchestrator's [execution style](#execution-styles-delegate-direct-mixed) decides whether its coordinator starts
+workers (`delegate`), acts in a sandbox itself (`direct`), or both (`mixed`). The four types and three styles give six
+patterns, built from three blocks: a container per session, the shared multi-tenant runtime, and sandboxes
+orchestrated on demand. [Patterns](../concepts/patterns.md) compares them.
 ## 1. Declare your environments
 
 Environments are part of your Aspire app model, so the same declaration runs locally and deploys to Azure:
@@ -1546,7 +1550,7 @@ flowchart LR
     Owner["Session owner<br/>action claims, webhooks, schedules"]
     Identity["Credential / inference broker"]
     Shared["Shared runtime<br/>shared, promotable, and orchestrator sessions"]
-    Sbx["Sandboxes<br/>one per isolated or promoted session, or worker"]
+    Sbx["Sandboxes<br/>one per isolated or promoted session, worker,<br/>or direct or mixed coordinator's hands"]
     Egress["Egress proxy<br/>network rules and vault secrets"]
     Store[("Durable session / action ledger<br/>state and artifact storage")]
   end
@@ -1563,7 +1567,7 @@ flowchart LR
   Owner --> Store
   Owner --> Identity
   Shared -. "promote" .-> Sbx
-  Shared -. "start_worker" .-> Sbx
+  Shared -. "start_worker, hands" .-> Sbx
   Shared --> Egress
   Sbx --> Egress
   Egress --> Web

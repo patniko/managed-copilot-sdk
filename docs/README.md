@@ -6,7 +6,7 @@ real in about a minute.
 
 ```mermaid
 flowchart LR
-  U["1 · Understand<br/>how it works · environments"] --> T["2 · Try it locally<br/>walkthroughs 01 to 04"]
+  U["1 · Understand<br/>how it works · patterns"] --> T["2 · Try it locally<br/>walkthroughs 01 to 04"]
   T --> B["3 · Build your app<br/>walkthroughs 05 to 09"]
   B --> Z["4 · Run it in Azure<br/>walkthrough 10"]
   Z --> O["5 · Operate it<br/>access · console"]
@@ -16,7 +16,7 @@ flowchart LR
 
 | I'm… | Read | Then run |
 | --- | --- | --- |
-| **Evaluating it** | [How it works](concepts/how-it-works.md), then [environments](concepts/environments.md) | [01 · Your first agent](../samples/01-first-agent/README.md) |
+| **Evaluating it** | [How it works](concepts/how-it-works.md), then [patterns](concepts/patterns.md) | [01 · Your first agent](../samples/01-first-agent/README.md) |
 | **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../samples/README.md), and [11](../samples/11-orchestrator/README.md) to [13](../samples/13-your-own-harness/README.md) for multi-agent jobs and direct execution |
 | **Running the platform** | [Local and Azure](concepts/local-and-azure.md), then [identity and access](concepts/identity.md) | [10 · Azure from your laptop](../samples/10-azure/README.md) |
 
@@ -27,6 +27,7 @@ Each page answers one question, diagram first.
 | Page | The question it answers |
 | --- | --- |
 | [How it works](concepts/how-it-works.md) | What is this, and how do the pieces fit together? |
+| [Patterns](concepts/patterns.md) | What are the ways to run an agent, and which one fits my job? |
 | [Environments](concepts/environments.md) | Where does my agent run, and how do I choose? |
 | [Sandboxes](concepts/sandboxes.md) | What is a sandbox's life? How do files get in and results out? |
 | [Promotion](concepts/promotion.md) | How does a chat move into a sandbox when it needs one? |
@@ -42,6 +43,7 @@ Each page answers one question, diagram first.
 
 | I want to… | Read | Run |
 | --- | --- | --- |
+| Compare the ways an agent can run: isolated, shared, promotable, direct, delegate, mixed | [Patterns](concepts/patterns.md) | `pnpm gallery` |
 | Run an agent in Azure from a TypeScript script on my laptop | [Local and Azure](concepts/local-and-azure.md) | [10](../samples/10-azure/README.md) |
 | Build a chat agent that uses my app's data | [The harness](concepts/harness.md) | [02](../samples/02-your-own-tools/README.md) |
 | Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../samples/03-sandbox/README.md) |
@@ -64,6 +66,7 @@ Each page answers one question, diagram first.
 | Term | Meaning |
 | --- | --- |
 | **AppHost** | The Aspire app model (`apphost.mts`) that declares the platform: environments, access, vaults, webhooks, and your apps |
+| **Pattern** | One of six ways to run an agent (isolated, shared, promotable, direct, delegate, mixed), each built from three building blocks: single containers, the multi-tenant shared runtime, and container orchestration |
 | **Environment** | A template for sessions: type, sandbox image and size, network rules, setup, models, and shipped agents |
 | **Session** | One stock Copilot SDK conversation, owned by one GitHub account |
 | **Placement** | Where a session runs: `shared` (the shared runtime) or `sandbox` (its own sandbox) |
@@ -88,11 +91,11 @@ Each page answers one question, diagram first.
 | --- | --- |
 | [README](../README.md) | The project in one page, with screenshots of the demos |
 | [Demo walkthrough](walkthrough.md) | A checklist to run every demo locally, deploy, run them again in Azure, and let teammates in |
-| [Video tour](tutorial/README.md) | Six narrated minutes: the idea, how it works, and both demos running for real |
+| [Video tour](tutorial/README.md) | Six narrated minutes: the idea, how it works, and two demos running for real. Recorded before the direct, delegate, and mixed patterns and Dispatch |
 | [Developer experience spec](spec/developer-experience.md) | The customer contract: every API, decision, and delivery gate |
 | [Architecture](architecture.md) | How it's built: topology, protocol facts, and each module |
 | [Security model and threat model](threat-model.md) | Trust boundaries between your machine and the cloud, STRIDE threats, and review findings |
-| [Proposal: direct execution](proposals/direct-execution.md) | Research, not built: one brain whose tools and sub-agents act inside sandboxes, beside today's delegating orchestrator |
+| [Proposal: direct execution](proposals/direct-execution.md) | Built: the design and evidence behind the direct and mixed patterns, where one brain's tools and sub-agents act inside sandboxes |
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../packages/cli/README.md) | Every command |
 | [Quickstart](../demos/quickstart/README.md) | Every spec snippet as an automated acceptance check |

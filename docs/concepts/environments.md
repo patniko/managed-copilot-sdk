@@ -26,18 +26,15 @@ The sandbox IDs come from a live run: two `coder` sessions created by one client
 | `shared` | In the one shared runtime, next to other sessions | Your app's tools, web fetches, and remote MCP servers; no shell, no files | Chat agents, assistants, high volume |
 | `isolated` | In its own new sandbox | A shell, files, packages, git, plus your app's tools | Coding agents, builds, data work |
 | `promotable` | Shared at first, then once in its own sandbox | Shared tools, then sandbox tools after the move | Chats that sometimes need to run code |
-| `orchestrator` | A coordinator on the shared runtime; each worker it starts gets its own sandbox | Tools to start, message, wait for, and stop workers; workers get their environment's sandbox tools | Jobs with parts that can run in parallel |
+| `orchestrator` | A coordinator on the shared runtime. Its `execution` setting picks how it works: it starts workers, each in its own sandbox (`delegate`, the default), acts in a sandbox itself (`direct`), or does both (`mixed`) | With `delegate` or `mixed`, tools to start, message, wait for, and stop workers; with `direct` or `mixed`, `bash`, `view`, `create`, `edit`, and the other built-in shell and file tools, acting on its own sandbox | Jobs with parts that can run in parallel, and harnesses that must not run code on their host |
+
+Four types and three execution styles make the six [patterns](patterns.md): isolated, shared, promotable, direct,
+delegate, and mixed.
 
 ## Which type should I use?
 
-```mermaid
-flowchart TD
-  Q{"Does the agent need a shell,<br/>files, or packages?"}
-  Q -- "never" --> S["shared<br/>fast to start, nothing to set up"]
-  Q -- "always" --> I["isolated<br/>a fresh sandbox per session"]
-  Q -- "only sometimes" --> P["promotable<br/>starts shared, moves when it must"]
-  Q -- "in several parts at once" --> O["orchestrator<br/>a coordinator with workers in their own sandboxes"]
-```
+Start from the pattern your job needs: [Patterns](patterns.md#which-pattern-should-i-use) walks through the choice
+and gives each pattern's declaration.
 
 ## Declare environments once
 
@@ -112,4 +109,4 @@ four of them, which the root AppHost spreads into its list.
 
 ---
 
-**Next:** [Sandboxes](sandboxes.md) · **Previous:** [How it works](how-it-works.md) · **All topics:** [Start here](../README.md)
+**Next:** [Sandboxes](sandboxes.md) · **Previous:** [Patterns](patterns.md) · **All topics:** [Start here](../README.md)

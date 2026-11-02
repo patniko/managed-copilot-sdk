@@ -106,4 +106,4 @@ The same AppHost runs in both places, and your code doesn't change.
 
 ---
 
-**Next:** [Environments](environments.md) · **All topics:** [Start here](../README.md)
+**Next:** [Patterns](patterns.md) · **All topics:** [Start here](../README.md)
