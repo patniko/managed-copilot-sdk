@@ -102,6 +102,17 @@ export interface RuntimeStateImport {
 export interface OpenRuntimeOptions {
   /** The session owner's current GitHub token; rejects with `authentication_required` when none is usable. */
   resolveToken(): Promise<string>;
+  /**
+   * The session's model calls go to Azure AI Foundry (spec section 15): no GitHub credential is installed or brokered
+   * (`resolveToken` is never called), the runtime gets `provider` with the sandbox's placeholder as its bearer token,
+   * and brokered calls may reach only `host`, with `token()` in place of the placeholder.
+   */
+  readonly inference?: {
+    readonly account: string;
+    readonly provider: Readonly<Record<string, unknown>>;
+    readonly host: string;
+    token(): Promise<string>;
+  };
 }
 
 /** Sends a request on the upstream connection that `SandboxRuntime.stream` carries. */

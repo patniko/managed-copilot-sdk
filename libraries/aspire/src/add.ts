@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { sandboxedType, type ManagedCopilotConfig } from "@managed-copilot/protocol";
-import type { AspireBuilder, AspireNodeAppBuilder, EndpointOf, GatewayResourceOf } from "./aspire.js";
+import type { AspireBuilder, AspireNodeAppBuilder, EndpointOf, GatewayResourceOf, ParameterOf } from "./aspire.js";
 import { appKeyParameterName, normalizeOptions, type ManagedCopilotOptions } from "./options.js";
 
 /** Default gateway port on the developer's machine. */
@@ -13,7 +13,7 @@ export const DEFAULT_GATEWAY_PORT = 7400;
 const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,62}$/;
 
 /** The platform declared by `addManagedCopilot`, for wiring other AppHost resources to it. */
-export interface ManagedCopilotResource<TGateway = unknown, TEndpoint = unknown> {
+export interface ManagedCopilotResource<TGateway = unknown, TEndpoint = unknown, TParameter = object> {
   readonly name: string;
   /** The gateway resource. Pass it to `waitFor(...)` on resources that use the platform. */
   readonly gateway: TGateway;
@@ -27,11 +27,11 @@ export interface ManagedCopilotResource<TGateway = unknown, TEndpoint = unknown>
    * The key of an app declared in `apps` (spec section 2): a generated secret parameter, kept in the AppHost's user
    * secrets. Inject it into that app as `MANAGED_COPILOT_APP_KEY`; `ManagedCopilot.connect()` reads it from there.
    */
-  appKey(app: string): object;
+  appKey(app: string): TParameter;
 }
 
 /** `appKey(app)` for the apps an AppHost declared, with a clear error for anything else. */
-export function appKeyLookup(name: string, keys: ReadonlyMap<string, object>): (app: string) => object {
+export function appKeyLookup<T extends object>(name: string, keys: ReadonlyMap<string, T>): (app: string) => T {
   return (app) => {
     const key = keys.get(app);
     if (key) return key;
@@ -84,7 +84,7 @@ export async function addManagedCopilot<B extends AspireBuilder>(
   builder: B,
   name: string,
   options: ManagedCopilotOptions,
-): Promise<ManagedCopilotResource<GatewayResourceOf<B>, EndpointOf<B>>> {
+): Promise<ManagedCopilotResource<GatewayResourceOf<B>, EndpointOf<B>, ParameterOf<B>>> {
   if (!RESOURCE_NAME.test(name)) {
     throw new Error(`Managed Copilot resource name "${name}" must start with a lowercase letter and use only lowercase letters, digits, and hyphens.`);
   }
@@ -130,9 +130,9 @@ export async function addManagedCopilot<B extends AspireBuilder>(
   if (options.discovery === false) gateway = gateway.withEnvironment("MANAGED_COPILOT_WRITE_DISCOVERY", "0");
   for (const secret of secrets) gateway = gateway.withEnvironment(secret.env, secret.value);
   // Each app's key: generated once and kept in the AppHost's user secrets, so restarts keep the same key.
-  const appKeys = new Map<string, object>();
+  const appKeys = new Map<string, ParameterOf<B>>();
   for (const { app, env } of apps) {
-    const key = await builder.addParameterWithGeneratedValue(appKeyParameterName(name, app), { minLength: 48, special: false }, { secret: true, persist: true });
+    const key = (await builder.addParameterWithGeneratedValue(appKeyParameterName(name, app), { minLength: 48, special: false }, { secret: true, persist: true })) as ParameterOf<B>;
     appKeys.set(app, key);
     gateway = gateway.withEnvironment(env, key);
   }

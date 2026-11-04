@@ -49,3 +49,6 @@ export type GatewayResourceOf<B extends AspireBuilder> = Awaited<ReturnType<B["a
 
 /** The AppHost's own endpoint reference type (the generated `EndpointReference`). */
 export type EndpointOf<B extends AspireBuilder> = Awaited<ReturnType<GatewayResourceOf<B>["getEndpoint"]>>;
+
+/** The AppHost's own parameter type (the generated `ParameterResource`), which its `withEnvironment` accepts. */
+export type ParameterOf<B extends AspireBuilder> = Awaited<ReturnType<B["addParameterWithGeneratedValue"]>>;

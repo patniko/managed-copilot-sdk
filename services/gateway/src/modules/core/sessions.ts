@@ -17,7 +17,7 @@ import {
   type SessionState,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
-import type { Principal } from "../../http.js";
+import { isGitHubPrincipal, type Principal } from "../../http.js";
 import type { Logger } from "../../log.js";
 import {
   ACTION_EVENT_TYPES,
@@ -42,6 +42,7 @@ import {
   type OrchestratorBrief,
   type WorkerEnvironmentBrief,
 } from "./admission.js";
+import { appUserPrincipal, assertAppEnvironment, assertAppUserInference } from "./apps.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -55,6 +56,7 @@ import {
   type ResolvedEnvironment,
   type RuntimeRequestRegistry,
   type SandboxPlacement,
+  type SandboxInferenceRoute,
   type SandboxRuntimeHandle,
   type SessionCallOptions,
   type SessionEventListener,
@@ -64,6 +66,7 @@ import {
   type SessionsService,
   type VaultHeaderSource,
 } from "./contracts.js";
+import type { FoundryService } from "../foundry/service.js";
 import type { Environments } from "./environments.js";
 import type { PlatformEvents } from "./events.js";
 import type { AdmittedConfig, CallbackInventory, SessionLedger } from "./ledger.js";
@@ -594,6 +597,8 @@ export class SessionManager implements SessionsService {
       ...(record.title ? { title: record.title } : {}),
       ...(record.model ? { model: record.model } : {}),
       ...(record.agent ? { agent: record.agent } : {}),
+      // Workspace-only sessions make no model calls.
+      ...(record.kind === "workspace" ? {} : { inference: record.inference ?? { route: "copilot" as const } }),
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
       ...(sandbox ? { sandbox } : {}),
@@ -624,6 +629,7 @@ export class SessionManager implements SessionsService {
       }
     }
     const environment = this.#options.environments.resolve(request.environment);
+    if (request.parentSessionId === undefined) assertAppEnvironment(this.#options.app.services.apps, principal, environment.name);
     // A worker's coordinator: the same owner's live session, pinned to the incarnation that starts it.
     let parent: { readonly id: string; readonly incarnation: string } | undefined;
     if (request.parentSessionId !== undefined) {
@@ -679,6 +685,7 @@ export class SessionManager implements SessionsService {
       }
     }
     const environment = this.#options.environments.resolve(request.environment);
+    if (request.parentSessionId === undefined) assertAppEnvironment(this.#options.app.services.apps, principal, environment.name);
     if (environment.type !== "isolated") {
       throw new ManagedCopilotError("invalid_request", `Environment "${environment.name}" is ${environment.type}; workspace-only sandboxes need an isolated environment.`, { environment: environment.name });
     }
@@ -1222,8 +1229,9 @@ export class SessionManager implements SessionsService {
     const optionsPatch = { ...admitted.optionsPatch, ...(Object.keys(callerOptions).length > 0 ? admitOptionsUpdate(callerOptions, context) : {}) };
     let handle!: SandboxRuntimeHandle;
     let upstream: RuntimeUpstream | undefined;
+    const inference = await this.#sandboxInference(live.id);
     for (let reopen = 0; ; reopen++) {
-      handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token) });
+      handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token), ...(inference ? { inference } : {}) });
       upstream = undefined;
       try {
         // A cutover that closed while this opened found no destination to close: this one is never installed.
@@ -1257,7 +1265,8 @@ export class SessionManager implements SessionsService {
     try {
       const registrations = this.#registrations(live, undefined, true);
       const params = await this.#withVaultHeaders(live.id, { ...admitted.params, ...registrations.flags, sessionId: live.id, tools: [...registrations.tools, ...this.#platformToolDeclarations(live, "sandbox")], ...extra }, "sandbox");
-      const prepared = handle.prepareSessionParams ? await handle.prepareSessionParams("session.resume", params) : params;
+      const routed = await this.#routeInference(live, params, "sandbox");
+      const prepared = handle.prepareSessionParams ? await handle.prepareSessionParams("session.resume", routed) : routed;
       await this.#bounded(live, opened, "session.resume", () => opened.request("session.resume", prepared));
       if (handle.sessionOpened) await this.#bounded(live, opened, "the session's credential setup", () => handle.sessionOpened!(live.id));
       if (Object.keys(optionsPatch).length > 0) await this.#bounded(live, opened, "session.options.update", () => opened.request("session.options.update", { ...optionsPatch, sessionId: live.id }));
@@ -1606,9 +1615,11 @@ export class SessionManager implements SessionsService {
           break;
         }
         case "session.model.switchTo":
+          this.#checkModelSwitch(live, params["modelId"]);
           checkModel(live.environment, params["modelId"]);
           break;
         case "session.model.switchAutoTier":
+          if (this.#foundryRoute(live.id)) throw new ManagedCopilotError("capability_unavailable", `Session ${live.id} sends model calls to Azure AI Foundry; Auto model routing is a GitHub Copilot feature`, { sessionId });
           if (live.environment.config.models) throw new ManagedCopilotError("policy_violation", `Environment "${live.environment.name}" restricts models; Auto routing is not available`);
           break;
         default:
@@ -1801,8 +1812,16 @@ export class SessionManager implements SessionsService {
     this.#actions?.onDetached(peer.id);
   }
 
-  /** `models.list` for the caller: the owner's entitlement, filtered by the environment's `models`. */
+  /**
+   * `models.list` for the caller: the owner's entitlement, filtered by the environment's `models`. A Foundry
+   * environment lists its deployments instead, whoever asks; nobody's Copilot plan is consulted.
+   */
   async listModels(peer: ClientPeer): Promise<unknown> {
+    const foundry = peer.environment.config.inference?.foundry;
+    if (foundry) return { models: this.#foundry().models(foundry, peer.environment.config.models) };
+    if (!isGitHubPrincipal(peer.principal)) {
+      throw new ManagedCopilotError("inference_unavailable", `Environment "${peer.environment.name}" uses each user's GitHub Copilot plan, and ${peer.principal.login} has none`);
+    }
     const shared = this.#options.sharedRuntime;
     if (!shared) throw new ManagedCopilotError("capability_unavailable", "Model discovery needs the shared runtime, which is disabled on this gateway");
     const upstream = await shared.ready();
@@ -1915,14 +1934,17 @@ export class SessionManager implements SessionsService {
     if (placement === "sandbox" && !this.#sandboxes) {
       throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" needs isolated sandboxes, which this deployment does not provide yet`);
     }
-    if (environment.config.inference?.foundry) {
-      // An explicitly selected billing route must never silently fall back to the owner's GitHub entitlement.
-      throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" routes inference to Azure AI Foundry ("${environment.config.inference.foundry}"), which this gateway does not support yet`);
-    }
+    // An app's own users have no Copilot plan: only Foundry environments, refused before anything exists.
+    assertAppUserInference(principal, environment.name, environment.config);
+    // An explicitly selected billing route never falls back to the owner's Copilot plan: the session gets no GitHub
+    // credential, and its deployment is fixed for its life.
+    const foundry = environment.config.inference?.foundry ? await this.#foundryChoice(environment, input.raw["model"]) : undefined;
+    const raw = foundry ? { ...input.raw, model: foundry.deployment } : input.raw;
     const tokenRegistrationId = `mc-${randomUUID()}`;
     // Taken before admission, which rewrites nested values (remote MCP servers point at the gateway adapter).
-    const requested = requestedParams(input.raw);
-    const admitted = await this.#admit(environment, placement, input.raw, "create", environment.network, sessionId, tokenRegistrationId, principal);
+    const requested = requestedParams(raw);
+    const admitted = await this.#admit(environment, placement, raw, "create", environment.network, sessionId, tokenRegistrationId, principal);
+    if (foundry) admitted.params["allowedModels"] = [foundry.deployment];
 
     // Bind network policy (validates vaults) before anything is allocated.
     let network: NetworkPolicy = environment.network;
@@ -1959,13 +1981,14 @@ export class SessionManager implements SessionsService {
         network,
         environmentRequest: environment.request,
         admitted: stored,
-        ...(admitted.model ? { model: admitted.model } : {}),
+        ...(foundry ? { model: foundry.deployment, inference: { route: "foundry" as const, foundry: foundry.account } } : admitted.model ? { model: admitted.model } : {}),
         ...(admitted.agent ? { agent: admitted.agent } : {}),
         ...(input.clientName ? { clientName: input.clientName } : {}),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
         ...(input.webhook ? { webhook: input.webhook } : {}),
         ...(input.parent ? { parentSessionId: input.parent.id, parentIncarnation: input.parent.incarnation } : {}),
       });
+      if (foundry) this.#log.info("Session model calls go to Azure AI Foundry", { sessionId, account: foundry.account, deployment: foundry.deployment, owner: principal.login });
       const created = this.#register(record, environment, tokenRegistrationId);
       live = created;
       // The creating principal's verified credential serves the session while it is created (without a client, the
@@ -2041,6 +2064,108 @@ export class SessionManager implements SessionsService {
       this.#log.warn("Session creation failed", { sessionId, environment: environment.name, error: (error as Error).message });
       throw error;
     }
+  }
+
+  // ------------------------------------------------------------------------------------------------------------
+  // Azure AI Foundry (spec section 15): a session's model calls go to its environment's Foundry account, with the
+  // platform's Azure identity, and never to its owner's Copilot plan. The route is fixed when the session is created.
+
+  #foundry(): FoundryService {
+    const service = this.#options.app.services.foundry;
+    if (!service) throw new ManagedCopilotError("inference_unavailable", "This gateway has no Azure AI Foundry accounts configured (foundry in the AppHost)");
+    return service;
+  }
+
+  /** The Foundry account and deployment a new session in a Foundry environment uses (its model, or the first one). */
+  async #foundryChoice(environment: ResolvedEnvironment, requested: unknown): Promise<{ readonly account: string; readonly deployment: string }> {
+    const account = environment.config.inference!.foundry;
+    const service = this.#foundry();
+    const allowed = service.deployments(account, environment.config.models);
+    if (requested !== undefined && requested !== null && typeof requested !== "string") throw new ManagedCopilotError("invalid_request", "model must be a string");
+    const deployment = (requested as string | undefined) ?? allowed[0];
+    if (!deployment || !allowed.includes(deployment)) {
+      throw new ManagedCopilotError(
+        "policy_violation",
+        `Model "${String(requested)}" is not one of environment "${environment.name}"'s Azure AI Foundry deployments (${allowed.join(", ")})`,
+        { allowedModels: allowed },
+      );
+    }
+    const route = await service.route(account);
+    if (!route.deployments.has(deployment)) throw new ManagedCopilotError("inference_unavailable", `Azure AI Foundry account "${account}" has no deployment "${deployment}"`, { foundry: account });
+    return { account, deployment };
+  }
+
+  /** The session's Foundry account and deployment; undefined for a session billed to its owner's Copilot plan. */
+  #foundryRoute(sessionId: string): { readonly account: string; readonly deployment: string } | undefined {
+    const record = this.get(sessionId);
+    if (record?.inference?.route !== "foundry") return undefined;
+    if (!record.model) throw new ManagedCopilotError("state_restore_failed", `Session ${sessionId} has no recorded Foundry deployment`, { sessionId });
+    return { account: record.inference.foundry, deployment: record.model };
+  }
+
+  /**
+   * Create/resume params for where the session's model calls go. A session keeps the route it was created with: if its
+   * environment now routes elsewhere, resuming it fails rather than switching its billing. A Foundry session gets no
+   * GitHub credential fields, a fixed model, and (shared placement) the provider whose token the gateway answers.
+   */
+  async #routeInference(live: LiveSession, params: Record<string, unknown>, placement: Placement): Promise<Record<string, unknown>> {
+    const route = this.#foundryRoute(live.id);
+    const current = live.environment.config.inference?.foundry;
+    if ((route?.account ?? null) !== (current ?? null)) {
+      const describe = (account: string | undefined) => (account ? `to Azure AI Foundry account "${account}"` : "to its owner's Copilot plan");
+      throw new ManagedCopilotError(
+        "capability_unavailable",
+        `Session ${live.id} sends model calls ${describe(route?.account)}, and environment "${live.environment.name}" now sends them ${describe(current)}. A session keeps its billing route: start a new session.`,
+        { sessionId: live.id },
+      );
+    }
+    if (!route) return params;
+    const service = this.#foundry();
+    const resolved = await service.route(route.account);
+    if (!resolved.deployments.has(route.deployment)) {
+      throw new ManagedCopilotError("inference_unavailable", `Azure AI Foundry account "${route.account}" no longer declares deployment "${route.deployment}"`, { sessionId: live.id, foundry: route.account });
+    }
+    const { gitHubTokenProviderRegistrationId: _registration, gitHubToken: _token, provider: _provider, ...rest } = params;
+    const routed: Record<string, unknown> = { ...rest, model: route.deployment, allowedModels: [route.deployment] };
+    // In a sandbox the broker adds the provider with its placeholder; the shared runtime asks the gateway for a token.
+    if (placement === "shared") routed["provider"] = { ...service.provider(resolved, route.deployment), hasBearerTokenProvider: true };
+    return routed;
+  }
+
+  /** What a sandbox runtime needs to send a Foundry session's model calls to its account through the broker. */
+  async #sandboxInference(sessionId: string): Promise<SandboxInferenceRoute | undefined> {
+    const route = this.#foundryRoute(sessionId);
+    if (!route) return undefined;
+    const service = this.#foundry();
+    const resolved = await service.route(route.account);
+    return { account: route.account, provider: service.provider(resolved, route.deployment), host: resolved.host, token: () => service.token(route.account) };
+  }
+
+  /** A Foundry session keeps its deployment for its whole life (its provider is fixed when the runtime opens it). */
+  #checkModelSwitch(live: LiveSession, model: unknown): void {
+    const route = this.#foundryRoute(live.id);
+    if (!route || model === route.deployment) return;
+    throw new ManagedCopilotError(
+      "capability_unavailable",
+      `Session ${live.id} sends model calls to Azure AI Foundry deployment "${route.deployment}" and keeps it for its whole life. Start a new session to use another deployment.`,
+      { sessionId: live.id },
+    );
+  }
+
+  /**
+   * Answers the shared runtime's `providerToken.getToken` for a Foundry session: an Entra ID token for its account from
+   * the platform's own identity. Never for a session the shared runtime no longer hosts, and never a GitHub token.
+   */
+  async answerProviderTokenRequest(params: unknown): Promise<{ token: string }> {
+    const request = (params ?? {}) as { sessionId?: unknown; providerName?: unknown };
+    const live = typeof request.sessionId === "string" ? this.#live.get(request.sessionId) : undefined;
+    if (!live || live.placement !== "shared" || live.deleting) throw new ManagedCopilotError("forbidden", "No session on the shared runtime asked for this token");
+    const route = this.#foundryRoute(live.id);
+    if (!route) throw new ManagedCopilotError("forbidden", `Session ${live.id} has no Azure AI Foundry route; its model calls use its owner's Copilot plan`);
+    if (request.providerName !== undefined && request.providerName !== "default") throw new ManagedCopilotError("forbidden", `Session ${live.id} has no model provider "${String(request.providerName)}"`);
+    const token = await this.#foundry().token(route.account);
+    this.#log.debug("Answered a Foundry token request", { sessionId: live.id, account: route.account });
+    return { token };
   }
 
   async #admit(
@@ -2406,8 +2531,9 @@ export class SessionManager implements SessionsService {
 
   async #openSandbox(live: LiveSession): Promise<RuntimeUpstream> {
     const sandboxes = this.#sandboxes!;
+    const inference = await this.#sandboxInference(live.id);
     for (let reopen = 0; ; reopen++) {
-      const handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token) });
+      const handle = await sandboxes.openRuntime(live.id, { resolveToken: () => this.#ownerToken(live).then((credential) => credential.token), ...(inference ? { inference } : {}) });
       let upstream: RuntimeUpstream | undefined;
       try {
         upstream = await RuntimeUpstream.open({ id: `sandbox:${live.id}`, kind: "sandbox", sandboxId: live.id }, streamTransport(handle.stream), {
@@ -2543,7 +2669,8 @@ export class SessionManager implements SessionsService {
   }
 
   async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, params) : params;
+    const routed = await this.#routeInference(live, params, live.placement);
+    return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, routed) : routed;
   }
 
   /** Before resuming on a source an aborted cutover sealed: its answers to the sealing calls come first. */
@@ -3275,8 +3402,13 @@ export class SessionManager implements SessionsService {
    * background sign-in, re-verified too, never a token remembered from an earlier connection. Only attached clients'
    * tokens count as the account's live credential (presences may be background work, like a schedule's send).
    */
-  async #ownerToken(live: LiveSession): Promise<{ token: string; expiresAt?: number }> {
+  async #ownerToken(live: LiveSession): Promise<{ token: string; expiresAt?: number; app?: string }> {
     const auth = this.#options.auth;
+    // An app's own users have no GitHub credential at all: their sessions only ever use Foundry (refused at creation
+    // otherwise), so nothing may ask for one.
+    if (this.get(live.id)?.owner.kind === "app-user") {
+      throw new ManagedCopilotError("inference_unavailable", `Session ${live.id} belongs to an app user, who has no GitHub Copilot plan; its environment must send model calls to Azure AI Foundry.`, { sessionId: live.id });
+    }
     const parent = this.#credentialParent(live);
     // Each candidate must still be connected (or present) once its verification finishes.
     const present: { readonly principal: Principal; readonly current: () => boolean; readonly background: boolean }[] = [];
@@ -3288,12 +3420,13 @@ export class SessionManager implements SessionsService {
       );
     }
     for (const { principal, current, background } of present) {
-      if (principal.accountId !== live.ownerId) continue;
+      if (principal.accountId !== live.ownerId || !isGitHubPrincipal(principal)) continue;
       try {
-        const verified = await auth.authenticate(principal.token, { background });
+        // Through the app the caller came through, when it did: an app that admits any GitHub user admits it here too.
+        const verified = await auth.authenticate(principal.token, { background, ...(principal.app ? { app: principal.app } : {}) });
         if (verified.accountId !== live.ownerId || !current() || live.deleting) continue;
         const expiresAt = auth.tokenExpiration(principal.token);
-        return { token: principal.token, ...(expiresAt !== undefined ? { expiresAt } : {}) };
+        return { token: principal.token, ...(expiresAt !== undefined ? { expiresAt } : {}), ...(principal.app ? { app: principal.app } : {}) };
       } catch (error) {
         this.#log.debug("A connected client's credential could not be used for the session", { sessionId: live.id, error: (error as Error).message });
       }
@@ -3301,6 +3434,7 @@ export class SessionManager implements SessionsService {
     const credentials = this.#options.app.services.credentials;
     if (credentials) {
       const principal = await credentials.principalFor(live.ownerId);
+      if (!isGitHubPrincipal(principal)) throw new ManagedCopilotError("authentication_required", "The stored credential is not a GitHub sign-in");
       // The gateway's own verification decides too: a token GitHub rejected since (an invalidated 401) is never used.
       const verified = await auth.authenticate(principal.token, { background: true });
       if (principal.accountId !== live.ownerId || verified.accountId !== live.ownerId) throw new ManagedCopilotError("authentication_required", "The stored credential belongs to another account");
@@ -3339,11 +3473,20 @@ export class SessionManager implements SessionsService {
 
   async ownerPrincipal(sessionId: string): Promise<Principal> {
     const live = this.#liveFor(sessionId);
+    const owner = this.get(sessionId)?.owner;
+    // An app's own user has no credential to present: the account is the deployment's own, kept while its app is.
+    if (owner?.kind === "app-user") {
+      if (!owner.app || !this.#options.app.services.apps?.get(owner.app)) {
+        throw new ManagedCopilotError("authentication_required", `Session ${sessionId} belongs to a user of the "${owner.app}" app, which this deployment no longer declares`, { sessionId });
+      }
+      return appUserPrincipal(owner, owner.app);
+    }
     const credential = await this.#ownerToken(live);
-    // Background: work the platform does for the owner never becomes the account's live credential.
-    const principal = await this.#options.auth.authenticate(credential.token, { background: true });
+    // Background: work the platform does for the owner never becomes the account's live credential. Through the app
+    // its credential came through, so an app that admits any GitHub user still admits it.
+    const principal = await this.#options.auth.authenticate(credential.token, { background: true, ...(credential.app ? { app: credential.app } : {}) });
     if (principal.accountId !== live.ownerId) throw new ManagedCopilotError("authentication_required", "The session's credential belongs to another account");
-    return principal;
+    return credential.app ? { ...principal, app: credential.app } : principal;
   }
 
   async attachCli(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment> {
@@ -3433,6 +3576,7 @@ export class SessionManager implements SessionsService {
             return;
           }
           case "model":
+            this.#checkModelSwitch(live, operation.modelId);
             checkModel(live.environment, operation.modelId);
             send();
             // Restores select the model the session last had.

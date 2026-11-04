@@ -3,6 +3,7 @@
 import { join } from "node:path";
 import { ROUTES } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
+import { AppRegistry } from "./apps.js";
 import { GitHubAuthenticator } from "./auth.js";
 import { Environments } from "./environments.js";
 import { PlatformEvents } from "./events.js";
@@ -20,11 +21,20 @@ export const coreModule: GatewayModule = {
     const log = app.log.child("core");
     app.routes.get("/healthz", () => ({ status: "ok", version: app.config.version }), { auth: "none" });
 
-    const auth = new GitHubAuthenticator({ apiUrl: app.config.githubApiUrl, ...(app.config.deployment.access ? { access: app.config.deployment.access } : {}), log: log.child("auth") });
+    const ledger = new SessionLedger(app.db);
+    const apps = new AppRegistry({ deployment: app.config.deployment, env: app.config.env, ledger, log: log.child("apps") });
+    const auth = new GitHubAuthenticator({
+      apiUrl: app.config.githubApiUrl,
+      ...(app.config.deployment.access ? { access: app.config.deployment.access } : {}),
+      apps,
+      log: log.child("auth"),
+    });
     if (app.config.mode === "azure" && !app.config.deployment.access?.githubOrgs?.length && !app.config.deployment.access?.githubUsers?.length) {
       log.warn("No access rules configured: any GitHub account can use this deployment. Set access.githubOrgs or access.githubUsers in the AppHost.");
     }
-    const ledger = new SessionLedger(app.db);
+    for (const declared of apps.list()) {
+      if (declared.anyGitHubUser) log.info("App admits any GitHub account through its key", { app: declared.name, environments: declared.environments });
+    }
     const events = new PlatformEvents(ledger, log.child("events"), () => app.metrics.increment("events.published"));
     const environments = new Environments({ deployment: app.config.deployment, baseDir: app.config.appHostDir, pinDir: join(app.config.dataDir, "customizations"), log });
     const platformTools = new PlatformTools();
@@ -56,8 +66,11 @@ export const coreModule: GatewayModule = {
 
     // Per-session user credentials for shared sessions: the runtime asks the gateway, never a shared service token.
     runtimeRequests.register("gitHubToken.getToken", ({ params }) => sessions.answerTokenRequest(params), { upstream: "shared" });
+    // Foundry sessions on the shared runtime: an Entra ID token for their account, per model call (spec section 15).
+    runtimeRequests.register("providerToken.getToken", ({ params }) => sessions.answerProviderTokenRequest(params), { upstream: "shared" });
 
     app.provide("auth", auth);
+    app.provide("apps", apps);
     app.provide("sessions", sessions);
     app.provide("events", events);
     app.provide("platformTools", platformTools);

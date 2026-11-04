@@ -12,7 +12,7 @@ import {
 } from "@managed-copilot/protocol";
 import { z } from "zod";
 import { transaction, type Database } from "../../../db.js";
-import type { Principal } from "../../../http.js";
+import { isGitHubPrincipal, type Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
 import { redactText } from "../../../redaction.js";
 import type { ActionChange } from "../actions/service.js";
@@ -297,6 +297,13 @@ export class DurableSchedules implements SchedulesService {
   // ---------------------------------------------------------------------------------------------------------
 
   async create(principal: Principal, request: CreateScheduleRequest, options: CreateOptions = {}): Promise<ScheduleInfo> {
+    // Runs happen with the owner's background sign-in, a GitHub credential stored from the CLI.
+    if (!isGitHubPrincipal(principal)) {
+      throw new ManagedCopilotError("capability_unavailable", "Schedules run with their owner's background GitHub sign-in, and an app's own users have none.");
+    }
+    if (principal.app) {
+      throw new ManagedCopilotError("capability_unavailable", `Schedules run with their owner's background sign-in (\`npx managed-copilot login\`), which is never made through an app; create it outside the "${principal.app}" app.`);
+    }
     const createdBy: ScheduleCreator = options.createdBy ?? "user";
     const parsed = CreateScheduleSchema.parse(request);
     const now = this.#now();

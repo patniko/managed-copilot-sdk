@@ -2,8 +2,9 @@
 // AppHost access rules, and remembers the tokens it verified for connected callers (for secret scanning).
 import { createHash } from "node:crypto";
 import { ManagedCopilotError, type AccountInfo } from "@managed-copilot/protocol";
-import type { Authenticator, Principal } from "../../http.js";
+import { isGitHubPrincipal, type Authenticator, type GitHubPrincipal, type Principal, type RequestCredentials } from "../../http.js";
 import type { Logger } from "../../log.js";
+import type { AppRegistry } from "./apps.js";
 
 export interface AccessRules {
   readonly githubOrgs?: readonly string[];
@@ -14,6 +15,8 @@ export interface GitHubAuthOptions {
   /** GitHub REST API base URL (https://api.github.com, or a loopback stub in tests). */
   readonly apiUrl: string;
   readonly access?: AccessRules;
+  /** Apps that vouch for their own users (spec section 2). */
+  readonly apps?: AppRegistry;
   readonly log: Logger;
   /** How long a verified token is trusted before it is re-verified. */
   readonly cacheTtlMs?: number;
@@ -36,6 +39,11 @@ export interface GitHubAuthOptions {
 
 interface CacheEntry {
   readonly principal?: Principal;
+  /**
+   * The verified account is not one the access rules allow. It is still admitted through an app that admits any GitHub
+   * user (`anyGitHubUser`), never directly.
+   */
+  readonly denied?: ManagedCopilotError;
   readonly error?: ManagedCopilotError;
   /** Until when the entry answers without calling GitHub. */
   readonly expiresAt: number;
@@ -55,6 +63,14 @@ export interface AuthenticateOptions {
    * remembered as the account's live credential.
    */
   readonly background?: boolean;
+  /** The app the token came through (its key was verified): an app with `anyGitHubUser` admits any GitHub account. */
+  readonly app?: string;
+}
+
+/** A token GitHub verified, and whether the access rules allow its account directly. */
+interface Verified {
+  readonly principal: Principal;
+  readonly denied?: ManagedCopilotError;
 }
 
 export interface LiveCredential {
@@ -74,13 +90,16 @@ export function accountInfo(principal: Principal): AccountInfo {
     login: principal.login,
     ...(principal.name ? { name: principal.name } : {}),
     ...(principal.avatarUrl ? { avatarUrl: principal.avatarUrl } : {}),
+    ...(principal.kind === "app-user" || principal.kind === "app" ? { kind: principal.kind } : {}),
+    ...(principal.app && principal.kind !== undefined && principal.kind !== "github" ? { app: principal.app } : {}),
+    ...(principal.userId !== undefined ? { userId: principal.userId } : {}),
   };
 }
 
 export class GitHubAuthenticator implements Authenticator {
   readonly #options: GitHubAuthOptions;
   readonly #cache = new Map<string, CacheEntry>();
-  readonly #inflight = new Map<string, Promise<Principal>>();
+  readonly #inflight = new Map<string, Promise<Verified>>();
   /** When a token was last invalidated: verifications that started earlier must not store a result for it. */
   readonly #invalidatedAt = new Map<string, number>();
   readonly #credentials = new Map<number, LiveCredential>();
@@ -96,6 +115,11 @@ export class GitHubAuthenticator implements Authenticator {
     return this.#options.access;
   }
 
+  /** The deployment's apps (spec section 2), when it declares any. */
+  get apps(): AppRegistry | undefined {
+    return this.#options.apps;
+  }
+
   async authenticate(token: string, options: AuthenticateOptions = {}): Promise<Principal> {
     if (!token || token.length > 4096 || /\s/.test(token)) throw new ManagedCopilotError("authentication_required", "The GitHub token is malformed");
     // Action capabilities (`mcc_…`) authorize only their own action routes; they are never sent to GitHub.
@@ -105,10 +129,7 @@ export class GitHubAuthenticator implements Authenticator {
     const now = Date.now();
     if (cached && cached.expiresAt > now) {
       if (cached.error) throw cached.error;
-      if (cached.principal) {
-        if (!options.background) this.#remember(key, cached.principal);
-        return cached.principal;
-      }
+      if (cached.principal) return this.#admit(key, { principal: cached.principal, ...(cached.denied ? { denied: cached.denied } : {}) }, options);
     }
     let pending = this.#inflight.get(key);
     if (!pending) {
@@ -123,16 +144,60 @@ export class GitHubAuthenticator implements Authenticator {
     // caller's token becomes the account's live credential once that re-check succeeds.
     if (cached?.principal && cached.outage && cached.staleUntil !== undefined && cached.staleUntil > now) {
       pending.then(
-        (principal) => {
-          if (!options.background) this.#remember(key, principal);
+        (verified) => {
+          if (!options.background && this.#admits(verified, options)) this.#remember(key, verified.principal);
         },
         () => undefined,
       );
-      return cached.principal;
+      return this.#admit(key, { principal: cached.principal, ...(cached.denied ? { denied: cached.denied } : {}) }, options, { remember: false });
     }
-    const principal = await pending;
-    if (!options.background) this.#remember(key, principal);
-    return principal;
+    return this.#admit(key, await pending, options);
+  }
+
+  /** Whether a verified account may use the deployment this way: allowed by `access`, or through an app that admits anyone. */
+  #admits(verified: Verified, options: AuthenticateOptions): boolean {
+    if (!verified.denied) return true;
+    return options.app !== undefined && this.#options.apps?.get(options.app)?.anyGitHubUser === true;
+  }
+
+  #admit(key: string, verified: Verified, options: AuthenticateOptions, behavior: { readonly remember?: boolean } = {}): Principal {
+    if (!this.#admits(verified, options)) throw verified.denied!;
+    if (!options.background && behavior.remember !== false) this.#remember(key, verified.principal);
+    return verified.principal;
+  }
+
+  /**
+   * A request's credentials: a GitHub token alone, or an app key (spec section 2) acting for one of the app's own users,
+   * a GitHub user who signed in to it, or itself.
+   */
+  async authenticateRequest(credentials: RequestCredentials): Promise<Principal> {
+    if (credentials.appKey === undefined) {
+      if (credentials.appUser !== undefined) throw new ManagedCopilotError("authentication_required", "An app user can only be sent with the app's key");
+      if (!credentials.token) throw new ManagedCopilotError("authentication_required", "Sign in with a GitHub token");
+      return this.authenticate(credentials.token);
+    }
+    const apps = this.#options.apps;
+    const app = apps?.match(credentials.appKey);
+    if (!apps || !app) throw new ManagedCopilotError("authentication_required", "The app key is not valid for this deployment. Use the key the AppHost issued to the app (MANAGED_COPILOT_APP_KEY).");
+    if (credentials.appUser !== undefined) {
+      if (credentials.token) throw new ManagedCopilotError("invalid_request", "Act for one person at a time: send an app user or a GitHub token, not both");
+      return apps.userPrincipal(app, credentials.appUser, credentials.appUserName);
+    }
+    if (credentials.appUserName !== undefined) throw new ManagedCopilotError("invalid_request", "An app user's name was sent without the app user");
+    if (credentials.token) return { ...(await this.authenticate(credentials.token, { app: app.name })), app: app.name };
+    return apps.appPrincipal(app);
+  }
+
+  /** Checks a long-lived connection's principal again: a GitHub user's token, or that an app user's app still exists. */
+  async reverify(principal: Principal): Promise<Principal> {
+    if (principal.kind === "app-user" || principal.kind === "app") {
+      if (!principal.app || !this.#options.apps?.get(principal.app)) throw new ManagedCopilotError("authentication_required", `The "${principal.app}" app is no longer configured on this deployment`);
+      return principal;
+    }
+    if (!principal.token) throw new ManagedCopilotError("authentication_required", "The connection has no credential to check");
+    const verified = await this.authenticate(principal.token, principal.app ? { app: principal.app } : {});
+    if (verified.accountId !== principal.accountId) throw new ManagedCopilotError("authentication_required", "The credential now belongs to another account");
+    return principal.app ? { ...verified, app: principal.app } : verified;
   }
 
   /**
@@ -204,6 +269,8 @@ export class GitHubAuthenticator implements Authenticator {
    * `upstream_unavailable`, never "not a member"; a token GitHub rejects fails with `authentication_required`.
    */
   async satisfies(principal: Principal, rules: AccessRules): Promise<boolean> {
+    // App users and apps are never GitHub accounts, whatever their login looks like.
+    if (!isGitHubPrincipal(principal)) return false;
     const users = rules.githubUsers ?? [];
     const orgs = rules.githubOrgs ?? [];
     if (users.some((user) => user.toLowerCase() === principal.login.toLowerCase())) return true;
@@ -244,7 +311,7 @@ export class GitHubAuthenticator implements Authenticator {
     return allowed;
   }
 
-  async #verify(token: string, key: string): Promise<Principal> {
+  async #verify(token: string, key: string): Promise<Verified> {
     const startedAt = Date.now();
     try {
       // One budget for the whole verification (user lookup, membership checks, retries, and body reads).
@@ -263,7 +330,7 @@ export class GitHubAuthenticator implements Authenticator {
           error: error.message,
         });
         this.#cache.set(key, { ...previous, outage: true, expiresAt: Math.min(previous.staleUntil, now + (this.#options.outageRecheckMs ?? OUTAGE_RECHECK_MS)) });
-        return previous.principal;
+        return { principal: previous.principal, ...(previous.denied ? { denied: previous.denied } : {}) };
       }
       log.warn("GitHub is unreachable while verifying a token", { error: error.message });
       throw new ManagedCopilotError("upstream_unavailable", "GitHub is unreachable from the gateway right now, so the credential cannot be verified. Retry shortly.", {
@@ -273,7 +340,7 @@ export class GitHubAuthenticator implements Authenticator {
     }
   }
 
-  async #verifyWithGitHub(token: string, key: string, startedAt: number, deadline: number): Promise<Principal> {
+  async #verifyWithGitHub(token: string, key: string, startedAt: number, deadline: number): Promise<Verified> {
     const response = await this.#get("/user", token, deadline, { json: true });
     if (response.status === 401) {
       this.invalidate(token);
@@ -288,7 +355,7 @@ export class GitHubAuthenticator implements Authenticator {
     if (typeof user.id !== "number" || typeof user.login !== "string") {
       throw new ManagedCopilotError("authentication_required", "The token does not identify a GitHub user account");
     }
-    const principal: Principal = {
+    const principal: GitHubPrincipal = {
       accountId: user.id,
       login: user.login,
       ...(typeof user.name === "string" && user.name ? { name: user.name } : {}),
@@ -296,7 +363,7 @@ export class GitHubAuthenticator implements Authenticator {
       token,
     };
     const expiresAt = parseExpiration(response.headers.get("github-authentication-token-expiration"));
-    await this.#checkAccess(principal, key, deadline);
+    const denied = await this.#checkAccess(principal, key, deadline);
     if (!this.#current(key, startedAt)) {
       throw new ManagedCopilotError("authentication_required", "This token was revoked while it was being verified. Sign in again and retry.");
     }
@@ -304,38 +371,42 @@ export class GitHubAuthenticator implements Authenticator {
     const limit = expiresAt ?? Number.POSITIVE_INFINITY;
     this.#cache.set(key, {
       principal,
+      ...(denied ? { denied } : {}),
       verifiedAt: now,
-      expiresAt: Math.min(now + (this.#options.cacheTtlMs ?? 5 * 60_000), limit),
+      // A denial is checked again as soon as a rejection would be (organization membership can change).
+      expiresAt: Math.min(now + (denied ? (this.#options.negativeTtlMs ?? 30_000) : (this.#options.cacheTtlMs ?? 5 * 60_000)), limit),
       staleUntil: Math.min(now + (this.#options.staleGraceMs ?? 15 * 60_000), limit),
       ...(expiresAt !== undefined ? { tokenExpiresAt: expiresAt } : {}),
     });
-    this.#notify(principal);
+    if (!denied) this.#notify(principal);
     this.#prune();
-    return principal;
+    return { principal, ...(denied ? { denied } : {}) };
   }
 
-  async #checkAccess(principal: Principal, key: string, deadline: number): Promise<void> {
+  /** Undefined when the access rules allow the account; otherwise why not (it may still come through an app). */
+  async #checkAccess(principal: GitHubPrincipal, key: string, deadline: number): Promise<ManagedCopilotError | undefined> {
     const access = this.#options.access;
     const users = access?.githubUsers ?? [];
     const orgs = access?.githubOrgs ?? [];
-    if (users.length === 0 && orgs.length === 0) return;
-    if (users.some((user) => user.toLowerCase() === principal.login.toLowerCase())) return;
+    if (users.length === 0 && orgs.length === 0) return undefined;
+    if (users.some((user) => user.toLowerCase() === principal.login.toLowerCase())) return undefined;
     for (const org of orgs) {
       // The caller checks their own membership, so private memberships are visible to them. Outages throw
       // GitHubUnavailable (never "not a member"); a 401 rejects the token outright; 404 and other refusals mean
       // not a member of this org.
       const response = await this.#get(`/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(principal.login)}`, principal.token, deadline, { json: false });
-      if (response.status === 204) return;
+      if (response.status === 204) return undefined;
       if (response.status === 401) {
         this.invalidate(principal.token);
         this.#reject(key, new ManagedCopilotError("authentication_required", "GitHub rejected this token. Sign in again (for example `gh auth login`) and retry."));
       }
       if (response.status >= 500) throw new GitHubUnavailable(`GitHub returned HTTP ${response.status} for an organization membership check`);
     }
-    // The account lost (or never had) access: its live credential must not keep serving its sessions' runtimes.
+    // The account lost (or never had) access: its live credential must not keep serving its sessions' runtimes. A
+    // connection through an app that admits any GitHub user remembers it again.
     if (this.#credentials.get(principal.accountId)) this.#credentials.delete(principal.accountId);
     const allowed = [...orgs.map((org) => `members of ${org}`), ...users.map((user) => `@${user}`)].join(", ");
-    this.#reject(key, new ManagedCopilotError("forbidden", `@${principal.login} is not allowed to use this deployment (allowed: ${allowed})`));
+    return new ManagedCopilotError("forbidden", `@${principal.login} is not allowed to use this deployment (allowed: ${allowed})`);
   }
 
   /** Records a definitive answer from GitHub; it replaces any earlier verification, so no stale window survives it. */
@@ -347,7 +418,7 @@ export class GitHubAuthenticator implements Authenticator {
   /** Remembers a connected caller's token while its verification is current (not an outage's stand-in). */
   #remember(key: string, principal: Principal): void {
     const entry = this.#cache.get(key);
-    if (entry?.principal !== principal || entry.outage || entry.verifiedAt === undefined) return;
+    if (entry?.principal !== principal || entry.outage || entry.verifiedAt === undefined || !isGitHubPrincipal(principal)) return;
     this.#credentials.set(principal.accountId, {
       token: principal.token,
       verifiedAt: entry.verifiedAt,

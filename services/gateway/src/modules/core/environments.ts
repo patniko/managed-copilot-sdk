@@ -270,11 +270,15 @@ export class Environments implements EnvironmentResolver {
   info(): EnvironmentInfo[] {
     return Object.entries(this.#deployment.environments).map(([name, env]) => {
       const bundle = this.#bundles.get(name)?.bundle;
+      const foundry = env.inference?.foundry;
+      // A Foundry environment's models are its account's deployments unless it narrows them.
+      const models = env.models ?? (foundry ? this.#deployment.foundry?.[foundry]?.deployments : undefined);
       return {
         name,
         type: env.type,
         ...(env.description ? { description: env.description } : {}),
-        ...(env.models ? { models: env.models } : {}),
+        ...(models ? { models: [...models] } : {}),
+        ...(foundry ? { inference: { foundry } } : {}),
         network: this.ceiling(env),
         ...(sandboxedType(env.type) ? { size: env.size ?? "small" } : {}),
         ...(env.promoteTo ? { promoteTo: env.promoteTo } : {}),

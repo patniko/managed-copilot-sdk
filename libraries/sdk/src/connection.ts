@@ -134,6 +134,8 @@ function withDefaults(state: Omit<ManagedState, "httpFor">): ManagedState {
   const ctx: ManagedState = {
     ...state,
     httpFor(sessionId: string): HttpClient {
+      // A view acts for its own person, always: never as whoever created or resumed the session in this process.
+      if (state.root) return state.http;
       const identity = state.identities.get(sessionId);
       return identity ? httpForIdentity(ctx, identity) : state.http;
     },
