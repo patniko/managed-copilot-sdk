@@ -167,6 +167,7 @@ export const networkModule: GatewayModule = {
             key: egressKey,
             settings,
             ...(env.MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64 ? { upstreamCa: env.MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64 } : {}),
+            ...(env.MANAGED_COPILOT_NETWORK_SUBNET_POOL ? { subnetPool: env.MANAGED_COPILOT_NETWORK_SUBNET_POOL } : {}),
             log: log.child("egress"),
           })
         : undefined;
