@@ -14,7 +14,10 @@ describe("driver helpers", () => {
     expect(snapshot).toContain("export GIT_INDEX_FILE=/tmp/repo-doctor-before.index");
     expect(snapshot).toContain("{ git read-tree HEAD 2>/dev/null || true; } && git add -u && git add -A -- . ':(exclude,glob)**/node_modules/**'");
     expect(snapshot.endsWith("git write-tree")).toBe(true);
-    expect(diffScript("a", "b")).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames a b");
+  });
+
+  it("diffs the snapshots, keeping git's warnings out of the patch itself", () => {
+    expect(diffScript("a", "b")).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames a b 2>/dev/null");
     expect(diffScript("a", "b", true)).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames --stat a b");
   });
 

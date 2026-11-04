@@ -78,12 +78,16 @@ export interface PatchFileStat {
   readonly deletions: number;
 }
 
+/** A whole patch: one too large to return fails the Patch step instead (`PATCH_TOO_LARGE`), so a fragment is never shown. */
 export interface PatchView {
   readonly text: string;
   readonly files: readonly PatchFileStat[];
   readonly additions: number;
   readonly deletions: number;
 }
+
+/** The error code of a run whose patch was too large to return. */
+export const PATCH_TOO_LARGE = "patch_too_large";
 
 /** What an allowed host serves: GitHub, the npm registry, the pip index, or something else the environment allows. */
 export type HostRole = "github" | "npm" | "pip" | "other";
