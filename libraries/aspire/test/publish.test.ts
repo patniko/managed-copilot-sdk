@@ -160,8 +160,11 @@ describe("Foundry access", () => {
     expect(FOUNDRY_ACCESS_BICEP).toContain("var openAiUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'");
     expect(FOUNDRY_ACCESS_BICEP).toContain("resourceGroup: accountResourceGroup");
     expect(FOUNDRY_ACCESS_BICEP).toContain("subscriptionId: subscriptionId");
-    expect(FOUNDRY_ACCESS_BICEP).toContain("scope: '[format(\\'Microsoft.CognitiveServices/accounts/{0}\\', parameters(\\'accountName\\'))]'");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("scope: 'Microsoft.CognitiveServices/accounts/${accountName}'");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("name: guid(accountId, gatewayPrincipalId, openAiUser)");
     expect(FOUNDRY_ACCESS_BICEP).toContain("principalType: 'ServicePrincipal'");
     expect(FOUNDRY_ACCESS_BICEP.match(/Microsoft\.Authorization\/roleAssignments/g)).toHaveLength(1);
+    // Bicep writes a nested template's strings literally: an ARM expression there would never be evaluated.
+    expect(FOUNDRY_ACCESS_BICEP).not.toMatch(/'\[/);
   });
 });

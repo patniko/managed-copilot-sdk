@@ -23,51 +23,30 @@ param accountSubscription string = ''
 param gatewayPrincipalId string
 
 var subscriptionId = empty(accountSubscription) ? subscription().subscriptionId : accountSubscription
+// Cognitive Services OpenAI User: model calls, and reading the account and its deployments.
 var openAiUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+var accountId = resourceId(subscriptionId, accountResourceGroup, 'Microsoft.CognitiveServices/accounts', accountName)
 
+// Every value is computed here, in this template: Bicep writes the nested template's strings literally, so it holds
+// no expressions of its own.
 resource access 'Microsoft.Resources/deployments@2022-09-01' = {
   name: take('mc-foundry-\${uniqueString(gatewayPrincipalId, accountName, location)}', 64)
   subscriptionId: subscriptionId
   resourceGroup: accountResourceGroup
   properties: {
     mode: 'Incremental'
-    expressionEvaluationOptions: {
-      scope: 'inner'
-    }
-    parameters: {
-      accountName: {
-        value: accountName
-      }
-      principalId: {
-        value: gatewayPrincipalId
-      }
-      roleId: {
-        value: openAiUser
-      }
-    }
     template: {
       '$schema': 'https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#'
       contentVersion: '1.0.0.0'
-      parameters: {
-        accountName: {
-          type: 'string'
-        }
-        principalId: {
-          type: 'string'
-        }
-        roleId: {
-          type: 'string'
-        }
-      }
       resources: [
         {
           type: 'Microsoft.Authorization/roleAssignments'
           apiVersion: '2022-04-01'
-          scope: '[format(\\'Microsoft.CognitiveServices/accounts/{0}\\', parameters(\\'accountName\\'))]'
-          name: '[guid(resourceId(\\'Microsoft.CognitiveServices/accounts\\', parameters(\\'accountName\\')), parameters(\\'principalId\\'), parameters(\\'roleId\\'))]'
+          scope: 'Microsoft.CognitiveServices/accounts/\${accountName}'
+          name: guid(accountId, gatewayPrincipalId, openAiUser)
           properties: {
-            roleDefinitionId: '[subscriptionResourceId(\\'Microsoft.Authorization/roleDefinitions\\', parameters(\\'roleId\\'))]'
-            principalId: '[parameters(\\'principalId\\')]'
+            roleDefinitionId: subscriptionResourceId(subscriptionId, 'Microsoft.Authorization/roleDefinitions', openAiUser)
+            principalId: gatewayPrincipalId
             principalType: 'ServicePrincipal'
           }
         }
