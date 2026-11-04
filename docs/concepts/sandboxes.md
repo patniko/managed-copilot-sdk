@@ -111,8 +111,8 @@ The operator console lists every sandbox with its state. Here, two are running a
 </p>
 
 > [!TIP]
-> **Try it:** [walkthrough 03](../../samples/03-sandbox/README.md) uploads a CSV, gets a report back as an artifact,
-> and shows that a second session gets a second sandbox. [Walkthrough 13](../../samples/13-your-own-harness/README.md)
+> **Try it:** [walkthrough 03](../../walkthroughs/03-sandbox/README.md) uploads a CSV, gets a report back as an artifact,
+> and shows that a second session gets a second sandbox. [Walkthrough 13](../../walkthroughs/13-your-own-harness/README.md)
 > runs commands directly and gives a stock Copilot client hands in a sandbox.
 
 <details>

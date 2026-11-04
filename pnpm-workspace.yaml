@@ -1,10 +1,10 @@
 packages:
-  - packages/*
-  - platform/*
+  - libraries/*
+  - services/*
   - demos/*
   - tests/*
-  - deploy/*
-  - samples
+  - deployments/*
+  - walkthroughs
 
 # Allow install scripts only for packages that need them.
 onlyBuiltDependencies:

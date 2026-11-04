@@ -241,25 +241,25 @@ guard the review could name. The residual risks below are defense-in-depth gaps 
 
 | # | Severity | Where | Risk | Suggested fix |
 | --- | --- | --- | --- | --- |
-| R1 | ✅ Fixed (was 🟡 Medium) | `platform/gateway/src/modules/sandbox/artifacts.ts` | The gateway used the `sha256` reported by sandboxd as a filename without validating it. A sandbox that reached root (sandboxd) could report `../../…`: an existing file skipped the download, and `open()` later served it. That could expose gateway-host files. | Fixed: manifests are refused when a digest isn't 64 lowercase hex characters, a size is invalid or over the artifact limits, or a path isn't a clean relative path. Downloads stop once they exceed the declared size, and `open()` refuses malformed stored digests |
-| R2 | ✅ Fixed (was 🟡 Medium) | `packages/aspire/src/publish/index.ts`, `platform/gateway/src/key-files.ts` | The sealing keys were generated into `/data`, beside the sealed values | Fixed: `aspire deploy` generates both keys as persisted secret parameters. A key file that seals stored data is wrapped under the parameter. Its plaintext is retired by a later deployment only after a gateway reading the wrapped key has served for 15 minutes, so a failed rollout can always fall back |
-| R3 | ⚪ Low | `platform/gateway/src/modules/sandbox/providers/azure/provider.ts:153` | Sandbox port URLs accept any source address unless `MANAGED_COPILOT_AZURE_INGRESS_CIDRS` is set, which leaves the per-sandbox key as the only gate | Default the CIDR to the gateway's egress range |
-| R4 | ⚪ Low | `platform/sandbox/src/relay/main.ts`, `providers/docker/provider.ts:252` | One platform key authorizes both the gateway's platform routes and the sandbox relay | Split into separate keys |
-| R5 | ⚪ Low | `platform/gateway/src/modules/attach/index.ts:44-46`, `src/redaction.ts:18` | Generic AHP clients may pass the attach ticket as `?tkn=`, but the redaction patterns don't include the `mcat_` prefix | Add `mcat_` to the redaction patterns |
-| R6 | ⚪ Low | `packages/aspire/src/publish/index.ts:350-375` | Published apps act as one GitHub account (`app-github-token`) and are gated only by an IP allowlist; `*` removes the gate | Warn or refuse when the allowlist is `*` |
-| R7 | ℹ️ By design | `platform/gateway/src/modules/network/policy.ts:241-250` | An AppHost vault can be used, by substitution only, by every account admitted to that environment | Use per-user vaults (`managed.vaults.create`) for personal credentials |
-| R8 | ℹ️ By design | `platform/gateway/src/modules/operator/access.ts:72-76` | A local gateway with no operators named makes every local GitHub account an operator | Name operators on shared machines |
+| R1 | ✅ Fixed (was 🟡 Medium) | `services/gateway/src/modules/sandbox/artifacts.ts` | The gateway used the `sha256` reported by sandboxd as a filename without validating it. A sandbox that reached root (sandboxd) could report `../../…`: an existing file skipped the download, and `open()` later served it. That could expose gateway-host files. | Fixed: manifests are refused when a digest isn't 64 lowercase hex characters, a size is invalid or over the artifact limits, or a path isn't a clean relative path. Downloads stop once they exceed the declared size, and `open()` refuses malformed stored digests |
+| R2 | ✅ Fixed (was 🟡 Medium) | `libraries/aspire/src/publish/index.ts`, `services/gateway/src/key-files.ts` | The sealing keys were generated into `/data`, beside the sealed values | Fixed: `aspire deploy` generates both keys as persisted secret parameters. A key file that seals stored data is wrapped under the parameter. Its plaintext is retired by a later deployment only after a gateway reading the wrapped key has served for 15 minutes, so a failed rollout can always fall back |
+| R3 | ⚪ Low | `services/gateway/src/modules/sandbox/providers/azure/provider.ts:153` | Sandbox port URLs accept any source address unless `MANAGED_COPILOT_AZURE_INGRESS_CIDRS` is set, which leaves the per-sandbox key as the only gate | Default the CIDR to the gateway's egress range |
+| R4 | ⚪ Low | `services/sandbox/src/relay/main.ts`, `providers/docker/provider.ts:252` | One platform key authorizes both the gateway's platform routes and the sandbox relay | Split into separate keys |
+| R5 | ⚪ Low | `services/gateway/src/modules/attach/index.ts:44-46`, `src/redaction.ts:18` | Generic AHP clients may pass the attach ticket as `?tkn=`, but the redaction patterns don't include the `mcat_` prefix | Add `mcat_` to the redaction patterns |
+| R6 | ⚪ Low | `libraries/aspire/src/publish/index.ts:350-375` | Published apps act as one GitHub account (`app-github-token`) and are gated only by an IP allowlist; `*` removes the gate | Warn or refuse when the allowlist is `*` |
+| R7 | ℹ️ By design | `services/gateway/src/modules/network/policy.ts:241-250` | An AppHost vault can be used, by substitution only, by every account admitted to that environment | Use per-user vaults (`managed.vaults.create`) for personal credentials |
+| R8 | ℹ️ By design | `services/gateway/src/modules/operator/access.ts:72-76` | A local gateway with no operators named makes every local GitHub account an operator | Name operators on shared machines |
 | R9 | ℹ️ By design | Gateway memory, sealed background credentials | Users must trust the deployment's operator: it holds their full GitHub tokens (in memory, and sealed at rest for background work) | Document it; prefer narrowly scoped tokens; `managed-copilot logout` when background work isn't needed |
 
 Controls the review traced in code, by boundary: GitHub-token auth on every non-opt-out route
-(`platform/gateway/src/http.ts:159`, `modules/core/auth.ts:105-145`); account-ID ownership with a per-session
+(`services/gateway/src/http.ts:159`, `modules/core/auth.ts:105-145`); account-ID ownership with a per-session
 incarnation counter (`modules/core/sessions.ts:555-625`); a JSON-RPC allowlist (`modules/core/router.ts:151-156`);
 an admission allowlist that refuses cwd, plugins, BYOK, and local MCP servers (`modules/core/admission.ts:350-593`);
 HMAC action capabilities compared in constant time (`modules/durable/actions/capability.ts:37-62`); hashed single-use
 attach tickets (`modules/attach/tickets.ts:72-103`); an SDK relay that binds loopback and checks the CLI is the owner
-(`packages/sdk/src/features/cli.ts:212-312`); keys compared in constant time for the relay and for sandboxd
-(`platform/sandbox/src/relay/main.ts:21-37`, `sandboxd/server.ts:71-90`); a promotion export that refuses
-secret-shaped content (`modules/promotion/export.ts:168-214`); SSRF resolve-then-connect (`packages/protocol/src/network.ts:277-438`);
+(`libraries/sdk/src/features/cli.ts:212-312`); keys compared in constant time for the relay and for sandboxd
+(`services/sandbox/src/relay/main.ts:21-37`, `sandboxd/server.ts:71-90`); a promotion export that refuses
+secret-shaped content (`modules/promotion/export.ts:168-214`); SSRF resolve-then-connect (`libraries/protocol/src/network.ts:277-438`);
 AES-256-GCM sealing with row AAD (`modules/network/sealing.ts:42-64`); `verifyWebhook` in the SDK with a constant-time
-compare and a replay window (`packages/sdk/src/features/webhooks.ts:87-121`); and least-privilege managed identity
-(`packages/aspire/src/publish/sandbox-group.ts:48-66`).
+compare and a replay window (`libraries/sdk/src/features/webhooks.ts:87-121`); and least-privilege managed identity
+(`libraries/aspire/src/publish/sandbox-group.ts:48-66`).

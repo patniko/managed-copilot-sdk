@@ -1,0 +1,25 @@
+{
+  "name": "@managed-copilot/snippets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Every snippet from the developer experience spec as a runnable script, plus one acceptance run against your platform.",
+  "type": "module",
+  "scripts": {
+    "acceptance": "tsx src/run-all.ts",
+    "snippet": "tsx src/run-snippet.ts",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.26",
+    "@managed-copilot/protocol": "workspace:*",
+    "@managed-copilot/sdk": "workspace:*",
+    "ws": "^8.22.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -70,7 +70,7 @@ sequenceDiagram
   P-->>S: the echo, with the real value shown as [redacted]
 ```
 
-That run is [walkthrough 07](../../samples/07-network-and-secrets/README.md). Declare vaults in the AppHost for a
+That run is [walkthrough 07](../../walkthroughs/07-network-and-secrets/README.md). Declare vaults in the AppHost for a
 whole environment, or create one in code for one user:
 
 ```ts
@@ -102,7 +102,7 @@ gateway's `web_fetch` tool, and remote MCP servers through a gateway adapter, bo
 for a shared environment holds MCP server credentials, which the adapter attaches; your code never handles them.
 
 > [!TIP]
-> **Try it:** [walkthrough 07](../../samples/07-network-and-secrets/README.md) shows the placeholder, the real value
+> **Try it:** [walkthrough 07](../../walkthroughs/07-network-and-secrets/README.md) shows the placeholder, the real value
 > reaching an allowed host, and a blocked host, in one run.
 
 <details>

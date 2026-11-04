@@ -24,7 +24,7 @@ sequenceDiagram
   SB-->>App: the reply: saved outputs/sum.json, result 60
 ```
 
-This is a live run of [walkthrough 04](../../samples/04-promotion/README.md). Its `sendAndWait` call returned once,
+This is a live run of [walkthrough 04](../../walkthroughs/04-promotion/README.md). Its `sendAndWait` call returned once,
 after the work finished in the sandbox.
 
 ## Two ways to move
@@ -53,7 +53,7 @@ There are no workspace files to carry: a shared session never had a filesystem, 
   session keeps running where it was. `managed.promote` on a busy session answers `session_busy`.
 
 > [!TIP]
-> **Try it:** [walkthrough 04](../../samples/04-promotion/README.md) asks a question, then a task that needs Python,
+> **Try it:** [walkthrough 04](../../walkthroughs/04-promotion/README.md) asks a question, then a task that needs Python,
 > and prints where the session runs before and after.
 
 <details>

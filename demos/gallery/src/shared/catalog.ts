@@ -17,13 +17,13 @@ export interface AppEntry {
 }
 
 export interface Walkthrough {
-  /** Two digits, as `pnpm sample <id>` takes it. */
+  /** Two digits, as `pnpm walkthrough <id>` takes it. */
   readonly id: string;
   readonly folder: string;
   readonly title: string;
   readonly youSee: string;
   readonly minutes: number;
-  /** Runs with `pnpm sample <id>`; walkthrough 10 is a guide without a script. */
+  /** Runs with `pnpm walkthrough <id>`; walkthrough 10 is a guide without a script. */
   readonly runnable: boolean;
 }
 
@@ -41,7 +41,7 @@ export const CONSOLE: AppEntry = {
   app: GATEWAY_APP,
   port: GATEWAY_PORT,
   healthPath: "/healthz",
-  readme: "platform/console/README.md",
+  readme: "services/console/README.md",
 };
 
 export const APPS: readonly AppEntry[] = [

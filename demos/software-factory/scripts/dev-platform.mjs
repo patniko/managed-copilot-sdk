@@ -15,7 +15,7 @@ import { softwareFactory } from "../apphost.mts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repo = resolve(root, "..", "..");
-const gateway = join(repo, "platform", "gateway", "dist", "main.js");
+const gateway = join(repo, "services", "gateway", "dist", "main.js");
 if (!existsSync(gateway)) {
   console.error("The gateway isn't built. Run `pnpm build` from the repository root first.");
   process.exit(1);

@@ -4,11 +4,8 @@ A six-minute narrated tour for any audience: the idea, the three environment typ
 both demos running for real, and the Azure deployment. Every demo shot is a recording of the real platform with
 real models, not a mock-up.
 
-| | |
-| --- | --- |
-| [**Watch the tour**](managed-copilot-tour.mp4) | MP4, 1080p, 6:08, narrated with burned-in captions |
-| [Slides](managed-copilot-tour-slides.pdf) | The 19 slides from the video, as a PDF deck |
-| [Captions](managed-copilot-tour.srt) | SRT, for players and editors that take separate captions |
+The video (MP4, 1080p, 6:08, burned-in captions), its captions (SRT), and its 19 slides (PDF) are not kept in the
+repository. [Rebuild the video](#rebuild-the-video) to produce all three in `source/out/build/`.
 
 ## Chapters
 

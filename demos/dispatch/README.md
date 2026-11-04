@@ -195,6 +195,6 @@ Copilot CLI reused one of them, and deleting the conversation deleted all three 
 | `apphost.mts` | AppHost fragment: the three orchestrator environments (one per execution style), their four worker environments, and the app resource |
 | `src/server` | Platform connection, conversations (one coordinator session each), the event projection, REST and server-sent events |
 | `src/shared` | Types shared with the UI, blueprint labels, and templates |
-| `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`packages/github-theme`](../../packages/github-theme); light and dark follow the OS) |
+| `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `test` | Unit tests: the projection, conversations and approvals against an in-memory platform, the API, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

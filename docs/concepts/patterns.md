@@ -91,16 +91,16 @@ flowchart TD
 
 | Pattern | Scenarios it fits | Try it | See it in an app |
 | --- | --- | --- | --- |
-| **Isolated** | A coding agent that edits, builds, and tests a repository; data jobs | [Walkthrough 03](../../samples/03-sandbox/README.md) | The [software factory](../../demos/software-factory/README.md)'s Classic mode: a sandbox per build task |
-| **Shared** | Support, sales, and Q&A chat over your own data, at volume | [Walkthrough 02](../../samples/02-your-own-tools/README.md) | The factory's planner and reviewer |
-| **Promotable** | An assistant that usually chats but sometimes needs to run code | [Walkthrough 04](../../samples/04-promotion/README.md) | — |
-| **Direct** | A harness with its own planning and sub-agents that must not run code on your host; tight edit-and-run loops | [Walkthrough 12](../../samples/12-direct-execution/README.md) | [Dispatch](../../demos/dispatch/README.md), **Work directly** |
-| **Delegate** | Software factories and research swarms: independent, long-running parts in parallel | [Walkthrough 11](../../samples/11-orchestrator/README.md) | Dispatch, **Delegate to workers**; the factory's agent-led mode; the [assistant](../../demos/assistant/README.md)'s sandboxes |
-| **Mixed** | One conversation that does quick work itself and hands big or differently permitted parts to new agents | [Walkthrough 12](../../samples/12-direct-execution/README.md) | Dispatch, **Mixed** |
+| **Isolated** | A coding agent that edits, builds, and tests a repository; data jobs | [Walkthrough 03](../../walkthroughs/03-sandbox/README.md) | The [software factory](../../demos/software-factory/README.md)'s Classic mode: a sandbox per build task |
+| **Shared** | Support, sales, and Q&A chat over your own data, at volume | [Walkthrough 02](../../walkthroughs/02-your-own-tools/README.md) | The factory's planner and reviewer |
+| **Promotable** | An assistant that usually chats but sometimes needs to run code | [Walkthrough 04](../../walkthroughs/04-promotion/README.md) | — |
+| **Direct** | A harness with its own planning and sub-agents that must not run code on your host; tight edit-and-run loops | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | [Dispatch](../../demos/dispatch/README.md), **Work directly** |
+| **Delegate** | Software factories and research swarms: independent, long-running parts in parallel | [Walkthrough 11](../../walkthroughs/11-orchestrator/README.md) | Dispatch, **Delegate to workers**; the factory's agent-led mode; the [assistant](../../demos/assistant/README.md)'s sandboxes |
+| **Mixed** | One conversation that does quick work itself and hands big or differently permitted parts to new agents | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | Dispatch, **Mixed** |
 
 **Bring your own brain.** If you already have an agent loop, keep it in your process and give it hands in a sandbox:
 `managed.sandboxes.create` and `managed.exec` use the single-container block directly
-([walkthrough 13](../../samples/13-your-own-harness/README.md)).
+([walkthrough 13](../../walkthroughs/13-your-own-harness/README.md)).
 
 ## What every pattern shares
 
@@ -123,7 +123,7 @@ The patterns are the combinations the platform supports. These are not:
 - **Promotion moves a session into an isolated environment**, not into a coordinator.
 
 > [!TIP]
-> **Try it:** run the six patterns' walkthroughs (`pnpm sample 02`, `03`, `04`, `11`, and `12`) or open
+> **Try it:** run the six patterns' walkthroughs (`pnpm walkthrough 02`, `03`, `04`, `11`, and `12`) or open
 > [Dispatch](../../demos/dispatch/README.md) and send the same request with each of its three styles. `pnpm gallery`
 > lists every pattern with its walkthrough and app.
 
@@ -132,7 +132,7 @@ The patterns are the combinations the platform supports. These are not:
 
 - [Spec: environment types](../spec/developer-experience.md#environment-types) and
   [execution styles](../spec/developer-experience.md#execution-styles-delegate-direct-mixed).
-- The building blocks in the gateway: the shared runtime is `platform/gateway/src/modules/core/runtime.ts`, sandboxes
+- The building blocks in the gateway: the shared runtime is `services/gateway/src/modules/core/runtime.ts`, sandboxes
   are `modules/sandbox`, and orchestration is `modules/orchestrator`, with `modules/promotion` for the one-time move
   and `modules/orchestrator/hands.ts` for direct and mixed.
 - [Architecture: isolated placement](../architecture.md#isolated-placement),

@@ -180,13 +180,13 @@ function AppCard({ app, state }: { readonly app: AppEntry; readonly state?: Gall
 }
 
 function WalkthroughCard({ walkthrough, state }: { readonly walkthrough: Walkthrough; readonly state?: GalleryState }) {
-  const command = `pnpm sample ${walkthrough.id}`;
+  const command = `pnpm walkthrough ${walkthrough.id}`;
   // Both copies name their gateway: MANAGED_COPILOT_URL outlives the command in that terminal, and an AppHost with a
   // port offset writes no discovery record.
   const withUrl = (url: string) => `$env:MANAGED_COPILOT_URL = "${url}"; ${command}`;
   const localUrl = state?.local?.gatewayUrl;
   const cloudUrl = state?.cloud.gatewayUrl;
-  const readme = `${state?.repoUrl ?? ""}samples/${walkthrough.folder}/README.md`;
+  const readme = `${state?.repoUrl ?? ""}walkthroughs/${walkthrough.folder}/README.md`;
   return (
     <article id={`walkthrough-${walkthrough.id}`} className="card Box overflow-hidden flex flex-col scroll-mt-6">
       <Shot id={`sample-${walkthrough.id}`} alt={`Walkthrough ${walkthrough.id}: ${walkthrough.title}`} href={readme} />
@@ -429,7 +429,7 @@ export function App() {
               <TerminalIcon size={20} /> Walkthroughs
             </h2>
             <div className="Subhead-description">
-              Short scripts from {renderCode("`samples/`")}. Copy {hosted ? "the Azure" : "the Local or Azure"} command and run it from the repository root; each sets {renderCode("`MANAGED_COPILOT_URL`")}{" "}
+              Short scripts from {renderCode("`walkthroughs/`")}. Copy {hosted ? "the Azure" : "the Local or Azure"} command and run it from the repository root; each sets {renderCode("`MANAGED_COPILOT_URL`")}{" "}
               to that gateway first.
             </div>
           </div>

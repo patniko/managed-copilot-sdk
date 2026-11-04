@@ -13,7 +13,7 @@
     "test": "pnpm -r --if-present run test",
     "clean": "pnpm -r --if-present run clean",
     "dev": "aspire run",
-    "sample": "pnpm --silent --filter @managed-copilot/samples sample",
+    "walkthrough": "pnpm --silent --filter @managed-copilot/walkthroughs walkthrough",
     "gallery": "pnpm --silent --filter @managed-copilot/demo-gallery start"
   },
   "devDependencies": {

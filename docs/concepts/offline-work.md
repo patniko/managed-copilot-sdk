@@ -115,8 +115,8 @@ await managed.close(); // detaches this process; it never deletes sessions or ca
 Pass your tools again when you resume: functions are never stored on the platform.
 
 > [!TIP]
-> **Try it:** [walkthrough 08](../../samples/08-offline/README.md) sends a prompt, disconnects, and answers the tool
-> call by polling. [Walkthrough 09](../../samples/09-schedules/README.md) creates a schedule and runs it now.
+> **Try it:** [walkthrough 08](../../walkthroughs/08-offline/README.md) sends a prompt, disconnects, and answers the tool
+> call by polling. [Walkthrough 09](../../walkthroughs/09-schedules/README.md) creates a schedule and runs it now.
 
 <details>
 <summary><strong>Under the hood</strong></summary>

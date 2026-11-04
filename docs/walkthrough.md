@@ -143,8 +143,8 @@ npx managed-copilot new chat              # a new chat session, opened in Copilo
 npx managed-copilot new coder             # the same in its own sandbox; ask it to run `uname -a`
 npx managed-copilot workers <id>          # an orchestrator session's workers (use a Dispatch conversation's ID)
 npx managed-copilot exec <id> -- ls -la   # a command in a session's sandbox
-pnpm sample 01                            # walkthrough 01; the gallery lists all of them
-pnpm --filter @managed-copilot/quickstart acceptance   # every spec snippet against the local platform
+pnpm walkthrough 01                            # walkthrough 01; the gallery lists all of them
+pnpm --filter @managed-copilot/snippets acceptance   # every spec snippet against the local platform
 ```
 
 - [ ] `new coder` opens Copilot CLI with the footer `remote /workspace`.
@@ -277,9 +277,9 @@ Repeat 1.4 to 1.7 with each card's **Azure** button. Differences to expect:
 Platform checks from the terminal:
 
 ```powershell
-pnpm sample 03                   # an Azure sandbox: prints Linux x86_64
+pnpm walkthrough 03                   # an Azure sandbox: prints Linux x86_64
 npx managed-copilot new coder    # Copilot CLI on an Azure sandbox
-pnpm --filter @managed-copilot/quickstart acceptance 01 02 03 04 05 06 07 08 09 11 13 14 --strict
+pnpm --filter @managed-copilot/snippets acceptance 01 02 03 04 05 06 07 08 09 11 13 14 --strict
 ```
 
 Snippets 10 and 12 need a local webhook receiver, so they're left out against Azure.
@@ -358,7 +358,7 @@ gh auth login                                            # their GitHub account 
 $env:MANAGED_COPILOT_URL = "https://copilot.<environment-domain>"
 npx managed-copilot status                               # should show them as Signed in
 npx managed-copilot new chat                             # a chat in Copilot CLI
-pnpm sample 03                                           # an Azure sandbox
+pnpm walkthrough 03                                           # an Azure sandbox
 pnpm --filter @managed-copilot/demo-dispatch start       # Dispatch on http://localhost:7470, running in Azure
 npx managed-copilot console                              # operators only
 ```
