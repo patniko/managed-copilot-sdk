@@ -173,24 +173,28 @@ with the fix.
 
 ### Changing a saved parameter
 
-Aspire saves the parameter values a deployment used in its deployment record,
-`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/production.json`, and on later deploys the saved value
-wins over the AppHost's user secrets and the environment. (`Parameters:app-github-token` is the exception: an explicit
-`Parameters__app-github-token` replaces it; see below.) To change another saved parameter, for example a rotated OAuth
-client secret:
+Aspire saves the parameter values a deployment used with its deployment state (under
+`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) and reuses them on later deploys, ahead of the
+AppHost's user secrets and the environment. So a changed user secret, or `Parameters__<name>` in the environment, doesn't
+replace a saved value by itself. To make a parameter replaceable (a rotated OAuth client secret, say), have the AppHost
+pass the environment's value explicitly when there is one, as `publishApp` does for `Parameters:app-github-token`:
 
-1. Delete its `"Parameters:<name>"` entry from that file. Never delete the platform's keys (`<name>-platform-key`,
-   `-durable-key`, `-vault-key`, `-egress-key`): without them the gateway can't read what it sealed, and refuses to
-   start.
-2. Deploy again with the new value in the environment, kept out of command arguments:
+```ts
+const name = "google-client-secret";
+const replacement = process.env[`Parameters__${name}`]; // set only when replacing; never on a command line
+const clientSecret = await builder.addParameter(name, { secret: true, ...(replacement ? { value: replacement } : {}) });
+```
 
-   ```powershell
-   ${env:Parameters__google-client-secret} = Read-Host "New Google client secret" -MaskInput
-   npx managed-copilot deploy
-   Remove-Item Env:Parameters__google-client-secret
-   ```
+Then deploy with the new value in the environment:
 
-   or in the AppHost's user secrets, which `npx managed-copilot deploy` passes on for parameters the record doesn't hold.
+```powershell
+${env:Parameters__google-client-secret} = Read-Host "New Google client secret" -MaskInput
+npx managed-copilot deploy
+Remove-Item Env:Parameters__google-client-secret
+```
+
+Don't edit the deployment state by hand: it also holds the platform's keys (`<name>-platform-key`, `-durable-key`,
+`-vault-key`, `-egress-key`), and without them the gateway can't read what it sealed.
 
 ### App credentials and rotation
 

@@ -418,7 +418,11 @@ function recordDirectory(host: HostTools, appHost: string): string {
   return join(host.deploymentsDirectory(), createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
 }
 
-/** Reads only the target and parameter names of a deployment record; the file also holds secrets, which are never printed. */
+/**
+ * Reads only the target and parameter names of a deployment record; the files also hold secrets, which are never read
+ * out. Aspire 13.6 keeps its current state beside `production.json`, in `production.json.migration`, whose
+ * `ClaimedSections` name the parameters it holds.
+ */
 function readRecord(directory: string): DeploymentRecord | undefined {
   const file = join(directory, "production.json");
   try {
@@ -429,9 +433,19 @@ function readRecord(directory: string): DeploymentRecord | undefined {
     };
     const parameters = new Set(Object.keys(parsed).filter((key) => /^parameters:/i.test(key)).map((key) => key.toLowerCase()));
     if (parsed.Parameters && typeof parsed.Parameters === "object") for (const key of Object.keys(parsed.Parameters)) parameters.add(`parameters:${key}`.toLowerCase());
+    for (const section of claimedSections(join(directory, "production.json.migration"))) if (/^parameters:/i.test(section)) parameters.add(section.toLowerCase());
     return { directory, subscription: value("SubscriptionId"), resourceGroup: value("ResourceGroup"), modified: statSync(file).mtimeMs, parameters };
   } catch {
     return undefined;
+  }
+}
+
+function claimedSections(file: string): string[] {
+  try {
+    const { ClaimedSections: sections } = JSON.parse(readFileSync(file, "utf8")) as { ClaimedSections?: unknown };
+    return Array.isArray(sections) ? sections.filter((section): section is string => typeof section === "string") : [];
+  } catch {
+    return [];
   }
 }
 
