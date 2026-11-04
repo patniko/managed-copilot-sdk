@@ -162,7 +162,7 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the ingress of every app that isn't public (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it, looked up only when such an app exists. The platform subnet is always allowed (webhooks). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |
 | `Parameters:<name>-durable-key`, `Parameters:<name>-vault-key` | No | Secrets, 32 bytes base64. Generated and persisted with the deployment when not set, so the sealing keys never sit beside the sealed values on the NFS share. A deployment that predates them had its keys generated into `/data`. Its next gateway wraps each key file that still seals stored data under these parameters (`durable.key.wrapped`, `network/vault.key.wrapped`). The following `aspire deploy` deletes the plaintext files once a gateway that reads the wrapped keys has served for 15 minutes (so a failed rollout's fallback is never left without them). A stale key file the parameter already replaced is renamed `.replaced`. Earlier vaults and background sign-ins stay readable. Keep these parameters: without the right one the gateway refuses to start. |
-| `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. `npx managed-copilot deploy` passes them from the AppHost's user secrets on the deployment that first uses them; to replace values the deployment already keeps, set `Parameters__google-client-secret` (and so on) in the environment. |
+| `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. `npx managed-copilot deploy` passes them from the AppHost's user secrets on the deployment that first uses them; after that, see "Changing a saved parameter". |
 | `Parameters:<name>-platform-key`, `Parameters:<name>-egress-key`, and the AppHost's generated secrets | Generated | Kept in the AppHost's user secrets and deployment state; deployed as Container Apps secrets (`secretRef`), never in plain configuration. The egress key links the egress proxy to the gateway. |
 
 Every AppHost secret parameter reaches the gateway as a Container Apps secret, and its `MANAGED_COPILOT_CONFIG` holds
@@ -170,6 +170,27 @@ only `{ secretEnv }` references. Webhooks that point at a local app (`http://loc
 app's HTTPS address (`https://<app>.<environment-domain>/...`; calls between apps stay inside the environment, and the
 gateway fills in the domain when it starts); a loopback webhook with no published app on that port fails the deploy
 with the fix.
+
+### Changing a saved parameter
+
+Aspire saves the parameter values a deployment used in its deployment record,
+`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/production.json`, and on later deploys the saved value
+wins over the AppHost's user secrets and the environment. (`Parameters:app-github-token` is the exception: an explicit
+`Parameters__app-github-token` replaces it; see below.) To change another saved parameter, for example a rotated OAuth
+client secret:
+
+1. Delete its `"Parameters:<name>"` entry from that file. Never delete the platform's keys (`<name>-platform-key`,
+   `-durable-key`, `-vault-key`, `-egress-key`): without them the gateway can't read what it sealed, and refuses to
+   start.
+2. Deploy again with the new value in the environment, kept out of command arguments:
+
+   ```powershell
+   ${env:Parameters__google-client-secret} = Read-Host "New Google client secret" -MaskInput
+   npx managed-copilot deploy
+   Remove-Item Env:Parameters__google-client-secret
+   ```
+
+   or in the AppHost's user secrets, which `npx managed-copilot deploy` passes on for parameters the record doesn't hold.
 
 ### App credentials and rotation
 

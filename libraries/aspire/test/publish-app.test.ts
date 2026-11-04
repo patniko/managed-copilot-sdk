@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appAccessSummary, checkPublicTransition, publishApp, publishManagedCopilot, type AzRunner, type PublishAppOptions } from "../src/publish/index.js";
+import { appAccessSummary, azCommandLine, checkPublicTransition, publishApp, publishManagedCopilot, type AzRunner, type PublishAppOptions } from "../src/publish/index.js";
 import type { PublishBuilder } from "../src/publish/types.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -217,6 +217,17 @@ describe("publishApp access", () => {
     expect(steps.filter((step) => step.name.startsWith("check-")).map((step) => [step.name, step.options])).toEqual([
       ["check-front-desk-public", { dependsOn: [`provision-${NAME}-env`], requiredBy: ["push-prereq"] }],
     ]);
+  });
+});
+
+describe("azCommandLine", () => {
+  it("quotes every argument and escapes cmd.exe metacharacters twice (cmd, then the batch file's %*)", () => {
+    expect(azCommandLine(["group", "show", "--name", "team(dev)"])).toBe('"az ^^^"group^^^" ^^^"show^^^" ^^^"--name^^^" ^^^"team^^^(dev^^^)^^^""');
+    expect(azCommandLine(["a%PATH%b"])).toBe('"az ^^^"a^^^%PATH^^^%b^^^""');
+  });
+
+  it("refuses an argument with a line break, which cmd.exe can't pass", () => {
+    expect(() => azCommandLine(["group\nshow"])).toThrow(/line break/);
   });
 });
 

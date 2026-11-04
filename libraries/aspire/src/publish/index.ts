@@ -407,24 +407,55 @@ const AZ_OUTPUT_LIMIT = 64 * 1024 * 1024;
 /** Runs the Azure CLI and returns all of its stdout, apart from stderr (a JSON answer must arrive whole). */
 export type AzRunner = (args: readonly string[]) => Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }>;
 
+/** cmd.exe metacharacters, escaped with `^` so cmd passes them through literally (as the SDK's attach launcher does). */
+const CMD_META = /([()\][%!^"`<>&|;, *?])/g;
+
+/** Quotes one argument for CommandLineToArgvW: backslashes double only before a quote or the closing quote. */
+function quoteArgument(value: string): string {
+  let quoted = '"';
+  let backslashes = 0;
+  for (const character of value) {
+    if (character === "\\") {
+      backslashes++;
+      continue;
+    }
+    quoted += character === '"' ? `${"\\".repeat(backslashes * 2 + 1)}"` : `${"\\".repeat(backslashes)}${character}`;
+    backslashes = 0;
+  }
+  return `${quoted}${"\\".repeat(backslashes * 2)}"`;
+}
+
+/**
+ * The cmd.exe command line that runs the Azure CLI (a batch file on Windows) with `args`: every argument quoted, and its
+ * metacharacters escaped twice, because cmd parses the line and the batch file re-parses `%*`. Nothing in an argument
+ * (a resource group named `team(dev)`, say) can expand a variable or start another command.
+ */
+export function azCommandLine(args: readonly string[]): string {
+  if (args.some((arg) => /[\r\n\0]/.test(arg))) throw new AzurePublishError("An Azure CLI argument can't contain a line break.");
+  const escape = (value: string) => value.replace(CMD_META, "^$1");
+  return `"${["az", ...args.map((arg) => escape(escape(quoteArgument(arg))))].join(" ")}"`;
+}
+
 export const runAz: AzRunner = (args) =>
   new Promise((resolve, reject) => {
-    // The Azure CLI is a .cmd on Windows and runs only through a shell; its arguments here are fixed words and Azure
-    // resource names, checked so nothing is interpreted by the shell.
-    const viaShell = process.platform === "win32";
-    if (viaShell && args.some((arg) => !/^[A-Za-z0-9._:/=-]+$/.test(arg))) {
-      reject(new AzurePublishError(`Refusing to run the Azure CLI with an unexpected argument: ${args.join(" ")}`));
+    let child: ReturnType<typeof spawn>;
+    try {
+      child =
+        process.platform === "win32"
+          ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", azCommandLine(args)], { windowsHide: true, windowsVerbatimArguments: true })
+          : spawn("az", [...args], { windowsHide: true });
+    } catch (error) {
+      reject(error);
       return;
     }
-    const child = viaShell ? spawn(["az", ...args].join(" "), { windowsHide: true, shell: true }) : spawn("az", [...args], { windowsHide: true });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     let size = 0;
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout!.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size <= AZ_OUTPUT_LIMIT) stdout.push(chunk);
     });
-    child.stderr.on("data", (chunk: Buffer) => void stderr.push(chunk));
+    child.stderr!.on("data", (chunk: Buffer) => void stderr.push(chunk));
     child.on("error", reject);
     child.on("close", (code) => {
       const errors = Buffer.concat(stderr).toString("utf8");

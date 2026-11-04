@@ -388,6 +388,15 @@ describe("deploy", () => {
     expect(h.out()).toContain("Passing 2 parameters from the AppHost's user secrets: google-client-id, google-client-secret");
     expect(h.out() + h.err()).not.toMatch(/google-secret-value|local-durable-key|do-not-print-me|from-user-secrets/);
     expect(host.calls.some((call) => call.args.some((arg) => arg.includes("google-secret-value")))).toBe(false);
+
+    // The caller's value wins under any spelling Aspire reads the same: any case, and `_` for `-`.
+    host.calls.length = 0;
+    const aliased = harness(host, { env: { NO_COLOR: "1", Parameters__google_client_secret: "from-environment", "PARAMETERS__GOOGLE-CLIENT-ID": "from-environment" } });
+    expect(await run(["deploy", "--yes"], aliased.io)).toBe(0);
+    const aliasedEnv = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(aliasedEnv).not.toHaveProperty("Parameters__google-client-secret");
+    expect(aliasedEnv).not.toHaveProperty("Parameters__google-client-id");
+    expect(aliased.out()).toContain("Passing 1 parameter from the AppHost's user secrets: front-desk-github-client-secret");
   });
 
   it("says public apps are open to any address, and lists them once deployed", async () => {
