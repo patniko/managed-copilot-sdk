@@ -51,6 +51,8 @@ class FakeHost implements HostTools {
   manifestSavesValues = false;
   /** Another deployment of the same AppHost writes its Production state while the check runs. */
   concurrentDeployment = false;
+  /** The saved settings the AppHost saw in its configuration during the last check. */
+  checkStateSeen: string[] = [];
   readonly calls: { command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }[] = [];
 
   has(command: string) {
@@ -78,6 +80,9 @@ class FakeHost implements HostTools {
       mkdirSync(recordDir, { recursive: true });
       // Aspire keeps deployment state per environment: <record>/<environment>.json.
       const environment = args.includes("--environment") ? args[args.indexOf("--environment") + 1]! : "production";
+      const seen = join(recordDir, `${environment}.json`);
+      // Aspire loads the environment's saved state into the AppHost's configuration.
+      this.checkStateSeen = existsSync(seen) ? Object.keys(JSON.parse(readFileSync(seen, "utf8")) as object) : [];
       if (this.manifestSavesValues) {
         // As Aspire's parameter step does in publish mode: every value it resolves goes into the environment's state.
         const file = join(recordDir, `${environment}.json`);
@@ -423,7 +428,7 @@ describe("deploy", () => {
       "Parameters:copilot-app-front-desk-key": "local-app-key",
       "ConnectionStrings:db": "not-a-parameter",
     });
-    host.manifest = { "google-client-id": false, "google-client-secret": false, "front-desk-session-secret": true, "copilot-app-front-desk-key": true, "copilot-platform-key": true };
+    host.manifest = { "google-client-id": false, "google-client-secret": false, "front-desk-github-client-secret": false, "front-desk-session-secret": true, "copilot-app-front-desk-key": true, "copilot-platform-key": true };
     const h = harness(host, { env: { NO_COLOR: "1", "Parameters__front-desk-github-client-secret": "from-environment" } });
     writeRecord(host, thisAppHost(), "managed-copilot-dev");
     expect(await run(["deploy", "--yes"], h.io)).toBe(0);
@@ -484,6 +489,7 @@ describe("deploy", () => {
     const flaky = deployedHost();
     flaky.secrets["Parameters:google-client-secret"] = "google-secret-value";
     flaky.manifestFailures = 1;
+    flaky.manifest = { "google-client-secret": false };
     const flakyRun = harness(flaky);
     writeRecord(flaky, thisAppHost(), "managed-copilot-dev");
     expect(await run(["deploy", "--yes"], flakyRun.io)).toBe(0);
@@ -503,6 +509,24 @@ describe("deploy", () => {
     expect(host.calls.some((call) => call.command === "aspire" && call.args[0] === "do")).toBe(true);
     expect(readdirSync(host.records)).toEqual([]);
     expect(h.out()).toContain("Passing 1 parameter from the AppHost's user secrets: google-client-id");
+  });
+
+  it("shows the check the deployment's saved state, and passes only parameters the AppHost declares", async () => {
+    const host = deployedHost();
+    Object.assign(host.secrets, { "Parameters:new-client-secret": "new-secret-value", "Parameters:leftover": "leftover-value" });
+    host.manifest = { "new-client-secret": false };
+    const h = harness(host);
+    const recordDir = writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    const files = () => Object.fromEntries(readdirSync(recordDir).map((file) => [file, readFileSync(join(recordDir, file), "utf8")]));
+    const before = files();
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(host.checkStateSeen).toContain("Parameters:copilot-platform-key");
+    expect(files()).toEqual(before);
+    const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(env).toMatchObject({ "Parameters__new-client-secret": "new-secret-value" });
+    expect(env).not.toHaveProperty("Parameters__leftover");
+    expect(h.out()).toContain("Not declared by the AppHost, so not passed: leftover");
+    expect(h.out() + h.err()).not.toMatch(/new-secret-value|leftover-value/);
   });
 
   it("keeps what the check might save out of the deployment's state, and leaves other deployments' files alone", async () => {

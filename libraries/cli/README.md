@@ -73,8 +73,8 @@ passes the AppHost's own parameters from them the same way (for example an OAuth
 `aspire secret set Parameters:<name> ...`), and names them, never their values. It never passes a parameter the AppHost
 generates (`addParameterWithGeneratedValue`, such as the platform's and apps' keys and webhook secrets): each deployment
 makes its own. It learns which ones those are from the manifest `aspire do publish-manifest` writes for the AppHost
-(under an Aspire environment of its own, so nothing it does reaches the deployment's state); if that fails twice, it
-stops before deploying and names Aspire's log. It also leaves out every parameter the deployment's Aspire record already
+(under an Aspire environment of its own, so nothing it does reaches the deployment's state), and passes only parameters
+the AppHost declares; if that fails twice, it stops before deploying and names Aspire's log. It also leaves out every parameter the deployment's Aspire record already
 keeps (Aspire's saved value wins on later deploys; see
 [changing a saved parameter](../../docs/deployment.md#changing-a-saved-parameter)), and a value you've set in the
 environment yourself (any spelling Aspire reads the same) wins over the user secret.
