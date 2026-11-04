@@ -168,9 +168,10 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 
 Every AppHost secret parameter reaches the gateway as a Container Apps secret, and its `MANAGED_COPILOT_CONFIG` holds
 only `{ secretEnv }` references. Webhooks that point at a local app (`http://localhost:<port>/...`) are rewritten to that
-app's HTTPS address (`https://<app>.<environment-domain>/...`; calls between apps stay inside the environment, and the
-gateway fills in the domain when it starts); a loopback webhook with no published app on that port fails the deploy
-with the fix.
+app's name inside the environment (`http://<app>/...`). Those calls never leave the environment, so an app behind
+`Parameters:app-allowed-ips` still receives them (its public address would be refused: the environment's outbound
+addresses aren't on the allowlist), and the webhook's signature still authenticates every delivery. A loopback webhook
+with no published app on that port fails the deploy with the fix.
 
 ### Changing a saved parameter
 

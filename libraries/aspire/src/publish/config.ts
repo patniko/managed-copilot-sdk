@@ -122,8 +122,10 @@ function isLoopback(url: URL): boolean {
 }
 
 /**
- * Points loopback webhooks at the deployed app that serves that port, by its HTTPS address: plain HTTP between apps is
- * redirected to HTTPS by the environment's ingress, and the app's public host name is the one it accepts.
+ * Points loopback webhooks at the deployed app that serves that port, by its name inside the environment
+ * (`http://<app>`): those calls stay in the environment, so an app's ingress allowlist admits them as the platform
+ * subnet's. Its public HTTPS address would leave through the environment's outbound IPs, which an allowlist refuses
+ * (403). The webhook's signature still authenticates each delivery.
  */
 export function rewriteWebhooks(config: ManagedCopilotConfig, appsByPort: ReadonlyMap<number, string>): ManagedCopilotConfig {
   if (!config.webhooks) return config;
@@ -142,7 +144,7 @@ export function rewriteWebhooks(config: ManagedCopilotConfig, appsByPort: Readon
           "Deploy that app with publishApp(...) in the AppHost, or leave the webhook out when publishing.",
       );
     }
-    webhooks[name] = { ...hook, url: `https://${app}.${DNS_SUFFIX_PLACEHOLDER}${url.pathname}${url.search}` };
+    webhooks[name] = { ...hook, url: `http://${app}${url.pathname}${url.search}` };
   }
   return { ...config, webhooks };
 }

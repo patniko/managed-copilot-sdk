@@ -113,7 +113,7 @@ describe("applyOperators", () => {
 describe("rewriteWebhooks", () => {
   it("points loopback webhooks at the deployed app's HTTPS address and leaves others alone", () => {
     const rewritten = rewriteWebhooks(config(), new Map([[7490, "assistant"]]));
-    expect(rewritten.webhooks?.assistant?.url).toBe("https://assistant.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/api/copilot-events?v=1");
+    expect(rewritten.webhooks?.assistant?.url).toBe("http://assistant/api/copilot-events?v=1");
     expect(rewritten.webhooks?.partner?.url).toBe("https://hooks.example.com/copilot");
   });
 

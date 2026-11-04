@@ -110,7 +110,8 @@ export class DurableWebhooks implements WebhooksService {
     for (const subscription of this.#subscriptions.values()) {
       const url = new URL(subscription.url);
       if (!subscription.secret) this.#log.error("Webhook has no signing secret; its deliveries will fail until it is set", { webhook: subscription.name });
-      if (url.protocol === "http:" && !isLoopback(url) && deps.mode === "azure") {
+      // A single-label host is an app's name inside the deployment's environment: the call never leaves it.
+      if (url.protocol === "http:" && !isLoopback(url) && url.hostname.includes(".") && deps.mode === "azure") {
         this.#log.warn("Webhook uses plain HTTP; use HTTPS for deployed environments", { webhook: subscription.name });
       }
     }

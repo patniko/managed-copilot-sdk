@@ -1884,8 +1884,10 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   `deployments/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
   revision mode, IP rules, tags). Publishing refuses an open gateway: access rules come from the AppHost or from
   `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port, by
-  its HTTPS address in the environment (`https://<app>.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/...`, filled in by the
-  gateway's entrypoint at start). The `push-<name>-sandbox-images` step runs after `provision-<name>-env` (the
+  its name inside the environment (`http://<app>/...`): an app's public HTTPS address would leave through the
+  environment's outbound IPs, which its ingress allowlist refuses (403, verified live), while in-environment calls come
+  from the platform subnet the allowlist admits. The webhook signature still authenticates each delivery. The gateway
+  doesn't warn about plain HTTP for a single-label (in-environment) host. The `push-<name>-sandbox-images` step runs after `provision-<name>-env` (the
   registry address is an environment output) and before `provision-<name>-egress` (the gateway follows the proxy).
   App credentials remain secure parameters/secret references. An explicit `Parameters__app-github-token` environment
   value overrides stale Aspire deployment state; rotation needs a new ready app revision and renewal of any
