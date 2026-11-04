@@ -4,6 +4,7 @@ import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
+import { HELP_DESK_PORT, helpDesk } from "./demos/help-desk/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -22,6 +23,7 @@ const ports = {
   factory: 7480 + offset,
   snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
+  helpDesk: HELP_DESK_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -33,6 +35,7 @@ const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
+const helpDeskDemo = helpDesk({ port: ports.helpDesk });
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
@@ -59,6 +62,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...factory.environments,
     ...assistant.environments,
     ...dispatchDemo.environments,
+    ...helpDeskDemo.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -126,6 +130,10 @@ if (await configuration.exists("Parameters:google-client-id")) {
     .withEnvironment("GOOGLE_CLIENT_ID", await builder.addParameter("google-client-id"))
     .withEnvironment("GOOGLE_CLIENT_SECRET", await builder.addParameter("google-client-secret", { secret: true }));
 }
+
+// Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
+// store's tools bound to that customer's orders.
+await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" });
 
 // The demo gallery: every demo and walkthrough of this deployment on one page, at https://gallery.<environment-domain>.
 // Deployed only (locally, `pnpm gallery`). It holds no GitHub token, and opens from the same addresses as the demos.

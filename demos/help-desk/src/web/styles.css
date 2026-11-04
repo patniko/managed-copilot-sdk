@@ -1,0 +1,108 @@
+@import "tailwindcss";
+@import "@managed-copilot/github-theme";
+
+/*
+ * Help Desk additions: only what Primer has no class for (the tiles' whole-card link, the approval pulse, typing dots,
+ * and the streaming caret). Every color is a Primer variable.
+ */
+
+@keyframes asking-ring {
+  0% {
+    box-shadow: 0 0 0 0 var(--borderColor-attention-emphasis);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes typing {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: none;
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@layer components {
+  /* The name links the whole tile; buttons inside it sit above the link. */
+  .tile-link {
+    outline: none;
+  }
+  .tile-link::after {
+    position: absolute;
+    inset: 0;
+    content: "";
+    border-radius: var(--borderRadius-medium);
+  }
+  .tile-link:focus-visible::after {
+    outline: 2px solid var(--focus-outlineColor);
+    outline-offset: -2px;
+  }
+
+  /* A refund or cancellation waits for the operator. */
+  .tile-asking {
+    border-color: var(--borderColor-attention-emphasis);
+    background-color: var(--bgColor-attention-muted);
+    animation: asking-ring 2s ease-out infinite;
+  }
+
+  .typing {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+    height: 1.25rem;
+  }
+  .typing > span {
+    width: 6px;
+    height: 6px;
+    background-color: var(--fgColor-muted);
+    border-radius: 50%;
+    animation: typing 1.2s ease-in-out infinite;
+  }
+  .typing > span:nth-child(2) {
+    animation-delay: 0.15s;
+  }
+  .typing > span:nth-child(3) {
+    animation-delay: 0.3s;
+  }
+
+  /* A caret after an answer that is still being written. */
+  .streaming::after {
+    display: inline-block;
+    width: 0.45em;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    content: "";
+    background-color: var(--fgColor-accent);
+    border-radius: 1px;
+    animation: blink 1.1s steps(1, end) infinite;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile-asking,
+  .typing > span,
+  .streaming::after {
+    animation: none;
+  }
+}
