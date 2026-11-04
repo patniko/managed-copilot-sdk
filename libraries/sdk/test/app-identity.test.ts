@@ -95,6 +95,11 @@ describe("app connections", () => {
     expect(headers.authorization).toBeUndefined();
     expect(await managed.as({ appUser: { id: "auth0|zoë", name: "Zoë Ångström" } })).toBe(zoe);
     expect(await managed.as({ appUser: { id: "someone-else" } })).not.toBe(zoe);
+    // A closed view is forgotten: the next as(...) for the same person is a fresh one.
+    await zoe.close();
+    const again = await managed.as({ appUser: { id: "auth0|zoë" } });
+    expect(again).not.toBe(zoe);
+    await again.sessions.list();
 
     const octo = await managed.as({ gitHubToken: "gho_signed_in_user" });
     expect(octo.account).toMatchObject({ id: 7, login: "octo" });

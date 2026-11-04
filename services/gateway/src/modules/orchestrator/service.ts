@@ -32,6 +32,7 @@ import {
 import type { GatewayApp } from "../../app.js";
 import type { Principal } from "../../http.js";
 import type { Logger } from "../../log.js";
+import { assertAppUserInference } from "../core/apps.js";
 import type { PlatformToolCallContext, SessionRecord } from "../core/contracts.js";
 import type { ActionCaller, ActionsService, RuntimeSessionEvent } from "../durable/contract.js";
 import type { FileDownload, SandboxesService } from "../sandbox/contract.js";
@@ -269,6 +270,9 @@ export class WorkerManager {
     // Fails now, before admitting, when nothing can act for the owner. The worker's own session never uses this
     // credential: its coordinator's connected clients (or the owner's background sign-in) serve it.
     const principal = await this.#principal(coordinator.id);
+    // An app's own user has no Copilot plan: a Copilot-billed worker environment fails here, not after the worker was
+    // reported started.
+    assertAppUserInference(principal, environment, workerConfig);
     // A shutdown meanwhile leaves the call unanswered (nothing admitted: its rerun starts the worker), and the
     // coordinator must still be the session that asked.
     if (this.#closed) return unanswered();

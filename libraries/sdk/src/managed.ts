@@ -1,7 +1,7 @@
 import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
 import type { AccountInfo, DeploymentInfo, ExecInfo, ExecResult, PlatformEventType, PromoteResult } from "@managed-copilot/protocol";
 import { createContext, createView, type ManagedState } from "./connection.js";
-import { actingIdentity, requireActor } from "./identity.js";
+import { actingIdentity, identityKey, requireActor } from "./identity.js";
 import { createArtifactsApi } from "./features/artifacts.js";
 import { openCli } from "./features/cli.js";
 import { createClient, createManagedSession, resumeManagedSession } from "./features/client.js";
@@ -174,8 +174,12 @@ export class ManagedCopilot {
     // The connection itself closes every view's clients and streams too.
     if (!this.#ctx.root) for (const pending of this.#ctx.views.values()) contexts.push(...(await pending.then((view) => [view], () => [])));
     const pending: Promise<unknown>[] = [];
+    const stopped = new Set<CopilotClient>();
     for (const ctx of contexts) {
-      for (const client of ctx.clients) pending.push(client.stop().catch(() => undefined));
+      for (const client of ctx.clients) {
+        stopped.add(client);
+        pending.push(client.stop().catch(() => undefined));
+      }
       for (const dispose of ctx.disposables) pending.push(Promise.resolve().then(dispose).catch(() => undefined));
       ctx.clients.clear();
       ctx.disposables.clear();
@@ -184,6 +188,16 @@ export class ManagedCopilot {
     if (!this.#ctx.root) {
       this.#ctx.cachedClients.clear();
       this.#ctx.views.clear();
+    } else {
+      // A closed view is forgotten, with the clients it stopped: the next `as(...)` for this person starts afresh.
+      const key = identityKey(this.#ctx.identity);
+      const view = this.#ctx.root.views.get(key);
+      if (view && (await view.catch(() => undefined)) === this.#ctx) this.#ctx.root.views.delete(key);
+      for (const [cacheKey, client] of [...this.#ctx.cachedClients]) {
+        if (!cacheKey.startsWith(`${key}:`)) continue;
+        const resolved = await client.catch(() => undefined);
+        if (resolved && stopped.has(resolved) && this.#ctx.cachedClients.get(cacheKey) === client) this.#ctx.cachedClients.delete(cacheKey);
+      }
     }
     await Promise.all(pending);
   }

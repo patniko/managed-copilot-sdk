@@ -268,9 +268,10 @@ As built (spec section 2, "Your app's own users", and section 15; decisions 5 an
   - **The app itself**: the key alone, only on `auth: "user-or-app"` routes: `/v1/info` (the app's environments, no
     `inline`) and `/v1/me` (`{ id: 0, kind: "app" }`). Anything else answers 401 "needs a person to act for".
 - **App scope.** Every request through a key stays in the app's `environments` (`assertAppEnvironment` at bridge
-  welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator). An app user
-  in a Copilot-billed environment gets `inference_unavailable` (bridge welcome, session create, and the SDK's
-  pre-check). Background sign-in and schedules are refused for app users and for any request through an app, and
+  welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator). An app user's
+  session in a Copilot-billed environment gets `inference_unavailable` (bridge welcome, session create, an
+  orchestrator's `start_worker`, and the SDK's pre-check); workspace-only sandboxes make no model calls and may use any
+  of the app's environments. Background sign-in and schedules are refused for app users and for any request through an app, and
   Copilot CLI attach for app users (`capability_unavailable`).
 - **Foundry accounts.** `FoundryService` resolves each declared account through Azure Resource Manager
   (`GET .../Microsoft.CognitiveServices/accounts/<name>?api-version=2024-10-01`): the endpoint is

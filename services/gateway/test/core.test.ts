@@ -17,6 +17,7 @@ import {
   sharedToolFilters,
   type AdmissionContext,
 } from "../src/modules/core/admission.js";
+import type { AppRegistry } from "../src/modules/core/apps.js";
 import { GitHubAuthenticator, parseExpiration } from "../src/modules/core/auth.js";
 import { Environments, parseAgentFile } from "../src/modules/core/environments.js";
 import { PlatformEvents } from "../src/modules/core/events.js";
@@ -325,6 +326,22 @@ describe("GitHub authentication", () => {
     await expect(auth.authenticate("member")).resolves.toMatchObject({ login: "Member" });
     await expect(auth.authenticate("listed")).resolves.toMatchObject({ login: "listed-user" });
     await expect(auth.authenticate("outsider")).rejects.toMatchObject({ code: "forbidden" });
+  });
+
+  it("keeps an account admitted through an app that admits anyone as steady as an allowed one", async () => {
+    const site = { name: "site", environments: ["chat"], anyGitHubUser: true };
+    const apps = { get: (name: string) => (name === "site" ? site : undefined), list: () => [site] } as unknown as AppRegistry;
+    const auth = new GitHubAuthenticator({ apiUrl: github.url, log, apps, access: { githubOrgs: ["contoso"] }, negativeTtlMs: 20, cacheTtlMs: 60_000 });
+    const outsider = await auth.authenticate("outsider", { app: "site" });
+    const calls = github.calls;
+    await sleep(60);
+    // Not checked with GitHub again every negativeTtlMs, and its credential keeps serving its sessions.
+    await expect(auth.authenticate("outsider", { app: "site" })).resolves.toMatchObject({ accountId: outsider.accountId });
+    expect(github.calls).toBe(calls);
+    expect(auth.liveCredential(outsider.accountId)?.token).toBe("outsider");
+    // Still never directly, and a refusal does not take away the credential its app sessions use.
+    await expect(auth.authenticate("outsider")).rejects.toMatchObject({ code: "forbidden" });
+    expect(auth.liveCredential(outsider.accountId)?.token).toBe("outsider");
   });
 
   it("reports persistent GitHub outages as retryable upstream_unavailable, not as a bad token", async () => {
