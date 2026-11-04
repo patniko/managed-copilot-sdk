@@ -103,7 +103,7 @@ await addManagedCopilot(builder, "copilot", {
   environments: {
     chat: {
       type: "shared",
-      customizations: "./customizations/chat", // agents, skills, and instructions (section 10)
+      customizations: "./environments/chat", // agents, skills, and instructions (section 10)
       models: ["claude-sonnet-5", "claude-haiku-5.5"],
       network: ["learn.microsoft.com"], // only this host
     },
@@ -852,7 +852,7 @@ Reusable agent configurations are ordinary **Copilot custom agents**, deployed w
 instructions can ship in the same folder, in the formats Copilot CLI already reads:
 
 ```text
-customizations/chat/
+environments/chat/
 ├── agents/
 │   └── triage.agent.md
 ├── skills/

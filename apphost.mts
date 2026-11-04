@@ -44,7 +44,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   environments: {
     chat: {
       type: "shared",
-      customizations: "./customizations/chat", // agents, skills, and instructions (section 10)
+      customizations: "./environments/chat", // agents, skills, and instructions (section 10)
       models: ["claude-sonnet-5", "claude-haiku-5.5"],
       network: ["learn.microsoft.com"], // only this host
     },

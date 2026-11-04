@@ -305,7 +305,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | `services/sandbox`, `services/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
 | `deployments/azure` | The Azure integration for `aspire deploy`: hosting, the gateway's lease supervisor, and qualification probes |
 | `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
-| `customizations/chat` | The agents, skills, and instructions of the AppHost's `chat` environment |
+| `environments` | Per-environment customizations for the AppHost: `environments/<name>` holds that environment's agents, skills, and instructions (today `chat`) |
 | `tests/snippets` | Every spec snippet as a runnable script and one acceptance run |
 | `walkthroughs` | The walkthroughs: small, commented scripts you run with `pnpm walkthrough <number>` |
 | `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
