@@ -119,6 +119,7 @@ All of them run under `aspire run` with real models and deploy to Azure with the
 | [Pattern Race](demos/pattern-race/README.md) | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests, and a scorecard |
 | [Data Desk](demos/data-desk/README.md) | Chat with a spreadsheet: the app's own tools answer on the shared runtime, and a chart request moves the same session into a Python sandbox, with Copilot CLI following it |
 | [Help Desk](demos/help-desk/README.md) | A support rush: 25 customers, each chatting with a private agent bound to their own orders, all on one shared runtime with no sandboxes; refunds wait for the operator |
+| [Incident Commander](demos/incident-commander/README.md) | An alert opens an incident; Copilot triages in its own sandbox, hands the repro and fix to workers, and asks before deploying, even with the tab closed |
 
 ## Deploy to Azure
 

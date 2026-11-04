@@ -128,6 +128,18 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/api/health",
     readme: "demos/help-desk/README.md",
   },
+  {
+    id: "incident-commander",
+    title: "Incident Commander",
+    tagline: "On call: triage, fix, and deploy when you say so",
+    description:
+      "An alert opens an incident: Copilot triages in its own sandbox, hands the repro and the fix to workers, and waits for your OK to deploy, even with the tab closed.",
+    tryIt: "Simulate an incident, close the tab, then reopen it and deploy.",
+    app: "incident-commander",
+    port: 7445,
+    healthPath: "/api/health",
+    readme: "demos/incident-commander/README.md",
+  },
   CONSOLE,
 ];
 
@@ -269,7 +281,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "lead",
     settings: ['type: "orchestrator"', 'execution: "mixed"'],
     walkthrough: "12",
-    demos: [{ app: "dispatch", where: "Mixed" }],
+    demos: [
+      { app: "dispatch", where: "Mixed" },
+      { app: "incident-commander", where: "every incident" },
+    ],
   },
 ];
 

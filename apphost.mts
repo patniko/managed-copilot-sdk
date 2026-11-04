@@ -8,6 +8,7 @@ import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swa
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 import { DATA_DESK_DEFAULT_PORT, dataDesk } from "./demos/data-desk/apphost.mjs";
 import { HELP_DESK_PORT, helpDesk } from "./demos/help-desk/apphost.mjs";
+import { INCIDENT_DEFAULT_PORT, incidentCommander } from "./demos/incident-commander/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -30,6 +31,7 @@ const ports = {
   patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
   dataDesk: DATA_DESK_DEFAULT_PORT + offset,
   helpDesk: HELP_DESK_PORT + offset,
+  incidentCommander: INCIDENT_DEFAULT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -44,6 +46,7 @@ const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 const swarm = researchSwarm({ port: ports.researchSwarm });
 const helpDeskDemo = helpDesk({ port: ports.helpDesk });
+const incidents = incidentCommander({ port: ports.incidentCommander, webhookSecret: await generatedSecret("incident-commander-webhook-secret") });
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
@@ -73,6 +76,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...swarm.environments,
     ...dataDeskDemo.environments,
     ...helpDeskDemo.environments,
+    ...incidents.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -93,6 +97,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...assistant.webhooks,
     // The assistant receives its events on its own port.
     assistant: { ...assistant.webhooks.assistant, url: `${assistantUrl}/api/copilot-events` },
+    ...incidents.webhooks,
   },
 });
 
@@ -154,6 +159,19 @@ if (await configuration.exists("Parameters:google-client-id")) {
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
 // store's tools bound to that customer's orders.
 await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" });
+
+// Incident Commander: an alert opens an incident; a mixed coordinator triages in its own sandbox, hands the repro and
+// the fix to workers, and waits on the platform for a person to approve the deploy. Alerts carry the generated bearer
+// secret; the platform's webhook keeps the app informed while it isn't attached.
+await (
+  await addDemo(incidents.app, {
+    dockerfile: "demos/incident-commander/Dockerfile",
+    publicUrlEnv: "INCIDENT_PUBLIC_URL",
+    allowedHostsEnv: "INCIDENT_ALLOWED_HOSTS",
+  })
+)
+  .withEnvironment("INCIDENT_WEBHOOK_SECRET", incidents.webhooks["incident-commander"].secret)
+  .withEnvironment("INCIDENT_ALERT_SECRET", await generatedSecret("incident-commander-alert-secret"));
 
 // The demo gallery: every demo and walkthrough of this deployment on one page, at https://gallery.<environment-domain>.
 // Deployed only (locally, `pnpm gallery`). It holds no GitHub token, and opens from the same addresses as the demos.

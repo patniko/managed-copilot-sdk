@@ -58,6 +58,15 @@ const APPS = [
     },
   },
   {
+    id: "incident-commander",
+    url: local(7445),
+    async prepare(page) {
+      // Open the newest incident when there is one: its response map, and its approval or postmortem.
+      const first = page.locator('a[href^="#/incidents/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "data-desk",
     url: local(7430),
     async prepare(page) {

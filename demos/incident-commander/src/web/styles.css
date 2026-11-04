@@ -1,0 +1,133 @@
+@import "tailwindcss";
+@import "@managed-copilot/github-theme";
+
+/*
+ * Incident Commander additions: the response map's connectors and the pulse on what waits for a person.
+ * Every color is a Primer variable.
+ */
+
+@keyframes flow {
+  to {
+    background-position: 10px 0;
+  }
+}
+
+@keyframes flow-down {
+  to {
+    background-position: 0 10px;
+  }
+}
+
+@keyframes needs-you {
+  0% {
+    box-shadow: 0 0 0 0 var(--borderColor-attention-emphasis);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@layer components {
+  /* An arrow between two columns of the map; `data-active` makes it flow. */
+  .link {
+    position: relative;
+    height: 2px;
+    background-color: var(--borderColor-default);
+  }
+  .link::after {
+    position: absolute;
+    top: -4px;
+    right: -2px;
+    content: "";
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-left: 7px solid var(--borderColor-default);
+  }
+  .link[data-active] {
+    background-color: transparent;
+    background-image: repeating-linear-gradient(90deg, var(--fgColor-accent) 0 6px, transparent 6px 10px);
+    animation: flow 0.6s linear infinite;
+  }
+  .link[data-active]::after {
+    border-left-color: var(--fgColor-accent);
+  }
+
+  /* The same arrow, pointing down, when the map stacks on narrow screens. */
+  .link-down {
+    position: relative;
+    width: 2px;
+    height: 20px;
+    margin: 0 auto;
+    background-color: var(--borderColor-default);
+  }
+  .link-down::after {
+    position: absolute;
+    bottom: -2px;
+    left: -4px;
+    content: "";
+    border-top: 7px solid var(--borderColor-default);
+    border-right: 5px solid transparent;
+    border-left: 5px solid transparent;
+  }
+  .link-down[data-active] {
+    background-color: transparent;
+    background-image: repeating-linear-gradient(180deg, var(--fgColor-accent) 0 6px, transparent 6px 10px);
+    animation: flow-down 0.6s linear infinite;
+  }
+  .link-down[data-active]::after {
+    border-top-color: var(--fgColor-accent);
+  }
+
+  /* The brain's fan-out to its sandboxes: a bus on the left, a branch to each card. */
+  .fan {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-left: 20px;
+  }
+  .fan > li {
+    position: relative;
+  }
+  .fan > li::before {
+    position: absolute;
+    top: 50%;
+    left: -20px;
+    width: 20px;
+    height: 2px;
+    content: "";
+    background-color: var(--borderColor-default);
+  }
+  .fan > li[data-active]::before {
+    background-color: transparent;
+    background-image: repeating-linear-gradient(90deg, var(--fgColor-accent) 0 6px, transparent 6px 10px);
+    animation: flow 0.6s linear infinite;
+  }
+  .fan > li::after {
+    position: absolute;
+    top: -5px;
+    bottom: -5px;
+    left: -20px;
+    width: 2px;
+    content: "";
+    background-color: var(--borderColor-default);
+  }
+  .fan > li:first-child::after {
+    top: 50%;
+  }
+  .fan > li:last-child::after {
+    bottom: calc(50% - 2px);
+  }
+  .fan > li:only-child::after {
+    display: none;
+  }
+
+  /* Something that waits for a person. */
+  .needs-you {
+    border-color: var(--borderColor-attention-emphasis);
+    animation: needs-you 2s ease-out infinite;
+  }
+}
