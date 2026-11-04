@@ -230,6 +230,51 @@ if (await builder.executionContext().isPublishMode()) {
 The app's image should start with the lease supervisor (see `demos/assistant/Dockerfile`), keep its state under
 `/data`, and listen on `PORT`.
 
+### Azure AI Foundry and your app's own users
+
+Environments with `inference: { foundry }` send their model calls to an Azure AI Foundry account you own, billed to
+its subscription, and are the only ones your app's own users (people without GitHub) can use
+([spec section 15](spec/developer-experience.md#15-models-and-billing),
+[your app's own users](spec/developer-experience.md#your-apps-own-users)). The account and its model deployments are
+yours: the platform never creates or changes them. An AIServices account with a custom subdomain works, for example:
+
+```powershell
+az cognitiveservices account create --subscription <subscription-id> -g contoso-ai -n contoso-foundry -l westus2 `
+  --kind AIServices --sku S0 --custom-domain contoso-foundry
+az cognitiveservices account deployment create --subscription <subscription-id> -g contoso-ai -n contoso-foundry `
+  --deployment-name gpt-5-mini --model-name gpt-5-mini --model-version <version> --model-format OpenAI `
+  --sku-name GlobalStandard --sku-capacity 50
+```
+
+Declare the account, the environments that use it, and the apps that act for their own users:
+
+```ts
+const copilot = await addManagedCopilot(builder, "copilot", {
+  foundry: { "contoso-foundry": { resourceGroup: "contoso-ai", deployments: ["gpt-5-mini"] } }, // subscription: optional
+  environments: { support: { type: "shared", inference: { foundry: "contoso-foundry" } } },
+  apps: { "support-site": { environments: ["support"], anyGitHubUser: true } },
+});
+await publishApp(builder, copilot, { name: "support-site", dockerfile: "support-site/Dockerfile", port: 3000, healthPath: "/healthz", app: "support-site" });
+```
+
+- **Model calls.** `aspire deploy` gives the gateway its user-assigned identity and grants it **Cognitive Services
+  OpenAI User** on each declared account, with a deployment into the account's own resource group (and subscription).
+  You need permission to assign roles there (Owner, User Access Administrator, or Role Based Access Control
+  Administrator). An account that names no `subscription` is in the deployment's (`Azure:SubscriptionId`). With
+  `aspire run`, the gateway uses your Azure CLI sign-in instead (`az login`, with at least Cognitive Services OpenAI
+  User on the account); it asks for tokens in the account's subscription, so the right tenant is used.
+- **App keys.** Each app's key is the generated secret parameter `Parameters:<name>-app-<app>-key`, kept with the
+  deployment like the other generated secrets. `publishApp(..., { app })` (or, with `aspire run`,
+  `.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(app))`) gives the app its key as a secret. To replace a
+  key, give the parameter a new value of at least 32 characters (an environment value such as
+  `Parameters__copilot-app-support-site-key` for `aspire deploy`; never on a command line) and deploy again.
+- **Who gets in.** The gateway still admits only the GitHub accounts in its access rules directly. An app's own users
+  come in only through its key, and `anyGitHubUser: true` admits any GitHub account through that app's key alone.
+- **Checking it.** `/v1/info` lists `foundry` and `apps` in its capabilities, each Foundry environment's `inference`,
+  and its deployments as `models`. The gateway logs "Foundry account ready" for each account it can use, or the
+  problem (a missing account, deployment, or role assignment); `SessionInfo.inference` says where each session's
+  model calls go.
+
 ## Durable state
 
 The gateway keeps its ledger (SQLite, WAL), the stock runtime's session state, vault and durable keys, artifacts, and
@@ -422,8 +467,9 @@ check your subscription's rates and discounts before deploying.
 
 Standing WebSocket/SSE connections and background work can keep replicas at active rates even without a browser open.
 The six apps alone cost roughly $0.13/hour at idle rates or $0.45/hour when active, before free grants. These are
-estimates, not a spending cap: sandbox usage, additional network/bandwidth charges, and model usage billed to the
-authorized GitHub account are separate.
+estimates, not a spending cap: sandbox usage, additional network/bandwidth charges, model usage billed to the
+authorized GitHub account, and model usage in Azure AI Foundry environments (billed per token to each Foundry
+account's subscription; set its deployments' capacity to the spend you accept) are separate.
 
 The probe resource group was created at 15:31 UTC and confirmed deleted by 16:28 UTC on 2026-10-24.
 At 22:30 UTC, Cost Management reported **$0.0032710244 USD pretax posted so far** for `mc-azure-probe`.
@@ -453,6 +499,12 @@ identities. Your AppHost's user secrets stay on your machine.
   be detected; set `Parameters:app-allowed-ips`.
 - **An app answers `403 RBAC: access denied`** (some or all requests): its ingress allowlist does not include the
   address Azure sees for your machine. See "Who can open the apps".
+- **"Foundry account unavailable"** in the gateway's log, or sessions failing with `inference_unavailable`: the message
+  names the problem. "was not found": check the account name, resource group, and subscription in `foundry`. A 403
+  or "Cognitive Services OpenAI User": the role assignment is missing or still propagating (a few minutes); locally,
+  your `az login` account needs that role. "no ready deployment": create the model deployment, or fix `deployments`.
+- **`aspire deploy` fails with `AuthorizationFailed` for `roleAssignments/write`** in a Foundry account's resource
+  group: your account can't assign roles there. Ask its owner for Role Based Access Control Administrator on that group.
 - **`/v1/info` lists no `isolated` capability**: the gateway's log names what the sandbox backend is missing (for
   example the role assignment, which can take a few minutes to propagate; the gateway re-checks every 30 s).
 - **Isolated sessions with network access fail with `capability_unavailable`**: the egress proxy is not connected to
