@@ -92,6 +92,31 @@ describe("patterns", () => {
   });
 });
 
+describe("public apps", () => {
+  const apphost = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
+  /** The root AppHost's call that publishes a demo: the nearest `addDemo(` or `publishApp(` before its Dockerfile, to the matching `)`. */
+  const publishCall = (folder: string): string | undefined => {
+    const at = apphost.indexOf(`dockerfile: "demos/${folder}/Dockerfile"`);
+    const start = Math.max(apphost.lastIndexOf("addDemo(", at), apphost.lastIndexOf("publishApp(", at));
+    if (at < 0 || start < 0) return undefined;
+    let depth = 0;
+    for (let index = apphost.indexOf("(", start); index < apphost.length; index++) {
+      if (apphost[index] === "(") depth++;
+      else if (apphost[index] === ")" && --depth === 0) return apphost.slice(start, index + 1);
+    }
+    return undefined;
+  };
+
+  it("marks Public exactly the apps the root AppHost publishes with public: true", () => {
+    for (const app of APPS.filter((entry) => entry.id !== "console")) {
+      const folder = /^demos\/([^/]+)\//.exec(app.readme)?.[1];
+      const call = folder ? publishCall(folder) : undefined;
+      expect(call, `${app.id} is published in apphost.mts`).toBeDefined();
+      expect(/\bpublic: true\b/.test(call!), app.id).toBe(app.public === true);
+    }
+  });
+});
+
 describe("probe", () => {
   it("bounds a command that outlives its timeout", async () => {
     const started = Date.now();

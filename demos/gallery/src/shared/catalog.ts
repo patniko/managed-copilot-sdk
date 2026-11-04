@@ -14,6 +14,11 @@ export interface AppEntry {
   readonly healthPath: string;
   /** Repository path of its README. */
   readonly readme: string;
+  /**
+   * Published with `publishApp({ public: true })` in the root AppHost: any address can open the deployed app, which
+   * signs in its own users. The others open only from `Parameters:app-allowed-ips`.
+   */
+  readonly public?: boolean;
 }
 
 export interface Walkthrough {

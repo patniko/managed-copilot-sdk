@@ -116,6 +116,8 @@ function lastLine(text: string): string | undefined {
 
 interface ContainerApp {
   readonly name: string;
+  /** `managed-copilot-access: public` marks an app published with `publishApp({ public: true })`. */
+  readonly tags?: Readonly<Record<string, string>> | null;
   readonly properties?: { readonly managedEnvironmentId?: string; readonly configuration?: { readonly ingress?: { readonly external?: boolean; readonly fqdn?: string; readonly ipSecurityRestrictions?: readonly IpRule[] | null } | null } };
 }
 interface IpRule {
@@ -165,7 +167,12 @@ class Azure {
 
   /** Published apps: external ingress restricted to an allowlist that keeps the platform subnet (rule "platform"). */
   static publishedApps(apps: readonly ContainerApp[], gateway: string): ContainerApp[] {
-    return Azure.siblingApps(apps, gateway).filter((app) => rules(app).some((rule) => rule.name === "platform"));
+    return Azure.siblingApps(apps, gateway).filter((app) => !isPublic(app) && rules(app).some((rule) => rule.name === "platform"));
+  }
+
+  /** Public apps (`publishApp({ public: true })`): open to any address, so the allowlist never applies to them. */
+  static publicApps(apps: readonly ContainerApp[], gateway: string): ContainerApp[] {
+    return Azure.siblingApps(apps, gateway).filter(isPublic);
   }
 
   /**
@@ -191,9 +198,15 @@ class Azure {
 }
 
 const ALLOW_RULE = /^allow-\d+$/;
+/** The tag the Azure integration (`PublishAsManagedCopilotPublicApp`) puts on public apps. */
+const ACCESS_TAG = "managed-copilot-access";
 
 function rules(app: ContainerApp): readonly IpRule[] {
   return app.properties?.configuration?.ingress?.ipSecurityRestrictions ?? [];
+}
+
+function isPublic(app: ContainerApp): boolean {
+  return app.tags?.[ACCESS_TAG] === "public";
 }
 
 function azureFor(ctx: Context, settings: AppHostSettings): Azure | undefined {
@@ -278,7 +291,8 @@ export async function access(ctx: Context): Promise<number | void> {
   if (which === "ips" && next.includes("*") && next.length > 1) next = ["*"];
 
   if (which === "ips" && next.includes("*") && !current.includes("*")) {
-    ctx.err(`${ctx.errStyle.yellow(ctx.errStyle.warn)} The deployed apps act as one GitHub account, so "*" lets anyone on the Internet use them as that account.`);
+    ctx.err(`${ctx.errStyle.yellow(ctx.errStyle.warn)} The deployed apps that aren't public act as one GitHub account, so "*" lets anyone on the Internet use them as that account.`);
+    ctx.err(ctx.errStyle.dim("  To open an app that signs in its own users, publish it with public: true instead."));
     if (!ctx.yes && !(ctx.interactive && (await ctx.confirm("Open the apps to any address?")))) return 1;
   }
   if ((which === "users" || which === "orgs") && next.length === 0) {
@@ -298,6 +312,7 @@ export async function access(ctx: Context): Promise<number | void> {
   const { style } = ctx;
   ctx.out(`${style.green(style.ok)} ${LISTS[which].label}: ${describeList(ctx, which, next)}${failed ? style.dim(" (saved)") : ""}`);
   if (live?.applied.length) ctx.out(style.dim(`  Applied now to ${live.applied.join(", ")}.`));
+  if (live?.public?.length) ctx.out(style.dim(`  ${live.public.join(", ")} ${live.public.length === 1 ? "is" : "are"} public: open to any address, whatever this list says.`));
   if (failed) {
     ctx.err(`${ctx.errStyle.red(ctx.errStyle.fail)} ${live.reason}`);
     ctx.err(ctx.errStyle.dim("  The running apps may still admit the old addresses. Run the command again, or `npx managed-copilot deploy`."));
@@ -313,6 +328,8 @@ interface LiveResult {
   readonly applied: string[];
   readonly failed: string[];
   readonly reason?: string;
+  /** Public apps in the deployment, which the list never applies to. */
+  readonly public?: string[];
 }
 
 async function applyLive(ctx: Context, settings: AppHostSettings, name: string, cidrs: readonly string[]): Promise<LiveResult | undefined> {
@@ -326,14 +343,16 @@ async function applyLive(ctx: Context, settings: AppHostSettings, name: string, 
   const apps = await azure.apps();
   if (!apps) return { status: "failed", applied: [], failed: [], reason: `Could not list the apps in ${azure.resourceGroup} (check \`az login\` and your access).` };
   if (!apps.some((app) => app.name === name)) return deferred(`No gateway named "${name}" in ${azure.resourceGroup} yet.`);
+  const publicApps = Azure.publicApps(apps, name).map((app) => app.name);
+  const open = publicApps.length > 0 ? { public: publicApps } : {};
   const published = Azure.publishedApps(apps, name);
-  if (published.length === 0) return deferred(`No running apps with an allowlist in ${azure.resourceGroup}.`);
+  if (published.length === 0) return { ...deferred(`No running apps with an allowlist in ${azure.resourceGroup}.`), ...open };
   if (!ctx.json) ctx.err(ctx.errStyle.dim(`Updating ${plural(published.length, "running app")} in ${azure.resourceGroup}${ctx.errStyle.ellipsis}`));
   const applied: string[] = [];
   const failed: string[] = [];
   for (const app of published) ((await azure.applyAllowlist(app, allowlist)) ? applied : failed).push(app.name);
-  if (failed.length) return { status: "failed", applied, failed, reason: `Could not update ${failed.join(", ")} now.` };
-  return { status: "applied", applied, failed };
+  if (failed.length) return { status: "failed", applied, failed, reason: `Could not update ${failed.join(", ")} now.`, ...open };
+  return { status: "applied", applied, failed, ...open };
 }
 
 async function showAccess(ctx: Context, settings: AppHostSettings, name: string): Promise<void> {
@@ -341,13 +360,21 @@ async function showAccess(ctx: Context, settings: AppHostSettings, name: string)
   const azure = azureFor(ctx, settings);
   const apps = azure ? await azure.apps() : undefined;
   const running = apps ? Azure.publishedApps(apps, name).map((app) => ({ name: app.name, allowed: rules(app).filter((rule) => ALLOW_RULE.test(rule.name)).map((rule) => rule.ipAddressRange) })) : [];
-  const openApps = apps ? Azure.siblingApps(apps, name).filter((app) => rules(app).length === 0).map((app) => app.name) : [];
+  const openApps = apps ? Azure.siblingApps(apps, name).filter((app) => !isPublic(app) && rules(app).length === 0).map((app) => app.name) : [];
+  // A public app has no rules unless someone added them by hand; show them if so.
+  const publicApps = apps ? Azure.publicApps(apps, name).map((app) => ({ name: app.name, allowed: rules(app).map((rule) => rule.ipAddressRange) })) : [];
   const login = await ctx.host
     .githubToken()
     .then((token) => ctx.host.githubLogin(token))
     .catch(() => undefined);
   if (ctx.json) {
-    ctx.out(JSON.stringify({ name, apphost: settings.path, ...lists, appsActAs: login ?? null, deployment: azure ? { subscription: azure.subscription, resourceGroup: azure.resourceGroup } : null, runningApps: running, openApps }, null, 2));
+    ctx.out(
+      JSON.stringify(
+        { name, apphost: settings.path, ...lists, appsActAs: login ?? null, deployment: azure ? { subscription: azure.subscription, resourceGroup: azure.resourceGroup } : null, runningApps: running, openApps, publicApps },
+        null,
+        2,
+      ),
+    );
     return;
   }
   const { style } = ctx;
@@ -356,13 +383,18 @@ async function showAccess(ctx: Context, settings: AppHostSettings, name: string)
     ["Apps act as", login ? `@${login} ${style.dim("(your GitHub sign-in when you deploy)")}` : style.dim("your GitHub sign-in when you deploy"), ""],
     [LISTS.ips.label, describeList(ctx, "ips", lists.ips), "ips"],
   ];
-  const width = Math.max(...rows.map(([label]) => label.length));
+  const publicLabel = "Public apps";
+  const width = Math.max(...rows.map(([label]) => label.length), publicApps.length ? publicLabel.length : 0);
   ctx.out(`${style.bold(name)} ${style.dim(`· ${basename(settings.path)}${azure ? ` · ${azure.resourceGroup}` : ""}`)}`);
   for (const [label, value] of rows) ctx.out(`${style.dim(label.padEnd(width))}  ${value}`);
   for (const app of running) ctx.out(`${style.dim("".padEnd(width))}  ${style.dim(`${app.name} now: ${app.allowed.join(", ") || "platform only"}`)}`);
   for (const app of openApps) ctx.out(`${style.dim("".padEnd(width))}  ${style.dim(`${app} now: any address`)}`);
+  publicApps.forEach((app, index) => {
+    ctx.out(`${style.dim((index === 0 ? publicLabel : "").padEnd(width))}  ${app.name} ${style.dim(`now: ${app.allowed.join(", ") || "any address"}`)}`);
+  });
   ctx.out();
   ctx.out(style.dim("Change with: npx managed-copilot access <users|orgs|operators|operator-orgs|ips> <add|remove|set> <entries>  (\"me\" is you, or this machine for ips)"));
+  if (publicApps.length) ctx.out(style.dim("Public apps sign in their own users and hold no GitHub token; the AppHost makes an app public (publishApp's public: true), not ips."));
 }
 
 interface DeploymentRecord {
@@ -394,6 +426,22 @@ function readRecord(directory: string): DeploymentRecord | undefined {
 
 const targets = (record: DeploymentRecord | undefined, subscription: string, resourceGroup: string) =>
   Boolean(record && record.subscription?.toLowerCase() === subscription.toLowerCase() && record.resourceGroup?.toLowerCase() === resourceGroup.toLowerCase());
+
+/** `az account show` output; the account's name is compared, never printed. */
+interface AzAccount {
+  readonly id: string;
+  readonly name?: string;
+  readonly tenantId?: string;
+  readonly user?: { readonly name?: string };
+}
+
+function parseAccount(text: string): AzAccount | undefined {
+  try {
+    return JSON.parse(text) as AzAccount;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * When the resource group already has a deployment, deploys only if this AppHost's record made it, or, in a terminal,
@@ -448,7 +496,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (docker.code !== 0) throw new CommandError("Docker isn't running.", { hint: "Start Docker Desktop, then deploy again." });
   const account = await host.capture("az", ["account", "show", "-o", "json"]);
   if (account.code !== 0) throw new CommandError("The Azure CLI isn't signed in.", { hint: "Run `az login`, then deploy again." });
-  const azAccount = JSON.parse(account.stdout) as { id: string; name?: string };
+  const azAccount = JSON.parse(account.stdout) as AzAccount;
 
   const option = (key: string) => (typeof ctx.options[key] === "string" ? (ctx.options[key] as string) : undefined);
   const subscription = option("subscription") ?? settings.get("Azure:SubscriptionId") ?? azAccount.id;
@@ -457,6 +505,25 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (!SUBSCRIPTION.test(subscription)) throw new UsageError(`"${subscription}" is not an Azure subscription ID.`);
   if (!LOCATION.test(location)) throw new UsageError(`"${location}" is not an Azure region name, such as westus2.`);
   if (!RESOURCE_GROUP.test(resourceGroup)) throw new UsageError(`"${resourceGroup}" is not a valid resource group name.`);
+  // `aspire deploy` signs in as the Azure CLI's current account, to the tenant of its default subscription unless told
+  // otherwise (Azure:TenantId). Another subscription of that account can be in another tenant; another account's can't
+  // be used without switching the Azure CLI to it, which is the caller's choice.
+  let tenant = settings.get("Azure:TenantId");
+  if (!tenant && subscription.toLowerCase() !== azAccount.id.toLowerCase()) {
+    const target = await host.capture("az", ["account", "show", "--subscription", subscription, "-o", "json"]);
+    const found = target.code === 0 ? parseAccount(target.stdout) : undefined;
+    if (!found?.tenantId) {
+      throw new CommandError(`The Azure CLI can't use subscription ${subscription}.`, {
+        hint: "Check the ID with `az account list`. If it's in another tenant, sign in to that tenant too (`az login --tenant <tenant-id>`).",
+      });
+    }
+    if (found.user?.name && azAccount.user?.name && found.user.name.toLowerCase() !== azAccount.user.name.toLowerCase()) {
+      throw new CommandError(`Subscription ${subscription} belongs to another account than the Azure CLI's current one, and aspire deploy signs in as the current account.`, {
+        hint: `Switch the Azure CLI to it with \`az account set --subscription ${subscription}\`, then deploy again.`,
+      });
+    }
+    tenant = found.tenantId;
+  }
 
   const token = await host.githubToken();
   const login = await host.githubLogin(token);
@@ -486,7 +553,10 @@ export async function deploy(ctx: Context): Promise<number | void> {
     ["Platform users", `${describeList(ctx, "users", users)}${orgs.length ? `, orgs ${orgs.join(", ")}` : ""}`],
     ["Operators", describeList(ctx, "operators", operators)],
     ["Apps act as", `@${login} ${style.dim("(your GitHub sign-in)")}`],
-    ["Apps open to", ips.length ? describeList(ctx, "ips", ips) : address ? `${address}/32 ${style.dim("(this machine)")}` : style.dim("this machine's public address")],
+    [
+      "Apps open to",
+      `${ips.length ? describeList(ctx, "ips", ips) : address ? `${address}/32 ${style.dim("(this machine)")}` : style.dim("this machine's public address")}${style.dim("; public apps: any address")}`,
+    ],
   ];
   const width = Math.max(...rows.map(([label]) => label.length));
   ctx.out(`${style.bold(`Deploying ${basename(settings.path)} to Azure`)}`);
@@ -513,15 +583,22 @@ export async function deploy(ctx: Context): Promise<number | void> {
     const value = settings.get(key);
     if (value) env[key.replaceAll(":", "__")] = value;
   }
+  if (tenant) env.Azure__TenantId = tenant;
 
   const code = await host.stream("aspire", ["deploy", "--apphost", settings.path, ...(ctx.interactive ? [] : ["--non-interactive"])], { env });
   if (code !== 0) throw new CommandError(`aspire deploy failed (exit ${code}).`, { hint: "Its output above says why. Fix that, then run `npx managed-copilot deploy` again." });
 
   const url = (await azure.gatewayUrl(name)) ?? existing;
   const gallery = await azure.gatewayUrl("gallery");
+  const deployed = await azure.apps();
+  const publicUrls = (deployed ? Azure.publicApps(deployed, name) : []).flatMap((app) => {
+    const fqdn = app.properties?.configuration?.ingress?.fqdn;
+    return fqdn ? [`https://${fqdn}`] : [];
+  });
   ctx.out();
   ctx.out(`${style.green(style.ok)} Deployed${url ? `: ${style.bold(url)}` : ""}`);
   if (gallery) ctx.out(`  Demo gallery: ${style.bold(gallery)}`);
+  if (publicUrls.length) ctx.out(`  Public apps: ${publicUrls.map((publicUrl) => style.bold(publicUrl)).join(", ")} ${style.dim("(any address)")}`);
   if (url) {
     ctx.out(style.dim(`  $env:MANAGED_COPILOT_URL = "${url}"`));
     ctx.out(style.dim("  npx managed-copilot status      # check it, then `npx managed-copilot login` once for background work"));

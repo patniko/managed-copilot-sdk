@@ -23,6 +23,8 @@ It opens http://localhost:7460 in your browser.
   - Green: it answered. Amber: **IP-restricted**: the deployed app refused this network, because its ingress allows
     only `Parameters:app-allowed-ips` ([deploying to Azure](../../docs/deployment.md)). The button still opens it, for
     when you're on an allowed network. Grey: offline.
+  - A **Public** label marks an app the root AppHost publishes with `publishApp({ public: true })`: it signs in its own
+    users, so anyone can open its deployed copy, and the allowlist doesn't apply to it.
   - The operator console buttons sign you in with your GitHub sign-in, like `npx managed-copilot console`: the gallery
     asks the gateway for a one-time link and redirects to it. A deployment's console stays off until it names operators;
     the gallery says so instead of opening a broken page.
@@ -60,7 +62,7 @@ a link you can share. The deployed copy shows that deployment only:
   `githubToken: false`).
 - **Same audience as the demos.** It opens only from `Parameters:app-allowed-ips` (`npx managed-copilot access ips`).
   It checks the apps from inside the deployment, which the allowlist always admits, so its dots say whether an app is
-  up, not whether a visitor's network may open it; the page says so.
+  up, not whether a visitor's network may open it; the page says so, and says which apps are public.
 
 The image is [`Dockerfile`](Dockerfile) (`GALLERY_HOSTED=1`; `GALLERY_ALLOWED_HOSTS` names the host names it answers).
 
@@ -85,5 +87,6 @@ pnpm --filter @managed-copilot/demo-gallery test
 ```
 
 `src/shared/catalog.ts` lists the patterns, apps, and walkthroughs. Add a demo there (with its Aspire resource name,
-local port, and health path), then capture its screenshot. A pattern names an environment of the root AppHost and the
-settings that make it that pattern; the tests check both against `apphost.mts`.
+local port, and health path, and `public: true` if the root AppHost publishes it as public), then capture its
+screenshot. A pattern names an environment of the root AppHost and the settings that make it that pattern; the tests
+check both against `apphost.mts`, as they check each app's `public` flag.
