@@ -5,6 +5,8 @@ Apps: the gateway (with its stock shared runtime) behind HTTPS/WSS ingress, your
 Azure Container Apps Sandboxes group for isolated sessions. Customer code does not change: `ManagedCopilot.connect()`
 reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public URL.
 
+AWS is planned as a second target, not built: see the plan in [deploy/aws](../deploy/aws/README.md).
+
 > **Status.** The root AppHost deploys and both demo happy paths pass in westus2 (2026-10-24), using stock
 > SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
 > with the deployed assistant's webhook and reminder journeys checked separately. Orchestrator environments (snippet
