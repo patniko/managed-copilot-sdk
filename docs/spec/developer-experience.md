@@ -1361,8 +1361,10 @@ the Azure CLI's current account: that account's subscription in another tenant g
 subscription stops with `az account set --subscription <id>` as the fix. A first deployment with no access rules or
 operators adds the caller to both. The token for published apps that act as an account is the caller's GitHub sign-in,
 passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. The AppHost's own parameters in its
-user secrets go the same way (`aspire deploy` doesn't load user secrets), except the platform's generated keys and
-values the deployment's Aspire record already keeps; `deploy` names them, never their values. It asks before deploying
+user secrets go the same way (`aspire deploy` doesn't load user secrets), except values the deployment's Aspire record
+already keeps and every parameter the AppHost generates (`addParameterWithGeneratedValue`, including the platform's and
+apps' keys: each deployment makes its own), which `deploy` learns from the manifest `aspire do publish-manifest` writes;
+if it can't tell, it passes none. `deploy` names them, never their values. It asks before deploying
 (`--yes` skips the question). If the resource group already holds a deployment, it deploys only when this AppHost's Aspire
 deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it; otherwise, in a
 terminal, it offers to adopt another checkout's record for that target so the deployment keeps its generated keys. User
