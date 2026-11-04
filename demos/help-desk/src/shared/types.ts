@@ -22,14 +22,11 @@ export interface PlatformStatus {
 export interface DeskInfo {
   readonly environment: string;
   readonly model?: string;
-  /** Premium requests one customer message costs with that model. */
-  readonly multiplier?: number;
   readonly tools: readonly ToolInfo[];
 }
 
 export interface ToolInfo {
   readonly name: ToolName;
-  readonly description: string;
   /** Runs only after the operator approves it. */
   readonly approval: boolean;
 }
@@ -109,7 +106,6 @@ export interface ApprovalRequest {
   /** USD. */
   readonly amount: number;
   readonly reason?: string;
-  readonly requestedAt: string;
 }
 
 /** One customer's conversation: a session of the help desk environment. */
@@ -123,7 +119,6 @@ export interface Ticket {
   readonly blocked: number;
   readonly premiumRequests?: number;
   readonly problem?: string;
-  readonly updatedAt: string;
 }
 
 export interface Counters {

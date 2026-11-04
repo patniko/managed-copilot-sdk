@@ -44,7 +44,6 @@ export class Transcript {
   #busy = false;
   #resolved = false;
   #problem: string | undefined;
-  #updatedAt: string | undefined;
 
   constructor(othersOrder: (args: Readonly<Record<string, unknown>>) => boolean = () => false) {
     this.#othersOrder = othersOrder;
@@ -67,10 +66,6 @@ export class Transcript {
   /** The platform reported an error in the latest turn. */
   get problem(): string | undefined {
     return this.#problem;
-  }
-
-  get updatedAt(): string | undefined {
-    return this.#updatedAt;
   }
 
   /** Tool calls waiting for the operator. */
@@ -97,9 +92,7 @@ export class Transcript {
     }
     const data = record(event.data);
     const at = event.timestamp ?? new Date().toISOString();
-    const changed = this.#apply(event.type, data, at, event.id ?? `${this.#items.length}`);
-    if (changed) this.#updatedAt = at;
-    return changed;
+    return this.#apply(event.type, data, at, event.id ?? `${this.#items.length}`);
   }
 
   #apply(type: string, data: Record<string, unknown>, at: string, eventId: string): boolean {

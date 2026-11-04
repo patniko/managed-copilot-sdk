@@ -197,7 +197,12 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
 
       <div className="Box grid grid-cols-1 gap-px overflow-hidden bg-line-muted text-sm sm:grid-cols-3">
         <Placement icon={<CpuIcon size={16} />} label="Agent" value="Shared runtime" title={desk?.model ? `Model ${desk.model}` : undefined} />
-        <Placement icon={<PlugIcon size={16} />} label="Tools" value="In Help Desk" title={desk?.tools.map((tool) => tool.name).join(", ")} />
+        <Placement
+          icon={<PlugIcon size={16} />}
+          label="Tools"
+          value="In Help Desk"
+          title={desk?.tools.map((tool) => (tool.approval ? `${tool.name} (needs approval)` : tool.name)).join(", ")}
+        />
         <Placement icon={<ContainerIcon size={16} />} label="Sandbox" value="None" />
       </div>
 

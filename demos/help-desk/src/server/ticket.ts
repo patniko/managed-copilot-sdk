@@ -51,7 +51,6 @@ export class TicketSession {
   #generation = 0;
   readonly #approvals = new Map<string, HeldApproval>();
   #premiumRequests: number | undefined;
-  #updatedAt = new Date().toISOString();
 
   /** `existing`: its session is already on the platform (a simulation picked up after a restart); attach to it. */
   constructor(host: TicketHost, customer: CustomerSeed, sessionId: string, existing = false) {
@@ -253,7 +252,6 @@ export class TicketSession {
         orderId: normalizeOrderId(args["orderId"]),
         amount: check.amount,
         ...(typeof args["reason"] === "string" && args["reason"].trim() ? { reason: args["reason"].trim() } : {}),
-        requestedAt: new Date().toISOString(),
       };
       this.#approvals.set(id, { request: approval, resolve });
       this.#changed();
@@ -301,7 +299,6 @@ export class TicketSession {
   }
 
   #changed(): void {
-    this.#updatedAt = new Date().toISOString();
     this.#host.changed(this);
   }
 
@@ -325,7 +322,6 @@ export class TicketSession {
       blocked: this.#transcript.blocked,
       ...(this.#premiumRequests !== undefined ? { premiumRequests: this.#premiumRequests } : {}),
       ...(problem ? { problem } : {}),
-      updatedAt: this.#transcript.updatedAt ?? this.#updatedAt,
     };
   }
 }

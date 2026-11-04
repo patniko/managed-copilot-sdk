@@ -11,12 +11,12 @@ import { REFUND_WINDOW_DAYS, type CustomerSeed } from "./seed.js";
 export const APPROVAL_TOOLS: ReadonlySet<string> = new Set<ToolName>(["request_refund", "cancel_order"]);
 
 export const TOOLS: readonly ToolInfo[] = [
-  { name: "list_my_orders", description: "This customer's orders", approval: false },
-  { name: "get_order", description: "One of their orders", approval: false },
-  { name: "track_shipment", description: "Carrier, tracking, and delivery date", approval: false },
-  { name: "request_refund", description: "Refund a delivered order", approval: true },
-  { name: "cancel_order", description: "Cancel an order that hasn't shipped", approval: true },
-  { name: "resolve_conversation", description: "Mark the request handled", approval: false },
+  { name: "list_my_orders", approval: false },
+  { name: "get_order", approval: false },
+  { name: "track_shipment", approval: false },
+  { name: "request_refund", approval: true },
+  { name: "cancel_order", approval: true },
+  { name: "resolve_conversation", approval: false },
 ];
 
 const orderId = z.string().min(1).max(40).describe("The order number, for example CO-48213");

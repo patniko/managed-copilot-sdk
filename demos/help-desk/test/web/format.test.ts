@@ -4,7 +4,7 @@ import { customerLine, inlineMarkdown, latestMessage, money, operatorOutcome, pl
 import { reduce, type StoreState } from "../../src/web/lib/store.js";
 
 const tool = (overrides: Partial<ToolItem>): ToolItem => ({ kind: "tool", id: "t1", name: "get_order", args: { orderId: "co-48177" }, at: "2026-11-03T10:00:00.000Z", status: "done", ...overrides });
-const ticket = (overrides: Partial<Ticket> = {}): Ticket => ({ customerId: "c01", status: "waiting", items: [], blocked: 0, updatedAt: "2026-11-03T10:00:00.000Z", ...overrides });
+const ticket = (overrides: Partial<Ticket> = {}): Ticket => ({ customerId: "c01", status: "waiting", items: [], blocked: 0, ...overrides });
 
 describe("words on the wall", () => {
   it("formats money and premium requests", () => {
