@@ -28,6 +28,8 @@ export interface DoctorConfig {
     readonly fixMs: number;
     /** How long a finished run's sandbox stays up so the last blocked-request reports arrive. */
     readonly graceMs: number;
+    /** Waits before trying again to delete a sandbox while the platform is reachable but the delete failed. */
+    readonly deleteRetriesMs: readonly number[];
   };
   /** How often the platform connection is checked. */
   readonly healthIntervalMs: number;
@@ -62,7 +64,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     model: env.REPO_DOCTOR_MODEL?.trim() || "claude-sonnet-5",
     maxRuns: positive(env.REPO_DOCTOR_MAX_RUNS, 3),
     keepRuns: 50,
-    timeouts: { checkoutMs: 5 * 60_000, setupMs: 15 * 60_000, testsMs: 10 * 60_000, fixMs: 20 * 60_000, graceMs: 1_500 },
+    timeouts: { checkoutMs: 5 * 60_000, setupMs: 15 * 60_000, testsMs: 10 * 60_000, fixMs: 20 * 60_000, graceMs: 1_500, deleteRetriesMs: [5_000, 20_000] },
     healthIntervalMs: 15_000,
   };
 }

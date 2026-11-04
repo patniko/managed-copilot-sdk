@@ -147,6 +147,8 @@ export interface RunSummary {
 }
 
 export interface RunView extends RunSummary {
+  /** Rises with every change, across restarts too, so a client keeps the newest view it has seen. */
+  readonly revision: number;
   readonly model: string;
   readonly sessionId?: string;
   readonly sandbox: SandboxView;

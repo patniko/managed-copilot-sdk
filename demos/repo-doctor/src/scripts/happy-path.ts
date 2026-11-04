@@ -41,6 +41,9 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** How long a finished run's sandbox gets to be deleted: Repo Doctor tries a failed delete again for about 30 s. */
+const DELETE_WAIT_MS = 60_000;
+
 /** Polls the run, printing each step as it changes, until it ends and its sandbox is deleted (or can't be). */
 async function follow(id: string, interrupted: () => boolean): Promise<RunView> {
   const seen = new Map<string, string>();
@@ -58,7 +61,7 @@ async function follow(id: string, interrupted: () => boolean): Promise<RunView> 
     blocked = run.network.blocked.length;
     if (run.status !== "running") {
       ended ??= Date.now();
-      if (run.sandbox.state === "deleted" || run.sandbox.state === "failed" || Date.now() - ended > 30_000) return run;
+      if (run.sandbox.state === "deleted" || run.sandbox.state === "failed" || Date.now() - ended > DELETE_WAIT_MS) return run;
     }
     if (Date.now() - started > timeoutMs && !interrupted()) throw new Error(`The run didn't finish within ${values["timeout-minutes"]} minutes.`);
     await sleep(2_000);

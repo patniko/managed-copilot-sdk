@@ -12,7 +12,7 @@ export interface StoreState {
   readonly platform?: PlatformStatus;
   /** Newest first. */
   readonly runs: readonly RunSummary[];
-  /** Runs opened in this tab, kept current by the event stream. */
+  /** Runs this tab opened or saw change, kept current by the event stream. */
   readonly views: Readonly<Record<string, RunView>>;
   readonly logs: Readonly<Record<string, StepLogs>>;
   readonly viewErrors: Readonly<Record<string, string>>;
@@ -24,9 +24,10 @@ const MAX_LINES = 500;
 
 let state: StoreState = { phase: "loading", connection: "connecting", runs: [], views: {}, logs: {}, viewErrors: {}, maxRuns: 3 };
 const listeners = new Set<() => void>();
-/** The highest log line number each loaded run has, and lines that arrived while its log was loading. */
+/** The highest log line number each loaded run has, lines that arrived while its log was loading, and its latest load. */
 const lastSeq = new Map<string, number>();
 const pending = new Map<string, { step: StepId; line: LogLine }[]>();
+const loads = new Map<string, number>();
 
 function setState(update: (current: StoreState) => StoreState): void {
   const next = update(state);
@@ -53,6 +54,8 @@ function without<T>(record: Readonly<Record<string, T>>, key: string): Readonly<
 }
 
 function upsertRun(current: StoreState, run: RunView): StoreState {
+  // Events and fetched snapshots can arrive out of order: the higher revision is the newer view.
+  if ((current.views[run.id]?.revision ?? -1) > run.revision) return current;
   const runs = [...current.runs.filter((item) => item.id !== run.id), summarize(run)].sort((a, b) => b.number - a.number);
   return { ...current, runs, views: { ...current.views, [run.id]: run } };
 }
@@ -85,6 +88,7 @@ function handle(event: ServerEvent): void {
     case "run.deleted": {
       lastSeq.delete(event.id);
       pending.delete(event.id);
+      loads.delete(event.id);
       setState((current) => ({ ...current, runs: current.runs.filter((run) => run.id !== event.id), views: without(current.views, event.id), logs: without(current.logs, event.id) }));
       const route = parseHash(window.location.hash);
       if (route.kind === "run" && route.id === event.id) navigate(homeHref(), { replace: true });
@@ -104,17 +108,24 @@ async function loadState(): Promise<void> {
   setState((current) => ({ ...current, phase: "ready", platform: loaded.platform, runs: loaded.runs, sample: loaded.sample, maxRuns: loaded.maxRuns }));
 }
 
-/** Loads a run with its logs; lines streamed meanwhile are merged in by number. */
+/**
+ * Loads a run with its logs. Lines streamed meanwhile are buffered and merged in by number; when loads overlap (a
+ * reconnect while the page opens), only the latest one commits, and the buffer stays until it does.
+ */
 export async function loadRun(id: string): Promise<void> {
-  pending.set(id, []);
+  const generation = (loads.get(id) ?? 0) + 1;
+  loads.set(id, generation);
+  if (!pending.has(id)) pending.set(id, []);
   try {
     const detail = await api.run(id);
+    if (loads.get(id) !== generation) return;
     const logs = Object.fromEntries(STEP_IDS.map((step) => [step, detail.logs[step] ?? []])) as StepLogs;
     lastSeq.set(id, Math.max(0, ...STEP_IDS.flatMap((step) => logs[step].map((line) => line.seq))));
     const streamed = pending.get(id) ?? [];
     pending.delete(id);
     setState((current) => appendLines({ ...upsertRun(current, detail.run), logs: { ...current.logs, [id]: logs }, viewErrors: without(current.viewErrors, id) }, id, streamed));
   } catch (error) {
+    if (loads.get(id) !== generation) return;
     pending.delete(id);
     setState((current) => ({ ...current, viewErrors: { ...current.viewErrors, [id]: errorMessage(error) } }));
   }

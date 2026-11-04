@@ -1,6 +1,8 @@
 // One run, start to finish, in one sandbox: Repo Doctor checks out the code and runs the tests itself (`managed.exec`),
 // Copilot sets the project up and fixes it (agent turns in the same sandbox), and the sandbox is deleted at the end.
+import { randomUUID } from "node:crypto";
 import { approveAll } from "@github/copilot-sdk";
+import { isManagedCopilotError } from "@managed-copilot/sdk";
 import { diffTotals, parseDiff } from "../shared/diff.js";
 import { cloneUrl } from "../shared/repo.js";
 import type { PatchView, RunStatus, StepId, TestReport } from "../shared/types.js";
@@ -18,8 +20,6 @@ export interface DriverDeps {
   readonly platform: DoctorPlatform;
   readonly config: DoctorConfig;
   readonly sample: SampleProject;
-  /** Called once the run's session exists, so platform events for it reach the run. */
-  readonly onSession: (run: Run) => void;
 }
 
 /** A step that couldn't do its job: the run fails with this code and message, and the step shows `summary`. */
@@ -35,7 +35,7 @@ class StepFailure extends Error {
 
 class Stopped extends Error {}
 
-/** Patches leave out installed dependencies, caches, and coverage output (as git pathspecs). */
+/** New files under these paths stay out of patches: installed dependencies, caches, and coverage output. */
 const EXCLUDES = ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".tox", "coverage", ".nyc_output"]
   .map((dir) => `':(exclude,glob)**/${dir}/**'`)
   .concat("':(exclude,glob)**/*.pyc'", "':(exclude,glob)**/*.egg-info/**'")
@@ -50,11 +50,21 @@ export function shellQuote(value: string): string {
 
 /** Records the working tree as a git tree, without touching the repository's index, branches, or history. */
 export function snapshotScript(name: string): string {
-  return [`cd ${REPO_DIR}`, `export GIT_INDEX_FILE=/tmp/repo-doctor-${name}.index`, 'rm -f "$GIT_INDEX_FILE"', `git add -A -- . ${EXCLUDES}`, "git write-tree"].join(" && ");
+  return [
+    `cd ${REPO_DIR}`,
+    `export GIT_INDEX_FILE=/tmp/repo-doctor-${name}.index`,
+    'rm -f "$GIT_INDEX_FILE"',
+    // Start from HEAD so tracked files count even where .gitignore or the exclusions would skip them; then new files.
+    "{ git read-tree HEAD 2>/dev/null || true; }",
+    "git add -u",
+    `git add -A -- . ${EXCLUDES}`,
+    "git write-tree",
+  ].join(" && ");
 }
 
+/** The trees hold tracked files and new files outside the exclusions, so the diff compares them whole. */
 export function diffScript(from: string, to: string, stat = false): string {
-  return `cd ${REPO_DIR} && git diff --no-color --no-ext-diff --find-renames${stat ? " --stat" : ""} ${from} ${to} -- . ${EXCLUDES}`;
+  return `cd ${REPO_DIR} && git diff --no-color --no-ext-diff --find-renames${stat ? " --stat" : ""} ${from} ${to}`;
 }
 
 export function cloneFailure(output: string, name: string): string {
@@ -201,9 +211,12 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
   };
 
   try {
-    // The sandbox: a new session of the isolated environment. It's ready when createSession returns.
+    // The sandbox: a new session of the isolated environment, under an ID recorded first, so the session can be deleted
+    // even if creating it fails on this side after the platform started it.
     const created = Date.now();
+    run.update({ sessionId: randomUUID() });
     session = await platform.createSession({
+      sessionId: run.view.sessionId!,
       model: config.model,
       systemMessage: { content: SYSTEM_MESSAGE },
       tools: [
@@ -222,8 +235,6 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
       ],
       onPermissionRequest: approveAll,
     });
-    run.update({ sessionId: session.sessionId });
-    deps.onSession(run);
     detach = session.on((event) => observer.handle(event));
     checkStopped();
     const sandbox = await platform.sandbox(session.sessionId);
@@ -331,24 +342,38 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
     run.current = undefined;
     run.update({ status, finishedAt: new Date().toISOString() });
     detach?.();
-    await cleanUp(run, platform, session, run.stopping ? 0 : timeouts.graceMs);
+    await cleanUp(run, deps, session);
   }
 }
 
-/** Deletes the run's session, and with it its sandbox, after the last network reports arrive. */
-async function cleanUp(run: Run, platform: DoctorPlatform, session: DoctorSession | undefined, graceMs: number): Promise<void> {
-  if (!session) {
-    if (run.view.sandbox.state === "creating") run.update({ sandbox: { ...run.view.sandbox, state: "failed" } });
-    return;
-  }
-  await session.disconnect().catch(() => undefined);
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Deletes the run's session, and with it its sandbox, once the last network reports arrived. While the platform is
+ * unreachable the sandbox stays `deleting`, and the run manager deletes it when the platform is back.
+ */
+async function cleanUp(run: Run, { platform, config }: DriverDeps, session: DoctorSession | undefined): Promise<void> {
+  const sessionId = run.view.sessionId;
+  if (!sessionId) return;
+  await session?.disconnect().catch(() => undefined);
   run.update({ sandbox: { ...run.view.sandbox, state: "deleting" } });
-  if (graceMs > 0) await new Promise((resolve) => setTimeout(resolve, graceMs));
-  try {
-    await platform.deleteSession(session.sessionId);
-    run.update({ sandbox: { ...run.view.sandbox, state: "deleted" } });
-  } catch (error) {
-    log.warn("Couldn't delete a run's sandbox; Repo Doctor tries again when it reconnects", { run: run.id, error: errorText(error) });
-    run.update({ sandbox: { ...run.view.sandbox, state: "ready" } });
+  if (session && !run.stopping) await sleep(config.timeouts.graceMs);
+  let failure: unknown;
+  for (const wait of [0, ...config.timeouts.deleteRetriesMs]) {
+    await sleep(wait);
+    try {
+      await platform.deleteSession(sessionId);
+      run.update({ sandbox: { ...run.view.sandbox, state: "deleted" } });
+      return;
+    } catch (error) {
+      // Not found: the platform never created it (or it's gone already).
+      if (isManagedCopilotError(error, "not_found")) {
+        run.update({ sandbox: { ...run.view.sandbox, state: session ? "deleted" : "failed" } });
+        return;
+      }
+      failure = error;
+      if (platform.status.state !== "connected") break;
+    }
   }
+  log.warn("Couldn't delete a run's sandbox; Repo Doctor tries again when it reconnects", { run: run.id, error: errorText(failure) });
 }

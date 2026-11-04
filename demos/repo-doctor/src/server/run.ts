@@ -21,6 +21,11 @@ function compact<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
 }
 
+/** One more than the view's revision, and never behind the clock, so revisions keep rising across restarts. */
+export function nextRevision(view: RunView): number {
+  return Math.max((view.revision ?? 0) + 1, Date.now());
+}
+
 function emptyLogs(): Record<StepId, LogLine[]> {
   return Object.fromEntries(STEP_IDS.map((id) => [id, [] as LogLine[]])) as Record<StepId, LogLine[]>;
 }
@@ -60,12 +65,13 @@ export class Run {
   }
 
   update(patch: Partial<RunView>): void {
-    this.#view = compact({ ...this.#view, ...patch });
+    this.#view = compact({ ...this.#view, ...patch, revision: nextRevision(this.#view) });
     this.#sink.changed(this);
   }
 
   step(id: StepId, patch: Partial<StepView>): void {
-    this.#view = { ...this.#view, steps: this.#view.steps.map((step) => (step.id === id ? compact({ ...step, ...patch }) : step)) };
+    const steps = this.#view.steps.map((step) => (step.id === id ? compact({ ...step, ...patch }) : step));
+    this.#view = { ...this.#view, steps, revision: nextRevision(this.#view) };
     this.#sink.changed(this);
   }
 

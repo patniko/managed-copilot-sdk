@@ -9,13 +9,13 @@ describe("driver helpers", () => {
     expect(shellQuote("it's")).toBe("'it'\\''s'");
   });
 
-  it("snapshots and diffs through a temporary index, leaving dependencies and caches out", () => {
+  it("snapshots through a temporary index that starts from HEAD, leaving new dependencies and caches out", () => {
     const snapshot = snapshotScript("before");
     expect(snapshot).toContain("export GIT_INDEX_FILE=/tmp/repo-doctor-before.index");
-    expect(snapshot).toContain("git add -A -- . ':(exclude,glob)**/node_modules/**'");
+    expect(snapshot).toContain("{ git read-tree HEAD 2>/dev/null || true; } && git add -u && git add -A -- . ':(exclude,glob)**/node_modules/**'");
     expect(snapshot.endsWith("git write-tree")).toBe(true);
-    expect(diffScript("a", "b")).toMatch(/^cd \/workspace\/repo && git diff --no-color --no-ext-diff --find-renames a b -- \. /);
-    expect(diffScript("a", "b", true)).toContain("--find-renames --stat a b");
+    expect(diffScript("a", "b")).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames a b");
+    expect(diffScript("a", "b", true)).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames --stat a b");
   });
 
   it("explains failed clones in plain words", () => {

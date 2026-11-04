@@ -9,7 +9,7 @@ import type { PlatformStatus } from "../src/shared/types.js";
 
 export function testConfig(dataDir: string, overrides: Partial<DoctorConfig> = {}): DoctorConfig {
   const base = loadConfig({ REPO_DOCTOR_DATA_DIR: dataDir });
-  return { ...base, dev: false, webRoot: join(dataDir, "no-web"), timeouts: { ...base.timeouts, graceMs: 0 }, ...overrides };
+  return { ...base, dev: false, webRoot: join(dataDir, "no-web"), timeouts: { ...base.timeouts, graceMs: 0, deleteRetriesMs: [] }, ...overrides };
 }
 
 let eventId = 0;
@@ -161,6 +161,8 @@ export function standardScript(state: { fixed: boolean }): Script {
 export class FakePlatform implements DoctorPlatform {
   status: PlatformStatus = { state: "connected", url: "http://localhost:9100", mode: "local", deployment: "copilot", account: { login: "octocat" } };
   readonly sessions = new Map<string, FakeSession>();
+  /** Sessions the platform has, whether or not createSession answered. */
+  readonly created = new Set<string>();
   readonly deleted: string[] = [];
   readonly files = new Map<string, string>();
   readonly scripts: string[] = [];
@@ -171,6 +173,8 @@ export class FakePlatform implements DoctorPlatform {
   commands: Commands;
   /** Fails deleteSession with this error. */
   deleteError: Error | undefined;
+  /** Fails createSession with this error; `platformHasIt` says whether the platform created the session anyway. */
+  createError: { readonly error: Error; readonly platformHasIt: boolean } | undefined;
   /** Runs as each session is created, before createSession returns (the sandbox starting up). */
   onCreate: ((session: FakeSession) => void) | undefined;
 
@@ -200,7 +204,13 @@ export class FakePlatform implements DoctorPlatform {
   }
 
   async createSession(config: SessionConfig): Promise<DoctorSession> {
-    const session = new FakeSession(`session-${++this.#count}`, config, this.script);
+    const sessionId = config.sessionId ?? `session-${++this.#count}`;
+    if (this.createError) {
+      if (this.createError.platformHasIt) this.created.add(sessionId);
+      throw this.createError.error;
+    }
+    this.created.add(sessionId);
+    const session = new FakeSession(sessionId, config, this.script);
     this.sessions.set(session.sessionId, session);
     this.onCreate?.(session);
     return session;
@@ -217,7 +227,7 @@ export class FakePlatform implements DoctorPlatform {
 
   async deleteSession(sessionId: string): Promise<void> {
     if (this.deleteError) throw this.deleteError;
-    if (this.deleted.includes(sessionId)) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
+    if (!this.created.has(sessionId) || this.deleted.includes(sessionId)) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`);
     this.deleted.push(sessionId);
   }
 

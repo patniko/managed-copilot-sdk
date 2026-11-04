@@ -8,13 +8,14 @@ import { DoctorError, errorText } from "./errors.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
 import type { BlockedRequest, DoctorPlatform } from "./platform.js";
-import { Run, type RunSink } from "./run.js";
+import { nextRevision, Run, type RunSink } from "./run.js";
 import type { SampleProject } from "./sample.js";
 import type { RunStore } from "./store.js";
 
-/** Blocked requests for sessions no run has claimed yet: the sandbox reports some while its session is being created. */
-const UNCLAIMED_LIMIT = 200;
-const UNCLAIMED_MS = 2 * 60_000;
+/** A finished run whose sandbox may still exist: the manager deletes it (again) when the platform is reachable. */
+function needsCleanUp(view: RunView): boolean {
+  return view.status !== "running" && view.sessionId !== undefined && view.sandbox.state !== "deleted" && view.sandbox.state !== "failed";
+}
 
 export function parseSource(body: unknown): RunSource {
   const value = (body ?? {}) as { repo?: unknown; sample?: unknown };
@@ -30,6 +31,7 @@ export function interrupted(view: RunView, now = new Date().toISOString()): RunV
   if (view.status !== "running") return view;
   return {
     ...view,
+    revision: nextRevision(view),
     status: "failed",
     finishedAt: now,
     error: { code: "interrupted", message: "Repo Doctor restarted during this run." },
@@ -57,7 +59,6 @@ export class RunManager {
   readonly #drivers = new Map<string, Promise<void>>();
   readonly #publishing = new Map<string, NodeJS.Timeout>();
   readonly #saving = new Map<string, NodeJS.Timeout>();
-  #unclaimed: BlockedRequest[] = [];
   #counter = 0;
   #cleaning = false;
   readonly #sink: RunSink = {
@@ -132,6 +133,7 @@ export class RunManager {
     const view: RunView = {
       id: `r-${randomBytes(6).toString("hex")}`,
       number,
+      revision: 0,
       source,
       title: source.kind === "github" ? `${source.owner}/${source.repo}` : this.#sample.name,
       status: "running",
@@ -145,7 +147,7 @@ export class RunManager {
     this.#runs.set(view.id, run);
     this.#sink.changed(run);
     log.info("Run started", { run: view.id, number, source: view.title });
-    const driving = drive(run, { platform: this.#platform, config: this.#config, sample: this.#sample, onSession: (started) => this.#claim(started) })
+    const driving = drive(run, { platform: this.#platform, config: this.#config, sample: this.#sample })
       .catch((error: unknown) => log.error("A run stopped unexpectedly", { run: view.id, error: errorText(error) }))
       .finally(() => {
         this.#drivers.delete(view.id);
@@ -167,9 +169,9 @@ export class RunManager {
   async delete(id: string): Promise<void> {
     const run = this.#get(id);
     if (run.view.status === "running") throw new DoctorError("running", "Stop the run before deleting it.", 409);
-    if (run.view.sessionId && run.view.sandbox.state !== "deleted" && run.view.sandbox.state !== "failed") {
+    if (needsCleanUp(run.view)) {
       try {
-        await this.#platform.deleteSession(run.view.sessionId);
+        await this.#platform.deleteSession(run.view.sessionId!);
       } catch (error) {
         if (!isManagedCopilotError(error, "not_found")) throw new DoctorError("cleanup_failed", "Couldn't delete this run's sandbox. Try again once Managed Copilot is connected.", 503);
       }
@@ -242,40 +244,32 @@ export class RunManager {
 
   /** Keeps the newest finished runs whose sandboxes are gone. */
   #prune(): void {
-    const finished = this.#sorted().filter((run) => run.view.status !== "running" && (run.view.sandbox.state === "deleted" || !run.view.sessionId));
+    const finished = this.#sorted().filter((run) => run.view.status !== "running" && !needsCleanUp(run.view));
     for (const run of finished.slice(this.#config.keepRuns)) this.#forget(run);
   }
 
   #blocked(request: BlockedRequest): void {
-    const run = [...this.#runs.values()].find((candidate) => candidate.view.sessionId === request.sessionId);
-    if (run) return run.blocked(request);
-    const now = Date.now();
-    this.#unclaimed = [...this.#unclaimed.filter((held) => now - Date.parse(held.at) < UNCLAIMED_MS), request].slice(-UNCLAIMED_LIMIT);
+    [...this.#runs.values()].find((candidate) => candidate.view.sessionId === request.sessionId)?.blocked(request);
   }
 
-  #claim(run: Run): void {
-    const mine = this.#unclaimed.filter((request) => request.sessionId === run.view.sessionId);
-    this.#unclaimed = this.#unclaimed.filter((request) => request.sessionId !== run.view.sessionId);
-    for (const request of mine) run.blocked(request);
-  }
-
-  /** Deletes sandboxes that a finished run couldn't delete, for example while the platform was unreachable. */
+  /** Deletes sandboxes that finished runs couldn't delete, for example while the platform was unreachable. */
   async #cleanUp(): Promise<void> {
     if (this.#cleaning) return;
     this.#cleaning = true;
     try {
       for (const run of this.#runs.values()) {
-        const { status, sessionId, sandbox } = run.view;
-        if (status === "running" || !sessionId || sandbox.state === "deleted" || sandbox.state === "failed") continue;
+        if (!needsCleanUp(run.view) || this.#drivers.has(run.id)) continue;
+        const { sessionId, sandbox } = run.view;
         try {
-          await this.#platform.deleteSession(sessionId);
+          await this.#platform.deleteSession(sessionId!);
         } catch (error) {
           if (!isManagedCopilotError(error, "not_found")) {
             log.warn("Couldn't delete a finished run's sandbox", { run: run.id, error: errorText(error) });
             continue;
           }
         }
-        run.update({ sandbox: { ...sandbox, state: "deleted" } });
+        // A session still being created when the run ended may never have existed: then there was nothing to delete.
+        run.update({ sandbox: { ...sandbox, state: sandbox.state === "creating" ? "failed" : "deleted" } });
         this.#flush(run);
       }
     } finally {

@@ -97,8 +97,8 @@ sequenceDiagram
   [`testsummary.ts`](src/server/testsummary.ts) reads counts from node:test, Jest, Vitest, Mocha, pytest, unittest,
   Go, Cargo, and TAP output.
 - **Records:** each run's steps, logs, test reports, and patch are kept in `.data/runs` (`REPO_DOCTOR_DATA_DIR`). A
-  run that was going when the server stopped reads as interrupted, and its sandbox is deleted when the platform is
-  back.
+  run that was going when the server stopped reads as interrupted. Its sandbox, like any a finished run couldn't
+  delete, is deleted once the platform is reachable.
 
 ## Settings
 

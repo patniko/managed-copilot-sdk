@@ -193,11 +193,30 @@ describe("a run", () => {
     platform.deleteError = new Error("The platform is unreachable");
     const { manager } = setup(platform);
     const { id } = manager.create({ sample: true });
-    await until(() => manager.detail(id).run.status !== "running" && manager.detail(id).run.sandbox.state === "ready");
+    await until(() => manager.detail(id).run.status !== "running" && manager.detail(id).run.sandbox.state === "deleting");
     platform.deleteError = undefined;
     platform.setStatus({ ...platform.status, state: "connected" });
     await until(() => manager.detail(id).run.sandbox.state === "deleted");
     expect(platform.deleted).toHaveLength(1);
+  });
+
+  it("deletes a session the platform created even though creating it failed here", async () => {
+    const platform = new FakePlatform();
+    platform.createError = { error: new Error("Connection is disposed."), platformHasIt: true };
+    const { manager } = setup(platform);
+    const run = await finished(manager, manager.create({ sample: true }).id);
+    expect(run).toMatchObject({ status: "failed", error: { message: "Connection is disposed." }, sandbox: { state: "deleted" } });
+    expect(platform.deleted).toEqual([run.sessionId]);
+  });
+
+  it("marks the sandbox not started when the platform never created the session", async () => {
+    const platform = new FakePlatform();
+    platform.createError = { error: new Error("Sandboxes aren't available."), platformHasIt: false };
+    const { manager } = setup(platform);
+    const run = await finished(manager, manager.create({ sample: true }).id);
+    expect(run).toMatchObject({ status: "failed", sandbox: { state: "failed" } });
+    expect(run.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(platform.deleted).toEqual([]);
   });
 });
 
@@ -243,6 +262,7 @@ describe("the run manager", () => {
     const view: RunView = {
       id: "r-0123456789ab",
       number: 7,
+      revision: 3,
       source: { kind: "sample" },
       title: "bumpkit",
       status: "running",
@@ -255,13 +275,17 @@ describe("the run manager", () => {
     };
     new RunStore(dir).save({ run: view, logs: { checkout: [], setup: [], reproduce: [], fix: [], patch: [], verify: [] } });
     const platform = new FakePlatform();
+    platform.created.add("session-old");
     const hub = new EventHub(60_000);
     const manager = new RunManager(platform, testConfig(dir), new RunStore(dir), hub, loadSample(testConfig(dir).sampleDir));
+    const restartedAt = Date.now();
     manager.start();
     cleanups.push(() => hub.close());
     await until(() => manager.detail(view.id).run.sandbox.state === "deleted");
     const run = manager.detail(view.id).run;
     expect(run).toMatchObject({ status: "failed", error: { code: "interrupted" } });
+    // Newer than anything the server sent before it stopped, so open tabs take it.
+    expect(run.revision).toBeGreaterThanOrEqual(restartedAt);
     expect(run.steps.map((item) => item.status)).toEqual(["passed", "failed", "skipped", "skipped", "skipped", "skipped"]);
     expect(step(run, "setup").activity).toBeUndefined();
     expect(platform.deleted).toEqual(["session-old"]);
