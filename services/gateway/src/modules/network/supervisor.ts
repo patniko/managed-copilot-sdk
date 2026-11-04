@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { EGRESS_PROXY_HOST } from "@managed-copilot/protocol";
+import { isSubnetOverlap, sharedNetworkSubnets } from "../../docker-subnets.js";
 import type { Logger } from "../../log.js";
 
 export interface EgressSupervisorOptions {
@@ -25,6 +26,8 @@ export interface EgressSupervisorOptions {
   readonly upstreamCa?: string;
   readonly log: Logger;
   readonly docker?: string;
+  /** Base of the /16 the instance's shared networks get their /24s from (`MANAGED_COPILOT_NETWORK_SUBNET_POOL`). */
+  readonly subnetPool?: string;
 }
 
 interface Run {
@@ -100,13 +103,20 @@ export class EgressSupervisor {
     return tag;
   }
 
+  /** Creates a shared network on an explicit /24 (see docker-subnets.ts), probing past subnets already in use. */
   async #network(name: string, internal: boolean): Promise<void> {
     if (await this.#exists(["network", "inspect", name])) return;
-    try {
-      await this.#docker(["network", "create", ...(internal ? ["--internal"] : []), "--label", `managed-copilot.instance=${this.#options.instance}`, name]);
-    } catch (error) {
-      if (!/already exists/i.test((error as { stderr?: string }).stderr ?? "")) throw error;
+    for (const subnet of sharedNetworkSubnets(name, this.#options.subnetPool)) {
+      try {
+        await this.#docker(["network", "create", ...(internal ? ["--internal"] : []), "--subnet", subnet, "--label", `managed-copilot.instance=${this.#options.instance}`, name]);
+        return;
+      } catch (error) {
+        const stderr = (error as { stderr?: string }).stderr ?? "";
+        if (/already exists/i.test(stderr)) return;
+        if (!isSubnetOverlap(stderr)) throw error;
+      }
     }
+    throw new Error(`No free subnet is available for the ${name} network; remove unused Docker networks or set MANAGED_COPILOT_NETWORK_SUBNET_POOL`);
   }
 
   /** Makes sure the image, networks, and container exist and match the current configuration. */
