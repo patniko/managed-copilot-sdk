@@ -14,6 +14,7 @@ import {
   type HTMLAttributes,
   type KeyboardEvent,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactElement,
   type ReactNode,
   type RefObject,
@@ -45,15 +46,29 @@ export function Spinner({ size = 16, className, label }: { size?: number; classN
 
 type TooltipTrigger = ReactElement<HTMLAttributes<HTMLElement>>;
 
+/** Elements that do something when clicked; a click on anything else (or on a disabled control) only asks what it is. */
+const ACTIONABLE = 'a[href], button, input, select, textarea, summary, [role="button"], [role="link"]';
+
+/** How long a tooltip opened by a tap stays up (touch screens have no hover to end it). */
+const TAP_TOOLTIP_MS = 4000;
+
 /**
  * Primer's tooltip: shown while the pointer is over its trigger or keyboard focus is on it, in a portal so scrolling
- * panels never clip it. The trigger is the single child (no wrapper element). With `describe`, the text also becomes
- * the trigger's accessible description; leave it off when the trigger's label already says the same.
+ * panels never clip it. Clicking or tapping a trigger that does nothing itself (plain text, or an `aria-disabled`
+ * control) shows it too, so it works on touch screens. The trigger is the single child (no wrapper element). With
+ * `describe`, the text also becomes the trigger's accessible description; leave it off when the trigger's label
+ * already says the same, and give screen readers the same facts another way when the trigger can't take focus.
  */
 export function Tooltip({ content, children, describe = true }: { content: ReactNode; children: TooltipTrigger; describe?: boolean }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
   const id = useId();
-  const hide = useCallback(() => setAnchor(null), []);
+  const pointer = useRef("mouse");
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const hide = useCallback(() => {
+    clearTimeout(timer.current);
+    setAnchor(null);
+  }, []);
+  useEffect(() => () => clearTimeout(timer.current), []);
   const child = Children.only(children);
   const own = child.props;
   const empty = content === undefined || content === null || content === false || content === "";
@@ -62,6 +77,10 @@ export function Tooltip({ content, children, describe = true }: { content: React
     if (!empty && target.getAttribute("aria-expanded") !== "true") setAnchor(target.getBoundingClientRect());
   };
   const trigger = cloneElement(child, {
+    onPointerDown: (event: ReactPointerEvent<HTMLElement>) => {
+      own.onPointerDown?.(event);
+      pointer.current = event.pointerType;
+    },
     onMouseEnter: (event: MouseEvent<HTMLElement>) => {
       own.onMouseEnter?.(event);
       show(event.currentTarget);
@@ -81,7 +100,14 @@ export function Tooltip({ content, children, describe = true }: { content: React
     },
     onClick: (event: MouseEvent<HTMLElement>) => {
       own.onClick?.(event);
-      hide();
+      const target = event.currentTarget;
+      if (target.matches(ACTIONABLE) && target.getAttribute("aria-disabled") !== "true") {
+        hide();
+        return;
+      }
+      show(target);
+      clearTimeout(timer.current);
+      if (pointer.current === "touch") timer.current = setTimeout(() => setAnchor(null), TAP_TOOLTIP_MS);
     },
     onKeyDown: (event: KeyboardEvent<HTMLElement>) => {
       own.onKeyDown?.(event);

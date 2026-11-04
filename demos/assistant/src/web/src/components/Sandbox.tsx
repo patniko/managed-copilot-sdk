@@ -184,6 +184,7 @@ export function SandboxCard({ item, state, approval, timeZone, highlight }: { it
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="min-w-0 break-words font-semibold">{title}</span>
+            {where && <span className="sr-only">({where})</span>}
             {start ? (
               <span className="Label Label--success" title="A new sandbox for this work">
                 New

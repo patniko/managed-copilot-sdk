@@ -353,30 +353,35 @@ function ScheduleMeta({ schedule }: { schedule: ScheduleView }) {
     );
   }
   if (failed) {
+    const failure = `Last run failed${schedule.lastRun?.reason ? `: ${schedule.lastRun.reason}` : ""}`;
     return (
       <div className="flex min-w-0 items-center gap-1 text-xs text-fg-danger">
         <XCircleFillIcon size={12} className="shrink-0" />
-        <span className="truncate">Last run failed</span>
+        <span className="truncate" title={failure}>
+          {failure}
+        </span>
       </div>
     );
   }
   return <div className="truncate text-xs text-fg-muted">{schedule.cadence}</div>;
 }
 
-/** Everything about a schedule that its row doesn't show: what it asks, when it runs next, and how it went. */
+/** What a schedule's row doesn't show: when it runs next, when it last ran, and who set it. */
+function scheduleNotes(schedule: ScheduleView, timeZone: string): string[] {
+  return [
+    schedule.state === "active" && schedule.nextRunAt ? `Next ${whenLabel(schedule.nextRunAt, timeZone)}` : undefined,
+    schedule.lastRun?.completedAt ? `Last ran ${relativeTime(schedule.lastRun.completedAt)}` : undefined,
+    schedule.createdBy === "agent" ? "Set by your assistant" : undefined,
+  ].filter((note): note is string => note !== undefined);
+}
+
+/** Everything about a schedule that its row doesn't show: what it asks, when it runs, and how it went. */
 function ScheduleDetails({ schedule, timeZone }: { schedule: ScheduleView; timeZone: string }) {
-  const notes = [
-    schedule.cadence,
-    schedule.state === "active" && schedule.nextRunAt ? `next ${whenLabel(schedule.nextRunAt, timeZone)}` : undefined,
-    schedule.lastRun?.completedAt ? `last ran ${relativeTime(schedule.lastRun.completedAt)}` : undefined,
-    schedule.createdBy === "agent" ? "set by your assistant" : undefined,
-  ].filter(Boolean);
-  const failure = schedule.lastRun?.status === "failed" ? `Last run failed${schedule.lastRun.reason ? `: ${schedule.lastRun.reason}` : ""}` : undefined;
+  const notes = [schedule.cadence, ...scheduleNotes(schedule, timeZone)];
   return (
     <span className="block text-left">
       <span className="block">“{schedule.prompt}”</span>
       <span className="mt-1 block opacity-80">{notes.join(" · ")}</span>
-      {failure && <span className="mt-1 block">{failure}</span>}
     </span>
   );
 }
@@ -456,6 +461,9 @@ export function AutomationsCard(props: {
                     <div className="min-w-0 flex-1">
                       <div className={cx("truncate font-semibold", paused && "text-fg-muted")}>{schedule.name}</div>
                       <ScheduleMeta schedule={schedule} />
+                      <span className="sr-only">
+                        {[`Asks: ${schedule.prompt.replace(/[.!?\s]+$/, "")}`, paused || schedule.lastRun?.status === "failed" ? schedule.cadence : undefined, ...scheduleNotes(schedule, props.timeZone)].filter(Boolean).join(". ")}
+                      </span>
                     </div>
                   </Tooltip>
                   <div className="-mr-1 flex shrink-0 items-center">
@@ -543,17 +551,17 @@ function sandboxNote(worker: SandboxWorkerView): string {
 function SandboxTile({ worker, environment, onOpen }: { worker: SandboxWorkerView; environment?: SandboxEnvironmentView; onOpen(): void }) {
   const KindIcon = SANDBOX_ICONS[environment?.kind ?? "general"];
   const stopped = worker.state === "stopped";
-  const details = (
-    <span className="block text-left">
-      <span className="block font-semibold">{environment ? capitalize(environment.label) : "Sandbox"}</span>
-      <span className="block">{[worker.environment, environment?.size, networkLabel(environment?.network)].filter(Boolean).join(" · ")}</span>
-      <span className="block">{sandboxNote(worker)}</span>
-      {worker.error && <span className="block">{worker.error}</span>}
-    </span>
-  );
+  const lines = [
+    environment ? capitalize(environment.label) : "Sandbox",
+    [worker.environment, environment?.size, networkLabel(environment?.network)].filter(Boolean).join(" · "),
+    sandboxNote(worker),
+    worker.error,
+  ].filter(Boolean);
+  // One text with line breaks, so the description screen readers get keeps a pause between lines.
+  const details = <span className="block whitespace-pre-line text-left">{lines.join(".\n")}</span>;
   return (
     <li className="min-w-0" data-testid="sandbox-row" data-worker={worker.name} data-state={worker.state}>
-      <Tooltip content={details} describe={false}>
+      <Tooltip content={details}>
         <button
           type="button"
           className="Box flex h-full w-full flex-col gap-1 p-2.5 text-left transition-colors duration-100 hover:bg-canvas-muted"
@@ -619,6 +627,7 @@ export function SandboxesCard({ sandboxes, onOpen, onOpenSettings }: { sandboxes
               <div className="Box flex items-center gap-2 px-3 py-2.5 text-fg-muted">
                 <ContainerIcon className="shrink-0" />
                 <span className="min-w-0 truncate">None yet · each one asks you first</span>
+                <span className="sr-only">. It can start: {sandboxes.environments.map((environment) => environment.label).join(", ")}</span>
               </div>
             </Tooltip>
           ) : (

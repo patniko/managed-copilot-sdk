@@ -136,11 +136,22 @@ function TaskWell({ task }: { task: string }) {
   useLayoutEffect(() => {
     const element = text.current;
     if (!element || expanded) return;
-    const measure = () => setOverflows(element.scrollHeight > element.clientHeight + 1);
+    let live = true;
+    const measure = () => {
+      if (live) setOverflows(element.scrollHeight > element.clientHeight + 1);
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
-    return () => observer.disconnect();
+    // The web font can load after this first measure and change how many lines the task needs (the clamped box keeps its size).
+    const fonts = document.fonts;
+    fonts.addEventListener("loadingdone", measure);
+    void fonts.ready.then(measure);
+    return () => {
+      live = false;
+      observer.disconnect();
+      fonts.removeEventListener("loadingdone", measure);
+    };
   }, [expanded, task]);
   return (
     <Well>
@@ -175,6 +186,7 @@ function SandboxPreview({ preview }: { preview: Extract<ApprovalPreview, { type:
                 {part}
               </span>
             ))}
+            {runsAs && <span className="sr-only"> · {runsAs}</span>}
           </div>
         </Tooltip>
       </div>
