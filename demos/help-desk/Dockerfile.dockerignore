@@ -1,0 +1,19 @@
+# Build context for demos/help-desk/Dockerfile (the repository root): only what the Help Desk build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!libraries/protocol/**
+!libraries/sdk/**
+!libraries/github-theme/**
+!demos/help-desk/**
+!deployments/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+demos/help-desk/docs
+deployments/azure/hosting
+deployments/azure/sandbox

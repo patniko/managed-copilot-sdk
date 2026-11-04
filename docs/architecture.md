@@ -94,7 +94,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, and the gallery |
+| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Help Desk, and the gallery |
 | Walkthroughs | `walkthroughs` | scripts (`pnpm walkthrough <nn>`) | The walkthroughs' runnable code, documented in `walkthroughs/*/README.md` |
 | Spec snippets | `tests/snippets` | scripts (Aspire resource `snippets`) | Every spec snippet as an acceptance check against a running platform |
 | Environment customizations | `environments/<name>` | files | Agents, skills, and instructions for the root AppHost's environments, one folder per environment (today `chat`) |
@@ -1805,6 +1805,7 @@ Where each area of the platform lives.
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
+| **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()` |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |

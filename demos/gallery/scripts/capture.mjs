@@ -47,6 +47,14 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "help-desk",
+    url: local(7440),
+    async prepare(page) {
+      // The wall of the latest simulation; wait for its live tiles when there is one.
+      await page.locator("article[data-ticket]").first().waitFor({ timeout: 10_000 }).catch(() => undefined);
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {

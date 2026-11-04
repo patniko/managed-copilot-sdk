@@ -81,6 +81,17 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/healthz",
     readme: "demos/assistant/README.md",
   },
+  {
+    id: "help-desk",
+    title: "Help Desk",
+    tagline: "25 customers, 25 private sessions, one shared runtime",
+    description: "A support rush where every customer chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you.",
+    tryIt: "Simulate 25 customers, then approve a refund.",
+    app: "help-desk",
+    port: 7440,
+    healthPath: "/api/health",
+    readme: "demos/help-desk/README.md",
+  },
   CONSOLE,
 ];
 
@@ -170,7 +181,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "chat",
     settings: ['type: "shared"'],
     walkthrough: "02",
-    demos: [{ app: "software-factory", where: "its planner and reviewer" }],
+    demos: [
+      { app: "software-factory", where: "its planner and reviewer" },
+      { app: "help-desk", where: "25 customers, one runtime" },
+    ],
   },
   {
     id: "promotable",
