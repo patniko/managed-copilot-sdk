@@ -32,8 +32,11 @@ export function Tooltip({ content, children, className, disabled = false, delay 
   return (
     <span
       className={cx("inline-flex min-w-0", className)}
-      onMouseEnter={(event) => show(event.currentTarget, delay)}
-      onMouseLeave={hide}
+      onPointerEnter={(event) => {
+        // Touch and pen taps also send pointer and mouse "enter" events; only a hovering mouse should open a tooltip.
+        if (event.pointerType === "mouse") show(event.currentTarget, delay);
+      }}
+      onPointerLeave={hide}
       onPointerDown={hide}
       onFocus={(event) => {
         // A click focuses buttons too; only keyboard focus (focus-visible) should open the tooltip.

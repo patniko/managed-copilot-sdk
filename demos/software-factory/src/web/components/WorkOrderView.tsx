@@ -359,7 +359,7 @@ function Actions({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly t
       <Popover
         role="menu"
         label={`${number} actions`}
-        overlayClassName="w-56"
+        overlayClassName="w-56 max-sm:fixed max-sm:inset-x-3 max-sm:top-auto max-sm:w-auto"
         trigger={(props) => <IconButton {...props} icon={KebabHorizontalIcon} label="More actions" variant="default" disabled={pending !== undefined} />}
       >
         {(close) => (

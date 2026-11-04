@@ -45,8 +45,16 @@ function useStickToBottom(
   scrollRef: RefObject<HTMLDivElement | null>,
   contentRef: RefObject<HTMLDivElement | null>,
   startAtBottom: boolean,
-): { readonly showJump: boolean; readonly hasNew: boolean; readonly jump: () => void; readonly pin: () => void } {
+): {
+  readonly showJump: boolean;
+  readonly hasNew: boolean;
+  readonly jump: () => void;
+  readonly pin: () => void;
+  readonly unpin: () => void;
+} {
   const pinned = useRef(startAtBottom);
+  /** The next size change is the user's own (opening details), not new output. */
+  const ownResize = useRef(false);
   const [away, setAway] = useState(false);
   const [hasNew, setHasNew] = useState(false);
 
@@ -73,7 +81,9 @@ function useStickToBottom(
     };
     const observer = new ResizeObserver(() => {
       const height = content.offsetHeight;
-      if (pinned.current) {
+      if (ownResize.current) {
+        ownResize.current = false;
+      } else if (pinned.current) {
         scroller.scrollTop = scroller.scrollHeight;
         lastTop = scroller.scrollTop;
       } else if (height > lastHeight && distance() > 40) {
@@ -109,7 +119,13 @@ function useStickToBottom(
     scroller.scrollTop = scroller.scrollHeight;
   }, [scrollRef]);
 
-  return { showJump: away || (hasNew && !pinned.current), hasNew, jump, pin };
+  /** Stops following output, so opening something near the top doesn't scroll it away. */
+  const unpin = useCallback(() => {
+    pinned.current = false;
+    ownResize.current = true;
+  }, []);
+
+  return { showJump: away || (hasNew && !pinned.current), hasNew, jump, pin, unpin };
 }
 
 const PANEL_CLASS = "Box relative flex min-w-0 flex-col overflow-clip xl:h-full";
@@ -122,7 +138,7 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
   const [startAtBottom] = useState(live);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const { showJump, hasNew, jump, pin } = useStickToBottom(scroller, content, startAtBottom);
+  const { showJump, hasNew, jump, pin, unpin } = useStickToBottom(scroller, content, startAtBottom);
   const wasLive = useRef(live);
   useEffect(() => {
     if (live && !wasLive.current) pin();
@@ -134,7 +150,7 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
       <PanelHeader station={station} workOrder={workOrder} />
       <div ref={scroller} className={SCROLL_CLASS}>
         <div ref={content} className="space-y-5 p-4">
-          <Details workOrder={workOrder} station={station} />
+          <Details workOrder={workOrder} station={station} onToggle={unpin} />
           {station.kind === "coordinate" ? <CoordinatorDecisions workOrder={workOrder} /> : null}
           {station.kind === "review" ? <ReviewHistory station={station} /> : null}
           {station.acceptedWithFindings ? (
@@ -346,7 +362,7 @@ function Mono({ children, title }: { readonly children: ReactNode; readonly titl
   );
 }
 
-function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readonly station: Station }) {
+function Details({ workOrder, station, onToggle }: { readonly workOrder: WorkOrder; readonly station: Station; readonly onToggle: () => void }) {
   const environment = useEnvironment(station.environment);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
@@ -363,6 +379,7 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
   return (
     <details className="group">
       <summary
+        onClick={onToggle}
         className="-mx-1 flex cursor-pointer list-none items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-fg-muted select-none hover:bg-control-transparent-hover [&::-webkit-details-marker]:hidden"
         title={placement.label}
       >

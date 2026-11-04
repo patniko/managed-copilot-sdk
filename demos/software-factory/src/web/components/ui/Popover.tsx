@@ -32,7 +32,11 @@ export function Popover({ trigger, children, label, role = "dialog", align = "en
   const button = useRef<HTMLButtonElement>(null);
   const overlay = useRef<HTMLDivElement>(null);
   const id = useId();
-  const close = useCallback(() => setOpen(false), []);
+  // Choosing something inside returns focus to the trigger first, so a dialog it opens can hand focus back there.
+  const close = useCallback(() => {
+    setOpen(false);
+    button.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
