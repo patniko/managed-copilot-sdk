@@ -36,12 +36,13 @@ aspire run --non-interactive
 ```
 
 `--non-interactive` skips the hidden "Trusting certificates…" prompt (or run `aspire certs trust` once). It prints the
-Aspire dashboard URL. Wait until the dashboard shows `copilot`, `dispatch`, `software-factory`, and `assistant` as
-**Running / Healthy**. The first run builds the sandbox image, which takes a few minutes.
+Aspire dashboard URL. Wait until the dashboard shows `copilot`, `front-desk`, `dispatch`, `software-factory`, and
+`assistant` as **Running / Healthy**. The first run builds the sandbox image, which takes a few minutes.
 
 | Resource | Local URL |
 | --- | --- |
 | Gateway (`copilot`) | http://localhost:7400 |
+| Front Desk | http://localhost:7450 |
 | Dispatch | http://localhost:7470 |
 | Software factory | http://localhost:7480 |
 | Assistant | http://localhost:7490 |
@@ -67,7 +68,7 @@ pnpm gallery            # opens http://localhost:7460; add --no-azure to hide th
 - [ ] Header shows the local gateway as up.
 - [ ] The **Patterns** row shows the three building blocks and six pattern cards; each card's walkthrough link jumps
   to its walkthrough below.
-- [ ] Dispatch, Software factory, Assistant, and Operator console cards each have a green **Local** dot.
+- [ ] Front Desk, Dispatch, Software factory, Assistant, and Operator console cards each have a green **Local** dot.
 
 Open each app from its **Local** button and run the checks below.
 
@@ -121,7 +122,26 @@ Scripted check in Microsoft Edge (`--fresh` starts a new conversation and resets
 pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --sandbox --enable-background
 ```
 
-### 1.7 Operator console
+### 1.7 Front Desk (many people, each with private conversations)
+
+1. Open http://localhost:7450 and press **Use this computer's GitHub sign-in**.
+2. Ask: "Remember that my favorite color is teal." Open **Memory**.
+3. In a private window, open Front Desk again and **Create an account** with any email and password.
+4. As that person, ask: "What's my favorite color?"
+
+- [ ] The GitHub user's chip says **Your Copilot plan**; the email account's says **Front Desk's Azure AI Foundry**,
+      with a daily allowance.
+- [ ] The memory panel lists the favorite color for the GitHub user only; the other person's list and memory are empty,
+      and their assistant doesn't know it.
+
+Scripted check (two email accounts and your GitHub CLI's account; each saves a secret, and every other person is checked
+to see none of it):
+
+```powershell
+pnpm --filter @managed-copilot/demo-front-desk e2e -- --url http://localhost:7450
+```
+
+### 1.8 Operator console
 
 Press the console card's **Local** button, or:
 
@@ -135,7 +155,7 @@ npx managed-copilot operator     # the same overview in the terminal
       with placement and sandbox; conversation content is not shown.
 - [ ] The live feed moves while a demo runs.
 
-### 1.8 The CLI and the walkthroughs (T3)
+### 1.9 The CLI and the walkthroughs (T3)
 
 ```powershell
 npx managed-copilot sessions              # your sessions
@@ -149,7 +169,7 @@ pnpm --filter @managed-copilot/snippets acceptance   # every spec snippet agains
 
 - [ ] `new coder` opens Copilot CLI with the footer `remote /workspace`.
 
-### 1.9 Stop
+### 1.10 Stop
 
 ```powershell
 aspire stop --apphost apphost.mts --non-interactive
@@ -260,7 +280,7 @@ your network address (see 3.4); the deployed gallery can't tell, because the app
 
 ### 3.3 The demos and console in Azure
 
-Repeat 1.4 to 1.7 with each card's **Azure** button. Differences to expect:
+Repeat 1.4 to 1.8 with each card's **Azure** button. Differences to expect:
 
 - Sandboxes are Azure Container Apps microVMs (`Linux x86_64`), so the first one in a conversation takes a little
   longer to start.

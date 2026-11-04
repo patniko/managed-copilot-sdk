@@ -47,6 +47,20 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "front-desk",
+    url: local(7450),
+    async prepare(page) {
+      // Locally, sign in as this computer's GitHub CLI account and open the latest conversation with its memory.
+      const signIn = page.getByRole("button", { name: "Use this computer's GitHub sign-in" });
+      if (!(await signIn.count())) return;
+      await signIn.click();
+      await page.getByRole("button", { name: /^Account:/ }).waitFor({ timeout: 30_000 });
+      const first = page.locator('nav[aria-label="Your conversations"] a[href^="/c/"]').first();
+      if (await first.count()) await first.click();
+      await page.getByRole("button", { name: /What Front Desk remembers about you/ }).click();
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {

@@ -86,6 +86,19 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/healthz",
     readme: "demos/assistant/README.md",
   },
+  {
+    id: "front-desk",
+    title: "Front Desk",
+    tagline: "One app for many people, each with their own private conversations",
+    description:
+      "Anyone signs in: with GitHub, to chat on their own Copilot plan, or with an email, so the app pays through its Azure AI Foundry. Each person gets conversations and a memory that nobody else can see.",
+    tryIt: "Ask it to remember your favorite color, then sign in as someone else and ask for it.",
+    app: "front-desk",
+    port: 7450,
+    healthPath: "/api/health",
+    readme: "demos/front-desk/README.md",
+    public: true,
+  },
   CONSOLE,
 ];
 
@@ -175,7 +188,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "chat",
     settings: ['type: "shared"'],
     walkthrough: "02",
-    demos: [{ app: "software-factory", where: "its planner and reviewer" }],
+    demos: [
+      { app: "software-factory", where: "its planner and reviewer" },
+      { app: "front-desk", where: "every person's conversations" },
+    ],
   },
   {
     id: "promotable",

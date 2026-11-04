@@ -94,14 +94,14 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, and the gallery |
+| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Front Desk, and the gallery |
 | Walkthroughs | `walkthroughs` | scripts (`pnpm walkthrough <nn>`) | The walkthroughs' runnable code, documented in `walkthroughs/*/README.md` |
 | Spec snippets | `tests/snippets` | scripts (Aspire resource `snippets`) | Every spec snippet as an acceptance check against a running platform |
 | Environment customizations | `environments/<name>` | files | Agents, skills, and instructions for the root AppHost's environments, one folder per environment (today `chat`) |
 
 ### Web UI look and feel
 
-Every web UI (the console, the software factory, the assistant, and Dispatch) looks like part of github.com. The shared
+Every web UI (the console, the software factory, the assistant, Dispatch, and Front Desk) looks like part of github.com. The shared
 `@managed-copilot/github-theme` package (`libraries/github-theme`) is the single source: GitHub's Primer design tokens
 from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
 Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
@@ -1513,10 +1513,12 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
-- `aspire run` from the repository root starts: the gateway (7400), `dispatch` (7470), `software-factory` (7480),
-  `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets webhook receives on
-  7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all five ports for a second copy, which also sets `discovery: false`
-  (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
+- `aspire run` from the repository root starts: the gateway (7400), `front-desk` (7450), `dispatch` (7470),
+  `software-factory` (7480), `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets
+  webhook receives on 7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all six ports for a second copy, which also sets
+  `discovery: false` (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
+- Front Desk is the one demo published with `public: true`: it signs in its own users and holds no GitHub token, so
+  every call it makes carries a signed-in person's credential (a GitHub user's own token).
 
 ### Copilot CLI attach (spec section 14)
 
@@ -1765,7 +1767,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7470, 7480, 7490, 7485 | Dispatch, software factory, assistant (fixed for its Google OAuth redirect), spec snippets webhook receiver |
+| Demo ports | 7450, 7470, 7480, 7490, 7485 | Front Desk (fixed for its GitHub OAuth callback), Dispatch, software factory, assistant (fixed for its Google OAuth redirect), spec snippets webhook receiver |
 | Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
@@ -1801,6 +1803,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
+| **front-desk** | `demos/front-desk/**` | Front Desk: an app many people sign in to (GitHub, or an email account the app keeps), each with private conversations and memory, published as a public app with no GitHub token |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |

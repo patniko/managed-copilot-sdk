@@ -150,7 +150,7 @@ More in [patterns](docs/concepts/patterns.md) (how to choose, and the scenarios 
 
 ## The demos
 
-All three demos run under `aspire run` with real models, and the same AppHost publishes them to Azure. For a live
+All four demos run under `aspire run` with real models, and the same AppHost publishes them to Azure. For a live
 demo, start with the [demo gallery](demos/gallery/README.md): `pnpm gallery` opens one page with every app and
 walkthrough, with Local and Azure links and their status.
 
@@ -200,6 +200,19 @@ conversation in Copilot CLI and keep talking there.
 
 → [demos/dispatch](demos/dispatch/README.md)
 
+### Front Desk
+
+<p align="center">
+  <img src="demos/front-desk/docs/screenshots/github-user.png" alt="A GitHub user in Front Desk: the assistant saved their secret word to memory, and the memory panel lists what it remembers about them" width="900">
+</p>
+
+An app for other people: anyone signs in, with GitHub or with an email and password, and gets private conversations
+and a memory nobody else can see. GitHub users chat on their own Copilot plan; for everyone else, the app pays. Front
+Desk holds no GitHub token of its own, so it never acts as whoever deployed it, and it's published as a public app
+that opens from anywhere.
+
+→ [demos/front-desk](demos/front-desk/README.md)
+
 ## Run it locally
 
 You need Node 24, pnpm 10, Docker Desktop, the Aspire CLI 13.6, a GitHub account with Copilot (`gh auth login`), and
@@ -211,9 +224,9 @@ pnpm build
 aspire run        # the dashboard, the platform at http://localhost:7400, and the demos
 ```
 
-`aspire run` starts the gateway, Dispatch (http://localhost:7470), the software factory (http://localhost:7480), and
-the assistant (http://localhost:7490). Your code finds the platform with no configuration: `ManagedCopilot.connect()`
-reads the discovery record the local gateway writes. From another terminal:
+`aspire run` starts the gateway, Front Desk (http://localhost:7450), Dispatch (http://localhost:7470), the software
+factory (http://localhost:7480), and the assistant (http://localhost:7490). Your code finds the platform with no
+configuration: `ManagedCopilot.connect()` reads the discovery record the local gateway writes. From another terminal:
 
 ```powershell
 npx managed-copilot status             # the deployment, your account, and its environments
@@ -234,12 +247,12 @@ To run every snippet from the spec against your platform, start **snippets** in 
 - **Behind a NuGet proxy.** If nuget.org is blocked, point the Aspire CLI at your proxy with
   `ASPIRE_CLI_NUGET_SERVICE_INDEX=<proxy>/v3/index.json` and add an untracked `NuGet.config` at the repository root
   whose `packageSourceMapping` maps `*` to that proxy (the file is git-ignored).
-- **A port is in use.** The gateway (7400), Dispatch (7470), the factory (7480), and the assistant (7490) use fixed
-  ports; the assistant's is fixed for its Google OAuth redirect. Stop whatever holds the port, then restart the
-  resource.
+- **A port is in use.** The gateway (7400), Front Desk (7450), Dispatch (7470), the factory (7480), and the assistant
+  (7490) use fixed ports; Front Desk's and the assistant's are fixed for their GitHub and Google OAuth redirects. Stop
+  whatever holds the port, then restart the resource.
 - **A second copy beside the first** (for example another checkout): set `MANAGED_COPILOT_PORT_OFFSET=300` to move
-  its ports to 7700, 7770, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at it with
-  `MANAGED_COPILOT_URL=http://localhost:7700`.
+  its ports to 7700, 7750, 7770, 7780, and 7790. It leaves zero-config discovery to the first copy, so point tools at
+  it with `MANAGED_COPILOT_URL=http://localhost:7700`.
 
 ## Deploy to Azure
 
@@ -287,6 +300,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
 | [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail, Google Calendar, and sandboxes for hands-on work |
 | [Dispatch](demos/dispatch/README.md) | A chat with an orchestrator agent that creates a sandbox for each part of a request, or reuses the ones it has |
+| [Front Desk](demos/front-desk/README.md) | An app many people sign in to, with GitHub or an email, each with private conversations and memory |
 | [`managed-copilot` CLI](libraries/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
 | [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
 | [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
@@ -308,7 +322,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | `environments` | Per-environment customizations for the AppHost: `environments/<name>` holds that environment's agents, skills, and instructions (today `chat`) |
 | `tests/snippets` | Every spec snippet as a runnable script and one acceptance run |
 | `walkthroughs` | The walkthroughs: small, commented scripts you run with `pnpm walkthrough <number>` |
-| `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
+| `demos/software-factory`, `demos/assistant`, `demos/dispatch`, `demos/front-desk` | The AI software factory, the long-running assistant, Dispatch, and Front Desk |
 | `demos/gallery` | `pnpm gallery`: every demo and walkthrough on one page, with local and Azure links |
 | `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |
 
