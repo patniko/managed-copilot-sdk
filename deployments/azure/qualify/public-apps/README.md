@@ -9,8 +9,9 @@ publishes the demo gallery's image twice:
 | `public-gallery` | `public: true` | Tagged `managed-copilot-access: public`, no IP rules, no `MANAGED_COPILOT_GITHUB_TOKEN`; answers any address |
 | `deployer-gallery` | the default | Acts as the deployer's account (`Parameters:app-github-token`); its ingress admits only `Parameters:app-allowed-ips` and the platform subnet |
 
-Run it from this folder (a pnpm workspace package, so `pnpm install` at the repository root sets it up), into a
-resource group of its own, with the allowlist set to an address that isn't yours:
+Run it from this folder, into a resource group of its own, with the allowlist set to an address that isn't yours. It's a
+standalone pnpm project whose dependencies link to the repository's installed packages (Aspire installs it with
+`pnpm install --ignore-workspace`), so run `pnpm install` and `pnpm build` at the repository root first:
 
 ```powershell
 npx managed-copilot access ips set 203.0.113.7 --apphost apphost.mts

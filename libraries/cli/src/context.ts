@@ -46,6 +46,8 @@ export interface Context {
   deployment(): Promise<Deployment>;
   /** Local tools for commands that work on the AppHost rather than a deployment (`access`, `deploy`). */
   readonly host: HostTools;
+  /** This process's environment, which commands that run local tools pass on to them. */
+  readonly env: Readonly<Record<string, string | undefined>>;
 }
 
 /** Connects with the same URL and token lookup as `ManagedCopilot.connect()`; the token never comes from argv. */

@@ -3,7 +3,7 @@
  * `publishManagedCopilot` in publish mode; AppHosts publish their own apps with `publishApp`. Same AppHost, same
  * customer code: only where it runs changes.
  */
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -16,7 +16,7 @@ import { expr, joinExpression } from "./expressions.js";
 import { writeGatewayBuildFiles } from "./gateway-image.js";
 import { EGRESS_BICEP } from "./egress.js";
 import { SANDBOX_GROUP_BICEP } from "./sandbox-group.js";
-import { imageMap, planEgressImage, planSandboxImages, pushEgressImage, pushSandboxImages, runCommand, type CommandRunner, type EgressImagePlan, type SandboxImagePlan } from "./sandbox-images.js";
+import { imageMap, planEgressImage, planSandboxImages, pushEgressImage, pushSandboxImages, type EgressImagePlan, type SandboxImagePlan } from "./sandbox-images.js";
 import type { PublishAzureResource, PublishBuilder, PublishContainer, PublishContainerResource, PublishEnvironmentResource, PublishValue } from "./types.js";
 
 export { AzurePublishError } from "./config.js";
@@ -402,6 +402,36 @@ export function appAccessSummary(
 }
 
 const APP_TOKEN_ENV = "MANAGED_COPILOT_GITHUB_TOKEN";
+const AZ_OUTPUT_LIMIT = 64 * 1024 * 1024;
+
+/** Runs the Azure CLI and returns all of its stdout, apart from stderr (a JSON answer must arrive whole). */
+export type AzRunner = (args: readonly string[]) => Promise<{ readonly code: number; readonly stdout: string; readonly stderr: string }>;
+
+export const runAz: AzRunner = (args) =>
+  new Promise((resolve, reject) => {
+    // The Azure CLI is a .cmd on Windows and runs only through a shell; its arguments here are fixed words and Azure
+    // resource names, checked so nothing is interpreted by the shell.
+    const viaShell = process.platform === "win32";
+    if (viaShell && args.some((arg) => !/^[A-Za-z0-9._:/=-]+$/.test(arg))) {
+      reject(new AzurePublishError(`Refusing to run the Azure CLI with an unexpected argument: ${args.join(" ")}`));
+      return;
+    }
+    const child = viaShell ? spawn(["az", ...args].join(" "), { windowsHide: true, shell: true }) : spawn("az", [...args], { windowsHide: true });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let size = 0;
+    child.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size <= AZ_OUTPUT_LIMIT) stdout.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => void stderr.push(chunk));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      const errors = Buffer.concat(stderr).toString("utf8");
+      if (size > AZ_OUTPUT_LIMIT) resolve({ code: 1, stdout: "", stderr: `${errors}\nThe Azure CLI's answer was larger than ${AZ_OUTPUT_LIMIT} bytes.` });
+      else resolve({ code: code ?? 1, stdout: Buffer.concat(stdout).toString("utf8"), stderr: errors });
+    });
+  });
 
 interface Revision {
   readonly name?: string;
@@ -414,25 +444,29 @@ interface Revision {
  * that acted as the deployer would serve any address as the deployer until the new revision took over (or for as long
  * as it failed to). A new app, or one that already holds no token, passes.
  */
-export async function checkPublicTransition(app: string, environmentId: string | null | undefined, run: CommandRunner = runCommand): Promise<void> {
+export async function checkPublicTransition(app: string, environmentId: string | null | undefined, run: AzRunner = runAz): Promise<void> {
   const scope = environmentId ? /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\//i.exec(environmentId) : null;
   if (!scope) throw new AzurePublishError(`Can't check app "${app}" before opening it to any address: the Container Apps environment's resource ID isn't known yet.`);
   const [, subscription, group] = scope;
-  const listed = await run("az", ["containerapp", "revision", "list", "--name", app, "--resource-group", group!, "--subscription", subscription!, "--only-show-errors", "-o", "json"]).catch(
-    (error: Error) => ({ code: 1, output: error.message }),
+  const listed = await run(["containerapp", "revision", "list", "--name", app, "--resource-group", group!, "--subscription", subscription!, "--only-show-errors", "-o", "json"]).catch(
+    (error: Error) => ({ code: 1, stdout: "", stderr: error.message }),
   );
   if (listed.code !== 0) {
-    if (/\(ResourceNotFound\)|was not found/i.test(listed.output)) return;
-    const tail = listed.output.split("\n").filter(Boolean).slice(-5).join("\n");
+    // Only Azure saying this very container app doesn't exist yet passes; any other failure (sign-in, tenant,
+    // permissions) fails closed.
+    const missing = new RegExp(`\\(ResourceNotFound\\)[^\\n]*'Microsoft\\.App/containerApps/${app.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}'`, "i");
+    if (missing.test(listed.stderr)) return;
+    const tail = listed.stderr.split(/\r?\n/).filter(Boolean).slice(-5).join("\n");
     throw new AzurePublishError(
       `Couldn't check app "${app}" before opening it to any address (\`az containerapp revision list\` exited with ${listed.code}; the Azure CLI must be installed and signed in).${tail ? `\n${tail}` : ""}`,
     );
   }
   let revisions: Revision[];
   try {
-    revisions = JSON.parse(listed.output) as Revision[];
+    revisions = JSON.parse(listed.stdout) as Revision[];
+    if (!Array.isArray(revisions)) throw new TypeError("not a list");
   } catch {
-    throw new AzurePublishError(`Couldn't check app "${app}" before opening it to any address: the Azure CLI's revision list wasn't JSON.`);
+    throw new AzurePublishError(`Couldn't check app "${app}" before opening it to any address: the Azure CLI's revision list wasn't a JSON list.`);
   }
   const holding = revisions
     .filter((revision) => revision.properties?.active !== false)
@@ -477,6 +511,8 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   if (actsAsAccount) deployment.appToken ??= await publisher.addParameter("app-github-token", appTokenParameterOptions());
   if (isPublic) {
     // Before the app's ingress opens: an earlier revision that still holds the deployer's token must not become public.
+    // Container app provisioning steps only exist once the pipeline runs, so this runs before every image push (each
+    // app's provisioning waits for its image), after the environment whose resource ID names the resource group.
     await publisher.pipeline().addStep(
       `check-${app.name}-public`,
       async (context) => {
@@ -490,7 +526,7 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
           throw error;
         }
       },
-      { dependsOn: [`provision-${deployment.name}-env`], requiredBy: [`provision-${app.name}-containerapp`] },
+      { dependsOn: [`provision-${deployment.name}-env`], requiredBy: ["push-prereq"] },
     );
   }
 

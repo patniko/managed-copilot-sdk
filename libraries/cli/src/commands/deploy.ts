@@ -29,6 +29,8 @@ const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const DEFAULT_LOCATION = "westus2";
 const DEFAULT_RESOURCE_GROUP = "managed-copilot-dev";
 const TOKEN_PARAMETER_ENV = "Parameters__app-github-token";
+/** Keys `@managed-copilot/aspire` generates for a deployment (`Parameters:<name>-<suffix>`); local values must never replace them. */
+const GENERATED_KEYS = ["platform-key", "durable-key", "vault-key", "egress-key"];
 
 const split = (value: string | undefined) => (value ?? "").split(/[\s,]+/).filter(Boolean);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -99,6 +101,11 @@ class AppHostSettings {
   get(key: string): string | undefined {
     const value = this.values[key]?.trim();
     return value ? value : undefined;
+  }
+
+  /** Every non-empty setting, for passing the AppHost's own parameters on to `aspire deploy`. */
+  entries(): [string, string][] {
+    return Object.entries(this.values).filter(([, value]) => value.trim() !== "");
   }
 
   async set(key: string, value: string | undefined): Promise<void> {
@@ -402,6 +409,8 @@ interface DeploymentRecord {
   readonly subscription?: string;
   readonly resourceGroup?: string;
   readonly modified: number;
+  /** The parameters the deployment keeps (`parameters:<name>`, lowercase); their values are never read out. */
+  readonly parameters: ReadonlySet<string>;
 }
 
 /** Aspire keeps an AppHost's deployment state in `~/.aspire/deployments/<SHA-256 of its lowercased path>/<environment>.json`. */
@@ -409,16 +418,18 @@ function recordDirectory(host: HostTools, appHost: string): string {
   return join(host.deploymentsDirectory(), createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
 }
 
-/** Reads only the target of a deployment record; the file also holds secrets, which are never printed. */
+/** Reads only the target and parameter names of a deployment record; the file also holds secrets, which are never printed. */
 function readRecord(directory: string): DeploymentRecord | undefined {
   const file = join(directory, "production.json");
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown> & { Azure?: Record<string, unknown> };
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown> & { Azure?: Record<string, unknown>; Parameters?: unknown };
     const value = (key: string) => {
       const found = parsed[`Azure:${key}`] ?? parsed.Azure?.[key];
       return typeof found === "string" ? found : undefined;
     };
-    return { directory, subscription: value("SubscriptionId"), resourceGroup: value("ResourceGroup"), modified: statSync(file).mtimeMs };
+    const parameters = new Set(Object.keys(parsed).filter((key) => /^parameters:/i.test(key)).map((key) => key.toLowerCase()));
+    if (parsed.Parameters && typeof parsed.Parameters === "object") for (const key of Object.keys(parsed.Parameters)) parameters.add(`parameters:${key}`.toLowerCase());
+    return { directory, subscription: value("SubscriptionId"), resourceGroup: value("ResourceGroup"), modified: statSync(file).mtimeMs, parameters };
   } catch {
     return undefined;
   }
@@ -426,6 +437,24 @@ function readRecord(directory: string): DeploymentRecord | undefined {
 
 const targets = (record: DeploymentRecord | undefined, subscription: string, resourceGroup: string) =>
   Boolean(record && record.subscription?.toLowerCase() === subscription.toLowerCase() && record.resourceGroup?.toLowerCase() === resourceGroup.toLowerCase());
+
+/**
+ * The AppHost's own parameters from its user secrets (OAuth clients and the like), as environment variables for
+ * `aspire deploy`, which doesn't load user secrets. Left out: the settings this command passes itself, the apps' token,
+ * the keys the platform generates for a deployment, and every parameter the deployment's record already keeps (the
+ * deployment keeps its value; `Parameters__<name>` in the environment replaces one). A variable already in this
+ * process's environment wins over the user secret.
+ */
+function appHostParameters(ctx: Context, settings: AppHostSettings, name: string, kept: ReadonlySet<string>, own: readonly string[]): Record<string, string> {
+  const skip = new Set([...own, "Parameters:app-github-token", ...GENERATED_KEYS.map((suffix) => `Parameters:${name}-${suffix}`)].map((key) => key.toLowerCase()));
+  const parameters: Record<string, string> = {};
+  for (const [key, value] of settings.entries()) {
+    if (!/^Parameters:[A-Za-z0-9][A-Za-z0-9-]*$/.test(key) || skip.has(key.toLowerCase()) || kept.has(key.toLowerCase())) continue;
+    const variable = key.replace(":", "__");
+    if (ctx.env[variable] === undefined) parameters[variable] = value;
+  }
+  return parameters;
+}
 
 /** `az account show` output; the account's name is compared, never printed. */
 interface AzAccount {
@@ -567,6 +596,13 @@ export async function deploy(ctx: Context): Promise<number | void> {
   // Generated keys (sealing, platform, egress) live in Aspire's deployment record for this AppHost. A deployment made
   // from another checkout has them in that checkout's record, and a gateway given new sealing keys refuses to start.
   if (existing && !(await guardExistingDeployment(ctx, settings.path, subscription, resourceGroup))) return 1;
+
+  // `aspire deploy` runs the AppHost as Production, where user secrets aren't loaded, so the settings this command
+  // manages and the AppHost's own parameters go in as environment variables (`Parameters:x` is `Parameters__x`).
+  const managed = ["Azure:SubscriptionId", "Azure:Location", "Azure:ResourceGroup", ...ACCESS_LISTS.map((list) => LISTS[list].key(name))];
+  const parameters = appHostParameters(ctx, settings, name, readRecord(recordDirectory(host, settings.path))?.parameters ?? new Set(), managed);
+  const passed = Object.keys(parameters).map((variable) => variable.slice("Parameters__".length));
+  if (passed.length) ctx.out(style.dim(`  Passing ${plural(passed.length, "parameter")} from the AppHost's user secrets: ${passed.join(", ")}`));
   if (!ctx.yes && !(await ctx.confirm("Deploy?"))) return 1;
 
   await settings.set("Azure:SubscriptionId", subscription);
@@ -575,10 +611,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   await settings.set(usersKey, users.join(","));
   await settings.set(operatorsKey, operators.join(","));
 
-  // `aspire deploy` runs the AppHost as Production, where user secrets aren't loaded, so the settings this command
-  // manages go in as environment variables (`Parameters:x` is `Parameters__x`). None of them is a secret.
-  const env: Record<string, string> = { [TOKEN_PARAMETER_ENV]: token };
-  const managed = ["Azure:SubscriptionId", "Azure:Location", "Azure:ResourceGroup", ...ACCESS_LISTS.map((list) => LISTS[list].key(name))];
+  const env: Record<string, string> = { ...parameters, [TOKEN_PARAMETER_ENV]: token };
   for (const key of managed) {
     const value = settings.get(key);
     if (value) env[key.replaceAll(":", "__")] = value;

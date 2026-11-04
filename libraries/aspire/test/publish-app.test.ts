@@ -3,8 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appAccessSummary, checkPublicTransition, publishApp, publishManagedCopilot, type PublishAppOptions } from "../src/publish/index.js";
-import type { CommandRunner } from "../src/publish/sandbox-images.js";
+import { appAccessSummary, checkPublicTransition, publishApp, publishManagedCopilot, type AzRunner, type PublishAppOptions } from "../src/publish/index.js";
 import type { PublishBuilder } from "../src/publish/types.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -211,24 +210,25 @@ describe("publishApp access", () => {
     ]);
   });
 
-  it("checks a public app's running revisions after the environment exists and before the app's ingress changes", async () => {
+  it("checks a public app's running revisions after the environment exists and before any image is pushed", async () => {
     const { publish, steps } = await deploy();
     await publish(app("dispatch", 7470));
     await publish(app("front-desk", 7450, { public: true }));
     expect(steps.filter((step) => step.name.startsWith("check-")).map((step) => [step.name, step.options])).toEqual([
-      ["check-front-desk-public", { dependsOn: [`provision-${NAME}-env`], requiredBy: ["provision-front-desk-containerapp"] }],
+      ["check-front-desk-public", { dependsOn: [`provision-${NAME}-env`], requiredBy: ["push-prereq"] }],
     ]);
   });
 });
 
 describe("checkPublicTransition", () => {
   const ENVIRONMENT_ID = "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/mc-demo/providers/Microsoft.App/managedEnvironments/copilot-env";
+  const NOT_FOUND = "ERROR: (ResourceNotFound) The Resource 'Microsoft.App/containerApps/front-desk' under resource group 'mc-demo' was not found.";
   const revision = (name: string, env: string[], active = true) => ({ name, properties: { active, template: { containers: [{ env: env.map((variable) => ({ name: variable })) }] } } });
-  const runner = (code: number, output: unknown) => {
+  const runner = (code: number, stdout: unknown, stderr = "") => {
     const calls: (readonly string[])[] = [];
-    const run: CommandRunner = async (command, args) => {
-      calls.push([command, ...args]);
-      return { code, output: typeof output === "string" ? output : JSON.stringify(output) };
+    const run: AzRunner = async (args) => {
+      calls.push(args);
+      return { code, stdout: typeof stdout === "string" ? stdout : JSON.stringify(stdout, null, 2), stderr };
     };
     return { run, calls };
   };
@@ -237,7 +237,7 @@ describe("checkPublicTransition", () => {
     const { run, calls } = runner(0, []);
     await checkPublicTransition("front-desk", ENVIRONMENT_ID, run);
     expect(calls).toEqual([
-      ["az", "containerapp", "revision", "list", "--name", "front-desk", "--resource-group", "mc-demo", "--subscription", "11111111-2222-3333-4444-555555555555", "--only-show-errors", "-o", "json"],
+      ["containerapp", "revision", "list", "--name", "front-desk", "--resource-group", "mc-demo", "--subscription", "11111111-2222-3333-4444-555555555555", "--only-show-errors", "-o", "json"],
     ]);
   });
 
@@ -247,15 +247,30 @@ describe("checkPublicTransition", () => {
   });
 
   it("passes a new app, an app whose revisions hold no token, and inactive revisions that still do", async () => {
-    await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "ERROR: (ResourceNotFound) The Resource 'Microsoft.App/containerApps/front-desk' under resource group 'mc-demo' was not found.").run);
+    await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "", NOT_FOUND).run);
     await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, [revision("front-desk--a", ["PORT", "MANAGED_COPILOT_URL"])]).run);
     await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, [revision("front-desk--old", ["MANAGED_COPILOT_GITHUB_TOKEN"], false), revision("front-desk--new", ["PORT"])]).run);
   });
 
-  it("fails explicitly when it can't tell", async () => {
+  it("reads a long revision list whole", async () => {
+    const env = Array.from({ length: 300 }, (_, index) => `SETTING_${index}`);
+    const { run } = runner(0, [revision("front-desk--big", [...env, "MANAGED_COPILOT_GITHUB_TOKEN"])]);
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, run)).rejects.toThrow(/front-desk--big/);
+  });
+
+  it("fails closed when it can't tell", async () => {
     await expect(checkPublicTransition("front-desk", null, runner(0, []).run)).rejects.toThrow(/resource ID isn't known/);
-    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "ERROR: Please run 'az login' to setup account.").run)).rejects.toThrow(/Couldn't check app "front-desk".*az login/s);
-    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, "not json").run)).rejects.toThrow(/wasn't JSON/);
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "", "ERROR: Please run 'az login' to setup account.").run)).rejects.toThrow(/Couldn't check app "front-desk".*az login/s);
+    // "was not found" about something other than this container app is not "the app doesn't exist yet".
+    for (const stderr of [
+      "ERROR: AADSTS700016: Application with identifier '04b07795' was not found in the directory 'contoso'.",
+      "ERROR: (ResourceNotFound) The Resource 'Microsoft.App/containerApps/front-desk-old' under resource group 'mc-demo' was not found.",
+      "ERROR: (ResourceGroupNotFound) Resource group 'mc-demo' could not be found.",
+    ]) {
+      await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "", stderr).run), stderr).rejects.toThrow(/Couldn't check app "front-desk"/);
+    }
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, "not json").run)).rejects.toThrow(/wasn't a JSON list/);
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, { value: [] }).run)).rejects.toThrow(/wasn't a JSON list/);
   });
 });
 
