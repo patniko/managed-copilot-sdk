@@ -75,10 +75,10 @@ your Azure AI Foundry. Name an existing Foundry account and its model deployment
 needs the **Cognitive Services OpenAI User** role on it:
 
 ```powershell
-aspire secret set Foundry:Account <account-name>
-aspire secret set Foundry:ResourceGroup <its-resource-group>
-aspire secret set Foundry:Deployments <deployment-name>        # several: a,b; the first is the default
-aspire secret set Foundry:Subscription <subscription-id>        # only when it isn't the deployment's
+aspire secret set Parameters:foundry-account <account-name>
+aspire secret set Parameters:foundry-resource-group <its-resource-group>
+aspire secret set Parameters:foundry-deployments <deployment-name>        # several: a,b; the first is the default
+aspire secret set Parameters:foundry-subscription <subscription-id>        # only when it isn't the deployment's
 ```
 
 Without them, people can still create an account and sign in, and Front Desk tells them that chatting needs GitHub
@@ -116,11 +116,10 @@ using the deployment directly still takes `access`. Deploying also gives the gat
 Services OpenAI User role on the Foundry account, so you need permission to assign roles in its resource group.
 
 `aspire deploy` runs the AppHost as Production, which doesn't read user secrets. `npx managed-copilot deploy` passes
-the AppHost's parameters from them (the GitHub OAuth app from `setup-github`, an invitation code); the Foundry
-settings aren't parameters, so give them as environment variables for that run (`A__B` for `A:B`):
+the AppHost's parameters from them (the Foundry account above, the GitHub OAuth app from `setup-github`, an
+invitation code), so deploying takes no more than:
 
 ```powershell
-$env:Foundry__Account = "<account-name>"; $env:Foundry__ResourceGroup = "<its-resource-group>"; $env:Foundry__Deployments = "<deployment-name>"
 npx managed-copilot deploy
 ```
 

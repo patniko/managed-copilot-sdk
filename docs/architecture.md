@@ -1590,8 +1590,8 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - Front Desk is the one demo published with `public: true`: it signs in its own users and holds no GitHub token. It is
   declared in the root AppHost's `apps` (`anyGitHubUser: true`) and connects with its app key, then acts for each
   person: a GitHub user with their own token (`front-desk`, their Copilot plan), everyone else as one of its app users
-  (`front-desk-foundry`, which sends model calls to the AppHost's `Foundry:*` account). The root AppHost declares the
-  Foundry account and environment only when `Foundry:Account` is set.
+  (`front-desk-foundry`, which sends model calls to the AppHost's `Parameters:foundry-*` account). The root AppHost
+  declares the Foundry account and environment only when `Parameters:foundry-account` is set.
 
 ### Copilot CLI attach (spec section 14)
 

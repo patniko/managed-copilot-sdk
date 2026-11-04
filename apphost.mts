@@ -30,20 +30,23 @@ const assistantUrl = `http://localhost:${ports.assistant}`;
 // Generated once and kept in the AppHost's user secrets, so restarts keep the same values.
 const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue(name, { minLength: 48, special: false }, { secret: true, persist: true });
 
-// Settings from the AppHost's configuration: user secrets with `aspire run`, environment variables (`A__B` for `A:B`)
-// with `aspire deploy`, which runs as Production and doesn't load user secrets.
+// Settings from the AppHost's configuration: user secrets with `aspire run`. `aspire deploy` runs as Production and
+// doesn't load user secrets; `npx managed-copilot deploy` passes the `Parameters:*` ones on as environment variables.
 const configuration = await builder.getConfiguration();
 const setting = async (key: string) => ((await configuration.exists(key)) ? (await configuration.getConfigValue(key)).trim() || undefined : undefined);
 
 // An Azure AI Foundry account pays for Front Desk's people without GitHub (spec section 15). Optional: name an existing
-// account and its model deployments with `aspire secret set Foundry:Account <name>`, `Foundry:ResourceGroup <group>`,
-// and `Foundry:Deployments <deployment,...>` (and `Foundry:Subscription <id>` when it isn't the deployment's).
-const foundryAccount = await setting("Foundry:Account");
-const foundryResourceGroup = await setting("Foundry:ResourceGroup");
-const foundryDeployments = (await setting("Foundry:Deployments"))?.split(",").map((name) => name.trim()).filter(Boolean) ?? [];
-const foundrySubscription = await setting("Foundry:Subscription");
+// account and its model deployments with `aspire secret set Parameters:foundry-account <name>`,
+// `Parameters:foundry-resource-group <group>`, and `Parameters:foundry-deployments <deployment,...>` (and
+// `Parameters:foundry-subscription <id>` when it isn't the deployment's).
+const foundryAccount = await setting("Parameters:foundry-account");
+const foundryResourceGroup = await setting("Parameters:foundry-resource-group");
+const foundryDeployments = (await setting("Parameters:foundry-deployments"))?.split(",").map((name) => name.trim()).filter(Boolean) ?? [];
+const foundrySubscription = await setting("Parameters:foundry-subscription");
 if (foundryAccount && (!foundryResourceGroup || foundryDeployments.length === 0)) {
-  throw new Error(`Foundry:Account is "${foundryAccount}": also set Foundry:ResourceGroup and Foundry:Deployments (its model deployments, comma-separated).`);
+  throw new Error(
+    `Parameters:foundry-account is "${foundryAccount}": also set Parameters:foundry-resource-group and Parameters:foundry-deployments (its model deployments, comma-separated).`,
+  );
 }
 const foundry = foundryAccount
   ? { [foundryAccount]: { resourceGroup: foundryResourceGroup!, deployments: foundryDeployments, ...(foundrySubscription ? { subscription: foundrySubscription } : {}) } }

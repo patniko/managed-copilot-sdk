@@ -124,13 +124,18 @@ pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder -
 
 ### 1.7 Front Desk (many people, each with private conversations)
 
+Email accounts chat only when the AppHost names an Azure AI Foundry account for them (`Parameters:foundry-account`
+and the rest, in [Front Desk's README](../demos/front-desk/README.md#people-without-github)); without one, Front Desk
+tells them chatting needs GitHub here.
+
 1. Open http://localhost:7450 and press **Use this computer's GitHub sign-in**.
 2. Ask: "Remember that my favorite color is teal." Open **Memory**.
 3. In a private window, open Front Desk again and **Create an account** with any email and password.
 4. As that person, ask: "What's my favorite color?"
 
 - [ ] The GitHub user's chip says **Your Copilot plan**; the email account's says **Front Desk's Azure AI Foundry**,
-      with a daily allowance.
+      with a daily allowance. Each conversation's header shows the platform's own record of where its model calls go
+      (**Your Copilot plan · claude-sonnet-5**, or **Azure AI Foundry · \<deployment\>**).
 - [ ] The memory panel lists the favorite color for the GitHub user only; the other person's list and memory are empty,
       and their assistant doesn't know it.
 
@@ -287,11 +292,16 @@ Repeat 1.4 to 1.8 with each card's **Azure** button. Differences to expect:
 - "Open in Copilot CLI" commands include `--url https://copilot.<environment-domain>`.
 - The console button signs you in with a one-time link; it works only for operators (`npx managed-copilot access`
   lists them).
+- Front Desk is a public app: it opens from any network, and it doesn't offer this computer's GitHub sign-in. Sign in
+  with **Continue with GitHub** (its OAuth app needs the deployed callback URL; see its README) or create an email
+  account.
 
 - [ ] Dispatch: π template with approvals, a reused follow-up, Copilot CLI follow-up.
 - [ ] Software factory: CSV ⇄ JSON toolkit, Agent-led, release with all tests passed.
 - [ ] Assistant: approval card, reminder while the tab is closed, a sandbox chart. (Its sandboxes haven't been
       verified on Azure before, so this is the one to watch.)
+- [ ] Front Desk: a GitHub user on their own Copilot plan and an email account on Foundry, neither seeing the other's
+      conversations or memory; it opens from a phone off Wi-Fi, where the other apps answer 403.
 - [ ] Console: health, sessions with Azure sandboxes, live feed.
 
 Platform checks from the terminal:
