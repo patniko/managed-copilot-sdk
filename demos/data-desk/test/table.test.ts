@@ -37,6 +37,18 @@ describe("columns", () => {
     expect(inferType(["2025-01", "2025-02-03", "2025-02-03T10:00:00Z"])).toBe("date");
     expect(inferType(["1", "two"])).toBe("text");
     expect(inferType(["", " "])).toBe("text");
+    expect(inferType(["1".repeat(64)])).toBe("number");
+    expect(inferType(["1".repeat(65)])).toBe("text");
+  });
+
+  it("reads a huge number-like value quickly, as text", () => {
+    // 100,000 digits and a letter used to make the number check backtrack for 12 seconds.
+    const digits = "1".repeat(100_000);
+    const started = performance.now();
+    const table = Table.fromCsv(`id,value\n1,${digits}x\n2,${digits}\n`);
+    expect(table.columns.map((column) => column.type)).toEqual(["number", "text"]);
+    expect(() => table.query({ filters: [{ column: "id", op: ">", value: `${digits}x` }] })).toThrow(/holds numbers/);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("summarizes each column by its type", () => {

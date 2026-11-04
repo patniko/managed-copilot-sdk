@@ -13,8 +13,11 @@ export class TableError extends Error {
   }
 }
 
-const NUMBER = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+// Unambiguous: a run of digits can match only one way, so a long one followed by a letter fails in linear time.
+const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 const DATE = /^\d{4}-\d{2}(?:-\d{2})?(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/;
+/** Longer values are text: real numbers and dates are shorter, and type inference stays cheap for any file. */
+const MAX_TYPED_LENGTH = 64;
 
 /** The delimiter of the first line: comma, semicolon, or tab, whichever separates the most fields outside quotes. */
 function detectDelimiter(text: string): string {
@@ -106,6 +109,7 @@ export function inferType(values: readonly string[]): ColumnType {
     const value = raw.trim();
     if (!value) continue;
     present++;
+    if (value.length > MAX_TYPED_LENGTH) continue;
     if (NUMBER.test(value)) numbers++;
     else if (DATE.test(value)) dates++;
   }
