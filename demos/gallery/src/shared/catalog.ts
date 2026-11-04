@@ -105,6 +105,18 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/api/health",
     readme: "demos/pattern-race/README.md",
   },
+  {
+    id: "data-desk",
+    title: "Data Desk",
+    tagline: "Chat with a spreadsheet; it moves to a sandbox for code",
+    description:
+      "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it.",
+    tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
+    app: "data-desk",
+    port: 7430,
+    healthPath: "/api/health",
+    readme: "demos/data-desk/README.md",
+  },
   CONSOLE,
 ];
 
@@ -205,7 +217,7 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "helper",
     settings: ['type: "promotable"', 'promoteTo: "coder"'],
     walkthrough: "04",
-    demos: [],
+    demos: [{ app: "data-desk", where: "every analysis" }],
   },
   {
     id: "direct",

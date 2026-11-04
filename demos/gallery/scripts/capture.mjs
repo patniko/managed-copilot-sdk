@@ -58,6 +58,15 @@ const APPS = [
     },
   },
   {
+    id: "data-desk",
+    url: local(7430),
+    async prepare(page) {
+      // Open the most recent analysis when there is one (after the move, it shows the session docked in its sandbox).
+      const first = page.locator('a[href^="#/a/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "pattern-race",
     url: local(7420),
     async prepare(page) {

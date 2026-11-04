@@ -23,19 +23,28 @@ async function listen(handler: Parameters<typeof createServer>[1]): Promise<stri
 }
 
 describe("links", () => {
+  const appIds = (apps: typeof APPS) => apps.map((app) => app.id).sort();
+  const withoutConsole = APPS.filter((app) => app.id !== "console");
+
   it("uses the AppHost's fixed local ports, shifted by the port offset", () => {
-    expect(localUrls(0)).toEqual({
-      gatewayUrl: "http://localhost:7400",
-      apps: {
-        dispatch: "http://localhost:7470",
-        "software-factory": "http://localhost:7480",
-        assistant: "http://localhost:7490",
-        "research-swarm": "http://localhost:7425",
-        "pattern-race": "http://localhost:7420",
-        console: "/open/console?target=local",
-      },
+    const { gatewayUrl, apps } = localUrls(0);
+    expect(gatewayUrl).toBe("http://localhost:7400");
+    expect(apps).toMatchObject({
+      dispatch: "http://localhost:7470",
+      "software-factory": "http://localhost:7480",
+      assistant: "http://localhost:7490",
+      console: "/open/console?target=local",
     });
+    expect(Object.keys(apps).sort()).toEqual(appIds(APPS));
+    for (const app of withoutConsole) expect(apps[app.id]).toBe(`http://localhost:${app.port}`);
     expect(localUrls(300).apps.dispatch).toBe("http://localhost:7770");
+  });
+
+  it("gives every app its own local port, apart from the gateway's and the gallery's", () => {
+    const ports = withoutConsole.map((app) => app.port);
+    expect(new Set(ports).size).toBe(ports.length);
+    expect(ports).not.toContain(7400);
+    expect(ports).not.toContain(7460);
   });
 
   it("puts deployed apps beside the gateway on the environment's domain", () => {
@@ -47,13 +56,10 @@ describe("links", () => {
   });
 
   it("leaves the console out when asked (a hosted gallery)", () => {
-    expect(cloudUrls("https://copilot.d.io", { console: false }).apps).toEqual({
-      dispatch: "https://dispatch.d.io",
-      "software-factory": "https://software-factory.d.io",
-      assistant: "https://assistant.d.io",
-      "research-swarm": "https://research-swarm.d.io",
-      "pattern-race": "https://pattern-race.d.io",
-    });
+    const { apps } = cloudUrls("https://copilot.d.io", { console: false });
+    expect(apps).toMatchObject({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io" });
+    expect(Object.keys(apps).sort()).toEqual(appIds(withoutConsole));
+    for (const app of withoutConsole) expect(apps[app.id]).toBe(`https://${app.app}.d.io`);
   });
 
   it("offers only the console for a gateway on a custom host", () => {
@@ -229,7 +235,7 @@ describe("gallery server", () => {
       expect(state.hosted).toBe(true);
       expect(state.local).toBeUndefined();
       expect(state.cloud.gatewayUrl).toBe("https://copilot.d.invalid");
-      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "pattern-race", "research-swarm", "software-factory"]);
+      expect(Object.keys(state.cloud.links).sort()).toEqual(APPS.filter((app) => app.id !== "console").map((app) => app.id).sort());
     });
 
     it("never mints a console sign-in link, and says how to open it", async () => {

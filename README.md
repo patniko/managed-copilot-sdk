@@ -96,7 +96,7 @@ pnpm gallery                        # every demo and walkthrough on one page
 - **Stuck at "Trusting certificates…".** Run `aspire certs trust` once, or use `aspire run --non-interactive`.
 - **nuget.org is blocked.** Set `ASPIRE_CLI_NUGET_SERVICE_INDEX=<proxy>/v3/index.json` and add an untracked
   `NuGet.config` at the repository root that maps `*` to that proxy.
-- **A port is in use.** The gateway (7400), Dispatch (7470), the factory (7480), and the assistant (7490) use fixed
+- **A port is in use.** The gateway (7400), Data Desk (7430), Dispatch (7470), the factory (7480), and the assistant (7490) use fixed
   ports. To run a second copy, set `MANAGED_COPILOT_PORT_OFFSET=300` and point tools at it with
   `MANAGED_COPILOT_URL=http://localhost:7700`.
 
@@ -104,7 +104,7 @@ pnpm gallery                        # every demo and walkthrough on one page
 
 ## Demos
 
-All three run under `aspire run` with real models and deploy to Azure with the same AppHost.
+All of them run under `aspire run` with real models and deploy to Azure with the same AppHost.
 
 <p align="center">
   <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The software factory floor: a coordinator that created two builder sandboxes and reused one for review fixes" width="900">
@@ -117,6 +117,7 @@ All three run under `aspire run` with real models and deploy to Azure with the s
 | [Dispatch](demos/dispatch/README.md) | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
 | [Research Swarm](demos/research-swarm/README.md) | One question fans out to web researchers, each in its own sandbox, and comes back as a report where every claim cites a page they read |
 | [Pattern Race](demos/pattern-race/README.md) | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests, and a scorecard |
+| [Data Desk](demos/data-desk/README.md) | Chat with a spreadsheet: the app's own tools answer on the shared runtime, and a chart request moves the same session into a Python sandbox, with Copilot CLI following it |
 
 ## Deploy to Azure
 

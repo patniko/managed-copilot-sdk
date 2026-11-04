@@ -6,6 +6,7 @@ import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
 import { PATTERN_RACE_DEFAULT_PORT, patternRace } from "./demos/pattern-race/apphost.mjs";
 import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swarm/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
+import { DATA_DESK_DEFAULT_PORT, dataDesk } from "./demos/data-desk/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -26,6 +27,7 @@ const ports = {
   assistant: ASSISTANT_PORT + offset,
   researchSwarm: RESEARCH_SWARM_DEFAULT_PORT + offset,
   patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
+  dataDesk: DATA_DESK_DEFAULT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -35,6 +37,7 @@ const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue
 // The demos bring their own environments (and the assistant its webhook) as plain data.
 const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
+const dataDeskDemo = dataDesk({ port: ports.dataDesk });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 const swarm = researchSwarm({ port: ports.researchSwarm });
@@ -65,6 +68,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...assistant.environments,
     ...dispatchDemo.environments,
     ...swarm.environments,
+    ...dataDeskDemo.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -118,6 +122,10 @@ await addDemo(swarm.app, { dockerfile: "demos/research-swarm/Dockerfile", allowe
 
 // Pattern Race: one job in six lanes at once, one per pattern environment above; only the environment name differs.
 await addDemo(patternRace({ port: ports.patternRace }).app, { dockerfile: "demos/pattern-race/Dockerfile", allowedHostsEnv: "PATTERN_RACE_ALLOWED_HOSTS" });
+
+// Data Desk: chat with a spreadsheet. The session answers on the shared runtime, then moves once into a Python sandbox
+// when a request needs code, and an attached Copilot CLI follows it.
+await addDemo(dataDeskDemo.app, { dockerfile: "demos/data-desk/Dockerfile", allowedHostsEnv: "DATA_DESK_ALLOWED_HOSTS", gatewayUrlEnv: ["DATA_DESK_ATTACH_URL"] });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
 // for hands-on work.

@@ -1,0 +1,145 @@
+month,store,product,units,revenue
+2025-01,Downtown,Espresso,901,2883.20
+2025-01,Downtown,Latte,1647,7905.60
+2025-01,Downtown,Cold brew,159,715.50
+2025-01,Downtown,Pastry,689,2583.75
+2025-01,Harbor,Espresso,478,1529.60
+2025-01,Harbor,Latte,867,4161.60
+2025-01,Harbor,Cold brew,91,409.50
+2025-01,Harbor,Pastry,381,1428.75
+2025-01,Campus,Espresso,664,2124.80
+2025-01,Campus,Latte,1227,5889.60
+2025-01,Campus,Cold brew,114,513.00
+2025-01,Campus,Pastry,517,1938.75
+2025-02,Downtown,Espresso,890,2848.00
+2025-02,Downtown,Latte,1582,7593.60
+2025-02,Downtown,Cold brew,238,1071.00
+2025-02,Downtown,Pastry,700,2625.00
+2025-02,Harbor,Espresso,530,1696.00
+2025-02,Harbor,Latte,853,4094.40
+2025-02,Harbor,Cold brew,137,616.50
+2025-02,Harbor,Pastry,425,1593.75
+2025-02,Campus,Espresso,696,2227.20
+2025-02,Campus,Latte,1199,5755.20
+2025-02,Campus,Cold brew,180,810.00
+2025-02,Campus,Pastry,526,1972.50
+2025-03,Downtown,Espresso,924,2956.80
+2025-03,Downtown,Latte,1436,6892.80
+2025-03,Downtown,Cold brew,398,1791.00
+2025-03,Downtown,Pastry,715,2681.25
+2025-03,Harbor,Espresso,677,2166.40
+2025-03,Harbor,Latte,1136,5452.80
+2025-03,Harbor,Cold brew,287,1291.50
+2025-03,Harbor,Pastry,536,2010.00
+2025-03,Campus,Espresso,661,2115.20
+2025-03,Campus,Latte,1018,4886.40
+2025-03,Campus,Cold brew,321,1444.50
+2025-03,Campus,Pastry,526,1972.50
+2025-04,Downtown,Espresso,935,2992.00
+2025-04,Downtown,Latte,1338,6422.40
+2025-04,Downtown,Cold brew,686,3087.00
+2025-04,Downtown,Pastry,688,2580.00
+2025-04,Harbor,Espresso,799,2556.80
+2025-04,Harbor,Latte,1197,5745.60
+2025-04,Harbor,Cold brew,602,2709.00
+2025-04,Harbor,Pastry,606,2272.50
+2025-04,Campus,Espresso,755,2416.00
+2025-04,Campus,Latte,1062,5097.60
+2025-04,Campus,Cold brew,497,2236.50
+2025-04,Campus,Pastry,548,2055.00
+2025-05,Downtown,Espresso,890,2848.00
+2025-05,Downtown,Latte,1144,5491.20
+2025-05,Downtown,Cold brew,979,4405.50
+2025-05,Downtown,Pastry,788,2955.00
+2025-05,Harbor,Espresso,986,3155.20
+2025-05,Harbor,Latte,1199,5755.20
+2025-05,Harbor,Cold brew,904,4068.00
+2025-05,Harbor,Pastry,682,2557.50
+2025-05,Campus,Espresso,695,2224.00
+2025-05,Campus,Latte,941,4516.80
+2025-05,Campus,Cold brew,743,3343.50
+2025-05,Campus,Pastry,558,2092.50
+2025-06,Downtown,Espresso,941,3011.20
+2025-06,Downtown,Latte,1036,4972.80
+2025-06,Downtown,Cold brew,1147,5161.50
+2025-06,Downtown,Pastry,725,2718.75
+2025-06,Harbor,Espresso,959,3068.80
+2025-06,Harbor,Latte,1183,5678.40
+2025-06,Harbor,Cold brew,1294,5823.00
+2025-06,Harbor,Pastry,814,3052.50
+2025-06,Campus,Espresso,504,1612.80
+2025-06,Campus,Latte,546,2620.80
+2025-06,Campus,Cold brew,558,2511.00
+2025-06,Campus,Pastry,390,1462.50
+2025-07,Downtown,Espresso,984,3148.80
+2025-07,Downtown,Latte,1131,5428.80
+2025-07,Downtown,Cold brew,1241,5584.50
+2025-07,Downtown,Pastry,741,2778.75
+2025-07,Harbor,Espresso,1118,3577.60
+2025-07,Harbor,Latte,1162,5577.60
+2025-07,Harbor,Cold brew,1420,6390.00
+2025-07,Harbor,Pastry,880,3300.00
+2025-07,Campus,Espresso,333,1065.60
+2025-07,Campus,Latte,350,1680.00
+2025-07,Campus,Cold brew,439,1975.50
+2025-07,Campus,Pastry,246,922.50
+2025-08,Downtown,Espresso,1014,3244.80
+2025-08,Downtown,Latte,1083,5198.40
+2025-08,Downtown,Cold brew,1231,5539.50
+2025-08,Downtown,Pastry,750,2812.50
+2025-08,Harbor,Espresso,1122,3590.40
+2025-08,Harbor,Latte,1231,5908.80
+2025-08,Harbor,Cold brew,1196,5382.00
+2025-08,Harbor,Pastry,800,3000.00
+2025-08,Campus,Espresso,340,1088.00
+2025-08,Campus,Latte,404,1939.20
+2025-08,Campus,Cold brew,389,1750.50
+2025-08,Campus,Pastry,253,948.75
+2025-09,Downtown,Espresso,960,3072.00
+2025-09,Downtown,Latte,1359,6523.20
+2025-09,Downtown,Cold brew,941,4234.50
+2025-09,Downtown,Pastry,780,2925.00
+2025-09,Harbor,Espresso,982,3142.40
+2025-09,Harbor,Latte,1296,6220.80
+2025-09,Harbor,Cold brew,961,4324.50
+2025-09,Harbor,Pastry,737,2763.75
+2025-09,Campus,Espresso,712,2278.40
+2025-09,Campus,Latte,874,4195.20
+2025-09,Campus,Cold brew,709,3190.50
+2025-09,Campus,Pastry,547,2051.25
+2025-10,Downtown,Espresso,997,3190.40
+2025-10,Downtown,Latte,1357,6513.60
+2025-10,Downtown,Cold brew,748,3366.00
+2025-10,Downtown,Pastry,784,2940.00
+2025-10,Harbor,Espresso,873,2793.60
+2025-10,Harbor,Latte,1235,5928.00
+2025-10,Harbor,Cold brew,609,2740.50
+2025-10,Harbor,Pastry,683,2561.25
+2025-10,Campus,Espresso,692,2214.40
+2025-10,Campus,Latte,1112,5337.60
+2025-10,Campus,Cold brew,566,2547.00
+2025-10,Campus,Pastry,581,2178.75
+2025-11,Downtown,Espresso,1075,3440.00
+2025-11,Downtown,Latte,1642,7881.60
+2025-11,Downtown,Cold brew,483,2173.50
+2025-11,Downtown,Pastry,809,3033.75
+2025-11,Harbor,Espresso,724,2316.80
+2025-11,Harbor,Latte,1083,5198.40
+2025-11,Harbor,Cold brew,324,1458.00
+2025-11,Harbor,Pastry,526,1972.50
+2025-11,Campus,Espresso,774,2476.80
+2025-11,Campus,Latte,1141,5476.80
+2025-11,Campus,Cold brew,358,1611.00
+2025-11,Campus,Pastry,604,2265.00
+2025-12,Downtown,Espresso,1215,3888.00
+2025-12,Downtown,Latte,1961,9412.80
+2025-12,Downtown,Cold brew,280,1260.00
+2025-12,Downtown,Pastry,969,3633.75
+2025-12,Harbor,Espresso,582,1862.40
+2025-12,Harbor,Latte,984,4723.20
+2025-12,Harbor,Cold brew,162,729.00
+2025-12,Harbor,Pastry,472,1770.00
+2025-12,Campus,Espresso,772,2470.40
+2025-12,Campus,Latte,1361,6532.80
+2025-12,Campus,Cold brew,182,819.00
+2025-12,Campus,Pastry,588,2205.00
