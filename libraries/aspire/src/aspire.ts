@@ -40,6 +40,8 @@ export interface AspireBuilder {
     value: { minLength?: number; special?: boolean },
     options?: { secret?: boolean; persist?: boolean },
   ): PromiseLike<object>;
+  /** The AppHost's configuration (user secrets, environment); read for `Azure:SubscriptionId`. */
+  getConfiguration?(): PromiseLike<{ exists(key: string): Promise<boolean>; getConfigValue(key: string): Promise<string> }>;
 }
 
 /** The AppHost's own gateway resource type (the generated `NodeAppResource`). */
@@ -47,3 +49,6 @@ export type GatewayResourceOf<B extends AspireBuilder> = Awaited<ReturnType<B["a
 
 /** The AppHost's own endpoint reference type (the generated `EndpointReference`). */
 export type EndpointOf<B extends AspireBuilder> = Awaited<ReturnType<GatewayResourceOf<B>["getEndpoint"]>>;
+
+/** The AppHost's own parameter type (the generated `ParameterResource`), which its `withEnvironment` accepts. */
+export type ParameterOf<B extends AspireBuilder> = Awaited<ReturnType<B["addParameterWithGeneratedValue"]>>;

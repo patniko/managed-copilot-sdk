@@ -18,8 +18,7 @@ import {
   type SessionState,
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
-import { bearerToken, toManagedError, type RequestContext } from "../../http.js";
-import type { Principal } from "../../http.js";
+import { bearerToken, isGitHubPrincipal, toManagedError, type Principal, type RequestContext } from "../../http.js";
 import { logRing, type Logger } from "../../log.js";
 import { redactLogRecord } from "../../redaction.js";
 import { accountInfo } from "../core/auth.js";
@@ -60,6 +59,12 @@ function limit(ctx: RequestContext, fallback: number, max = 1000): number {
   return Math.min(parsed, max);
 }
 
+/** Operators are GitHub users: a console session or ticket always holds one's token. */
+function githubToken(principal: Principal): string {
+  if (!isGitHubPrincipal(principal)) throw new ManagedCopilotError("authentication_required", "Operators sign in with GitHub.");
+  return principal.token;
+}
+
 export function registerOperatorRoutes(app: GatewayApp, options: { readonly access: OperatorAccess; readonly audit: OperatorAudit; readonly views: OperatorViews; readonly log: Logger }): void {
   const { access, audit, views } = options;
   const auth = () => app.service("auth") as unknown as OperatorAuthPort;
@@ -85,7 +90,7 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
     }
     access.assertConsoleRequest(ctx.req);
     try {
-      const principal = await auth().authenticate(session.principal.token);
+      const principal = await auth().authenticate(githubToken(session.principal));
       if (principal.accountId !== session.principal.accountId) throw new ManagedCopilotError("authentication_required", "its credential now belongs to another GitHub account.");
       const grant = await access.authorize(principal);
       access.touch(session);
@@ -160,7 +165,7 @@ export function registerOperatorRoutes(app: GatewayApp, options: { readonly acce
       const body = await ctx.json<{ ticket?: unknown }>();
       const redeemed = access.redeemTicket(body.ticket);
       // The ticket may have waited up to a minute: the account must still be valid and still an operator.
-      const principal = await auth().authenticate(redeemed.principal.token);
+      const principal = await auth().authenticate(githubToken(redeemed.principal));
       if (principal.accountId !== redeemed.principal.accountId) throw new ManagedCopilotError("authentication_required", "The sign-in link's credential now belongs to another GitHub account.");
       const grant = await access.authorize(principal);
       access.endSession(access.cookieFrom(ctx.req));

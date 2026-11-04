@@ -1,15 +1,21 @@
 import { ManagedCopilotError, type ActionClaimRequest, type ActionResultRequest } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../../app.js";
-import { bearerToken, type RequestContext } from "../../../http.js";
+import { bearerToken, resolvePrincipal, type RequestContext } from "../../../http.js";
 import type { ActionCaller, ActionsService } from "../contract.js";
 import { isCapabilityToken } from "./capability.js";
 
-/** Resolves the caller of an action route: an `mcc_` webhook capability, or a GitHub user via the auth service. */
+/**
+ * Resolves the caller of an action route: an `mcc_` webhook capability, or a person as every user route admits one (a
+ * GitHub user, or one acting through an app's key; never the app alone).
+ */
 export async function resolveActionCaller(app: GatewayApp, actions: ActionsService, ctx: RequestContext): Promise<ActionCaller> {
   const token = bearerToken(ctx.req);
-  if (!token) throw new ManagedCopilotError("authentication_required", "Sign in with a GitHub token (Authorization: Bearer <token>) or present an action capability");
-  if (isCapabilityToken(token)) return { type: "capability", capability: actions.verifyCapability(token) };
-  return { type: "user", principal: await app.service("auth").authenticate(token) };
+  if (token && isCapabilityToken(token)) return { type: "capability", capability: actions.verifyCapability(token) };
+  const principal = await resolvePrincipal(app, ctx.req, "user");
+  if (!principal) throw new ManagedCopilotError("authentication_required", "Sign in with a GitHub token, or present an action capability");
+  // Through an app, only the sessions within its environments (the router checks this for routes it authenticates).
+  if (ctx.params["id"]) app.services.sessions?.assertAppScope?.(principal, ctx.params["id"]);
+  return { type: "user", principal };
 }
 
 function optionalNumber(value: unknown, name: string): number | undefined {

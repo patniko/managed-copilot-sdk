@@ -3,12 +3,12 @@ import { isManagedCopilotError, type DeploymentInfo } from "@managed-copilot/pro
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createVaultsApi } from "../src/features/vaults.js";
 import { HttpClient } from "../src/http.js";
-import type { ManagedContext } from "../src/types.js";
+import type { ManagedState } from "../src/connection.js";
 
 describe("managed.vaults", () => {
   const seen: { method: string; url: string; authorization: string | undefined; body: unknown }[] = [];
   let server: Server;
-  let ctx: ManagedContext;
+  let ctx: ManagedState;
 
   beforeAll(async () => {
     server = createServer(async (req: IncomingMessage, res) => {
@@ -36,7 +36,7 @@ describe("managed.vaults", () => {
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     ctx = {
       url,
-      token: "connection-token",
+      identity: { token: "connection-token" },
       clientName: undefined,
       info: {} as DeploymentInfo,
       account: { id: 1, login: "alice" },
@@ -44,7 +44,8 @@ describe("managed.vaults", () => {
       clients: new Set(),
       listeners: new Map(),
       disposables: new Set(),
-    } as unknown as ManagedContext;
+      httpClients: new Map(),
+    } as unknown as ManagedState;
   });
 
   afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));

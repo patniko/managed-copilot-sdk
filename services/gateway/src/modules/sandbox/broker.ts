@@ -109,6 +109,11 @@ export interface InferenceBrokerOptions {
   invalidateToken?(token: string): void;
   readonly githubApiUrl: string;
   readonly log: Logger;
+  /**
+   * The session's model calls go to an Azure AI Foundry account (spec section 15): no GitHub credential is ever
+   * installed or brokered, and model calls may reach only `host`, with `token()` in place of the placeholder.
+   */
+  readonly foundry?: { readonly account: string; readonly host: string; token(): Promise<string> };
   readonly fetch?: typeof fetch;
   /** Opens upstream WebSockets (tests); defaults to `ws`. */
   readonly webSocket?: (url: URL, options: WebSocket.ClientOptions) => WebSocket;
@@ -161,6 +166,8 @@ export class InferenceBroker {
   /** Installs the placeholder credential with the owner's pre-resolved Copilot identity. */
   async sessionOpened(sessionId: string): Promise<void> {
     if (!this.#send) throw new ManagedCopilotError("internal", "The sandbox runtime connection was not initialized.");
+    // A Foundry session holds no GitHub credential at all: its provider's placeholder is all the runtime has.
+    if (this.#options.foundry) return;
     const token = await this.#options.resolveToken();
     let copilotUser: Record<string, unknown>;
     try {
@@ -283,7 +290,13 @@ export class InferenceBroker {
     if (url.protocol !== "https:" && !(url.protocol === "wss:" && start.transport === "websocket")) {
       return { status: 403, message: "Only HTTPS Copilot API endpoints are reachable from sandboxes.", code: "forbidden" };
     }
-    if (url.username || url.password || (url.port && url.port !== "443") || !this.#apiHosts.has(url.hostname.toLowerCase())) {
+    const foundry = this.#options.foundry;
+    if (foundry) {
+      // Only the session's own Foundry account: never the Copilot API, never another host.
+      if (url.username || url.password || (url.port && url.port !== "443") || url.hostname.toLowerCase() !== foundry.host) {
+        return { status: 403, message: `This session's model calls go to Azure AI Foundry account "${foundry.account}", not ${url.hostname}.`, code: "forbidden" };
+      }
+    } else if (url.username || url.password || (url.port && url.port !== "443") || !this.#apiHosts.has(url.hostname.toLowerCase())) {
       return { status: 403, message: `Sandbox inference can only reach the Copilot API, not ${url.hostname}. Custom model providers are not available in sandboxes.`, code: "forbidden" };
     }
     const unauthorized = { status: 401, message: "Sandbox inference requests must use the session's brokered credential.", code: "authentication_required" };
@@ -292,6 +305,8 @@ export class InferenceBroker {
     for (const [name, values] of Object.entries(start.headers ?? {})) {
       const lower = name.toLowerCase();
       if (!values || FORBIDDEN_REQUEST_HEADERS.has(lower)) continue;
+      // A Foundry call authenticates only with the platform's token in place of the placeholder.
+      if (foundry && lower === "api-key") return unauthorized;
       if (lower in headers) return { status: 400, message: `Duplicate "${lower}" request header.`, code: "invalid_request" };
       let value = values.join(", ");
       if (lower === "authorization") {
@@ -299,7 +314,7 @@ export class InferenceBroker {
         const match = values.length === 1 ? /^(Bearer|token) (\S+)$/i.exec(value) : null;
         if (!match || match[2] !== this.#options.placeholder) return unauthorized;
         try {
-          token = await this.#options.resolveToken();
+          token = foundry ? await foundry.token() : await this.#options.resolveToken();
         } catch (error) {
           const managed = error instanceof ManagedCopilotError ? error : undefined;
           return { status: 401, message: managed?.message ?? "The session owner has no usable GitHub credential.", code: managed?.code ?? "authentication_required" };
@@ -317,6 +332,11 @@ export class InferenceBroker {
    * dropped if GitHub agrees) before its next use. The cached Copilot identity for it goes too.
    */
   #rejected(token: string, source: string): void {
+    if (this.#options.foundry) {
+      // The platform's own Azure token: nothing about the owner's GitHub sign-in to forget.
+      this.#options.log.warn("Azure AI Foundry refused the platform's token for a model call", { sessionId: this.#options.sessionId, account: this.#options.foundry.account, source });
+      return;
+    }
     identityCache.delete(identityKey(token, this.#options.githubApiUrl));
     this.#options.log.info("GitHub rejected the session owner's credential; it is verified again before its next use", { sessionId: this.#options.sessionId, source });
     try {

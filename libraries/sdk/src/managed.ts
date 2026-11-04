@@ -1,6 +1,7 @@
 import type { CopilotClient, CopilotSession } from "@github/copilot-sdk";
 import type { AccountInfo, DeploymentInfo, ExecInfo, ExecResult, PlatformEventType, PromoteResult } from "@managed-copilot/protocol";
-import { createContext, type ManagedState } from "./connection.js";
+import { createContext, createView, type ManagedState } from "./connection.js";
+import { actingIdentity, identityKey, requireActor } from "./identity.js";
 import { createArtifactsApi } from "./features/artifacts.js";
 import { openCli } from "./features/cli.js";
 import { createClient, createManagedSession, resumeManagedSession } from "./features/client.js";
@@ -13,6 +14,7 @@ import { createSessionsApi } from "./features/sessions.js";
 import { createVaultsApi } from "./features/vaults.js";
 import { createWorkersApi } from "./features/workers.js";
 import type {
+  ActingAs,
   ConnectOptions,
   EnvironmentSelector,
   ExecHandle,
@@ -86,6 +88,23 @@ export class ManagedCopilot {
     return new ManagedCopilot(await createContext(options));
   }
 
+  /**
+   * This API, acting for one person: one of your app's own users (`{ appUser }`, an app connection only) or someone
+   * who signed in with GitHub (`{ gitHubToken }`). Sessions, files, artifacts, schedules, vaults, and events are theirs.
+   * Views of the same person are shared; `close()` on the connection closes its views too.
+   */
+  async as(user: ActingAs): Promise<ManagedCopilot> {
+    const identity = actingIdentity(this.#ctx.identity, user);
+    requireActor(identity, "managed.as(...)");
+    const view = await createView(this.#ctx, identity);
+    let wrapper = VIEWS.get(view);
+    if (!wrapper) {
+      wrapper = new ManagedCopilot(view);
+      VIEWS.set(view, wrapper);
+    }
+    return wrapper;
+  }
+
   get url(): string {
     return this.#ctx.url;
   }
@@ -149,15 +168,40 @@ export class ManagedCopilot {
     };
   }
 
-  /** Detaches this process. Does not delete sessions or cancel accepted work. */
+  /** Detaches this process (or this view's clients). Does not delete sessions or cancel accepted work. */
   async close(): Promise<void> {
+    const contexts = [this.#ctx];
+    // The connection itself closes every view's clients and streams too.
+    if (!this.#ctx.root) for (const pending of this.#ctx.views.values()) contexts.push(...(await pending.then((view) => [view], () => [])));
     const pending: Promise<unknown>[] = [];
-    for (const client of this.#ctx.clients) pending.push(client.stop().catch(() => undefined));
-    for (const dispose of this.#ctx.disposables) pending.push(Promise.resolve().then(dispose).catch(() => undefined));
-    this.#ctx.clients.clear();
-    this.#ctx.cachedClients.clear();
-    this.#ctx.disposables.clear();
-    this.#ctx.listeners.clear();
+    const stopped = new Set<CopilotClient>();
+    for (const ctx of contexts) {
+      for (const client of ctx.clients) {
+        stopped.add(client);
+        pending.push(client.stop().catch(() => undefined));
+      }
+      for (const dispose of ctx.disposables) pending.push(Promise.resolve().then(dispose).catch(() => undefined));
+      ctx.clients.clear();
+      ctx.disposables.clear();
+      ctx.listeners.clear();
+    }
+    if (!this.#ctx.root) {
+      this.#ctx.cachedClients.clear();
+      this.#ctx.views.clear();
+    } else {
+      // A closed view is forgotten, with the clients it stopped: the next `as(...)` for this person starts afresh.
+      const key = identityKey(this.#ctx.identity);
+      const view = this.#ctx.root.views.get(key);
+      if (view && (await view.catch(() => undefined)) === this.#ctx) this.#ctx.root.views.delete(key);
+      for (const [cacheKey, client] of [...this.#ctx.cachedClients]) {
+        if (!cacheKey.startsWith(`${key}:`)) continue;
+        const resolved = await client.catch(() => undefined);
+        if (resolved && stopped.has(resolved) && this.#ctx.cachedClients.get(cacheKey) === client) this.#ctx.cachedClients.delete(cacheKey);
+      }
+    }
     await Promise.all(pending);
   }
 }
+
+/** The `ManagedCopilot` for each view, so `as(...)` for the same person returns the same object. */
+const VIEWS = new WeakMap<ManagedState, ManagedCopilot>();

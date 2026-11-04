@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import type { CopilotClient } from "@github/copilot-sdk";
 import {
+  APP_KEY_ENV,
   discoveryFile,
   ManagedCopilotError,
   ROUTES,
@@ -13,6 +14,7 @@ import {
   type DiscoveryRecord,
 } from "@managed-copilot/protocol";
 import { HttpClient, timings } from "./http.js";
+import { identityKey, type Identity } from "./identity.js";
 import type { ConnectOptions, ManagedContext } from "./types.js";
 
 const execFileAsync = promisify(execFile);
@@ -105,26 +107,65 @@ export async function resolveToken(explicit?: string): Promise<string> {
 
 /** Internal state beyond the public `ManagedContext` shape. */
 export interface ManagedState extends ManagedContext {
-  /** Session ID → GitHub token of the client identity that created or resumed it. */
-  readonly identities: Map<string, string>;
+  /** Session ID → the identity of the client that created or resumed it (shared by every view of a connection). */
+  readonly identities: Map<string, Identity>;
   /** `managed.createSession` / `resumeSession` reuse one client per environment selector and identity. */
   readonly cachedClients: Map<string, Promise<CopilotClient>>;
-  /** Per-identity REST clients. */
+  /** Per-identity REST clients, by `identityKey`. */
   readonly httpClients: Map<string, HttpClient>;
+  /** `managed.as(...)` views of this connection, by `identityKey` (the root's map, shared by its views). */
+  readonly views: Map<string, Promise<ManagedState>>;
+  /** The connection this view came from (undefined for the connection itself). */
+  readonly root: ManagedState | undefined;
+}
+
+/** The REST client acting as `identity`, shared across a connection's views. */
+export function httpForIdentity(ctx: Pick<ManagedState, "url" | "httpClients">, identity: Identity): HttpClient {
+  const key = identityKey(identity);
+  let client = ctx.httpClients.get(key);
+  if (!client) {
+    client = new HttpClient(ctx.url, identity);
+    ctx.httpClients.set(key, client);
+  }
+  return client;
+}
+
+function withDefaults(state: Omit<ManagedState, "httpFor">): ManagedState {
+  const ctx: ManagedState = {
+    ...state,
+    httpFor(sessionId: string): HttpClient {
+      // A view acts for its own person, always: never as whoever created or resumed the session in this process.
+      if (state.root) return state.http;
+      const identity = state.identities.get(sessionId);
+      return identity ? httpForIdentity(ctx, identity) : state.http;
+    },
+  };
+  return ctx;
+}
+
+/** The app key: the explicit option, then `MANAGED_COPILOT_APP_KEY`. */
+export function resolveAppKey(explicit?: string): string | undefined {
+  if (explicit !== undefined) {
+    if (!explicit.trim()) throw new ManagedCopilotError("authentication_required", "appKey is empty; pass the key the AppHost issued to your app.");
+    return explicit.trim();
+  }
+  const fromEnv = process.env[APP_KEY_ENV]?.trim();
+  return fromEnv ? fromEnv : undefined;
 }
 
 export async function createContext(options: ConnectOptions = {}): Promise<ManagedState> {
   const url = await resolveUrl(options.url);
-  const token = await resolveToken(options.gitHubToken);
-  const http = new HttpClient(url, token);
+  const appKey = resolveAppKey(options.appKey);
+  // An app connection is the app itself: it never falls back to this machine's GitHub sign-in. It acts for a GitHub
+  // user only when one is named (`gitHubToken` here, or per client and view).
+  const identity: Identity = appKey ? { appKey, ...(options.gitHubToken ? { token: options.gitHubToken } : {}) } : { token: await resolveToken(options.gitHubToken) };
+  const http = new HttpClient(url, identity);
   // Bounded, so a deployment that never answers (a gateway being replaced behind its ingress) fails with `timeout`.
   const bound = { timeoutMs: timings.connectMs };
   const [info, account] = await Promise.all([http.get<DeploymentInfo>(ROUTES.info, bound), http.get<AccountInfo>(ROUTES.me, bound)]);
-  const identities = new Map<string, string>();
-  const httpClients = new Map<string, HttpClient>([[token, http]]);
-  return {
+  return withDefaults({
     url: http.baseUrl,
-    token,
+    identity,
     clientName: options.clientName,
     info,
     account,
@@ -132,20 +173,49 @@ export async function createContext(options: ConnectOptions = {}): Promise<Manag
     clients: new Set(),
     listeners: new Map(),
     disposables: new Set(),
-    identities,
+    identities: new Map(),
     cachedClients: new Map(),
-    httpClients,
-    httpFor(sessionId: string): HttpClient {
-      const identity = identities.get(sessionId);
-      if (!identity) return http;
-      let client = httpClients.get(identity);
-      if (!client) {
-        client = new HttpClient(http.baseUrl, identity);
-        httpClients.set(identity, client);
-      }
-      return client;
-    },
-  };
+    httpClients: new Map([[identityKey(identity), http]]),
+    views: new Map(),
+    root: undefined,
+  });
+}
+
+/**
+ * A view of a connection that acts for another person by default (`managed.as(...)`): it shares the connection's
+ * deployment information, REST clients, and session identities, and has its own account, clients, and event stream.
+ */
+export async function createView(ctx: ManagedState, identity: Identity): Promise<ManagedState> {
+  const root = ctx.root ?? ctx;
+  const key = identityKey(identity);
+  // A view even for the connection's own identity: a view always acts for its person, while the connection falls back
+  // to whoever created or resumed a session in this process.
+  let pending = root.views.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const http = httpForIdentity(root, identity);
+      const account = await http.get<AccountInfo>(ROUTES.me, { timeoutMs: timings.connectMs });
+      return withDefaults({
+        url: root.url,
+        identity,
+        clientName: root.clientName,
+        info: root.info,
+        account,
+        http,
+        clients: new Set(),
+        listeners: new Map(),
+        disposables: new Set(),
+        identities: root.identities,
+        cachedClients: root.cachedClients,
+        httpClients: root.httpClients,
+        views: root.views,
+        root,
+      });
+    })();
+    root.views.set(key, pending);
+    pending.catch(() => root.views.delete(key));
+  }
+  return pending;
 }
 
 export function notImplemented(feature: string): never {

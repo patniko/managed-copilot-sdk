@@ -186,6 +186,15 @@ function OverviewTab({ session }: { readonly session: OperatorSessionDetail }) {
           <Field label="Model" mono>
             {session.model}
           </Field>
+          <Field label="Inference" hint="Where this session's model calls go, fixed when it was created">
+            {session.inference ? (
+              session.inference.route === "foundry" ? (
+                <span className="font-mono text-xs">Foundry: {session.inference.foundry}</span>
+              ) : (
+                <span className="text-fg-muted">Through the owner's GitHub Copilot</span>
+              )
+            ) : undefined}
+          </Field>
           <Field label="Agent">{session.agent}</Field>
           <Field label="Client">{session.clientName}</Field>
           <Field label="Generation">

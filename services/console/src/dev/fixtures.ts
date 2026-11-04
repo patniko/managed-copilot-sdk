@@ -37,6 +37,8 @@ export const ACCOUNTS = {
   monalisa: { id: 1024025, login: "monalisa", name: "Mona Lisa Octocat" },
   defunkt: { id: 2, login: "defunkt", name: "Chris Wanstrath", avatarUrl: "https://avatars.githubusercontent.com/u/2?v=4" },
   hubot: { id: 480938, login: "hubot", avatarUrl: "https://example.com/not-a-github-avatar.png" },
+  // One of an app's own users (spec section 2): not a GitHub account.
+  carol: { id: -1, login: "support-site/auth0|5f2c", name: "Carol Danvers", kind: "app-user", app: "support-site", userId: "auth0|5f2c" },
 } satisfies Record<string, AccountInfo>;
 
 const RESTRICTED = { access: "restricted", allowedDomains: ["*.pythonhosted.org", "api.github.com", "files.pythonhosted.org", "pypi.org", "registry.npmjs.org"] } as const;
@@ -247,6 +249,7 @@ const SESSION_SPECS: readonly Partial<OperatorSessionSummary>[] = [
   { owner: ACCOUNTS.defunkt, environment: "assistant", type: "shared", placement: "shared", state: "deleted", live: false, attached: 0 },
   { owner: ACCOUNTS.monalisa, environment: "assistant", type: "shared", placement: "shared", state: "creating", live: false, attached: 0 },
   { owner: ACCOUNTS.octocat, environment: "data-science", type: "isolated", placement: "sandbox", state: "running", live: true, attached: 1, model: "claude-sonnet-4.5", id: "custom.session.with.dots" },
+  { owner: ACCOUNTS.carol, environment: "assistant", type: "shared", placement: "shared", state: "idle", live: true, attached: 1, model: "gpt-5-mini", clientName: "support-site", inference: { route: "foundry", foundry: "contoso-foundry" } },
 ];
 
 export const SESSIONS: OperatorSessionSummary[] = SESSION_SPECS.map((spec, index) => {
@@ -260,6 +263,7 @@ export const SESSIONS: OperatorSessionSummary[] = SESSION_SPECS.map((spec, index
     state: spec.state ?? "idle",
     generation: spec.generation ?? 1,
     model: spec.model,
+    inference: spec.inference ?? { route: "copilot" },
     agent: spec.agent,
     clientName: spec.clientName,
     scheduleId: spec.scheduleId,

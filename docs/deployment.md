@@ -264,6 +264,51 @@ The app's image should start with the lease supervisor (see `demos/assistant/Doc
 `Parameters:app-allowed-ips`; `githubToken: false` keeps it behind the allowlist without the token, and `public: true`
 opens it to any address without the token (see "Who can open the apps").
 
+### Azure AI Foundry and your app's own users
+
+Environments with `inference: { foundry }` send their model calls to an Azure AI Foundry account you own, billed to
+its subscription, and are the only ones your app's own users (people without GitHub) can use
+([spec section 15](spec/developer-experience.md#15-models-and-billing),
+[your app's own users](spec/developer-experience.md#your-apps-own-users)). The account and its model deployments are
+yours: the platform never creates or changes them. An AIServices account with a custom subdomain works, for example:
+
+```powershell
+az cognitiveservices account create --subscription <subscription-id> -g contoso-ai -n contoso-foundry -l westus2 `
+  --kind AIServices --sku S0 --custom-domain contoso-foundry
+az cognitiveservices account deployment create --subscription <subscription-id> -g contoso-ai -n contoso-foundry `
+  --deployment-name gpt-5-mini --model-name gpt-5-mini --model-version <version> --model-format OpenAI `
+  --sku-name GlobalStandard --sku-capacity 50
+```
+
+Declare the account, the environments that use it, and the apps that act for their own users:
+
+```ts
+const copilot = await addManagedCopilot(builder, "copilot", {
+  foundry: { "contoso-foundry": { resourceGroup: "contoso-ai", deployments: ["gpt-5-mini"] } }, // subscription: optional
+  environments: { support: { type: "shared", inference: { foundry: "contoso-foundry" } } },
+  apps: { "support-site": { environments: ["support"], anyGitHubUser: true } },
+});
+await publishApp(builder, copilot, { name: "support-site", dockerfile: "support-site/Dockerfile", port: 3000, healthPath: "/healthz", app: "support-site" });
+```
+
+- **Model calls.** `aspire deploy` gives the gateway its user-assigned identity and grants it **Cognitive Services
+  OpenAI User** on each declared account, with a deployment into the account's own resource group (and subscription).
+  You need permission to assign roles there (Owner, User Access Administrator, or Role Based Access Control
+  Administrator). An account that names no `subscription` is in the deployment's (`Azure:SubscriptionId`). With
+  `aspire run`, the gateway uses your Azure CLI sign-in instead (`az login`, with at least Cognitive Services OpenAI
+  User on the account); it asks for tokens in the account's subscription, so the right tenant is used.
+- **App keys.** Each app's key is the generated secret parameter `Parameters:<name>-app-<app>-key`, kept with the
+  deployment like the other generated secrets. `publishApp(..., { app })` (or, with `aspire run`,
+  `.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(app))`) gives the app its key as a secret. To replace a
+  key, give the parameter a new value of at least 32 characters (an environment value such as
+  `Parameters__copilot-app-support-site-key` for `aspire deploy`; never on a command line) and deploy again.
+- **Who gets in.** The gateway still admits only the GitHub accounts in its access rules directly. An app's own users
+  come in only through its key, and `anyGitHubUser: true` admits any GitHub account through that app's key alone.
+- **Checking it.** `/v1/info` lists `foundry` and `apps` in its capabilities, each Foundry environment's `inference`,
+  and its deployments as `models`. The gateway logs "Foundry account ready" for each account it can use, or the
+  problem (a missing account, deployment, or role assignment); `SessionInfo.inference` says where each session's
+  model calls go.
+
 ## Durable state
 
 The gateway keeps its ledger (SQLite, WAL), the stock runtime's session state, vault and durable keys, artifacts, and
@@ -419,6 +464,7 @@ Alternatives when an address allowlist does not fit an app that has no sign-in o
 | Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every orchestrator tool live) | Yes: snippet 14, walkthrough 11, and every orchestrator tool passed (2026-10-27). Workers run in Container Apps Sandboxes, and their files move through the sandbox file API, not a shared disk. A gateway restart during worker runs has been tested only locally |
 | Direct and mixed orchestrators (the coordinator's own hands sandbox) | Yes (Docker; snippet 15, walkthrough 12, and `subagents: "own"` live) | Not yet run; no provider change: hands sandboxes are workspace-only sandboxes reached through the exec and file APIs |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
+| Your app's own users and Azure AI Foundry (`apps`, `inference: { foundry }`) | Yes (`az login`; shared and Docker sandboxes) | Yes (2026-11-04): the gateway's managed identity with the role `aspire deploy` assigns; shared and Container Apps sandbox sessions, app users, refusals, and `anyGitHubUser` admission |
 | Warm sandboxes (`warm > 0`) | No | No |
 | Demos (software factory, assistant, Dispatch) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; the factory's agent-led mode and Dispatch pass with their workers in Container Apps Sandboxes; assistant uses labelled demo Google data, and its sandboxes (added 2026-10-27) are verified locally only |
 | Public apps (`publishApp({ public: true })`) | Not applicable (apps run on localhost) | Yes (2026-11-04): open to any address with no deployer token, beside an app that keeps the allowlist |
@@ -460,6 +506,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
 | Orchestrator (2026-10-27) | Snippet 14 (34 s) and walkthrough 11 (50 s) passed, each worker in its own sandbox. A run of every orchestrator tool passed 10/10 checks: a builder's script read with `read_worker_file`, copied to a second worker's sandbox with `copy_worker_files` and run there after `message_worker`, worker prompts answered as `platform:orchestrator`, `stop_worker` deleting the builder's session, and deleting the coordinator deleting the other |
 | Software factory, agent-led (2026-10-27) | Run from this machine against the deployed gateway (the apps' allowlist excluded this machine's tunnel). The coordinator created two builders and later a release worker, each in its own Container Apps sandbox. It reused one builder for two fix rounds until the second-model review approved it, then copied both builders' files into the release sandbox. Completed in 541 s: **9 files, 47/47 tests**, which also passed in an offline, read-only container. The coordinator stopped all three workers afterwards |
+| Apps and Azure AI Foundry (2026-11-04) | A deployment of its own (gateway, two Foundry environments, a Copilot environment, an app with `anyGitHubUser`, access limited to another account) in its own resource group, deleted afterwards. `aspire deploy` granted the gateway's identity Cognitive Services OpenAI User on an existing Foundry account in another resource group, and the gateway reported it ready. With real model calls to its `grok-4.7` deployment, all 23 checks passed in one run: an app user's shared session with a tool call and a resume; a command in a Container Apps sandbox whose model calls the gateway brokered to Foundry; isolation between app users; refusals of Copilot-billed environments, background sign-in, schedules, and Copilot CLI attach; and a GitHub account outside `access` refused directly but admitted through the app, with a Foundry session and a Copilot session on its own plan. (An earlier run lost one connection before it reached the gateway; the SDK's bridge now reports such failures as `capability_unavailable` with the cause.) |
 | Dispatch (2026-10-27) | The deployed app started and connected to the gateway. This machine's network tunnel reaches the apps from an address outside their allowlist, so the app was driven through its own API from inside its container (`az containerapp exec`). Two approved requests each created a worker in its own sandbox: Python (`dispatch-python`) and web research (`dispatch-web`, which read en.wikipedia.org through its allowlist). A follow-up typed in Copilot CLI, attached to the same coordinator, reused the Python worker without a new approval; Dispatch labeled it "from Copilot CLI" and showed the reuse. Deleting the conversation removed the coordinator and both workers |
 | Public apps (2026-11-04) | A separate deployment of [`deployments/azure/qualify/public-apps`](../deployments/azure/qualify/public-apps/README.md) (a gateway and the gallery image twice; no model calls), made with `npx managed-copilot deploy` into its own resource group in 6 m 35 s with `Parameters:app-allowed-ips` set to an address that isn't this machine's. Its `check.mjs` passed **10/10**: the public app (tagged `managed-copilot-access: public`, no IP rules, no `MANAGED_COPILOT_GITHUB_TOKEN`) answered this machine with 200, while the app acting as the deployer (its allowlist plus the platform rule, the token as a secret reference) answered `403 RBAC: access denied`. `access` listed the public app apart, and `access ips add` updated only the allowlisted app. This machine's tunnel reaches Azure from an address other than the one `api.ipify.org` reports, so the allowlisted app kept refusing it after `access ips add me`; the public app didn't care. The resource group was deleted afterwards. A second deployment then checked the switch to public, with the guard step running live each time: switching the app that acted as the deployer straight to `public: true` was refused (`check-deployer-gallery-public` named its token-holding revision) and left its ingress as it was (`allow-1`, `platform`); `githubToken: false` deployed and its old revision was deactivated; `public: true` then passed, and the app answered this machine with 200, tagged `public` with no IP rules. That resource group was deleted too |
 
@@ -494,8 +541,9 @@ check your subscription's rates and discounts before deploying.
 
 Standing WebSocket/SSE connections and background work can keep replicas at active rates even without a browser open.
 The six apps alone cost roughly $0.13/hour at idle rates or $0.45/hour when active, before free grants. These are
-estimates, not a spending cap: sandbox usage, additional network/bandwidth charges, and model usage billed to the
-authorized GitHub account are separate.
+estimates, not a spending cap: sandbox usage, additional network/bandwidth charges, model usage billed to the
+authorized GitHub account, and model usage in Azure AI Foundry environments (billed per token to each Foundry
+account's subscription; set its deployments' capacity to the spend you accept) are separate.
 
 The probe resource group was created at 15:31 UTC and confirmed deleted by 16:28 UTC on 2026-10-24.
 At 22:30 UTC, Cost Management reported **$0.0032710244 USD pretax posted so far** for `mc-azure-probe`.
@@ -538,6 +586,12 @@ identities. Your AppHost's user secrets stay on your machine.
   `az account set --subscription <id>` and deploy again. (A subscription of the current account in another tenant
   needs nothing: `deploy` passes its tenant as `Azure__TenantId`. With `aspire deploy` alone, set `Azure__TenantId` in
   the environment.)
+- **"Foundry account unavailable"** in the gateway's log, or sessions failing with `inference_unavailable`: the message
+  names the problem. "was not found": check the account name, resource group, and subscription in `foundry`. A 403
+  or "Cognitive Services OpenAI User": the role assignment is missing or still propagating (a few minutes); locally,
+  your `az login` account needs that role. "no ready deployment": create the model deployment, or fix `deployments`.
+- **`aspire deploy` fails with `AuthorizationFailed` for `roleAssignments/write`** in a Foundry account's resource
+  group: your account can't assign roles there. Ask its owner for Role Based Access Control Administrator on that group.
 - **`/v1/info` lists no `isolated` capability**: the gateway's log names what the sandbox backend is missing (for
   example the role assignment, which can take a few minutes to propagate; the gateway re-checks every 30 s).
 - **Isolated sessions with network access fail with `capability_unavailable`**: the egress proxy is not connected to

@@ -1,18 +1,48 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
-import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { APP_KEY_HEADER, APP_USER_HEADER, APP_USER_NAME_HEADER, ManagedCopilotError } from "@managed-copilot/protocol";
 import { ZodError } from "zod";
 import type { GatewayApp } from "./app.js";
 
-/** An authenticated GitHub caller. Ownership binds to `accountId`, never to `login`. */
+/**
+ * An authenticated caller. Ownership binds to `accountId`, never to `login`.
+ *
+ * - A GitHub user (`kind` absent or `github`): positive account ID, and `token` holds their verified GitHub token.
+ * - One of an app's own users (`app-user`): a negative account ID the gateway assigned for (app, user ID). No token:
+ *   never a GitHub account, never an operator, and their model calls go only to Foundry.
+ * - An app acting for itself (`app`): deployment information only (routes with `auth: "user-or-app"`).
+ *
+ * `app` names the app whose key the request carried; requests through an app use only its environments.
+ */
 export interface Principal {
   readonly accountId: number;
   readonly login: string;
   readonly name?: string;
   readonly avatarUrl?: string;
-  /** The caller's GitHub token; held in memory only and never forwarded into sandboxes. */
-  readonly token: string;
+  /** A GitHub user's token; held in memory only and never forwarded into sandboxes. Absent for app users and apps. */
+  readonly token?: string;
+  readonly kind?: "github" | "app-user" | "app";
+  /** The app the request came through (its key). */
+  readonly app?: string;
+  /** App users: the ID the app's own sign-in gave them. */
+  readonly userId?: string;
+}
+
+/** A GitHub user, whose verified token is at hand. */
+export type GitHubPrincipal = Principal & { readonly token: string; readonly kind?: "github" };
+
+export function isGitHubPrincipal(principal: Principal): principal is GitHubPrincipal {
+  return (principal.kind === undefined || principal.kind === "github") && typeof principal.token === "string" && principal.token.length > 0;
+}
+
+/** What a request presented: a GitHub bearer token, an app key, and the app user it acts for. */
+export interface RequestCredentials {
+  readonly token?: string;
+  readonly appKey?: string;
+  /** Raw (percent-encoded) header values. */
+  readonly appUser?: string;
+  readonly appUserName?: string;
 }
 
 /** Provided by the core module as `app.services.auth`. */
@@ -22,7 +52,14 @@ export interface Authenticator {
    * `background` when re-verifying a stored credential rather than a connected caller's: it never becomes the
    * account's live credential.
    */
-  authenticate(token: string, options?: { readonly background?: boolean }): Promise<Principal>;
+  authenticate(token: string, options?: { readonly background?: boolean; readonly app?: string }): Promise<Principal>;
+  /**
+   * Authenticates a request's credentials: a GitHub token, or an app key acting for one of the app's users, a GitHub
+   * user who signed in to it, or itself. Gateways without apps only accept GitHub tokens.
+   */
+  authenticateRequest?(credentials: RequestCredentials): Promise<Principal>;
+  /** Checks a principal again for a long-lived connection: its token with GitHub, or its app key still configured. */
+  reverify?(principal: Principal): Promise<Principal>;
   /**
    * Forgets a token GitHub rejected (a 401 from the Copilot API, for example): its cached verification and every
    * reference to it. Its next use is verified with GitHub again.
@@ -33,10 +70,11 @@ export interface Authenticator {
 }
 
 /**
- * `user`: GitHub bearer token (default). `platform`: internal services presenting `x-managed-copilot-platform-key`.
- * `none`: unauthenticated (health only). Routes may also verify their own scoped capabilities.
+ * `user`: GitHub bearer token (default), or an app key acting for a user. `user-or-app`: also an app acting for itself.
+ * `platform`: internal services presenting `x-managed-copilot-platform-key`. `none`: unauthenticated (health only).
+ * Routes may also verify their own scoped capabilities.
  */
-export type RouteAuth = "user" | "platform" | "none";
+export type RouteAuth = "user" | "user-or-app" | "platform" | "none";
 
 export interface RequestContext {
   readonly app: GatewayApp;
@@ -134,6 +172,28 @@ export function bearerToken(req: IncomingMessage): string | undefined {
   return match?.[1]?.trim();
 }
 
+/** A single-valued request header; repeated headers are refused rather than merged. */
+function singleHeader(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) throw new ManagedCopilotError("invalid_request", `Send the ${name} header once`);
+  return value;
+}
+
+/** The credentials a request presented (`Authorization`, and the app headers). */
+export function requestCredentials(req: IncomingMessage): RequestCredentials {
+  const token = bearerToken(req);
+  const appKey = singleHeader(req, APP_KEY_HEADER);
+  const appUser = singleHeader(req, APP_USER_HEADER);
+  const appUserName = singleHeader(req, APP_USER_NAME_HEADER);
+  return {
+    ...(token ? { token } : {}),
+    ...(appKey !== undefined ? { appKey } : {}),
+    ...(appUser !== undefined ? { appUser } : {}),
+    ...(appUserName !== undefined ? { appUserName } : {}),
+  };
+}
+
 async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -159,17 +219,29 @@ export function toManagedError(error: unknown): ManagedCopilotError {
   return new ManagedCopilotError("internal", "Internal error");
 }
 
-async function resolvePrincipal(app: GatewayApp, req: IncomingMessage, auth: RouteAuth): Promise<Principal | undefined> {
+/** The caller a route's `auth` setting admits: a GitHub user, one acting through an app's key, or (`user-or-app`) the app. */
+export async function resolvePrincipal(app: GatewayApp, req: IncomingMessage, auth: RouteAuth): Promise<Principal | undefined> {
   if (auth === "none") return undefined;
   if (auth === "platform") {
     if (!platformKeyMatches(req.headers[PLATFORM_KEY_HEADER], app.config.platformKey)) throw new ManagedCopilotError("forbidden", "Platform credential required");
     return undefined;
   }
-  const token = bearerToken(req);
-  if (!token) throw new ManagedCopilotError("authentication_required", "Sign in with a GitHub token (Authorization: Bearer <token>)");
+  const credentials = requestCredentials(req);
   const authenticator = app.services.auth;
   if (!authenticator) throw new ManagedCopilotError("capability_unavailable", "Authentication is not configured on this gateway");
-  return authenticator.authenticate(token);
+  if (credentials.appKey !== undefined || credentials.appUser !== undefined) {
+    if (!authenticator.authenticateRequest) throw new ManagedCopilotError("authentication_required", "This gateway does not accept app keys");
+    const principal = await authenticator.authenticateRequest(credentials);
+    if (principal.kind === "app" && auth !== "user-or-app") {
+      throw new ManagedCopilotError(
+        "authentication_required",
+        `This request needs a person to act for, and it carries only the "${principal.app}" app's key: send one of the app's users (managed.as({ appUser })) or a GitHub user's token (managed.as({ gitHubToken })).`,
+      );
+    }
+    return principal;
+  }
+  if (!credentials.token) throw new ManagedCopilotError("authentication_required", "Sign in with a GitHub token (Authorization: Bearer <token>)");
+  return authenticator.authenticate(credentials.token);
 }
 
 export class Router {
@@ -242,6 +314,10 @@ export class Router {
         throw new ManagedCopilotError(pathMatched ? "invalid_request" : "not_found", pathMatched ? `Method ${req.method} not allowed` : `No route for ${url.pathname}`);
       }
       const principal = await resolvePrincipal(app, req, route.auth);
+      // A request through an app reaches only the sessions within that app's environments, whatever module serves it.
+      if (principal?.app && route.segments[0] === "v1" && route.segments[1] === "sessions" && route.segments[2] === ":id" && params["id"]) {
+        app.services.sessions?.assertAppScope?.(principal, params["id"]);
+      }
       let status = 200;
       const ctx: RequestContext = {
         app,

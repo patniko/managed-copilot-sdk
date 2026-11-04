@@ -819,11 +819,11 @@ export class RawClient {
     throw new RpcError(-32601, "not handled");
   };
 
-  static async connect(url: string, token: string, environment: EnvironmentRequest | string): Promise<RawClient> {
+  static async connect(url: string, token: string, environment: EnvironmentRequest | string, headers: Record<string, string> = {}): Promise<RawClient> {
     const client = new RawClient();
     const target = new URL("/v1/connect", url);
     target.protocol = "ws:";
-    client.ws = new WebSocket(target, [BRIDGE_SUBPROTOCOL], { headers: { authorization: `Bearer ${token}` } });
+    client.ws = new WebSocket(target, [BRIDGE_SUBPROTOCOL], { headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...headers } });
     client.ws.on("close", (code, reason) => {
       client.closeInfo = { code, reason: reason.toString() };
     });
