@@ -1,6 +1,5 @@
 import { BeakerIcon, CodeIcon, GlobeIcon, type Icon, PackageIcon, PencilIcon } from "@primer/octicons-react";
-import type { Blueprint, BlueprintKind, NetworkView, WorkerState } from "../../shared/types.js";
-import type { Tone } from "./tone.js";
+import type { Blueprint, BlueprintKind, NetworkView } from "../../shared/types.js";
 
 /** Each kind of sandbox gets its own icon and lane color, so a worker's blueprint is recognizable at a glance. */
 export const KIND_ICON: Readonly<Record<BlueprintKind, Icon>> = {
@@ -36,18 +35,3 @@ export function sizeSummary(blueprint: Pick<Blueprint, "size" | "cpus" | "memory
   if (blueprint.memoryGiB !== undefined) parts.push(`${blueprint.memoryGiB} GiB`);
   return parts.join(" · ");
 }
-
-export interface WorkerStateMeta {
-  readonly label: string;
-  readonly tone: Tone;
-  /** What happens to the sandbox in this state. */
-  readonly sandbox: string;
-}
-
-export const WORKER_STATE: Readonly<Record<WorkerState, WorkerStateMeta>> = {
-  starting: { label: "Starting", tone: "active", sandbox: "preparing its sandbox" },
-  working: { label: "Working", tone: "active", sandbox: "sandbox running" },
-  idle: { label: "Idle", tone: "success", sandbox: "sandbox kept" },
-  failed: { label: "Failed", tone: "danger", sandbox: "sandbox kept" },
-  stopped: { label: "Stopped", tone: "neutral", sandbox: "sandbox deleted" },
-};

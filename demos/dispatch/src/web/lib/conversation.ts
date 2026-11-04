@@ -1,5 +1,5 @@
 import { blueprintKind } from "../../shared/catalog.js";
-import type { Blueprint, BlueprintKind, ConversationView, WorkerView } from "../../shared/types.js";
+import type { Blueprint, BlueprintKind, ConversationView, Decision, WorkerView } from "../../shared/types.js";
 import { parseTime } from "./format.js";
 
 export function blueprintFor(environment: string, blueprints: readonly Blueprint[]): Blueprint | undefined {
@@ -67,4 +67,28 @@ export function handlingTime(at: string, steps: readonly { readonly at: string; 
   if (current) return Math.max(0, now - start);
   const ends = steps.map((step) => parseTime(step.endedAt) ?? parseTime(step.at) ?? start);
   return Math.max(0, Math.max(start, ...ends) - start);
+}
+
+/** Whether `later` redoes what `failed` tried: the same kind of step on the same worker (and, copying, the same files). */
+function redoes(failed: Decision, later: Decision): boolean {
+  if (later.kind !== failed.kind || (later.status !== "done" && later.status !== "running")) return false;
+  switch (failed.kind) {
+    case "copy":
+      return later.from === failed.from && later.to === failed.to && (!failed.paths?.length || failed.paths.some((path) => later.paths?.includes(path)));
+    case "create":
+    case "message":
+    case "stop":
+      return later.worker !== undefined && later.worker === failed.worker;
+    default:
+      return false;
+  }
+}
+
+/** The IDs of failed steps that a later step of the same message redid successfully (say, a copy retried once its target started). */
+export function retriedSteps(decisions: readonly Decision[]): ReadonlySet<string> {
+  const retried = new Set<string>();
+  decisions.forEach((decision, index) => {
+    if (decision.status === "failed" && decisions.slice(index + 1).some((later) => redoes(decision, later))) retried.add(decision.id);
+  });
+  return retried;
 }

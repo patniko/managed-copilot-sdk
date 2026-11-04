@@ -303,6 +303,7 @@ export interface Template {
   readonly title: string;
   /** An Octicon name. */
   readonly icon: string;
+  /** One line, about 50 characters. */
   readonly description: string;
   readonly prompt: string;
   /** The sandboxes it usually needs. */
@@ -310,6 +311,8 @@ export interface Template {
   readonly minutes: number;
   /** Follow-ups that show the coordinator reusing its sandboxes. */
   readonly followUps: readonly string[];
+  /** The style it was written for: picking the template also picks this style. */
+  readonly style?: ExecutionStyle;
 }
 
 /** New conversations' defaults. */
