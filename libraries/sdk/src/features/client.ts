@@ -167,9 +167,13 @@ export async function createManagedSession(ctx: ManagedState, config: ManagedSes
 export async function resumeManagedSession(ctx: ManagedState, sessionId: string, config: ManagedResumeConfig = {}): Promise<CopilotSession> {
   const { environment, appUser, ...resumeConfig } = config;
   const named = resumeConfig.gitHubToken !== undefined || appUser !== undefined;
+  // A view (managed.as) always acts for its own person; only the connection itself falls back to whoever created or last
+  // resumed the session in this process.
   const identity = named
     ? actingIdentity(ctx.identity, { ...(resumeConfig.gitHubToken !== undefined ? { gitHubToken: resumeConfig.gitHubToken } : {}), ...(appUser !== undefined ? { appUser } : {}) })
-    : (ctx.identities.get(sessionId) ?? ctx.identity);
+    : ctx.root
+      ? ctx.identity
+      : (ctx.identities.get(sessionId) ?? ctx.identity);
   requireActor(identity, "managed.resumeSession(...)");
   let selector: EnvironmentSelector | undefined = environment;
   if (selector === undefined) {

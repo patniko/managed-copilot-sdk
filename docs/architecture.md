@@ -264,11 +264,15 @@ As built (spec section 2, "Your app's own users", and section 15; decisions 5 an
     or operator authorization.
   - **GitHub user through the app**: plus `Authorization: Bearer <GitHub token>`, verified with GitHub as usual and
     admitted by `access`, or by the app's `anyGitHubUser`. A token admitted only through an app is refused when it
-    comes without the key. Sessions are the GitHub account's own (not app-scoped).
+    comes without the key. Sessions are the GitHub account's own; through an app, only those in its environments are
+    reachable (below).
   - **The app itself**: the key alone, only on `auth: "user-or-app"` routes: `/v1/info` (the app's environments, no
     `inline`) and `/v1/me` (`{ id: 0, kind: "app" }`). Anything else answers 401 "needs a person to act for".
 - **App scope.** Every request through a key stays in the app's `environments` (`assertAppEnvironment` at bridge
-  welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator). An app user's
+  welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator), and sees only
+  the sessions there (`SessionManager.inAppScope`): the router answers `not_found` for any other `/v1/sessions/:id/...`
+  route (and the action routes, which authenticate themselves, do the same), and the session list, the event stream,
+  and the bridge's `session.list`, `getMetadata`, `delete`, and `resume` leave them out. An app user's
   session in a Copilot-billed environment gets `inference_unavailable` (bridge welcome, session create, an
   orchestrator's `start_worker`, and the SDK's pre-check); workspace-only sandboxes make no model calls and may use any
   of the app's environments. Background sign-in and schedules are refused for app users and for any request through an app, and

@@ -91,14 +91,15 @@ const alice = await managed.as({ appUser: { id: user.id } }); // their sessions,
 ```
 
 - **The key is the app's word.** Whoever holds it can act for any of the app's users, so keep it on your server like
-  any API key. Every request through it is limited to the app's `environments`.
+  any API key. Every request through it is limited to the app's `environments`, and sees only the sessions there.
 - **App users are not GitHub accounts.** Their sessions show as `<app>/<user ID>` (`owner.kind: "app-user"`). Another
   app, or this app naming another user, never reaches them, and they never count for `access` or `operators`.
 - **Foundry only, never a Copilot plan.** App users' sessions run only in environments with `inference: { foundry }`;
   anywhere else fails with `inference_unavailable` (a workspace-only sandbox, which makes no model calls, may use any of
   the app's environments). Background sign-in, schedules, and Copilot CLI attach fail with `capability_unavailable`.
 - **Your GitHub users keep their own plan.** The same connection acts for someone who signed in with GitHub:
-  `managed.client(env, { gitHubToken })` or `managed.as({ gitHubToken })`. Their sessions are their own account's.
+  `managed.client(env, { gitHubToken })` or `managed.as({ gitHubToken })`. Their sessions are their own account's;
+  through your app, only those in its environments are visible.
 - **Public apps.** A deployment admits only the GitHub accounts in `access`. `anyGitHubUser: true` on an app admits
   every GitHub account that comes through the app's key, without opening the deployment to them directly.
 

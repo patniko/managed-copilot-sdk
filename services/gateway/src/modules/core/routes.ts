@@ -1,5 +1,5 @@
 // Core REST routes: deployment info, the caller's account, owner-scoped sessions, and platform events (SSE).
-import { isManagedCopilotError, ManagedCopilotError, ROUTES, type DeploymentInfo, type SessionState } from "@managed-copilot/protocol";
+import { isManagedCopilotError, ManagedCopilotError, ROUTES, type DeploymentInfo, type PlatformEvent, type SessionState } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
 import type { Principal } from "../../http.js";
 import { appAllows } from "./apps.js";
@@ -74,11 +74,15 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
     const limit = limitText === null ? undefined : Number(limitText);
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new ManagedCopilotError("invalid_request", "limit must be a positive integer");
     const environment = ctx.query.get("environment") ?? undefined;
-    const records = manager.list(ctx.principal!.accountId, {
+    const principal = ctx.principal!;
+    // Through an app: only the sessions within its environments (the limit applies after that).
+    const scoped = principal.app !== undefined;
+    const listed = manager.list(principal.accountId, {
       ...(environment ? { environment } : {}),
       ...(state ? { state: state as SessionState } : {}),
-      ...(limit !== undefined ? { limit } : {}),
+      ...(limit !== undefined && !scoped ? { limit } : {}),
     });
+    const records = scoped ? listed.filter((record) => manager.inAppScope(principal, record)).slice(0, limit ?? listed.length) : listed;
     // A session deleted while its details were read is left out.
     const infos = await Promise.all(records.map((record) => manager.toInfo(record).catch((error: unknown) => (isManagedCopilotError(error, "not_found") ? undefined : Promise.reject(error)))));
     return infos.filter((info) => info !== undefined);
@@ -92,10 +96,26 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
   });
 
   app.routes.get(ROUTES.events, (ctx) =>
-    events.stream(ctx, async () => {
-      const auth = app.service("auth");
-      const principal = auth.reverify ? await auth.reverify(ctx.principal!) : await auth.authenticate(ctx.principal!.token ?? "");
-      if (principal.accountId !== ctx.principal!.accountId) throw new ManagedCopilotError("authentication_required", "The credential now belongs to another account");
-    }),
+    events.stream(
+      ctx,
+      async () => {
+        const auth = app.service("auth");
+        const principal = auth.reverify ? await auth.reverify(ctx.principal!) : await auth.authenticate(ctx.principal!.token ?? "");
+        if (principal.accountId !== ctx.principal!.accountId) throw new ManagedCopilotError("authentication_required", "The credential now belongs to another account");
+      },
+      // Through an app: only events of sessions within its environments.
+      ctx.principal!.app === undefined ? undefined : (event) => eventInAppScope(app, manager, ctx.principal!, event),
+    ),
   );
+}
+
+/** Whether a platform event belongs to a session within the app a request came through (or names no session). */
+function eventInAppScope(app: GatewayApp, manager: SessionManager, principal: Principal, event: PlatformEvent): boolean {
+  const sessionId = (event as { sessionId?: unknown }).sessionId;
+  if (typeof sessionId !== "string") return true;
+  const record = manager.get(sessionId);
+  if (record) return manager.inAppScope(principal, record);
+  // A session deleted since: its event names its environment.
+  const environment = (event as { environment?: unknown }).environment;
+  return typeof environment === "string" && appAllows(app.services.apps, principal, environment);
 }

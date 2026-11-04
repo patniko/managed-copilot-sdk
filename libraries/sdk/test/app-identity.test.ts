@@ -110,6 +110,18 @@ describe("app connections", () => {
     await managed.close();
   });
 
+  it("resumes from a view as that view's person, never as whoever this process last saw on the session", async () => {
+    const { resumeManagedSession } = await import("../src/features/client.js");
+    const alice = { appKey: APP_KEY, appUser: { id: "alice" } };
+    const bob = { appKey: APP_KEY, appUser: { id: "bob" } };
+    // Alice's session, as the connection remembers it; Bob's view asks to resume it without naming anyone.
+    const root = { identities: new Map([["s-alice", alice]]) };
+    const view = { url, identity: bob, identities: root.identities, httpClients: new Map(), root, info: { environments: [] } };
+    await expect(resumeManagedSession(view as never, "s-alice", {})).rejects.toThrow();
+    const asked = lastTo("/v1/sessions/s-alice");
+    expect(asked[APP_USER_HEADER]).toBe("bob");
+  });
+
   it("refuses what the gateway would, before sending anything", async () => {
     const managed = await ManagedCopilot.connect({ url, appKey: APP_KEY });
     await expect(managed.as({ appUser: { id: "zoe" }, gitHubToken: "gho_x" } as never)).rejects.toMatchObject({ code: "invalid_request" });
@@ -125,6 +137,25 @@ describe("app connections", () => {
 });
 
 describe("bridge refusals", { timeout: 30_000 }, () => {
+  it("answers requests the SDK already sent when the gateway cannot be reached", async () => {
+    const child = spawn(process.execPath, [BRIDGE, "--headless", "--no-auto-update", "--stdio"], {
+      env: { ...process.env, [BRIDGE_ENV]: JSON.stringify({ url: "ws://127.0.0.1:9/v1/connect", appKey: APP_KEY, appUser: { id: "zoe" }, environment: { name: "support" } }) },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 7, method: "connect", params: {} });
+    child.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+    const [code] = await once(child, "exit");
+    expect(code).toBe(1);
+    const answer = JSON.parse(stdout.slice(stdout.indexOf("{"))) as { id: number; error: { message: string } };
+    expect(answer.id).toBe(7);
+    expect(answer.error.message).toMatch(/^\[managed-copilot\] Cannot reach Managed Copilot at ws:\/\/127\.0\.0\.1:9: .+ \(capability_unavailable\)$/);
+  });
+
   it("answers requests the SDK already sent with the gateway's refusal, instead of dropping them", async () => {
     const server = createServer();
     const wss = new WebSocketServer({ server, handleProtocols: (protocols) => (protocols.has(BRIDGE_SUBPROTOCOL) ? BRIDGE_SUBPROTOCOL : false) });

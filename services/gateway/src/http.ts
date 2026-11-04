@@ -52,7 +52,7 @@ export interface Authenticator {
    * `background` when re-verifying a stored credential rather than a connected caller's: it never becomes the
    * account's live credential.
    */
-  authenticate(token: string, options?: { readonly background?: boolean }): Promise<Principal>;
+  authenticate(token: string, options?: { readonly background?: boolean; readonly app?: string }): Promise<Principal>;
   /**
    * Authenticates a request's credentials: a GitHub token, or an app key acting for one of the app's users, a GitHub
    * user who signed in to it, or itself. Gateways without apps only accept GitHub tokens.
@@ -219,7 +219,8 @@ export function toManagedError(error: unknown): ManagedCopilotError {
   return new ManagedCopilotError("internal", "Internal error");
 }
 
-async function resolvePrincipal(app: GatewayApp, req: IncomingMessage, auth: RouteAuth): Promise<Principal | undefined> {
+/** The caller a route's `auth` setting admits: a GitHub user, one acting through an app's key, or (`user-or-app`) the app. */
+export async function resolvePrincipal(app: GatewayApp, req: IncomingMessage, auth: RouteAuth): Promise<Principal | undefined> {
   if (auth === "none") return undefined;
   if (auth === "platform") {
     if (!platformKeyMatches(req.headers[PLATFORM_KEY_HEADER], app.config.platformKey)) throw new ManagedCopilotError("forbidden", "Platform credential required");
@@ -313,6 +314,10 @@ export class Router {
         throw new ManagedCopilotError(pathMatched ? "invalid_request" : "not_found", pathMatched ? `Method ${req.method} not allowed` : `No route for ${url.pathname}`);
       }
       const principal = await resolvePrincipal(app, req, route.auth);
+      // A request through an app reaches only the sessions within that app's environments, whatever module serves it.
+      if (principal?.app && route.segments[0] === "v1" && route.segments[1] === "sessions" && route.segments[2] === ":id" && params["id"]) {
+        app.services.sessions?.assertAppScope?.(principal, params["id"]);
+      }
       let status = 200;
       const ctx: RequestContext = {
         app,
