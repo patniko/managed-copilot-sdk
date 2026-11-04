@@ -1,5 +1,8 @@
 // Minimal Docker Engine API client over the local named pipe (Windows) or Unix socket, with no dependencies.
+import { execFile } from "node:child_process";
 import { request, type IncomingMessage } from "node:http";
+import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { z } from "zod";
 
 export interface DockerEndpoint {
   readonly socketPath?: string;
@@ -29,6 +32,41 @@ export function resolveDockerEndpoints(env: Readonly<Record<string, string | und
     ];
   }
   return [{ socketPath: "/var/run/docker.sock", label: "unix:///var/run/docker.sock" }];
+}
+
+const contextSchema = z.object({
+  Endpoints: z.object({ docker: z.object({ Host: z.string().min(1), SkipTLSVerify: z.boolean().optional() }) }),
+  TLSMaterial: z.record(z.string(), z.array(z.string())).optional(),
+});
+
+/** Use Docker's own context selection, including DOCKER_CONTEXT, DOCKER_CONFIG, and its platform defaults. */
+export async function discoverDockerEndpoints(env: Readonly<Record<string, string | undefined>>): Promise<DockerEndpoint[]> {
+  if (env.DOCKER_HOST && !env.DOCKER_CONTEXT) return resolveDockerEndpoints(env);
+  const output = await new Promise<string>((resolve, reject) => {
+    execFile("docker", ["context", "inspect", "--format", "{{json .}}"], { env, encoding: "utf8", windowsHide: true, timeout: 5_000, maxBuffer: 64 * 1024 }, (error, stdout) => {
+      if (!error) return resolve(stdout);
+      const message = error.code === "ENOENT"
+        ? "The Docker CLI could not be found; it is required to discover the sandbox Docker endpoint."
+        : error.killed
+          ? "Docker endpoint discovery timed out."
+          : "Docker endpoint discovery failed. Run `docker context inspect` to check the selected context.";
+      reject(new ManagedCopilotError("capability_unavailable", message));
+    });
+  });
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(output);
+  } catch {
+    throw new ManagedCopilotError("capability_unavailable", "Docker endpoint discovery returned invalid context metadata.");
+  }
+  const parsed = contextSchema.safeParse(metadata);
+  if (!parsed.success) throw new ManagedCopilotError("capability_unavailable", "Docker endpoint discovery returned invalid context metadata.");
+  const context = parsed.data;
+  const endpoint = context.Endpoints.docker;
+  if (!/^(unix|npipe|tcp):\/\//.test(endpoint.Host) || (endpoint.Host.startsWith("tcp://") && (endpoint.SkipTLSVerify || context.TLSMaterial?.docker?.length))) {
+    throw new ManagedCopilotError("capability_unavailable", "The selected Docker context uses a connection type the sandbox backend does not support.");
+  }
+  return resolveDockerEndpoints({ DOCKER_HOST: endpoint.Host });
 }
 
 export class DockerError extends Error {
@@ -83,12 +121,14 @@ type Filters = Record<string, string[]>;
 
 export class DockerClient {
   #endpoint: DockerEndpoint;
-  readonly #candidates: readonly DockerEndpoint[];
+  #candidates: readonly DockerEndpoint[];
+  readonly #resolveEndpoints: (() => Promise<readonly DockerEndpoint[]>) | undefined;
 
-  constructor(endpoints: readonly DockerEndpoint[]) {
-    if (endpoints.length === 0) throw new Error("No Docker endpoint configured");
-    this.#candidates = endpoints;
-    this.#endpoint = endpoints[0]!;
+  constructor(endpoints: readonly DockerEndpoint[] | (() => Promise<readonly DockerEndpoint[]>)) {
+    this.#resolveEndpoints = typeof endpoints === "function" ? endpoints : undefined;
+    this.#candidates = typeof endpoints === "function" ? [] : endpoints;
+    if (!this.#resolveEndpoints && this.#candidates.length === 0) throw new Error("No Docker endpoint configured");
+    this.#endpoint = this.#candidates[0] ?? { label: "Not resolved" };
   }
 
   get endpoint(): DockerEndpoint {
@@ -97,6 +137,10 @@ export class DockerClient {
 
   /** Finds a reachable endpoint; returns the engine version or throws. */
   async ping(): Promise<{ version: string; os: string; arch: string }> {
+    if (this.#resolveEndpoints && this.#candidates.length === 0) {
+      this.#candidates = await this.#resolveEndpoints();
+      if (this.#candidates.length === 0) throw new Error("No Docker endpoint configured");
+    }
     let lastError: unknown;
     for (const candidate of this.#candidates) {
       this.#endpoint = candidate;
@@ -111,6 +155,7 @@ export class DockerClient {
   }
 
   request<T = unknown>(method: string, path: string, options: { query?: Record<string, string | number | boolean | undefined>; body?: unknown; timeoutMs?: number } = {}): Promise<T> {
+    if (this.#candidates.length === 0) return Promise.reject(new ManagedCopilotError("capability_unavailable", "The sandbox Docker endpoint has not been discovered yet."));
     const search = new URLSearchParams();
     for (const [key, value] of Object.entries(options.query ?? {})) if (value !== undefined) search.set(key, String(value));
     const fullPath = search.size > 0 ? `${path}?${search}` : path;

@@ -82,8 +82,14 @@ describe("links", () => {
 
 describe("patterns", () => {
   const apphost = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
-  /** An environment's declaration in the root AppHost: one line, or a block closed at the same indent. */
-  const declaration = (name: string) => apphost.match(new RegExp(`^( +)${name}: \\{(?:[^\\n]*\\},?|[\\s\\S]*?\\n\\1\\},?)`, "m"))?.[0];
+  /** An environment's inline declaration or its shared top-level object in the root AppHost. */
+  const declaration = (name: string) => {
+    const reference = apphost.match(new RegExp(`^ +${name}: (\\w+),?$`, "m"))?.[1];
+    const pattern = reference
+      ? `^const ${reference} = \\{[\\s\\S]*?^\\};`
+      : `^( +)${name}: \\{(?:[^\\n]*\\},?|[\\s\\S]*?\\n\\1\\},?)`;
+    return apphost.match(new RegExp(pattern, "m"))?.[0];
+  };
 
   it("lists the six patterns, made of the three building blocks", () => {
     expect(PATTERNS.map((pattern) => pattern.id)).toEqual(["isolated", "shared", "promotable", "direct", "delegate", "mixed"]);

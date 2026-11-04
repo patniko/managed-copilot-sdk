@@ -6,8 +6,12 @@ import { JOBS } from "../src/shared/jobs.js";
 import { LANES } from "../src/shared/lanes.js";
 
 const root = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
-/** An environment's declaration in the root AppHost: one line, or a block closed at the same indent. */
-const declaration = (name: string) => root.match(new RegExp(`^( +)${name}: \\{(?:[^\\n]*\\},?|[\\s\\S]*?\\n\\1\\},?)`, "m"))?.[0];
+/** An environment's declaration in the root AppHost: inline (one line, or a block closed at the same indent), or the top-level object it names. */
+const declaration = (name: string) => {
+  const reference = root.match(new RegExp(`^ +${name}: (\\w+),?$`, "m"))?.[1];
+  const pattern = reference ? `^const ${reference} = \\{[\\s\\S]*?^\\};` : `^( +)${name}: \\{(?:[^\\n]*\\},?|[\\s\\S]*?\\n\\1\\},?)`;
+  return root.match(new RegExp(pattern, "m"))?.[0];
+};
 
 describe("AppHost fragment", () => {
   it("describes the app the way the root AppHost expects", () => {

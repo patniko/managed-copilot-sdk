@@ -5,7 +5,7 @@ import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, 
 import { DEFAULT_NETWORK_SUBNET_POOL, isSubnetOverlap, sharedNetworkSubnets } from "../../../../docker-subnets.js";
 import type { Logger } from "../../../../log.js";
 import type { SandboxEndpoint, SandboxImageRef, SandboxProvider, SandboxProviderDeps, SandboxSpec, SandboxStartResult } from "../types.js";
-import { DockerClient, DockerError, resolveDockerEndpoints } from "./docker.js";
+import { DockerClient, DockerError, discoverDockerEndpoints } from "./docker.js";
 import { SandboxImages, registrySettingProblems } from "./images.js";
 
 interface RelayTarget {
@@ -61,7 +61,7 @@ export function createDockerSandboxProvider(deps: SandboxProviderDeps): DockerSa
   const { env, log } = deps;
   // Refused again (with the same message) when an image is built; said at startup so the operator sees it at once.
   for (const problem of registrySettingProblems(env)) log.warn(problem);
-  const docker = new DockerClient(resolveDockerEndpoints(env));
+  const docker = new DockerClient(() => discoverDockerEndpoints(env));
   const images = new SandboxImages({ docker, log, env, appHostDir: deps.appHostDir, ...(env.MANAGED_COPILOT_SANDBOX_CONTEXT ? { contextDir: env.MANAGED_COPILOT_SANDBOX_CONTEXT } : {}) });
   return new DockerSandboxProvider({
     docker,

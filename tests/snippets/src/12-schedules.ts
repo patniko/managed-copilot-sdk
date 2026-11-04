@@ -22,7 +22,7 @@ export default snippet(import.meta.url, { title: "Run on a schedule", section: "
     name: `weekday-triage-${randomUUID().slice(0, 8)}`,
     cron: "0 9 * * 1-5",
     timeZone: "America/Los_Angeles",
-    environment: "chat",
+    environment: "webhook-examples",
     session: { agent: "triage", tools: [lookupOrder] },
     webhook: "snippets", // supplies an authorized handler while the creating process is offline
     prompt: "Triage the issues opened since the last run",

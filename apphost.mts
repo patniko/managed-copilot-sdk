@@ -50,6 +50,12 @@ const swarm = researchSwarm({ port: ports.researchSwarm });
 const helpDeskDemo = helpDesk({ port: ports.helpDesk });
 const incidents = incidentCommander({ port: ports.incidentCommander, webhookSecret: await generatedSecret("incident-commander-webhook-secret") });
 const repoDoctorDemo = repoDoctor({ port: ports.repoDoctor });
+const chatEnvironment = {
+  type: "shared" as const,
+  customizations: "./environments/chat", // agents, skills, and instructions (section 10)
+  models: ["claude-sonnet-5", "claude-haiku-5.5"],
+  network: ["learn.microsoft.com"], // only this host
+};
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
@@ -59,12 +65,8 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   // The operator console (`npx managed-copilot console`, spec section 16) is open to every account on this machine; a
   // deployment turns it on for the accounts in Parameters:copilot-operator-users (or -operator-orgs).
   environments: {
-    chat: {
-      type: "shared",
-      customizations: "./environments/chat", // agents, skills, and instructions (section 10)
-      models: ["claude-sonnet-5", "claude-haiku-5.5"],
-      network: ["learn.microsoft.com"], // only this host
-    },
+    chat: chatEnvironment,
+    ...(publishing ? {} : { "webhook-examples": chatEnvironment }),
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
     // A coordinator on the shared runtime that starts workers, each a session of `coder` in its own sandbox (section 17).
@@ -93,7 +95,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
       : {
           snippets: {
             url: `http://localhost:${snippetsWebhook.port}/api/copilot-events`,
-            environments: ["chat"],
+            environments: ["webhook-examples"],
             events: ["session.action_required", "session.idle", "session.failed", "schedule.run_started"],
             secret: snippetsWebhook.secret,
           },
