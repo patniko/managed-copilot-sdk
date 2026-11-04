@@ -94,7 +94,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Research Swarm, Pattern Race, Data Desk, Help Desk, Incident Commander, and the gallery |
+| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Research Swarm, Pattern Race, Data Desk, Repo Doctor, Help Desk, Incident Commander, and the gallery |
 | Walkthroughs | `walkthroughs` | scripts (`pnpm walkthrough <nn>`) | The walkthroughs' runnable code, documented in `walkthroughs/*/README.md` |
 | Spec snippets | `tests/snippets` | scripts (Aspire resource `snippets`) | Every spec snippet as an acceptance check against a running platform |
 | Environment customizations | `environments/<name>` | files | Agents, skills, and instructions for the root AppHost's environments, one folder per environment (today `chat`) |
@@ -1563,10 +1563,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
 - `aspire run` from the repository root starts: the gateway (7400), `pattern-race` (7420), `research-swarm` (7425),
-  `data-desk` (7430), `help-desk` (7440), `incident-commander` (7445), `dispatch` (7470), `software-factory` (7480),
-  `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets webhook receives on 7485.
-  `MANAGED_COPILOT_PORT_OFFSET` shifts all these ports for a second copy, which also sets `discovery: false`
-  (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
+  `data-desk` (7430), `repo-doctor` (7435), `help-desk` (7440), `incident-commander` (7445), `dispatch` (7470),
+  `software-factory` (7480), `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets
+  webhook receives on 7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all these ports for a second copy, which also sets
+  `discovery: false` (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 
 ### Copilot CLI attach (spec section 14)
 
@@ -1815,7 +1815,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7420, 7425, 7430, 7440, 7445, 7470, 7480, 7485, 7490 | Pattern Race, Research Swarm, Data Desk, Help Desk, Incident Commander, Dispatch, software factory, spec snippets webhook receiver, assistant (fixed for its Google OAuth redirect) |
+| Demo ports | 7420, 7425, 7430, 7435, 7440, 7445, 7470, 7480, 7485, 7490 | Pattern Race, Research Swarm, Data Desk, Repo Doctor, Help Desk, Incident Commander, Dispatch, software factory, spec snippets webhook receiver, assistant (fixed for its Google OAuth redirect) |
 | Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
@@ -1857,6 +1857,7 @@ Where each area of the platform lives.
 | **data-desk** | `demos/data-desk/**` | Data Desk: chat with a spreadsheet on a promotable environment; the app's tools answer on the shared runtime, and a request that needs code moves the session into its Python sandbox |
 | **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()` |
 | **incident-commander** | `demos/incident-commander/**` | Incident Commander: alerts (or the labeled simulation) open incidents run by a mixed coordinator; its deploy approval waits on the platform with the app detached, and the platform's webhook keeps the app informed |
+| **repo-doctor** | `demos/repo-doctor/**` | Repo Doctor: a CI fixer that gives each run one isolated sandbox (checkout, tests, and diff through `managed.exec`; setup and the fix as Copilot turns), deletes it at the end, and shows its allowed hosts and its `network.blocked` events live |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |

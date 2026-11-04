@@ -58,6 +58,15 @@ const APPS = [
     },
   },
   {
+    id: "repo-doctor",
+    url: local(7435),
+    async prepare(page) {
+      // Open the most recent run when there is one.
+      const first = page.locator('a[href^="#/runs/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "incident-commander",
     url: local(7445),
     async prepare(page) {

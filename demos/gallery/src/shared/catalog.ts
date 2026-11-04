@@ -140,6 +140,18 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/api/health",
     readme: "demos/incident-commander/README.md",
   },
+  {
+    id: "repo-doctor",
+    title: "Repo Doctor",
+    tagline: "A failing test in, a verified patch out",
+    description:
+      "Paste a public GitHub repository: one sandbox clones it, Copilot fixes the failing tests, and Repo Doctor verifies the patch, while a strip shows which hosts the sandbox reached and which were blocked.",
+    tryIt: "Run the sample and watch two failing tests turn green.",
+    app: "repo-doctor",
+    port: 7435,
+    healthPath: "/api/health",
+    readme: "demos/repo-doctor/README.md",
+  },
   CONSOLE,
 ];
 
@@ -218,7 +230,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "coder",
     settings: ['type: "isolated"'],
     walkthrough: "03",
-    demos: [{ app: "software-factory", where: "App-driven mode" }],
+    demos: [
+      { app: "repo-doctor", where: "every run" },
+      { app: "software-factory", where: "App-driven mode" },
+    ],
   },
   {
     id: "shared",
