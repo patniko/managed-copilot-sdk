@@ -1,0 +1,20 @@
+# Build context for demos/research-swarm/Dockerfile (the repository root): only what the Research Swarm build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!libraries/protocol/**
+!libraries/sdk/**
+!libraries/github-theme/**
+!demos/research-swarm/**
+!deployments/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+demos/research-swarm/customizations
+demos/research-swarm/docs
+deployments/azure/hosting
+deployments/azure/sandbox

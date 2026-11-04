@@ -81,6 +81,18 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/healthz",
     readme: "demos/assistant/README.md",
   },
+  {
+    id: "research-swarm",
+    title: "Research Swarm",
+    tagline: "One question, many researchers, one cited report",
+    description:
+      "A lead on the shared runtime splits your question across web researchers, each in its own sandbox, and writes a report where every claim cites a page they read.",
+    tryIt: "Ask how WebAssembly garbage collection works.",
+    app: "research-swarm",
+    port: 7425,
+    healthPath: "/api/health",
+    readme: "demos/research-swarm/README.md",
+  },
   CONSOLE,
 ];
 
@@ -207,6 +219,7 @@ export const PATTERNS: readonly Pattern[] = [
       { app: "dispatch", where: "Delegate to workers" },
       { app: "software-factory", where: "Agent-led mode" },
       { app: "assistant", where: "its sandboxes" },
+      { app: "research-swarm", where: "its researchers" },
     ],
   },
   {

@@ -4,6 +4,7 @@ import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
+import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swarm/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -22,6 +23,7 @@ const ports = {
   factory: 7480 + offset,
   snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
+  researchSwarm: RESEARCH_SWARM_DEFAULT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -33,6 +35,7 @@ const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
+const swarm = researchSwarm({ port: ports.researchSwarm });
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
@@ -59,6 +62,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...factory.environments,
     ...assistant.environments,
     ...dispatchDemo.environments,
+    ...swarm.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -106,6 +110,9 @@ await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", al
 // Dispatch: one conversation with an orchestrator agent that, message by message, creates a sandbox for each part of
 // the work or sends it to a sandbox it already has.
 await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allowedHostsEnv: "DISPATCH_ALLOWED_HOSTS", gatewayUrlEnv: ["DISPATCH_ATTACH_URL"] });
+
+// Research Swarm: one question fans out to web researchers, each in its own sandbox, and comes back as a cited report.
+await addDemo(swarm.app, { dockerfile: "demos/research-swarm/Dockerfile", allowedHostsEnv: "RESEARCH_SWARM_ALLOWED_HOSTS" });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
 // for hands-on work.
