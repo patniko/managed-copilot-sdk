@@ -4,7 +4,6 @@ packages:
   - demos/*
   - tests/*
   - deployments/*
-  - deployments/azure/qualify/*
   - walkthroughs
 
 # Allow install scripts only for packages that need them.

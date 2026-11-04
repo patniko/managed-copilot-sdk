@@ -75,7 +75,9 @@ flowchart LR
 
 > **Shortcut.** From the repository root, `npx managed-copilot deploy` runs the steps below: it checks the tools, fills
 > in the subscription, region, resource group, and (on a first deployment) you as a user and operator, passes your
-> GitHub sign-in as the apps' token without putting it on a command line, and runs `aspire deploy`.
+> GitHub sign-in as the apps' token without putting it on a command line, passes the AppHost's own parameters from its
+> user secrets the same way (for example OAuth clients; not the platform's generated keys or values the deployment
+> already keeps), and runs `aspire deploy`.
 > `npx managed-copilot access` shows and changes who may use it, operate it, and open its apps
 > ([CLI reference](../libraries/cli/README.md#deploy-and-share)). The manual steps:
 
@@ -97,8 +99,9 @@ flowchart LR
    ```
 
    `aspire deploy` runs the AppHost as Production, and with Aspire CLI 13.6.4 it doesn't load user secrets there, so
-   these settings can be missed ("has no access rules" although `aspire secret list` shows them). Pass them in the
-   environment too, as `npx managed-copilot deploy` does (`:` becomes `__`):
+   these settings, and any other parameter kept only in user secrets, can be missed ("has no access rules" although
+   `aspire secret list` shows them). Pass them in the environment too, as `npx managed-copilot deploy` does (`:` becomes
+   `__`):
 
    ```powershell
    ${env:Parameters__copilot-github-users} = "your-login"
@@ -159,7 +162,7 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the ingress of every app that isn't public (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it, looked up only when such an app exists. The platform subnet is always allowed (webhooks). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |
 | `Parameters:<name>-durable-key`, `Parameters:<name>-vault-key` | No | Secrets, 32 bytes base64. Generated and persisted with the deployment when not set, so the sealing keys never sit beside the sealed values on the NFS share. A deployment that predates them had its keys generated into `/data`. Its next gateway wraps each key file that still seals stored data under these parameters (`durable.key.wrapped`, `network/vault.key.wrapped`). The following `aspire deploy` deletes the plaintext files once a gateway that reads the wrapped keys has served for 15 minutes (so a failed rollout's fallback is never left without them). A stale key file the parameter already replaced is renamed `.replaced`. Earlier vaults and background sign-ins stay readable. Keep these parameters: without the right one the gateway refuses to start. |
-| `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. |
+| `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. `npx managed-copilot deploy` passes them from the AppHost's user secrets on the deployment that first uses them; to replace values the deployment already keeps, set `Parameters__google-client-secret` (and so on) in the environment. |
 | `Parameters:<name>-platform-key`, `Parameters:<name>-egress-key`, and the AppHost's generated secrets | Generated | Kept in the AppHost's user secrets and deployment state; deployed as Container Apps secrets (`secretRef`), never in plain configuration. The egress key links the egress proxy to the gateway. |
 
 Every AppHost secret parameter reaches the gateway as a Container Apps secret, and its `MANAGED_COPILOT_CONFIG` holds
@@ -433,7 +436,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Orchestrator (2026-10-27) | Snippet 14 (34 s) and walkthrough 11 (50 s) passed, each worker in its own sandbox. A run of every orchestrator tool passed 10/10 checks: a builder's script read with `read_worker_file`, copied to a second worker's sandbox with `copy_worker_files` and run there after `message_worker`, worker prompts answered as `platform:orchestrator`, `stop_worker` deleting the builder's session, and deleting the coordinator deleting the other |
 | Software factory, agent-led (2026-10-27) | Run from this machine against the deployed gateway (the apps' allowlist excluded this machine's tunnel). The coordinator created two builders and later a release worker, each in its own Container Apps sandbox. It reused one builder for two fix rounds until the second-model review approved it, then copied both builders' files into the release sandbox. Completed in 541 s: **9 files, 47/47 tests**, which also passed in an offline, read-only container. The coordinator stopped all three workers afterwards |
 | Dispatch (2026-10-27) | The deployed app started and connected to the gateway. This machine's network tunnel reaches the apps from an address outside their allowlist, so the app was driven through its own API from inside its container (`az containerapp exec`). Two approved requests each created a worker in its own sandbox: Python (`dispatch-python`) and web research (`dispatch-web`, which read en.wikipedia.org through its allowlist). A follow-up typed in Copilot CLI, attached to the same coordinator, reused the Python worker without a new approval; Dispatch labeled it "from Copilot CLI" and showed the reuse. Deleting the conversation removed the coordinator and both workers |
-| Public apps (2026-11-04) | A separate deployment of [`deployments/azure/qualify/public-apps`](../deployments/azure/qualify/public-apps/README.md) (a gateway and the gallery image twice; no model calls), made with `npx managed-copilot deploy` into its own resource group in 6 m 35 s with `Parameters:app-allowed-ips` set to an address that isn't this machine's. Its `check.mjs` passed **10/10**: the public app (tagged `managed-copilot-access: public`, no IP rules, no `MANAGED_COPILOT_GITHUB_TOKEN`) answered this machine with 200, while the app acting as the deployer (its allowlist plus the platform rule, the token as a secret reference) answered `403 RBAC: access denied`. `access` listed the public app apart, and `access ips add` updated only the allowlisted app. This machine's tunnel reaches Azure from an address other than the one `api.ipify.org` reports, so the allowlisted app kept refusing it after `access ips add me`; the public app didn't care. The resource group was deleted afterwards |
+| Public apps (2026-11-04) | A separate deployment of [`deployments/azure/qualify/public-apps`](../deployments/azure/qualify/public-apps/README.md) (a gateway and the gallery image twice; no model calls), made with `npx managed-copilot deploy` into its own resource group in 6 m 35 s with `Parameters:app-allowed-ips` set to an address that isn't this machine's. Its `check.mjs` passed **10/10**: the public app (tagged `managed-copilot-access: public`, no IP rules, no `MANAGED_COPILOT_GITHUB_TOKEN`) answered this machine with 200, while the app acting as the deployer (its allowlist plus the platform rule, the token as a secret reference) answered `403 RBAC: access denied`. `access` listed the public app apart, and `access ips add` updated only the allowlisted app. This machine's tunnel reaches Azure from an address other than the one `api.ipify.org` reports, so the allowlisted app kept refusing it after `access ips add me`; the public app didn't care. The resource group was deleted afterwards. A second deployment then checked the switch to public, with the guard step running live each time: switching the app that acted as the deployer straight to `public: true` was refused (`check-deployer-gallery-public` named its token-holding revision) and left its ingress as it was (`allow-1`, `platform`); `githubToken: false` deployed and its old revision was deactivated; `public: true` then passed, and the app answered this machine with 200, tagged `public` with no IP rules. That resource group was deleted too |
 
 The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real
 email or calendar invitation was sent. GitHub App credential refresh, real two-account access isolation, unsupported
@@ -516,6 +519,11 @@ identities. Your AppHost's user secrets stay on your machine.
   the gateway. Check the `egress` app's log in the `mc-egress-<suffix>` environment (it names the gateway URL it
   cannot reach) and that its key matches the gateway's (`Parameters:<name>-egress-key`).
 - **The image step fails at `az acr login`**: install the Azure CLI and sign in with the account you deploy with.
+- **`login-to-acr-…` fails with "error storing credentials … Not enough memory resources are available"** (Windows):
+  the registry's token is larger than the Windows credential store Docker Desktop saves it in accepts. Deploy with
+  `DOCKER_CONFIG` pointing at a copy of `%USERPROFILE%\.docker` whose `config.json` has no `credsStore` and at least
+  one entry under `auths` (any placeholder; with none, Docker falls back to the Windows store), then delete the copy,
+  which holds the registry credential.
 - **"Azure did not confirm whether … was created" / "An earlier attempt … has not been confirmed"**: Azure's answer to a
   create was lost. The gateway retains its write-ahead record across restarts and retries only the lookup, not the
   create. Neither elapsed time nor an empty lookup proves failure. It preserves associated disks until the operation

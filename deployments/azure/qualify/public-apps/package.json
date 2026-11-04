@@ -7,10 +7,10 @@
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "devDependencies": {
-    "@managed-copilot/aspire": "workspace:*",
-    "@managed-copilot/cli": "workspace:*",
-    "@types/node": "^24.0.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "@managed-copilot/aspire": "link:../../../../libraries/aspire",
+    "@managed-copilot/cli": "link:../../../../libraries/cli",
+    "@types/node": "link:../../../../node_modules/@types/node",
+    "tsx": "link:../../../../node_modules/tsx",
+    "typescript": "link:../../../../node_modules/typescript"
   }
 }
