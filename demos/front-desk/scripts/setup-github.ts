@@ -8,7 +8,7 @@
  * `aspire secret path` names, so the secret never appears on a command line. Restart `aspire run` to use them; for
  * `aspire deploy`, see demos/front-desk/README.md.
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
@@ -20,13 +20,32 @@ const ID_KEY = "Parameters:front-desk-github-client-id";
 const SECRET_KEY = "Parameters:front-desk-github-client-secret";
 
 function secretsFile(): string {
+  const args = ["secret", "path", "--apphost", resolve(repo, "apphost.mts"), "--non-interactive"];
   try {
-    const output = execFileSync("aspire", ["secret", "path", "--apphost", resolve(repo, "apphost.mts"), "--non-interactive"], { cwd: repo, encoding: "utf8", windowsHide: true, shell: process.platform === "win32" });
+    let output: string;
+    try {
+      output = execFileSync("aspire", args, { cwd: repo, encoding: "utf8", windowsHide: true });
+    } catch (error) {
+      // On Windows, `aspire` may be only an npm .cmd shim, which runs through the shell.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || process.platform !== "win32") throw error;
+      output = execSync(`aspire ${args.map((arg) => `"${arg}"`).join(" ")}`, { cwd: repo, encoding: "utf8", windowsHide: true });
+    }
     const path = output.trim().split(/\r?\n/).filter(Boolean).at(-1)?.trim();
     if (!path) throw new Error("aspire secret path printed nothing");
     return path;
   } catch (error) {
     throw new Error(`Couldn't find the AppHost's user secrets with \`aspire secret path\`: ${(error as Error).message.split("\n")[0]}`);
+  }
+}
+
+/** The user secrets as they are now. Aspire writes the file with a byte order mark, which JSON.parse doesn't accept. */
+function readSecrets(file: string): Record<string, unknown> {
+  if (!existsSync(file)) return {};
+  const text = readFileSync(file, "utf8").replace(/^\uFEFF/, "").trim();
+  try {
+    return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch (error) {
+    throw new Error(`The AppHost's user secrets (${file}) aren't valid JSON, so nothing was changed: ${(error as Error).message}`);
   }
 }
 
@@ -70,13 +89,16 @@ async function ask(question: string, hidden = false): Promise<string> {
 
 try {
   const file = secretsFile();
+  // Read first: a file that can't be updated is reported before anything is typed.
+  const secrets = readSecrets(file);
   console.log("Front Desk: Continue with GitHub");
-  console.log(`Callback URLs your GitHub OAuth app needs: http://localhost:7450/auth/github/callback (plus any port offset), and https://front-desk.<environment-domain>/auth/github/callback once deployed.\n`);
+  console.log(
+    "Callback URLs your GitHub OAuth app (or GitHub App) needs: http://localhost:7450/auth/github/callback (plus any port offset), and https://front-desk.<environment-domain>/auth/github/callback once deployed.\n",
+  );
   const clientId = await ask("Client ID: ");
   if (!/^[A-Za-z0-9._-]{10,100}$/.test(clientId)) throw new Error("That doesn't look like a GitHub client ID (for example Ov23li… or Iv23li…).");
   const clientSecret = await ask("Client secret (not shown): ", true);
   if (clientSecret.length < 20) throw new Error("That client secret looks too short. Generate one on the OAuth app's page and paste it.");
-  const secrets: Record<string, unknown> = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8") || "{}") as Record<string, unknown>) : {};
   secrets[ID_KEY] = clientId;
   secrets[SECRET_KEY] = clientSecret;
   mkdirSync(dirname(file), { recursive: true });
