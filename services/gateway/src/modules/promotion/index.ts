@@ -1,4 +1,4 @@
-// Owner: promotion workstream. One-way promotion of promotable sessions from shared placement into their own sandbox
+// One-way promotion of promotable sessions from shared placement into their own sandbox
 // (spec section 9, gate G5): `POST /v1/sessions/:id/promote`, the `request_sandbox` platform tool, the
 // `session.promoted` platform event, and crash recovery of interrupted attempts.
 import { join } from "node:path";

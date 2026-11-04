@@ -3,7 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { appAccessSummary, publishApp, publishManagedCopilot, type PublishAppOptions } from "../src/publish/index.js";
+import { appAccessSummary, checkPublicTransition, publishApp, publishManagedCopilot, type PublishAppOptions } from "../src/publish/index.js";
+import type { CommandRunner } from "../src/publish/sandbox-images.js";
 import type { PublishBuilder } from "../src/publish/types.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -55,6 +56,7 @@ class FakeContainer {
 interface Step {
   readonly name: string;
   readonly run: (context: unknown) => Promise<void>;
+  readonly options?: { readonly dependsOn?: readonly string[]; readonly requiredBy?: readonly string[] };
 }
 
 /** The members of the generated AppHost builder that publish mode uses, recording what it declares. */
@@ -86,8 +88,8 @@ function fakeBuilder(settings: Record<string, string> = {}) {
     },
     addParameterWithGeneratedValue: async (name: string) => ({ parameter: name }),
     pipeline: () => ({
-      addStep: async (name: string, run: Step["run"]) => {
-        steps.push({ name, run });
+      addStep: async (name: string, run: Step["run"], options?: Step["options"]) => {
+        steps.push({ name, run, ...(options ? { options } : {}) });
       },
     }),
   };
@@ -207,6 +209,53 @@ describe("publishApp access", () => {
       ["Apps open to", "203.0.113.7/32: dispatch, gallery (change with Parameters:app-allowed-ips)"],
       ["Public apps", `https://front-desk.${DOMAIN} (any address; they sign in their own users)`],
     ]);
+  });
+
+  it("checks a public app's running revisions after the environment exists and before the app's ingress changes", async () => {
+    const { publish, steps } = await deploy();
+    await publish(app("dispatch", 7470));
+    await publish(app("front-desk", 7450, { public: true }));
+    expect(steps.filter((step) => step.name.startsWith("check-")).map((step) => [step.name, step.options])).toEqual([
+      ["check-front-desk-public", { dependsOn: [`provision-${NAME}-env`], requiredBy: ["provision-front-desk-containerapp"] }],
+    ]);
+  });
+});
+
+describe("checkPublicTransition", () => {
+  const ENVIRONMENT_ID = "/subscriptions/11111111-2222-3333-4444-555555555555/resourceGroups/mc-demo/providers/Microsoft.App/managedEnvironments/copilot-env";
+  const revision = (name: string, env: string[], active = true) => ({ name, properties: { active, template: { containers: [{ env: env.map((variable) => ({ name: variable })) }] } } });
+  const runner = (code: number, output: unknown) => {
+    const calls: (readonly string[])[] = [];
+    const run: CommandRunner = async (command, args) => {
+      calls.push([command, ...args]);
+      return { code, output: typeof output === "string" ? output : JSON.stringify(output) };
+    };
+    return { run, calls };
+  };
+
+  it("lists the app's revisions in the environment's subscription and resource group", async () => {
+    const { run, calls } = runner(0, []);
+    await checkPublicTransition("front-desk", ENVIRONMENT_ID, run);
+    expect(calls).toEqual([
+      ["az", "containerapp", "revision", "list", "--name", "front-desk", "--resource-group", "mc-demo", "--subscription", "11111111-2222-3333-4444-555555555555", "--only-show-errors", "-o", "json"],
+    ]);
+  });
+
+  it("refuses while an active revision holds the deployer's GitHub token, and says how to switch in two deploys", async () => {
+    const { run } = runner(0, [revision("front-desk--old", ["PORT", "MANAGED_COPILOT_GITHUB_TOKEN"]), revision("front-desk--new", ["PORT"])]);
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, run)).rejects.toThrow(/front-desk--old.*githubToken: false instead of public: true/s);
+  });
+
+  it("passes a new app, an app whose revisions hold no token, and inactive revisions that still do", async () => {
+    await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "ERROR: (ResourceNotFound) The Resource 'Microsoft.App/containerApps/front-desk' under resource group 'mc-demo' was not found.").run);
+    await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, [revision("front-desk--a", ["PORT", "MANAGED_COPILOT_URL"])]).run);
+    await checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, [revision("front-desk--old", ["MANAGED_COPILOT_GITHUB_TOKEN"], false), revision("front-desk--new", ["PORT"])]).run);
+  });
+
+  it("fails explicitly when it can't tell", async () => {
+    await expect(checkPublicTransition("front-desk", null, runner(0, []).run)).rejects.toThrow(/resource ID isn't known/);
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(1, "ERROR: Please run 'az login' to setup account.").run)).rejects.toThrow(/Couldn't check app "front-desk".*az login/s);
+    await expect(checkPublicTransition("front-desk", ENVIRONMENT_ID, runner(0, "not json").run)).rejects.toThrow(/wasn't JSON/);
   });
 });
 

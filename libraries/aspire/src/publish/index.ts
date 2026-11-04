@@ -17,7 +17,7 @@ import { writeGatewayBuildFiles } from "./gateway-image.js";
 import { EGRESS_BICEP } from "./egress.js";
 import { FOUNDRY_ACCESS_BICEP } from "./foundry.js";
 import { SANDBOX_GROUP_BICEP } from "./sandbox-group.js";
-import { imageMap, planEgressImage, planSandboxImages, pushEgressImage, pushSandboxImages, type EgressImagePlan, type SandboxImagePlan } from "./sandbox-images.js";
+import { imageMap, planEgressImage, planSandboxImages, pushEgressImage, pushSandboxImages, runCommand, type CommandRunner, type EgressImagePlan, type SandboxImagePlan } from "./sandbox-images.js";
 import type { PublishAzureResource, PublishBuilder, PublishContainer, PublishContainerResource, PublishEnvironmentResource, PublishValue } from "./types.js";
 
 export { AzurePublishError } from "./config.js";
@@ -453,6 +453,52 @@ export function appAccessSummary(
   return lines;
 }
 
+const APP_TOKEN_ENV = "MANAGED_COPILOT_GITHUB_TOKEN";
+
+interface Revision {
+  readonly name?: string;
+  readonly properties?: { readonly active?: boolean; readonly template?: { readonly containers?: readonly { readonly env?: readonly { readonly name?: string }[] }[] } };
+}
+
+/**
+ * Refuses to open an app to any address while one of its active revisions holds the deployment's GitHub token.
+ * Container Apps applies ingress to every revision at once, but the token leaves only with the new revision, so an app
+ * that acted as the deployer would serve any address as the deployer until the new revision took over (or for as long
+ * as it failed to). A new app, or one that already holds no token, passes.
+ */
+export async function checkPublicTransition(app: string, environmentId: string | null | undefined, run: CommandRunner = runCommand): Promise<void> {
+  const scope = environmentId ? /^\/subscriptions\/([^/]+)\/resourceGroups\/([^/]+)\//i.exec(environmentId) : null;
+  if (!scope) throw new AzurePublishError(`Can't check app "${app}" before opening it to any address: the Container Apps environment's resource ID isn't known yet.`);
+  const [, subscription, group] = scope;
+  const listed = await run("az", ["containerapp", "revision", "list", "--name", app, "--resource-group", group!, "--subscription", subscription!, "--only-show-errors", "-o", "json"]).catch(
+    (error: Error) => ({ code: 1, output: error.message }),
+  );
+  if (listed.code !== 0) {
+    if (/\(ResourceNotFound\)|was not found/i.test(listed.output)) return;
+    const tail = listed.output.split("\n").filter(Boolean).slice(-5).join("\n");
+    throw new AzurePublishError(
+      `Couldn't check app "${app}" before opening it to any address (\`az containerapp revision list\` exited with ${listed.code}; the Azure CLI must be installed and signed in).${tail ? `\n${tail}` : ""}`,
+    );
+  }
+  let revisions: Revision[];
+  try {
+    revisions = JSON.parse(listed.output) as Revision[];
+  } catch {
+    throw new AzurePublishError(`Couldn't check app "${app}" before opening it to any address: the Azure CLI's revision list wasn't JSON.`);
+  }
+  const holding = revisions
+    .filter((revision) => revision.properties?.active !== false)
+    .filter((revision) => (revision.properties?.template?.containers ?? []).some((container) => (container.env ?? []).some((variable) => variable.name === APP_TOKEN_ENV)))
+    .map((revision) => revision.name ?? "unnamed");
+  if (holding.length > 0) {
+    throw new AzurePublishError(
+      `App "${app}" runs now as an app that acts as your GitHub account (revision ${holding.join(", ")}), and opening it to any address in the same deploy would ` +
+        "expose that revision, with your token, until the new one takes over. Deploy it once with githubToken: false instead of public: true " +
+        "(it stays behind Parameters:app-allowed-ips and drops the token), then again with public: true.",
+    );
+  }
+}
+
 /**
  * Publishes an app that uses the platform (a demo or your own service). By default it acts as one GitHub account
  * (`Parameters:app-github-token`), so its ingress only admits the source ranges in `Parameters:app-allowed-ips`. An
@@ -481,6 +527,24 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   if (isPublic) deployment.publicApps.push(app.name);
   else deployment.restrictedApps.push({ name: app.name, actsAsAccount });
   if (actsAsAccount) deployment.appToken ??= await publisher.addParameter("app-github-token", appTokenParameterOptions());
+  if (isPublic) {
+    // Before the app's ingress opens: an earlier revision that still holds the deployer's token must not become public.
+    await publisher.pipeline().addStep(
+      `check-${app.name}-public`,
+      async (context) => {
+        const step = await context.reportingStep();
+        const task = await step.createTask(`Checking that no revision of ${app.name} holds your GitHub token before opening it to any address`);
+        try {
+          await checkPublicTransition(app.name, await (await deployment.environment.getOutput("AZURE_CONTAINER_APPS_ENVIRONMENT_ID")).value());
+          await task.completeTask({ completionMessage: `${app.name} holds no GitHub token` });
+        } catch (error) {
+          await task.completeTask({ completionMessage: (error as Error).message, completionState: "CompletedWithError" });
+          throw error;
+        }
+      },
+      { dependsOn: [`provision-${deployment.name}-env`], requiredBy: [`provision-${app.name}-containerapp`] },
+    );
+  }
 
   const dataDirectory = app.dataDirectory ?? "/data";
   const subPath = `apps/${app.name}`;

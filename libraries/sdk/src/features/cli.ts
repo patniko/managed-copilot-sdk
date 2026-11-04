@@ -1,4 +1,4 @@
-// Owner: devloop workstream. Runs the stock Copilot CLI attached to the live session (spec section 14).
+// Runs the stock Copilot CLI attached to the live session (spec section 14).
 //
 // The CLI only accepts its AHP endpoint on the command line, so the launcher never puts a credential there. It runs a
 // loopback relay for the CLI and connects to the deployment itself with a fresh single-use attach ticket per CLI

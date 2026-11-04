@@ -1,4 +1,4 @@
-// Owner: sandbox workstream. Turn-scoped immutable artifacts from /workspace/outputs (spec section 6).
+// Turn-scoped immutable artifacts from /workspace/outputs (spec section 6).
 import { isManagedCopilotError, ManagedCopilotError, ROUTES, type ArtifactInfo, type PublicationResult } from "@managed-copilot/protocol";
 import { timings } from "../http.js";
 import type { ManagedArtifacts, ManagedContext } from "../types.js";

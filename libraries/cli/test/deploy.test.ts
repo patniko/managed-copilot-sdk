@@ -382,6 +382,13 @@ describe("deploy", () => {
     const deployCall = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!;
     expect(deployCall.env).toMatchObject({ Azure__SubscriptionId: other, Azure__TenantId: "tenant-b" });
 
+    // An explicit tenant wins over the subscription's.
+    host.secrets["Azure:TenantId"] = "tenant-explicit";
+    writeRecord(host, thisAppHost(), "managed-copilot-dev", other);
+    host.calls.length = 0;
+    expect(await run(["deploy", "--yes", "--subscription", other], harness(host).io)).toBe(0);
+    expect(host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env).toMatchObject({ Azure__TenantId: "tenant-explicit" });
+
     const elsewhere = new FakeHost();
     elsewhere.tenants[other] = { tenantId: "tenant-c", user: "someone@fabrikam.example" };
     const switching = harness(elsewhere);
@@ -390,6 +397,14 @@ describe("deploy", () => {
     expect(switching.err()).toContain(`az account set --subscription ${other}`);
     expect(switching.err()).not.toContain("someone@fabrikam.example");
     expect(elsewhere.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+
+    // A tenant in the AppHost's settings doesn't skip the account check.
+    elsewhere.secrets["Azure:TenantId"] = "tenant-c";
+    const configured = harness(elsewhere);
+    expect(await run(["deploy", "--yes", "--subscription", other], configured.io)).toBe(1);
+    expect(configured.err()).toContain("belongs to another account than the Azure CLI's current one");
+    expect(elsewhere.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+    expect(elsewhere.secrets["Azure:SubscriptionId"]).toBeUndefined();
 
     const unknown = new FakeHost();
     const refused = harness(unknown);

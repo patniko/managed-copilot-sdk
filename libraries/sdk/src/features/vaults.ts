@@ -1,4 +1,4 @@
-// Owner: network workstream. Per-user vaults created in code (spec section 8).
+// Per-user vaults created in code (spec section 8).
 //
 // A vault created in code belongs to the account that created it: only that account's sessions can use it, and no API
 // ever returns its values. Pass `{ gitHubToken }` to act for a specific user (for example a backend serving signed-in

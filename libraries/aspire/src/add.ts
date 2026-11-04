@@ -89,7 +89,7 @@ export async function addManagedCopilot<B extends AspireBuilder>(
     throw new Error(`Managed Copilot resource name "${name}" must start with a lowercase letter and use only lowercase letters, digits, and hyphens.`);
   }
   if (await builder.executionContext().isPublishMode()) {
-    // `aspire deploy`: Azure Container Apps (libraries/aspire/src/publish, owned by the azure workstream).
+    // `aspire deploy`: Azure Container Apps (libraries/aspire/src/publish).
     const appHostDirectory = await builder.appHostDirectory();
     const { config, secrets, apps } = normalizeOptions(name, options, { baseDirectory: appHostDirectory });
     const { publishManagedCopilot } = await import("./publish/index.js");

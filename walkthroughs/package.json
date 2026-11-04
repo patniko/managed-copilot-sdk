@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/walkthroughs",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "The walkthroughs' code: small, commented scripts that run against your Managed Copilot platform.",
   "type": "module",

@@ -10,7 +10,7 @@
 > implemented and exercised; that is not a claim of full parity. The
 > [delivery gates](#delivery-gates) record what each gate proved and what it did not, and the
 > [decision tracker](#decision-tracker) separates user decisions from their delivery state.
-> [architecture.md](../architecture.md) and [deployment.md](../deployment.md) describe the system as built.
+> [architecture.md](../architecture.md) and [deployment.md](../deployment.md) describe the current implementation.
 
 ## The idea in one snippet
 
@@ -1355,16 +1355,41 @@ npx managed-copilot access ips add me            # Parameters:app-allowed-ips, a
 ```
 
 `deploy` targets `Azure:SubscriptionId`, `Azure:Location`, and `Azure:ResourceGroup` (defaults: the Azure CLI's
-subscription, `westus2`, `managed-copilot-dev`, or `--subscription`, `--location`, `--resource-group`). A first
-deployment with no access rules or operators adds the caller to both. The published apps' token is the caller's
-GitHub sign-in, passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. It asks before
-deploying (`--yes` skips the question). If the resource group already holds a deployment, it deploys only when this
-AppHost's Aspire deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it;
-otherwise, in a terminal, it offers to adopt another checkout's record for that target so the deployment keeps its
-generated keys. User and operator changes take effect on the next deploy. Allowlist changes also update the running apps'
-`allow-<n>` ingress rules through the Azure CLI, adding before removing and leaving the platform subnet's rule and
-any hand-made rule alone; `*` (any address) waits for the next deploy. A failed live update keeps the saved list and
-exits non-zero.
+subscription, `westus2`, `managed-copilot-dev`, or `--subscription`, `--location`, `--resource-group`). It deploys as
+the Azure CLI's current account: that account's subscription in another tenant gets its tenant, and another account's
+subscription stops with `az account set --subscription <id>` as the fix. A first deployment with no access rules or
+operators adds the caller to both. The token for published apps that act as an account is the caller's GitHub sign-in,
+passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. It asks before deploying (`--yes`
+skips the question). If the resource group already holds a deployment, it deploys only when this AppHost's Aspire
+deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it; otherwise, in a
+terminal, it offers to adopt another checkout's record for that target so the deployment keeps its generated keys. User
+and operator changes take effect on the next deploy. Allowlist changes also update the running apps' `allow-<n>`
+ingress rules through the Azure CLI, adding before removing and leaving the platform subnet's rule, any hand-made rule,
+and public apps alone; `*` (any address) waits for the next deploy. A failed live update keeps the saved list and exits
+non-zero.
+
+Apps built for other people sign their users in themselves, so they can be public:
+
+```ts
+if (await builder.executionContext().isPublishMode()) {
+  await publishApp(builder, copilot, {
+    name: "front-desk",
+    dockerfile: "demos/front-desk/Dockerfile",
+    port: 7450,
+    healthPath: "/api/health",
+    public: true, // any address can open it; it gets no GitHub token
+  });
+}
+```
+
+By default a published app acts as the deploying account (`Parameters:app-github-token`) and opens only from
+`Parameters:app-allowed-ips`, the deploying machine's address unless set. A public app opens from any address and never
+holds that token: `public: true` with `githubToken: true` is refused, and neither the allowlist nor `access ips`
+applies to it. It calls the platform as its signed-in users (section 2), never as the deployer. Only the AppHost makes
+an app public; the deploy summary, `npx managed-copilot access`, and the container app's tag
+`managed-copilot-access: public` name every public app. An app that acts as the deployer becomes public in two deploys
+(`githubToken: false`, then `public: true`): `aspire deploy` refuses to open an app while one of its active revisions
+still holds the token, because ingress applies to every revision at once.
 
 ## 17. Orchestrator: a coordinator with workers
 
@@ -1617,7 +1642,7 @@ REST: `POST /v1/sandboxes`, `POST|GET /v1/sessions/:id/exec`, `GET /v1/sessions/
 `POST .../exec/:execId/input`, and `POST .../exec/:execId/stop`.
 
 Not in this delivery: the orchestrator's `direct` and `mixed` styles, whose coordinator tools are built on the same
-platform service ([proposal](../proposals/direct-execution.md)).
+platform service ([design note](../design/direct-execution.md)).
 
 ## What runs where
 
@@ -1672,7 +1697,7 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 | Piece | What it is | Status |
 | --- | --- | --- |
 | `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `workers`, `openCli`, and `verifyWebhook` | Built: `libraries/sdk` |
-| `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `libraries/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
+| `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost, and `publishApp(...)` for the apps that use it | Built: `libraries/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
 | `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console`, and `operator` | Built: `libraries/cli`, plus `status` |
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `services/gateway`, `services/sandbox`, `services/egress` |
 | Orchestrator environments | A shared coordinator with worker tools, workers as sessions in their own sandboxes, approvals within each worker's start, and cleanup (section 17) | Built: gateway `modules/orchestrator`, with real models locally and on Azure |
@@ -1729,11 +1754,11 @@ limitations or unresolved gates, not reasons to claim feature parity.
 | Idle sandboxes | Can expire after an hour without activity/keep-alives; published artifacts remain | Restore declared durable state after safe idle stop; active waits may incur compute cost. No general process hibernation |
 | MCP credentials | Your application stores a static token or an OAuth grant it obtained (`static_bearer`, `mcp_oauth`); OpenAI refreshes OAuth grants | Proposed: connectors cover both, and the deployment can also run the sign-in itself (CLI, an app's link, or a waiting agent) with your own OAuth client; credentials refresh outside every runtime |
 
-These six workstreams do not exhaust the entire OpenAI API. MCP credentials, refreshable OAuth grants included, now
+These six areas do not exhaust the entire OpenAI API. MCP credentials, refreshable OAuth grants included, now
 have a proposed contract ([connectors](#connect-any-mcp-server)) that is not built, and additional vault protocol
 forms still need their own; static MCP credentials are not equivalent to connectors.
 Do not silently declare such gaps intentional or closed. They remain in the parity backlog within the requested
-vault workstream, and have to be explicitly implemented or reported unsupported.
+vault work, and have to be explicitly implemented or reported unsupported.
 
 Sources: OpenAI's Agents API
 [overview](https://developers.openai.com/api/docs/guides/agents-api/overview),
@@ -1789,7 +1814,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 29 | GitHub App registration | Operator-owned registration versus a supported shared registration, including callback setup and tenant separation | Needs decision | Not built: callers use their own GitHub sign-in (`gh` or `GH_TOKEN`) |
 | 30 | Active-wait cost policy | Proposed resident waits until a qualified checkpoint; exact limits and cancel/recovery behavior need agreement | Needs decision | Interim: waits stay resident until the 24-hour answer deadline |
 | 31 | Background callback scope | Reject unsupported required hooks rather than bypass them; decide release scope after G2 without claiming full SDK callback parity | Needs decision | Interim: while a session's hook handler is away, new turns on it, unattended ones included, are refused (`background_callback_unsupported`). A turn already running when the handler leaves runs hooks other than `preToolUse`, `userPromptSubmitted`, and `postToolUse` without it |
-| 32 | Six-gap scope | Setup, artifacts, network controls, vaults, offline actions, and schedules all remain required workstreams; no parity claim from documentation alone | Decided | Built: all six exercised with real models |
+| 32 | Six-gap scope | Setup, artifacts, network controls, vaults, offline actions, and schedules all remain required; no parity claim from documentation alone | Decided | Built: all six exercised with real models |
 | 33 | Native transport/defaults | Public adapter and supported SDK APIs only; required upstream extensions block the affected capability | Validated | Stock SDK and runtime only; [upstream gaps](#upstream-gaps) have platform mitigations or fail explicitly |
 | 34 | Azure persistence | Select a backend that preserves declared state and safe ownership; do not equate Docker volumes with Azure Files compatibility | Validated | Container Apps Sandboxes with retained data disks; gateway state on Azure Files NFS; one gateway replica (G3) |
 | 35 | Broader vault parity | MCP OAuth lifecycle and additional request/auth formats need explicit designs and qualification, not a static-token parity claim | To validate | MCP OAuth proposed as connectors (rows 37–40); other request and auth formats not designed |
@@ -1801,6 +1826,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 41 | Users without GitHub | Your app signs them in with any provider and vouches for each with an app key the AppHost issues (`apps`, `managed.client(env, { appUser })`, `managed.as(...)`); their sessions belong to that app user, scoped to the app and never a GitHub account, and bill to the deployment's Foundry; anything that needs a GitHub entitlement fails explicitly. People who sign in with GitHub keep `{ gitHubToken }` and their own plan | Decided | In progress |
 | 42 | GitHub users of a public app | `anyGitHubUser: true` on an app admits any GitHub account that comes through that app's key; `access` still decides who may use the deployment directly. Such sessions are the GitHub account's own, not scoped to the app | Proposed | In progress |
 | 43 | Declaring Foundry | AppHost `foundry` names existing AIServices accounts (resource group, optional subscription, deployments). The platform's Azure identity calls them: `az login` locally, the gateway's managed identity in Azure with a role `aspire deploy` assigns. Stock runtime BYOK provider: a token the gateway answers per call on the shared runtime, a placeholder the gateway swaps in sandboxes. A session's route is fixed at creation | Proposed | In progress |
+| 44 | Public apps | `publishApp({ public: true })` opens an app that signs in its own users to any address. It never holds the deployer's GitHub token (`githubToken: true` is refused); every other app keeps the deploy-time address allowlist, which only an explicit `"*"` opens (section 16) | Proposed | Built and verified on Azure (2026-11-04): a public app answered from outside the allowlist while an app acting as the deployer refused it |
 
 ## Platform contracts
 
@@ -1971,32 +1997,32 @@ not silent fallbacks. Diagnostic output must be redacted and scoped to the owner
 
 ## Review disposition
 
-Both reviews were of the earlier draft, except the last seven rows, which come from their review of the proposed
-connectors (2026-10-26). The changes below incorporate their findings, and the Qualification column names the gates
-whose [results](#gate-results) cover each. Argon and Astra also reviewed every implementation milestone and the final
-integration; their findings were fixed before merge.
+Two independent model reviews of the earlier draft shaped this plan; the last seven rows come from their review of the
+proposed connectors (2026-10-26). The changes below incorporate their findings, and the Qualification column names the
+gates whose [results](#gate-results) cover each. The same reviewers also reviewed every implementation milestone and
+the final integration; their findings were fixed before merge.
 
-| Finding | Reviewer | Plan response | Qualification |
-| --- | --- | --- | --- |
-| Native SDK transport and resume replay were assumed | Both | Public bridge/defaults contract and explicit pending reconciliation | G1, G2 |
-| Shared tool allowlists did not cover subprocess/nested configuration | Astra | Shared admission on every mutation, plus server-owned namespace and mode | G1, G4 |
-| Empty-mode defaults could disable deployed customizations | Argon | Explicit approved skills/instruction activation without ambient discovery | G1 |
-| Live/webhook/reconnect could execute the same tool twice | Both | Claim before callback delivery, durable results, idempotency and uncertainty states | G2 |
-| Offline hook support was missing | Astra | Callback matrix and fail-closed unsupported background admission | G2 |
-| Pending wait suspension was confused with process hibernation | Both | Resident-wait proposal and separately qualified root-agent checkpoints | G2, G3 |
-| Promotion was treated as routing rather than execution cutover | Both | Safe checkpoints, single owner, generation fencing, event correlation, and rollback rules | G5 |
-| Credential-free sandboxes did not follow from model proxying | Astra; Argon gate | Trusted admission/inference broker plus refresh/revocation and account attribution | G4 |
-| Azure package/HOME/runtime persistence and warm assignment were unresolved | Argon; Astra storage concern | Explicit state contract and substrate selection gate | G3 |
-| Scheduled tools lacked schemas and concurrency rules | Astra; Argon | Stored declarations/handler routes, input deduplication, and collision policies | G2 |
-| Per-session files were awkwardly expressed as client defaults | Argon | Equivalent per-session descriptor and streaming file transfer | G1, G3 |
-| Vault protocol and shared-process credential semantics were too broad | Argon | Typed credential use, exact destinations, explicit TLS/header limits and no global secrets | G4 |
-| A forwarded sign-in link could attach someone else's service account (connection fixation) | Both | A sign-in finishes only in the browser that opened its link, for the account and app session that started it; links return only to loopback or `connectorReturnUrls` | G7 |
-| The gateway's own OAuth requests (discovery, registration, tokens) sat outside network policy | Both | Destination checks with pinned DNS at every hop, issuer-bound registrations, and an environment check before contacting a user's server | G7 |
-| Runtime OAuth and header answers were conflated, and shared startup without a grant was unspecified | Both | One answer mapping per protocol, gateway-owned event interest, and servers without a grant starting disabled | G7 |
-| Refresh and reconnection could lose a rotated token or replay work | Both | Refresh where tokens are resolved, 401s scoped to the token generation they used, recorded attempts and fencing, `needs_sign_in` on unknown outcomes, no restart of connected servers or replay of failed calls | G7 |
-| Several connectors could match one URL, and service grants lacked an operator check | Both | `conflict` for ambiguous matches; only operators manage service grants, and service-grant sign-ins are routed to them | G7 |
-| General support left gaps: secret-bearing URLs on import, local client IDs, servers without credentials, credential-only connectors, and the runtime's identity variables | Both | Import sends only confirmed clean URLs; no-credential and `env`-only connectors; `env` only in sandboxes; identity variable names refused; narrowed sessions leave out connectors they block | G7 |
-| Provider specifics: Entra v2.0 refuses `resource`, GitHub Apps use installations rather than scopes, Slack limits app distribution, Work IQ needs licensing | Both | `resource` only where accepted, `oauth.parameters`, documented prerequisites, and `needs_setup` for failures no sign-in fixes | G7 |
+| Finding | Plan response | Qualification |
+| --- | --- | --- |
+| Native SDK transport and resume replay were assumed | Public bridge/defaults contract and explicit pending reconciliation | G1, G2 |
+| Shared tool allowlists did not cover subprocess/nested configuration | Shared admission on every mutation, plus server-owned namespace and mode | G1, G4 |
+| Empty-mode defaults could disable deployed customizations | Explicit approved skills/instruction activation without ambient discovery | G1 |
+| Live/webhook/reconnect could execute the same tool twice | Claim before callback delivery, durable results, idempotency and uncertainty states | G2 |
+| Offline hook support was missing | Callback matrix and fail-closed unsupported background admission | G2 |
+| Pending wait suspension was confused with process hibernation | Resident-wait proposal and separately qualified root-agent checkpoints | G2, G3 |
+| Promotion was treated as routing rather than execution cutover | Safe checkpoints, single owner, generation fencing, event correlation, and rollback rules | G5 |
+| Credential-free sandboxes did not follow from model proxying | Trusted admission/inference broker plus refresh/revocation and account attribution | G4 |
+| Azure package/HOME/runtime persistence and warm assignment were unresolved | Explicit state contract and substrate selection gate | G3 |
+| Scheduled tools lacked schemas and concurrency rules | Stored declarations/handler routes, input deduplication, and collision policies | G2 |
+| Per-session files were awkwardly expressed as client defaults | Equivalent per-session descriptor and streaming file transfer | G1, G3 |
+| Vault protocol and shared-process credential semantics were too broad | Typed credential use, exact destinations, explicit TLS/header limits and no global secrets | G4 |
+| A forwarded sign-in link could attach someone else's service account (connection fixation) | A sign-in finishes only in the browser that opened its link, for the account and app session that started it; links return only to loopback or `connectorReturnUrls` | G7 |
+| The gateway's own OAuth requests (discovery, registration, tokens) sat outside network policy | Destination checks with pinned DNS at every hop, issuer-bound registrations, and an environment check before contacting a user's server | G7 |
+| Runtime OAuth and header answers were conflated, and shared startup without a grant was unspecified | One answer mapping per protocol, gateway-owned event interest, and servers without a grant starting disabled | G7 |
+| Refresh and reconnection could lose a rotated token or replay work | Refresh where tokens are resolved, 401s scoped to the token generation they used, recorded attempts and fencing, `needs_sign_in` on unknown outcomes, no restart of connected servers or replay of failed calls | G7 |
+| Several connectors could match one URL, and service grants lacked an operator check | `conflict` for ambiguous matches; only operators manage service grants, and service-grant sign-ins are routed to them | G7 |
+| General support left gaps: secret-bearing URLs on import, local client IDs, servers without credentials, credential-only connectors, and the runtime's identity variables | Import sends only confirmed clean URLs; no-credential and `env`-only connectors; `env` only in sandboxes; identity variable names refused; narrowed sessions leave out connectors they block | G7 |
+| Provider specifics: Entra v2.0 refuses `resource`, GitHub Apps use installations rather than scopes, Slack limits app distribution, Work IQ needs licensing | `resource` only where accepted, `oauth.parameters`, documented prerequisites, and `needs_setup` for failures no sign-in fixes | G7 |
 
 The network-off package exception, blanket sandbox safety of `approveAll`, and unqualified latency/parity claims
 were also removed or bounded. The approved network-on default and one-line off switch are unchanged.
@@ -2072,7 +2098,7 @@ newer default-branch docs when describing version 1.0.26.
 | Callback dispatch source in SDK 1.0.26 | Local tool handlers execute before result submission; first-result acceptance alone cannot prevent duplicate external effects. Hooks have a separate RPC path |
 | Session authentication source in SDK 1.0.26 | Per-session GitHub tokens are normally sent to the runtime. Credential isolation requires more than changing the inference endpoint |
 | Previous Azure storage experiment | The prior project reported SQLite/locking failures on Azure Files SMB. The deployment here uses Azure Files NFS 4.1 instead, which passed its locking and recovery checks (G3) |
-| Foundry through the stock runtime (2026-11-03, SDK 1.0.26, runtime 1.0.103, [probe](../proposals/probes/foundry-inference.mjs)) | A whole-session BYOK `provider` (`type: "openai"`, the account's `/openai/v1` endpoint, an Entra token) works with no GitHub credential at all: an empty `COPILOT_HOME`, no GitHub variables, `--no-auto-login`. With `hasBearerTokenProvider`, the runtime asks its client for a token before every model call (`providerToken.getToken`); with a static placeholder and `llmInference.setProvider`, every model call reaches the client carrying only the placeholder. A tool call and a resume in a second runtime process worked both ways, with `provider` sent again on resume; neither the token nor the placeholder appeared under `COPILOT_HOME` |
+| Foundry through the stock runtime (2026-11-03, SDK 1.0.26, runtime 1.0.103, [probe](../design/probes/foundry-inference.mjs)) | A whole-session BYOK `provider` (`type: "openai"`, the account's `/openai/v1` endpoint, an Entra token) works with no GitHub credential at all: an empty `COPILOT_HOME`, no GitHub variables, `--no-auto-login`. With `hasBearerTokenProvider`, the runtime asks its client for a token before every model call (`providerToken.getToken`); with a static placeholder and `llmInference.setProvider`, every model call reaches the client carrying only the placeholder. A tool call and a resume in a second runtime process worked both ways, with `provider` sent again on resume; neither the token nor the placeholder appeared under `COPILOT_HOME` |
 
 Source references used in the reviews: the locally installed published `@github/copilot-sdk` 1.0.26
 (`dist/client.js`, `dist/session.js`, `dist/types.d.ts`, `dist/host.d.ts`, and `dist/generated/rpc.d.ts`);

@@ -1,6 +1,6 @@
 /**
- * The egress proxy for isolated sessions on Azure (services/egress in its "external" mode, owned by the network
- * workstream). It runs in an internal Container Apps environment on the platform network's `egress` subnet, published on
+ * The egress proxy for isolated sessions on Azure (services/egress in its "external" mode). It runs in an
+ * internal Container Apps environment on the platform network's `egress` subnet, published on
  * that environment's internal load balancer (TCP 3128): sandboxes reach it only through their VNet connection, with a
  * transport rule that allows nothing else (measured in deployments/azure/qualify). The proxy connects to the gateway's
  * egress hub over HTTPS with the shared egress key and enforces each sandbox's network policy and vault credentials.

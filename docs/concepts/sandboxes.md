@@ -120,7 +120,7 @@ The operator console lists every sandbox with its state. Here, two are running a
 
 - [Architecture: isolated placement](../architecture.md#isolated-placement): sandboxd, the workload user, images,
   setup, idle stop, and artifacts.
-- [Architecture: commands run directly in sandboxes](../architecture.md#commands-run-directly-in-sandboxes-as-built):
+- [Architecture: commands run directly in sandboxes](../architecture.md#commands-run-directly-in-sandboxes):
   the command journal, workspace-only sessions, and recovery.
 - [Deploying to Azure: isolated placement on Azure](../deployment.md#isolated-placement-on-azure): microVMs, disk
   sizes, and egress.

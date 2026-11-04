@@ -119,7 +119,7 @@ describe("turns a lost runtime connection cut", () => {
     // Nothing carries it: it ends like any lost turn, for observers and the ledger.
     await waitUntil(() => record(sessionId).lastTurn?.completedAt !== undefined);
     expect(record(sessionId)).toMatchObject({ state: "idle", lastTurn: { turnId, status: "failed" } });
-    expect(client.events("session.error").some((event) => (event["data"] as Record<string, unknown>)["errorType"] === "interrupted")).toBe(true);
+    await waitUntil(() => client.events("session.error").some((event) => (event["data"] as Record<string, unknown>)["errorType"] === "interrupted"));
   });
 
   it("ends a turn a failed deletion cut, reports the session's runtime stopped, and keeps the session failed", async () => {

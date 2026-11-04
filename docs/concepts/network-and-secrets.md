@@ -112,7 +112,7 @@ for a shared environment holds MCP server credentials, which the adapter attache
   [section 8: keep secrets out of the sandbox](../spec/developer-experience.md#8-keep-secrets-out-of-the-sandbox).
 - Proposed, not built: [connectors](../spec/developer-experience.md#connect-any-mcp-server) for any MCP server, such
   as GitHub's, Work IQ, and Slack, with credentials the platform keeps and refreshes outside every runtime.
-- [Architecture: network policy, egress, and vaults](../architecture.md#network-policy-egress-and-vaults-as-built)
+- [Architecture: network policy, egress, and vaults](../architecture.md#network-policy-egress-and-vaults)
   and [shared placement egress](../architecture.md#shared-placement-egress).
 
 </details>

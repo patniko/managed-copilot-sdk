@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/demo-front-desk",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Front Desk: a chat assistant many people use. Each person signs in, gets private conversations and memory, and never sees anyone else's.",
   "type": "module",

@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/egress",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Managed Copilot egress proxy: per-sandbox network policy enforcement and vault credential substitution.",
   "type": "module",

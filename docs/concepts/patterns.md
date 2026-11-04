@@ -136,8 +136,8 @@ The patterns are the combinations the platform supports. These are not:
   are `modules/sandbox`, and orchestration is `modules/orchestrator`, with `modules/promotion` for the one-time move
   and `modules/orchestrator/hands.ts` for direct and mixed.
 - [Architecture: isolated placement](../architecture.md#isolated-placement),
-  [promotion (as built)](../architecture.md#promotion-as-built), and
-  [orchestrator (as built)](../architecture.md#orchestrator-as-built).
+  [promotion](../architecture.md#promotion), and
+  [orchestrator](../architecture.md#orchestrator).
 
 </details>
 

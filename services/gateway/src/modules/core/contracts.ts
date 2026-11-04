@@ -2,8 +2,8 @@
 //
 // Core *provides* `sessions`, `events`, `platformTools`, `runtimeRequests`, and `environments` (typed in
 // GatewayServices below, structurally compatible with the durable ports in ../durable/contract.ts).
-// Core *consumes* optional services other workstreams provide: `actions` and `credentials` (durable, typed by the
-// durable contract), and `sandboxes` / `policy` (sandbox and network workstreams) through the contracts in this file.
+// Core *consumes* optional services other modules provide: `actions` and `credentials` (durable, typed by the
+// durable contract), and `sandboxes` / `policy` (sandbox and network modules) through the contracts in this file.
 // Providers implement these interfaces (they may add members) and register with `app.provide(key, value)`.
 import type { Duplex } from "node:stream";
 import type {
@@ -123,7 +123,7 @@ export interface RuntimeRequestRegistry {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Placement (provided by the sandbox workstream as `sandboxes`)
+// Placement (provided by the sandbox module as `sandboxes`)
 
 export interface SandboxCreateRequest {
   /** The SDK's caller-assigned session ID (validated unique by core). */
@@ -178,7 +178,7 @@ export interface SandboxPlacement {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Network policy and vaults (provided by the network workstream as `policy` and `vaults`)
+// Network policy and vaults (provided by the network module as `policy` and `vaults`)
 
 export interface PolicyBinding {
   readonly sessionId: string;
@@ -524,7 +524,7 @@ declare module "../../app.js" {
   }
 }
 
-/** Optional services provided by other workstreams but not declared in GatewayServices by them. */
+/** Optional services provided by other modules but not declared in GatewayServices by them. */
 export function optionalService<T>(services: object, key: string): T | undefined {
   return (services as Record<string, unknown>)[key] as T | undefined;
 }

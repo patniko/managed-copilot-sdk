@@ -642,7 +642,8 @@ describe("Azure sandbox provider", () => {
     const subject = provider();
     const error = await subject.create(spec()).catch((caught: unknown) => caught);
     expect(isManagedCopilotError(error, "capability_unavailable")).toBe(true);
-    expect((error as Error).message).toMatch(/cannot record an Azure create before submitting it/);
+    // Windows reports the missing journal as absent and refuses the record; Linux can't read it (ENOTDIR). Both refuse.
+    expect((error as Error).message).toMatch(/cannot record an Azure create before submitting it|unconfirmed-creates\.json\) cannot be read/);
     expect(plane.requests.filter((request) => request === "PUT /sandboxes")).toHaveLength(0);
     rmSync(join(dataDir, "sandbox-azure"));
     await subject.create(spec()); // nothing recorded in memory either

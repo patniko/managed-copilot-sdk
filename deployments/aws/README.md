@@ -1,9 +1,10 @@
-# AWS deployment (planned)
+# AWS deployment (roadmap)
 
-> **Status: proposal, not started.** Nothing in this folder deploys anything yet. This is the plan for adding AWS as a
+> **Status: roadmap, not started.** Nothing in this folder deploys anything yet. Today the platform runs locally and
+> on Azure. This is the plan for adding AWS as a
 > second `aspire deploy` target beside [Azure](../azure) so that Managed Copilot is multi-cloud. The customer contract
 > is still [the spec](../../docs/spec/developer-experience.md), which today promises "local or Azure"; adopting this
-> plan means amending it (see [Spec changes](#spec-changes)). The as-built Azure design this mirrors is in
+> plan means amending it (see [Spec changes](#spec-changes)). The current Azure design this mirrors is in
 > [docs/architecture.md](../../docs/architecture.md#azure-deployment-aspire-deploy) and
 > [docs/deployment.md](../../docs/deployment.md).
 
@@ -33,7 +34,8 @@ aspire deploy
 
 ```text
 Managed Copilot: https://copilot.<deployment-domain> (ManagedCopilot.connect({ url }), MANAGED_COPILOT_URL, or managed-copilot attach --url)
-Apps open to: 203.0.113.7/32 (change with Parameters:app-allowed-ips)
+Apps open to: 203.0.113.7/32: software-factory, dispatch, assistant, gallery (change with Parameters:app-allowed-ips)
+Public apps: https://front-desk.<deployment-domain> (any address; they sign in their own users)
 ```
 
 Or with the CLI shortcut, which checks the AWS CLI and its sign-in instead of the Azure CLI:
@@ -95,19 +97,19 @@ flowchart LR
 
 ### Service mapping
 
-| Concern | Azure (as built) | AWS (proposed) | Notes |
+| Concern | Azure (today) | AWS (proposed) | Notes |
 | --- | --- | --- | --- |
 | Container runtime for gateway, apps, egress | Container Apps (Consumption) | ECS on Fargate services | One task each, like one replica today |
 | Public HTTPS/WSS ingress | Container Apps ingress, `*.azurecontainerapps.io` certificate | ALB with an ACM certificate | ACM does not issue certificates for `*.elb.amazonaws.com`, so HTTPS needs a customer domain or CloudFront; see [open question 2](#open-questions) |
 | Idle WebSocket timeout | 240 s (fixed) | ALB idle timeout, configurable up to 4000 s | Existing keepalives still apply |
 | Health and the lease | TCP liveness, HTTP readiness, so a standby supervisor can answer 503 | ECS treats a failing ALB target health check as a failed task | A standby gateway answering 503 would be killed; see [open question 7](#open-questions) |
-| App IP allowlist | Container Apps IP rules | ALB security group (direct ALB), or WAF / `X-Forwarded-For` rules behind CloudFront | `Parameters:app-allowed-ips` keeps its meaning; behind CloudFront the ALB only sees edge addresses |
+| App IP allowlist | Container Apps IP rules per app; none for public apps (`publishApp({ public: true })`, tagged `managed-copilot-access: public`) | ALB security group (direct ALB), or WAF / `X-Forwarded-For` rules behind CloudFront. A security group covers the whole ALB, so public apps need host-scoped WAF rules or an ALB of their own | `Parameters:app-allowed-ips` keeps its meaning and never applies to public apps; behind CloudFront the ALB only sees edge addresses |
 | Gateway → app webhooks | `https://<app>.<environment-domain>`, allowed from the platform subnet | Internal service discovery (ECS Service Connect / Cloud Map), not the public URL | Calling the public URL would leave through the NAT address, which the allowlist does not include |
 | Durable state (`/data`, SQLite + lease) | Azure Files NFS 4.1 | A **platform** EFS file system (NFS 4.1, POSIX advisory locks), mount targets reachable only from the platform and egress security groups | Same lease supervisor; the NFS/lease qualification must be re-run on EFS. Never reachable from sandboxes, as on Azure |
 | Images | ACR | ECR | Tasks pull with their execution role: no registry-token exchange like Azure's `registry.ts`. Sandbox subnets need ECR, S3, and Logs VPC endpoints for that (below) |
 | Isolated sandboxes | Container Apps Sandboxes (microVM + data disks) | Fargate task per sandbox over a separate **sandbox** EFS file system (recommended; see [below](#isolated-placement-options)) | New gateway provider `providers/aws/` |
 | Sandbox network isolation | Platform egress policy, VNet connection | Per-task ENI and security group: ingress 7781 from the gateway only; egress to the proxy (3128), the sandbox EFS (2049), and the VPC endpoints (443) only; subnets without a NAT route; Route 53 Resolver DNS Firewall | Security groups cannot block the VPC resolver, so DNS needs the firewall. Endpoint policies restrict the endpoints to this deployment's repositories, layer bucket, and log groups, so they are not a way out for the workload |
-| Egress proxy | Internal Container Apps environment | Fargate service behind an internal NLB | Same `platform/egress` in external mode. `addressPinning` can be `true` only with client IP preservation enabled on the NLB's IP target group (off by default) and verified in A3; otherwise `false`, as on Azure. The per-sandbox proxy credential stays the primary binding |
+| Egress proxy | Internal Container Apps environment | Fargate service behind an internal NLB | Same `services/egress` in external mode. `addressPinning` can be `true` only with client IP preservation enabled on the NLB's IP target group (off by default) and verified in A3; otherwise `false`, as on Azure. The per-sandbox proxy credential stays the primary binding |
 | Platform identity | User-assigned managed identity + Azure RBAC | ECS task role + IAM policies | Gateway needs `ecs:RegisterTaskDefinition`/`DeregisterTaskDefinition`/`RunTask`/`StopTask`/`DescribeTasks`/`TagResource`, `iam:PassRole` for the sandbox roles, and EFS access point create/delete, all scoped by tag or ARN |
 | Secrets (durable key, vault key, app token) | Secure parameters / Container Apps secrets | Secrets Manager, referenced from task definitions | Never in logs, command lines, or the sandbox task definition |
 | Logs | Log Analytics | CloudWatch Logs | Gateway logger `redact` unchanged |
@@ -115,7 +117,7 @@ flowchart LR
 
 ### Isolated placement options
 
-The provider must keep the invariants in `platform/gateway/src/modules/sandbox/providers/types.ts`: sandboxd as root
+The provider must keep the invariants in `services/gateway/src/modules/sandbox/providers/types.ts`: sandboxd as root
 with only CHOWN, KILL, SETGID, SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, and
 `/var/lib/managed-copilot` that survive stop/start; no route between sandboxes; no Internet except through the egress
 proxy; sandboxd reachable only through `endpoint`.
@@ -170,20 +172,20 @@ Adopting this plan amends the spec, which is the customer contract:
 
 ## Code changes (where it would live)
 
-| Area | Change | Owner today |
-| --- | --- | --- |
-| `deployments/aws/**` (this folder) | AWS package: infrastructure, sandbox image layer, qualification probes, live checks | new **aws** workstream |
-| `packages/aspire/src/publish/**` | Split into cloud-neutral publish logic plus `azure/` and `aws/` targets chosen by `Deploy:Target` | azure |
-| gateway `modules/sandbox/providers/aws/**` | `SandboxProvider` over ECS RunTask and EFS access points; `MANAGED_COPILOT_SANDBOX_PROVIDER=aws` | new **aws** workstream |
-| `deployments/azure/src/lease`, `deployments/azure/src/probe` | Cloud-neutral already; move to a shared package (for example `deployments/common`) used by both targets' images | azure |
-| `platform/gateway/Dockerfile`, `demos/*/Dockerfile` | An `aws` stage beside `azure`, or one neutral stage | azure |
-| `packages/cli` `deploy` / `access` | `--target aws`, AWS CLI checks, ALB allowlist updates instead of Container Apps ingress rules | attach |
-| `docs/deployment.md`, `docs/architecture.md`, the spec | AWS sections, capability matrix column, cost, teardown | azure / aws |
+| Area | Change |
+| --- | --- |
+| `deployments/aws/**` (this folder) | AWS package: infrastructure, sandbox image layer, qualification probes, live checks |
+| `libraries/aspire/src/publish/**` | Split into cloud-neutral publish logic plus `azure/` and `aws/` targets chosen by `Deploy:Target` |
+| gateway `modules/sandbox/providers/aws/**` | `SandboxProvider` over ECS RunTask and EFS access points; `MANAGED_COPILOT_SANDBOX_PROVIDER=aws` |
+| `deployments/azure/src/lease`, `deployments/azure/src/probe` | Cloud-neutral already; move to a shared package (for example `deployments/common`) used by both targets' images |
+| `services/gateway/Dockerfile`, `demos/*/Dockerfile` | An `aws` stage beside `azure`, or one neutral stage |
+| `libraries/cli` `deploy` / `access` | `--target aws`, AWS CLI checks, ALB allowlist updates instead of Container Apps ingress rules |
+| `docs/deployment.md`, `docs/architecture.md`, the spec | AWS sections, capability matrix column, cost, teardown |
 
 ## Milestones
 
 Each milestone merges only with `pnpm build` and `pnpm test` green, live evidence recorded in the deployment guide,
-and reviews from both Argon and Astra, as for Azure.
+and independent code reviews, as for Azure.
 
 | # | Milestone | Exit criteria | Status |
 | --- | --- | --- | --- |

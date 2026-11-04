@@ -1,7 +1,7 @@
 # Security model and threat model
 
 How Managed Copilot keeps your machine, your GitHub identity, your secrets, and other people's sessions safe when a
-local app or Copilot CLI drives agents running in the cloud. This page is the as-built picture: each claim links to
+local app or Copilot CLI drives agents running in the cloud. This page describes the current implementation: each claim links to
 the [architecture](architecture.md) section or code that implements it. Review findings and open risks are at the
 end.
 
@@ -153,7 +153,7 @@ The CLI's own token is consumed by the relay and gateway; it is never forwarded 
 
 | Control | Local | Azure |
 | --- | --- | --- |
-| Network exposure | Gateway on loopback | Public HTTPS ingress; demo apps IP-allowlisted to the deployer |
+| Network exposure | Gateway on loopback | Public HTTPS ingress; demo apps IP-allowlisted to the deployer; apps published as public (they sign in their own users) open to any address, never with the deployer's token |
 | Who may connect | Any GitHub account on the machine | Only `Parameters:copilot-github-users/orgs`; deploy **refuses** an open gateway |
 | Operators | Every local account | Named operators only |
 | Sandbox isolation | Docker container, own `/28` network, cap-drop | Container Apps Sandboxes microVM, platform egress policy allows only the proxy |
@@ -169,6 +169,7 @@ tests; ⚠️ = partial or depends on operator configuration; ❌ = open.
 | Threat | Category | Mitigation | Status |
 | --- | --- | --- | --- |
 | Attacker with any GitHub account connects to your deployment | Spoofing / EoP | `access` rules required to publish; org membership checked with caller's token | ✅ |
+| Anyone on the Internet uses a deployed app as the deployer | Spoofing / EoP | Apps that hold `app-github-token` open only from `app-allowed-ips`; a public app (`publishApp({ public: true })`) never gets that token (`githubToken: true` is refused at publish) and calls the platform as its own signed-in users | ✅ (⚠️ `"*"` opens the allowlisted apps; R6) |
 | Stolen GitHub token used against the gateway | Spoofing | Token revocation honored within the 5 min cache; long-lived sockets re-verify each minute; but a stolen token is a full user credential by design | ⚠️ inherent |
 | User A reads/attaches/drives user B's session | Info disclosure / EoP | Ownership bound to stable account ID on every session-scoped RPC and REST route; others see `not_found` | ✅ |
 | Client sends a crafted `session.create` (broader tools, network, BYOK provider, cwd) | Tampering / EoP | Gateway admission rewrites create/resume/options; BYOK refused; network can only narrow; unknown config RPCs denied | ✅ |
@@ -246,7 +247,7 @@ guard the review could name. The residual risks below are defense-in-depth gaps 
 | R3 | ⚪ Low | `services/gateway/src/modules/sandbox/providers/azure/provider.ts:153` | Sandbox port URLs accept any source address unless `MANAGED_COPILOT_AZURE_INGRESS_CIDRS` is set, which leaves the per-sandbox key as the only gate | Default the CIDR to the gateway's egress range |
 | R4 | ⚪ Low | `services/sandbox/src/relay/main.ts`, `providers/docker/provider.ts:252` | One platform key authorizes both the gateway's platform routes and the sandbox relay | Split into separate keys |
 | R5 | ⚪ Low | `services/gateway/src/modules/attach/index.ts:44-46`, `src/redaction.ts:18` | Generic AHP clients may pass the attach ticket as `?tkn=`, but the redaction patterns don't include the `mcat_` prefix | Add `mcat_` to the redaction patterns |
-| R6 | ⚪ Low | `libraries/aspire/src/publish/index.ts:350-375` | Published apps act as one GitHub account (`app-github-token`) and are gated only by an IP allowlist; `*` removes the gate | Warn or refuse when the allowlist is `*` |
+| R6 | ⚪ Low | `libraries/aspire/src/publish/index.ts` (`publishApp`) | Published apps that act as one GitHub account (`app-github-token`) are gated only by an IP allowlist; `*` removes the gate | Partly addressed: `access ips set "*"` asks first, the deploy summary names the apps that then act as your account for anyone, and an app meant for anyone is published with `public: true`, which can't hold the token. Refusing `*` outright remains an option |
 | R7 | ℹ️ By design | `services/gateway/src/modules/network/policy.ts:241-250` | An AppHost vault can be used, by substitution only, by every account admitted to that environment | Use per-user vaults (`managed.vaults.create`) for personal credentials |
 | R8 | ℹ️ By design | `services/gateway/src/modules/operator/access.ts:72-76` | A local gateway with no operators named makes every local GitHub account an operator | Name operators on shared machines |
 | R9 | ℹ️ By design | Gateway memory, sealed background credentials | Users must trust the deployment's operator: it holds their full GitHub tokens (in memory, and sealed at rest for background work) | Document it; prefer narrowly scoped tokens; `managed-copilot logout` when background work isn't needed |
