@@ -87,7 +87,7 @@ export const APPS: readonly AppEntry[] = [
     tagline: "A failing test in, a verified patch out",
     description:
       "Paste a public GitHub repository: one sandbox clones it, Copilot fixes the failing tests, and Repo Doctor verifies the patch, while a strip shows which hosts the sandbox reached and which were blocked.",
-    tryIt: "Try the sample and watch two failing tests turn green.",
+    tryIt: "Run the sample and watch two failing tests turn green.",
     app: "repo-doctor",
     port: 7435,
     healthPath: "/api/health",
