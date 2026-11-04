@@ -1,5 +1,5 @@
 import { CalendarIcon, DownloadIcon, FileIcon, GraphIcon, NumberIcon, PlugIcon, TableIcon, TypographyIcon, XIcon, type Icon } from "@primer/octicons-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AnalysisView, ColumnType, DatasetSummary, OutputFile, ResultView } from "../../shared/types.js";
 import { api, errorMessage, outputUrl } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
@@ -31,7 +31,7 @@ export function DataPanel({ view, className }: { readonly view: AnalysisView; re
             <span className="min-w-0 truncate font-semibold" title={result.title}>
               {result.title}
             </span>
-            <span className="shrink-0 text-xs text-fg-muted tabular-nums">{formatCount(result.total, result.rows.length < result.total ? "match" : "row", result.rows.length < result.total ? "matches" : "rows")}</span>
+            <span className="shrink-0 text-xs text-fg-muted tabular-nums">{formatCount(result.total, result.unit)}</span>
             <button type="button" className="btn btn-sm btn-invisible ml-auto shrink-0" onClick={() => selectResult(view.id, undefined)}>
               <XIcon size={16} />
               <span className="max-sm:hidden">All rows</span>
@@ -62,9 +62,11 @@ interface GridColumn {
   readonly name: string;
   readonly type?: ColumnType;
   readonly numeric: boolean;
+  /** The column's largest absolute value: its cells show bars against it. */
+  readonly scale?: number;
 }
 
-function Grid({ columns, rows, format, footer }: { readonly columns: readonly GridColumn[]; readonly rows: readonly (readonly string[])[]; readonly format: boolean; readonly footer?: React.ReactNode }) {
+function Grid({ columns, rows, format, footer }: { readonly columns: readonly GridColumn[]; readonly rows: readonly (readonly string[])[]; readonly format: boolean; readonly footer?: ReactNode }) {
   return (
     <div className="min-h-0 flex-1 overflow-auto">
       <table className="Table Table--sticky Table--condensed">
@@ -90,9 +92,15 @@ function Grid({ columns, rows, format, footer }: { readonly columns: readonly Gr
               <td className="text-right text-xs text-fg-muted tabular-nums">{index + 1}</td>
               {columns.map((column, position) => {
                 const cell = row[position] ?? "";
+                const ratio = column.scale && isNumeric(cell) ? Math.min(1, Math.abs(Number(cell)) / column.scale) : 0;
                 return (
-                  <td key={column.name} className={cx("max-w-[18rem] truncate whitespace-nowrap", column.numeric && "text-right tabular-nums")} title={cell.length > 30 ? cell : undefined}>
-                    {format ? formatCell(cell) : cell}
+                  <td
+                    key={column.name}
+                    className={cx("max-w-[18rem] truncate whitespace-nowrap", column.numeric && "text-right tabular-nums", ratio > 0 && "relative")}
+                    title={cell.length > 30 ? cell : undefined}
+                  >
+                    {ratio > 0 ? <span aria-hidden className="absolute inset-y-1.5 right-1 rounded-sm bg-accent-muted" style={{ width: `calc((100% - 0.5rem) * ${ratio})` }} /> : null}
+                    <span className={ratio > 0 ? "relative" : undefined}>{format ? formatCell(cell) : cell}</span>
                   </td>
                 );
               })}
@@ -166,9 +174,19 @@ function DatasetGrid({ dataset }: { readonly dataset: DatasetSummary }) {
 function ResultGrid({ result }: { readonly result: ResultView }) {
   const columns: GridColumn[] = result.columns.map((name, position) => {
     const cells = result.rows.map((row) => row[position] ?? "").filter((cell) => cell.trim() !== "");
-    return { name, numeric: cells.length > 0 && cells.every(isNumeric) };
+    const numeric = cells.length > 0 && cells.every(isNumeric);
+    // Groups compare at a glance: their numbers get bars.
+    const scale = numeric && result.unit === "group" && cells.length > 1 ? Math.max(...cells.map((cell) => Math.abs(Number(cell)))) : 0;
+    return { name, numeric, ...(scale > 0 ? { scale } : {}) };
   });
-  return <Grid columns={columns} rows={result.rows} format footer={result.rows.length < result.total ? <p className="p-3 text-center text-xs text-fg-muted">The first {result.rows.length} of {formatCount(result.total, "match", "matches")}</p> : null} />;
+  return (
+    <Grid
+      columns={columns}
+      rows={result.rows}
+      format
+      footer={result.rows.length < result.total ? <p className="p-3 text-center text-xs text-fg-muted">The first {result.rows.length} of {formatCount(result.total, result.unit)}</p> : null}
+    />
+  );
 }
 
 function Outputs({ view }: { readonly view: AnalysisView }) {

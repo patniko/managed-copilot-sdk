@@ -50,6 +50,29 @@ export function exitCode(content: string | undefined): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+/** A shell command as a person reads it: the Python script it runs, or its first line. */
+export function summarizeCommand(command: string): string | undefined {
+  const script = /\bpython3?\s+(?:-u\s+)?([\w./-]+\.py)\b/.exec(command)?.[1];
+  if (script) return `Ran ${basename(script)}`;
+  if (/\bpython3?\b/.test(command)) return "Ran Python";
+  return firstLine(command);
+}
+
+/** A data tool's arguments as one readable line: "sum(revenue) by store · where month ≥ 2025-01 · sorted by sum(revenue) ↓". */
+export function describeQuery(args: Record<string, unknown>): string | undefined {
+  const list = (value: unknown): Record<string, unknown>[] => (Array.isArray(value) ? value.map(record) : []);
+  const ops: Record<string, string> = { ">=": "≥", "<=": "≤", "!=": "≠" };
+  const parts: string[] = [];
+  const metrics = list(args["metrics"]).map((metric) => (metric["fn"] === "count" ? "count" : `${String(metric["fn"])}(${String(metric["column"] ?? "")})`));
+  const groups = Array.isArray(args["groupBy"]) ? args["groupBy"].map(String) : [];
+  if (metrics.length) parts.push(`${metrics.join(", ")}${groups.length ? ` by ${groups.join(", ")}` : ""}`);
+  else if (Array.isArray(args["columns"]) && args["columns"].length) parts.push(args["columns"].map(String).join(", "));
+  const filters = list(args["filters"]).map((filter) => `${String(filter["column"])} ${ops[String(filter["op"])] ?? String(filter["op"])} ${String(filter["value"])}`);
+  if (filters.length) parts.push(`where ${filters.join(", ")}`);
+  if (text(args["sortBy"])) parts.push(`sorted by ${String(args["sortBy"])} ${args["descending"] ? "↓" : "↑"}`);
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
 /** How a tool call reads as a step: its type, a one-line label, and the full text behind it. */
 export function describeStep(tool: string, args: Record<string, unknown>): { type: StepType; label: string; detail?: string } {
   switch (tool) {
@@ -58,13 +81,14 @@ export function describeStep(tool: string, args: Record<string, unknown>): { typ
     case "query_rows":
     case "aggregate": {
       const title = text(args["title"]);
-      return { type: "data", label: title ?? (tool === "aggregate" ? "Grouped the rows" : "Filtered the rows"), detail: JSON.stringify(args) };
+      const detail = describeQuery(args);
+      return { type: "data", label: title ?? (tool === "aggregate" ? "Grouped the rows" : "Filtered the rows"), ...(detail ? { detail } : {}) };
     }
     case MOVE_TOOL:
       return { type: "move", label: "Asked for a sandbox", ...(text(args["reason"]) ? { detail: text(args["reason"]) } : {}) };
     case "bash": {
       const command = text(args["command"]);
-      return { type: "shell", label: firstLine(text(args["description"]) ?? command) ?? "Ran a command", ...(command ? { detail: command } : {}) };
+      return { type: "shell", label: firstLine(text(args["description"])) ?? (command ? summarizeCommand(command) : undefined) ?? "Ran a command", ...(command ? { detail: command } : {}) };
     }
     case "create":
     case "edit": {
@@ -81,7 +105,7 @@ export function describeStep(tool: string, args: Record<string, unknown>): { typ
 }
 
 /** A data tool's answer as a grid table, when it is one (`query_rows` and `aggregate` answer with rows). */
-export function resultView(id: string, at: string, content: string | undefined): ResultView | undefined {
+export function resultView(id: string, at: string, content: string | undefined, unit: ResultView["unit"] = "row"): ResultView | undefined {
   if (!content) return undefined;
   let parsed: unknown;
   try {
@@ -99,6 +123,7 @@ export function resultView(id: string, at: string, content: string | undefined):
     columns: columns as string[],
     rows: rows.filter(Array.isArray).map((row) => (row as unknown[]).map((cell) => (cell === null || cell === undefined ? "" : String(cell)))),
     total: typeof value["matched"] === "number" ? value["matched"] : rows.length,
+    unit,
     at,
   };
 }
@@ -297,11 +322,12 @@ export class Transcript {
           return true;
         }
         step.status = "done";
-        const view = resultView(step.id, at, content) ?? resultView(step.id, at, typeof result["detailedContent"] === "string" ? result["detailedContent"] : undefined);
+        const unit = step.tool === "aggregate" ? "group" : "row";
+        const view = resultView(step.id, at, content, unit) ?? resultView(step.id, at, typeof result["detailedContent"] === "string" ? result["detailedContent"] : undefined, unit);
         if (view) {
           this.#results.set(step.id, view);
           step.resultId = step.id;
-          step.outcome = `${view.total.toLocaleString("en-US")} ${step.tool === "aggregate" ? (view.total === 1 ? "group" : "groups") : view.total === 1 ? "row" : "rows"}`;
+          step.outcome = `${view.total.toLocaleString("en-US")} ${view.unit}${view.total === 1 ? "" : "s"}`;
         }
         return true;
       }

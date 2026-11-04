@@ -91,7 +91,8 @@ function Caption({ view, state, now }: { readonly view: AnalysisView; readonly s
     return (
       <span className={cx(common, "text-fg-muted")}>
         <CheckIcon size={12} className="text-fg-success" />
-        {view.moveMs !== undefined ? `Moved in ${formatSeconds(view.moveMs)} · same session` : "Same session"}
+        {view.moveMs !== undefined ? `Moved in ${formatSeconds(view.moveMs)}` : "Moved"}
+        <span className="max-sm:hidden">· same session</span>
       </span>
     );
   }

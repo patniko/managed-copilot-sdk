@@ -87,6 +87,8 @@ export interface ResultView {
   readonly rows: readonly (readonly string[])[];
   /** Rows or groups that matched, before the limit. */
   readonly total: number;
+  /** What it counts: filtered rows (`query_rows`) or groups (`aggregate`). */
+  readonly unit: "row" | "group";
   readonly at: string;
 }
 

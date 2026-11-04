@@ -67,6 +67,8 @@ export class Analysis {
   /** Digests of messages being sent: their `user.message` can arrive before `send` returns. */
   readonly #inflight = new Map<string, number>();
   readonly #timers = new Set<NodeJS.Timeout>();
+  /** A usage read is scheduled. */
+  #usagePending = false;
 
   constructor(host: AnalysisHost, id = "") {
     this.#host = host;
@@ -383,6 +385,8 @@ export class Analysis {
       changed = true;
     }
     if (event.type === "tool.execution_complete" && (event.data as { toolCallId?: unknown }).toolCallId === this.#transcript.lastMoveId) void this.#refreshPlacement();
+    // Each model reply may have counted a premium request: keep the count live during the turn.
+    if (event.type === "assistant.message") this.#refreshUsageSoon();
     if (event.type === "session.idle") {
       void this.#refreshUsage();
       void this.#refreshPlacement();
@@ -427,6 +431,16 @@ export class Analysis {
     }, ms);
     timer.unref?.();
     this.#timers.add(timer);
+  }
+
+  /** Reads the usage shortly, once for a burst of replies. */
+  #refreshUsageSoon(): void {
+    if (this.#usagePending) return;
+    this.#usagePending = true;
+    this.#later(400, () => {
+      this.#usagePending = false;
+      void this.#refreshUsage();
+    });
   }
 
   #notePlacement(info: SessionInfo): void {

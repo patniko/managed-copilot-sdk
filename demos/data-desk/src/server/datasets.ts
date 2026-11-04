@@ -32,7 +32,7 @@ export const SAMPLES: readonly Sample[] = [
     id: "sample-bike-rides",
     file: "bike-rides.csv",
     name: "City bike rides",
-    description: "Daily rides and weather, summer 2025",
+    description: "Daily rides and the weather",
     prompts: [
       { text: "Which weekday has the most rides on average?", needs: "tools" },
       { text: "Plot rides against temperature with a trend line", needs: "code" },

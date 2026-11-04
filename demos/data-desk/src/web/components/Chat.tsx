@@ -231,7 +231,10 @@ function StepLine({ step, active, onShow }: { readonly step: Step; readonly acti
     <div className={className}>{body}</div>
   );
   return tip ? (
-    <Tooltip content={<span className="block max-h-40 overflow-hidden text-left font-mono text-xs whitespace-pre-wrap">{tip.length > 400 ? `${tip.slice(0, 400)}…` : tip}</span>} className="w-full">
+    <Tooltip
+      content={<span className={cx("block max-h-40 overflow-hidden text-left whitespace-pre-wrap", step.type !== "data" && step.type !== "move" && "font-mono text-xs")}>{tip.length > 400 ? `${tip.slice(0, 400)}…` : tip}</span>}
+      className="w-full"
+    >
       {line}
     </Tooltip>
   ) : (
@@ -319,7 +322,7 @@ function Composer({ view }: { readonly view: AnalysisView }) {
           value={text}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={onKey}
-          placeholder={blocked ? "Waiting for the sandbox…" : "Ask about this data"}
+          placeholder={view.moveRequest ? "Waiting for your answer" : view.placement === "moving" ? "Moving into the sandbox…" : "Ask about this data"}
           disabled={blocked}
           className="max-h-40 min-h-6 flex-1 resize-none bg-transparent py-0.5 leading-6 outline-none placeholder:text-fg-muted disabled:cursor-not-allowed"
         />

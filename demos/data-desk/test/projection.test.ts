@@ -142,9 +142,18 @@ describe("transcript", () => {
 describe("steps and results", () => {
   it("labels each kind of tool call", () => {
     expect(describeStep("describe_dataset", {})).toEqual({ type: "data", label: "Read the dataset's columns" });
+    expect(describeStep("aggregate", { title: "Revenue by store", groupBy: ["store"], metrics: [{ fn: "sum", column: "revenue" }, { fn: "count" }], filters: [{ column: "month", op: ">=", value: "2025-01" }], sortBy: "sum(revenue)", descending: true })).toEqual({
+      type: "data",
+      label: "Revenue by store",
+      detail: "sum(revenue), count by store · where month ≥ 2025-01 · sorted by sum(revenue) ↓",
+    });
+    expect(describeStep("query_rows", { columns: ["date", "rides"], sortBy: "rides" })).toMatchObject({ label: "Filtered the rows", detail: "date, rides · sorted by rides ↑" });
     expect(describeStep("create", { path: "/workspace/chart.py" })).toEqual({ type: "file", label: "Wrote chart.py", detail: "/workspace/chart.py" });
     expect(describeStep("view", { path: "/workspace/data/sales.csv" })).toMatchObject({ type: "read", label: "Read sales.csv" });
-    expect(describeStep("bash", { command: "python3 a.py\npython3 b.py" })).toMatchObject({ type: "shell", label: "python3 a.py" });
+    expect(describeStep("bash", { command: "ls -la\npwd" })).toMatchObject({ type: "shell", label: "ls -la" });
+    expect(describeStep("bash", { command: "mkdir -p outputs && cat << 'EOF' > /workspace/chart.py\nprint(1)\nEOF\npython3 /workspace/chart.py" })).toMatchObject({ label: "Ran chart.py" });
+    expect(describeStep("bash", { command: "python3 -c 'print(1)'", description: "Check the totals" })).toMatchObject({ label: "Check the totals" });
+    expect(describeStep("bash", { command: "python3 - << 'EOF'\nprint(1)\nEOF" })).toMatchObject({ label: "Ran Python" });
     expect(describeStep("glob", {})).toEqual({ type: "other", label: "glob" });
   });
 

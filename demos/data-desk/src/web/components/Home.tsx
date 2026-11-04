@@ -26,8 +26,13 @@ export function Home() {
 
   return (
     <div className="mx-auto w-full max-w-[1120px] px-4 py-8 sm:px-6 sm:py-12">
-      <h1 className="text-2xl font-semibold">Chat with a spreadsheet</h1>
-      <p className="mt-1 text-fg-muted">It answers on the shared runtime and moves into a sandbox for code.</p>
+      <div className="flex flex-wrap items-end justify-between gap-6">
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold">Chat with a spreadsheet</h1>
+          <p className="mt-1 text-fg-muted">It answers on the shared runtime and moves into a sandbox for code.</p>
+        </div>
+        <PatternDiagram />
+      </div>
       {platform && platform.state !== "connected" && platform.message ? (
         <div className="flash flash-warn mt-4" role="status">
           {platform.message}
@@ -47,6 +52,25 @@ export function Home() {
         <UploadCard disabled={!connected || starting !== undefined} starting={starting === "upload"} onFile={(file) => void start("upload", () => uploadAndAnalyze(file))} />
       </section>
       {analyses.length ? <Recent analyses={analyses} /> : null}
+    </div>
+  );
+}
+
+/** The pattern in one glance, drawn like the workspace's placement track: shared runtime first, then a sandbox. */
+function PatternDiagram() {
+  const stop = (Glyph: typeof CpuIcon, label: string, fill: string) => (
+    <span className="flex w-24 flex-col items-center gap-1">
+      <span className={cx("grid size-9 place-items-center rounded-lg text-fg-on-emphasis", fill)}>
+        <Glyph size={18} />
+      </span>
+      <span className="text-xs font-semibold whitespace-nowrap">{label}</span>
+    </span>
+  );
+  return (
+    <div className="flex items-start max-sm:hidden" role="img" aria-label="A session starts on the shared runtime and moves once into a sandbox">
+      {stop(CpuIcon, "Shared runtime", "bg-accent-emphasis")}
+      <span className="track-fill mt-4 h-1 w-20 rounded-full" />
+      {stop(ContainerIcon, "Sandbox", "bg-done-emphasis")}
     </div>
   );
 }
