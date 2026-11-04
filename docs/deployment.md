@@ -43,7 +43,7 @@ flowchart LR
   NFS[("Azure Files NFS<br/>/data")]
   Net((Internet))
   Client["SDK / CLI / browser"] -- "HTTPS + WSS" --> GW
-  Client -- "HTTPS (IP allowlist)" --> Apps
+  Client -- "HTTPS (IP allowlist, or any address for public apps)" --> Apps
   Apps -- "MANAGED_COPILOT_URL" --> GW
   GW -- "webhooks https://<app>.<domain>" --> Apps
   GW -- "data plane (managed identity)" --> SG
@@ -63,7 +63,7 @@ flowchart LR
 | Storage account (FileStorage, Premium SSD v2) + NFS share `managed-copilot` (32 GiB) | Durable state: the gateway at `gateway/`, each app at `apps/<name>/`, proxy CA at `egress/`. NFS 4.1, reachable only from the trusted `platform` and `egress` subnets, not the sandbox subnet; shared-key access disabled. |
 | Container registry + pull identity | Holds the gateway, app, egress proxy, and sandbox images. |
 | `copilot` container app | The gateway: external HTTPS ingress, exactly one replica, Single revision mode, `/data` on the NFS share, startup/liveness over TCP and readiness over HTTP. |
-| One container app per `publishApp` | Your apps (the demos, and the demo gallery at `https://gallery.<environment-domain>`): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. The gallery gets no GitHub token. |
+| One container app per `publishApp` | Your apps (the demos, and the demo gallery at `https://gallery.<environment-domain>`): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. The gallery gets no GitHub token. An app published with `public: true` accepts any address, gets no GitHub token, and is tagged `managed-copilot-access: public` (see "Who can open the apps"). |
 | `copilot-gateway-identity` | User-assigned identity of the gateway. Its roles: **Container Apps SandboxGroup Data Owner** on the sandbox group, and **AcrPull** on the registry (for the registry tokens it hands to disk-image imports). |
 | Sandboxes group (`Microsoft.App/sandboxGroups`) + VNet connection | Isolated placement. Created only when the AppHost declares isolated environments. |
 | Internal Container Apps environment `mc-egress-<suffix>` + `egress` container app | The sandboxes' only way out: the platform's egress proxy (`services/egress`, external mode) on TCP 3128 of the environment's internal load balancer, one replica, linked to the gateway over HTTPS. Created with the sandbox group. |
@@ -116,9 +116,9 @@ flowchart LR
    ${env:Parameters__copilot-operator-users} = "your-login"
    ```
 
-3. If the AppHost publishes apps (the root AppHost publishes both demos), set the account they act as. Their public
-   address is restricted to this machine's public IPv4 address unless you choose the addresses (see "Who can open
-   the apps"):
+3. If the AppHost publishes apps that act as your account (the root AppHost's demos do), set that account. Their
+   public address is restricted to this machine's public IPv4 address unless you choose the addresses. Apps published
+   with `public: true` need neither (see "Who can open the apps"):
 
    ```powershell
    ${env:Parameters__app-github-token} = (gh auth token).Trim()   # credential stays out of command arguments
@@ -137,8 +137,11 @@ flowchart LR
 
    ```text
    Managed Copilot: https://copilot.<environment-domain> (ManagedCopilot.connect({ url }), MANAGED_COPILOT_URL, or managed-copilot attach --url)
-   Apps open to: 203.0.113.7/32 (change with Parameters:app-allowed-ips)
+   Apps open to: 203.0.113.7/32: software-factory, dispatch, assistant, gallery (change with Parameters:app-allowed-ips)
+   Public apps: https://front-desk.<environment-domain> (any address; they sign in their own users)
    ```
+
+   The last line appears when the AppHost publishes public apps.
 
 Connect to it exactly as you would locally:
 
@@ -163,8 +166,8 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | --- | --- | --- |
 | `Parameters:<name>-github-users`, `Parameters:<name>-github-orgs` | One of them, unless the AppHost declares `access` | GitHub accounts or organizations allowed to use the platform. |
 | `Parameters:<name>-operator-users`, `Parameters:<name>-operator-orgs` | No | GitHub accounts or organizations that may open the operator console and operator API (spec section 16), added to the AppHost's `operators`. Without any, the deployed console stays off. Operators must also be allowed to use the platform. |
-| `Parameters:app-github-token` | When the AppHost publishes apps | Secret. The GitHub token the published apps use (`MANAGED_COPILOT_GITHUB_TOKEN`). |
-| `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the apps' ingress (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it. The platform subnet is always allowed (webhooks). |
+| `Parameters:app-github-token` | When the AppHost publishes an app that acts as your account (one that isn't public and doesn't set `githubToken: false`) | Secret. The GitHub token those apps use (`MANAGED_COPILOT_GITHUB_TOKEN`). |
+| `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the ingress of every app that isn't public (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it, looked up only when such an app exists. The platform subnet is always allowed (webhooks). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |
 | `Parameters:<name>-durable-key`, `Parameters:<name>-vault-key` | No | Secrets, 32 bytes base64. Generated and persisted with the deployment when not set, so the sealing keys never sit beside the sealed values on the NFS share. A deployment that predates them had its keys generated into `/data`. Its next gateway wraps each key file that still seals stored data under these parameters (`durable.key.wrapped`, `network/vault.key.wrapped`). The following `aspire deploy` deletes the plaintext files once a gateway that reads the wrapped keys has served for 15 minutes (so a failed rollout's fallback is never left without them). A stale key file the parameter already replaced is renamed `.replaced`. Earlier vaults and background sign-ins stay readable. Keep these parameters: without the right one the gateway refuses to start. |
 | `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. |
@@ -218,7 +221,7 @@ work with an explicit sign-in error; this deployment does not implement automati
 ### Publishing your own apps
 
 `addManagedCopilot` handles the platform. Apps that use it are ordinary Aspire resources; to deploy one with a durable
-directory, the lease supervisor, and an IP allowlist, publish it with `publishApp` in publish mode:
+directory, the lease supervisor, and an IP allowlist (or public ingress), publish it with `publishApp` in publish mode:
 
 ```ts
 import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
@@ -232,6 +235,7 @@ if (await builder.executionContext().isPublishMode()) {
     healthPath: "/healthz",            // readiness: 200 when the app serves
     publicUrlEnv: "WEB_PUBLIC_URL",    // optional: the app's own https URL
     allowedHostsEnv: "WEB_ALLOWED_HOSTS",
+    // public: true,                   // for an app that signs in its own users: any address, no GitHub token
   });
 } else {
   // aspire run: builder.addNodeApp(...).withEnvironment("MANAGED_COPILOT_URL", copilot.url)
@@ -239,7 +243,9 @@ if (await builder.executionContext().isPublishMode()) {
 ```
 
 The app's image should start with the lease supervisor (see `demos/assistant/Dockerfile`), keep its state under
-`/data`, and listen on `PORT`.
+`/data`, and listen on `PORT`. By default it acts as `Parameters:app-github-token` and opens only from
+`Parameters:app-allowed-ips`; `githubToken: false` keeps it behind the allowlist without the token, and `public: true`
+opens it to any address without the token (see "Who can open the apps").
 
 ## Durable state
 
@@ -324,17 +330,48 @@ create in about 8 s, a real model reply, files, uid 10001, idle stop, and resume
 
 ## Who can open the apps
 
-The published apps act as the GitHub account in `Parameters:app-github-token` and have no sign-in of their own, so
-their ingress accepts only the addresses in `Parameters:app-allowed-ips` (plus the platform subnet, for webhooks). The
-default is this machine's public address as `api.ipify.org` reports it, which `aspire deploy` prints.
+A published app is one of two kinds, chosen in the AppHost:
+
+| | Allowlisted (the default) | Public (`public: true`) |
+| --- | --- | --- |
+| For | Apps with no sign-in of their own. They act as the GitHub account in `Parameters:app-github-token`, or hold no account (`githubToken: false`, like the gallery) | Apps that sign in their own users: with each user's own GitHub token, or users the app vouches for with an app credential |
+| Who can open it | The addresses in `Parameters:app-allowed-ips` (default: this machine's public address, which `aspire deploy` prints), plus the platform subnet for webhooks | Any address |
+| GitHub token | `Parameters:app-github-token` as `MANAGED_COPILOT_GITHUB_TOKEN`, unless `githubToken: false` | Never: `githubToken: true` is refused, and `MANAGED_COPILOT_GITHUB_TOKEN` is never passed through `env` |
+| `npx managed-copilot access ips` | Changes its allowlist at once | Never applies; `access` lists it under **Public apps** |
 
 Networks that send Azure traffic through a corporate tunnel (a VPN or Microsoft Entra Global Secure Access, for
-example) reach Azure from different addresses than the rest of the Internet, often a rotating pool. The apps then
-answer some or all requests with `403 RBAC: access denied`. Set `Parameters:app-allowed-ips` to the ranges your network
-uses for Azure (ask your network team, or see "Troubleshooting") and deploy again. Everyone else behind those addresses
-can reach the apps too.
+example) reach Azure from different addresses than the rest of the Internet, often a rotating pool. Allowlisted apps
+then answer some or all requests with `403 RBAC: access denied`. Set `Parameters:app-allowed-ips` to the ranges your
+network uses for Azure (ask your network team, or see "Troubleshooting") and deploy again. Everyone else behind those
+addresses can reach the apps too.
 
-Alternatives when an address allowlist does not fit:
+### Public apps
+
+An app built for other people signs its users in itself, so it doesn't need the allowlist:
+
+```ts
+await publishApp(builder, copilot, {
+  name: "front-desk",
+  dockerfile: "demos/front-desk/Dockerfile",
+  port: 7450,
+  healthPath: "/api/health",
+  public: true, // any address can open it; it gets no GitHub token
+});
+```
+
+- **Ingress.** Its container app has no IP rules and is tagged `managed-copilot-access: public`. `aspire deploy`
+  prints its URL under "Public apps", `npx managed-copilot deploy` lists it when it's done, and the gallery labels it
+  Public. Nothing at deploy time opens or narrows it: the AppHost decides, so it's reviewed like any other code change.
+- **Identity.** It never holds the deployer's token. It calls the platform as each signed-in user:
+  `managed.client(environment, { gitHubToken: user.githubToken })` with that user's own GitHub token (the platform's
+  access rules must admit them), or as users it vouches for with an app credential.
+- **The other apps keep their protection.** Apps that act as your account stay behind `Parameters:app-allowed-ips`;
+  only an explicit `"*"` opens them, and `access ips set "*"` asks first.
+
+Verified on Azure on 2026-11-04 with [`deployments/azure/qualify/public-apps`](../deployments/azure/qualify/public-apps/README.md)
+(see "Live qualification").
+
+Alternatives when an address allowlist does not fit an app that has no sign-in of its own:
 
 - **Container Apps authentication (Easy Auth).** Configure Microsoft Entra ID or GitHub sign-in and restrict it to the
   intended accounts before removing IP restrictions. This needs an Entra app registration or a GitHub OAuth app.
@@ -362,6 +399,7 @@ Alternatives when an address allowlist does not fit:
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
 | Demos (software factory, assistant, Dispatch) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; the factory's agent-led mode and Dispatch pass with their workers in Container Apps Sandboxes; assistant uses labelled demo Google data, and its sandboxes (added 2026-10-27) are verified locally only |
+| Public apps (`publishApp({ public: true })`) | Not applicable (apps run on localhost) | Yes (2026-11-04): open to any address with no deployer token, beside an app that keeps the allowlist |
 
 ## Live qualification
 
@@ -385,6 +423,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Orchestrator (2026-10-27) | Snippet 14 (34 s) and walkthrough 11 (50 s) passed, each worker in its own sandbox. A run of every coordinator tool passed 10/10 checks: a builder's script read with `read_worker_file`, copied to a second worker's sandbox with `copy_worker_files` and run there after `message_worker`, worker prompts answered as `platform:orchestrator`, `stop_worker` deleting the builder's session, and deleting the coordinator deleting the other |
 | Software factory, agent-led (2026-10-27) | Run from this machine against the deployed gateway (the apps' allowlist excluded this machine's tunnel). The coordinator created two builders and later a release worker, each in its own Container Apps sandbox. It reused one builder for two fix rounds until the second-model review approved it, then copied both builders' files into the release sandbox. Completed in 541 s: **9 files, 47/47 tests**, which also passed in an offline, read-only container. The coordinator stopped all three workers afterwards |
 | Dispatch (2026-10-27) | The deployed app started and connected to the gateway. This machine's network tunnel reaches the apps from an address outside their allowlist, so the app was driven through its own API from inside its container (`az containerapp exec`). Two approved requests each created a worker in its own sandbox: Python (`dispatch-python`) and web research (`dispatch-web`, which read en.wikipedia.org through its allowlist). A follow-up typed in Copilot CLI, attached to the same coordinator, reused the Python worker without a new approval; Dispatch labeled it "from Copilot CLI" and showed the reuse. Deleting the conversation removed the coordinator and both workers |
+| Public apps (2026-11-04) | A separate deployment of [`deployments/azure/qualify/public-apps`](../deployments/azure/qualify/public-apps/README.md) (a gateway and the gallery image twice; no model calls), made with `npx managed-copilot deploy` into its own resource group in 6 m 35 s with `Parameters:app-allowed-ips` set to an address that isn't this machine's. Its `check.mjs` passed **10/10**: the public app (tagged `managed-copilot-access: public`, no IP rules, no `MANAGED_COPILOT_GITHUB_TOKEN`) answered this machine with 200, while the app acting as the deployer (its allowlist plus the platform rule, the token as a secret reference) answered `403 RBAC: access denied`. `access` listed the public app apart, and `access ips add` updated only the allowlisted app. This machine's tunnel reaches Azure from an address other than the one `api.ipify.org` reports, so the allowlisted app kept refusing it after `access ips add me`; the public app didn't care. The resource group was deleted afterwards |
 
 The assistant's real Google provider is implemented but Google OAuth was not configured for this deployment. No real
 email or calendar invitation was sent. GitHub App credential refresh, real two-account access isolation, unsupported
@@ -444,10 +483,19 @@ identities. Your AppHost's user secrets stay on your machine.
   or set them as environment variables (`Parameters__<name>-github-users`).
 - **"This deployment names no operators, so its operator console is off"**: set `Parameters:<name>-operator-users` /
   `-operator-orgs` (or add `operators` to the AppHost) and deploy again.
-- **"acts as your GitHub account, so its public address must be restricted"**: this machine's public address could not
-  be detected; set `Parameters:app-allowed-ips`.
+- **"Apps that aren't public open only from Parameters:app-allowed-ips … could not be detected"**: this machine's
+  public address could not be detected; set `Parameters:app-allowed-ips`. An app that signs in its own users can be
+  published with `public: true` instead.
+- **"is public, so it can't act as your GitHub account"**: a public app can't hold `Parameters:app-github-token`. Sign
+  its users in (their own GitHub tokens, or users it vouches for with an app credential) and remove
+  `githubToken: true`, or remove `public: true` to keep it behind the allowlist.
 - **An app answers `403 RBAC: access denied`** (some or all requests): its ingress allowlist does not include the
   address Azure sees for your machine. See "Who can open the apps".
+- **"belongs to another account than the Azure CLI's current one"** (`npx managed-copilot deploy`): `aspire deploy`
+  signs in as the Azure CLI's current account, so it can't deploy to another signed-in account's subscription. Run
+  `az account set --subscription <id>` and deploy again. (A subscription of the current account in another tenant
+  needs nothing: `deploy` passes its tenant as `Azure__TenantId`. With `aspire deploy` alone, set `Azure__TenantId` in
+  the environment.)
 - **`/v1/info` lists no `isolated` capability**: the gateway's log names what the sandbox backend is missing (for
   example the role assignment, which can take a few minutes to propagate; the gateway re-checks every 30 s).
 - **Isolated sessions with network access fail with `capability_unavailable`**: the egress proxy is not connected to

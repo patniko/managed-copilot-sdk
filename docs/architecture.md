@@ -1674,9 +1674,13 @@ sequenceDiagram
 - `deploy` and `access` (`src/commands/deploy.ts`, local tools in `src/host.ts`) work on the AppHost, not the gateway:
   they read and write its user secrets with `aspire secret` (`Azure:*`, `Parameters:<name>-github-users|-github-orgs|
   -operator-users|-operator-orgs`, `Parameters:app-allowed-ips`), then `deploy` runs `aspire deploy` with the caller's
-  token in `Parameters__app-github-token`. `access ips` also rewrites the running published apps' `allow-<n>` ingress
-  rules with `az containerapp ingress access-restriction` (set before remove; `platform` and hand-made rules stay; only
-  apps in the gateway's own environment; a failed lookup or update exits 1). `deploy` refuses to deploy over an existing
+  token in `Parameters__app-github-token`. `aspire deploy` signs in as the Azure CLI's current account, so for another
+  subscription `deploy` passes that subscription's tenant (`Azure__TenantId`) when the same account holds it and stops
+  with `az account set --subscription <id>` when another account does. `access ips` also rewrites the running published
+  apps' `allow-<n>` ingress rules with `az containerapp ingress access-restriction` (set before remove; `platform` and
+  hand-made rules stay; only apps in the gateway's own environment; never an app tagged `managed-copilot-access:
+  public`; a failed lookup or update exits 1). `access` lists public apps apart (`publicApps` in `--json`), and `deploy`
+  prints their URLs once deployed. `deploy` refuses to deploy over an existing
   gateway unless this AppHost's Aspire deployment record (`~/.aspire/deployments/<SHA-256 of lowercased AppHost path>/
   production.json`, which holds the generated keys) targets the same subscription and resource group; in a terminal it
   offers to copy another checkout's matching record.
@@ -1710,9 +1714,12 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   Dockerfile container (`services/gateway/Dockerfile`, stage `azure`, plus a generated stage that copies the AppHost's
   customization folders to `/opt/managed-copilot/apphost`) with external HTTPS ingress. Apps that use the platform
   are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist, by default the deployer's
-  public address). The C# integration in
+  public address, resolved only when such an app exists). With `public: true` an app gets no IP rules, is tagged
+  `managed-copilot-access: public` (`PublishAsManagedCopilotPublicApp`), and never gets `Parameters:app-github-token`
+  (`githubToken: true` is refused before anything is declared); the deploy summary lists allowlisted and public apps
+  separately. The C# integration in
   `deployments/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
-  revision mode, IP rules). Publishing refuses an open gateway: access rules come from the AppHost or from
+  revision mode, IP rules, tags). Publishing refuses an open gateway: access rules come from the AppHost or from
   `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port, by
   its HTTPS address in the environment (`https://<app>.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/...`, filled in by the
   gateway's entrypoint at start). The `push-<name>-sandbox-images` step runs after `provision-<name>-env` (the
@@ -1801,7 +1808,7 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
-| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
+| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots (apps the root AppHost publishes with `public: true` are labeled Public, which its tests check). `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |

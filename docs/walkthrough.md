@@ -175,7 +175,7 @@ Deploying apphost.mts to Azure
   Platform users  @your-login
   Operators       @your-login
   Apps act as     @your-login (your GitHub sign-in)
-  Apps open to    203.0.113.7/32 (this machine)
+  Apps open to    203.0.113.7/32 (this machine); public apps: any address
   Added you (@your-login) to platform users and operators. Change with `npx managed-copilot access`.
 
 Deploy? [y/N]

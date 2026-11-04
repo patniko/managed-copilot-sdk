@@ -1267,16 +1267,39 @@ npx managed-copilot access ips add me            # Parameters:app-allowed-ips, a
 ```
 
 `deploy` targets `Azure:SubscriptionId`, `Azure:Location`, and `Azure:ResourceGroup` (defaults: the Azure CLI's
-subscription, `westus2`, `managed-copilot-dev`, or `--subscription`, `--location`, `--resource-group`). A first
-deployment with no access rules or operators adds the caller to both. The published apps' token is the caller's
-GitHub sign-in, passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. It asks before
-deploying (`--yes` skips the question). If the resource group already holds a deployment, it deploys only when this
-AppHost's Aspire deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it;
-otherwise, in a terminal, it offers to adopt another checkout's record for that target so the deployment keeps its
-generated keys. User and operator changes take effect on the next deploy. Allowlist changes also update the running apps'
-`allow-<n>` ingress rules through the Azure CLI, adding before removing and leaving the platform subnet's rule and
-any hand-made rule alone; `*` (any address) waits for the next deploy. A failed live update keeps the saved list and
-exits non-zero.
+subscription, `westus2`, `managed-copilot-dev`, or `--subscription`, `--location`, `--resource-group`). It deploys as
+the Azure CLI's current account: that account's subscription in another tenant gets its tenant, and another account's
+subscription stops with `az account set --subscription <id>` as the fix. A first deployment with no access rules or
+operators adds the caller to both. The token for published apps that act as an account is the caller's GitHub sign-in,
+passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. It asks before deploying (`--yes`
+skips the question). If the resource group already holds a deployment, it deploys only when this AppHost's Aspire
+deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it; otherwise, in a
+terminal, it offers to adopt another checkout's record for that target so the deployment keeps its generated keys. User
+and operator changes take effect on the next deploy. Allowlist changes also update the running apps' `allow-<n>`
+ingress rules through the Azure CLI, adding before removing and leaving the platform subnet's rule, any hand-made rule,
+and public apps alone; `*` (any address) waits for the next deploy. A failed live update keeps the saved list and exits
+non-zero.
+
+Apps built for other people sign their users in themselves, so they can be public:
+
+```ts
+if (await builder.executionContext().isPublishMode()) {
+  await publishApp(builder, copilot, {
+    name: "front-desk",
+    dockerfile: "demos/front-desk/Dockerfile",
+    port: 7450,
+    healthPath: "/api/health",
+    public: true, // any address can open it; it gets no GitHub token
+  });
+}
+```
+
+By default a published app acts as the deploying account (`Parameters:app-github-token`) and opens only from
+`Parameters:app-allowed-ips`, the deploying machine's address unless set. A public app opens from any address and never
+holds that token: `public: true` with `githubToken: true` is refused, and neither the allowlist nor `access ips`
+applies to it. It calls the platform as its signed-in users (section 2), never as the deployer. Only the AppHost makes
+an app public; the deploy summary, `npx managed-copilot access`, and the container app's tag
+`managed-copilot-access: public` name every public app.
 
 ## 17. Orchestrator: a coordinator with workers
 
@@ -1584,7 +1607,7 @@ proves, and the limits, are in the [delivery gates](#delivery-gates). Listing a 
 | Piece | What it is | Status |
 | --- | --- | --- |
 | `@managed-copilot/sdk` | Supported transport/defaults integration, native clients/sessions, `connect`, `client`, `createSession`, `resumeSession`, `sessions`, `files`, `artifacts`, `vaults`, `schedules`, `promote`, `workers`, `openCli`, and `verifyWebhook` | Built: `libraries/sdk` |
-| `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost | Built: `libraries/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
+| `@managed-copilot/aspire` | `addManagedCopilot(builder, ...)` for your AppHost, and `publishApp(...)` for the apps that use it | Built: `libraries/aspire`, for `aspire run` and `aspire deploy` to Azure Container Apps |
 | `managed-copilot` CLI | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console`, and `operator` | Built: `libraries/cli`, plus `status` |
 | Platform services/images | Admission/router, durable session ownership, credential broker, shared runtime, egress enforcement, and sandbox base image | Built: `services/gateway`, `services/sandbox`, `services/egress` |
 | Orchestrator environments | A shared coordinator with worker tools, workers as sessions in their own sandboxes, approvals within each worker's start, and cleanup (section 17) | Built: gateway `modules/orchestrator`, with real models locally and on Azure |
@@ -1710,6 +1733,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 38 | Independence from GitHub | Connecting a service needs neither GitHub's connector service nor the platform's GitHub sign-in: the customer's own OAuth client (in the AppHost, in code, or automatic MCP registration), a token, or a grant their app imports, with consent, callback, and credentials at the service and the deployment. GitHub's MCP server is one more connector; GitHub stays the platform identity that owns personal connections (principle 5) | Decided | Not built |
 | 39 | Connector API shape | AppHost `connectors` (`mcpServer`, `oauth`, `token`, `env`, `account: "user"` or `"service"`), environment `connectors` that join every session, and `connectorReturnUrls`; `connect` (with `--token`), `connectors` (with `import`), and `disconnect` in the CLI; `managed.connectors` (`connect`, `complete`, `list`, `create`, `disconnect`, `delete`); `sign_in` actions and the `request_sign_in` platform tool; runtime credentials only through host-answered MCP headers | Proposed | Not built |
 | 40 | GitHub Connectors as a source | Optionally use connections made on GitHub once the stock runtime can use them without a GitHub token in the sandbox; never required | Later | Not built: sandboxes hold only a placeholder GitHub token |
+| 41 | Public apps | `publishApp({ public: true })` opens an app that signs in its own users to any address. It never holds the deployer's GitHub token (`githubToken: true` is refused); every other app keeps the deploy-time address allowlist, which only an explicit `"*"` opens (section 16) | Proposed | Built and verified on Azure (2026-11-04): a public app answered from outside the allowlist while an app acting as the deployer refused it |
 
 ## Platform contracts
 
