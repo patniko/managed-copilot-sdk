@@ -47,6 +47,15 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "incident-commander",
+    url: local(7445),
+    async prepare(page) {
+      // Open the newest incident when there is one: its response map, and its approval or postmortem.
+      const first = page.locator('a[href^="#/incidents/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
