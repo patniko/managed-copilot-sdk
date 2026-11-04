@@ -3,9 +3,9 @@ import { isRuntimeHost, matchesAllowed } from "./inference.js";
 import type { BlockedRequest } from "./platform.js";
 
 /** Lines kept per step; older ones are dropped first. */
-export const MAX_LOG_LINES = 500;
+const MAX_LOG_LINES = 500;
 /** Characters kept per line; longer output keeps its end, where test runners print their summary. */
-export const MAX_LINE_CHARS = 8_000;
+const MAX_LINE_CHARS = 8_000;
 
 export interface RunSink {
   changed(run: Run): void;
@@ -21,7 +21,7 @@ function compact<T extends object>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as T;
 }
 
-export function emptyLogs(): Record<StepId, LogLine[]> {
+function emptyLogs(): Record<StepId, LogLine[]> {
   return Object.fromEntries(STEP_IDS.map((id) => [id, [] as LogLine[]])) as Record<StepId, LogLine[]>;
 }
 

@@ -1,7 +1,7 @@
-import type { AppState, RunDetail, RunView } from "../../shared/types.js";
+import type { AppState, CreateRunRequest, RunDetail, RunView } from "../../shared/types.js";
 
 /** A failed API call with the server's friendly message (never a stack trace). */
-export class ApiError extends Error {
+class ApiError extends Error {
   readonly code: string;
   readonly status: number;
 
@@ -61,7 +61,7 @@ const runUrl = (id: string) => `/api/runs/${encodeURIComponent(id)}`;
 export const api = {
   state: () => json<AppState>("GET", "/api/state"),
   run: (id: string) => json<RunDetail>("GET", runUrl(id)),
-  create: (input: { readonly repo: string } | { readonly sample: true }) => json<RunView>("POST", "/api/runs", input),
+  create: (input: CreateRunRequest) => json<RunView>("POST", "/api/runs", input),
   stop: (id: string) => json<undefined>("POST", `${runUrl(id)}/stop`),
   delete: (id: string) => json<undefined>("DELETE", runUrl(id)),
   patchUrl: (id: string) => `${runUrl(id)}/patch`,

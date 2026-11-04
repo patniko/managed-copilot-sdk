@@ -18,7 +18,7 @@ const RING: Readonly<Record<StepView["status"], string>> = {
   skipped: "border-line-muted",
 };
 
-export function stepMetric(step: StepView, now: number): string {
+function stepMetric(step: StepView, now: number): string {
   const elapsed = between(step.startedAt, step.finishedAt, now);
   if (step.status === "running") return elapsed !== undefined ? clock(elapsed) : "";
   if (step.status === "skipped") return "Skipped";

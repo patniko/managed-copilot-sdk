@@ -1,7 +1,7 @@
 import { ArrowRightIcon, BeakerIcon, ContainerIcon, CopilotIcon, FileDiffIcon, PlayIcon, RepoIcon, ToolsIcon } from "@primer/octicons-react";
 import { useState, type FormEvent } from "react";
 import { parseRepoInput } from "../../shared/repo.js";
-import type { RunSummary } from "../../shared/types.js";
+import type { CreateRunRequest, RunSummary } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
 import { between, duration, relative } from "../lib/format.js";
@@ -51,7 +51,7 @@ function Launcher() {
   const [busy, setBusy] = useState<"repo" | "sample" | undefined>();
   const ready = platform?.state === "connected";
 
-  const start = async (input: { readonly repo: string } | { readonly sample: true }, kind: "repo" | "sample") => {
+  const start = async (input: CreateRunRequest, kind: "repo" | "sample") => {
     setBusy(kind);
     setProblem(undefined);
     try {

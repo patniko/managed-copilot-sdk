@@ -28,11 +28,24 @@ export function Header() {
           </a>
         </nav>
         <div className="AppHeader-actions min-w-0">
+          <Reconnecting />
           <PlatformPill />
           <Account />
         </div>
       </div>
     </header>
+  );
+}
+
+/** The page lost Repo Doctor's event stream: it reconnects by itself, and says so meanwhile. */
+function Reconnecting() {
+  const connection = useStore((state) => state.connection);
+  if (connection !== "reconnecting") return null;
+  return (
+    <span role="status" className="inline-flex shrink-0 animate-fade-in items-center gap-1.5 text-xs text-fg-muted">
+      <Spinner size={16} className="text-fg-attention" />
+      <span className="max-md:hidden">Reconnecting…</span>
+    </span>
   );
 }
 

@@ -3,7 +3,7 @@ import { STEP_IDS, summarize, type LogLine, type PlatformStatus, type RunSummary
 import { api, errorMessage } from "./api.js";
 import { homeHref, navigate, parseHash } from "./router.js";
 
-export type Connection = "connecting" | "open" | "reconnecting";
+type Connection = "connecting" | "open" | "reconnecting";
 
 export interface StoreState {
   readonly phase: "loading" | "ready" | "error";
