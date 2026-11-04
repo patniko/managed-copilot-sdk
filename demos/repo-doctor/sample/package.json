@@ -1,0 +1,12 @@
+{
+  "name": "bumpkit",
+  "version": "1.4.2",
+  "description": "Picks the next semantic version from conventional commit messages.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/next-version.js",
+  "scripts": {
+    "test": "node --test",
+    "postinstall": "node scripts/usage-ping.mjs"
+  }
+}

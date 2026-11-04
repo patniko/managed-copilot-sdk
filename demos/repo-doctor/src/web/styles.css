@@ -1,0 +1,110 @@
+@import "tailwindcss";
+@import "@managed-copilot/github-theme";
+
+/*
+ * Repo Doctor additions: only what Primer has no class for (the sandbox frame, the pipeline's links, the network
+ * chips, and the step log). Every color is a Primer variable.
+ */
+
+@keyframes rd-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes rd-ring {
+  0% {
+    box-shadow: 0 0 0 0 var(--borderColor-danger-emphasis);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes rd-flow {
+  to {
+    background-position: 24px 0;
+  }
+}
+
+@layer components {
+  /* The sandbox: everything a run does happens inside this frame. Dashed once the sandbox is deleted. */
+  .rd-frame {
+    border: 2px solid var(--borderColor-accent-muted);
+    border-radius: var(--borderRadius-large);
+    background-color: var(--bgColor-default);
+    transition:
+      border-color 0.4s,
+      opacity 0.4s;
+  }
+  .rd-frame[data-state="creating"] {
+    border-style: dashed;
+  }
+  .rd-frame[data-state="deleted"],
+  .rd-frame[data-state="failed"] {
+    border-style: dashed;
+    border-color: var(--borderColor-default);
+  }
+
+  /* The link between two steps: green once the earlier step is done, moving while the next one runs. */
+  .rd-link {
+    background-color: var(--borderColor-muted);
+  }
+  .rd-link[data-state="done"] {
+    background-color: var(--bgColor-success-emphasis);
+  }
+  .rd-link[data-state="active"] {
+    background-image: repeating-linear-gradient(90deg, var(--bgColor-attention-emphasis) 0 8px, transparent 8px 12px);
+    background-size: 24px 100%;
+    animation: rd-flow 0.8s linear infinite;
+  }
+
+  /* A host the sandbox may reach (dashed until a command used it), or a request the network rules refused. */
+  .rd-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+    height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
+    border: 1px solid var(--borderColor-default);
+    border-radius: 999px;
+    animation: rd-pop 0.25s var(--ease-github, ease-out);
+  }
+  .rd-chip[data-kind="used"] {
+    background-color: var(--bgColor-success-muted);
+    border-color: var(--borderColor-success-muted);
+  }
+  .rd-chip[data-kind="allowed"] {
+    color: var(--fgColor-muted);
+    border-style: dashed;
+    border-color: var(--borderColor-success-emphasis);
+  }
+  .rd-chip[data-kind="blocked"] {
+    background-color: var(--bgColor-danger-muted);
+    border-color: var(--borderColor-danger-muted);
+  }
+  .rd-chip[data-fresh="true"] {
+    animation:
+      rd-pop 0.25s var(--ease-github, ease-out),
+      rd-ring 1.4s ease-out 2;
+  }
+
+  /* A step's log: a terminal inside the sandbox. */
+  .rd-log {
+    font-family: var(--fontStack-monospace);
+    font-size: 12px;
+    line-height: 1.6;
+    background-color: var(--bgColor-inset);
+  }
+}
