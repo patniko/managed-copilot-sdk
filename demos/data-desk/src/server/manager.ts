@@ -151,7 +151,7 @@ export class AnalysisManager implements AnalysisHost {
   }
 
   rows(datasetId: string, offset: number, limit: number): RowsPage {
-    const table = this.datasets.require(datasetId).table;
+    const table = this.datasets.require(datasetId).table();
     const start = Math.max(0, Math.min(Number.isFinite(offset) ? Math.floor(offset) : 0, table.rows.length));
     const count = Math.max(1, Math.min(Number.isFinite(limit) ? Math.floor(limit) : 200, PAGE_MAX));
     return { offset: start, total: table.rows.length, rows: table.rows.slice(start, start + count) };

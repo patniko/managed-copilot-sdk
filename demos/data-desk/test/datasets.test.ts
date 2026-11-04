@@ -1,8 +1,8 @@
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { Datasets, displayName, sandboxFileName, SAMPLES, suggestPrompts } from "../src/server/datasets.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Datasets, displayName, sandboxFileName, SAMPLES, suggestPrompts, type Dataset } from "../src/server/datasets.js";
 import { Table } from "../src/server/table.js";
 import { PACKAGE_ROOT } from "./fakes.js";
 
@@ -28,6 +28,10 @@ describe("datasets", () => {
     first.load();
     const added = first.add("Q3 Sales (final).csv", Buffer.from("region,revenue\nWest,10\nEast,12\n"));
     expect(added.summary).toMatchObject({ name: "Q3 Sales (final)", fileName: "q3-sales-final.csv", sample: false, rows: 2 });
+    expect(added.summary.columns).toEqual([
+      { name: "region", type: "text" },
+      { name: "revenue", type: "number" },
+    ]);
     expect(first.add("again.csv", Buffer.from("region,revenue\nWest,10\nEast,12\n")).summary.id).toBe(added.summary.id);
     expect(readdirSync(join(dataDir, "uploads")).sort()).toEqual([`${added.summary.id}.csv`, `${added.summary.id}.json`]);
 
@@ -52,6 +56,15 @@ describe("datasets", () => {
     expect(displayName("q3_sales-by-region.csv")).toBe("Q3 sales by region");
   });
 
+  it("names files quickly however long the name is", () => {
+    // A 16,000-character name of dashes used to take 0.3 s to clean up; names are cut to 255 characters first.
+    const long = `a${"-".repeat(16_000)}b.csv`;
+    const started = performance.now();
+    expect(sandboxFileName(long)).toBe("a.csv");
+    expect(displayName(long)).toBe("A");
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
   it("suggests starting questions from an upload's columns", () => {
     const columns = (csv: string) => Table.fromCsv(csv).columns;
     expect(suggestPrompts(columns("date,region,sales\n2025-01-01,West,3\n2025-01-02,East,4\n"))).toEqual([
@@ -63,5 +76,89 @@ describe("datasets", () => {
       { text: "Describe this dataset", needs: "tools" },
       { text: "Chart the most interesting column", needs: "code" },
     ]);
+  });
+});
+
+describe("uploads", () => {
+  let minute = 0;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Uploads a 16-byte file a minute after the previous upload. */
+  function upload(datasets: Datasets, label: string): Dataset {
+    vi.setSystemTime(Date.parse("2026-11-04T10:00:00Z") + ++minute * 60_000);
+    return datasets.add(`${label}.csv`, Buffer.from(`name,value\n${label},1\n`));
+  }
+
+  const names = (datasets: Datasets) => datasets.list().flatMap((dataset) => (dataset.sample ? [] : [dataset.name]));
+  const files = (...kept: Dataset[]) => kept.flatMap((dataset) => [`${dataset.summary.id}.csv`, `${dataset.summary.id}.json`]).sort();
+
+  it("keep the newest: another one drops the oldest, files included", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "desk-"));
+    const datasets = new Datasets(samples, dataDir, 1024, { maxUploads: 2 });
+    datasets.load();
+    const aa = upload(datasets, "aa");
+    const bb = upload(datasets, "bb");
+    const cc = upload(datasets, "cc");
+    expect(names(datasets)).toEqual(["Cc", "Bb"]);
+    expect(readdirSync(join(dataDir, "uploads")).sort()).toEqual(files(bb, cc));
+    expect(datasets.get(aa.summary.id)).toBeUndefined();
+    expect(() => datasets.require(aa.summary.id)).toThrow(/isn't available/);
+    // An analysis still holding the dropped one hears the same.
+    expect(() => aa.table()).toThrow(/isn't available/);
+    expect(() => aa.bytes()).toThrow(/isn't available/);
+  });
+
+  it("fit a total size, and a file uploaded again counts as the newest", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "desk-"));
+    const datasets = new Datasets(samples, dataDir, 1024, { maxStoredBytes: 40 });
+    datasets.load();
+    upload(datasets, "aa");
+    upload(datasets, "bb");
+    upload(datasets, "aa");
+    upload(datasets, "cc");
+    expect(names(datasets)).toEqual(["Cc", "Aa"]);
+    const restarted = new Datasets(samples, dataDir, 1024, { maxStoredBytes: 40 });
+    restarted.load();
+    expect(names(restarted)).toEqual(["Cc", "Aa"]);
+  });
+
+  it("are limited again when Data Desk starts, and leftovers are removed", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "desk-"));
+    const before = new Datasets(samples, dataDir, 1024);
+    before.load();
+    const aa = upload(before, "aa");
+    const bb = upload(before, "bb");
+    const cc = upload(before, "cc");
+    const folder = join(dataDir, "uploads");
+    writeFileSync(join(folder, `${aa.summary.id}.json.tmp`), "{");
+    writeFileSync(join(folder, "upload-0123456789abcdef.csv"), "name\nlost\n");
+    writeFileSync(join(folder, "upload-fedcba9876543210.json"), "not json");
+    writeFileSync(join(folder, "notes.txt"), "someone else's");
+    const after = new Datasets(samples, dataDir, 1024, { maxUploads: 2 });
+    after.load();
+    expect(names(after)).toEqual(["Cc", "Bb"]);
+    expect(readdirSync(folder).sort()).toEqual([...files(bb, cc), "notes.txt"].sort());
+  });
+
+  it("stay parsed a few at a time, and are read again when used", () => {
+    const datasets = new Datasets(samples, mkdtempSync(join(tmpdir(), "desk-")), 1024, { maxParsedBytes: 20 });
+    datasets.load();
+    const aa = upload(datasets, "aa");
+    const bb = upload(datasets, "bb");
+    const parsed = bb.table();
+    expect(bb.table()).toBe(parsed);
+    expect(aa.table().rows).toEqual([["aa", "1"]]);
+    expect(bb.table()).not.toBe(parsed);
+    expect(bb.table().rows).toEqual([["bb", "1"]]);
+    expect(aa.bytes().toString("utf8")).toBe("name,value\naa,1\n");
+    const sample = datasets.require("sample-coffee-sales");
+    expect(sample.table()).toBe(sample.table());
   });
 });

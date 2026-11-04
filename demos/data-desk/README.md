@@ -107,7 +107,8 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
   an SVG from the sandbox can never run as part of the app.
 - **State is the platform's.** Sessions, sandboxes, and charts live in Managed Copilot. Data Desk's own records
   (`.data/data-desk.json`) keep each analysis's dataset, the messages it sent, the move it saw, and the last usage it
-  read; uploaded files are kept in `.data/uploads`.
+  read. Uploaded files are kept in `.data/uploads`: the newest 10, up to 20 MB in all, and another upload drops the
+  oldest. Only the most recently used ones stay parsed in memory (5 MB of files), so memory stays bounded.
 
 ## Configuration
 

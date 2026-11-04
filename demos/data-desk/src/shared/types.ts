@@ -46,6 +46,9 @@ export interface ColumnInfo {
   readonly top?: readonly { readonly value: string; readonly count: number }[];
 }
 
+/** A column in a dataset's summary; `describe_dataset` gives the agent the full `ColumnInfo`. */
+export type ColumnSummary = Pick<ColumnInfo, "name" | "type">;
+
 /** A prompt to start with: one the app's own tools answer, or one that needs code (and so a sandbox). */
 export interface SuggestedPrompt {
   readonly text: string;
@@ -62,7 +65,7 @@ export interface DatasetSummary {
   readonly sample: boolean;
   readonly rows: number;
   readonly bytes: number;
-  readonly columns: readonly ColumnInfo[];
+  readonly columns: readonly ColumnSummary[];
   readonly prompts: readonly SuggestedPrompt[];
 }
 
