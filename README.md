@@ -116,6 +116,7 @@ All three run under `aspire run` with real models and deploy to Azure with the s
 | [Long-running assistant](demos/assistant/README.md) | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 | [Dispatch](demos/dispatch/README.md) | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
 | [Research Swarm](demos/research-swarm/README.md) | One question fans out to web researchers, each in its own sandbox, and comes back as a report where every claim cites a page they read |
+| [Pattern Race](demos/pattern-race/README.md) | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests, and a scorecard |
 
 ## Deploy to Azure
 

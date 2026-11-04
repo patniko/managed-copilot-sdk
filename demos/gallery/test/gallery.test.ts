@@ -31,6 +31,7 @@ describe("links", () => {
         "software-factory": "http://localhost:7480",
         assistant: "http://localhost:7490",
         "research-swarm": "http://localhost:7425",
+        "pattern-race": "http://localhost:7420",
         console: "/open/console?target=local",
       },
     });
@@ -51,6 +52,7 @@ describe("links", () => {
       "software-factory": "https://software-factory.d.io",
       assistant: "https://assistant.d.io",
       "research-swarm": "https://research-swarm.d.io",
+      "pattern-race": "https://pattern-race.d.io",
     });
   });
 
@@ -227,7 +229,7 @@ describe("gallery server", () => {
       expect(state.hosted).toBe(true);
       expect(state.local).toBeUndefined();
       expect(state.cloud.gatewayUrl).toBe("https://copilot.d.invalid");
-      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "research-swarm", "software-factory"]);
+      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "pattern-race", "research-swarm", "software-factory"]);
     });
 
     it("never mints a console sign-in link, and says how to open it", async () => {
@@ -266,9 +268,11 @@ describe("page", () => {
   });
 
   it("links the side-by-side comparison only when its app is listed", () => {
-    expect(compareApp(APPS.filter((app) => app.id !== COMPARE_APP_ID))).toBeUndefined();
+    const others = APPS.filter((app) => app.id !== COMPARE_APP_ID);
+    expect(compareApp(others)).toBeUndefined();
     const race = { ...APPS[0]!, id: COMPARE_APP_ID, title: "Pattern Race" };
-    expect(compareApp([...APPS, race])).toBe(race);
+    expect(compareApp([...others, race])).toBe(race);
+    expect(compareApp(APPS)?.id).toBe(COMPARE_APP_ID);
   });
 
   it("finds the patterns an app shows, and where it opens", () => {

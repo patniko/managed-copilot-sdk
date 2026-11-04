@@ -3,8 +3,9 @@ import { createBuilder } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
-import { softwareFactory } from "./demos/software-factory/apphost.mjs";
+import { PATTERN_RACE_DEFAULT_PORT, patternRace } from "./demos/pattern-race/apphost.mjs";
 import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swarm/apphost.mjs";
+import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -24,6 +25,7 @@ const ports = {
   snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
   researchSwarm: RESEARCH_SWARM_DEFAULT_PORT + offset,
+  patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -113,6 +115,9 @@ await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allow
 
 // Research Swarm: one question fans out to web researchers, each in its own sandbox, and comes back as a cited report.
 await addDemo(swarm.app, { dockerfile: "demos/research-swarm/Dockerfile", allowedHostsEnv: "RESEARCH_SWARM_ALLOWED_HOSTS" });
+
+// Pattern Race: one job in six lanes at once, one per pattern environment above; only the environment name differs.
+await addDemo(patternRace({ port: ports.patternRace }).app, { dockerfile: "demos/pattern-race/Dockerfile", allowedHostsEnv: "PATTERN_RACE_ALLOWED_HOSTS" });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
 // for hands-on work.
