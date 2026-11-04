@@ -93,7 +93,7 @@ function RaceSummary({ race, now }: { readonly race: RaceSnapshot; readonly now:
   return (
     <span className="text-sm text-fg-muted" title={new Date(race.startedAt).toLocaleString()}>
       {race.state === "stopped" ? "Stopped" : "Finished"}
-      {took ? ` in ${took}` : ""} · {jobById(race.job).title} · {timeAgo(race.startedAt, now)}
+      {took ? ` in ${took}` : ""} · {jobById(race.job).title} · {timeAgo(race.finishedAt ?? race.startedAt, now)}
     </span>
   );
 }
