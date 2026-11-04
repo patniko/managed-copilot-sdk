@@ -58,7 +58,8 @@ export function Tooltip({ content, children, describe = true }: { content: React
   const own = child.props;
   const empty = content === undefined || content === null || content === false || content === "";
   const show = (target: HTMLElement) => {
-    if (!empty) setAnchor(target.getBoundingClientRect());
+    // Not over the trigger's own open menu or popover.
+    if (!empty && target.getAttribute("aria-expanded") !== "true") setAnchor(target.getBoundingClientRect());
   };
   const trigger = cloneElement(child, {
     onMouseEnter: (event: MouseEvent<HTMLElement>) => {

@@ -25,7 +25,7 @@ environments, created on demand once you approve them and reused for follow-ups.
 <table>
   <tr>
     <td width="50%"><img src="docs/screenshots/sandbox-approval.png" alt="The assistant asking to start a Python sandbox: its name and environment, the task clamped to three lines, and what it can reach"></td>
-    <td width="50%"><img src="docs/screenshots/sandbox-reused.png" alt="A follow-up sent to the same sandbox, marked Reused, with a breakdown by meeting type"></td>
+    <td width="50%"><img src="docs/screenshots/sandbox-reused.png" alt="A follow-up sent to the same sandbox, marked Reused, finding the busiest day of the week"></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/sandbox-research.png" alt="A new web research sandbox for different work, next to the reused Python sandbox's tile in the side panel"></td>
