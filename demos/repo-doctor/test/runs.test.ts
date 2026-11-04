@@ -7,7 +7,7 @@ import { interrupted, parseSource, RunManager } from "../src/server/runs.js";
 import { loadSample } from "../src/server/sample.js";
 import { RunStore } from "../src/server/store.js";
 import { STEP_IDS, type RunView } from "../src/shared/types.js";
-import { FakePlatform, PASSING_OUTPUT, testConfig, until, type FakeSession } from "./fakes.js";
+import { FakePlatform, PASSING_OUTPUT, SAMPLE_DIFF, testConfig, until, type FakeSession } from "./fakes.js";
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -120,6 +120,27 @@ describe("a run", () => {
     expect(run.source).toEqual({ kind: "github", owner: "octo", repo: "tools", ref: "release/2.x" });
     expect(run.network.allowed.find((entry) => entry.host === "github.com")?.used?.by).toBe("git clone --depth 1 --branch release/2.x https://github.com/octo/tools.git repo");
     expect(platform.scripts.find((script) => script.includes("git clone"))).toContain("--branch 'release/2.x'");
+  });
+
+  it("fails the Patch step instead of returning part of a patch", async () => {
+    const tooLarge = [
+      { output: "+".repeat(600 * 1024), message: "Copilot's changes make a 600 KB patch, over Repo Doctor's 512 KB limit. The Patch step's log lists the changed files." },
+      // The platform keeps a command's newest output: here the start of the diff was skipped.
+      { output: SAMPLE_DIFF, skippedBytes: 3 * 1024 * 1024, message: expect.stringMatching(/^Copilot's changes make a 3\.0 MB patch, over Repo Doctor's 512 KB limit\./) },
+    ];
+    for (const { message, ...result } of tooLarge) {
+      const platform = new FakePlatform();
+      const commands = platform.commands;
+      platform.commands = (script, fake) => (script.includes("git diff") && !script.includes("--stat") ? { exitCode: 0, state: "completed", ...result } : commands(script, fake));
+      const { manager } = setup(platform);
+      const run = await finished(manager, manager.create({ sample: true }).id);
+      expect(run).toMatchObject({ status: "failed", error: { code: "patch_too_large", message } });
+      expect(run.steps.map((item) => [item.id, item.status, item.summary])).toContainEqual(["patch", "failed", "Too large"]);
+      expect(step(run, "verify").status).toBe("skipped");
+      expect(run.patch).toBeUndefined();
+      expect(() => manager.patch(run.id)).toThrow("This run has no patch.");
+      expect(run.sandbox.state).toBe("deleted");
+    }
   });
 
   it("fails Set up when Copilot never reports a test command", async () => {

@@ -5,7 +5,7 @@ import { approveAll } from "@github/copilot-sdk";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
 import { diffTotals, parseDiff } from "../shared/diff.js";
 import { cloneUrl } from "../shared/repo.js";
-import type { PatchView, RunStatus, StepId, TestReport } from "../shared/types.js";
+import { PATCH_TOO_LARGE, type PatchView, type RunStatus, type StepId, type TestReport } from "../shared/types.js";
 import { AgentObserver, fixPrompt, noTestsTool, REPO_DIR, SETUP_PROMPT, SYSTEM_MESSAGE, testCommandTool } from "./agent.js";
 import type { DoctorConfig } from "./config.js";
 import { errorText } from "./errors.js";
@@ -14,7 +14,7 @@ import { log } from "./log.js";
 import type { CommandResult, DoctorPlatform, DoctorSession } from "./platform.js";
 import { tail, type Run } from "./run.js";
 import type { SampleProject } from "./sample.js";
-import { parseTestOutput, stripAnsi } from "./testsummary.js";
+import { outputEnd, parseTestOutput, stripAnsi } from "./testsummary.js";
 
 export interface DriverDeps {
   readonly platform: DoctorPlatform;
@@ -41,8 +41,11 @@ const EXCLUDES = ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache
   .concat("':(exclude,glob)**/*.pyc'", "':(exclude,glob)**/*.egg-info/**'")
   .join(" ");
 
+/** Patches are returned whole up to this size; a larger one fails the Patch step rather than being cut. */
 const PATCH_LIMIT = 512 * 1024;
 const TEST_TAIL = 4_000;
+/** Output without a newline is logged once this much of it has built up. */
+const LINE_BUFFER = 64 * 1024;
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -64,7 +67,9 @@ export function snapshotScript(name: string): string {
 
 /** The trees hold tracked files and new files outside the exclusions, so the diff compares them whole. */
 export function diffScript(from: string, to: string, stat = false): string {
-  return `cd ${REPO_DIR} && git diff --no-color --no-ext-diff --find-renames${stat ? " --stat" : ""} ${from} ${to}`;
+  const diff = `git diff --no-color --no-ext-diff --find-renames${stat ? " --stat" : ""} ${from} ${to}`;
+  // A command's output holds both of its streams: git's warnings stay out of the patch itself.
+  return `cd ${REPO_DIR} && ${stat ? diff : `${diff} 2>/dev/null`}`;
 }
 
 export function cloneFailure(output: string, name: string): string {
@@ -89,10 +94,14 @@ function minutes(ms: number): string {
   return `${value} minute${value === 1 ? "" : "s"}`;
 }
 
+function size(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(bytes / 1024)} KB`;
+}
+
 const headOf = (output: string) => /^HEAD (\w+)/m.exec(output)?.[1];
 
 /** Emits streamed output in whole lines, a few times a second. */
-class OutputBuffer {
+export class OutputBuffer {
   #pending = "";
   #timer: NodeJS.Timeout | undefined;
   readonly #emit: (text: string) => void;
@@ -103,7 +112,8 @@ class OutputBuffer {
 
   push(chunk: string): void {
     this.#pending += chunk;
-    this.#timer ??= setTimeout(() => this.#flush(false), 250);
+    if (this.#pending.length >= LINE_BUFFER) this.#flush(true);
+    else this.#timer ??= setTimeout(() => this.#flush(false), 250);
   }
 
   #flush(all: boolean): void {
@@ -114,7 +124,7 @@ class OutputBuffer {
       if (this.#pending) this.#timer = setTimeout(() => this.#flush(false), 250);
       return;
     }
-    const text = stripAnsi(this.#pending.slice(0, cut)).replace(/\s+$/, "");
+    const text = stripAnsi(this.#pending.slice(0, cut)).trimEnd();
     this.#pending = this.#pending.slice(cut);
     if (text) this.#emit(text);
     if (this.#pending) this.#timer = setTimeout(() => this.#flush(false), 250);
@@ -197,7 +207,7 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
       ...counts,
       failures,
       durationMs: Date.now() - started,
-      tail: tail(stripAnsi(result.output).replace(/\s+$/, ""), TEST_TAIL),
+      tail: tail(outputEnd(result.output), TEST_TAIL),
     };
   };
 
@@ -205,7 +215,7 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
     checkStopped();
     const result = await platform.run(session!.sessionId, snapshotScript(name), { timeoutMs: timeouts.checkoutMs, signal });
     checkStopped();
-    const tree = [...result.output.matchAll(/^([0-9a-f]{40}|[0-9a-f]{64})\s*$/gm)].at(-1)?.[1];
+    const tree = [...result.output.matchAll(/^([0-9a-f]{40}|[0-9a-f]{64})$/gm)].at(-1)?.[1];
     if (result.exitCode !== 0 || !tree) throw new StepFailure("snapshot_failed", "Couldn't read the repository's files to build the patch.");
     return tree;
   };
@@ -306,10 +316,14 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
     const diff = await platform.run(session.sessionId, diffScript(baseline, fixed), { timeoutMs: timeouts.checkoutMs, signal });
     checkStopped();
     if (diff.exitCode !== 0) throw new StepFailure("patch_failed", "Couldn't build the patch.");
-    const text = diff.output.length > PATCH_LIMIT ? diff.output.slice(0, PATCH_LIMIT) : diff.output;
-    const files = parseDiff(text);
+    // A cut patch doesn't apply, and a command keeps only its newest output: a patch that doesn't fit isn't returned.
+    const bytes = Buffer.byteLength(diff.output) + (diff.skippedBytes ?? 0);
+    if (diff.skippedBytes || bytes > PATCH_LIMIT) {
+      throw new StepFailure(PATCH_TOO_LARGE, `Copilot's changes make a ${size(bytes)} patch, over Repo Doctor's ${size(PATCH_LIMIT)} limit. The Patch step's log lists the changed files.`, "Too large");
+    }
+    const files = parseDiff(diff.output);
     const totals = diffTotals(files);
-    const patch: PatchView = { text, files: files.map(({ path, additions, deletions }) => ({ path, additions, deletions })), ...totals };
+    const patch: PatchView = { text: diff.output, files: files.map(({ path, additions, deletions }) => ({ path, additions, deletions })), ...totals };
     run.update({ patch, ...totals });
     run.finish("patch", files.length ? "passed" : "failed", files.length ? `+${totals.additions} −${totals.deletions}` : "No changes");
 

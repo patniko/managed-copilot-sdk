@@ -82,7 +82,7 @@ sequenceDiagram
 | Set up | Copilot | installs the dependencies, finds the test command, and reports it with `report_test_command` (or that there are no tests, with `report_no_tests`) |
 | Reproduce | Repo Doctor | runs the test command; if everything passes, the run ends **Healthy** |
 | Fix | Copilot | changes the code until the tests pass, and replies with the root cause |
-| Patch | Repo Doctor | diffs the working tree before and after the fix (through a temporary git index; the repository's history is untouched) |
+| Patch | Repo Doctor | diffs the working tree before and after the fix (through a temporary git index; the repository's history is untouched). A patch over 512 KB fails the step rather than being cut |
 | Verify | Repo Doctor | runs the same test command again |
 
 - **The environment** comes from [`apphost.mts`](apphost.mts): `repo-doctor` is isolated, medium, and allows

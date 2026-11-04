@@ -1,7 +1,7 @@
 import { CopilotIcon, FileDiffIcon } from "@primer/octicons-react";
 import { useMemo, useState } from "react";
 import { parseDiff, type DiffFile } from "../../shared/diff.js";
-import type { RunView } from "../../shared/types.js";
+import { PATCH_TOO_LARGE, type RunView } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { plural } from "../lib/format.js";
 import { Words } from "./Words.js";
@@ -80,10 +80,23 @@ function Diagnosis({ text }: { readonly text: string }) {
   );
 }
 
+/** What the panel says when it has no patch to show. */
+function emptyText(run: RunView): string {
+  if (run.error?.code === PATCH_TOO_LARGE) return "Too large to return.";
+  switch (run.steps.find((step) => step.id === "patch")?.status) {
+    case "passed":
+    case "failed":
+      return "No changes.";
+    case "skipped":
+      return "Nothing to fix.";
+    default:
+      return "The patch appears after the fix.";
+  }
+}
+
 /** Copilot's diagnosis and the patch Repo Doctor built from the sandbox. */
 export function PatchPanel({ run }: { readonly run: RunView }) {
   const files = useMemo(() => (run.patch ? parseDiff(run.patch.text) : []), [run.patch]);
-  const patchStep = run.steps.find((step) => step.id === "patch");
   return (
     <section className="Box min-w-0" aria-label="Patch">
       <div className="Box-header flex items-center gap-2 py-2">
@@ -98,13 +111,7 @@ export function PatchPanel({ run }: { readonly run: RunView }) {
       </div>
       <div className="Box-body flex flex-col gap-3">
         {run.diagnosis ? <Diagnosis text={run.diagnosis} /> : null}
-        {files.length ? (
-          files.map((file) => <FileDiff key={file.path} file={file} />)
-        ) : (
-          <p className="text-sm text-fg-muted">
-            {patchStep?.status === "passed" || patchStep?.status === "failed" ? "No changes." : patchStep?.status === "skipped" ? "Nothing to fix." : "The patch appears after the fix."}
-          </p>
-        )}
+        {files.length ? files.map((file) => <FileDiff key={file.path} file={file} />) : <p className="text-sm text-fg-muted">{emptyText(run)}</p>}
       </div>
     </section>
   );

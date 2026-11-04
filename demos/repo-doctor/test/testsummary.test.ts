@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseTestOutput, stripAnsi } from "../src/server/testsummary.js";
+import { outputEnd, parseTestOutput, stripAnsi } from "../src/server/testsummary.js";
 import { FAILING_OUTPUT } from "./fakes.js";
 
 describe("parseTestOutput", () => {
@@ -9,8 +9,8 @@ describe("parseTestOutput", () => {
   });
 
   it("reads node --test's TAP reporter", () => {
-    const output = ["TAP version 13", "ok 1 - adds", "not ok 2 - subtracts", "  ---", "  ...", "1..2", "# tests 2", "# suites 0", "# pass 1", "# fail 1", "# cancelled 0", "# skipped 0", "# todo 0"].join("\n");
-    expect(parseTestOutput(output)).toEqual({ total: 2, passed: 1, failed: 1, skipped: 0, failures: ["subtracts"] });
+    const output = ["TAP version 13", "ok 1 - adds", "not ok 2 - subtracts", "  ---", "  ...", "not ok 3 - divides # time=1.2ms", "1..3", "# tests 3", "# suites 0", "# pass 1", "# fail 2", "# cancelled 0", "# skipped 0", "# todo 0"].join("\n");
+    expect(parseTestOutput(output)).toEqual({ total: 3, passed: 1, failed: 2, skipped: 0, failures: ["subtracts", "divides"] });
   });
 
   it("reads Jest", () => {
@@ -52,5 +52,46 @@ describe("parseTestOutput", () => {
 
   it("strips terminal colors", () => {
     expect(stripAnsi("\x1b[32mok\x1b[0m \x1b]8;;https://x\x07link\x1b]8;;\x07")).toBe("ok link");
+    expect(stripAnsi("\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\")).toBe("link");
+  });
+
+  it("keeps the end of the output, as people read it", () => {
+    expect(outputEnd("\x1b[31mfailed\x1b[0m \n\n")).toBe("failed");
+    expect(outputEnd(`${"a".repeat(100_000)}b`)).toHaveLength(64 * 1024);
+  });
+
+  it("reads the summary at the end of a long output, and only the end", () => {
+    const noise = `${"x".repeat(79)}\n`.repeat(20_000);
+    expect(parseTestOutput(`${noise}${FAILING_OUTPUT}`)).toMatchObject({ total: 6, passed: 4, failed: 2 });
+    expect(parseTestOutput(`${FAILING_OUTPUT}\n${noise}`)).toEqual({ failures: [] });
+  });
+});
+
+/** How long `work` takes, in milliseconds. */
+function timed(work: () => unknown): number {
+  const started = performance.now();
+  work();
+  return performance.now() - started;
+}
+
+describe("output from the repository under test", () => {
+  // Patterns that rescanned runs of blank lines, whitespace, digits, or `ESC ]` took from seconds (these 100 KB inputs)
+  // to hours (a megabyte) on output like this, blocking the server.
+  const adversarial: Record<string, string> = {
+    "blank lines": `${"\n".repeat(100_000)}x`,
+    "a megabyte of blank lines": `${"\n".repeat(1 << 20)}x`,
+    "spaces between blank lines": `${" \n".repeat(100_000)}x`,
+    "digits on a Jest summary": `Tests: ${"1".repeat(100_000)}`,
+    "digits on a Vitest summary": ` Tests ${"1".repeat(100_000)} passed (`,
+    "unended terminal commands": "\x1b]".repeat(50_000),
+    "a window of long summary-like lines": `${`Tests: ${"1".repeat(990)}\n ✖ a${" ".repeat(990)}b\n= ${"1 passed in 1s (".repeat(60)}=\n`.repeat(30)}`,
+  };
+
+  it.each(Object.entries(adversarial))("reads %s in linear time", (_name, output) => {
+    expect(timed(() => parseTestOutput(output))).toBeLessThan(500);
+  });
+
+  it("strips a megabyte of unended terminal commands in linear time", () => {
+    expect(timed(() => stripAnsi("\x1b]".repeat(1 << 19)))).toBeLessThan(500);
   });
 });

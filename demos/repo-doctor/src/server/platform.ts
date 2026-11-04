@@ -31,7 +31,9 @@ export interface CommandResult {
   /** Absent when the command didn't finish on its own (it timed out, was stopped, or its state is uncertain). */
   readonly exitCode?: number;
   readonly state: string;
+  /** The newest output (the platform keeps 1 MiB); `skippedBytes` counts what came before it. */
   readonly output: string;
+  readonly skippedBytes?: number;
   readonly reason?: string;
 }
 
@@ -168,7 +170,13 @@ export class Platform implements DoctorPlatform {
     try {
       for await (const chunk of job.output) options.onOutput?.(chunk);
       const result = await job.result;
-      return { state: result.state, output: result.output, ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}), ...(result.reason ? { reason: result.reason } : {}) };
+      return {
+        state: result.state,
+        output: result.output,
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+        ...(result.skippedBytes ? { skippedBytes: result.skippedBytes } : {}),
+        ...(result.reason ? { reason: result.reason } : {}),
+      };
     } finally {
       options.signal?.removeEventListener("abort", stop);
     }

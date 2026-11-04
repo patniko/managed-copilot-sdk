@@ -1,6 +1,6 @@
 import { ManagedCopilotError, type DeploymentInfo } from "@managed-copilot/sdk";
 import { describe, expect, it } from "vitest";
-import { cloneFailure, diffScript, shellQuote, snapshotScript, testsSummary } from "../src/server/driver.js";
+import { cloneFailure, diffScript, OutputBuffer, shellQuote, snapshotScript, testsSummary } from "../src/server/driver.js";
 import { describeConnectError, describeEnvironment, reconnectDelay } from "../src/server/platform.js";
 
 describe("driver helpers", () => {
@@ -14,8 +14,24 @@ describe("driver helpers", () => {
     expect(snapshot).toContain("export GIT_INDEX_FILE=/tmp/repo-doctor-before.index");
     expect(snapshot).toContain("{ git read-tree HEAD 2>/dev/null || true; } && git add -u && git add -A -- . ':(exclude,glob)**/node_modules/**'");
     expect(snapshot.endsWith("git write-tree")).toBe(true);
-    expect(diffScript("a", "b")).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames a b");
+  });
+
+  it("diffs the snapshots, keeping git's warnings out of the patch itself", () => {
+    expect(diffScript("a", "b")).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames a b 2>/dev/null");
     expect(diffScript("a", "b", true)).toBe("cd /workspace/repo && git diff --no-color --no-ext-diff --find-renames --stat a b");
+  });
+
+  it("logs output without newlines once 64 KB build up, and trims it in linear time", () => {
+    const emitted: string[] = [];
+    const buffer = new OutputBuffer((text) => emitted.push(text));
+    const started = performance.now();
+    buffer.push(`x${" ".repeat(70_000)}`);
+    expect(emitted).toEqual(["x"]);
+    buffer.push(`${" \n".repeat(100_000)}y`);
+    buffer.end();
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]!.endsWith(" \ny")).toBe(true);
   });
 
   it("explains failed clones in plain words", () => {
