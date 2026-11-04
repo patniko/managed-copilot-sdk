@@ -34,6 +34,11 @@ pnpm --filter @managed-copilot/snippets acceptance --strict   # treat "not avail
 pnpm --filter @managed-copilot/snippets snippet 13            # one snippet; attach opens Copilot CLI here
 ```
 
+Snippets 10 and 12 use the local-only `webhook-examples` environment, which shares `chat`'s settings.
+The AppHost scopes the `snippets` webhook to that environment so ordinary `chat` sessions do not send
+notifications to the receiver that runs only during these examples. The other snippets and the basic quickstart
+continue to use their existing environments.
+
 Each snippet reports one outcome:
 
 - **pass**: the spec's code ran and every check held.

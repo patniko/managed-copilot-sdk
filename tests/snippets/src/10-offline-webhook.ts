@@ -11,7 +11,7 @@ export default snippet(import.meta.url, { title: "Keep working while your app is
   t.cleanup(() => receiver.close());
 
   const managed = await ManagedCopilot.connect();
-  const client = await managed.client("chat");
+  const client = await managed.client("webhook-examples");
   const session = await client.createSession({ model: "claude-sonnet-5", tools: [lookupOrder], onPermissionRequest: approveAll });
   const sessionId = session.sessionId;
   lookups.length = 0;
