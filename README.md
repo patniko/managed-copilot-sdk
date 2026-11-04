@@ -115,6 +115,7 @@ All three run under `aspire run` with real models and deploy to Azure with the s
 | [AI software factory](demos/software-factory/README.md) | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
 | [Long-running assistant](demos/assistant/README.md) | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 | [Dispatch](demos/dispatch/README.md) | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
+| [Pattern Race](demos/pattern-race/README.md) | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests, and a scorecard |
 
 ## Deploy to Azure
 

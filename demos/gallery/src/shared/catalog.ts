@@ -81,6 +81,18 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/healthz",
     readme: "demos/assistant/README.md",
   },
+  {
+    id: "pattern-race",
+    title: "Pattern Race",
+    tagline: "One job raced through all six patterns at once",
+    description:
+      "Sends the same prompt to six real sessions, one per pattern environment, and compares where each agent thinks and acts, its time, sandboxes, and premium requests.",
+    tryIt: "Race Run code, then Split the work, and compare Delegate with Mixed.",
+    app: "pattern-race",
+    port: 7420,
+    healthPath: "/api/health",
+    readme: "demos/pattern-race/README.md",
+  },
   CONSOLE,
 ];
 

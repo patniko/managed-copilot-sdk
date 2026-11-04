@@ -25,7 +25,7 @@ describe("links", () => {
   it("uses the AppHost's fixed local ports, shifted by the port offset", () => {
     expect(localUrls(0)).toEqual({
       gatewayUrl: "http://localhost:7400",
-      apps: { dispatch: "http://localhost:7470", "software-factory": "http://localhost:7480", assistant: "http://localhost:7490", console: "/open/console?target=local" },
+      apps: { dispatch: "http://localhost:7470", "software-factory": "http://localhost:7480", assistant: "http://localhost:7490", "pattern-race": "http://localhost:7420", console: "/open/console?target=local" },
     });
     expect(localUrls(300).apps.dispatch).toBe("http://localhost:7770");
   });
@@ -39,7 +39,7 @@ describe("links", () => {
   });
 
   it("leaves the console out when asked (a hosted gallery)", () => {
-    expect(cloudUrls("https://copilot.d.io", { console: false }).apps).toEqual({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io" });
+    expect(cloudUrls("https://copilot.d.io", { console: false }).apps).toEqual({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io", "pattern-race": "https://pattern-race.d.io" });
   });
 
   it("offers only the console for a gateway on a custom host", () => {
@@ -216,7 +216,7 @@ describe("gallery server", () => {
       expect(state.hosted).toBe(true);
       expect(state.local).toBeUndefined();
       expect(state.cloud.gatewayUrl).toBe("https://copilot.d.invalid");
-      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "software-factory"]);
+      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "pattern-race", "software-factory"]);
     });
 
     it("never mints a console sign-in link, and says how to open it", async () => {

@@ -47,6 +47,14 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "pattern-race",
+    url: local(7420),
+    async prepare(page) {
+      // The board shows the last real race: wait for its scorecard.
+      await page.getByRole("region", { name: "Scorecard" }).waitFor({ timeout: 10_000 });
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
