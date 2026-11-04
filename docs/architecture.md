@@ -1517,8 +1517,11 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   `software-factory` (7480), `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets
   webhook receives on 7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all six ports for a second copy, which also sets
   `discovery: false` (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
-- Front Desk is the one demo published with `public: true`: it signs in its own users and holds no GitHub token, so
-  every call it makes carries a signed-in person's credential (a GitHub user's own token).
+- Front Desk is the one demo published with `public: true`: it signs in its own users and holds no GitHub token. It is
+  declared in the root AppHost's `apps` (`anyGitHubUser: true`) and connects with its app key, then acts for each
+  person: a GitHub user with their own token (`front-desk`, their Copilot plan), everyone else as one of its app users
+  (`front-desk-foundry`, which sends model calls to the AppHost's `Foundry:*` account). The root AppHost declares the
+  Foundry account and environment only when `Foundry:Account` is set.
 
 ### Copilot CLI attach (spec section 14)
 
