@@ -485,14 +485,14 @@ export class IncidentRun implements ToolHost {
     this.#host.changed(this.id);
   }
 
-  #turnEnded(): void {
+  #turnEnded(endedAt = new Date().toISOString()): void {
     this.#busy = false;
     this.#activity = undefined;
     this.#stopPolling();
     this.#update((incident) => {
       incident.coordinator.state = incident.status === "resolved" ? "done" : "idle";
-      // The agent's turn ended while its deploy request was still open: nobody answered it in time.
-      if (incident.approval?.state === "waiting") incident.approval.state = "expired";
+      // The turn that asked ended before anyone answered (a late delivery about an earlier turn changes nothing).
+      if (incident.approval?.state === "waiting" && endedAt >= incident.approval.requestedAt) incident.approval.state = "expired";
     });
     void this.refresh();
   }
@@ -519,7 +519,7 @@ export class IncidentRun implements ToolHost {
       }
       case "session.idle":
         // While attached, the live session reports the end of its turn itself.
-        if (!this.#session) this.#turnEnded();
+        if (!this.#session) this.#turnEnded(event.createdAt);
         return;
       case "session.failed":
         this.#busy = false;
@@ -527,7 +527,7 @@ export class IncidentRun implements ToolHost {
         this.#update((incident) => {
           incident.coordinator.state = "failed";
           // Nothing can answer a request of a session that failed.
-          if (incident.approval?.state === "waiting") incident.approval.state = "expired";
+          if (incident.approval?.state === "waiting" && event.createdAt >= incident.approval.requestedAt) incident.approval.state = "expired";
         });
         this.#note("error", `Copilot's session failed${typeof event.data.error === "string" ? `: ${one(event.data.error, 200)}` : "."}`);
         return;

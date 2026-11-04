@@ -2,17 +2,28 @@ import { BugIcon, CheckIcon, NoteIcon } from "@primer/octicons-react";
 import type { IncidentView } from "../../shared/types.js";
 import { between, duration } from "../lib/format.js";
 
-/** What triage found, until the postmortem says it better. */
+/** What triage found, until the postmortem says it better. While Copilot is still looking, a placeholder holds its place. */
 export function Findings({ incident }: { readonly incident: IncidentView }) {
   const { findings } = incident;
-  if (incident.postmortem || (!findings.rootCause && findings.evidence.length === 0)) return null;
+  if (incident.postmortem) return null;
+  const looking = !findings.rootCause && (incident.coordinator.state === "working" || incident.coordinator.state === "starting");
   return (
-    <section aria-label="Root cause" className="Box p-4">
+    <section aria-label="Root cause" className="Box p-4" aria-busy={looking}>
       <h2 className="flex items-center gap-2 text-sm font-semibold">
         <BugIcon size={16} className="text-fg-danger" />
         Root cause
       </h2>
-      {findings.rootCause ? <p className="mt-2 text-base">{findings.rootCause}</p> : null}
+      {findings.rootCause ? (
+        <p className="mt-2 text-base">{findings.rootCause}</p>
+      ) : looking ? (
+        <div className="mt-3 flex flex-col">
+          <span className="SkeletonText w-11/12" />
+          <span className="SkeletonText w-2/3" />
+          <p className="mt-2 text-sm text-fg-muted">Copilot is searching the logs in its own sandbox.</p>
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-fg-muted">None recorded.</p>
+      )}
       {findings.evidence.length ? (
         <ul className="mt-3 flex flex-col gap-1.5">
           {findings.evidence.map((line) => (

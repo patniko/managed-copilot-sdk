@@ -205,9 +205,11 @@ describe("the deploy approval", () => {
     expect(incident().approval?.state).toBe("failed");
   });
 
-  it("expires when Copilot's turn ends before anyone answered", async () => {
+  it("expires when Copilot's turn ends before anyone answered, but not on a late delivery about an earlier turn", async () => {
     const { run, incident } = await waiting();
-    await run.webhook(webhookEvent("session.idle", {}));
+    await run.webhook({ ...webhookEvent("session.idle", {}), createdAt: "2020-01-01T00:00:00.000Z" } as VerifiedWebhookEvent);
+    expect(incident().approval?.state).toBe("waiting");
+    await run.webhook({ ...webhookEvent("session.idle", {}), createdAt: new Date(Date.now() + 1_000).toISOString() } as VerifiedWebhookEvent);
     expect(incident().approval?.state).toBe("expired");
     expect(run.view().needsYou).toBe(false);
   });
@@ -247,7 +249,7 @@ describe("the platform's webhook", () => {
   });
 
   it("records a failed session", async () => {
-    await h.run.webhook(webhookEvent("session.failed", { error: "The runtime stopped" }));
+    await h.run.webhook({ ...webhookEvent("session.failed", { error: "The runtime stopped" }), createdAt: new Date(Date.now() + 1_000).toISOString() } as VerifiedWebhookEvent);
     expect(h.run.view().coordinator.state).toBe("failed");
     expect(h.incident().timeline.at(-1)).toMatchObject({ kind: "error", text: expect.stringContaining("The runtime stopped") });
   });

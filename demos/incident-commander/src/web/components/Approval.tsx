@@ -64,7 +64,7 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
     }
   };
   return (
-    <section aria-label="Deploy approval" className="Box needs-you overflow-hidden">
+    <section id="approval" aria-label="Deploy approval" className="Box needs-you scroll-mt-4 overflow-hidden">
       <div className="flex items-center gap-3 border-b border-line-attention-muted bg-attention-muted px-4 py-3">
         <ShieldIcon size={20} className="shrink-0 text-fg-attention" />
         <h2 className="min-w-0 flex-1 text-base font-semibold">Deploy the fix to production?</h2>

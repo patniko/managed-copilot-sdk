@@ -1,4 +1,5 @@
 import {
+  ArrowDownIcon,
   ArrowLeftIcon,
   CheckCircleFillIcon,
   CircleIcon,
@@ -6,6 +7,7 @@ import {
   CopilotIcon,
   KebabHorizontalIcon,
   PaperAirplaneIcon,
+  ShieldIcon,
   TrashIcon,
 } from "@primer/octicons-react";
 import { useEffect, useState } from "react";
@@ -261,24 +263,31 @@ export function IncidentPage({ id }: { readonly id: string }) {
   }
 
   const stopped = incident.coordinator.state === "idle" && incident.status !== "resolved" && incident.approval?.state !== "waiting";
-  const visibleApproval = incident.approval && incident.approval.state !== "deployed";
-  const findings = !incident.postmortem && (incident.findings.rootCause || incident.findings.evidence.length > 0);
-  const side = Boolean(visibleApproval || incident.postmortem || findings || stopped);
+  const waiting = incident.approval?.state === "waiting";
 
   return (
     <main className="mx-auto flex w-full max-w-[1280px] flex-col gap-4 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6">
       <Heading incident={incident} />
       {incident.problem ? <div className="flash flash-warn">{incident.problem}</div> : null}
+      {waiting ? (
+        <button
+          type="button"
+          className="flash flash-warn flex items-center gap-2 text-left font-semibold lg:hidden"
+          onClick={() => document.getElementById("approval")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+        >
+          <ShieldIcon size={16} className="text-fg-attention" />
+          <span className="flex-1">The fix is ready to deploy</span>
+          <ArrowDownIcon size={16} />
+        </button>
+      ) : null}
       <ResponseMap incident={incident} />
-      <div className={cx("grid gap-4 sm:gap-5", side && "lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] lg:items-start")}>
-        {side ? (
-          <div className="flex min-w-0 flex-col gap-4">
-            <Approval incident={incident} />
-            {stopped ? <Stopped incident={incident} /> : null}
-            <Postmortem incident={incident} />
-            <Findings incident={incident} />
-          </div>
-        ) : null}
+      <div className="grid gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] lg:items-start">
+        <div className="flex min-w-0 flex-col gap-4">
+          <Approval incident={incident} />
+          {stopped ? <Stopped incident={incident} /> : null}
+          <Postmortem incident={incident} />
+          <Findings incident={incident} />
+        </div>
         <div className="flex min-w-0 flex-col gap-3">
           <Timeline entries={incident.timeline} />
           {incident.status !== "resolved" ? <NoteComposer incident={incident} /> : null}

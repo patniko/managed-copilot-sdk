@@ -158,7 +158,7 @@ function CopilotCard({ incident }: { readonly incident: IncidentView }) {
       width="w-80"
       align="left"
       trigger={(open, toggle) => (
-        <button type="button" className={cx(CARD, coordinator.state === "waiting" && "needs-you")} aria-expanded={open} onClick={toggle}>
+        <button type="button" className={CARD} aria-expanded={open} onClick={toggle}>
           <div className="flex items-center gap-3">
             <span className="grid size-9 shrink-0 place-items-center rounded-full bg-done-muted text-fg-done">
               <CopilotIcon size={20} />
