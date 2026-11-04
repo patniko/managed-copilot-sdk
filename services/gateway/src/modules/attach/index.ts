@@ -1,4 +1,4 @@
-// Owner: attach workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
+// Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
 // WebSocket that mediates the stock CLI's AHP connection to a per-session listener on the session's own runtime.
 // The CLI is a `cli` responder of the session (core's `attachCli`): its turns and cancels are admitted and fenced by
 // core, its approvals and answers go through the actions ledger, and anything else it may not do is refused

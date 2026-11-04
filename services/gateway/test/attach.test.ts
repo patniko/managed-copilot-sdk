@@ -471,7 +471,7 @@ describe("attach module", () => {
     expect(attachment.writes.slice(-2)).toEqual([{ kind: "turn", text: "Again" }, { kind: "model", modelId: "gpt-5" }]);
   });
 
-  it("records a message's model only when core admits its turn, and sends no turn with a model core refuses (Argon)", async () => {
+  it("records a message's model only when core admits its turn, and sends no turn with a model core refuses", async () => {
     await fresh();
     const { ws, attachment } = await connect();
     const withModel = (turnId: string, model: string) => ({ type: "chat/turnStarted", turnId, startedAt: "2026-10-24T00:00:00Z", message: { text: "Hello", origin: { kind: "user" }, model: { id: model } } });
@@ -488,7 +488,7 @@ describe("attach module", () => {
     expect(attachment.writes.some((operation) => operation.kind === "model")).toBe(false);
   });
 
-  it("refuses fields that aren't what they claim to be, and ends only the attachment whose message nests too deeply (Astra)", async () => {
+  it("refuses fields that aren't what they claim to be, and ends only the attachment whose message nests too deeply", async () => {
     await fresh();
     const { ws } = await connect();
     // Values that don't convert to strings are refused, never coerced (coercing one threw out of the socket handler).
@@ -506,7 +506,7 @@ describe("attach module", () => {
     expect(await received(again.ws, (message) => message.id === 2)).toMatchObject({ result: {} });
   });
 
-  it("answers each request ID once, keeps the client's identity, and unsubscribes only the session's channels (Argon)", async () => {
+  it("answers each request ID once, keeps the client's identity, and unsubscribes only the session's channels", async () => {
     await fresh();
     listener.results.set("initialize", { protocolVersion: "0.9.0", terminalCommandPrefix: "!", defaultDirectory: "file:///C:/Users/someone" });
     const ws = await open("s1", (await material()).token);
@@ -755,7 +755,7 @@ describe("attach module", () => {
     await fencing;
     await closed;
     expect(attachment.closed).toBe(true);
-    // The move ended, but the resumed turn's model calls need a credential until the CLI is back (Argon).
+    // The move ended, but the resumed turn's model calls need a credential until the CLI is back.
     participant!.release("s1", { committed: true, sealed: true });
     expect(sessions.presences[0]!.released).toBe(false);
     await connect();
@@ -1062,7 +1062,7 @@ describe("AhpHosts", () => {
     // A CLI reconnects: its attach resolves the source again and waits for the stalled disposal.
     const reconnect = hosts.ensure("s1", async () => source);
     await sleep(20);
-    // A second move fences: it waits for the first fence's disposal, which the runtime hasn't confirmed (Astra).
+    // A second move fences: it waits for the first fence's disposal, which the runtime hasn't confirmed.
     let fenced = false;
     const second = hosts.fence("s1", new AbortController().signal).then(() => (fenced = true));
     await sleep(20);
@@ -1077,7 +1077,7 @@ describe("AhpHosts", () => {
     hosts.unfence("s1");
   });
 
-  it("waits for a disposal that a release started before the fence (Argon)", async () => {
+  it("waits for a disposal that a release started before the fence", async () => {
     const listener = new FakeListener();
     listener.port = 1;
     let unstall!: () => void;
@@ -1109,7 +1109,7 @@ describe("AhpHosts", () => {
     hosts.unfence("s1");
   });
 
-  it("sends host.dispose again at the next fence when the runtime refused it before (Astra)", async () => {
+  it("sends host.dispose again at the next fence when the runtime refused it before", async () => {
     const listener = new FakeListener();
     listener.port = 1;
     const source = new FakeRuntime("conn-1", listener);
@@ -1145,7 +1145,7 @@ describe("AhpHosts", () => {
     hosts.unfence("s1");
   });
 
-  it("starts nothing on a runtime looked up across a fence, even one already lifted (Argon)", async () => {
+  it("starts nothing on a runtime looked up across a fence, even one already lifted", async () => {
     const listener = new FakeListener();
     listener.port = 1;
     const source = new FakeRuntime("conn-1", listener);
@@ -1222,7 +1222,7 @@ describe("AhpBridge", () => {
     return { cli, raw: raw!, bridge, attachment, pings, closed: once(cli, "close") as Promise<[number, Buffer]> };
   }
 
-  it("ends only its own attachment when it can't handle a message, in either direction (Astra)", async () => {
+  it("ends only its own attachment when it can't handle a message, in either direction", async () => {
     // Runtime → client: an update that can't be relayed.
     const fromRuntime = await bridged({
       scrub: (value) => {

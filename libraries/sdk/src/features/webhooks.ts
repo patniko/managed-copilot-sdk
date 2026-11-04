@@ -1,4 +1,4 @@
-// Owner: durable workstream. Verifies signed webhook deliveries and exposes `handleActions` (spec section 12).
+// Verifies signed webhook deliveries and exposes `handleActions` (spec section 12).
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   ManagedCopilotError,

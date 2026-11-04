@@ -1,4 +1,4 @@
-// Owner: orchestrator workstream. The hands of a direct or mixed coordinator (proposal "direct execution", spec
+// The hands of a direct or mixed coordinator (proposal "direct execution", spec
 // section 17): the stock shell and file tools' names and shapes (`bash`, `read_bash`, `write_bash`, `stop_bash`,
 // `list_bash`, `view`, `create`, `edit`, `glob`, `grep`), registered as gateway platform tools that override the
 // runtime's built-ins, so the coordinator and its stock sub-agents act in a workspace-only sandbox instead of the

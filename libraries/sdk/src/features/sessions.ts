@@ -1,4 +1,3 @@
-// Owner: core workstream (list/get/delete); durable workstream (handleActions).
 import { ROUTES, type SessionInfo, type SessionListQuery } from "@managed-copilot/protocol";
 import type { ManagedContext, ManagedSessions } from "../types.js";
 import { handleSessionActions } from "./actions.js";

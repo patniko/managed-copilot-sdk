@@ -1,4 +1,4 @@
-// Owner: sandbox workstream. Streams workspace files to and from an isolated session's sandbox (spec section 5).
+// Streams workspace files to and from an isolated session's sandbox (spec section 5).
 import { randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import { dirname, resolve } from "node:path";

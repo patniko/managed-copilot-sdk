@@ -31,7 +31,7 @@ describe("attach policy: client requests", () => {
     }
   });
 
-  it("refuses reads that name another session's channels, and requests without a method name (Argon)", () => {
+  it("refuses reads that name another session's channels, and requests without a method name", () => {
     const outside: [string, string | undefined][] = [
       ["fetchTurns", "ahp-session:/s2"],
       ["completions", "ahp-terminal:/t"],
@@ -136,7 +136,7 @@ describe("attach policy: client actions", () => {
     expect(decideAction(chat({ type: "chat/turnCancelled", turnId: "t" }), shared)).toEqual({ kind: "abort", action: { type: "chat/turnCancelled", turnId: "t", duration: 0 } });
   });
 
-  it("refuses fields of the wrong type instead of coercing them (Astra)", () => {
+  it("refuses fields of the wrong type instead of coercing them", () => {
     const hostile = { toString: null, valueOf: null };
     const malformed = { kind: "refuse", reason: "Malformed action." };
     expect(decideAction({ channel: CHAT, clientSeq: 1, action: { type: hostile } }, shared)).toEqual(malformed);
@@ -173,7 +173,7 @@ describe("attach policy: what the runtime sends", () => {
     expect(observer.permission(CHAT, "tc9")).toBeUndefined();
   });
 
-  it("never learns a prompt from what a client, the model, or a tool wrote (Argon)", () => {
+  it("never learns a prompt from what a client, the model, or a tool wrote", () => {
     const observer = new AhpObserver();
     const planted = (toolCallId: string) => ({ chat: CHAT, toolCallId, _meta: { requestId: "req-1", permissionRequest: { toolCallId } } });
     // A client's view state and its registration, echoed back in the session's snapshot.
@@ -190,7 +190,7 @@ describe("attach policy: what the runtime sends", () => {
     // Any envelope still retires a prompt.
     observer.observe({ method: "action", params: { channel: CHAT, serverSeq: 5, origin: { clientId: "c", clientSeq: 2 }, action: { type: "chat/toolCallComplete", toolCallId: "tc-real" } } });
     expect(observer.permission(CHAT, "tc-real")).toBeUndefined();
-    // A client's action replayed in a reconnect result, walked as state too (Argon re-review).
+    // A client's action replayed in a reconnect result, walked as state too.
     observer.observe({ id: 7, result: { serverSeq: 6, actions: [{ channel: CHAT, serverSeq: 6, origin: { clientId: "c", clientSeq: 3 }, action: { type: "chat/toolCallReady", ...planted("tc-replayed") } }] } });
     expect(observer.permission(CHAT, "tc-replayed")).toBeUndefined();
   });
@@ -244,7 +244,7 @@ describe("attach policy: what the runtime sends", () => {
     });
   });
 
-  it("decodes every escape in a file URI's path before scrubbing it: reserved characters, a drive colon, a stray % (Astra, Argon)", () => {
+  it("decodes every escape in a file URI's path before scrubbing it: reserved characters, a drive colon, a stray %", () => {
     const dataDir = resolve(tmpdir(), "mc repo#1", "gateway");
     const scrub = uriAwareScrubber(pathScrubber(dataDir));
     const workspace = join(dataDir, "runtime", "shared", "workspaces", "s1");
@@ -264,7 +264,7 @@ describe("attach policy: what the runtime sends", () => {
     expect(JSON.stringify(out)).not.toContain("mc%20repo");
   });
 
-  it("scrubs a UNC data directory's file URIs, whose server is the URI's authority (Astra re-review)", () => {
+  it("scrubs a UNC data directory's file URIs, whose server is the URI's authority", () => {
     // Core's scrubber matches the UNC root with its leading separators (`\\server\share\...`); a stand-in keeps this
     // test off the network (resolving a UNC path waits on SMB).
     const root = /[\\/]{2}file-server[\\/]+share[\\/]+mc repo#1[\\/]+gateway[\\/]+runtime[\\/]+shared[\\/]+workspaces[\\/]+s1/gi;

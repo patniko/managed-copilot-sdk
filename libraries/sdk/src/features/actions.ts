@@ -1,4 +1,4 @@
-// Owner: durable workstream. Claim-then-answer for pending actions (spec section 12, "One owner for each action").
+// Claim-then-answer for pending actions (spec section 12, "One owner for each action").
 import type { PermissionRequest, PermissionRequestResult, Tool, ToolInvocation } from "@github/copilot-sdk";
 import {
   isManagedCopilotError,

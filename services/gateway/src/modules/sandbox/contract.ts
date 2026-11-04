@@ -1,5 +1,5 @@
 /**
- * Sandbox workstream contract (spec sections 4, 5, 6, 8; architecture "Isolated placement").
+ * Sandbox module contract (spec sections 4, 5, 6, 8; architecture "Isolated placement").
  *
  * Types only, so other modules can import it without the implementation:
  *
@@ -276,7 +276,7 @@ export interface ArtifactsService {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Ports consumed from other workstreams
+// Ports consumed from other modules
 // ---------------------------------------------------------------------------------------------------------------
 
 /** A runtime `session.event` payload's `event` object (the stock SDK's `SessionEvent`). */

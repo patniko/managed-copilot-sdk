@@ -1,4 +1,4 @@
-// Owner: sandbox workstream. Isolated placement: per-session sandboxes, setup, files, artifacts, and lifecycle.
+// Isolated placement: per-session sandboxes, setup, files, artifacts, and lifecycle.
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
 import { ArtifactService } from "./artifacts.js";

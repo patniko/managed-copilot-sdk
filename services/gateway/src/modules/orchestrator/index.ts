@@ -1,4 +1,4 @@
-// Owner: orchestrator workstream. Orchestrator environments (spec section 17): the coordinator's worker tools,
+// Orchestrator environments (spec section 17): the coordinator's worker tools,
 // `GET /v1/sessions/:id/workers`, the `worker.*` platform events, approvals for approved workers' prompts, and the
 // cleanup of workers whose coordinator is gone.
 import { isManagedCopilotError } from "@managed-copilot/protocol";
