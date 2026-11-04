@@ -109,7 +109,7 @@ function Shell({ identity }: { readonly identity: OperatorIdentity }) {
       <TopBar identity={identity} onOpenMenu={() => setDrawerOpen(true)} />
       <div className="flex min-h-0 flex-1">
         <Sidebar active={routeView(location.route)} drawerOpen={drawerOpen} onCloseDrawer={closeDrawer} />
-        <main id="main" ref={main} tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto focus:outline-none">
+        <main id="main" ref={main} tabIndex={-1} className="relative min-w-0 flex-1 overflow-y-auto focus:outline-none">
           <RouteView route={location.route} query={location.query} />
         </main>
       </div>
