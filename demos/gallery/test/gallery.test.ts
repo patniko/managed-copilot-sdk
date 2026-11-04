@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { APPS, BUILDING_BLOCKS, PATTERNS, WALKTHROUGHS, type BuildingBlock, type GalleryState } from "../src/shared/catalog.js";
 import { createGallery, type CloudLookup, type GalleryOptions } from "../src/server/gallery.js";
-import { capture, cloudUrls, isLocalUrl, localUrls, normalizeGatewayUrl, probe } from "../src/server/targets.js";
+import { capture, checkTarget, cloudUrls, isLocalUrl, localUrls, normalizeGatewayUrl, probe } from "../src/server/targets.js";
 import { appHref, COMPARE_APP_ID, compareApp, patternsOf, SHAPES, walkthroughCommand } from "../src/web/model.js";
 
 const servers: Server[] = [];
@@ -84,6 +84,17 @@ describe("links", () => {
 
   it("has a unique id for every app and walkthrough", () => {
     for (const ids of [APPS.map((app) => app.id), WALKTHROUGHS.map((walkthrough) => walkthrough.id)]) expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("checks apps where it's told to, and still links to their public addresses", async () => {
+    // Each app's public address refuses this caller (an allowlist), as from inside a deployment's environment.
+    const refused = await listen((_req, res) => res.writeHead(403).end("RBAC: access denied"));
+    const inside = await listen((_req, res) => res.writeHead(200).end("ok"));
+    const urls = { gatewayUrl: inside, apps: Object.fromEntries(withoutConsole.map((app) => [app.id, `${refused}/${app.id}`])) };
+    const outside = await checkTarget(urls);
+    expect(new Set(Object.values(outside.links).map((link) => link.health))).toEqual(new Set(["restricted"]));
+    const hosted = await checkTarget(urls, () => inside);
+    for (const app of withoutConsole) expect(hosted.links[app.id]).toEqual({ url: `${refused}/${app.id}`, health: "online" });
   });
 });
 
