@@ -163,7 +163,7 @@ its workers.
 
 - [Spec section 17: orchestrator](../spec/developer-experience.md#17-orchestrator-a-coordinator-with-workers) and its
   contract.
-- [Architecture: orchestrator (as built)](../architecture.md#orchestrator-as-built): admission, the worker tools,
+- [Architecture: orchestrator](../architecture.md#orchestrator): admission, the worker tools,
   approvals, waiting, cleanup, and recovery.
 
 </details>

@@ -95,7 +95,7 @@ Each page answers one question, diagram first.
 | [Developer experience spec](spec/developer-experience.md) | The customer contract: every API, decision, and delivery gate |
 | [Architecture](architecture.md) | How it's built: topology, protocol facts, and each module |
 | [Security model and threat model](threat-model.md) | Trust boundaries between your machine and the cloud, STRIDE threats, and review findings |
-| [Proposal: direct execution](proposals/direct-execution.md) | Built: the design and evidence behind the direct and mixed patterns, where one brain's tools and sub-agents act inside sandboxes |
+| [Design note: direct execution](design/direct-execution.md) | The design and evidence behind the direct and mixed patterns, where one brain's tools and sub-agents act inside sandboxes |
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../libraries/cli/README.md) | Every command |
 | [Spec snippets](../tests/snippets/README.md) | Every spec snippet as an automated acceptance check |

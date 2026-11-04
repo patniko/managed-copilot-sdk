@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/demo-assistant",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "A long-running personal assistant on Managed Copilot: chat, schedules, Gmail, and Google Calendar.",
   "type": "module",

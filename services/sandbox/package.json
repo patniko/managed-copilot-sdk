@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/sandbox",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Isolated placement for Managed Copilot: the base sandbox image, the in-sandbox agent (sandboxd), and the gateway relay.",
   "type": "module",

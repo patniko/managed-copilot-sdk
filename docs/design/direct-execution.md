@@ -1,4 +1,4 @@
-# Proposal: direct execution (one brain, hands in sandboxes)
+# Design note: direct execution (one brain, hands in sandboxes)
 
 > **Status: built**, including the Dispatch mode switch. `managed.exec` and the `direct` and `mixed` orchestrator styles
 > are built and verified live on the stock SDK and runtime (see [What the platform needs to build](#what-the-platform-needs-to-build)
@@ -9,7 +9,7 @@ runtime, model loop, and context) inside its own sandbox. That is the right shap
 parts of a job. It is the wrong shape for a multi-tenant harness that already has its own planning and sub-agents and
 just wants them to *act* inside an isolated machine.
 
-This proposal adds two more orchestration styles beside it:
+This design adds two more orchestration styles beside it:
 
 - **Direct**: the brain (the coordinator and its stock sub-agents) stays on the shared runtime, and its hands (`bash`
   and its background-command tools, `view`, `create`, `edit`, `glob`, `grep`) run inside a sandbox. No agent runs in

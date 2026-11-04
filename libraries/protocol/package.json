@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/protocol",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Shared contracts for Managed Copilot: AppHost configuration, REST DTOs, errors, events, and the bridge protocol.",
   "type": "module",
   "main": "./dist/index.js",

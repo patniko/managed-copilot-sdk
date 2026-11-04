@@ -22,7 +22,7 @@
 
 ## Overview
 
-Apps can already build Copilot agents in with the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
+Apps can already build Copilot agents with the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
 Managed Copilot keeps that SDK exactly as published and changes only **where the agents run**. A platform you deploy
 decides whether a session runs on a shared runtime or in its own sandbox, what it may reach on the network, which
 secrets it can use, and what happens to its work while your app is offline. Only the setup lines change:
@@ -258,22 +258,20 @@ aspire deploy
 Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `ManagedCopilot.connect({ url })`.
 [docs/deployment.md](docs/deployment.md) covers prerequisites, the demo apps' access settings, costs, and teardown.
 
-## What's verified
+## Status
 
-- **Every example in the spec runs as an automated check** against the real platform with real models. The first 13
-  pass locally through the AppHost. On Azure, the 11 that don't need a local webhook receiver pass. The orchestrator
-  example (14) passes locally and on Azure. The direct-execution example (15) passes locally.
-- **All six patterns run with real models locally.** Isolated, shared, promotable, and delegate have also run on
-  Azure. Direct and mixed have not yet run there ([deployment](docs/deployment.md#live-qualification)).
-- **Unit and integration tests:** more than 1,100 run with `pnpm test`. Gated end-to-end suites use real Docker
-  sandboxes and models for sandboxes, egress policy, promotion, and recovery when the gateway is replaced mid-turn.
-- **The demos run end to end, locally and on Azure.** The factory runs in both modes: the classic pipeline, and the
-  agent-led mode, whose restart mid-build was tested locally. The assistant runs too; its sandboxes, added last, have
-  been verified locally only. Dispatch runs as well, including a follow-up typed in Copilot CLI attached to the same
-  conversation.
-- **Limits are written down.** Examples: no warm sandbox pools, a single gateway replica, and a turn whose runtime
-  process dies ends as failed, so the user retries. The spec's [delivery gates](docs/spec/developer-experience.md#delivery-gates)
-  list what each gate proved and what it did not.
+This is a working reference implementation, not a supported product. Everything below runs end to end with real
+models:
+
+- **Every spec example runs as an automated check** against the platform ([tests/snippets](tests/snippets/README.md)).
+- **All six patterns run locally.** Isolated, shared, promotable, and delegate also run on Azure; direct and mixed
+  haven't been qualified there yet.
+- **All three demos run locally and on Azure.** The assistant's sandboxes have been verified locally only.
+- **More than 1,600 unit and integration tests** run with `pnpm test`; gated suites add real Docker sandboxes and
+  models.
+- **Limits are written down**, such as no warm sandbox pools and a single gateway replica. The
+  [live qualification](docs/deployment.md#live-qualification) record and the spec's
+  [delivery gates](docs/spec/developer-experience.md#delivery-gates) list what was proved and what wasn't.
 
 ## Documentation
 
@@ -292,27 +290,7 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
 | [Architecture](docs/architecture.md) | Topology, protocol facts, and how the pieces fit |
 
-## Repository layout
-
-| Path | Contents |
-| --- | --- |
-| `libraries/protocol` | Shared contracts: AppHost config schema, REST DTOs, errors, events, network policy |
-| `libraries/sdk` | `@managed-copilot/sdk`: `ManagedCopilot.connect()`, stock clients over a secure bridge |
-| `libraries/aspire` | `@managed-copilot/aspire`: `addManagedCopilot(builder, name, options)` for Aspire TypeScript AppHosts |
-| `libraries/cli` | `npx managed-copilot`: background sign-in, sessions, Copilot CLI attach, artifacts, schedules |
-| `services/gateway` | Authenticated gateway: admission, routing, session ledger, platform services, operator API |
-| `services/console` | The operator console the gateway serves at `/console` |
-| `services/sandbox`, `services/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
-| `deployments/azure` | The Azure integration for `aspire deploy`: hosting, the gateway's lease supervisor, and qualification probes |
-| `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
-| `environments` | Per-environment customizations for the AppHost: `environments/<name>` holds that environment's agents, skills, and instructions (today `chat`) |
-| `tests/snippets` | Every spec snippet as a runnable script and one acceptance run |
-| `walkthroughs` | The walkthroughs: small, commented scripts you run with `pnpm walkthrough <number>` |
-| `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
-| `demos/gallery` | `pnpm gallery`: every demo and walkthrough on one page, with local and Azure links |
-| `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |
-
-## Develop
+## Contributing
 
 ```powershell
 pnpm install
@@ -320,5 +298,9 @@ pnpm build
 pnpm test
 ```
 
-Contributing: [AGENTS.md](AGENTS.md) has the hard rules (stock SDK and runtime only, no secrets in logs or
-sandboxes), commands, and conventions.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the ground rules (stock SDK and runtime only, no secrets in logs or
+sandboxes), conventions, and the repository layout. Report security issues as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE)
