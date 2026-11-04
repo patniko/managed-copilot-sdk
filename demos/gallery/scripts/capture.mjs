@@ -47,6 +47,15 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "repo-doctor",
+    url: local(7435),
+    async prepare(page) {
+      // Open the most recent run when there is one.
+      const first = page.locator('a[href^="#/runs/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
