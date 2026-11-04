@@ -1540,9 +1540,9 @@ sequenceDiagram
   GW-->>CLI: runtime frames, filtered and scrubbed of host paths
 ```
 
-- **Local authentication.** The launcher explicitly opts into GitHub authentication with `--ahp-authenticate github`;
-  newer stock CLIs do not send their GitHub credential to an AHP endpoint by default. The loopback relay verifies the
-  CLI's account against the session owner. A missing credential does not establish that the CLI is signed out.
+- **Local authentication.** The launcher passes `--ahp-authenticate github` so the stock CLI sends its GitHub
+  credential to the loopback relay. The relay verifies the CLI's account against the session owner. A missing
+  credential does not establish that the CLI is signed out.
 - **The CLI is a responder, not a pipe.** Once its ticket is redeemed, the gateway registers the CLI with core's
   `sessions.attachCli` as a `cli` responder of the session incarnation the ticket was minted for. The principal that
   requested the ticket (kept in memory with it, never stored) is the session's connected credential while the CLI is
