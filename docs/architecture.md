@@ -1,8 +1,8 @@
-# Architecture and workstreams
+# Architecture
 
-This is the as-built design for the [developer experience spec](spec/developer-experience.md). The spec is the
-customer contract; this document records how the platform implements it, the protocol facts it relies on, and who
-owns what. Update it with the code.
+This is how the platform implements the [developer experience spec](spec/developer-experience.md). The spec is the
+customer contract; this document records the current implementation, the protocol facts it relies on, and where each
+part lives in the code ([code map](#code-map)). Update it with the code.
 
 ## Topology
 
@@ -247,7 +247,7 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   `capabilities.addressPinning`), `endpoint` (http or https base URL plus headers, also used for WebSocket upgrades),
   optional `egressProxy` (passed to `policy.registerSandbox`), `reportUnreachable`/`reattach`, and `inventory`.
   `MANAGED_COPILOT_SANDBOX_PROVIDER` selects `docker` (local, `providers/docker/`, described below) or `azure`
-  (`providers/azure/`, owned by the azure workstream). Providers must keep: sandboxd as root with only CHOWN, KILL,
+  (`providers/azure/`). Providers must keep: sandboxd as root with only CHOWN, KILL,
   SETGID, and SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, `/var/lib/managed-copilot`; no
   route between sandboxes and no Internet except through the egress proxy; sandboxd reachable only through `endpoint`.
   `sandboxes.available` is the result of the provider's latest `ready()` (checked at module registration with a 2 s
@@ -383,10 +383,10 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
   request; the SDK keeps waiting), and `GET .../artifacts/:artifactId/content`.
 
-### Commands run directly in sandboxes (as built)
+### Commands run directly in sandboxes
 
 `managed.exec`, `managed.sandboxes.create`, and the sandbox service's `exec` API (spec section 18; the proposal
-[direct execution](proposals/direct-execution.md)). Code: `services/sandbox/src/sandboxd/execs.ts`,
+[direct execution](design/direct-execution.md)). Code: `services/sandbox/src/sandboxd/execs.ts`,
 `services/gateway/src/modules/sandbox/execs.ts` (with `store.ts`, `routes.ts`, `service.ts`), core's workspace-only
 session kind in `core/sessions.ts`, `libraries/sdk/src/features/exec.ts`, and `libraries/cli/src/commands/exec.ts`.
 
@@ -477,7 +477,7 @@ no direct workload egress: built-in web tools are disabled by admission, web acc
 `web_fetch` platform tool (per-session policy), and remote MCP servers are reached through a gateway MCP adapter that
 applies the session's policy and attaches vault credentials. Anything else is refused with `capability_unavailable`.
 
-### Network policy, egress, and vaults (as built)
+### Network policy, egress, and vaults
 
 - **Effective policy.** `policy.bindSession` computes `narrowNetwork(ceiling, caller request)` where the ceiling is the
   environment's `network` over the deployment default (inline sessions use the default; a declared environment always
@@ -718,7 +718,7 @@ As built in `services/gateway/src/modules/durable` (contract: `contract.ts`; liv
   { background: true })` and are never recorded as the account's live credential; logout, invalidation, and a new
   sign-in call `auth.forgetCredential`, so core drops the removed token.
 
-### Promotion (as built)
+### Promotion
 
 A promotable session moves once, from the shared runtime into its own sandbox, with the same session ID, history,
 and genuine `CopilotSession` objects (`services/gateway/src/modules/promotion`, contract in `contract.ts`; core's
@@ -836,7 +836,7 @@ and genuine `CopilotSession` objects (`services/gateway/src/modules/promotion`, 
   may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
   (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
 
-### Orchestrator (as built)
+### Orchestrator
 
 An orchestrator session (spec section 17) is a coordinator on shared placement; its workers are ordinary sessions of
 declared isolated environments, each in its own sandbox (`services/gateway/src/modules/orchestrator`; DTOs in
@@ -1632,7 +1632,7 @@ sequenceDiagram
   `defaultDirectory`; the CLI no longer opens a host terminal for `!`. Promoting an attached session: the fence closed
   the CLI 1 s after the request, before the state export, attaches answered `session_busy` until the commit (2.8 s),
   the stock CLI reconnected by itself, and its next turn ran in the sandbox (`agent`, `/workspace`, `Linux`) with the
-  approval recorded as the CLI's. Again after the Argon and Astra fixes, with durable's `promptVisibility` in place: an
+  approval recorded as the CLI's. Again after the review fixes, with durable's `promptVisibility` in place: an
   app-held prompt's CLI approval was refused ("Your application is answering this request.") and the app's answer
   completed it; with the app gone, the real CLI's turn asked for `request_sandbox`, its "Approve once" (recorded as
   `cli:<connection>`) moved the session with the CLI's credential as the only one (before the credential was kept
@@ -1794,24 +1794,24 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |
 | `DOCKER_HOST` | Docker Desktop pipe / `/var/run/docker.sock` | Docker Engine API endpoint for sandboxes |
 
-## Workstreams and ownership
+## Code map
 
-Each workstream is one session and one branch. Edit only owned paths; request changes elsewhere from the owner.
+Where each area of the platform lives.
 
-| Workstream | Owns | Delivers |
+| Area | Code | What it does |
 | --- | --- | --- |
-| **core** | `services/gateway/src/{app,http,server,config,main,log,db}.ts`, `modules/core/**`; SDK `bridge.ts`, `connection.ts`, `features/{client,sessions,events}.ts`, `managed.ts` | G1: bridge, router, shared runtime, admission, ledger, auth, `/v1/info`, `/v1/me`, sessions, SSE events, platform-tool registry |
+| **core** | `services/gateway/src/{app,http,server,config,main,log,db}.ts`, `modules/core/**`; SDK `bridge.ts`, `connection.ts`, `features/{client,sessions,events}.ts`, `managed.ts` | bridge, router, shared runtime, admission, ledger, auth, `/v1/info`, `/v1/me`, sessions, SSE events, platform-tool registry |
 | **sandbox** | `services/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
 | **network** | `services/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
-| **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
-| **attach** (was devloop) | `libraries/aspire/**` (except `src/publish/**`, azure), `libraries/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `environments/**`, `tests/snippets/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
+| **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | durable actions, webhooks, polling, schedules, agent scheduling, background login |
+| **attach** | `libraries/aspire/**` (except `src/publish/**`, azure), `libraries/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `environments/**`, `tests/snippets/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots (apps the root AppHost publishes with `public: true` are labeled Public, which its tests check). `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
-| **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
-| **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
-| **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
+| **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
+| **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
+| **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `services/console/**`, `libraries/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
-| **design** | `libraries/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |
+| **design** | `libraries/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; the apps build their screens from it |
 | **guides** | `docs/README.md`, `docs/concepts/**`, `walkthroughs/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |

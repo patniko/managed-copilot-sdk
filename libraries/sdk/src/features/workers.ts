@@ -1,4 +1,4 @@
-// Owner: orchestrator workstream. An orchestrator session's workers (spec section 17).
+// An orchestrator session's workers (spec section 17).
 import { ROUTES, type WorkerInfo } from "@managed-copilot/protocol";
 import type { ManagedState } from "../connection.js";
 import type { ManagedWorkers } from "../types.js";

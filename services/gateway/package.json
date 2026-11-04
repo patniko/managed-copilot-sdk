@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/gateway",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Managed Copilot platform gateway: authenticated admission, routing, session ownership, and platform services.",
   "type": "module",

@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/snippets",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Every snippet from the developer experience spec as a runnable script, plus one acceptance run against your platform.",
   "type": "module",

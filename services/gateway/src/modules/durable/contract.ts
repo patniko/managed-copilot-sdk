@@ -1,5 +1,5 @@
 /**
- * Durable workstream contract (spec sections 2, 12, 13; architecture "Gateway extension points").
+ * Durable module contract (spec sections 2, 12, 13; architecture "Gateway extension points").
  *
  * This file is types and constants only, so other modules can import it without pulling in the implementation:
  *

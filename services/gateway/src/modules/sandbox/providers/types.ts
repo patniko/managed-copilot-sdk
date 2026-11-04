@@ -1,7 +1,7 @@
 // The compute backend contract for isolated placement. The sandbox service owns policy and lifecycle decisions (setup,
 // egress registration, the runtime, idle stop, reconciliation, artifacts); a provider owns compute, persistent
 // storage, networking, images, and how the gateway reaches each sandbox's sandboxd. Providers: `docker` (local, this
-// directory's docker/) and `azure` (azure/, owned by the azure workstream).
+// directory's docker/) and `azure` (azure/).
 import type { EnvironmentConfig, InfraFact, SandboxSize } from "@managed-copilot/protocol";
 import type { Logger } from "../../../log.js";
 

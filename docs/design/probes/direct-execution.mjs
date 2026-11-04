@@ -1,9 +1,9 @@
 // Probe: a stock Copilot runtime on this machine (the brain) whose shell and file tools, and its sub-agents' tools,
 // run inside a Docker container (the hands). No agent runs in the container.
-// See docs/proposals/direct-execution.md. Needs `pnpm install`, Docker, and a Copilot sign-in on this machine.
+// See docs/design/direct-execution.md. Needs `pnpm install`, Docker, and a Copilot sign-in on this machine.
 //
 //   docker run -d --name mc-hands-probe --network none --entrypoint sleep -w /workspace ghcr.io/patniko/managed-copilot-sandbox:0.1.0 infinity
-//   node docs/proposals/probes/direct-execution.mjs
+//   node docs/design/probes/direct-execution.mjs
 //   docker rm -f mc-hands-probe
 import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";

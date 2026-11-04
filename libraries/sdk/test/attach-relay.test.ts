@@ -4,9 +4,22 @@ import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import type { AttachMaterial } from "@managed-copilot/protocol";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { HttpClient } from "../src/http.js";
+
+/** A frame the credential filter fails on. Engines differ in what JSON they can't re-serialize, so the test forces it. */
+const UNFILTERABLE = "unfilterable-frame";
+vi.mock("@managed-copilot/protocol", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@managed-copilot/protocol")>();
+  return {
+    ...actual,
+    filterAhpClientFrame: (text: string) => {
+      if (text.includes(UNFILTERABLE)) throw new RangeError("Maximum call stack size exceeded");
+      return actual.filterAhpClientFrame(text);
+    },
+  };
+});
 
 const OWNER = { id: 42, login: "octo" };
 let github: Server;
@@ -190,12 +203,11 @@ describe("Copilot CLI attach relay", () => {
     cli.close();
   });
 
-  it("ends only the CLI connection when a message can't be filtered, never the launcher (Astra)", async () => {
+  it("ends only the CLI connection when a message can't be filtered, never the launcher", async () => {
     const { url } = await startRelay();
     const cli = await connect(url, "gho_owner");
     const closed = once(cli, "close") as Promise<[number, Buffer]>;
-    // Removing `authenticate` re-serializes the rest of the batch, which this nesting makes impossible.
-    cli.send(`[{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}},{"jsonrpc":"2.0","id":2,"method":"ping","params":${"[".repeat(100_000)}${"]".repeat(100_000)}}]`);
+    cli.send(`[{"jsonrpc":"2.0","id":1,"method":"authenticate","params":{}},{"jsonrpc":"2.0","id":2,"method":"ping","params":"${UNFILTERABLE}"}]`);
     expect((await closed)[0]).toBe(1008);
     const again = await connect(url, "gho_owner");
     again.send(JSON.stringify({ jsonrpc: "2.0", id: 5, method: "initialize", params: {} }));
@@ -404,7 +416,7 @@ describe("Copilot CLI attach relay", () => {
     again.close();
   });
 
-  it("ends a dial at once when the CLI hangs up during the deployment's handshake (Argon)", async () => {
+  it("ends a dial at once when the CLI hangs up during the deployment's handshake", async () => {
     const { relay, url } = await startRelay();
     const cli = await connect(url, "gho_owner");
     expect(await platformCloses(cli, 4307, "The session is moving into a sandbox. Reconnecting.")).toBe(1012);
@@ -429,7 +441,7 @@ describe("Copilot CLI attach relay", () => {
     again.close();
   });
 
-  it("reports that the session is still moving when the reconnect window ends (Argon)", async () => {
+  it("reports that the session is still moving when the reconnect window ends", async () => {
     const { relay, url } = await startRelay({ busyRetryMs: 300 });
     const cli = await connect(url, "gho_owner");
     expect(await platformCloses(cli, 4307, "The session is moving into a sandbox. Reconnecting.")).toBe(1012);

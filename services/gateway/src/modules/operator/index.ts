@@ -1,4 +1,4 @@
-// Owner: operator workstream. The operator control plane (spec section 16): the operator API under /v1/operator,
+// The operator control plane (spec section 16): the operator API under /v1/operator,
 // console sign-in, the audit log, and the console itself at /console.
 import { CONSOLE_PATH } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
