@@ -48,9 +48,9 @@ The page checks every link every 15 seconds. When the local platform isn't runni
 
 ## Where the links come from
 
-- **Local**: the AppHost's fixed ports (gateway 7400, Dispatch 7470, software factory 7480, assistant 7490), shifted by
-  `MANAGED_COPILOT_PORT_OFFSET` like `aspire run`. Start the platform with `aspire run`; the gallery doesn't need it to
-  start.
+- **Local**: the AppHost's fixed ports (the gateway on 7400, each app on the port its catalog entry names, 7420 to
+  7490), shifted by `MANAGED_COPILOT_PORT_OFFSET` like `aspire run`. Start the platform with `aspire run`; the gallery
+  doesn't need it to start.
 - **Azure**, the first of:
   1. `--cloud https://copilot.<environment-domain>`
   2. `MANAGED_COPILOT_URL`, when it isn't a local address
@@ -85,7 +85,7 @@ without one shows the app's initials. To refresh them, start the platform, run s
 
 ```powershell
 pnpm --filter @managed-copilot/demo-gallery capture                  # every app
-pnpm --filter @managed-copilot/demo-gallery capture --only dispatch  # one card (ids: dispatch, software-factory, assistant, console ...)
+pnpm --filter @managed-copilot/demo-gallery capture --only dispatch  # one card, by app id (as in src/shared/catalog.ts)
 pnpm --filter @managed-copilot/demo-gallery capture --only gallery   # docs/gallery.png, from a running pnpm gallery
 ```
 
