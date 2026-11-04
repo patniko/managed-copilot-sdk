@@ -1018,11 +1018,14 @@ and quickstart snippet 14).
     follow-up reused one, and deleting the conversation deleted all three sessions.
     Execution styles: the fragment declares `dispatch-direct` (`execution: "direct"`, the Python lab only) and
     `dispatch-mixed` (`execution: "mixed"`, all four) beside `dispatch`; Dispatch keeps one stock client per style's
-    environment (each `managed.client(env)`), and its composer switch picks which one a new conversation is created
-    in. Direct and mixed messages list the hands tool calls of the coordinator and its sub-agents (events with
+    environment (each `managed.client(env)`), and the home page's style switch picks which one a new conversation is
+    created in (the conversation's header then shows its style read-only; the UI has no way to change it). Direct and
+    mixed messages list the hands tool calls of the coordinator and its sub-agents (events with
     `agentId`, named by `subagent.started`; persisted, so they rebuild from history; the exit code is parsed from
     `bash`'s status line), `bash`/`write_bash`/`create`/`edit` ask in the message's list with "approve the rest of this
-    message", and the `role: "hands"` sandbox shows `managed.exec.list` with each command's agent. Verified live
+    message", and the `role: "hands"` sandbox, drawn inside the coordinator's card, shows `managed.exec.list` with each
+    command's agent. The UI's fixture preview (`?preview`, `src/web/dev`) loads only behind `import.meta.env.DEV`, so
+    production builds never include it. Verified live
     (2026-10-28, local): all three styles with real models; two background sub-agents in one hands sandbox with
     per-command approvals; a mixed coordinator that started two workers and then worked in its own sandbox; a
     Dispatch restart that rebuilt the same commands; and a message typed in an attached Copilot CLI whose `bash` call
