@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import type { Context } from "../context.js";
 import { CommandError, UsageError } from "../errors.js";
 import type { HostTools } from "../host.js";
@@ -488,36 +488,105 @@ interface AspireManifest {
   readonly resources?: Readonly<Record<string, { readonly type?: string; readonly inputs?: { readonly value?: { readonly default?: { readonly generate?: unknown } } } }>>;
 }
 
+/** The parameters an AppHost generates, as `configKey`s, or why they couldn't be read. */
+type GeneratedParameters = { readonly generated: ReadonlySet<string> } | { readonly failure: string };
+
 /**
- * The parameters the AppHost generates (`addParameterWithGeneratedValue`), as `configKey`s, from the manifest Aspire
- * writes for it (`aspire do publish-manifest`, which needs no Azure and writes no values). It runs with the environment
- * the deployment gets, minus the apps' token, so the AppHost declares the same parameters. Undefined when it couldn't tell.
+ * The parameters the AppHost generates (`addParameterWithGeneratedValue`), from the manifest Aspire writes for it
+ * (`aspire do publish-manifest`, which needs no Azure and writes no values). It runs with the environment the deployment
+ * gets, minus the apps' token, so the AppHost declares the same parameters.
+ *
+ * Aspire's parameter step saves every value it resolves into the deployment record, so if a version ever ran it for the
+ * manifest, the local values in that environment would become the deployment's. Whatever the check changes in this
+ * AppHost's record (Aspire 13.6 only makes its empty directory) is put back as it was.
  */
-async function generatedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<Set<string> | undefined> {
-  const directory = mkdtempSync(join(tmpdir(), "managed-copilot-manifest-"));
-  // Aspire makes the AppHost's deployment record directory as it starts; don't leave an empty one behind.
+async function generatedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<GeneratedParameters> {
   const record = recordDirectory(ctx.host, appHost);
-  const hadRecord = existsSync(record);
+  let before: RecordSnapshot;
+  try {
+    before = snapshotRecord(record);
+  } catch {
+    return { failure: `Couldn't read this AppHost's Aspire deployment record (${record}).` };
+  }
+  const result = await manifestGeneratedParameters(ctx, appHost, env);
+  let changed: boolean;
+  try {
+    changed = restoreRecord(record, before);
+  } catch {
+    throw new CommandError("Couldn't put this AppHost's Aspire deployment record back as it was after reading its manifest, so nothing was deployed.", {
+      hint: `Check ${record}, then run \`npx managed-copilot deploy\` again.`,
+    });
+  }
+  if (changed) ctx.err(`${ctx.errStyle.yellow(ctx.errStyle.warn)} \`aspire do publish-manifest\` changed this AppHost's Aspire deployment record; it's back as it was.`);
+  return result;
+}
+
+async function manifestGeneratedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<GeneratedParameters> {
+  const directory = mkdtempSync(join(tmpdir(), "managed-copilot-manifest-"));
   try {
     const result = await ctx.host.capture("aspire", ["do", "publish-manifest", "--apphost", appHost, "--non-interactive", "--nologo", "-o", directory], { env });
-    if (result.code !== 0) return undefined;
-    const manifest = JSON.parse(readFileSync(join(directory, "aspire-manifest.json"), "utf8")) as AspireManifest;
-    if (!manifest.resources || typeof manifest.resources !== "object") return undefined;
+    if (result.code !== 0) return { failure: lastLine(result.stderr || result.stdout) ?? `It exited with ${result.code}.` };
+    let manifest: AspireManifest;
+    try {
+      manifest = JSON.parse(readFileSync(join(directory, "aspire-manifest.json"), "utf8")) as AspireManifest;
+    } catch {
+      return { failure: "It didn't write a manifest that could be read." };
+    }
+    if (!manifest.resources || typeof manifest.resources !== "object") return { failure: "Its manifest lists no resources." };
     const generated = new Set<string>();
     for (const [name, resource] of Object.entries(manifest.resources)) {
       if (resource?.type?.startsWith("parameter.") && resource.inputs?.value?.default?.generate !== undefined) generated.add(configKey(`Parameters:${name}`));
     }
-    return generated;
-  } catch {
-    return undefined;
+    return { generated };
+  } catch (error) {
+    return { failure: error instanceof Error ? error.message : String(error) };
   } finally {
     rmSync(directory, { recursive: true, force: true });
-    try {
-      if (!hadRecord && readdirSync(record).length === 0) rmdirSync(record);
-    } catch {
-      // Not there, or not empty: leave it.
+  }
+}
+
+/** A deployment record's files by relative path (they hold secrets: compared and written back, never read out), or undefined when it has no directory. */
+type RecordSnapshot = ReadonlyMap<string, Buffer> | undefined;
+
+function recordFiles(directory: string): string[] {
+  return readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => relative(directory, join(entry.parentPath, entry.name)));
+}
+
+function snapshotRecord(directory: string): RecordSnapshot {
+  if (!existsSync(directory)) return undefined;
+  return new Map(recordFiles(directory).map((file) => [file, readFileSync(join(directory, file))]));
+}
+
+/** Puts a deployment record back as the snapshot had it, and says whether anything besides an empty directory had changed. */
+function restoreRecord(directory: string, before: RecordSnapshot): boolean {
+  if (!existsSync(directory)) return before !== undefined && before.size > 0 ? writeRecordFiles(directory, before) : false;
+  if (!before) {
+    const changed = readdirSync(directory).length > 0;
+    rmSync(directory, { recursive: true, force: true });
+    return changed;
+  }
+  let changed = false;
+  for (const file of recordFiles(directory)) {
+    if (!before.has(file)) {
+      rmSync(join(directory, file), { force: true });
+      changed = true;
     }
   }
+  return writeRecordFiles(directory, before) || changed;
+}
+
+function writeRecordFiles(directory: string, files: ReadonlyMap<string, Buffer>): boolean {
+  let changed = false;
+  for (const [file, contents] of files) {
+    const path = join(directory, file);
+    if (existsSync(path) && readFileSync(path).equals(contents)) continue;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, contents, { mode: 0o600 });
+    changed = true;
+  }
+  return changed;
 }
 
 /** `az account show` output; the account's name is compared, never printed. */
@@ -684,12 +753,13 @@ export async function deploy(ctx: Context): Promise<number | void> {
     // deployment's own, so ask the AppHost which parameters it generates.
     if (!ctx.json) ctx.err(ctx.errStyle.dim(`Checking which parameters the AppHost generates${ctx.errStyle.ellipsis}`));
     const generated = await generatedParameters(ctx, settings.path, { ...parameters, ...settingsEnv });
-    if (!generated) {
+    if ("failure" in generated) {
       ctx.err(`${ctx.errStyle.yellow(ctx.errStyle.warn)} Couldn't tell which parameters the AppHost generates (\`aspire do publish-manifest\` failed), so none are passed from its user secrets.`);
+      ctx.err(ctx.errStyle.dim(`  ${generated.failure}`));
       ctx.err(ctx.errStyle.dim("  Set the ones the deployment needs as Parameters__<name> in the environment, or fix the AppHost and deploy again."));
       parameters = {};
     } else {
-      const own = Object.keys(parameters).filter((variable) => generated.has(configKey(variable)));
+      const own = Object.keys(parameters).filter((variable) => generated.generated.has(configKey(variable)));
       for (const variable of own) delete parameters[variable];
       if (own.length) ctx.out(style.dim(`  Generated by the AppHost, so the deployment makes its own: ${own.map((variable) => variable.slice("Parameters__".length)).join(", ")}`));
     }

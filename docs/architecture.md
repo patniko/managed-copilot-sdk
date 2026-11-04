@@ -1757,8 +1757,12 @@ sequenceDiagram
   (`aspire deploy` runs as Production without user secrets), except generated parameters (each `parameter.v0` with
   `inputs.value.default.generate` in the manifest `aspire do publish-manifest` writes, run with the deploy's
   environment minus the token, plus `<name>-platform-key|-durable-key|-vault-key|-egress-key|-app-<app>-key` by name;
-  none are passed when the manifest fails), parameters the deployment's Aspire record already holds, and variables
-  already in its environment. `aspire deploy` signs in as the Azure CLI's current account, so for another
+  none are passed when the manifest fails, and the warning carries the step's last output line), parameters the
+  deployment's Aspire record already holds, and variables already in its environment. The manifest step leaves this
+  AppHost's Aspire deployment record as it found it: Aspire's `process-parameters` step saves every resolved value
+  there in publish mode, and `publish-manifest` doesn't depend on it in 13.6 (verified: an existing record stays
+  byte-identical, and only an empty record directory is made), but `deploy` snapshots the record's files first and
+  writes back anything that changed, with a warning. `aspire deploy` signs in as the Azure CLI's current account, so for another
   subscription `deploy` passes that subscription's tenant (`Azure__TenantId`) when the same account holds it and stops
   with `az account set --subscription <id>` when another account does. `access ips` also rewrites the running published
   apps' `allow-<n>` ingress rules with `az containerapp ingress access-restriction` (set before remove; `platform` and

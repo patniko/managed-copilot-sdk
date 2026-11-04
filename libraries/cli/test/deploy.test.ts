@@ -46,6 +46,8 @@ class FakeHost implements HostTools {
   /** The AppHost's parameters in the manifest `aspire do publish-manifest` writes: name → generated. */
   manifest: Record<string, boolean> = {};
   manifestFails = false;
+  /** A future Aspire that runs its parameter step for the manifest, saving the values it's given into the record. */
+  manifestSavesValues = false;
   readonly calls: { command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }[] = [];
 
   has(command: string) {
@@ -69,7 +71,16 @@ class FakeHost implements HostTools {
     if (command === "aspire" && args[0] === "do" && args[1] === "publish-manifest") {
       // Like Aspire, it makes the AppHost's deployment record directory as the AppHost starts.
       const appHost = args[args.indexOf("--apphost") + 1]!;
-      mkdirSync(join(this.records, createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase()), { recursive: true });
+      const recordDir = join(this.records, createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
+      mkdirSync(recordDir, { recursive: true });
+      if (this.manifestSavesValues) {
+        // As Aspire's parameter step does in publish mode: every value it resolves goes into the deployment record.
+        const file = join(recordDir, "production.json");
+        const state = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, string>) : {};
+        for (const [variable, value] of Object.entries(options?.env ?? {})) if (variable.startsWith("Parameters__")) state[`Parameters:${variable.slice("Parameters__".length)}`] = value;
+        writeFileSync(file, JSON.stringify(state));
+        writeFileSync(join(recordDir, "production.json.lock"), "");
+      }
       if (this.manifestFails) return { code: 1, stdout: "", stderr: "The AppHost failed to start." };
       const resources = Object.fromEntries(
         Object.entries(this.manifest).map(([parameter, generated]) => [
@@ -451,6 +462,7 @@ describe("deploy", () => {
     writeRecord(host, thisAppHost(), "managed-copilot-dev");
     expect(await run(["deploy", "--yes"], h.io)).toBe(0);
     expect(h.err()).toContain("Couldn't tell which parameters the AppHost generates");
+    expect(h.err()).toContain("The AppHost failed to start.");
     expect(h.out()).not.toContain("Passing");
     const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
     expect(Object.keys(env).filter((variable) => variable.startsWith("Parameters__google"))).toEqual([]);
@@ -469,6 +481,36 @@ describe("deploy", () => {
     expect(host.calls.some((call) => call.command === "aspire" && call.args[0] === "do")).toBe(true);
     expect(readdirSync(host.records)).toEqual([]);
     expect(h.out()).toContain("Passing 1 parameter from the AppHost's user secrets: google-client-id");
+    expect(h.err()).not.toContain("deployment record");
+  });
+
+  it("puts the deployment record back if reading the manifest saved the local values into it", async () => {
+    const host = deployedHost();
+    Object.assign(host.secrets, { "Parameters:google-client-secret": "google-secret-value", "Parameters:front-desk-session-secret": "local-session-secret" });
+    host.manifest = { "google-client-secret": false, "front-desk-session-secret": true };
+    host.manifestSavesValues = true;
+    const h = harness(host);
+    const recordDir = writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    const files = () => Object.fromEntries(readdirSync(recordDir).map((file) => [file, readFileSync(join(recordDir, file), "utf8")]));
+    const before = files();
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(files()).toEqual(before);
+    expect(h.err()).toContain("`aspire do publish-manifest` changed this AppHost's Aspire deployment record; it's back as it was.");
+    const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(env).toMatchObject({ "Parameters__google-client-secret": "google-secret-value" });
+    expect(env).not.toHaveProperty("Parameters__front-desk-session-secret");
+    expect(h.out() + h.err()).not.toMatch(/google-secret-value|local-session-secret/);
+
+    // A first deployment has no record: whatever the manifest step wrote goes.
+    const first = new FakeHost();
+    first.records = join(directory, "first-deployments");
+    first.secrets = { "Parameters:front-desk-session-secret": "local-session-secret", "Parameters:google-client-id": "google-id-value" };
+    first.manifest = { "front-desk-session-secret": true, "google-client-id": false };
+    first.manifestSavesValues = true;
+    const firstRun = harness(first);
+    expect(await run(["deploy", "--yes"], firstRun.io)).toBe(0);
+    expect(readdirSync(first.records)).toEqual([]);
+    expect(firstRun.err()).toContain("it's back as it was");
   });
 
   it("says public apps are open to any address, and lists them once deployed", async () => {
