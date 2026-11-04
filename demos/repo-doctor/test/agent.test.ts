@@ -58,6 +58,16 @@ describe("AgentObserver", () => {
     expect(displayPath("/workspace/repo")).toBe(".");
     expect(displayPath("/workspace/outputs/x.md")).toBe("outputs/x.md");
   });
+
+  it("trims a command's output in linear time, however much whitespace the repository prints", () => {
+    const { lines, emit } = observe();
+    emit("tool.execution_start", { toolCallId: "1", toolName: "bash", arguments: { command: "npm test" } });
+    const started = performance.now();
+    emit("tool.execution_complete", { toolCallId: "1", success: true, result: { content: `ok${" \n".repeat(100_000)}x\n<exited with exit code 0>\n` }, shellExecution: { exitCode: 0 } });
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(lines.at(-1)).toMatchObject({ kind: "output" });
+    expect(lines.at(-1)!.text.endsWith(" \nx")).toBe(true);
+  });
 });
 
 describe("prompts and tools", () => {

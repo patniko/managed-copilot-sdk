@@ -197,7 +197,10 @@ export class AgentObserver {
     this.#calls.delete(data.toolCallId);
     if (!call || !(SHELL_TOOLS.has(call.tool) || SHELL_IO_TOOLS.has(call.tool))) return;
     // The runtime ends shell output with its own exit marker; the exit code is shown on its own line instead.
-    const output = (data.result?.detailedContent ?? data.result?.content ?? data.error?.message ?? "").replace(/\n?<(?:shellId: \S+ )?(?:completed|exited) with exit code -?\d+>\s*$/, "").replace(/\s+$/, "");
+    const output = (data.result?.detailedContent ?? data.result?.content ?? data.error?.message ?? "")
+      .trimEnd()
+      .replace(/\n?<(?:shellId: \S+ )?(?:completed|exited) with exit code -?\d+>$/, "")
+      .trimEnd();
     if (output) this.#sink.log({ kind: "output", text: output.length > OUTPUT_LIMIT ? `…${output.slice(-OUTPUT_LIMIT)}` : output });
     const exitCode = data.shellExecution?.exitCode;
     if (exitCode !== undefined && exitCode !== 0) this.#sink.log({ kind: "note", text: `Exit code ${exitCode}`, exitCode });

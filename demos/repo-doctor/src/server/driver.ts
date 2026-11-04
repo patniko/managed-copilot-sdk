@@ -14,7 +14,7 @@ import { log } from "./log.js";
 import type { CommandResult, DoctorPlatform, DoctorSession } from "./platform.js";
 import { tail, type Run } from "./run.js";
 import type { SampleProject } from "./sample.js";
-import { parseTestOutput, stripAnsi } from "./testsummary.js";
+import { outputEnd, parseTestOutput, stripAnsi } from "./testsummary.js";
 
 export interface DriverDeps {
   readonly platform: DoctorPlatform;
@@ -43,6 +43,8 @@ const EXCLUDES = ["node_modules", ".venv", "venv", "__pycache__", ".pytest_cache
 
 const PATCH_LIMIT = 512 * 1024;
 const TEST_TAIL = 4_000;
+/** Output without a newline is logged once this much of it has built up. */
+const LINE_BUFFER = 64 * 1024;
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -92,7 +94,7 @@ function minutes(ms: number): string {
 const headOf = (output: string) => /^HEAD (\w+)/m.exec(output)?.[1];
 
 /** Emits streamed output in whole lines, a few times a second. */
-class OutputBuffer {
+export class OutputBuffer {
   #pending = "";
   #timer: NodeJS.Timeout | undefined;
   readonly #emit: (text: string) => void;
@@ -103,7 +105,8 @@ class OutputBuffer {
 
   push(chunk: string): void {
     this.#pending += chunk;
-    this.#timer ??= setTimeout(() => this.#flush(false), 250);
+    if (this.#pending.length >= LINE_BUFFER) this.#flush(true);
+    else this.#timer ??= setTimeout(() => this.#flush(false), 250);
   }
 
   #flush(all: boolean): void {
@@ -114,7 +117,7 @@ class OutputBuffer {
       if (this.#pending) this.#timer = setTimeout(() => this.#flush(false), 250);
       return;
     }
-    const text = stripAnsi(this.#pending.slice(0, cut)).replace(/\s+$/, "");
+    const text = stripAnsi(this.#pending.slice(0, cut)).trimEnd();
     this.#pending = this.#pending.slice(cut);
     if (text) this.#emit(text);
     if (this.#pending) this.#timer = setTimeout(() => this.#flush(false), 250);
@@ -197,7 +200,7 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
       ...counts,
       failures,
       durationMs: Date.now() - started,
-      tail: tail(stripAnsi(result.output).replace(/\s+$/, ""), TEST_TAIL),
+      tail: tail(outputEnd(result.output), TEST_TAIL),
     };
   };
 
@@ -205,7 +208,7 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
     checkStopped();
     const result = await platform.run(session!.sessionId, snapshotScript(name), { timeoutMs: timeouts.checkoutMs, signal });
     checkStopped();
-    const tree = [...result.output.matchAll(/^([0-9a-f]{40}|[0-9a-f]{64})\s*$/gm)].at(-1)?.[1];
+    const tree = [...result.output.matchAll(/^([0-9a-f]{40}|[0-9a-f]{64})$/gm)].at(-1)?.[1];
     if (result.exitCode !== 0 || !tree) throw new StepFailure("snapshot_failed", "Couldn't read the repository's files to build the patch.");
     return tree;
   };

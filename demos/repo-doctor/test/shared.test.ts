@@ -5,7 +5,7 @@ import { SAMPLE_DIFF } from "./fakes.js";
 
 describe("parseRepoInput", () => {
   it("reads URLs, host paths, and owner/repo", () => {
-    for (const input of ["octo/tools", " octo/tools ", "github.com/octo/tools", "https://github.com/octo/tools", "https://github.com/octo/tools.git", "http://www.github.com/octo/tools/", "git@github.com:octo/tools.git"]) {
+    for (const input of ["octo/tools", " octo/tools ", "octo/tools///", "github.com/octo/tools", "https://github.com/octo/tools", "https://github.com/octo/tools.git", "http://www.github.com/octo/tools/", "git@github.com:octo/tools.git"]) {
       expect(parseRepoInput(input), input).toEqual({ owner: "octo", repo: "tools" });
     }
     expect(parseRepoInput("https://github.com/octo/tools/pull/12")).toEqual({ owner: "octo", repo: "tools" });
@@ -25,6 +25,14 @@ describe("parseRepoInput", () => {
     expect(parseRepoInput("octo/tools/tree/--upload-pack=x")).toMatchObject({ error: expect.stringContaining("isn't a branch or tag") });
     expect(parseRepoInput("octo/tools/tree/a..b")).toMatchObject({ error: expect.stringContaining("isn't a branch or tag") });
     expect(parseRepoInput("https://github.com/%E0%A4%A")).toEqual({ error: "That isn't a URL Repo Doctor can read." });
+  });
+
+  it("refuses input too long to be a repository at once, and trims slashes in linear time", () => {
+    expect(parseRepoInput(`octo/${"a".repeat(1_000)}`)).toEqual({ error: "That's too long to be a GitHub repository." });
+    const started = performance.now();
+    expect(parseRepoInput(`a/${"/".repeat(40_000)}x`)).toEqual({ error: "That's too long to be a GitHub repository." });
+    expect(parseRepoInput(`octo/tools${"/".repeat(900)}`)).toEqual({ owner: "octo", repo: "tools" });
+    expect(performance.now() - started).toBeLessThan(250);
   });
 
   it("builds clone and page URLs", () => {

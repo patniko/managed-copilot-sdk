@@ -10,11 +10,14 @@ export interface GitHubRepo {
 const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const NAME = /^[A-Za-z0-9._-]{1,100}$/;
 const REF = /^(?![-/.])(?!.*(?:\.\.|\/\/|@\{))[A-Za-z0-9._/+-]{1,200}(?<![/.])$/;
+/** More than a repository URL with a branch needs, so long input is refused before it's parsed. */
+const MAX_INPUT = 1_000;
 
 /** Parses a repository reference, or explains in plain words why it isn't one Repo Doctor can clone. */
 export function parseRepoInput(input: string): GitHubRepo | { readonly error: string } {
   let text = input.trim();
   if (!text) return { error: "Paste a GitHub repository, like github.com/owner/repo." };
+  if (text.length > MAX_INPUT) return { error: "That's too long to be a GitHub repository." };
   const ssh = /^git@github\.com:(.+)$/i.exec(text);
   if (ssh) text = ssh[1]!;
   else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) || /^(?:www\.)?github\.com\//i.test(text)) {
@@ -29,7 +32,8 @@ export function parseRepoInput(input: string): GitHubRepo | { readonly error: st
       return { error: "Repo Doctor clones public repositories from github.com." };
     }
   }
-  const [owner, rawName, kind, ...rest] = text.replace(/^\/+|\/+$/g, "").split("/");
+  // The trailing match starts only where a run of slashes starts, so a long run is read once.
+  const [owner, rawName, kind, ...rest] = text.replace(/^\/+|(?<!\/)\/+$/g, "").split("/");
   const name = rawName?.replace(/\.git$/i, "");
   if (!owner || !name) return { error: "Include the owner and the repository, like owner/repo." };
   if (!OWNER.test(owner) || !NAME.test(name) || name === "." || name === "..") return { error: `"${owner}/${name}" isn't a valid GitHub repository name.` };
