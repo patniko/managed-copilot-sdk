@@ -254,6 +254,11 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   bound, every 30 s, and before every backend operation); `/v1/info` should advertise `isolated` and `files` only while
   it is true, so a deployment whose backend is missing or unqualified never advertises a capability that cannot work.
   Docker trusts a successful ping for 15 s.
+- **Local Docker discovery.** An explicit `DOCKER_HOST` is used directly unless `DOCKER_CONTEXT` is also set;
+  otherwise `docker context inspect` resolves Docker's selected endpoint, including `DOCKER_CONFIG` and the saved
+  current context. Docker Desktop, Colima, and rootless Docker sockets need no extra configuration. Discovery runs
+  during backend readiness and the resolved endpoint is retained for the gateway's lifetime; failed discovery or an
+  unsupported context reports `capability_unavailable` rather than selecting another daemon.
 - **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
@@ -1788,7 +1793,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
 | `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
 | `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |
-| `DOCKER_HOST` | Docker Desktop pipe / `/var/run/docker.sock` | Docker Engine API endpoint for sandboxes |
+| `DOCKER_HOST` / `DOCKER_CONTEXT` / `DOCKER_CONFIG` | Docker's selected context and platform default | Docker Engine API endpoint selection for sandboxes; the Docker CLI resolves contexts |
 
 ## Code map
 
