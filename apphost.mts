@@ -3,6 +3,7 @@ import { createBuilder } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
+import { PATTERN_RACE_DEFAULT_PORT, patternRace } from "./demos/pattern-race/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 
 const builder = await createBuilder();
@@ -22,6 +23,7 @@ const ports = {
   factory: 7480 + offset,
   snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
+  patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -106,6 +108,9 @@ await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", al
 // Dispatch: one conversation with an orchestrator agent that, message by message, creates a sandbox for each part of
 // the work or sends it to a sandbox it already has.
 await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allowedHostsEnv: "DISPATCH_ALLOWED_HOSTS", gatewayUrlEnv: ["DISPATCH_ATTACH_URL"] });
+
+// Pattern Race: one job in six lanes at once, one per pattern environment above; only the environment name differs.
+await addDemo(patternRace({ port: ports.patternRace }).app, { dockerfile: "demos/pattern-race/Dockerfile", allowedHostsEnv: "PATTERN_RACE_ALLOWED_HOSTS" });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
 // for hands-on work.
