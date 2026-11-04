@@ -333,8 +333,8 @@ async function cleanUp(run: Run, platform: DoctorPlatform, session: DoctorSessio
     return;
   }
   await session.disconnect().catch(() => undefined);
-  if (graceMs > 0) await new Promise((resolve) => setTimeout(resolve, graceMs));
   run.update({ sandbox: { ...run.view.sandbox, state: "deleting" } });
+  if (graceMs > 0) await new Promise((resolve) => setTimeout(resolve, graceMs));
   try {
     await platform.deleteSession(session.sessionId);
     run.update({ sandbox: { ...run.view.sandbox, state: "deleted" } });
