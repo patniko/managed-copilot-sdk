@@ -48,6 +48,7 @@ builds the sandbox image, which takes a few minutes.
 | Repo Doctor | http://localhost:7435 | Isolated |
 | Help Desk | http://localhost:7440 | Shared |
 | Incident Commander | http://localhost:7445 | Mixed |
+| Front Desk | http://localhost:7450 | Shared |
 | Dispatch | http://localhost:7470 | Direct, delegate, mixed |
 | Software factory | http://localhost:7480 | Delegate, isolated |
 | Assistant | http://localhost:7490 | Shared, delegate |
@@ -205,7 +206,31 @@ Scripted check in Microsoft Edge (`--fresh` starts a new conversation and resets
 pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder --offline --sandbox --enable-background
 ```
 
-### 1.13 Operator console
+### 1.13 Front Desk (many people, each with private conversations)
+
+Email accounts chat only when the AppHost names an Azure AI Foundry account for them (`Parameters:foundry-account`
+and the rest, in [Front Desk's README](../demos/front-desk/README.md#people-without-github)); without one, Front Desk
+tells them chatting needs GitHub here.
+
+1. Open http://localhost:7450 and press **Use this computer's GitHub sign-in**.
+2. Ask: "Remember that my favorite color is teal." Open **Memory**.
+3. In a private window, open Front Desk again and **Create an account** with any email and password.
+4. As that person, ask: "What's my favorite color?"
+
+- [ ] The GitHub user's chip says **Your Copilot plan**; the email account's says **Front Desk's Azure AI Foundry**,
+      with a daily allowance. Each conversation's header shows the platform's own record of where its model calls go
+      (**Your Copilot plan · claude-sonnet-5**, or **Azure AI Foundry · \<deployment\>**).
+- [ ] The memory panel lists the favorite color for the GitHub user only; the other person's list and memory are empty,
+      and their assistant doesn't know it.
+
+Scripted check (two email accounts and your GitHub CLI's account; each saves a secret, and every other person is checked
+to see none of it):
+
+```powershell
+pnpm --filter @managed-copilot/demo-front-desk e2e -- --url http://localhost:7450
+```
+
+### 1.14 Operator console
 
 Press the console card's **Local** button, or:
 
@@ -219,7 +244,7 @@ npx managed-copilot operator     # the same overview in the terminal
       Repo Doctor's sandbox), with placement and sandbox; conversation content is not shown.
 - [ ] The live feed moves while a demo runs.
 
-### 1.14 The CLI and the walkthroughs (T3)
+### 1.15 The CLI and the walkthroughs (T3)
 
 ```powershell
 npx managed-copilot sessions              # your sessions
@@ -233,7 +258,7 @@ pnpm --filter @managed-copilot/snippets acceptance   # every spec snippet agains
 
 - [ ] `new coder` opens Copilot CLI with the footer `remote /workspace`.
 
-### 1.15 Stop
+### 1.16 Stop
 
 ```powershell
 aspire stop --apphost apphost.mts --non-interactive
@@ -259,7 +284,7 @@ Deploying apphost.mts to Azure
   Platform users  @your-login
   Operators       @your-login
   Apps act as     @your-login (your GitHub sign-in)
-  Apps open to    203.0.113.7/32 (this machine)
+  Apps open to    203.0.113.7/32 (this machine); public apps: any address
   Added you (@your-login) to platform users and operators. Change with `npx managed-copilot access`.
 
 Deploy? [y/N]
@@ -344,18 +369,23 @@ your network address (see 3.4); the deployed gallery can't tell, because the app
 
 ### 3.3 The demos and console in Azure
 
-Repeat 1.4 to 1.13 with each card's **Azure** button. Differences to expect:
+Repeat 1.4 to 1.14 with each card's **Azure** button. Differences to expect:
 
 - Sandboxes are Azure Container Apps microVMs (`Linux x86_64`), so the first one in a conversation takes a little
   longer to start.
 - "Open in Copilot CLI" commands include `--url https://copilot.<environment-domain>`.
 - The console button signs you in with a one-time link; it works only for operators (`npx managed-copilot access`
   lists them).
+- Front Desk is a public app: it opens from any network, and it doesn't offer this computer's GitHub sign-in. Sign in
+  with **Continue with GitHub** (its OAuth app needs the deployed callback URL; see its README) or create an email
+  account.
 
 - [ ] Dispatch: π template with approvals, a reused follow-up, Copilot CLI follow-up.
 - [ ] Software factory: CSV ⇄ JSON toolkit, Agent-led, release with all tests passed.
 - [ ] Assistant: approval card, reminder while the tab is closed, a sandbox chart. (Its sandboxes haven't been
       verified on Azure before, so this is the one to watch.)
+- [ ] Front Desk: a GitHub user on their own Copilot plan and an email account on Foundry, neither seeing the other's
+      conversations or memory; it opens from a phone off Wi-Fi, where the other apps answer 403.
 - [ ] Pattern Race, Help Desk, Repo Doctor, Data Desk, Research Swarm, and Incident Commander: their scripted checks
       above, each with `--url https://<app>.<environment-domain>`. They have run locally only so far, so watch them
       too.

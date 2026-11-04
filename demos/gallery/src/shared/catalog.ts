@@ -14,6 +14,11 @@ export interface AppEntry {
   readonly healthPath: string;
   /** Repository path of its README. */
   readonly readme: string;
+  /**
+   * Published with `publishApp({ public: true })` in the root AppHost: any address can open the deployed app, which
+   * signs in its own users. The others open only from `Parameters:app-allowed-ips`.
+   */
+  readonly public?: boolean;
 }
 
 export interface Walkthrough {
@@ -80,6 +85,19 @@ export const APPS: readonly AppEntry[] = [
     port: 7490,
     healthPath: "/healthz",
     readme: "demos/assistant/README.md",
+  },
+  {
+    id: "front-desk",
+    title: "Front Desk",
+    tagline: "One app for many people, each with their own private conversations",
+    description:
+      "Anyone signs in: with GitHub, to chat on their own Copilot plan, or with an email, so the app pays through its Azure AI Foundry. Each person gets conversations and a memory that nobody else can see.",
+    tryIt: "Ask it to remember your favorite color, then sign in as someone else and ask for it.",
+    app: "front-desk",
+    port: 7450,
+    healthPath: "/api/health",
+    readme: "demos/front-desk/README.md",
+    public: true,
   },
   {
     id: "research-swarm",
@@ -247,6 +265,7 @@ export const PATTERNS: readonly Pattern[] = [
     demos: [
       { app: "software-factory", where: "its planner and reviewer" },
       { app: "help-desk", where: "25 customers, one runtime" },
+      { app: "front-desk", where: "every person's conversations" },
     ],
   },
   {

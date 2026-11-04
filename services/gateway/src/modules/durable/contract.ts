@@ -354,7 +354,8 @@ export interface WebhooksService {
   dropSession?(sessionId: string): number;
   /** Names of AppHost webhooks that cover an environment and event type. */
   subscribers(environment: string, eventType: string): string[];
-  deliveries(options?: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number }): WebhookDeliveryInfo[];
+  /** `environments`: only deliveries of events in these environments (a request through an app). */
+  deliveries(options?: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number; readonly environments?: readonly string[] }): WebhookDeliveryInfo[];
 }
 
 export interface SchedulesService {

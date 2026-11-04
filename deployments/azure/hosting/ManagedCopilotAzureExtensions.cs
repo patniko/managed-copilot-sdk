@@ -20,6 +20,15 @@ public static class ManagedCopilotAzureExtensions
     /// <summary>Name of the environment storage that holds the platform's durable state (an NFS share).</summary>
     public const string DataStorageName = "mcdata";
 
+    /// <summary>
+    /// Tag on a public app's container app (value <see cref="PublicAccess"/>). Tools that manage the apps' address
+    /// allowlists (<c>npx managed-copilot access ips</c>) tell public apps apart by it and leave them alone.
+    /// </summary>
+    public const string AccessTagName = "managed-copilot-access";
+
+    /// <summary>Value of <see cref="AccessTagName"/> on a public app.</summary>
+    public const string PublicAccess = "public";
+
     private const string DataVolumeName = "data";
 
     /// <summary>
@@ -192,9 +201,7 @@ public static class ManagedCopilotAzureExtensions
         string allowedSourceCidrs)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentNullException.ThrowIfNull(environment);
-        var network = environment.Resource.Annotations.OfType<ManagedCopilotNetworkAnnotation>().SingleOrDefault()
-            ?? throw new InvalidOperationException($"Call WithManagedCopilotNetworkAndStorage on {environment.Resource.Name} before publishing apps to it.");
+        var network = NetworkOf(environment);
         var cidrs = (allowedSourceCidrs ?? string.Empty)
             .Split([',', ' ', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .ToArray();
@@ -216,6 +223,44 @@ public static class ManagedCopilotAzureExtensions
                 }
             }
         });
+    }
+
+    /// <summary>
+    /// Runs an app the way <see cref="PublishAsManagedCopilotApp"/> does, with public ingress: any address may open it.
+    /// For an app that signs in its own users and holds no deployment-wide credential. The container app is tagged
+    /// <c>managed-copilot-access: public</c> (<see cref="AccessTagName"/>).
+    /// </summary>
+    /// <param name="builder">The app container.</param>
+    /// <param name="environment">The environment configured with <see cref="WithManagedCopilotNetworkAndStorage"/>.</param>
+    /// <param name="subPath">The app's directory on the share, for example <c>apps/front-desk</c>.</param>
+    /// <param name="mountPath">Where the directory appears in the container.</param>
+    /// <param name="targetPort">The app's HTTP port.</param>
+    /// <param name="healthPath">The app's health route (200 when it serves; the waiting replica answers 503).</param>
+    /// <returns>The app, for chaining.</returns>
+    [AspireExport]
+    public static IResourceBuilder<ContainerResource> PublishAsManagedCopilotPublicApp(
+        this IResourceBuilder<ContainerResource> builder,
+        IResourceBuilder<AzureContainerAppEnvironmentResource> environment,
+        string subPath,
+        string mountPath,
+        int targetPort,
+        string healthPath)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        NetworkOf(environment);
+        return builder.PublishAsAzureContainerApp((infra, app) =>
+        {
+            ConfigureSingleWriter(app, subPath, mountPath);
+            AddSupervisedProbes(app, targetPort, healthPath);
+            app.Tags[AccessTagName] = PublicAccess;
+        });
+    }
+
+    private static ManagedCopilotNetworkAnnotation NetworkOf(IResourceBuilder<AzureContainerAppEnvironmentResource> environment)
+    {
+        ArgumentNullException.ThrowIfNull(environment);
+        return environment.Resource.Annotations.OfType<ManagedCopilotNetworkAnnotation>().SingleOrDefault()
+            ?? throw new InvalidOperationException($"Call WithManagedCopilotNetworkAndStorage on {environment.Resource.Name} before publishing apps to it.");
     }
 
     /// <summary>

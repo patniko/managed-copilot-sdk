@@ -33,6 +33,7 @@ describe("links", () => {
       dispatch: "http://localhost:7470",
       "software-factory": "http://localhost:7480",
       assistant: "http://localhost:7490",
+      "front-desk": "http://localhost:7450",
       console: "/open/console?target=local",
     });
     expect(Object.keys(apps).sort()).toEqual(appIds(APPS));
@@ -52,12 +53,18 @@ describe("links", () => {
     expect(urls.gatewayUrl).toBe("https://copilot.bravedesert-123.westus2.azurecontainerapps.io");
     expect(urls.apps.dispatch).toBe("https://dispatch.bravedesert-123.westus2.azurecontainerapps.io");
     expect(urls.apps.assistant).toBe("https://assistant.bravedesert-123.westus2.azurecontainerapps.io");
+    expect(urls.apps["front-desk"]).toBe("https://front-desk.bravedesert-123.westus2.azurecontainerapps.io");
     expect(urls.apps.console).toBe("/open/console?target=cloud");
   });
 
   it("leaves the console out when asked (a hosted gallery)", () => {
     const { apps } = cloudUrls("https://copilot.d.io", { console: false });
-    expect(apps).toMatchObject({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io" });
+    expect(apps).toMatchObject({
+      dispatch: "https://dispatch.d.io",
+      "software-factory": "https://software-factory.d.io",
+      assistant: "https://assistant.d.io",
+      "front-desk": "https://front-desk.d.io",
+    });
     expect(Object.keys(apps).sort()).toEqual(appIds(withoutConsole));
     for (const app of withoutConsole) expect(apps[app.id]).toBe(`https://${app.app}.d.io`);
   });
@@ -113,6 +120,31 @@ describe("patterns", () => {
       if (pattern.settings.includes('type: "orchestrator"') && !pattern.settings.some((setting) => setting.startsWith("execution:"))) {
         expect(declared, pattern.environment).not.toContain("execution:");
       }
+    }
+  });
+});
+
+describe("public apps", () => {
+  const apphost = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
+  /** The root AppHost's call that publishes a demo: the nearest `addDemo(` or `publishApp(` before its Dockerfile, to the matching `)`. */
+  const publishCall = (folder: string): string | undefined => {
+    const at = apphost.indexOf(`dockerfile: "demos/${folder}/Dockerfile"`);
+    const start = Math.max(apphost.lastIndexOf("addDemo(", at), apphost.lastIndexOf("publishApp(", at));
+    if (at < 0 || start < 0) return undefined;
+    let depth = 0;
+    for (let index = apphost.indexOf("(", start); index < apphost.length; index++) {
+      if (apphost[index] === "(") depth++;
+      else if (apphost[index] === ")" && --depth === 0) return apphost.slice(start, index + 1);
+    }
+    return undefined;
+  };
+
+  it("marks Public exactly the apps the root AppHost publishes with public: true", () => {
+    for (const app of APPS.filter((entry) => entry.id !== "console")) {
+      const folder = /^demos\/([^/]+)\//.exec(app.readme)?.[1];
+      const call = folder ? publishCall(folder) : undefined;
+      expect(call, `${app.id} is published in apphost.mts`).toBeDefined();
+      expect(/\bpublic: true\b/.test(call!), app.id).toBe(app.public === true);
     }
   });
 });

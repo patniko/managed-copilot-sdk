@@ -1,8 +1,8 @@
 // The core session ledger (`core_*` tables): ownership, placement, environment, admitted configuration, and the
 // owner-scoped platform event log used for SSE replay.
 import { randomBytes } from "node:crypto";
-import type { AccountInfo, EnvironmentRequest, EnvironmentType, NetworkPolicy, Placement, PlatformEvent, SessionState } from "@managed-copilot/protocol";
-import { migrate, type Database } from "../../db.js";
+import type { AccountInfo, EnvironmentRequest, EnvironmentType, NetworkPolicy, Placement, PlatformEvent, SessionInference, SessionState } from "@managed-copilot/protocol";
+import { migrate, transaction, type Database } from "../../db.js";
 import type { SessionRecord } from "./contracts.js";
 
 const MIGRATIONS = [
@@ -60,6 +60,13 @@ const MIGRATIONS = [
    CREATE INDEX core_sessions_parent ON core_sessions (parent_session_id);`,
   // `workspace`: a workspace-only session (a sandbox for commands and files, no runtime).
   `ALTER TABLE core_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent';`,
+  // An app's own users are accounts too: negative IDs this gateway assigns, unique per (app, the app's user ID). Where a
+  // session's model calls go is fixed when it is created (JSON `SessionInference`; NULL is the owner's Copilot plan).
+  `ALTER TABLE core_accounts ADD COLUMN kind TEXT;
+   ALTER TABLE core_accounts ADD COLUMN app TEXT;
+   ALTER TABLE core_accounts ADD COLUMN app_user_id TEXT;
+   CREATE UNIQUE INDEX core_accounts_app_user ON core_accounts (app, app_user_id) WHERE app_user_id IS NOT NULL;
+   ALTER TABLE core_sessions ADD COLUMN inference TEXT;`,
 ];
 
 interface SessionRow {
@@ -84,11 +91,15 @@ interface SessionRow {
   parent_session_id: string | null;
   parent_incarnation: string | null;
   kind: string | null;
+  inference: string | null;
   created_at: string;
   updated_at: string;
   login: string | null;
   name: string | null;
   avatar_url: string | null;
+  account_kind: string | null;
+  account_app: string | null;
+  account_user_id: string | null;
 }
 
 /** The SSE cursor of a stream that began before the owner had any events: replay starts from its first. */
@@ -143,9 +154,34 @@ export interface NewSession {
   readonly parentSessionId?: string;
   readonly parentIncarnation?: string;
   readonly kind?: "agent" | "workspace";
+  /** Where the session's model calls go; absent is the owner's Copilot plan. */
+  readonly inference?: SessionInference;
 }
 
-const SELECT = `SELECT s.*, a.login, a.name, a.avatar_url FROM core_sessions s LEFT JOIN core_accounts a ON a.id = s.owner_id`;
+const SELECT = `SELECT s.*, a.login, a.name, a.avatar_url, a.kind AS account_kind, a.app AS account_app, a.app_user_id AS account_user_id FROM core_sessions s LEFT JOIN core_accounts a ON a.id = s.owner_id`;
+
+interface AccountRow {
+  id: number;
+  login: string;
+  name: string | null;
+  avatar_url: string | null;
+  last_seen_at: string;
+  kind: string | null;
+  app: string | null;
+  app_user_id: string | null;
+}
+
+function accountOf(row: { id: number; login: string | null; name: string | null; avatar_url: string | null; kind: string | null; app: string | null; app_user_id: string | null }): AccountInfo {
+  return {
+    id: Number(row.id),
+    login: row.login ?? String(row.id),
+    ...(row.name ? { name: row.name } : {}),
+    ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
+    ...(row.kind === "app-user" ? { kind: "app-user" as const } : {}),
+    ...(row.app ? { app: row.app } : {}),
+    ...(row.app_user_id !== null ? { userId: row.app_user_id } : {}),
+  };
+}
 
 export class SessionLedger {
   readonly #db: Database;
@@ -168,6 +204,7 @@ export class SessionLedger {
   }
 
   upsertAccount(account: AccountInfo): void {
+    // An app user's row is created by `appUserAccount`, which owns its kind, app, and user ID; this only refreshes it.
     this.#db
       .prepare(
         `INSERT INTO core_accounts (id, login, name, avatar_url, last_seen_at) VALUES (?, ?, ?, ?, ?)
@@ -176,13 +213,38 @@ export class SessionLedger {
       .run(account.id, account.login, account.name ?? null, account.avatarUrl ?? null, new Date().toISOString());
   }
 
+  /**
+   * The account of one of an app's own users: found by (app, user ID), or created with the next negative ID. GitHub
+   * account IDs are positive, so the two can never share an ID; neither can two apps' users, or two users of one app.
+   */
+  appUserAccount(app: string, userId: string, name: string | undefined, login: string): AccountInfo {
+    return transaction(this.#db, () => {
+      const now = new Date().toISOString();
+      const existing = this.#db.prepare("SELECT * FROM core_accounts WHERE app = ? AND app_user_id = ?").get(app, userId) as AccountRow | undefined;
+      if (existing) {
+        // A request without a display name keeps the last one the app sent.
+        const current = name ?? existing.name;
+        if (current !== existing.name || Date.parse(existing.last_seen_at) < Date.now() - 60_000) {
+          this.#db.prepare("UPDATE core_accounts SET name = ?, last_seen_at = ? WHERE id = ?").run(current, now, existing.id);
+        }
+        return accountOf({ ...existing, name: current });
+      }
+      const lowest = this.#db.prepare("SELECT MIN(id) AS id FROM core_accounts").get() as { id: number | null };
+      const id = Math.min(0, Number(lowest.id ?? 0)) - 1;
+      this.#db
+        .prepare("INSERT INTO core_accounts (id, login, name, avatar_url, last_seen_at, kind, app, app_user_id) VALUES (?, ?, ?, NULL, ?, 'app-user', ?, ?)")
+        .run(id, login, name ?? null, now, app, userId);
+      return accountOf({ id, login, name: name ?? null, avatar_url: null, kind: "app-user", app, app_user_id: userId });
+    });
+  }
+
   insert(session: NewSession): SessionRecord {
     const now = new Date().toISOString();
     this.upsertAccount(session.owner);
     this.#db
       .prepare(
-        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, parent_session_id, parent_incarnation, created_at, updated_at, kind)
-         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO core_sessions (id, owner_id, environment, env_type, placement, state, generation, model, agent, client_name, schedule_id, webhook, network, environment_request, admitted, incarnation, parent_session_id, parent_incarnation, created_at, updated_at, kind, inference)
+         VALUES (?, ?, ?, ?, ?, 'creating', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -204,6 +266,7 @@ export class SessionLedger {
         now,
         now,
         session.kind ?? "agent",
+        session.inference && session.inference.route !== "copilot" ? JSON.stringify(session.inference) : null,
       );
     return this.get(session.id)!;
   }
@@ -218,12 +281,21 @@ export class SessionLedger {
     return row ? (JSON.parse(row.admitted) as AdmittedConfig) : undefined;
   }
 
-  list(ownerId: number, query: { environment?: string; state?: SessionState; limit?: number } = {}): SessionRecord[] {
+  list(ownerId: number, query: { environment?: string; state?: SessionState; limit?: number; environments?: readonly string[] } = {}): SessionRecord[] {
     const clauses = ["s.owner_id = ?", "s.state NOT IN ('deleted')"];
     const args: (string | number)[] = [ownerId];
     if (query.environment) {
       clauses.push("s.environment = ?");
       args.push(query.environment);
+    }
+    if (query.environments) {
+      // Sessions in these environments, and the workers of this incarnation of such a session (an app's scope).
+      if (query.environments.length === 0) return [];
+      const marks = query.environments.map(() => "?").join(", ");
+      clauses.push(
+        `(s.environment IN (${marks}) OR EXISTS (SELECT 1 FROM core_sessions p WHERE p.id = s.parent_session_id AND p.owner_id = s.owner_id AND p.incarnation = s.parent_incarnation AND p.state NOT IN ('deleted') AND p.environment IN (${marks})))`,
+      );
+      args.push(...query.environments, ...query.environments);
     }
     if (query.state) {
       clauses.push("s.state = ?");
@@ -374,16 +446,10 @@ export class SessionLedger {
     return counts;
   }
 
-  /** Every GitHub account the gateway has seen, most recently seen first. */
+  /** Every account the gateway has seen (GitHub accounts and apps' own users), most recently seen first. */
   accounts(): (AccountInfo & { readonly lastSeenAt: string })[] {
-    const rows = this.#db.prepare("SELECT * FROM core_accounts ORDER BY last_seen_at DESC").all() as { id: number; login: string; name: string | null; avatar_url: string | null; last_seen_at: string }[];
-    return rows.map((row) => ({
-      id: Number(row.id),
-      login: row.login,
-      ...(row.name ? { name: row.name } : {}),
-      ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
-      lastSeenAt: row.last_seen_at,
-    }));
+    const rows = this.#db.prepare("SELECT * FROM core_accounts ORDER BY last_seen_at DESC").all() as unknown as AccountRow[];
+    return rows.map((row) => ({ ...accountOf(row), lastSeenAt: row.last_seen_at }));
   }
 
   /** Recent platform events of every owner, newest first. */
@@ -399,12 +465,7 @@ export class SessionLedger {
 }
 
 function toRecord(row: SessionRow): SessionRecord {
-  const owner: AccountInfo = {
-    id: row.owner_id,
-    login: row.login ?? String(row.owner_id),
-    ...(row.name ? { name: row.name } : {}),
-    ...(row.avatar_url ? { avatarUrl: row.avatar_url } : {}),
-  };
+  const owner = accountOf({ id: row.owner_id, login: row.login, name: row.name, avatar_url: row.avatar_url, kind: row.account_kind, app: row.account_app, app_user_id: row.account_user_id });
   return {
     id: row.id,
     ownerId: row.owner_id,
@@ -427,6 +488,7 @@ function toRecord(row: SessionRow): SessionRecord {
     ...(row.parent_session_id ? { parentSessionId: row.parent_session_id } : {}),
     ...(row.parent_incarnation ? { parentIncarnation: row.parent_incarnation } : {}),
     ...(row.kind === "workspace" ? { kind: "workspace" as const } : {}),
+    ...(row.inference ? { inference: JSON.parse(row.inference) as SessionInference } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

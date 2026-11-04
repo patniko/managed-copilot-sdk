@@ -319,13 +319,15 @@ function Shot({ app, href }: { readonly app: AppEntry; readonly href?: string })
   );
 }
 
-function linkTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted: boolean): string {
+function linkTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted: boolean, open = false): string {
   if (!link) return target === "cloud" ? (state?.searching ? "Looking for your Azure deployment…" : "No Azure deployment") : "Not available";
   if (link.health === "restricted") return "Refuses this network: its ingress allows only Parameters:app-allowed-ips";
   if (link.health === "offline") return target === "local" ? "Not answering. Start the platform with aspire run." : "Not answering";
   // The console's link is the gallery's own route, which signs you in and redirects.
   if (link.url.startsWith("/")) return "Signs you in with this machine's GitHub sign-in";
-  return hosted ? `${link.url} · opens from allowed networks only` : link.url;
+  if (!hosted) return link.url;
+  // A public app (publishApp({ public: true })) opens from anywhere and signs in its own users.
+  return open ? `${link.url} · open to anyone; it signs in its own users` : `${link.url} · opens from allowed networks only`;
 }
 
 /** Opens an app on one target, with that link's live status. */
@@ -341,7 +343,7 @@ function OpenButton({ app, target, link, state, hosted }: { readonly app: AppEnt
   );
   const label = `Open ${app.title} (${TARGET_NAME[target]}, ${status.toLowerCase()})`;
   return (
-    <Tooltip content={linkTitle(target, link, state, hosted)}>
+    <Tooltip content={linkTitle(target, link, state, hosted, app.public === true)}>
       {link ? (
         <a className="btn btn-sm" href={link.url} target="_blank" rel="noreferrer" aria-label={label}>
           {content}
@@ -407,7 +409,11 @@ function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly pa
       <Shot app={app} href={best?.url} />
       <div className="flex grow flex-col gap-2 px-4 pt-3 pb-2">
         <Tooltip block content={app.description}>
-          <h3 className="truncate text-base font-semibold leading-snug">{app.title}</h3>
+          <h3 className="flex min-w-0 items-center gap-2 text-base font-semibold leading-snug">
+            <span className="truncate">{app.title}</span>
+            {/* Published with public: true: its deployed address opens from anywhere, because it signs in its own users. */}
+            {app.public ? <span className="Label Label--success shrink-0">Public</span> : null}
+          </h3>
           <p className="truncate text-sm text-fg-muted">{app.tagline}</p>
         </Tooltip>
         <PatternMarkers app={app} patterns={patterns} />
@@ -617,11 +623,12 @@ export function Gallery(props: GalleryProps) {
                 <ShieldIcon size={16} />
                 <details className="flash-content">
                   <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-                    Apps open from allowed networks only. <span className="Link">How to get access</span>
+                    {apps.some((app) => app.public) ? "Apps marked Public open from anywhere; the others, from allowed networks only." : "Apps open from allowed networks only."}{" "}
+                    <span className="Link">How to get access</span>
                   </summary>
                   <p className="mt-2 text-fg-muted">
                     {renderCode(
-                      "If one answers `403 RBAC: access denied`, ask the deployment's owner to add your address with `npx managed-copilot access ips add <your address>`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.",
+                      `${apps.some((app) => app.public) ? "A Public app signs in its own users. " : ""}If an app answers \`403 RBAC: access denied\`, ask the deployment's owner to add your address with \`npx managed-copilot access ips add <your address>\`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.`,
                     )}
                   </p>
                 </details>

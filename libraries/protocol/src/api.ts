@@ -8,12 +8,28 @@ import type { ExecState } from "./sandbox.js";
 import type { ExecutionStyle, SubagentSandboxes } from "./workers.js";
 
 export interface AccountInfo {
-  /** Stable GitHub account ID; ownership binds to this, never to the mutable login. */
+  /**
+   * Stable account ID; ownership binds to this, never to the mutable login. GitHub account IDs are positive. An app's
+   * own users (`kind: "app-user"`) get negative IDs this deployment assigns, so the two never collide.
+   */
   readonly id: number;
+  /** A GitHub login, `<app>/<user ID>` for an app user (never a GitHub login), or the app's name. */
   readonly login: string;
   readonly name?: string;
   readonly avatarUrl?: string;
+  /** Absent or `github`: a GitHub account. `app-user`: one of an app's own users. `app`: an app acting for itself. */
+  readonly kind?: AccountKind;
+  /** The app an app user belongs to, or that the request came through. */
+  readonly app?: string;
+  /** App users: the ID the app's own sign-in gave them. */
+  readonly userId?: string;
 }
+
+export type AccountKind = "github" | "app-user" | "app";
+
+/** Where a session's model calls go, fixed when it is created (spec section 15). */
+/** Where a session's model calls go: its owner's Copilot plan, or an Azure AI Foundry account's deployment. */
+export type SessionInference = { readonly route: "copilot" } | { readonly route: "foundry"; readonly foundry: string; readonly deployment?: string };
 
 export interface EnvironmentInfo {
   readonly name: string;
@@ -31,6 +47,8 @@ export interface EnvironmentInfo {
   readonly subagents?: SubagentSandboxes;
   readonly scheduling: boolean;
   readonly agents: readonly string[];
+  /** Present when the environment sends model calls to Azure AI Foundry instead of each user's Copilot plan. */
+  readonly inference?: { readonly foundry: string };
   /**
    * Isolated environments: whether `managed.exec`, `managed.sandboxes.create`, and the exec routes work in this
    * environment's sandboxes (operators turn them off with `exec: false`).
@@ -112,6 +130,8 @@ export interface SessionInfo {
   readonly title?: string;
   readonly model?: string;
   readonly agent?: string;
+  /** Where the session's model calls go: the owner's Copilot plan, or a Foundry account. */
+  readonly inference?: SessionInference;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly sandbox?: SandboxInfo;

@@ -3,6 +3,7 @@ import { createBuilder } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
+import { FRONT_DESK_APP, FRONT_DESK_PORT, frontDesk } from "./demos/front-desk/apphost.mjs";
 import { PATTERN_RACE_DEFAULT_PORT, patternRace } from "./demos/pattern-race/apphost.mjs";
 import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swarm/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
@@ -16,14 +17,15 @@ const builder = await createBuilder();
 const publishing = await builder.executionContext().isPublishMode();
 
 // Fixed local ports. MANAGED_COPILOT_PORT_OFFSET (for example 300) runs a second copy beside this one; that copy leaves
-// zero-config discovery to the first. Google sign-in redirects to the assistant's own URL, so with an offset, add that
-// callback URL to your Google OAuth client too.
+// zero-config discovery to the first. Google and GitHub sign-in redirect to the demos' own URLs, so with an offset, add
+// those callback URLs to your Google and GitHub OAuth apps too.
 const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
 if (!Number.isInteger(offset) || offset < 0 || offset > 50_000) {
   throw new Error(`MANAGED_COPILOT_PORT_OFFSET must be a whole number from 0 to 50000 (got "${process.env.MANAGED_COPILOT_PORT_OFFSET}").`);
 }
 const ports = {
   gateway: 7400 + offset,
+  frontDesk: FRONT_DESK_PORT + offset,
   dispatch: DISPATCH_DEFAULT_PORT + offset,
   factory: 7480 + offset,
   snippetsWebhook: 7485 + offset,
@@ -40,9 +42,32 @@ const assistantUrl = `http://localhost:${ports.assistant}`;
 // Generated once and kept in the AppHost's user secrets, so restarts keep the same values.
 const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue(name, { minLength: 48, special: false }, { secret: true, persist: true });
 
+// Settings from the AppHost's configuration: user secrets with `aspire run`. `aspire deploy` runs as Production and
+// doesn't load user secrets; `npx managed-copilot deploy` passes the `Parameters:*` ones on as environment variables.
+const configuration = await builder.getConfiguration();
+const setting = async (key: string) => ((await configuration.exists(key)) ? (await configuration.getConfigValue(key)).trim() || undefined : undefined);
+
+// An Azure AI Foundry account pays for Front Desk's people without GitHub (spec section 15). Optional: name an existing
+// account and its model deployments with `aspire secret set Parameters:foundry-account <name>`,
+// `Parameters:foundry-resource-group <group>`, and `Parameters:foundry-deployments <deployment,...>` (and
+// `Parameters:foundry-subscription <id>` when it isn't the deployment's).
+const foundryAccount = await setting("Parameters:foundry-account");
+const foundryResourceGroup = await setting("Parameters:foundry-resource-group");
+const foundryDeployments = (await setting("Parameters:foundry-deployments"))?.split(",").map((name) => name.trim()).filter(Boolean) ?? [];
+const foundrySubscription = await setting("Parameters:foundry-subscription");
+if (foundryAccount && (!foundryResourceGroup || foundryDeployments.length === 0)) {
+  throw new Error(
+    `Parameters:foundry-account is "${foundryAccount}": also set Parameters:foundry-resource-group and Parameters:foundry-deployments (its model deployments, comma-separated).`,
+  );
+}
+const foundry = foundryAccount
+  ? { [foundryAccount]: { resourceGroup: foundryResourceGroup!, deployments: foundryDeployments, ...(foundrySubscription ? { subscription: foundrySubscription } : {}) } }
+  : undefined;
+
 // The demos bring their own environments (and the assistant its webhook) as plain data.
 const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
+const frontDeskDemo = frontDesk({ port: ports.frontDesk, ...(foundryAccount ? { foundry: foundryAccount } : {}) });
 const dataDeskDemo = dataDesk({ port: ports.dataDesk });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
@@ -64,6 +89,9 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   // (or Parameters:copilot-github-orgs) names who may use it, for example `aspire secret set Parameters:copilot-github-users <your-login>`.
   // The operator console (`npx managed-copilot console`, spec section 16) is open to every account on this machine; a
   // deployment turns it on for the accounts in Parameters:copilot-operator-users (or -operator-orgs).
+  ...(foundry ? { foundry } : {}),
+  // Apps that sign in their own users and vouch for them with a key the AppHost issues (spec section 2).
+  apps: { ...frontDeskDemo.apps },
   environments: {
     chat: chatEnvironment,
     ...(publishing ? {} : { "webhook-examples": chatEnvironment }),
@@ -78,6 +106,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...factory.environments,
     ...assistant.environments,
     ...dispatchDemo.environments,
+    ...frontDeskDemo.environments,
     ...swarm.environments,
     ...dataDeskDemo.environments,
     ...helpDeskDemo.environments,
@@ -108,8 +137,12 @@ const copilot = await addManagedCopilot(builder, "copilot", {
 });
 
 type Demo = { name: string; workingDirectory: string; script: string; port: number; healthPath: string; env?: Readonly<Record<string, string>> };
-/** How a demo is deployed by `aspire deploy`: its image and the settings that receive its Azure addresses. */
-type DemoDeployment = { dockerfile: string; publicUrlEnv?: string; allowedHostsEnv?: string; gatewayUrlEnv?: string[] };
+/**
+ * How a demo is deployed by `aspire deploy`: its image and the settings that receive its Azure addresses. `public`
+ * opens it to any address with no GitHub token, for a demo that signs in its own users; `app` gives it the key of an
+ * app declared in `apps` (as MANAGED_COPILOT_APP_KEY, with `aspire run` too).
+ */
+type DemoDeployment = { dockerfile: string; publicUrlEnv?: string; allowedHostsEnv?: string; gatewayUrlEnv?: string[]; public?: boolean; app?: string };
 
 /** A demo's built Node server on its fixed port, connected to the platform (a container app when publishing). */
 function addDemo(demo: Demo, deployment: DemoDeployment) {
@@ -121,6 +154,7 @@ function addDemo(demo: Demo, deployment: DemoDeployment) {
     .withHttpHealthCheck({ path: demo.healthPath })
     .withEnvironment("MANAGED_COPILOT_URL", copilot.url)
     .waitFor(copilot.gateway);
+  if (deployment.app) app = app.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(deployment.app));
   for (const [name, value] of Object.entries(demo.env ?? {})) app = app.withEnvironment(name, value);
   return app;
 }
@@ -159,11 +193,36 @@ const assistantApp = await (
 
 // Google sign-in is optional: without it the assistant uses its labeled demo inbox and calendar. Set both with
 // `aspire secret set Parameters:google-client-id <id>` and `aspire secret set Parameters:google-client-secret <secret>`.
-const configuration = await builder.getConfiguration();
 if (await configuration.exists("Parameters:google-client-id")) {
   await assistantApp
     .withEnvironment("GOOGLE_CLIENT_ID", await builder.addParameter("google-client-id"))
     .withEnvironment("GOOGLE_CLIENT_SECRET", await builder.addParameter("google-client-secret", { secret: true }));
+}
+
+// Front Desk: a chat assistant many people use. Each person signs in with GitHub (their own Copilot plan) or with an
+// email and password (Foundry, which the app pays for), and gets private conversations and memory. Published as a
+// public app with no GitHub token: its app key lets it act for each signed-in person, and never as you.
+const frontDeskApp = await (
+  await addDemo(frontDeskDemo.app, {
+    dockerfile: "demos/front-desk/Dockerfile",
+    publicUrlEnv: "FRONT_DESK_PUBLIC_URL",
+    allowedHostsEnv: "FRONT_DESK_ALLOWED_HOSTS",
+    public: true,
+    app: FRONT_DESK_APP,
+  })
+).withEnvironment("FRONT_DESK_SEALING_KEY", await generatedSecret("front-desk-sealing-key"));
+// "Continue with GitHub" needs a GitHub OAuth app whose callback URL is <Front Desk's URL>/auth/github/callback (see
+// demos/front-desk/README.md). Without one, people sign in with email (and, on your own computer, as your GitHub CLI's
+// account). Put the secret in the file `aspire secret path` names, never on a command line.
+if (await configuration.exists("Parameters:front-desk-github-client-id")) {
+  await frontDeskApp
+    .withEnvironment("FRONT_DESK_GITHUB_CLIENT_ID", await builder.addParameter("front-desk-github-client-id"))
+    .withEnvironment("FRONT_DESK_GITHUB_CLIENT_SECRET", await builder.addParameter("front-desk-github-client-secret", { secret: true }));
+}
+// Anyone who can reach a public Front Desk can create an email account, and your Foundry pays for their messages. To
+// choose who can, set an invitation code (`Parameters:front-desk-invite-code`) and share it with them.
+if (await configuration.exists("Parameters:front-desk-invite-code")) {
+  await frontDeskApp.withEnvironment("FRONT_DESK_INVITE_CODE", await builder.addParameter("front-desk-invite-code", { secret: true }));
 }
 
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the

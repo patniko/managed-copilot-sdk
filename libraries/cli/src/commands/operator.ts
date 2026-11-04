@@ -1,4 +1,5 @@
 import {
+  accountLabel,
   CONSOLE_PATH,
   CONSOLE_TICKET_TTL_SECONDS,
   isManagedCopilotError,
@@ -239,7 +240,7 @@ function sessions(ctx: Context, list: readonly OperatorSessionSummary[]): void {
   if (list.length === 0) return ctx.out("No sessions match.");
   const rows = list.map((session) => [
     style.bold(shortId(session.id)),
-    `@${session.owner.login}`,
+    accountLabel(session.owner),
     session.environment,
     session.placement,
     session.state === "failed" ? style.red(session.state) : session.state,
@@ -256,7 +257,7 @@ function sandboxes(ctx: Context, list: readonly OperatorSandbox[]): void {
   const rows = list.map((sandbox) => [
     style.bold(sandbox.id),
     shortId(sandbox.sessionId),
-    `@${sandbox.owner.login}`,
+    accountLabel(sandbox.owner),
     sandbox.environment,
     sandbox.size,
     sandbox.state === "failed" ? style.red(sandbox.state) : sandbox.state === "running" ? style.green(sandbox.state) : sandbox.state,
@@ -271,7 +272,7 @@ function schedules(ctx: Context, list: readonly OperatorSchedule[]): void {
   if (list.length === 0) return ctx.out("No schedules.");
   const rows = list.map((schedule) => [
     style.bold(schedule.name),
-    `@${schedule.owner.login}`,
+    accountLabel(schedule.owner),
     schedule.cron ? `${schedule.cron} ${style.dim(schedule.timeZone)}` : (schedule.runAt ?? "-"),
     schedule.state === "paused" ? style.yellow(`paused${schedule.pausedReason ? style.dim(` · ${truncate(schedule.pausedReason.replace(/^Paused: /, ""), 40, style.ellipsis)}`) : ""}`) : "active",
     schedule.nextRunAt ? relativeTime(schedule.nextRunAt, ctx.now()) : style.dim("-"),

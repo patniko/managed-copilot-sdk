@@ -70,7 +70,7 @@ export class PlatformEvents implements EventsService {
   }
 
   /** Serves `GET /v1/events` as server-sent events for the authenticated owner. `verify` re-checks the credential. */
-  stream(ctx: RequestContext, verify?: () => Promise<void>): void {
+  stream(ctx: RequestContext, verify?: () => Promise<void>, visible?: (event: PlatformEvent) => boolean): void {
     const principal = ctx.principal!;
     const types = ctx.query.get("types")?.split(",").filter(Boolean);
     const { res, req } = ctx;
@@ -87,6 +87,7 @@ export class PlatformEvents implements EventsService {
       sent.add(event.id);
       if (sent.size > 10_000) sent.clear();
       if (types && !types.includes(event.type)) return;
+      if (visible && !visible(event)) return;
       res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     };
     // Subscribe before replaying so nothing published during the replay is lost; deliver it after the replay.

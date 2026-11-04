@@ -1,4 +1,5 @@
 import type { AccountInfo } from "@managed-copilot/protocol";
+import { accountKindLabel, accountLabel } from "@managed-copilot/protocol/operator";
 import { useState } from "react";
 import { cx } from "../../lib/cx.js";
 import { formatIso, formatRelative, initials, safeAvatarUrl, shortId } from "../../lib/format.js";
@@ -40,13 +41,18 @@ export function AccountLabel({
   readonly size?: "xs" | "sm" | "md" | "lg";
 }) {
   if (!account) return <None />;
-  const title = account.name ? `${account.name} (@${account.login}, ID ${account.id})` : `@${account.login} (ID ${account.id})`;
+  // An app's own users are not GitHub accounts: no @, and a label saying whose user they are.
+  const kind = accountKindLabel(account);
+  const label = accountLabel(account);
+  const details = [label, kind, `ID ${account.id}`].filter(Boolean).join(", ");
+  const title = account.name ? `${account.name} (${details})` : details;
   const content = (
     <>
       <Avatar account={account} size={size} />
       <span className="min-w-0 truncate">
         <span className="font-semibold">{account.login}</span>
         {showName && account.name ? <span className="ml-1.5 font-normal text-fg-muted">{account.name}</span> : null}
+        {kind ? <span className="Label Label--secondary ml-1.5 align-middle">{kind}</span> : null}
       </span>
     </>
   );

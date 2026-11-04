@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hostMatches, isHostAllowed, narrowNetwork, NETWORK_DISABLED, NETWORK_ENABLED, normalizeNetwork } from "../src/network.js";
 import { EnvironmentRequestSchema, parseConfig } from "../src/config.js";
+import { appUserLogin, decodeHeaderValue, encodeHeaderValue, parseAppUser } from "../src/apps.js";
 
 describe("network policy", () => {
   it("normalizes the shorthand forms", () => {
@@ -116,6 +117,40 @@ describe("AppHost configuration", () => {
       /orchestrator environments cannot use/,
     );
   });
+
+  it("routes an environment's model calls to a declared Foundry account's deployments", () => {
+    const foundry = { contoso: { resourceGroup: "ai", deployments: ["gpt-5-mini", "grok-4.7"] } };
+    const config = parseConfig({
+      foundry,
+      environments: {
+        support: { type: "shared", inference: { foundry: "contoso" }, models: ["grok-4.7"] },
+        coder: { type: "isolated", inference: { foundry: "contoso" } },
+        helper: { type: "promotable", inference: { foundry: "contoso" }, promoteTo: "coder" },
+      },
+      apps: { "support-site": { environments: ["support", "helper"], anyGitHubUser: true, key: { secretEnv: "SUPPORT_SITE_KEY" } } },
+    });
+    expect(config.environments["support"]!.inference).toEqual({ foundry: "contoso" });
+    expect(config.apps?.["support-site"]).toMatchObject({ environments: ["support", "helper"], anyGitHubUser: true });
+    expect(() => parseConfig({ environments: { support: { type: "shared", inference: { foundry: "missing" } } } })).toThrow(/Unknown Foundry account \W*missing\W*/);
+    expect(() => parseConfig({ foundry, environments: { support: { type: "shared", inference: { foundry: "contoso" }, models: ["claude-sonnet-5"] } } })).toThrow(
+      /claude-sonnet-5\W* is not a deployment of Foundry account \W*contoso/,
+    );
+    expect(() => parseConfig({ foundry: { contoso: { resourceGroup: "ai", deployments: [] } }, environments: {} })).toThrow();
+    // Promotion keeps a session's billing route.
+    expect(() => parseConfig({ foundry, environments: { coder: { type: "isolated" }, helper: { type: "promotable", inference: { foundry: "contoso" }, promoteTo: "coder" } } })).toThrow(
+      /promotion keeps a session's billing route/,
+    );
+  });
+
+  it("rejects apps that name unknown or repeated environments", () => {
+    const environments = { support: { type: "shared" } } as const;
+    const key = { secretEnv: "SITE_KEY" };
+    expect(() => parseConfig({ environments, apps: { site: { environments: ["missing"], key } } })).toThrow(/Unknown environment \W*missing\W*/);
+    expect(() => parseConfig({ environments, apps: { site: { environments: ["support", "support"], key } } })).toThrow(/listed twice/);
+    expect(() => parseConfig({ environments, apps: { site: { environments: [], key } } })).toThrow();
+    expect(() => parseConfig({ environments, apps: { "Bad Name": { environments: ["support"], key } } })).toThrow();
+    expect(() => parseConfig({ environments, apps: { site: { environments: ["support"] } } })).toThrow();
+  });
 });
 
 describe("environment requests", () => {
@@ -125,5 +160,24 @@ describe("environment requests", () => {
     expect(EnvironmentRequestSchema.safeParse({ type: "shared", files: { "a.txt": "aGk=" } }).success).toBe(false);
     expect(EnvironmentRequestSchema.safeParse({ type: "orchestrator", size: "small" }).success).toBe(false);
     expect(EnvironmentRequestSchema.safeParse({ type: "isolated", size: "small", files: { "a.txt": "aGk=" } }).success).toBe(true);
+  });
+});
+
+describe("app users", () => {
+  it("accepts any printable ID and name, and travels as ASCII header values", () => {
+    expect(parseAppUser({ id: "auth0|5f2c", name: "Zoë Ångström" })).toEqual({ id: "auth0|5f2c", name: "Zoë Ångström" });
+    const encoded = encodeHeaderValue("Zoë Ångström");
+    expect(encoded).toMatch(/^[\x21-\x7e]+$/);
+    expect(decodeHeaderValue(encoded)).toBe("Zoë Ångström");
+    expect(decodeHeaderValue("%E0%A4%A")).toBeUndefined();
+    expect(appUserLogin("support-site", "auth0|5f2c")).toBe("support-site/auth0|5f2c");
+  });
+
+  it("rejects empty, padded, control-character, oversized, and unknown fields", () => {
+    expect(() => parseAppUser({ id: "" })).toThrow(/must not be empty/);
+    expect(() => parseAppUser({ id: " alice" })).toThrow(/whitespace/);
+    expect(() => parseAppUser({ id: "a\nb" })).toThrow(/control characters/);
+    expect(() => parseAppUser({ id: "x".repeat(257) })).toThrow(/at most 256/);
+    expect(() => parseAppUser({ id: "alice", email: "a@example.com" })).toThrow();
   });
 });

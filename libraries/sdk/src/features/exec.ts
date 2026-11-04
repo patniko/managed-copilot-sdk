@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { isManagedCopilotError, ManagedCopilotError, ROUTES, type ExecInfo, type ExecResult, type SessionInfo } from "@managed-copilot/protocol";
 import type { HttpClient } from "../http.js";
 import type { ExecHandle, ExecOptions, ManagedContext, ManagedSandbox, ManagedSandboxes } from "../types.js";
+import { requireActor } from "../identity.js";
 import { checkEnvironment, toEnvironmentRequest } from "./client.js";
 
 /** One long poll: the gateway answers within 30 s. */
@@ -24,6 +25,7 @@ export function createSandboxesApi(ctx: ManagedContext): ManagedSandboxes {
   return {
     async create(options) {
       if (!options || options.environment === undefined) throw new ManagedCopilotError("invalid_request", "Pass environment: the name of an isolated environment.");
+      requireActor(ctx.identity, "managed.sandboxes.create(...)");
       const request = toEnvironmentRequest(options.environment);
       checkEnvironment(ctx.info, request);
       const declared = request.name !== undefined ? ctx.info.environments.find((environment) => environment.name === request.name) : undefined;

@@ -104,7 +104,7 @@ pnpm gallery                        # every demo and walkthrough on one page
 
 ## Demos
 
-Nine apps show the patterns doing real work, each built for its own use case. All of them run under `aspire run` with
+Ten apps show the patterns doing real work, each built for its own use case. All of them run under `aspire run` with
 real models and deploy to Azure with the same AppHost; `pnpm gallery` opens every one.
 
 <p align="center">
@@ -115,6 +115,7 @@ real models and deploy to Azure with the same AppHost; `pnpm gallery` opens ever
 | --- | --- | --- |
 | [Pattern Race](demos/pattern-race/README.md) | All six | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests |
 | [Help Desk](demos/help-desk/README.md) | Shared | 25 customers, each chatting with a private agent bound to their own orders, on one runtime with no sandboxes |
+| [Front Desk](demos/front-desk/README.md) | Shared | An app other people sign in to, with GitHub (their own Copilot plan) or an email (your Azure AI Foundry pays), each with private conversations and memory; published open to the Internet with no GitHub token of its own |
 | [Repo Doctor](demos/repo-doctor/README.md) | Isolated | One sandbox clones a repository and fixes its failing tests, while a live strip shows the hosts its network rules allowed and blocked |
 | [Data Desk](demos/data-desk/README.md) | Promotable | Chat with a spreadsheet: a chart request moves the same session from the shared runtime into a Python sandbox, and Copilot CLI follows it |
 | [Dispatch](demos/dispatch/README.md) | Direct, delegate, mixed | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |

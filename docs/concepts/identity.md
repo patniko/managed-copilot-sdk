@@ -2,6 +2,8 @@
 
 You are your GitHub sign-in, everywhere: in your code, in the CLI, in Copilot CLI, and in work that runs while you're
 away. Sessions belong to your GitHub account, model calls use your Copilot plan, and your token never enters a sandbox.
+The people who use an app you build don't need GitHub: the app can vouch for them, and their model calls go to your
+Azure AI Foundry ([below](#your-apps-own-users)).
 
 ```mermaid
 flowchart LR
@@ -60,6 +62,48 @@ A backend that signs users in with GitHub acts as each user, so sessions and mod
 const client = await managed.client("chat", { gitHubToken: user.githubToken }); // this user's sessions and plan
 ```
 
+## Your app's own users
+
+People who use your app don't need GitHub or Copilot. Your app signs them in with any provider, then vouches for each
+one with the **app key** the AppHost issued to it. Their sessions belong to them, and their model calls go to your
+Azure AI Foundry account, billed to your Azure subscription.
+
+```mermaid
+flowchart LR
+  P["someone signed in to your app<br/>(any provider)"] --> App["your app's server<br/>holds the app key"]
+  App -- "app key + their user ID" --> GW["Gateway<br/>scopes everything to the app and that user"]
+  GW -- "the platform's Azure identity" --> F["your Azure AI Foundry"]
+  GW -. "never" .-x C["a Copilot plan"]
+```
+
+```ts
+// apphost.mts: declare the Foundry account, a Foundry environment, and the app.
+foundry: { "contoso-foundry": { resourceGroup: "contoso-ai", deployments: ["gpt-5-mini"] } },
+environments: { support: { type: "shared", inference: { foundry: "contoso-foundry" } } },
+apps: { "support-site": { environments: ["support"] } },
+// ...and give the app its key:
+//   .withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey("support-site"))
+
+// support-site/server.ts: with MANAGED_COPILOT_APP_KEY set, this connection is the app itself.
+const managed = await ManagedCopilot.connect();
+const client = await managed.client("support", { appUser: { id: user.id, name: user.name } });
+const alice = await managed.as({ appUser: { id: user.id } }); // their sessions, files, and artifacts
+```
+
+- **The key is the app's word.** Whoever holds it can act for any of the app's users, so keep it on your server like
+  any API key. Every request through it is limited to the app's `environments`, and sees only the sessions there.
+- **App users are not GitHub accounts.** Their sessions show as `<app>/<user ID>` (`owner.kind: "app-user"`). Another
+  app, or this app naming another user, never reaches them, and they never count for `access` or `operators`.
+- **Foundry only, never a Copilot plan.** App users' sessions run only in environments with `inference: { foundry }`;
+  anywhere else fails with `inference_unavailable` (a workspace-only sandbox, which makes no model calls, may use any of
+  the app's environments). Background sign-in, schedules, and Copilot CLI attach fail with `capability_unavailable`.
+- **Your GitHub users keep their own plan.** The same connection acts for someone who signed in with GitHub:
+  `managed.client(env, { gitHubToken })` or `managed.as({ gitHubToken })`. Their sessions are their own account's;
+  through your app, only those in its environments are visible. Their schedules and background sign-in are managed
+  outside apps; their vaults are their account's, usable through any app they sign in to.
+- **Public apps.** A deployment admits only the GitHub accounts in `access`. `anyGitHubUser: true` on an app admits
+  every GitHub account that comes through the app's key, without opening the deployment to them directly.
+
 ## Work that continues while you're away
 
 Scheduled runs and offline work need a credential when you're not connected. Turn that on once per deployment:
@@ -86,7 +130,8 @@ is on.
 | Operators (console) | Every local account | `aspire secret set Parameters:copilot-operator-users "alice"`, then `aspire deploy` |
 
 `Parameters:copilot-github-users` (or `-github-orgs`) holds the whole list: setting it replaces what was there, and
-it adds to any `access` rules the AppHost declares itself. Copilot CLI uses its own GitHub sign-in when it attaches,
+it adds to any `access` rules the AppHost declares itself. People who use your app come in through the app instead:
+its own users with its key, and any GitHub account when the app sets `anyGitHubUser: true`. Copilot CLI uses its own GitHub sign-in when it attaches,
 and it must be the session's owner.
 
 > [!TIP]
@@ -99,8 +144,11 @@ and it must be the session's owner.
 - [Architecture: identity](../architecture.md#identity), including how GitHub outages are handled.
 - [Architecture: credentials and inference](../architecture.md#credentials-and-inference): the placeholder and the
   brokered model calls, step by step.
-- [Spec section 2: connect](../spec/developer-experience.md#2-connect) and
+- [Spec section 2: connect](../spec/developer-experience.md#2-connect), including
+  [your app's own users](../spec/developer-experience.md#your-apps-own-users), and
   [section 15: models and billing](../spec/developer-experience.md#15-models-and-billing).
+- [Architecture: apps and Azure AI Foundry](../architecture.md#apps-and-azure-ai-foundry): app keys, app-user
+  accounts, and how Foundry calls are made.
 - [Deploying to Azure: deploy](../deployment.md#deploy): access settings at deploy time.
 
 </details>

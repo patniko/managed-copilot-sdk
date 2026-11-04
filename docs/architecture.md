@@ -60,6 +60,12 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 - Runtime → client requests include `userInput.request`, `exitPlanMode.request`, `autoModeSwitch.request`,
   `systemMessage.transform`, `gitHubToken.getToken`, `providerToken.getToken`, `llmInference.httpRequestStart`/`Chunk`
   (the experimental public request-handler hook), `sessionFs.*`, `workflow.*`, `tasks.cancel`, and `host.*` (AHP).
+- A whole-session BYOK `provider` (`session.create`/`session.resume` params) works with **no GitHub credential at all**
+  (verified live on 1.0.103 against Azure AI Foundry, `docs/design/probes/foundry-inference.mjs`): with
+  `hasBearerTokenProvider: true` the runtime asks its client `providerToken.getToken({ sessionId, providerName })`
+  before each model call; with a static `bearerToken` and `llmInference.setProvider`, every call goes through the
+  client carrying that value. Tool calls work, a new runtime process resumes the session when `provider` is sent
+  again, and neither the token nor the static value lands in `COPILOT_HOME`.
 - AHP: the runtime exposes `host.start`, `host.publishSession`, `host.unpublishSession`, `host.setSessionCreationPolicy`;
   the SDK exposes `AhpHost`. Copilot CLI attaches with `copilot --ahp <url>` (interactive only).
 - `systemMessage` is per-resume configuration, not session state (verified live on 1.0.103): a runtime that resumes a
@@ -94,7 +100,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Research Swarm, Pattern Race, Data Desk, Repo Doctor, Help Desk, Incident Commander, and the gallery |
+| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Research Swarm, Pattern Race, Data Desk, Repo Doctor, Help Desk, Incident Commander, Front Desk, and the gallery |
 | Walkthroughs | `walkthroughs` | scripts (`pnpm walkthrough <nn>`) | The walkthroughs' runnable code, documented in `walkthroughs/*/README.md` |
 | Spec snippets | `tests/snippets` | scripts (Aspire resource `snippets`) | Every spec snippet as an acceptance check against a running platform |
 | Environment customizations | `environments/<name>` | files | Agents, skills, and instructions for the root AppHost's environments, one folder per environment (today `chat`) |
@@ -184,7 +190,8 @@ denies configuration RPCs it does not understand.
 
 - Gateway callers are one of: a GitHub **user principal**, an internal **platform service** (platform key), or a
   scoped **action capability** (webhook workers). Capabilities authorize only their exact session/action operations
-  and are rejected on general user routes.
+  and are rejected on general user routes. Requests through an **app key** add three more: one of the app's own
+  users, a GitHub user through the app, and the app itself ([Apps and Azure AI Foundry](#apps-and-azure-ai-foundry)).
 - `managed.client(env, { gitHubToken })` creates sessions owned by that account. SDK helpers (`files`, `artifacts`,
   `sessions`, actions) must use the identity of the client that created or resumed a session, tracked from the stock
   client's session lifecycle events. Owner checks are never weakened to make a helper work.
@@ -238,12 +245,84 @@ denies configuration RPCs it does not understand.
   back. Afterwards neither the placeholder nor the token appeared anywhere under `COPILOT_HOME` or in runtime output.
   Limits: runtime features that call GitHub services directly rather than through `llmInference` (the built-in GitHub
   MCP server, telemetry) only ever see the placeholder and fail or are blocked by egress policy; the identity and quota
-  snapshot is taken at create/resume time; BYOK providers are not available in sandboxes; when the owner has no usable
-  credential, inference fails with `authentication_required` and never falls back to another account.
+  snapshot is taken at create/resume time; a client-supplied BYOK `provider` is refused (the only provider a session
+  gets is the platform's own Foundry route, below); when the owner has no usable credential, inference fails with
+  `authentication_required` and never falls back to another account.
 - Runtime binary: the stock SDK spawns the dedicated headless runtime shipped in `@github/copilot-sdk-<platform>`;
   `@github/copilot` is the larger interactive CLI. The sandbox image installs `@github/copilot-sdk@1.0.26` and runs its
   headless `copilot-runtime` (1.0.103); the shared runtime should use the same binary, resolved through public package
   metadata.
+
+### Apps and Azure AI Foundry
+
+As built (spec section 2, "Your app's own users", and section 15; decisions 5 and 41-43). Gateway `modules/core/apps.ts`,
+`modules/foundry/**`, the Foundry parts of `modules/core/sessions.ts` and `modules/sandbox/broker.ts`; protocol
+`apps.ts`; SDK `identity.ts`.
+
+- **App keys.** The normalized config carries `apps: { <app>: { environments, anyGitHubUser?, key: { secretEnv } } }`.
+  The AppHost generates each key as the persistent secret parameter `<name>-app-<app>-key` (48 characters), hands it
+  to the gateway in that `secretEnv`, and to the app with `copilot.appKey(app)` (`aspire run`) or
+  `publishApp(..., { app })` (`aspire deploy`). `AppRegistry` keeps SHA-256 digests only and compares them in
+  constant time; an app with a missing or short (< 32 characters) key, or two apps with the same key, are refused and
+  logged at startup.
+- **Callers through an app** send `x-managed-copilot-app-key`:
+  - **App user**: plus `x-managed-copilot-app-user` (percent-encoded UTF-8, 1-256 printable characters, no surrounding
+    whitespace) and optionally `-app-user-name`, with no `Authorization` (both together are `invalid_request`). The
+    account comes from `core_accounts` by `(app, app_user_id)`: kind `app-user`, login `<app>/<id>` (no GitHub login
+    has a `/`), and a negative ID (`MIN(id) - 1`; GitHub IDs are positive), so an app user can never own, list, or
+    reach a GitHub account's session, another app's user's, or another user's of the same app. A request without a
+    name keeps the last one sent. App users are never verified with GitHub and never satisfy `access`, `operators`,
+    or operator authorization.
+  - **GitHub user through the app**: plus `Authorization: Bearer <GitHub token>`, verified with GitHub as usual and
+    admitted by `access`, or by the app's `anyGitHubUser`. A token admitted only through an app is refused when it
+    comes without the key. Sessions are the GitHub account's own; through an app, only those in its environments are
+    reachable (below).
+  - **The app itself**: the key alone, only on `auth: "user-or-app"` routes: `/v1/info` (the app's environments, no
+    `inline`) and `/v1/me` (`{ id: 0, kind: "app" }`). Anything else answers 401 "needs a person to act for".
+- **App scope.** Every request through a key stays in the app's `environments` (`assertAppEnvironment` at bridge
+  welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator), and sees only
+  the sessions there (`SessionManager.inAppScope`): the router answers `not_found` for any other `/v1/sessions/:id/...`
+  route (and the action routes, which authenticate themselves, do the same), and the session list (scoped in SQL, before
+  its limit), the event stream, and the bridge's `session.list`, `getMetadata`, `delete`, and `resume` leave them out.
+  A worker is in scope through the incarnation of its coordinator that started it. An event is decided by the
+  environment it recorded, never by a session that reused its ID; a worker's events after it was deleted are not
+  replayed through an app. Schedules (every route) are not available through an app, and webhook deliveries are
+  limited to the app's environments. A GitHub user's vaults stay their account's: any app they sign in to can manage
+  them and use them in its sessions (an app's own users' vaults are per app user). An app user's
+  session in a Copilot-billed environment gets `inference_unavailable` (bridge welcome, session create, an
+  orchestrator's `start_worker`, and the SDK's pre-check); workspace-only sandboxes make no model calls and may use any
+  of the app's environments. Background sign-in and schedules are refused for app users and for any request through an app, and
+  Copilot CLI attach for app users (`capability_unavailable`).
+- **Foundry accounts.** `FoundryService` resolves each declared account through Azure Resource Manager
+  (`GET .../Microsoft.CognitiveServices/accounts/<name>?api-version=2024-10-01`): the endpoint is
+  `properties.endpoints["OpenAI Language Model Instance API"]` (or `https://<customSubDomainName>.openai.azure.com/`),
+  and each declared deployment must exist and be `Succeeded`. Model calls go to `<endpoint>openai/v1` with an Entra ID
+  token for `https://cognitiveservices.azure.com`: the Azure CLI's sign-in locally (`az account get-access-token
+  --subscription <account's subscription>`, so the right tenant is used), the gateway's user-assigned managed identity
+  in Azure (`MANAGED_COPILOT_AZURE_CREDENTIAL`, `MANAGED_COPILOT_AZURE_CLIENT_ID`). Transient ARM failures are retried
+  (0.5, 1.5, 4 s); a definite problem (no account, no access, a missing deployment) is kept for 30 s and a resolved
+  account for 10 minutes. Startup checks every account in the background and logs "Foundry account ready" or the
+  problem; a session in an unusable account fails with `inference_unavailable` and that problem.
+- **Shared sessions.** For a Foundry environment, `#routeInference` strips every GitHub credential field and any
+  client `provider`, pins `model` and `allowedModels` to the deployment, and adds the provider
+  `{ type: "openai", baseUrl, wireApi: "completions", wireModel: <deployment>, modelId: <model>, hasBearerTokenProvider:
+  true }`. The shared runtime then asks the gateway `providerToken.getToken` before each call; the gateway answers
+  only for Foundry sessions (a Copilot session's request is refused) with the platform's token. `gitHubToken.getToken`
+  is never answered with a GitHub token for them.
+- **Sandboxes.** The broker gets the account's host and token source: `sessionOpened` installs no GitHub credential,
+  the session's `provider` carries the per-session placeholder as its `bearerToken`, and each `llmInference` request
+  is answered only for that one host on 443, only with the placeholder as its credential (an `api-key` header is
+  refused), swapping in the platform's token. The Copilot API and every other host are refused, so the token never
+  enters the sandbox.
+- **The route is part of the session.** `core_sessions.inference` (null for Copilot) is fixed at create and exposed
+  as `SessionInfo.inference` (`{ route: "copilot" }` or `{ route: "foundry", foundry }`) and on operator summaries.
+  Resume and promotion check it against the environment's current route (`capability_unavailable` when they differ:
+  never a silent switch), `models.list` returns the deployments, and switching models or Auto routing is refused.
+  An orchestrator's workers inherit its model only on the same route. A Foundry environment's custom agents may name
+  only its deployments.
+- **Observability.** Each Foundry session's creation is logged (`Session model calls go to Azure AI Foundry`, with the
+  account, deployment, and owner); token refreshes and brokered calls are logged at debug level, and refused tokens
+  as warnings. Per-call usage is in Foundry's own metrics for the account.
 
 ### Isolated placement
 
@@ -1568,10 +1647,15 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
 - `aspire run` from the repository root starts: the gateway (7400), `pattern-race` (7420), `research-swarm` (7425),
-  `data-desk` (7430), `repo-doctor` (7435), `help-desk` (7440), `incident-commander` (7445), `dispatch` (7470),
+  `data-desk` (7430), `repo-doctor` (7435), `help-desk` (7440), `incident-commander` (7445), `front-desk` (7450), `dispatch` (7470),
   `software-factory` (7480), `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets
   webhook receives on 7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all these ports for a second copy, which also sets
   `discovery: false` (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
+- Front Desk is the one demo published with `public: true`: it signs in its own users and holds no GitHub token. It is
+  declared in the root AppHost's `apps` (`anyGitHubUser: true`) and connects with its app key, then acts for each
+  person: a GitHub user with their own token (`front-desk`, their Copilot plan), everyone else as one of its app users
+  (`front-desk-foundry`, which sends model calls to the AppHost's `Parameters:foundry-*` account). The root AppHost
+  declares the Foundry account and environment only when `Parameters:foundry-account` is set.
 
 ### Copilot CLI attach (spec section 14)
 
@@ -1732,9 +1816,29 @@ sequenceDiagram
 - `deploy` and `access` (`src/commands/deploy.ts`, local tools in `src/host.ts`) work on the AppHost, not the gateway:
   they read and write its user secrets with `aspire secret` (`Azure:*`, `Parameters:<name>-github-users|-github-orgs|
   -operator-users|-operator-orgs`, `Parameters:app-allowed-ips`), then `deploy` runs `aspire deploy` with the caller's
-  token in `Parameters__app-github-token`. `access ips` also rewrites the running published apps' `allow-<n>` ingress
-  rules with `az containerapp ingress access-restriction` (set before remove; `platform` and hand-made rules stay; only
-  apps in the gateway's own environment; a failed lookup or update exits 1). `deploy` refuses to deploy over an existing
+  token in `Parameters__app-github-token` and the AppHost's other `Parameters:*` user secrets as `Parameters__<name>`
+  (`aspire deploy` runs as Production without user secrets), except generated parameters (each `parameter.v0` with
+  `inputs.value.default.generate` in the manifest `aspire do publish-manifest` writes, run with the deploy's
+  environment variables minus the token, plus `<name>-platform-key|-durable-key|-vault-key|-egress-key|-app-<app>-key`
+  by name), parameters the deployment's Aspire record already holds, and variables already in its environment. The
+  manifest step runs under its own Aspire environment (`--environment managed-copilot-parameter-check`), seeded with a
+  copy of the Production state files (Aspire loads an environment's saved state into the AppHost's configuration, so
+  the check sees what `aspire deploy` will): Aspire keeps
+  deployment state per environment (`<record>/<environment>.json`) and its `process-parameters` step saves every
+  resolved value there in publish mode. Only parameters the manifest declares and doesn't generate are passed; an
+  undeclared one is named and left out. `publish-manifest` doesn't depend on that step in 13.6 (verified: a record
+  stays byte-identical; only an empty record directory is made), and if a version ran it, the local values would land
+  in the check's state, never Production's; `deploy` deletes the check's state files and an empty record directory it
+  made, and touches nothing else (another deployment may be writing there). The step runs once more if it fails
+  (Aspire fails now and then while other Aspire commands are busy); failing twice stops `deploy` before anything
+  changes, naming only the "See logs at" path from its output, which can repeat values it was given. `aspire deploy`
+  signs in as the Azure CLI's current account, so for another
+  subscription `deploy` passes that subscription's tenant (`Azure__TenantId`) when the same account holds it and stops
+  with `az account set --subscription <id>` when another account does. `access ips` also rewrites the running published
+  apps' `allow-<n>` ingress rules with `az containerapp ingress access-restriction` (set before remove; `platform` and
+  hand-made rules stay; only apps in the gateway's own environment; never an app tagged `managed-copilot-access:
+  public`; a failed lookup or update exits 1). `access` lists public apps apart (`publicApps` in `--json`), and `deploy`
+  prints their URLs once deployed. `deploy` refuses to deploy over an existing
   gateway unless this AppHost's Aspire deployment record (`~/.aspire/deployments/<SHA-256 of lowercased AppHost path>/
   production.json`, which holds the generated keys) targets the same subscription and resource group; in a terminal it
   offers to copy another checkout's matching record.
@@ -1768,9 +1872,17 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   Dockerfile container (`services/gateway/Dockerfile`, stage `azure`, plus a generated stage that copies the AppHost's
   customization folders to `/opt/managed-copilot/apphost`) with external HTTPS ingress. Apps that use the platform
   are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist, by default the deployer's
-  public address). The C# integration in
+  public address, resolved only when such an app exists). With `public: true` an app gets no IP rules, is tagged
+  `managed-copilot-access: public` (`PublishAsManagedCopilotPublicApp`), and never gets `Parameters:app-github-token`
+  (`githubToken: true` is refused before anything is declared). A `check-<app>-public` pipeline step runs after the
+  environment is provisioned and before `push-prereq` (Aspire creates each container app's provisioning step only once
+  the pipeline runs, and that step waits for the app's image push): it lists the app's active revisions
+  (`az containerapp revision list`, read whole) and refuses to open an app while one still holds the token, since
+  ingress applies to every revision at once. Only `ResourceNotFound` for that container app counts as a new app; any
+  other Azure CLI failure fails closed. The deploy summary lists allowlisted and public apps
+  separately. The C# integration in
   `deployments/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
-  revision mode, IP rules). Publishing refuses an open gateway: access rules come from the AppHost or from
+  revision mode, IP rules, tags). Publishing refuses an open gateway: access rules come from the AppHost or from
   `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port, by
   its HTTPS address in the environment (`https://<app>.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/...`, filled in by the
   gateway's entrypoint at start). The `push-<name>-sandbox-images` step runs after `provision-<name>-env` (the
@@ -1796,6 +1908,12 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   empty disks) and creates the group and its VNet connection; the gateway's identity has SandboxGroup Data Owner on
   the group and AcrPull on the registry. Disk-image imports cannot use a managed identity, so the gateway exchanges its
   Entra token for an ACR refresh token (`registry.ts`) and passes it as `registryCredentials`.
+- **Azure AI Foundry.** When the AppHost declares `foundry`, the gateway gets its user-assigned identity even without
+  sandboxes, and each account gets a nested deployment into its own resource group (and subscription) that grants
+  that identity **Cognitive Services OpenAI User** on the account (`publish/foundry.ts`). The deploying user needs
+  permission to assign roles there. Accounts that name no subscription use the deployment's (`Azure:SubscriptionId`,
+  else the template's), passed as `MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION`. The accounts and model deployments are
+  yours: `aspire deploy` never creates or changes them.
 - **Egress (isolated).** `services/egress` in external mode runs as the `egress` app in an internal Container Apps
   environment on the `egress` subnet (TCP 3128 on its internal load balancer, one replica,
   `EGRESS_PROTECTED_CIDRS` = the VNet). The gateway runs `MANAGED_COPILOT_EGRESS=external` with a generated
@@ -1823,7 +1941,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7420, 7425, 7430, 7435, 7440, 7445, 7470, 7480, 7485, 7490 | Pattern Race, Research Swarm, Data Desk, Repo Doctor, Help Desk, Incident Commander, Dispatch, software factory, spec snippets webhook receiver, assistant (fixed for its Google OAuth redirect) |
+| Demo ports | 7420, 7425, 7430, 7435, 7440, 7445, 7450, 7470, 7480, 7485, 7490 | Pattern Race, Research Swarm, Data Desk, Repo Doctor, Help Desk, Incident Commander, Front Desk (fixed for its GitHub OAuth callback), Dispatch, software factory, spec snippets webhook receiver, assistant (fixed for its Google OAuth redirect) |
 | Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
@@ -1832,6 +1950,8 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_EGRESS_ALLOWED_PORTS` / `_PRIVATE_HOSTS` / `_PROTECTED_CIDRS` / `_BLOCKED_CIDRS` | `80,443` / none / `10.213.0.0/16` / none | Operator destination rules shared by the proxy and gateway-side fetches |
 | `MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64` | none | Extra CA certificates (base64 PEM) the proxy trusts for vault hosts |
 | `MANAGED_COPILOT_VAULT_KEY` | `<data>/network/vault.key` | 32-byte base64 key that seals vault values; wraps an existing key file like `MANAGED_COPILOT_DURABLE_KEY`. `aspire deploy` generates both as secret parameters |
+| `MANAGED_COPILOT_AZURE_CREDENTIAL` / `_CLIENT_ID` | `cli` locally, `managed-identity` in Azure | The platform's Azure identity for sandboxes and Azure AI Foundry; the client ID selects a user-assigned identity |
+| `MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION` | `Azure:SubscriptionId`, else `az account show` locally | Subscription of Foundry accounts that name none |
 | `MANAGED_COPILOT_MCP_ADAPTER_URL` | `http://127.0.0.1:<port>` | Base URL the shared runtime uses for the MCP adapter |
 | `MANAGED_COPILOT_CONSOLE_DIR` | `services/console/dist` beside the gateway | Built operator console the gateway serves at `/console` |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
@@ -1866,10 +1986,12 @@ Where each area of the platform lives.
 | **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()` |
 | **incident-commander** | `demos/incident-commander/**` | Incident Commander: alerts (or the labeled simulation) open incidents run by a mixed coordinator; its deploy approval waits on the platform with the app detached, and the platform's webhook keeps the app informed |
 | **repo-doctor** | `demos/repo-doctor/**` | Repo Doctor: a CI fixer that gives each run one isolated sandbox (checkout, tests, and diff through `managed.exec`; setup and the fix as Copilot turns), deletes it at the end, and shows its allowed hosts and its `network.blocked` events live |
+| **front-desk** | `demos/front-desk/**` | Front Desk: an app many people sign in to (GitHub, or an email account the app keeps), each with private conversations and memory, published as a public app with no GitHub token |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `services/console/**`, `libraries/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
+| **foundry** | gateway `modules/foundry/**`, `modules/core/apps.ts`, `libraries/protocol/src/apps.ts`, SDK `identity.ts`, `libraries/aspire/src/publish/foundry.ts`; the routing itself is in core's `sessions.ts` and the sandbox broker | Spec section 2 "Your app's own users" and section 15: app keys and app users, `anyGitHubUser` admission, the Azure AI Foundry inference route |
 | **design** | `libraries/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; the apps build their screens from it |
 | **guides** | `docs/README.md`, `docs/concepts/**`, `walkthroughs/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |
