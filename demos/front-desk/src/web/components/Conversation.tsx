@@ -107,15 +107,19 @@ function Chat({ view, user }: { readonly view: View; readonly user: UserView }) 
 }
 
 function RouteLabel({ view }: { readonly view: View }) {
-  const copilot = view.route === "copilot";
+  // Managed Copilot's own record of the session, when it gives one; otherwise where Front Desk started it.
+  const recorded = view.platform?.inference;
+  const copilot = (recorded?.route ?? view.route) === "copilot";
+  const model = view.platform?.model ?? view.model;
+  const where = copilot ? "your own Copilot plan" : `Front Desk's Azure AI Foundry${recorded?.foundry ? ` (${recorded.foundry})` : ""}`;
   return (
     <span
       className={cx("Label shrink-0 gap-1", copilot ? "Label--done" : "Label--accent")}
-      title={copilot ? "This conversation's model use goes to your own Copilot plan." : "Front Desk pays for this conversation's model use through its Azure AI Foundry."}
+      title={recorded ? `Managed Copilot records this conversation's model use as going to ${where}.` : `This conversation's model use goes to ${where}.`}
     >
       {copilot ? <CopilotIcon size={12} /> : <CloudIcon size={12} />}
       <span className="max-sm:hidden">{copilot ? "Your Copilot plan" : "Azure AI Foundry"}</span>
-      {view.model ? <span className="font-normal opacity-80 max-sm:hidden">· {view.model}</span> : null}
+      {model ? <span className="font-normal opacity-80 max-sm:hidden">· {model}</span> : null}
     </span>
   );
 }

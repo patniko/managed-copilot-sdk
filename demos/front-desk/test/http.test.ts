@@ -72,6 +72,9 @@ describe("people and their conversations", () => {
     // A GitHub user runs on their own Copilot plan, as their own GitHub identity.
     const carolConversation = (await carol.post("/api/conversations", { prompt: "hello" })).body.conversation.id as string;
     expect((await view(carol, carolConversation)).route).toBe("copilot");
+    // And the platform's own record agrees: who owns each session, and where its model calls go.
+    expect((await view(carol, carolConversation)).platform).toEqual({ ownerKind: "github", owner: "github-user", inference: { route: "copilot" }, model: "claude-sonnet-5" });
+    expect((await view(alice, aliceConversation)).platform).toMatchObject({ ownerKind: "app-user", owner: expect.stringMatching(/^front-desk\/u_/), inference: { route: "foundry", foundry: "test-foundry" } });
     expect(harness.platform.sessions.get(carolConversation)?.owner).toBe("github:gho_carol_token_000000000000000000");
     expect(harness.platform.sessions.get(aliceConversation)?.owner).toMatch(/^app:u_/);
     expect(harness.platform.sessions.get(aliceConversation)?.environment).toBe("front-desk-foundry");

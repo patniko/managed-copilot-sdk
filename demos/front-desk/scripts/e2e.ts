@@ -15,7 +15,7 @@
  * Exits non-zero when any check fails.
  */
 import { randomBytes } from "node:crypto";
-import type { ConversationView, MeResponse, MemoryItem, ServerEvent, UserView } from "../src/shared/types.js";
+import type { ConversationView, MeResponse, MemoryItem, PlatformRecord, ServerEvent, UserView } from "../src/shared/types.js";
 
 const args = new Map<string, string>();
 for (let i = 2; i < process.argv.length; i++) {
@@ -37,6 +37,7 @@ interface Person {
   chats: boolean;
   events?: ServerEvent[];
   stop?: () => void;
+  platform?: PlatformRecord;
 }
 
 const results: { check: string; ok: boolean; detail?: string }[] = [];
@@ -160,6 +161,20 @@ async function main(): Promise<void> {
         const memories = (await request<MemoryItem[]>(person, "GET", "/api/memories")).body;
         check(`${person.label} gets an answer from a real model`, Boolean(lastAnswer(view)?.text.trim()), `${Math.round((Date.now() - started) / 100) / 10} s, ${lastAnswer(view)?.model ?? "model not reported"}, route ${view.route}`);
         check(`${person.label}'s secret is in their own memory`, memories.some((memory) => memory.text.includes(person.secret)));
+        // What Managed Copilot itself records for the session: who owns it, and where its model calls go.
+        const github = person.user?.kind === "github";
+        const record = view.platform;
+        person.platform = record;
+        check(
+          `Managed Copilot records ${person.label}'s session as theirs`,
+          github ? record?.ownerKind === "github" && record.owner === person.user?.login : record?.ownerKind === "app-user" && record.owner.endsWith(`/${person.user?.id}`),
+          record ? `${record.ownerKind} ${record.owner}` : "no platform record",
+        );
+        check(
+          `Managed Copilot routes ${person.label}'s model calls to ${github ? "their Copilot plan" : "Foundry"}`,
+          record?.inference?.route === (github ? "copilot" : "foundry"),
+          record?.inference ? `${record.inference.route}${record.inference.foundry ? ` (${record.inference.foundry})` : ""}${record.model ? `, ${record.model}` : ""}` : "no inference record",
+        );
       }),
   );
   for (const person of people.filter((candidate) => !candidate.chats && candidate.user?.kind === "email")) {
@@ -207,9 +222,12 @@ async function main(): Promise<void> {
   for (const person of people) person.stop?.();
   const failed = results.filter((result) => !result.ok);
   console.log(`\n${results.length - failed.length} of ${results.length} checks passed.`);
-  console.log("\nWhere each person's model use went:");
+  console.log("\nWhere each person's model use went (Managed Copilot's own record of each session):");
   for (const person of people) {
-    console.log(`  ${person.label.padEnd(14)} ${person.user?.kind === "github" ? `@${person.user.login}` : person.user?.email}  →  ${person.user?.billing.label}${person.conversation ? `  (conversation ${person.conversation})` : ""}`);
+    const who = person.user?.kind === "github" ? `@${person.user.login}` : person.user?.email;
+    const record = person.platform;
+    const went = record?.inference ? `${record.inference.route === "foundry" ? `Azure AI Foundry (${record.inference.foundry})` : "their Copilot plan"}${record.model ? `, ${record.model}` : ""}` : person.user?.billing.label;
+    console.log(`  ${person.label.padEnd(14)} ${who}  →  ${went}${record ? `  [owner ${record.ownerKind} ${record.owner}]` : ""}${person.conversation ? `  (session ${person.conversation})` : ""}`);
   }
   process.exitCode = failed.length ? 1 : 0;
 }

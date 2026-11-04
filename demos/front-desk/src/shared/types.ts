@@ -87,6 +87,19 @@ export type ChatItem =
 
 export interface ConversationView extends ConversationSummary {
   readonly items: readonly ChatItem[];
+  /** What Managed Copilot itself records for this conversation's session, when it says. */
+  readonly platform?: PlatformRecord;
+}
+
+/** The platform's own record of a session: who owns it, and where its model calls go. */
+export interface PlatformRecord {
+  /** `github`: a GitHub account. `app-user`: one of Front Desk's own users. */
+  readonly ownerKind: "github" | "app-user" | "app";
+  /** The owner's login: a GitHub login, or `front-desk/<user ID>` for an app user. */
+  readonly owner: string;
+  /** Where model calls go: the owner's Copilot plan, or a Foundry account. */
+  readonly inference?: { readonly route: BillingRoute; readonly foundry?: string };
+  readonly model?: string;
 }
 
 export interface CreateConversationRequest {

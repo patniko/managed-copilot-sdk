@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { CopilotClient, SessionEvent, Tool } from "@github/copilot-sdk";
-import { ManagedCopilotError } from "@managed-copilot/protocol";
+import { ManagedCopilotError, type SessionInfo } from "@managed-copilot/protocol";
 import type { Person, PersonalConnection, Platform, Route } from "../src/server/platform.js";
 
 interface FakeSessionRecord {
@@ -105,6 +105,25 @@ class FakeConnection implements PersonalConnection {
     const record = this.#platform.sessions.get(sessionId);
     if (!record || record.deleted || record.owner !== this.#owner) throw new ManagedCopilotError("not_found", `Session ${sessionId} not found`);
     record.deleted = true;
+  }
+
+  async sessionInfo(sessionId: string): Promise<SessionInfo> {
+    const record = this.#platform.sessions.get(sessionId);
+    if (!record || record.deleted || record.owner !== this.#owner) throw new ManagedCopilotError("not_found", `Session ${sessionId} not found`);
+    const appUser = record.owner.startsWith("app:");
+    return {
+      id: record.id,
+      environment: record.environment,
+      type: "shared",
+      placement: "shared",
+      state: "idle",
+      owner: appUser ? { id: -1, login: `front-desk/${this.userId}`, kind: "app-user", app: "front-desk", userId: this.userId } : { id: 1, login: "github-user" },
+      inference: appUser ? { route: "foundry", foundry: "test-foundry" } : { route: "copilot" },
+      model: this.route.model ?? "default",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      pendingActions: [],
+    } as SessionInfo;
   }
 
   async ping(): Promise<void> {}

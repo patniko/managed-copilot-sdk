@@ -5,7 +5,8 @@
  */
 import { randomUUID } from "node:crypto";
 import type { CopilotSession, PermissionHandler, SessionEvent } from "@github/copilot-sdk";
-import { LIMITS, type ConversationSummary, type ConversationView, type ServerEvent } from "../shared/types.js";
+import type { SessionInfo } from "@managed-copilot/protocol";
+import { LIMITS, type ConversationSummary, type ConversationView, type PlatformRecord, type ServerEvent } from "../shared/types.js";
 import type { FrontDeskConfig } from "./config.js";
 import { AppError, notFound } from "./errors.js";
 import type { Hub } from "./hub.js";
@@ -66,6 +67,17 @@ function checkPrompt(value: unknown): string {
 
 const busy = () => new AppError("busy", "Front Desk is still answering. Wait for it to finish, or stop it first.", 409);
 
+/** The platform's own record of a session, as Front Desk shows it. */
+function platformRecord(info: SessionInfo): PlatformRecord {
+  const inference = info.inference;
+  return {
+    ownerKind: info.owner.kind ?? "github",
+    owner: info.owner.login,
+    ...(inference ? { inference: inference.route === "foundry" ? { route: "foundry" as const, foundry: inference.foundry } : { route: "copilot" as const } } : {}),
+    ...(info.model ? { model: info.model } : {}),
+  };
+}
+
 /** Only Front Desk's own memory tools may run; the shared environment offers nothing else that acts. */
 const permit: PermissionHandler = (request) => {
   const tool = (request as { toolName?: unknown }).toolName;
@@ -95,7 +107,11 @@ export class Conversations {
   async view(user: UserRecord, id: string): Promise<ConversationView> {
     const record = this.#owned(user, id);
     const live = await this.#ensureLive(user, record);
-    return { ...this.#summary(record), items: live.transcript.items };
+    const platform = await live.connection
+      .sessionInfo(id)
+      .then(platformRecord)
+      .catch(() => undefined);
+    return { ...this.#summary(record), items: live.transcript.items, ...(platform ? { platform } : {}) };
   }
 
   // ---- changes -----------------------------------------------------------------------------------------------------

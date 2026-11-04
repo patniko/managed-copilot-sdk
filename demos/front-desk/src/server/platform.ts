@@ -15,7 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import type { CopilotClient } from "@github/copilot-sdk";
-import { ERROR_CODES, ManagedCopilotError, type ErrorCode } from "@managed-copilot/protocol";
+import { ERROR_CODES, ManagedCopilotError, type ErrorCode, type SessionInfo } from "@managed-copilot/protocol";
 import { ManagedCopilot } from "@managed-copilot/sdk";
 import type { BillingRoute } from "../shared/types.js";
 import type { FrontDeskConfig } from "./config.js";
@@ -42,6 +42,8 @@ export interface PersonalConnection {
   client(): Promise<CopilotClient>;
   /** Deletes one of this person's sessions on the platform (the platform refuses anyone else's). */
   deleteSession(sessionId: string): Promise<void>;
+  /** The platform's record of one of this person's sessions: its owner and where its model calls go. */
+  sessionInfo(sessionId: string): Promise<SessionInfo>;
   /** Answers when the connection still works. */
   ping(): Promise<void>;
   close(): Promise<void>;
@@ -151,6 +153,10 @@ class PersonConnection implements PersonalConnection {
 
   deleteSession(sessionId: string): Promise<void> {
     return this.#managed.sessions.delete(sessionId);
+  }
+
+  sessionInfo(sessionId: string): Promise<SessionInfo> {
+    return this.#managed.sessions.get(sessionId);
   }
 
   async ping(): Promise<void> {
