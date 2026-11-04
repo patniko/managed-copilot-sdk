@@ -96,7 +96,7 @@ export function SignIn({ options }: { readonly options: AuthOptions }) {
                 <CopilotIcon size={12} className="mt-0.5 shrink-0" />
                 <span>
                   With GitHub, your conversations use <strong className="font-semibold text-fg">your own Copilot plan</strong>.
-                  {options.localGitHub ? " The second button only appears when Front Desk runs on your own computer." : ""}
+                  {options.localGitHub ? ` ${options.github ? "The second button" : "This button"} only appears when Front Desk runs on your own computer.` : ""}
                 </span>
               </p>
             </div>

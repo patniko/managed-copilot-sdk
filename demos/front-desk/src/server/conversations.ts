@@ -258,14 +258,14 @@ export class Conversations {
   }
 
   async #deliver(user: UserRecord, live: Live, prompt: string): Promise<string> {
-    let messageId: string;
+    // Busy before sending: a turn can end (or fail) before `send` returns, and that must not leave it marked busy.
+    this.#changes(live, live.transcript.markBusy());
     try {
-      messageId = await live.session.send({ prompt });
+      return await live.session.send({ prompt });
     } catch (error) {
+      this.#changes(live, live.transcript.settle());
       throw this.#fail(user, error, live.connection);
     }
-    this.#changes(live, live.transcript.markBusy());
-    return messageId;
   }
 
   async #ensureLive(user: UserRecord, record: ConversationRecord): Promise<Live> {
@@ -332,7 +332,7 @@ export class Conversations {
         case "busy":
         case "title": {
           const record =
-            change.type === "title" ? this.#deps.store.touchConversation(live.userId, live.id, change.title) : this.#deps.store.getConversation(live.userId, live.id);
+            change.type === "title" ? this.#deps.store.touchConversation(live.userId, live.id, titleFrom(change.title)) : this.#deps.store.getConversation(live.userId, live.id);
           if (record) this.#publish(live.userId, { type: "conversation", conversation: this.#summary(record) });
           break;
         }
