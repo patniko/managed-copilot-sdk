@@ -215,12 +215,13 @@ describe("Copilot CLI attach relay", () => {
     again.close();
   });
 
-  it("refuses a CLI signed in as someone else, or not signed in, with a clear reason", async () => {
+  it("refuses another account or a missing credential without assuming the CLI is signed out", async () => {
     const { relay, url } = await startRelay();
     await expect(connect(url, "gho_other")).rejects.toMatchObject({ status: 403 });
     expect(relay.outcome).toEqual({ code: "forbidden", message: expect.stringContaining("signed in as @other, but this session belongs to @octo") });
     await expect(connect(url)).rejects.toMatchObject({ status: 401 });
-    expect(relay.outcome?.message).toContain("Copilot CLI is not signed in");
+    expect(relay.outcome?.message).toContain("Copilot CLI did not send a GitHub credential");
+    expect(relay.outcome?.message).toContain("--ahp-authenticate github");
     await expect(connect(url, "gho_bogus")).rejects.toMatchObject({ status: 401 });
     await expect(connect(url.replace(/\/ahp\/.+$/, "/ahp/wrong"), "gho_owner")).rejects.toMatchObject({ status: 404 });
   });

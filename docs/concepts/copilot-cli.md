@@ -28,7 +28,9 @@ flowchart LR
   GW --> RT
 ```
 
-`managed-copilot` starts a small relay on `127.0.0.1` and launches `copilot --ahp ws://127.0.0.1:<port>/...`. The relay
+`managed-copilot` starts a small relay on `127.0.0.1` and launches
+`copilot --ahp ws://127.0.0.1:<port>/... --ahp-authenticate github`. The explicit authentication flag lets the CLI
+send its own GitHub credential to the local relay, which checks that the account owns the session. The relay
 holds the only connection to the gateway. In the live run above, `copilot.exe` never connected to the gateway: its
 connections went to `127.0.0.1` and to services Copilot CLI uses on its own, such as GitHub. The `managed-copilot`
 node process held the gateway connection.
