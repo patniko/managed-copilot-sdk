@@ -157,7 +157,7 @@ async function main(): Promise<void> {
       method: "POST",
       body: JSON.stringify({ title: template.title, brief: template.brief, templateId: template.id, mode }),
     });
-    log(`Submitted ${formatWorkOrderNumber(created.number)} "${created.title}" (${created.id}) · ${mode === "agent" ? "Agent-led" : "Classic"}`);
+    log(`Submitted ${formatWorkOrderNumber(created.number)} "${created.title}" (${created.id}) · ${mode === "agent" ? "Agent-led" : "App-driven"}`);
     return created;
   });
   const wo = await api<WorkOrder>(`/api/work-orders/${settled.id}`);

@@ -6,7 +6,7 @@ export const TEMPLATES: readonly WorkOrderTemplate[] = [
   {
     id: HAPPY_PATH_TEMPLATE_ID,
     title: "CSV ⇄ JSON toolkit",
-    tagline: "Two command-line tools built side by side in separate sandboxes, then integrated and released.",
+    tagline: "Two CLIs built in parallel sandboxes, then released together.",
     estimate: "~5 min",
     tags: ["Node.js", "CLI", "2 parallel builders"],
     featured: true,
@@ -26,7 +26,7 @@ Both tools exit with status 1 and a one-line error on invalid input or a missing
   {
     id: "csv-to-json-cli",
     title: "CSV → JSON CLI",
-    tagline: "A single command-line tool with a tested parser.",
+    tagline: "One command-line tool with a tested CSV parser.",
     estimate: "~4 min",
     tags: ["Node.js", "CLI"],
     brief: `Build a zero-dependency Node.js 24 CLI named \`csv2json\` that converts CSV (from a file path argument or stdin) to a JSON array of objects keyed by the header row.
@@ -40,7 +40,7 @@ Include tests with node:test for the parser and the CLI.`,
   {
     id: "semver-toolkit",
     title: "Semantic version toolkit",
-    tagline: "A small library and CLI: parse, compare, sort, and bump versions.",
+    tagline: "A library and CLI to parse, compare, sort, and bump versions.",
     estimate: "~5 min",
     tags: ["Node.js", "Library", "CLI"],
     brief: `Build \`semver-lite\`, a zero-dependency Node.js 24 library and CLI for semantic versions (semver 2.0.0).

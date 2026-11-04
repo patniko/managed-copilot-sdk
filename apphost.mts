@@ -4,7 +4,13 @@ import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
 import { FRONT_DESK_APP, FRONT_DESK_PORT, frontDesk } from "./demos/front-desk/apphost.mjs";
+import { PATTERN_RACE_DEFAULT_PORT, patternRace } from "./demos/pattern-race/apphost.mjs";
+import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swarm/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
+import { DATA_DESK_DEFAULT_PORT, dataDesk } from "./demos/data-desk/apphost.mjs";
+import { HELP_DESK_PORT, helpDesk } from "./demos/help-desk/apphost.mjs";
+import { INCIDENT_DEFAULT_PORT, incidentCommander } from "./demos/incident-commander/apphost.mjs";
+import { REPO_DOCTOR_PORT, repoDoctor } from "./demos/repo-doctor/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -24,6 +30,12 @@ const ports = {
   factory: 7480 + offset,
   snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
+  researchSwarm: RESEARCH_SWARM_DEFAULT_PORT + offset,
+  patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
+  dataDesk: DATA_DESK_DEFAULT_PORT + offset,
+  helpDesk: HELP_DESK_PORT + offset,
+  incidentCommander: INCIDENT_DEFAULT_PORT + offset,
+  repoDoctor: REPO_DOCTOR_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -56,8 +68,19 @@ const foundry = foundryAccount
 const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
 const frontDeskDemo = frontDesk({ port: ports.frontDesk, ...(foundryAccount ? { foundry: foundryAccount } : {}) });
+const dataDeskDemo = dataDesk({ port: ports.dataDesk });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
+const swarm = researchSwarm({ port: ports.researchSwarm });
+const helpDeskDemo = helpDesk({ port: ports.helpDesk });
+const incidents = incidentCommander({ port: ports.incidentCommander, webhookSecret: await generatedSecret("incident-commander-webhook-secret") });
+const repoDoctorDemo = repoDoctor({ port: ports.repoDoctor });
+const chatEnvironment = {
+  type: "shared" as const,
+  customizations: "./environments/chat", // agents, skills, and instructions (section 10)
+  models: ["claude-sonnet-5", "claude-haiku-5.5"],
+  network: ["learn.microsoft.com"], // only this host
+};
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
@@ -70,12 +93,8 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   // Apps that sign in their own users and vouch for them with a key the AppHost issues (spec section 2).
   apps: { ...frontDeskDemo.apps },
   environments: {
-    chat: {
-      type: "shared",
-      customizations: "./environments/chat", // agents, skills, and instructions (section 10)
-      models: ["claude-sonnet-5", "claude-haiku-5.5"],
-      network: ["learn.microsoft.com"], // only this host
-    },
+    chat: chatEnvironment,
+    ...(publishing ? {} : { "webhook-examples": chatEnvironment }),
     coder: { type: "isolated", size: "medium" },
     helper: { type: "promotable", promoteTo: "coder" }, // placement target, not a policy override
     // A coordinator on the shared runtime that starts workers, each a session of `coder` in its own sandbox (section 17).
@@ -88,6 +107,11 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...assistant.environments,
     ...dispatchDemo.environments,
     ...frontDeskDemo.environments,
+    ...swarm.environments,
+    ...dataDeskDemo.environments,
+    ...helpDeskDemo.environments,
+    ...incidents.environments,
+    ...repoDoctorDemo.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -100,7 +124,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
       : {
           snippets: {
             url: `http://localhost:${snippetsWebhook.port}/api/copilot-events`,
-            environments: ["chat"],
+            environments: ["webhook-examples"],
             events: ["session.action_required", "session.idle", "session.failed", "schedule.run_started"],
             secret: snippetsWebhook.secret,
           },
@@ -108,6 +132,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...assistant.webhooks,
     // The assistant receives its events on its own port.
     assistant: { ...assistant.webhooks.assistant, url: `${assistantUrl}/api/copilot-events` },
+    ...incidents.webhooks,
   },
 });
 
@@ -140,6 +165,20 @@ await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", al
 // Dispatch: one conversation with an orchestrator agent that, message by message, creates a sandbox for each part of
 // the work or sends it to a sandbox it already has.
 await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allowedHostsEnv: "DISPATCH_ALLOWED_HOSTS", gatewayUrlEnv: ["DISPATCH_ATTACH_URL"] });
+
+// Research Swarm: one question fans out to web researchers, each in its own sandbox, and comes back as a cited report.
+await addDemo(swarm.app, { dockerfile: "demos/research-swarm/Dockerfile", allowedHostsEnv: "RESEARCH_SWARM_ALLOWED_HOSTS" });
+
+// Pattern Race: one job in six lanes at once, one per pattern environment above; only the environment name differs.
+await addDemo(patternRace({ port: ports.patternRace }).app, { dockerfile: "demos/pattern-race/Dockerfile", allowedHostsEnv: "PATTERN_RACE_ALLOWED_HOSTS" });
+
+// Data Desk: chat with a spreadsheet. The session answers on the shared runtime, then moves once into a Python sandbox
+// when a request needs code, and an attached Copilot CLI follows it.
+await addDemo(dataDeskDemo.app, { dockerfile: "demos/data-desk/Dockerfile", allowedHostsEnv: "DATA_DESK_ALLOWED_HOSTS", gatewayUrlEnv: ["DATA_DESK_ATTACH_URL"] });
+
+// Repo Doctor: one sandbox per run clones a repository, reproduces its failing tests, fixes them, and returns a verified
+// patch, while a strip shows the hosts its network rules allowed and blocked.
+await addDemo(repoDoctorDemo.app, { dockerfile: "demos/repo-doctor/Dockerfile", allowedHostsEnv: "REPO_DOCTOR_ALLOWED_HOSTS" });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
 // for hands-on work.
@@ -185,6 +224,23 @@ if (await configuration.exists("Parameters:front-desk-github-client-id")) {
 if (await configuration.exists("Parameters:front-desk-invite-code")) {
   await frontDeskApp.withEnvironment("FRONT_DESK_INVITE_CODE", await builder.addParameter("front-desk-invite-code", { secret: true }));
 }
+
+// Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
+// store's tools bound to that customer's orders.
+await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" });
+
+// Incident Commander: an alert opens an incident; a mixed coordinator triages in its own sandbox, hands the repro and
+// the fix to workers, and waits on the platform for a person to approve the deploy. Alerts carry the generated bearer
+// secret; the platform's webhook keeps the app informed while it isn't attached.
+await (
+  await addDemo(incidents.app, {
+    dockerfile: "demos/incident-commander/Dockerfile",
+    publicUrlEnv: "INCIDENT_PUBLIC_URL",
+    allowedHostsEnv: "INCIDENT_ALLOWED_HOSTS",
+  })
+)
+  .withEnvironment("INCIDENT_WEBHOOK_SECRET", incidents.webhooks["incident-commander"].secret)
+  .withEnvironment("INCIDENT_ALERT_SECRET", await generatedSecret("incident-commander-alert-secret"));
 
 // The demo gallery: every demo and walkthrough of this deployment on one page, at https://gallery.<environment-domain>.
 // Deployed only (locally, `pnpm gallery`). It holds no GitHub token, and opens from the same addresses as the demos.

@@ -1,8 +1,9 @@
-import { CheckIcon, PlusIcon, WorkflowIcon, XIcon } from "@primer/octicons-react";
+import { CheckIcon, CopilotIcon, PlugIcon, PlusIcon, WorkflowIcon, XIcon } from "@primer/octicons-react";
 import { useEffect, useId, useRef } from "react";
 import { formatWorkOrderNumber, type WorkOrderSummary } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { formatFullDateTime, formatRelative, pluralize } from "../lib/format.js";
+import { formatFullDateTime, formatRelative } from "../lib/format.js";
+import { modeLabel } from "../lib/platform.js";
 import { workOrderHref } from "../lib/router.js";
 import { workOrderStatusMeta } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
@@ -91,7 +92,7 @@ function SidebarContent({
       <nav aria-label="Work order list" className="min-h-0 flex-1 overflow-y-auto border-t border-line-muted px-2 pt-2 pb-4">
         {summaries.length === 0 ? (
           <EmptyState icon={WorkflowIcon} title="No work orders yet" size="sm">
-            Pick a template to watch the factory build something.
+            Pick a template to start one.
           </EmptyState>
         ) : (
           <ul className="NavList">
@@ -104,6 +105,18 @@ function SidebarContent({
         )}
       </nav>
     </div>
+  );
+}
+
+/** Agent-led or App-driven as a small glyph; the label is for screen readers and the tooltip. */
+function ModeGlyph({ mode }: { readonly mode: WorkOrderSummary["mode"] }) {
+  const label = modeLabel(mode);
+  const Glyph = mode === "agent" ? CopilotIcon : PlugIcon;
+  return (
+    <span className="inline-flex shrink-0" title={label}>
+      <Glyph size={12} className={mode === "agent" ? "text-fg-done" : undefined} />
+      <span className="sr-only">{label}</span>
+    </span>
   );
 }
 
@@ -142,11 +155,11 @@ function WorkOrderItem({
             {formatWorkOrderNumber(summary.number)}
           </span>
           <span aria-hidden>·</span>
-          <span id={`${id}-meta`} className="truncate">
-            {summary.mode === "agent" ? "Agent-led" : "Classic"} ·{" "}
-            {meta.label}
-            {summary.taskCount > 0 ? ` · ${pluralize(summary.taskCount, "task")}` : ""} ·{" "}
-            <span title={formatFullDateTime(summary.createdAt)}>{formatRelative(summary.createdAt, now)}</span>
+          <span id={`${id}-meta`} className="inline-flex min-w-0 items-center gap-1">
+            <ModeGlyph mode={summary.mode} />
+            <span className="truncate">
+              {meta.label} · <span title={formatFullDateTime(summary.createdAt)}>{formatRelative(summary.createdAt, now)}</span>
+            </span>
           </span>
         </span>
       </span>

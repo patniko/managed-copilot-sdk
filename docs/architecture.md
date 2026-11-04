@@ -100,14 +100,14 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 | GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
 | Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
 | Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Front Desk, and the gallery |
+| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, Research Swarm, Pattern Race, Data Desk, Repo Doctor, Help Desk, Incident Commander, Front Desk, and the gallery |
 | Walkthroughs | `walkthroughs` | scripts (`pnpm walkthrough <nn>`) | The walkthroughs' runnable code, documented in `walkthroughs/*/README.md` |
 | Spec snippets | `tests/snippets` | scripts (Aspire resource `snippets`) | Every spec snippet as an acceptance check against a running platform |
 | Environment customizations | `environments/<name>` | files | Agents, skills, and instructions for the root AppHost's environments, one folder per environment (today `chat`) |
 
 ### Web UI look and feel
 
-Every web UI (the console, the software factory, the assistant, Dispatch, and Front Desk) looks like part of github.com. The shared
+Every web UI (the console, the gallery, and every demo) looks like part of github.com. The shared
 `@managed-copilot/github-theme` package (`libraries/github-theme`) is the single source: GitHub's Primer design tokens
 from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
 Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
@@ -116,6 +116,17 @@ classes under github.com's own names (`btn`, `Label`, `State`, `Box`, `Underline
 ...). Icons are Octicons (`@primer/octicons-react`). Each app's `styles.css` starts with
 `@import "tailwindcss"; @import "@managed-copilot/github-theme";`. The package is CSS only (no build step); the
 gateway and demo images copy it into their build stage and install it with the app.
+
+The demos share one header and one visual vocabulary, so they read as one product family:
+
+- **Header.** The GitHub mark and the breadcrumb `Managed Copilot / <App>` (`AppHeader`), the app's own icon buttons,
+  then one platform pill (`btn btn-sm`: a status dot, `Local` or `Azure`, a caret) and the account avatar. The pill's
+  popover lists the connection status, the deployment and its URL, the account, then the app's environments or where
+  it runs. Dispatch's `TopBar.tsx` is the reference.
+- **Where it runs.** `CopilotIcon` marks an agent's brain, `CpuIcon` the shared runtime, `ContainerIcon` a sandbox,
+  `PlugIcon` the app's own tools, `TerminalIcon` Copilot CLI, and `ShieldIcon` an approval.
+- **Copy.** A screen leads with one primary action; technical facts (sandbox IDs, environment and model names, sizes,
+  network rules) sit in tooltips, popovers, or a detail pane rather than on resting cards.
 
 ### Data plane
 
@@ -333,6 +344,11 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   bound, every 30 s, and before every backend operation); `/v1/info` should advertise `isolated` and `files` only while
   it is true, so a deployment whose backend is missing or unqualified never advertises a capability that cannot work.
   Docker trusts a successful ping for 15 s.
+- **Local Docker discovery.** An explicit `DOCKER_HOST` is used directly unless `DOCKER_CONTEXT` is also set;
+  otherwise `docker context inspect` resolves Docker's selected endpoint, including `DOCKER_CONFIG` and the saved
+  current context. Docker Desktop, Colima, and rootless Docker sockets need no extra configuration. Discovery runs
+  during backend readiness and the resolved endpoint is retained for the gateway's lifetime; failed discovery or an
+  unsupported context reports `capability_unavailable` rather than selecting another daemon.
 - **One sandbox per session.** `sandboxes.create` allocates a container `<instance>-sbx-<id>` from the environment's
   pinned image, with per-session volumes for `/workspace`, `/home/agent` (HOME, the Python venv `~/.venv`, and the npm
   prefix `~/.npm-global`), and `/var/lib/managed-copilot` (runtime `COPILOT_HOME` plus root-only sandboxd state). It
@@ -343,7 +359,10 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   `no-new-privileges`.
 - **Networks.** Every sandbox gets its **own internal Docker network** on an explicit /28 from `10.213.0.0/16`
   (probing on overlap), so sandboxes can never reach each other's ports and Docker's default pools are not
-  exhausted. The relay and the egress proxy (`<instance>-egress`, alias `mc-egress`) are connected to each sandbox
+  exhausted. Each gateway's shared networks (`<instance>-edge`, `<instance>-sandboxes`, `<instance>-egress-wan`) get
+  an explicit /24 from `10.214.0.0/16` the same way, because Docker's default pools hold only about thirty networks and
+  a handful of local platforms (checkouts, port-offset copies, end-to-end tests) would otherwise exhaust them.
+  The relay and the egress proxy (`<instance>-egress`, alias `mc-egress`) are connected to each sandbox
   network by the gateway on create and resume; nothing else is. The end-to-end test verifies a peer sandbox's IP is
   unreachable and that `network: false` sandboxes have no Internet route.
 - **sandboxd** (`services/sandbox/src/sandboxd`) runs as root, never as uid 10001. It serves, behind a per-sandbox
@@ -914,6 +933,11 @@ and genuine `CopilotSession` objects (`services/gateway/src/modules/promotion`, 
   Promotion is one-way. The stock SDK's `sendAndWait` times out after 60 s by default (the work continues); a turn that
   may promote includes sandbox setup, so pass a longer timeout, and prepare the base image ahead of time
   (`MANAGED_COPILOT_SANDBOX_PREPARE=1`) to keep the first promotion fast.
+- **In an app.** Data Desk (`demos/data-desk`) starts every analysis on a promotable environment. It answers
+  `request_sandbox` from its UI (`approve-once`, or `reject` with a reason), writes the dataset into the sandbox with
+  `managed.files` when `session.promoted` arrives, and approves the agent's `shell`, `write`, and `read` requests only
+  once that write has finished, so the first command after the move already finds the file. It reads
+  `session.usage.getMetrics` after each reply; the reading at `session.promoted` is the shared runtime's share.
 
 ### Orchestrator
 
@@ -1062,7 +1086,7 @@ and quickstart snippet 14).
   starting"), and coordinators observed live wait for the worker and copy again. A worker therefore starts its task
   before files copied for it arrive; tasks that depend on them should say so (the coordinator's own task text usually
   does).
-- **Apps on coordinators.** Three demos run on coordinator sessions, with the decisions left to the model and the app
+- **Apps on coordinators.** These demos run on coordinator sessions, with the decisions left to the model and the app
   observing workers through `managed.workers(coordinator).list()`, the `worker.*` events, and `managed.sessions.get`,
   never by attaching a client to a worker (which would take over its prompts).
   - *Software factory, agent-led mode* (the default; `demos/software-factory`). `factory-coordinator` is an
@@ -1077,10 +1101,10 @@ and quickstart snippet 14).
     as new work and a repeated call consumes no nudge or review round. Release inputs arrive by `copy_worker_files`
     under `.factory/incoming/<task>/` and are verified against the accepted artifacts. After a restart the factory
     resumes the same coordinator with its tools, stops only the coordinator's unfinished turn, and reconciles worker
-    IDs; cancelling deletes worker sessions through the REST API. Classic mode keeps the app-orchestrated pipeline on
-    the four station environments. On Azure (westus2, 2026-10-27), a factory run against the deployed gateway
-    completed a work order with three Container Apps sandboxes, one builder reused for two fix rounds, and a 47-test
-    release.
+    IDs; cancelling deletes worker sessions through the REST API. App-driven mode (API value `classic`) keeps the
+    app-orchestrated pipeline on the four station environments. On Azure (westus2, 2026-10-27), a factory run against
+    the deployed gateway completed a work order with three Container Apps sandboxes, one builder reused for two fix
+    rounds, and a 47-test release.
   - *Dispatch* (`demos/dispatch`). A conversation is a session of the `dispatch` orchestrator (four worker
     environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
     view is projected from the coordinator's own events (worker tool calls and the permission events above), so a
@@ -1094,11 +1118,14 @@ and quickstart snippet 14).
     follow-up reused one, and deleting the conversation deleted all three sessions.
     Execution styles: the fragment declares `dispatch-direct` (`execution: "direct"`, the Python lab only) and
     `dispatch-mixed` (`execution: "mixed"`, all four) beside `dispatch`; Dispatch keeps one stock client per style's
-    environment (each `managed.client(env)`), and its composer switch picks which one a new conversation is created
-    in. Direct and mixed messages list the hands tool calls of the coordinator and its sub-agents (events with
+    environment (each `managed.client(env)`), and the home page's style switch picks which one a new conversation is
+    created in (the conversation's header then shows its style read-only; the UI has no way to change it). Direct and
+    mixed messages list the hands tool calls of the coordinator and its sub-agents (events with
     `agentId`, named by `subagent.started`; persisted, so they rebuild from history; the exit code is parsed from
     `bash`'s status line), `bash`/`write_bash`/`create`/`edit` ask in the message's list with "approve the rest of this
-    message", and the `role: "hands"` sandbox shows `managed.exec.list` with each command's agent. Verified live
+    message", and the `role: "hands"` sandbox, drawn inside the coordinator's card, shows `managed.exec.list` with each
+    command's agent. The UI's fixture preview (`?preview`, `src/web/dev`) loads only behind `import.meta.env.DEV`, so
+    production builds never include it. Verified live
     (2026-10-28, local): all three styles with real models; two background sub-agents in one hands sandbox with
     per-command approvals; a mixed coordinator that started two workers and then worked in its own sandbox; a
     Dispatch restart that rebuilt the same commands; and a message typed in an attached Copilot CLI whose `bash` call
@@ -1117,6 +1144,33 @@ and quickstart snippet 14).
     conversation created before the environment became an orchestrator can't start sandboxes and offers Start over.
     Verified live locally (approval, a reused sandbox, a second kind of sandbox, approval after the tab was closed);
     not yet on Azure.
+  - *Pattern Race* (`demos/pattern-race`). One prompt goes to six new sessions at once, one per pattern environment of
+    the root AppHost (`chat`, `coder`, `helper`, `operator`, `team`, `lead`), each through its own stock client, with
+    caller-chosen session IDs (`pattern-race-<race>-<lane>`) so sessions a restart cut short are found by prefix and
+    deleted. Each lane answers its own permission requests with the stock `approveAll`. A lane's view comes from its
+    session's events, `session.promoted` (or `sessions.get` placement, polled in case the event is missed), the
+    `worker.*` events, and `managed.workers(...).list()`. Premium requests are each lane session's
+    `session.rpc.usage.getMetrics().totalPremiumRequestCost` (verified live: 1 per prompt for Claude Sonnet 5, whose
+    `listModels()` billing carries token prices and no multiplier) plus, for workers, one per message received at the
+    worker model's multiplier (else the rate the coordinator measured). A lane ends when `sendAndWait` returns; its
+    answer is checked against values the server computes, then its session is deleted with its sandboxes and workers.
+    Verified live locally (2026-11-04): all six lanes on all three jobs.
+  - *Incident Commander* (`demos/incident-commander`). An incident is a session of the `incident-commander`
+    orchestrator (`execution: "mixed"`, network off, `maxWorkers` 4): its own sandbox in `incident-commander-triage`
+    (small, network off) and workers in `incident-commander-node` (medium, the npm registry only). The app registers
+    `open_workspace` (writes the service's folder into the hands sandbox with `managed.files(hands.id).write()`, which
+    exists only after the coordinator's first shell or file call), `update_incident`, `publish_postmortem` (all
+    `skipPermission`), and `deploy_fix`, and approves every other prompt: sandboxes are isolated, production isn't. It
+    holds a live session only while the coordinator works. The `deploy_fix` prompt is snapshotted (the change is read
+    from the hands sandbox, so the person approves exactly what ships), answered `no-result`, and the app detaches:
+    the platform returns the prompt to `pending` and announces it with `session.action_required`. A decision is
+    stored, then the app resumes the session; the platform replays the prompt to the new live client, which answers
+    it from the decision, and `deploy_fix` runs live. The webhook (`session.action_required`, `session.idle`,
+    `session.failed`, `worker.*`) updates incidents while the app isn't attached and answers its tools and sandbox
+    prompts there, leaving an undecided deploy for a person. Verified live (2026-11-04, local, claude-sonnet-5): a
+    simulated incident triaged in the hands sandbox, ran repro and fix workers in parallel, verified, and parked its
+    deploy; after an app restart the platform still held it, and approving it deployed the fix and resolved the
+    incident. Not yet on Azure.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
@@ -1592,9 +1646,10 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
 - The returned `{ gateway, url }` wire other resources: `.withEnvironment("MANAGED_COPILOT_URL", copilot.url)` and
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
-- `aspire run` from the repository root starts: the gateway (7400), `front-desk` (7450), `dispatch` (7470),
+- `aspire run` from the repository root starts: the gateway (7400), `pattern-race` (7420), `research-swarm` (7425),
+  `data-desk` (7430), `repo-doctor` (7435), `help-desk` (7440), `incident-commander` (7445), `front-desk` (7450), `dispatch` (7470),
   `software-factory` (7480), `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets
-  webhook receives on 7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all six ports for a second copy, which also sets
+  webhook receives on 7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all these ports for a second copy, which also sets
   `discovery: false` (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 - Front Desk is the one demo published with `public: true`: it signs in its own users and holds no GitHub token. It is
   declared in the root AppHost's `apps` (`anyGitHubUser: true`) and connects with its app key, then acts for each
@@ -1614,7 +1669,7 @@ sequenceDiagram
   Relay->>GW: POST /v1/sessions/:id/attach (owner's GitHub token)
   GW->>RT: host.start(computeId mc-session-<id>, creation denied) + host.publishSession
   GW-->>Relay: AttachMaterial (single-use ticket, 60 s)
-  Relay->>CLI: copilot --ahp ws://127.0.0.1:<port>/ahp/<nonce> (no credential in argv)
+  Relay->>CLI: copilot --ahp ws://127.0.0.1:<port>/ahp/<nonce> --ahp-authenticate github (no credential in argv)
   CLI->>Relay: WebSocket (CLI's own GitHub token)
   Relay->>Relay: CLI's GitHub account must be the session owner
   Relay->>GW: WebSocket /v1/sessions/:id/ahp, Authorization: Bearer <ticket>
@@ -1624,6 +1679,9 @@ sequenceDiagram
   GW-->>CLI: runtime frames, filtered and scrubbed of host paths
 ```
 
+- **Local authentication.** The launcher passes `--ahp-authenticate github` so the stock CLI sends its GitHub
+  credential to the loopback relay. The relay verifies the CLI's account against the session owner. A missing
+  credential does not establish that the CLI is signed out.
 - **The CLI is a responder, not a pipe.** Once its ticket is redeemed, the gateway registers the CLI with core's
   `sessions.attachCli` as a `cli` responder of the session incarnation the ticket was minted for. The principal that
   requested the ticket (kept in memory with it, never stored) is the session's connected credential while the CLI is
@@ -1869,7 +1927,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7450, 7470, 7480, 7490, 7485 | Front Desk (fixed for its GitHub OAuth callback), Dispatch, software factory, assistant (fixed for its Google OAuth redirect), spec snippets webhook receiver |
+| Demo ports | 7420, 7425, 7430, 7435, 7440, 7445, 7450, 7470, 7480, 7485, 7490 | Pattern Race, Research Swarm, Data Desk, Repo Doctor, Help Desk, Incident Commander, Front Desk (fixed for its GitHub OAuth callback), Dispatch, software factory, spec snippets webhook receiver, assistant (fixed for its Google OAuth redirect) |
 | Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
@@ -1891,7 +1949,8 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
 | `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
 | `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |
-| `DOCKER_HOST` | Docker Desktop pipe / `/var/run/docker.sock` | Docker Engine API endpoint for sandboxes |
+| `MANAGED_COPILOT_NETWORK_SUBNET_POOL` | `10.214.0.0` | /16 carved into /24s for each gateway's edge, sandboxes, and egress WAN networks |
+| `DOCKER_HOST` / `DOCKER_CONTEXT` / `DOCKER_CONFIG` | Docker's selected context and platform default | Docker Engine API endpoint selection for sandboxes; the Docker CLI resolves contexts |
 
 ## Code map
 
@@ -1907,8 +1966,14 @@ Where each area of the platform lives.
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
+| **research-swarm** | `demos/research-swarm/**` | Research Swarm (delegate): a lead on the shared runtime (`research-swarm`, network off) starts web researchers in `research-swarm-web` sandboxes; their `research read` log is the only citable source list, its app tools (`plan_research`, `list_sources`, `submit_report`) refuse other citations, and deleting the lead's session deletes every sandbox |
+| **pattern-race** | `demos/pattern-race/**` | Pattern Race: one job raced through the root AppHost's six pattern environments at once, with a live board of where each agent thinks and acts and a scorecard |
+| **data-desk** | `demos/data-desk/**` | Data Desk: chat with a spreadsheet on a promotable environment; the app's tools answer on the shared runtime, and a request that needs code moves the session into its Python sandbox |
+| **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()` |
+| **incident-commander** | `demos/incident-commander/**` | Incident Commander: alerts (or the labeled simulation) open incidents run by a mixed coordinator; its deploy approval waits on the platform with the app detached, and the platform's webhook keeps the app informed |
+| **repo-doctor** | `demos/repo-doctor/**` | Repo Doctor: a CI fixer that gives each run one isolated sandbox (checkout, tests, and diff through `managed.exec`; setup and the fix as Copilot turns), deletes it at the end, and shows its allowed hosts and its `network.blocked` events live |
 | **front-desk** | `demos/front-desk/**` | Front Desk: an app many people sign in to (GitHub, or an email account the app keeps), each with private conversations and memory, published as a public app with no GitHub token |
-| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots (apps the root AppHost publishes with `public: true` are labeled Public, which its tests check). `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
+| **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
 | **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |

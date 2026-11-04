@@ -1,11 +1,11 @@
 import { MarkGithubIcon, ThreeBarsIcon, TriangleDownIcon } from "@primer/octicons-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { initials } from "../lib/format.js";
 import { platformPill } from "../lib/platform.js";
 import { useStore } from "../lib/store.js";
-import { useDismiss } from "../lib/useDismiss.js";
 import { PlatformPopover } from "./PlatformPopover.js";
 import { Dot } from "./ui/Chip.js";
+import { Popover } from "./ui/Popover.js";
 import { Spinner } from "./ui/Spinner.js";
 import { Tooltip } from "./ui/Tooltip.js";
 
@@ -77,29 +77,22 @@ function ConnectionIndicator() {
 
 function PlatformStatusButton() {
   const platform = useStore((state) => state.platform);
-  const [open, setOpen] = useState(false);
-  const container = useRef<HTMLDivElement>(null);
-  const close = useCallback(() => setOpen(false), []);
-  useDismiss(container, open, close);
   if (!platform) return null;
   const pill = platformPill(platform);
   return (
-    <div ref={container} className="relative min-w-0">
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        aria-label={`Platform: ${pill.label}${pill.mode ? ` (${pill.mode})` : ""}. Show deployment details`}
-        onClick={() => setOpen((value) => !value)}
-        className="btn btn-sm max-w-full min-w-0"
-      >
-        <Dot tone={pill.tone} pulse={pill.pulse} />
-        <span className="min-w-0 max-w-[14rem] truncate max-sm:hidden">{pill.label}</span>
-        {pill.mode ? <span className="font-normal text-fg-muted max-sm:hidden">{pill.mode}</span> : null}
-        <TriangleDownIcon size={16} />
-      </button>
-      {open ? <PlatformPopover platform={platform} /> : null}
-    </div>
+    <Popover
+      label="Platform details"
+      overlayClassName="max-h-[calc(100dvh-5rem)] overflow-y-auto max-sm:fixed max-sm:inset-x-3 max-sm:top-16 max-sm:mt-0 sm:w-[24rem]"
+      trigger={(props) => (
+        <button {...props} type="button" aria-label={`Platform: ${pill.label}, ${pill.status.toLowerCase()}. Show details`} className="btn btn-sm max-w-full min-w-0">
+          <Dot tone={pill.tone} pulse={pill.pulse} />
+          <span className="max-w-[10rem] min-w-0 truncate">{pill.label}</span>
+          <TriangleDownIcon size={16} />
+        </button>
+      )}
+    >
+      <PlatformPopover platform={platform} />
+    </Popover>
   );
 }
 

@@ -1,0 +1,61 @@
+@import "tailwindcss";
+@import "@managed-copilot/github-theme";
+
+/*
+ * Pattern Race additions: only the motion that signals live work (a thinking brain, a working sandbox, a running
+ * lane's time bar). Every color is a Primer variable.
+ */
+
+/* Six lanes side by side from this width (`race:`), so each lane has room for four sandboxes. */
+@theme {
+  --breakpoint-race: 85rem;
+}
+
+@keyframes brain-pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--bgColor-accent-emphasis) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes sandbox-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+  50% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bgColor-accent-emphasis) 25%, transparent);
+  }
+}
+
+@keyframes bar-stripes {
+  to {
+    background-position: 24px 0;
+  }
+}
+
+@layer components {
+  .brain-live {
+    animation: brain-pulse 1.6s ease-out infinite;
+  }
+  .sandbox-live {
+    animation: sandbox-glow 1.6s ease-in-out infinite;
+  }
+  .bar-live {
+    background-image: repeating-linear-gradient(-45deg, transparent 0 6px, color-mix(in srgb, var(--fgColor-onEmphasis) 25%, transparent) 6px 12px);
+    background-size: 24px 100%;
+    animation: bar-stripes 1s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .brain-live,
+    .sandbox-live,
+    .bar-live {
+      animation: none;
+    }
+  }
+}

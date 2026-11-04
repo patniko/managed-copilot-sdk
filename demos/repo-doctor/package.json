@@ -1,0 +1,41 @@
+{
+  "name": "@managed-copilot/demo-repo-doctor",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Repo Doctor: paste a repository, and one sandbox clones it, reproduces its failing test, fixes it, and hands back a verified patch.",
+  "type": "module",
+  "exports": {
+    "./apphost": "./apphost.mts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.tooling.json",
+    "dev": "tsx watch --clear-screen=false src/server/main.ts",
+    "start": "node dist/server/main.js",
+    "happy-path": "node dist/scripts/happy-path.js",
+    "test": "vitest run",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.26",
+    "@managed-copilot/protocol": "workspace:*",
+    "@managed-copilot/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@managed-copilot/github-theme": "workspace:*",
+    "@primer/octicons-react": "19.40.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tailwindcss": "^4.3.3",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "^4.0.0"
+  }
+}

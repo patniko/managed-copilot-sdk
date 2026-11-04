@@ -157,7 +157,6 @@ export function App({ preview }: { preview?: ReactNode }) {
   const platformDown = platform !== undefined && platform.state !== "ready" && platform.state !== "connecting";
   const loading = !snapshot || (!platformDown && items.length === 0 && pending.length === 0 && conversation?.attach !== "live" && conversation?.attach !== "error");
   const disabledReason = platformDown ? "Managed Copilot isn't reachable" : conversation?.attach === "error" ? "Couldn't open the conversation" : "Connecting to your assistant…";
-  const demo = snapshot?.connections.provider !== "google";
 
   const rail = !snapshot ? (
     <RailSkeleton />
@@ -187,7 +186,11 @@ export function App({ preview }: { preview?: ReactNode }) {
     <div className="flex h-full flex-col">
       <Header
         status={status}
+        platform={platform}
+        conversation={conversation}
         account={snapshot?.account}
+        sandboxes={sandboxes}
+        offline={snapshot?.offline}
         unread={unread}
         panelAttention={backgroundOff ? "Background work is off" : undefined}
         panelOpen={panelOpen && !wide}
@@ -215,7 +218,7 @@ export function App({ preview }: { preview?: ReactNode }) {
               <div className="blankslate blankslate--narrow">
                 <CloudOfflineIcon size={24} className="blankslate-icon" />
                 <h2 className="blankslate-heading">Waiting for Managed Copilot</h2>
-                <p className="blankslate-description">Your conversation lives on Managed Copilot. It will appear here as soon as the platform is reachable again.</p>
+                <p className="blankslate-description">Your conversation appears once the platform is reachable.</p>
               </div>
             </div>
           ) : loading ? (
@@ -236,7 +239,6 @@ export function App({ preview }: { preview?: ReactNode }) {
                   name={snapshot?.account?.name}
                   login={snapshot?.account?.login}
                   timeZone={timeZone}
-                  demo={demo}
                   background={snapshot?.background}
                   sandboxes={sandboxes?.enabled ?? false}
                   onPick={(text) => void actions.send(text)}
@@ -258,7 +260,7 @@ export function App({ preview }: { preview?: ReactNode }) {
             disabled={!live}
             disabledReason={disabledReason}
             busy={conversation?.busy ?? false}
-            hint={sandboxes?.enabled ? "Sending mail, changing your calendar, and starting sandboxes always ask you first" : undefined}
+            hint={sandboxes?.enabled ? "Asks before sending, booking, or starting sandboxes" : undefined}
             onSend={(text) => void actions.send(text)}
             onStop={() => void actions.abort()}
           />

@@ -239,7 +239,7 @@ export class AttachRelay {
     const token = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "")?.[1];
     const { owner, sessionId } = this.#options;
     if (!token) {
-      return { code: "authentication_required", message: `Copilot CLI is not signed in. Run \`copilot login\` as @${owner.login}, then attach to ${sessionId} again.` };
+      return { code: "authentication_required", message: `Copilot CLI did not send a GitHub credential for attachment to session ${sessionId}.` };
     }
     const key = createHash("sha256").update(token).digest("hex");
     let lookup = this.#verifying.get(key);
@@ -542,7 +542,7 @@ export async function launchAttachedCli(
   // An empty folder of its own: Copilot CLI asks to trust its working folder, and the session runs remotely.
   const folder = join(discoveryDirectory(), "attach");
   mkdirSync(folder, { recursive: true });
-  const args = ["--ahp", relayUrl, ...(options.args ?? [])];
+  const args = ["--ahp", relayUrl, "--ahp-authenticate", "github", ...(options.args ?? [])];
   const ignoreInterrupt = () => undefined;
   process.on("SIGINT", ignoreInterrupt);
   try {

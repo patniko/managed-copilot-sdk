@@ -122,9 +122,7 @@ function ArtifactsBrowser({ workOrder, index, query }: { readonly workOrder: Wor
             onVersion={(next) => select(selected, next === selected.versions[0]?.version ? undefined : next)}
           />
         ) : (
-          <EmptyState icon={FileIcon} title="Pick a file">
-            Choose a file on the left to preview it.
-          </EmptyState>
+          <EmptyState icon={FileIcon} title="Pick a file to preview" />
         )}
       </section>
     </div>
@@ -297,8 +295,7 @@ function Viewer({
     // The factory keeps text files up to 1 MB; it has no bytes to serve for anything else.
     body = (
       <EmptyState icon={FileZipIcon} title="This file can't be previewed" size="lg">
-        {formatBytes(version.size)} · {file.contentType}. The factory keeps text files up to 1 MB, so binary and larger outputs
-        aren't stored here.
+        {formatBytes(version.size)} · {file.contentType}. Only text files up to 1 MB are kept.
       </EmptyState>
     );
   } else if (content.status === "ready") {
