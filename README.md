@@ -104,7 +104,7 @@ pnpm gallery                        # every demo and walkthrough on one page
 
 ## Demos
 
-All three run under `aspire run` with real models and deploy to Azure with the same AppHost.
+All of them run under `aspire run` with real models and deploy to Azure with the same AppHost.
 
 <p align="center">
   <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The software factory floor: a coordinator that created two builder sandboxes and reused them for review fixes" width="900">
@@ -115,6 +115,7 @@ All three run under `aspire run` with real models and deploy to Azure with the s
 | [AI software factory](demos/software-factory/README.md) | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
 | [Long-running assistant](demos/assistant/README.md) | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 | [Dispatch](demos/dispatch/README.md) | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
+| [Incident Commander](demos/incident-commander/README.md) | An alert opens an incident; Copilot triages in its own sandbox, hands the repro and fix to workers, and asks before deploying, even with the tab closed |
 
 ## Deploy to Azure
 

@@ -96,7 +96,7 @@ flowchart TD
 | **Promotable** | An assistant that usually chats but sometimes needs to run code | [Walkthrough 04](../../walkthroughs/04-promotion/README.md) | — |
 | **Direct** | A harness with its own planning and sub-agents that must not run code on your host; tight edit-and-run loops | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | [Dispatch](../../demos/dispatch/README.md), **Work directly** |
 | **Delegate** | Software factories and research swarms: independent, long-running parts in parallel | [Walkthrough 11](../../walkthroughs/11-orchestrator/README.md) | Dispatch, **Delegate to workers**; the factory's agent-led mode; the [assistant](../../demos/assistant/README.md)'s sandboxes |
-| **Mixed** | One conversation that does quick work itself and hands big or differently permitted parts to new agents | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | Dispatch, **Mixed** |
+| **Mixed** | One conversation that does quick work itself and hands big or differently permitted parts to new agents | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | Dispatch, **Mixed**; [Incident Commander](../../demos/incident-commander/README.md): triage in its own sandbox, repro and fix in workers |
 
 **Bring your own brain.** If you already have an agent loop, keep it in your process and give it hands in a sandbox:
 `managed.sandboxes.create` and `managed.exec` use the single-container block directly
