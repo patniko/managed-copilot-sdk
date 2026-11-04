@@ -177,6 +177,11 @@ if (await configuration.exists("Parameters:front-desk-github-client-id")) {
     .withEnvironment("FRONT_DESK_GITHUB_CLIENT_ID", await builder.addParameter("front-desk-github-client-id"))
     .withEnvironment("FRONT_DESK_GITHUB_CLIENT_SECRET", await builder.addParameter("front-desk-github-client-secret", { secret: true }));
 }
+// Anyone who can reach a public Front Desk can create an email account, and your Foundry pays for their messages. To
+// choose who can, set an invitation code (`Parameters:front-desk-invite-code`) and share it with them.
+if (await configuration.exists("Parameters:front-desk-invite-code")) {
+  await frontDeskApp.withEnvironment("FRONT_DESK_INVITE_CODE", await builder.addParameter("front-desk-invite-code", { secret: true }));
+}
 
 // The demo gallery: every demo and walkthrough of this deployment on one page, at https://gallery.<environment-domain>.
 // Deployed only (locally, `pnpm gallery`). It holds no GitHub token, and opens from the same addresses as the demos.

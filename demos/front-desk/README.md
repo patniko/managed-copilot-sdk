@@ -115,18 +115,21 @@ platform's Azure Files share. Any GitHub account that signs in through it may us
 using the deployment directly still takes `access`. Deploying also gives the gateway's managed identity the Cognitive
 Services OpenAI User role on the Foundry account, so you need permission to assign roles in its resource group.
 
-`aspire deploy` runs the AppHost as Production, which doesn't read user secrets, so give it the Foundry and GitHub
-settings as environment variables for that run (`A__B` for `A:B`). Read the secret from a prompt, not a command line:
+`aspire deploy` runs the AppHost as Production, which doesn't read user secrets. `npx managed-copilot deploy` passes
+the AppHost's parameters from them (the GitHub OAuth app from `setup-github`, an invitation code); the Foundry
+settings aren't parameters, so give them as environment variables for that run (`A__B` for `A:B`):
 
 ```powershell
 $env:Foundry__Account = "<account-name>"; $env:Foundry__ResourceGroup = "<its-resource-group>"; $env:Foundry__Deployments = "<deployment-name>"
-${env:Parameters__front-desk-github-client-id} = "<client-id>"
-${env:Parameters__front-desk-github-client-secret} = Read-Host "Client secret" -MaskInput
 npx managed-copilot deploy
-Remove-Item Env:Parameters__front-desk-github-client-secret
 ```
 
 Then add the deployed callback URL to the GitHub OAuth app (step 2 above).
+
+Anyone who can reach a public Front Desk can create an email account, and your Foundry pays for their messages: each
+person gets 50 a day, and one address can create 10 accounts an hour. To choose who can, set an invitation code and
+share it with them: add `"Parameters:front-desk-invite-code": "<code>"` to the file `aspire secret path` names, then
+deploy again.
 
 ## How it works
 
@@ -169,7 +172,7 @@ Then add the deployed callback URL to the GitHub OAuth app (step 2 above).
 | `FRONT_DESK_FOUNDRY_MODEL` | the environment's default | Their model (a Foundry deployment) |
 | `FRONT_DESK_GITHUB_CLIENT_ID` / `_SECRET` | none | "Continue with GitHub" |
 | `FRONT_DESK_SEALING_KEY` | a key file in the data directory | Seals the GitHub tokens Front Desk keeps |
-| `FRONT_DESK_INVITE_CODE` | none | Creating an account needs this code |
+| `FRONT_DESK_INVITE_CODE` | none | Creating an account needs this code (the AppHost's `Parameters:front-desk-invite-code`) |
 | `FRONT_DESK_DAILY_LIMIT` | `50` | Messages a day for each person the app pays for |
 | `FRONT_DESK_DATA_DIR` | `.data` | Front Desk's records |
 | `FRONT_DESK_LOCAL_SIGNIN` | on | `0` hides "Use this computer's GitHub sign-in" (it's never offered when deployed) |
@@ -201,6 +204,11 @@ Where each person's model use went (Managed Copilot's own record of each session
 
 The gateway's log agrees: it logs "Session model calls go to Azure AI Foundry" with the session ID and owner for each
 email user's session, and never for the GitHub user's.
+
+Deployed to Azure, the same check with two email users passed 19 of 19 against `https://front-desk.<environment-domain>`
+(`--github skip`, since a deployed Front Desk never offers this computer's GitHub sign-in): the gateway called Foundry
+with its managed identity, and Front Desk answered from outside the deployment's address allowlist, which still
+refused the apps that act as the deployer.
 
 ## Layout
 
