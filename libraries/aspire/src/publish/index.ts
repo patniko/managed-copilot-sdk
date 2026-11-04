@@ -418,6 +418,7 @@ export interface PublishAppOptions {
    */
   readonly githubToken?: boolean;
   /**
+  /**
    * Opens the app to any address on the Internet, for an app that signs in its own users (with their own GitHub tokens,
    * or users it vouches for with an app credential). It gets no GitHub token (`githubToken: true` is refused), and
    * `Parameters:app-allowed-ips` doesn't apply to it. Default false: only the addresses in `Parameters:app-allowed-ips`

@@ -1817,8 +1817,22 @@ sequenceDiagram
   they read and write its user secrets with `aspire secret` (`Azure:*`, `Parameters:<name>-github-users|-github-orgs|
   -operator-users|-operator-orgs`, `Parameters:app-allowed-ips`), then `deploy` runs `aspire deploy` with the caller's
   token in `Parameters__app-github-token` and the AppHost's other `Parameters:*` user secrets as `Parameters__<name>`
-  (`aspire deploy` runs as Production without user secrets), except `<name>-platform-key|-durable-key|-vault-key|
-  -egress-key`, parameters the deployment's Aspire record already holds, and variables already in its environment. `aspire deploy` signs in as the Azure CLI's current account, so for another
+  (`aspire deploy` runs as Production without user secrets), except generated parameters (each `parameter.v0` with
+  `inputs.value.default.generate` in the manifest `aspire do publish-manifest` writes, run with the deploy's
+  environment variables minus the token, plus `<name>-platform-key|-durable-key|-vault-key|-egress-key|-app-<app>-key`
+  by name), parameters the deployment's Aspire record already holds, and variables already in its environment. The
+  manifest step runs under its own Aspire environment (`--environment managed-copilot-parameter-check`), seeded with a
+  copy of the Production state files (Aspire loads an environment's saved state into the AppHost's configuration, so
+  the check sees what `aspire deploy` will): Aspire keeps
+  deployment state per environment (`<record>/<environment>.json`) and its `process-parameters` step saves every
+  resolved value there in publish mode. Only parameters the manifest declares and doesn't generate are passed; an
+  undeclared one is named and left out. `publish-manifest` doesn't depend on that step in 13.6 (verified: a record
+  stays byte-identical; only an empty record directory is made), and if a version ran it, the local values would land
+  in the check's state, never Production's; `deploy` deletes the check's state files and an empty record directory it
+  made, and touches nothing else (another deployment may be writing there). The step runs once more if it fails
+  (Aspire fails now and then while other Aspire commands are busy); failing twice stops `deploy` before anything
+  changes, naming only the "See logs at" path from its output, which can repeat values it was given. `aspire deploy`
+  signs in as the Azure CLI's current account, so for another
   subscription `deploy` passes that subscription's tenant (`Azure__TenantId`) when the same account holds it and stops
   with `az account set --subscription <id>` when another account does. `access ips` also rewrites the running published
   apps' `allow-<n>` ingress rules with `az containerapp ingress access-restriction` (set before remove; `platform` and

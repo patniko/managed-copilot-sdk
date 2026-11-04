@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Context } from "../context.js";
 import { CommandError, UsageError } from "../errors.js";
-import type { HostTools } from "../host.js";
+import type { CommandResult, HostTools } from "../host.js";
 
 /** Deploy-time settings `access` edits, as `@managed-copilot/aspire` reads them from the AppHost's user secrets. */
 const LISTS = {
@@ -463,6 +464,8 @@ const targets = (record: DeploymentRecord | undefined, subscription: string, res
  */
 function appHostParameters(ctx: Context, settings: AppHostSettings, name: string, kept: ReadonlySet<string>, own: readonly string[]): Record<string, string> {
   const skip = new Set([...own, "Parameters:app-github-token", ...GENERATED_KEYS.map((suffix) => `Parameters:${name}-${suffix}`), ...kept].map(configKey));
+  // An app's key (`<name>-app-<app>-key`, from addManagedCopilot's `apps`) is generated too: each deployment makes its own.
+  const appKey = new RegExp(`^parameters:${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-app-.+-key$`);
   const caller = new Set(
     Object.entries(ctx.env)
       .filter(([, value]) => value !== undefined)
@@ -470,7 +473,7 @@ function appHostParameters(ctx: Context, settings: AppHostSettings, name: string
   );
   const parameters: Record<string, string> = {};
   for (const [key, value] of settings.entries()) {
-    if (!/^Parameters:[A-Za-z0-9][A-Za-z0-9_-]*$/.test(key) || skip.has(configKey(key)) || caller.has(configKey(key))) continue;
+    if (!/^Parameters:[A-Za-z0-9][A-Za-z0-9_-]*$/.test(key) || skip.has(configKey(key)) || caller.has(configKey(key)) || appKey.test(configKey(key))) continue;
     parameters[key.replace(":", "__")] = value;
   }
   return parameters;
@@ -479,6 +482,116 @@ function appHostParameters(ctx: Context, settings: AppHostSettings, name: string
 /** How Aspire matches a setting: case-insensitively, `__` for `:`, and `_` for `-` in a parameter's name. */
 function configKey(key: string): string {
   return key.replace(/__/g, ":").toLowerCase().replace(/_/g, "-");
+}
+
+interface AspireManifest {
+  readonly resources?: Readonly<Record<string, { readonly type?: string; readonly inputs?: { readonly value?: { readonly default?: { readonly generate?: unknown } } } }>>;
+}
+
+/**
+ * The parameters an AppHost declares and those it generates, as `configKey`s, or the Aspire log that says why they
+ * couldn't be read.
+ */
+type GeneratedParameters = { readonly declared: ReadonlySet<string>; readonly generated: ReadonlySet<string> } | { readonly failed: true; readonly log?: string };
+
+/**
+ * The Aspire environment the parameter check runs under. Aspire keeps an AppHost's deployment state per environment
+ * (`<record>/<environment>.json`), and its parameter step saves every value it resolves there in publish mode. Aspire
+ * 13.6 doesn't run that step for the manifest, but if a version did, the local values the check is given would land in
+ * this environment's state, never in the Production state `aspire deploy` uses, and the check deletes it.
+ */
+const PARAMETER_CHECK_ENVIRONMENT = "managed-copilot-parameter-check";
+
+/**
+ * The parameters the AppHost generates (`addParameterWithGeneratedValue`), from the manifest Aspire writes for it
+ * (`aspire do publish-manifest`, which needs no Azure and writes no values). It runs with the environment variables the
+ * deployment gets, minus the apps' token, and with a copy of the Production state Aspire saved (it loads an
+ * environment's state into the AppHost's configuration), so the AppHost sees what `aspire deploy` will and declares the
+ * same parameters. Aspire can fail while other Aspire commands are busy, so a failed check runs once more.
+ */
+async function generatedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<GeneratedParameters> {
+  const record = recordDirectory(ctx.host, appHost);
+  const hadRecord = existsSync(record);
+  try {
+    if (hadRecord) {
+      for (const file of readdirSync(record)) {
+        const lower = file.toLowerCase();
+        if (lower === "production.json" || lower.startsWith("production.json.")) copyFileSync(join(record, file), join(record, `${PARAMETER_CHECK_ENVIRONMENT}${file.slice("production".length)}`));
+      }
+    }
+  } catch {
+    removeCheckState(record, hadRecord);
+    return { failed: true };
+  }
+  try {
+    const first = await manifestGeneratedParameters(ctx, appHost, env);
+    return "generated" in first ? first : await manifestGeneratedParameters(ctx, appHost, env);
+  } finally {
+    removeCheckState(record, hadRecord);
+  }
+}
+
+async function manifestGeneratedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<GeneratedParameters> {
+  const directory = mkdtempSync(join(tmpdir(), "managed-copilot-manifest-"));
+  try {
+    const args = ["do", "publish-manifest", "--apphost", appHost, "--environment", PARAMETER_CHECK_ENVIRONMENT, "--non-interactive", "--nologo", "-o", directory];
+    const result = await ctx.host.capture("aspire", args, { env });
+    // Only the log's path is shown: the rest of the output could repeat a value the AppHost was given.
+    if (result.code !== 0) return { failed: true, log: aspireLog(result) };
+    const manifest = JSON.parse(readFileSync(join(directory, "aspire-manifest.json"), "utf8")) as AspireManifest;
+    if (!manifest.resources || typeof manifest.resources !== "object") return { failed: true };
+    const declared = new Set<string>();
+    const generated = new Set<string>();
+    for (const [name, resource] of Object.entries(manifest.resources)) {
+      if (!resource?.type?.startsWith("parameter.")) continue;
+      declared.add(configKey(`Parameters:${name}`));
+      if (resource.inputs?.value?.default?.generate !== undefined) generated.add(configKey(`Parameters:${name}`));
+    }
+    return { declared, generated };
+  } catch {
+    return { failed: true };
+  } finally {
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // A leftover manifest holds no values.
+    }
+  }
+}
+
+/** The log file Aspire names on its last "See logs at <path>" line. */
+function aspireLog(result: CommandResult): string | undefined {
+  const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+  for (const line of lines.reverse()) {
+    const found = /See logs at (\S.*\.log)\s*$/.exec(line);
+    if (found) return found[1];
+  }
+  return undefined;
+}
+
+/** Deletes the check environment's state files, and the record directory if the check made it and it's still empty. */
+function removeCheckState(record: string, hadRecord: boolean): void {
+  let files: string[];
+  try {
+    files = readdirSync(record);
+  } catch {
+    return;
+  }
+  for (const file of files) {
+    if (!file.toLowerCase().startsWith(`${PARAMETER_CHECK_ENVIRONMENT}.`)) continue;
+    try {
+      rmSync(join(record, file), { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // Never read by `aspire deploy`, which uses the Production state.
+    }
+  }
+  if (hadRecord) return;
+  try {
+    // Fails, as it should, once a deployment has written its own files here.
+    rmdirSync(record);
+  } catch {
+    // Left behind.
+  }
 }
 
 /** `az account show` output; the account's name is compared, never printed. */
@@ -625,7 +738,39 @@ export async function deploy(ctx: Context): Promise<number | void> {
   // `aspire deploy` runs the AppHost as Production, where user secrets aren't loaded, so the settings this command
   // manages and the AppHost's own parameters go in as environment variables (`Parameters:x` is `Parameters__x`).
   const managed = ["Azure:SubscriptionId", "Azure:Location", "Azure:ResourceGroup", ...ACCESS_LISTS.map((list) => LISTS[list].key(name))];
+  const chosen: Record<string, string | undefined> = {
+    "Azure:SubscriptionId": subscription,
+    "Azure:Location": location,
+    "Azure:ResourceGroup": resourceGroup,
+    [usersKey]: users.join(","),
+    [operatorsKey]: operators.join(","),
+  };
+  const settingsEnv: Record<string, string> = {};
+  for (const key of managed) {
+    const value = (key in chosen ? chosen[key] : settings.get(key))?.trim();
+    if (value) settingsEnv[key.replaceAll(":", "__")] = value;
+  }
+  if (tenant) settingsEnv.Azure__TenantId = tenant;
+
   const parameters = appHostParameters(ctx, settings, name, readRecord(recordDirectory(host, settings.path))?.parameters ?? new Set(), managed);
+  if (Object.keys(parameters).length > 0) {
+    // Values `aspire run` generated and kept in the user secrets (keys, webhook secrets) must never stand in for the
+    // deployment's own, so ask the AppHost which parameters it generates.
+    if (!ctx.json) ctx.err(ctx.errStyle.dim(`Checking which parameters the AppHost generates${ctx.errStyle.ellipsis}`));
+    const generated = await generatedParameters(ctx, settings.path, { ...parameters, ...settingsEnv });
+    if ("failed" in generated) {
+      throw new CommandError("Couldn't tell which parameters the AppHost generates (`aspire do publish-manifest` failed twice), so nothing was deployed.", {
+        hint: `${generated.log ? `Aspire's log: ${generated.log}. ` : ""}Try again; if it keeps failing, \`aspire do publish-manifest --apphost "${settings.path}" -o <folder>\` shows why.`,
+      });
+    }
+    const own = Object.keys(parameters).filter((variable) => generated.generated.has(configKey(variable)));
+    for (const variable of own) delete parameters[variable];
+    if (own.length) ctx.out(style.dim(`  Generated by the AppHost, so the deployment makes its own: ${own.map((variable) => variable.slice("Parameters__".length)).join(", ")}`));
+    // A parameter the check didn't see declared might be one the AppHost generates under other conditions: never guess.
+    const unused = Object.keys(parameters).filter((variable) => !generated.declared.has(configKey(variable)));
+    for (const variable of unused) delete parameters[variable];
+    if (unused.length) ctx.out(style.dim(`  Not declared by the AppHost, so not passed: ${unused.map((variable) => variable.slice("Parameters__".length)).join(", ")}`));
+  }
   const passed = Object.keys(parameters).map((variable) => variable.slice("Parameters__".length));
   if (passed.length) ctx.out(style.dim(`  Passing ${plural(passed.length, "parameter")} from the AppHost's user secrets: ${passed.join(", ")}`));
   if (!ctx.yes && !(await ctx.confirm("Deploy?"))) return 1;
@@ -636,12 +781,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   await settings.set(usersKey, users.join(","));
   await settings.set(operatorsKey, operators.join(","));
 
-  const env: Record<string, string> = { ...parameters, [TOKEN_PARAMETER_ENV]: token };
-  for (const key of managed) {
-    const value = settings.get(key);
-    if (value) env[key.replaceAll(":", "__")] = value;
-  }
-  if (tenant) env.Azure__TenantId = tenant;
+  const env: Record<string, string> = { ...parameters, ...settingsEnv, [TOKEN_PARAMETER_ENV]: token };
 
   const code = await host.stream("aspire", ["deploy", "--apphost", settings.path, ...(ctx.interactive ? [] : ["--non-interactive"])], { env });
   if (code !== 0) throw new CommandError(`aspire deploy failed (exit ${code}).`, { hint: "Its output above says why. Fix that, then run `npx managed-copilot deploy` again." });

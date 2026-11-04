@@ -1361,8 +1361,10 @@ the Azure CLI's current account: that account's subscription in another tenant g
 subscription stops with `az account set --subscription <id>` as the fix. A first deployment with no access rules or
 operators adds the caller to both. The token for published apps that act as an account is the caller's GitHub sign-in,
 passed to `aspire deploy` in `Parameters__app-github-token`, never as an argument. The AppHost's own parameters in its
-user secrets go the same way (`aspire deploy` doesn't load user secrets), except the platform's generated keys and
-values the deployment's Aspire record already keeps; `deploy` names them, never their values. It asks before deploying
+user secrets go the same way (`aspire deploy` doesn't load user secrets), except values the deployment's Aspire record
+already keeps and every parameter the AppHost generates (`addParameterWithGeneratedValue`, including the platform's and
+apps' keys: each deployment makes its own), which `deploy` learns from the manifest `aspire do publish-manifest` writes;
+if it can't tell, it stops before deploying. `deploy` names them, never their values. It asks before deploying
 (`--yes` skips the question). If the resource group already holds a deployment, it deploys only when this AppHost's Aspire
 deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it; otherwise, in a
 terminal, it offers to adopt another checkout's record for that target so the deployment keeps its generated keys. User
@@ -1829,7 +1831,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 41 | Users without GitHub | Your app signs them in with any provider and vouches for each with an app key the AppHost issues (`apps`, `managed.client(env, { appUser })`, `managed.as(...)`); their sessions belong to that app user, scoped to the app and never a GitHub account, and bill to the deployment's Foundry; anything that needs a GitHub entitlement fails explicitly. People who sign in with GitHub keep `{ gitHubToken }` and their own plan | Decided | Built (2026-11-04): app keys, app-user accounts scoped to their app, Foundry-only inference, and explicit refusals, verified with real Foundry calls through `aspire run` and on Azure |
 | 42 | GitHub users of a public app | `anyGitHubUser: true` on an app admits any GitHub account that comes through that app's key; `access` still decides who may use the deployment directly. Such sessions are the GitHub account's own; a request through an app reaches only those in its environments | Proposed | Built; verified on Azure with a GitHub account outside `access` |
 | 43 | Declaring Foundry | AppHost `foundry` names existing AIServices accounts (resource group, optional subscription, deployments). The platform's Azure identity calls them: `az login` locally, the gateway's managed identity in Azure with a role `aspire deploy` assigns. Stock runtime BYOK provider: a token the gateway answers per call on the shared runtime, a placeholder the gateway swaps in sandboxes. A session's route is fixed at creation | Proposed | Built: shared runtime and sandboxes (Docker and Container Apps Sandboxes), `az login` locally and the gateway's managed identity on Azure |
-| 44 | Public apps | `publishApp({ public: true })` opens an app that signs in its own users to any address. It never holds the deployer's GitHub token (`githubToken: true` is refused); every other app keeps the deploy-time address allowlist, which only an explicit `"*"` opens (section 16) | Proposed | Built and verified on Azure (2026-11-04): a public app answered from outside the allowlist while an app acting as the deployer refused it |
+| 44 | Public apps | `publishApp({ public: true })` opens an app that signs in its own users to any address. It never holds the deployer's GitHub token (`githubToken: true` is refused); every other app keeps the deploy-time address allowlist, which only an explicit `"*"` opens, and an app that acts as the deployer becomes public only in two deploys (section 16) | Proposed | Built and verified on Azure (2026-11-04): a public app answered from outside the allowlist while an app acting as the deployer refused it; a one-step switch to public was refused |
 
 ## Platform contracts
 
