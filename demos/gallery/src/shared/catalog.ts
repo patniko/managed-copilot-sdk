@@ -107,7 +107,7 @@ export const WALKTHROUGHS: readonly Walkthrough[] = [
   { id: "13", folder: "13-your-own-harness", title: "Your own harness", youSee: "Commands run directly in a sandbox, and a stock client whose sub-agents' hands are there", minutes: 1, runnable: true },
 ];
 
-/** Screenshot file for an app or walkthrough, served at /shots/<file>. */
+/** An app's screenshot file, served at /shots/<file>. */
 export const shotFile = (id: string): string => `${id}.png`;
 
 /** The three building blocks every pattern is made of. */
@@ -159,7 +159,7 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "coder",
     settings: ['type: "isolated"'],
     walkthrough: "03",
-    demos: [{ app: "software-factory", where: "Classic mode" }],
+    demos: [{ app: "software-factory", where: "App-driven mode" }],
   },
   {
     id: "shared",
