@@ -241,6 +241,8 @@ async function ensureBackgroundWork(page: Page): Promise<void> {
   await card.getByRole("button", { name: /Turn (on background work|background work back on)/ }).click();
   await page.locator('[data-testid="background"][data-state="on"]').waitFor({ timeout: 30_000 });
   ok("background work is on");
+  // Its confirmation toast leaves before the next screenshot.
+  await page.locator(".Toast").first().waitFor({ state: "detached", timeout: 15_000 }).catch(() => undefined);
 }
 
 /** Settings → Start over (and, with `demo`, fresh demo data), then waits for the new, empty conversation. */

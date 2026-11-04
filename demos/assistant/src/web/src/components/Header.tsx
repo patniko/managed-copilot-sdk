@@ -98,19 +98,42 @@ function PlatformDetails({
 }) {
   const connected = status.tone === "ok" || status.tone === "busy";
   const label = platformLabel(deployment);
-  const kind = label && label !== deployment?.name ? `${label} deployment` : "Deployment";
-  const named = deployment && deployment.name.toLowerCase() !== deployment.mode ? ` “${deployment.name}”` : "";
-  const where = deployment ? `${kind}${named} · v${deployment.version}` : undefined;
   return (
     <div className="text-sm">
-      <div className="flex items-start gap-2 border-b border-line px-4 py-3">
-        <span className="mt-0.5 flex shrink-0">
-          <StatusDot tone={status.tone} />
-        </span>
-        <div className="min-w-0">
-          <div className="font-semibold">{connected ? "Connected to Managed Copilot" : status.text}</div>
-          {(connected ? where : (platform?.message ?? where)) && <div className="mt-0.5 line-clamp-2 text-xs text-fg-muted">{connected ? where : (platform?.message ?? where)}</div>}
+      <div className="border-b border-line px-4 py-3">
+        <div className="flex items-center gap-2 font-semibold">
+          <span className="flex shrink-0">
+            <StatusDot tone={status.tone} />
+          </span>
+          <span className="min-w-0">{connected ? `Connected${label ? ` · ${label}` : ""}` : status.text}</span>
         </div>
+        {!connected && platform?.message && <p className="mt-1 line-clamp-2 text-xs text-fg-muted">{platform.message}</p>}
+        {deployment && (
+          <div className="mt-2 truncate text-fg-muted" title={`v${deployment.version}`}>
+            Deployment <span className="font-semibold text-fg">{deployment.name}</span>
+          </div>
+        )}
+        {platform?.url && (
+          <div className="mt-0.5 flex min-w-0 items-center gap-1">
+            <span className="truncate font-mono text-xs text-fg-muted" title={platform.url}>
+              {platform.url}
+            </span>
+            <CopyButton text={platform.url} label="Copy URL" />
+          </div>
+        )}
+        {account && (
+          <div className="mt-2 flex min-w-0 items-center gap-2">
+            {account.avatarUrl ? (
+              <img src={account.avatarUrl} alt="" className="avatar size-5 shrink-0" />
+            ) : (
+              <span className="avatar avatar-initials size-5 shrink-0 text-[10px]" aria-hidden>
+                {account.login.slice(0, 2).toUpperCase()}
+              </span>
+            )}
+            {account.name && <span className="truncate font-semibold">{account.name}</span>}
+            <span className="truncate text-fg-muted">@{account.login}</span>
+          </div>
+        )}
       </div>
       <div className="px-4 py-3">
         <h3 className="text-xs font-semibold text-fg-muted">Where it runs</h3>
@@ -128,39 +151,16 @@ function PlatformDetails({
           ))}
         </ul>
       </div>
-      <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-1.5 border-t border-line-muted px-4 py-3 text-xs">
-        <dt className="text-fg-muted">URL</dt>
-        <dd className="flex min-w-0 items-center gap-1">
-          {platform?.url ? (
-            <>
-              <span className="truncate font-mono" title={platform.url}>
-                {platform.url}
-              </span>
-              <CopyButton text={platform.url} label="Copy URL" />
-            </>
-          ) : (
-            <span className="text-fg-muted">Not known yet</span>
+      {(conversation?.model || offline) && (
+        <div className="space-y-0.5 border-t border-line-muted px-4 py-2.5 text-xs text-fg-muted">
+          {conversation?.model && (
+            <div className="truncate">
+              Model <span className="font-mono">{conversation.model}</span>
+            </div>
           )}
-        </dd>
-        {account && (
-          <>
-            <dt className="text-fg-muted">Account</dt>
-            <dd className="truncate">@{account.login}</dd>
-          </>
-        )}
-        {conversation?.model && (
-          <>
-            <dt className="text-fg-muted">Model</dt>
-            <dd className="truncate font-mono">{conversation.model}</dd>
-          </>
-        )}
-        {offline && (
-          <>
-            <dt className="text-fg-muted">Webhook</dt>
-            <dd>{offline.webhookConfigured ? "On" : "Off · polling only"}</dd>
-          </>
-        )}
-      </dl>
+          {offline && <div>Webhook {offline.webhookConfigured ? "on" : "off · polling only"}</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -220,8 +220,10 @@ function PlatformPill(props: {
 }
 
 /** Copilot CLI: the command that opens this same conversation in a terminal. */
-function CliButton({ sessionId }: { sessionId?: string }) {
-  const command = sessionId ? `npx managed-copilot attach ${sessionId}` : undefined;
+function CliButton({ sessionId, platform }: { sessionId?: string; platform?: PlatformStatus }) {
+  // A local platform's URL works from this machine; naming it keeps the command right when discovery is off.
+  const url = platform?.deployment?.mode === "local" ? platform.url : undefined;
+  const command = sessionId ? `npx managed-copilot attach ${sessionId}${url ? ` --url ${url}` : ""}` : undefined;
   return (
     <Popover
       label="Open in Copilot CLI"
@@ -326,7 +328,7 @@ export function Header(props: {
         )}
         {props.preview}
         <div className="AppHeader-actions min-w-0">
-          <CliButton sessionId={props.conversation?.sessionId} />
+          <CliButton sessionId={props.conversation?.sessionId} platform={props.platform} />
           <Tooltip content="Settings" describe={false}>
             <button type="button" className="AppHeader-button" onClick={props.onOpenSettings} aria-label="Settings">
               <GearIcon />

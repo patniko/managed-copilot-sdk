@@ -549,13 +549,13 @@ function SandboxTile({ worker, environment, onOpen }: { worker: SandboxWorkerVie
         >
           <span className="flex w-full min-w-0 items-center gap-1.5">
             <KindIcon size={14} className={cx("shrink-0", stopped ? "text-fg-disabled" : "text-fg-accent")} />
-            <span className={cx("truncate font-semibold", stopped && "text-fg-muted")}>{worker.name}</span>
-          </span>
-          <span className="flex w-full min-w-0 items-center gap-2 text-xs text-fg-muted">
-            <SandboxState worker={worker} />
-            <span className="ml-auto shrink-0 tabular-nums">
+            <span className={cx("min-w-0 flex-1 truncate font-semibold", stopped && "text-fg-muted")}>{worker.name}</span>
+            <span className="shrink-0 text-xs text-fg-muted tabular-nums">
               {worker.messages} task{worker.messages === 1 ? "" : "s"}
             </span>
+          </span>
+          <span className="flex w-full min-w-0 items-center pl-5 text-xs text-fg-muted">
+            <SandboxState worker={worker} />
           </span>
         </button>
       </Tooltip>
@@ -609,7 +609,7 @@ export function SandboxesCard({ sandboxes, onOpen, onOpenSettings }: { sandboxes
               </div>
             </Tooltip>
           ) : (
-            <ul className="grid grid-cols-2 gap-2">
+            <ul className="flex flex-col gap-2">
               {shown.map((worker) => (
                 <SandboxTile key={worker.id} worker={worker} environment={kinds.get(worker.environment)} onOpen={() => onOpen(worker.id)} />
               ))}

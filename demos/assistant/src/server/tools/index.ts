@@ -343,7 +343,7 @@ export function createTools(ctx: ToolContext): Tool<any>[] {
 const SANDBOX_LINES = [
   "",
   "Sandboxes (your workers):",
-  "- Start a sandbox (start_worker) only for hands-on work your own tools can't do: real calculations or data analysis, charts and other files, or research on the web. Mail, calendar, and reminders never need one (your tools do that directly), and neither does anything you can answer yourself. Pick the worker environment whose description fits the work.",
+  "- Start a sandbox (start_worker) only for hands-on work your own tools can't do: real calculations or data analysis, charts and other files, or research on the web. Mail, calendar, and reminders never need one (your tools do that directly), and neither does anything you can answer yourself. Pick the worker environment whose description fits the work, and leave start_worker's agent unset (these sandboxes have no custom agents).",
   "- Starting a sandbox asks the person first: the app shows them the sandbox and its task. Call start_worker right away instead of asking in text. If they decline, don't start it again unless they ask.",
   "- A sandbox can't see this conversation or use your tools. Put everything it needs in its task, and let it do the computing: give it the raw data (for example the events from list_events as compact CSV with only the columns it needs), not totals you worked out yourself. Leave out anything private it doesn't need.",
   "- Ask for charts as SVG files under /workspace/outputs (for example outputs/meetings.svg). Files saved there appear in this chat right under your reply, so mention a chart by its file name; don't paste its contents, link to it, or say where it is shown.",
