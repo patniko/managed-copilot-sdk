@@ -1719,9 +1719,11 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   public address, resolved only when such an app exists). With `public: true` an app gets no IP rules, is tagged
   `managed-copilot-access: public` (`PublishAsManagedCopilotPublicApp`), and never gets `Parameters:app-github-token`
   (`githubToken: true` is refused before anything is declared). A `check-<app>-public` pipeline step runs after the
-  environment is provisioned and before the app's container app is: it lists the app's active revisions
-  (`az containerapp revision list`) and refuses to open an app while one still holds the token, since ingress applies
-  to every revision at once. The deploy summary lists allowlisted and public apps
+  environment is provisioned and before `push-prereq` (Aspire creates each container app's provisioning step only once
+  the pipeline runs, and that step waits for the app's image push): it lists the app's active revisions
+  (`az containerapp revision list`, read whole) and refuses to open an app while one still holds the token, since
+  ingress applies to every revision at once. Only `ResourceNotFound` for that container app counts as a new app; any
+  other Azure CLI failure fails closed. The deploy summary lists allowlisted and public apps
   separately. The C# integration in
   `deployments/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
   revision mode, IP rules, tags). Publishing refuses an open gateway: access rules come from the AppHost or from

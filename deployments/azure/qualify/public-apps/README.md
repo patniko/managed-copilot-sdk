@@ -25,4 +25,14 @@ az group delete --subscription <id> --name <new group> --yes
 with `--expect-restricted 200` to see the allowlist admit this machine (if Azure sees this machine at the address
 `api.ipify.org` reports; corporate tunnels often differ).
 
-Last run: 2026-11-04, westus2, 10/10 checks (see "Live qualification" in [deploying to Azure](../../../../docs/deployment.md#live-qualification)).
+To check the switch of an app that acts as the deployer to public, deploy again with `QUALIFY_DEPLOYER_GALLERY` set
+in the environment:
+
+| `QUALIFY_DEPLOYER_GALLERY` | `deployer-gallery` is published with | Expected |
+| --- | --- | --- |
+| `public` (straight after the default) | `public: true` | `check-deployer-gallery-public` refuses, naming the revision that holds the token; the app's ingress is unchanged |
+| `no-token` | `githubToken: false` | Deploys; once the new revision serves, the token-holding one is no longer active |
+| `public` (after `no-token`) | `public: true` | Deploys; the app is tagged `public`, has no IP rules, and answers any address |
+
+Last run: 2026-11-04, westus2: 10/10 checks, and all three switch stages as expected (see "Live qualification" in
+[deploying to Azure](../../../../docs/deployment.md#live-qualification)).
