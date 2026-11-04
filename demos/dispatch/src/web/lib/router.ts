@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-export type ConversationTab = "environments" | "timeline";
+export type ConversationTab = "sandboxes" | "timeline";
 
 export type Route =
   | { readonly kind: "home" }
@@ -22,7 +22,7 @@ export function parseHash(hash: string): Route {
   const [first, id, tab] = path.split("/").filter(Boolean).map(safeDecode);
   if (first === "c" && id) {
     const worker = query.get("worker") ?? undefined;
-    return { kind: "conversation", id, tab: tab === "timeline" ? "timeline" : "environments", ...(worker ? { worker } : {}) };
+    return { kind: "conversation", id, tab: tab === "timeline" ? "timeline" : "sandboxes", ...(worker ? { worker } : {}) };
   }
   return { kind: "home" };
 }

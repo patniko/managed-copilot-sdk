@@ -13,12 +13,12 @@ import {
   type Icon,
 } from "@primer/octicons-react";
 import { useState, type ReactNode } from "react";
-import type { Approval, Blueprint, Decision } from "../../shared/types.js";
-import { BLUEPRINT_LABELS } from "../../shared/catalog.js";
-import { networkSummary, sizeSummary } from "../lib/blueprints.js";
+import type { Approval, Decision } from "../../shared/types.js";
+import { BLUEPRINT_LABELS, blueprintKind } from "../../shared/catalog.js";
 import { cx } from "../lib/cx.js";
 import { between, formatDuration, oneLine, plural } from "../lib/format.js";
 import { answerApproval } from "../lib/store.js";
+import { BlueprintIcon } from "./BlueprintIcon.js";
 import { Button } from "./ui/Button.js";
 import { Spinner } from "./ui/Spinner.js";
 
@@ -37,7 +37,18 @@ function Tag({ tone, children }: { readonly tone: TagTone; readonly children: Re
 }
 
 const Name = ({ children }: { readonly children: ReactNode }) => <strong className="font-semibold">{children}</strong>;
-const Env = ({ children }: { readonly children: ReactNode }) => <span className="font-mono text-xs text-fg-muted">{children}</span>;
+
+/** A blueprint as its glyph and short name; the environment's name is in the tooltip. */
+function Env({ children: name }: { readonly children?: string }) {
+  if (!name) return null;
+  const kind = blueprintKind(name);
+  return (
+    <span className="ml-0.5 inline-flex items-center gap-1 align-[-2px] text-xs text-fg-muted" title={name}>
+      <BlueprintIcon kind={kind} size={12} />
+      {BLUEPRINT_LABELS[kind]}
+    </span>
+  );
+}
 
 interface RowParts {
   readonly icon: Icon;
@@ -155,7 +166,7 @@ export function DecisionCard({ decisions, took, now }: { readonly decisions: rea
           return (
             <li key={decision.id} className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 border-t border-line-muted px-3 py-1.5 text-sm first:border-t-0" title={row.title}>
               {row.spin ? <Spinner size={14} className={row.iconClass} /> : <Glyph size={14} className={row.iconClass} />}
-              <span className="min-w-0">{row.text}</span>
+              <span className="min-w-0 truncate">{row.text}</span>
               {row.tag ?? <span />}
             </li>
           );
@@ -166,16 +177,17 @@ export function DecisionCard({ decisions, took, now }: { readonly decisions: rea
 }
 
 /** Sandboxes the coordinator asked for, waiting for the person's decision. */
-export function ApprovalCard({ conversationId, approvals, blueprints, now }: { readonly conversationId: string; readonly approvals: readonly Approval[]; readonly blueprints: readonly Blueprint[]; readonly now: number }) {
+export function ApprovalCard({ conversationId, approvals, now }: { readonly conversationId: string; readonly approvals: readonly Approval[]; readonly now: number }) {
   if (approvals.length === 0) return null;
   const oldest = approvals.reduce((first, approval) => (approval.requestedAt < first ? approval.requestedAt : first), approvals[0]!.requestedAt);
+  const many = approvals.length > 1;
   return (
-    <section aria-label="Needs your approval" className="overflow-hidden rounded-lg border border-[var(--borderColor-attention-emphasis)] bg-canvas">
-      <header className="flex items-center gap-2 bg-attention-muted px-3 py-1.5 text-xs font-semibold text-fg-attention">
+    <section aria-label="Needs your approval" className="overflow-hidden rounded-lg border border-line-attention bg-canvas">
+      <header className="flex min-h-9 items-center gap-2 bg-attention-muted px-3 py-1 text-xs font-semibold text-fg-attention">
         <ShieldIcon size={14} />
         Needs your approval
         <span className="ml-auto font-mono font-normal tabular-nums">{formatDuration(between(oldest, undefined, now))}</span>
-        {approvals.length > 1 ? (
+        {many ? (
           <button type="button" className="btn btn-sm btn-primary" onClick={() => approvals.forEach((approval) => void answerApproval(conversationId, approval.id, true))}>
             Approve all {approvals.length}
           </button>
@@ -183,15 +195,15 @@ export function ApprovalCard({ conversationId, approvals, blueprints, now }: { r
       </header>
       <ul>
         {approvals.map((approval) => (
-          <ApprovalRow key={approval.id} conversationId={conversationId} approval={approval} blueprint={blueprints.find((candidate) => candidate.name === approval.environment)} />
+          <ApprovalRow key={approval.id} conversationId={conversationId} approval={approval} primary={!many} />
         ))}
       </ul>
-      <footer className="border-t border-line-muted px-3 py-1.5 text-xs text-fg-muted">Approving a sandbox also covers what its worker does there. Work sent to existing sandboxes never asks.</footer>
+      <footer className="border-t border-line-muted px-3 py-1.5 text-xs text-fg-muted">Approving a sandbox also covers what its worker does there.</footer>
     </section>
   );
 }
 
-function ApprovalRow({ conversationId, approval, blueprint }: { readonly conversationId: string; readonly approval: Approval; readonly blueprint?: Blueprint }) {
+function ApprovalRow({ conversationId, approval, primary }: { readonly conversationId: string; readonly approval: Approval; readonly primary: boolean }) {
   const [denying, setDenying] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -201,29 +213,32 @@ function ApprovalRow({ conversationId, approval, blueprint }: { readonly convers
     setBusy(false);
   };
   return (
-    <li className="flex flex-col gap-1.5 border-t border-line-muted px-3 py-2 text-sm first:border-t-0">
-      <div className="flex items-start gap-2">
-        <PlusIcon size={14} className="mt-1 shrink-0 text-fg-success" />
-        <div className="min-w-0 flex-1">
-          <div>
-            Create <Name>{approval.worker}</Name> in <Env>{approval.environment}</Env>
-            {blueprint ? (
-              <span className="text-fg-muted">
-                : {BLUEPRINT_LABELS[blueprint.kind].toLowerCase()}, {sizeSummary(blueprint)}, {networkSummary(blueprint.network, blueprint.kind).toLowerCase()}
-              </span>
-            ) : null}
-          </div>
-          {approval.task ? (
-            <p className="mt-0.5 line-clamp-3 text-fg-muted" title={approval.task}>
-              {approval.task}
-            </p>
-          ) : null}
-        </div>
-        {approval.messageIndex !== undefined ? <span className="Label Label--secondary shrink-0">#{approval.messageIndex}</span> : null}
+    <li className="flex flex-col gap-1 border-t border-line-muted px-3 py-2 text-sm first:border-t-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <PlusIcon size={14} className="shrink-0 text-fg-success" />
+        <span className="min-w-0 flex-1 truncate">
+          Create <Name>{approval.worker}</Name> <Env>{approval.environment}</Env>
+        </span>
+        {approval.messageIndex !== undefined ? <span className="Label Label--secondary shrink-0 tabular-nums">#{approval.messageIndex}</span> : null}
+        {denying ? null : (
+          <span className="flex shrink-0 gap-1.5">
+            <Button size="sm" variant={primary ? "primary" : "default"} loading={busy} onClick={() => void answer(true)}>
+              Approve
+            </Button>
+            <Button size="sm" onClick={() => setDenying(true)} disabled={busy}>
+              Deny…
+            </Button>
+          </span>
+        )}
       </div>
+      {approval.task ? (
+        <p className="truncate pl-[22px] text-fg-muted" title={approval.task}>
+          {approval.task}
+        </p>
+      ) : null}
       {denying ? (
         <form
-          className="flex flex-wrap items-center gap-2 pl-6"
+          className="flex flex-wrap items-center gap-2 pl-[22px]"
           onSubmit={(event) => {
             event.preventDefault();
             void answer(false);
@@ -235,7 +250,7 @@ function ApprovalRow({ conversationId, approval, blueprint }: { readonly convers
             maxLength={1000}
             autoFocus
             onChange={(event) => setReason(event.target.value)}
-            placeholder="Tell the agent why (optional), for example: use the Node environment for this"
+            placeholder="Why? (optional) For example: use the Node workshop"
             aria-label="Why you're declining (optional)"
           />
           <Button size="sm" variant="danger" type="submit" loading={busy}>
@@ -245,16 +260,7 @@ function ApprovalRow({ conversationId, approval, blueprint }: { readonly convers
             Cancel
           </Button>
         </form>
-      ) : (
-        <div className="flex flex-wrap items-center gap-2 pl-6">
-          <Button size="sm" variant="primary" loading={busy} onClick={() => void answer(true)}>
-            Approve
-          </Button>
-          <Button size="sm" onClick={() => setDenying(true)} disabled={busy}>
-            Deny…
-          </Button>
-        </div>
-      )}
+      ) : null}
     </li>
   );
 }

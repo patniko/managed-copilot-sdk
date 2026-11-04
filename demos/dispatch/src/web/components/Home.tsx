@@ -1,90 +1,18 @@
-import { BroadcastIcon, ClockIcon, ContainerIcon, GraphIcon, type Icon, InfoIcon, ShieldCheckIcon, ShieldIcon, TerminalIcon, VersionsIcon, ZapIcon } from "@primer/octicons-react";
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { BLUEPRINT_LABELS } from "../../shared/catalog.js";
+import { AlertIcon, BroadcastIcon, ContainerIcon, GraphIcon, type Icon, TerminalIcon, VerifiedIcon, VersionsIcon } from "@primer/octicons-react";
+import { useEffect, useRef, useState } from "react";
+import { BLUEPRINT_LABELS, blueprintKind } from "../../shared/catalog.js";
 import type { ApprovalMode, Blueprint, ExecutionStyle, StyleInfo, Template } from "../../shared/types.js";
 import { errorMessage } from "../lib/api.js";
-import { KIND_ICON, KIND_LANE, networkSummary, sizeSummary } from "../lib/blueprints.js";
+import { networkSummary, sizeSummary } from "../lib/blueprints.js";
+import { cx } from "../lib/cx.js";
 import { conversationHref, navigate } from "../lib/router.js";
 import { createConversation, setDraft, useStore } from "../lib/store.js";
-import { STYLE_META, STYLE_ORDER } from "../lib/styles.js";
+import { STYLE_META } from "../lib/styles.js";
+import { BlueprintIcon } from "./BlueprintIcon.js";
 import { Composer, type ComposerHandle } from "./Composer.js";
+import { ApprovalChoice, StyleChoice, StyleDiagram, useNewConversationStyle } from "./Styles.js";
 import { Callout } from "./ui/Feedback.js";
-
-export function ApprovalChoice({
-  value,
-  onChange,
-  disabled,
-  style = "delegate",
-}: {
-  readonly value: ApprovalMode;
-  readonly onChange: (mode: ApprovalMode) => void;
-  readonly disabled?: boolean;
-  readonly style?: ExecutionStyle;
-}) {
-  const labels = STYLE_META[style].approvals;
-  return (
-    <div className="SegmentedControl SegmentedControl--sm" role="group" aria-label="Approvals">
-      <button type="button" className="SegmentedControl-item" aria-current={value === "ask"} disabled={disabled} onClick={() => onChange("ask")} title={labels.ask.title}>
-        <ShieldIcon size={14} />
-        {labels.ask.label}
-      </button>
-      <button type="button" className="SegmentedControl-item" aria-current={value === "auto"} disabled={disabled} onClick={() => onChange("auto")} title={labels.auto.title}>
-        <ZapIcon size={14} />
-        {labels.auto.label}
-      </button>
-    </div>
-  );
-}
-
-/**
- * The execution style switch: which orchestrator environment a new conversation is created in. A conversation keeps
- * its style; `current` marks the open conversation's.
- */
-export function StyleChoice({
-  value,
-  onChange,
-  styles,
-  disabled,
-}: {
-  readonly value: ExecutionStyle;
-  readonly onChange: (style: ExecutionStyle) => void;
-  readonly styles: readonly StyleInfo[];
-  readonly disabled?: boolean;
-}) {
-  return (
-    <div className="SegmentedControl SegmentedControl--sm" role="group" aria-label="How the agent works (new conversations)">
-      {STYLE_ORDER.map((style) => {
-        const meta = STYLE_META[style];
-        const info = styles.find((candidate) => candidate.style === style);
-        const unavailable = info !== undefined && !info.available;
-        const Glyph = meta.icon;
-        return (
-          <button
-            key={style}
-            type="button"
-            className="SegmentedControl-item"
-            aria-current={value === style}
-            disabled={disabled || unavailable}
-            onClick={() => onChange(style)}
-            title={unavailable ? `Not available: ${info?.reason ?? "this deployment doesn't declare it."}` : `${meta.summary}${info ? ` (${info.environment})` : ""}`}
-          >
-            <Glyph size={14} />
-            {meta.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-/** The style a new conversation gets: the person's pick if the deployment has it, else the default. */
-export function useNewConversationStyle(): ExecutionStyle {
-  const styles = useStore((state) => state.styles);
-  const defaults = useStore((state) => state.defaults);
-  const picked = useStore((state) => state.draft.style);
-  if (picked && (styles.length === 0 || styles.some((style) => style.style === picked && style.available))) return picked;
-  return defaults.style;
-}
+import { Tooltip } from "./ui/Tooltip.js";
 
 export function Home() {
   const platform = useStore((state) => state.platform);
@@ -95,16 +23,14 @@ export function Home() {
   const carried = useStore((state) => state.draft.text);
   const style = useNewConversationStyle();
   const info = styles.find((candidate) => candidate.style === style);
-  const coordinator = info?.coordinator;
   const [text, setText] = useState(carried ?? "");
   const [approvals, setApprovals] = useState<ApprovalMode>(defaults.approvals);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
   const composer = useRef<ComposerHandle>(null);
   const ready = platform?.state === "connected" && blueprints.length > 0 && info?.available !== false;
-  const meta = STYLE_META[style];
 
-  // A message carried from a conversation ("start a new one in this style") fills the box once.
+  // A message carried from elsewhere fills the box once.
   useEffect(() => {
     if (carried === undefined) return;
     setText(carried);
@@ -126,12 +52,10 @@ export function Home() {
 
   const useTemplate = (template: Template): void => {
     setText(template.prompt);
+    // A template written for one style picks it, when this deployment has it.
+    if (template.style && styles.some((candidate) => candidate.style === template.style && candidate.available)) setDraft({ style: template.style });
     composer.current?.focus();
   };
-
-  const own = info?.handsEnvironment;
-  const shown = style === "direct" ? blueprints.filter((blueprint) => blueprint.name === own) : info?.workers.length ? blueprints.filter((blueprint) => info.workers.includes(blueprint.name)) : blueprints;
-  const MetaIcon = meta.icon;
 
   return (
     <div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6 lg:py-10">
@@ -139,10 +63,6 @@ export function Home() {
         <h1 id="home-title" className="text-2xl font-semibold tracking-tight">
           What should the agent work on?
         </h1>
-        <p className="mt-1 max-w-3xl text-fg-muted">
-          You talk to one coordinator. Choose how it gets the work done: it can delegate each part to a worker agent in a sandbox of its own, work directly in a sandbox with
-          its sub-agents, or mix the two. You watch every step.
-        </p>
         <Composer
           ref={composer}
           className="mt-4"
@@ -150,7 +70,7 @@ export function Home() {
           onChange={setText}
           onSubmit={() => void submit()}
           label="Your first message"
-          placeholder={ready ? "Describe the job. For example: benchmark three sorting algorithms in Python and JavaScript, then write it up." : "Waiting for Managed Copilot…"}
+          placeholder={ready ? "Describe the job, or try one below" : "Waiting for Managed Copilot…"}
           sending={sending}
           disabled={!ready}
           minRows={3}
@@ -158,131 +78,89 @@ export function Home() {
           footer={
             <>
               <StyleChoice value={style} onChange={(next) => setDraft({ style: next })} styles={styles} disabled={sending} />
-              <ApprovalChoice value={approvals} onChange={setApprovals} disabled={sending} style={style} />
+              <ApprovalChoice value={approvals} onChange={setApprovals} style={style} disabled={sending} />
             </>
           }
         />
-        <p className="mt-2 flex items-start gap-1.5 text-sm text-fg-muted" aria-live="polite">
-          <MetaIcon size={16} className="mt-0.5 shrink-0" />
-          <span>
-            <strong className="font-semibold text-fg">{meta.label}.</strong> {meta.summary}
-            {info?.available ? (
-              <>
-                {" "}
-                New conversations run in <span className="font-mono text-xs">{info.environment}</span>; a conversation keeps its style.
-              </>
-            ) : null}
-            {style === "delegate" ? " Work sent to existing sandboxes never asks." : style === "direct" ? " Reading files and output never asks." : null}
-          </span>
-        </p>
+        <StyleDiagram style={style} className="mt-3 px-1" />
         {info && !info.available ? (
-          <Callout tone="warning" className="mt-3">
+          <Callout tone="warning" compact className="mt-3">
             {info.reason ?? "This deployment doesn't declare an environment for this style."}
           </Callout>
         ) : null}
         {error ? (
-          <Callout tone="danger" className="mt-3" role="alert">
+          <Callout tone="danger" compact className="mt-3" role="alert">
             {error}
           </Callout>
         ) : null}
       </section>
 
       {templates.length ? (
-        <section aria-labelledby="templates-title" className="mt-10">
+        <section aria-labelledby="templates-title" className="mt-8">
           <h2 id="templates-title" className="text-base font-semibold">
             Try one
           </h2>
-          <p className="mt-0.5 text-sm text-fg-muted">
-            Each starts a conversation.{" "}
-            {style === "direct"
-              ? "Working directly, the agent does all of it in one Python lab sandbox (Python and Node, no network), splitting parallel parts across sub-agents."
-              : "Its follow-ups show the agent reusing the sandboxes it made."}
-          </p>
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+          <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {templates.map((template) => (
-              <TemplateCard key={template.id} template={template} onUse={() => useTemplate(template)} disabled={!ready} style={style} />
+              <TemplateCard key={template.id} template={template} onUse={() => useTemplate(template)} disabled={!ready} style={style} info={info} />
             ))}
           </div>
         </section>
       ) : null}
 
-      <section aria-labelledby="blueprints-title" className="mt-10">
-        <h2 id="blueprints-title" className="text-base font-semibold">
-          {style === "direct" ? "Where it works" : style === "mixed" ? "Its own sandbox, and the sandboxes it can create" : "Sandboxes it can create"}
-        </h2>
-        <p className="mt-0.5 text-sm text-fg-muted">
-          {coordinator ? (
-            style === "direct" ? (
-              <>
-                The <span className="font-mono text-xs">{coordinator.environment}</span> coordinator ({coordinator.model}) and its sub-agents run commands in a sandbox made
-                from this blueprint, with no agent inside it. It's created on the first command{info?.subagents === "own" ? "; each sub-agent gets one of its own" : " and shared by its sub-agents"}.
-              </>
-            ) : style === "mixed" ? (
-              <>
-                The <span className="font-mono text-xs">{coordinator.environment}</span> coordinator ({coordinator.model}) works in a sandbox of the first blueprint itself, and
-                creates workers from any of them, up to {coordinator.maxWorkers} sandboxes at once.
-              </>
-            ) : (
-              <>
-                The <span className="font-mono text-xs">{coordinator.environment}</span> environment's coordinator ({coordinator.model}) creates workers from these blueprints,
-                up to {coordinator.maxWorkers} at once. Each worker gets its own sandbox.
-              </>
-            )
-          ) : (
-            "The coordinator creates workers from the blueprints its environment declares. Each worker gets its own sandbox."
-          )}
-        </p>
-        {shown.length ? (
-          <div className="mt-3 grid gap-3 sm:grid-cols-2">
-            {shown.map((blueprint) => (
-              <BlueprintCard key={blueprint.name} blueprint={blueprint} badge={own && blueprint.name === own ? "its own sandbox" : !own && blueprint.isDefault ? "default" : undefined} />
-            ))}
-          </div>
-        ) : (
-          <p className="mt-3 rounded-md border border-dashed border-line p-4 text-sm text-fg-muted">
-            {platform?.message ?? "The blueprints appear once Dispatch connects to Managed Copilot."}
-          </p>
-        )}
-      </section>
+      <BlueprintChips style={style} info={info} blueprints={blueprints} message={platform?.state === "connected" ? undefined : platform?.message} />
     </div>
   );
 }
 
 /** The Octicons templates name (`Template.icon`). */
-const TEMPLATE_ICONS: Readonly<Record<string, Icon>> = { versions: VersionsIcon, broadcast: BroadcastIcon, graph: GraphIcon, terminal: TerminalIcon };
+const TEMPLATE_ICONS: Readonly<Record<string, Icon>> = { versions: VersionsIcon, broadcast: BroadcastIcon, graph: GraphIcon, terminal: TerminalIcon, verified: VerifiedIcon };
 
-function TemplateCard({ template, onUse, disabled, style }: { readonly template: Template; readonly onUse: () => void; readonly disabled: boolean; readonly style: ExecutionStyle }) {
+function TemplateCard({
+  template,
+  onUse,
+  disabled,
+  style,
+  info,
+}: {
+  readonly template: Template;
+  readonly onUse: () => void;
+  readonly disabled: boolean;
+  readonly style: ExecutionStyle;
+  readonly info: StyleInfo | undefined;
+}) {
   const Glyph = TEMPLATE_ICONS[template.icon] ?? ContainerIcon;
-  const uses = template.uses.map((use) => `${use.count} × ${BLUEPRINT_LABELS[use.kind]}`).join(" · ");
+  // A template written for another style switches to it; otherwise it runs in the style picked now.
+  const runs = template.style ?? style;
   // Working directly, everything happens in one sandbox without network: say so where a template needs more.
-  const needsWeb = style === "direct" && template.uses.some((use) => use.kind === "web");
+  const needsWeb = runs === "direct" && template.uses.some((use) => use.kind === "web");
+  const StyleGlyph = STYLE_META[runs].icon;
   return (
-    <button type="button" onClick={onUse} disabled={disabled} className="Box flex flex-col gap-1.5 p-3 text-left transition-colors hover:bg-canvas-muted disabled:cursor-not-allowed disabled:opacity-60">
-      <span className="flex items-center gap-2 font-semibold">
-        <Glyph size={16} className="text-fg-muted" />
-        {template.title}
+    <button
+      type="button"
+      onClick={onUse}
+      disabled={disabled}
+      className="Box flex min-w-0 flex-col gap-1 px-3 py-2.5 text-left transition-colors hover:bg-canvas-muted focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--focus-outlineColor)] disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <Glyph size={16} className="shrink-0 text-fg-muted" />
+        <span className="min-w-0 truncate font-semibold">{template.title}</span>
+        <span className="ml-auto shrink-0 text-xs text-fg-muted tabular-nums">~{template.minutes} min</span>
       </span>
-      <span className="text-sm text-fg-muted">{template.description}</span>
-      <span className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1 pt-1 text-xs text-fg-muted">
-        {style === "direct" ? (
-          <span className="inline-flex items-center gap-1">
-            <TerminalIcon size={12} />
-            one sandbox, with sub-agents
-          </span>
-        ) : (
-          <span className="inline-flex items-center gap-1">
-            <ContainerIcon size={12} />
-            {uses}
-          </span>
-        )}
-        <span className="inline-flex items-center gap-1">
-          <ClockIcon size={12} />
-          about {template.minutes} min
-        </span>
+      <span className="truncate text-sm text-fg-muted" title={template.description}>
+        {template.description}
+      </span>
+      <span className="mt-1 flex min-h-5 items-center gap-1.5">
+        <UsesGlyphs template={template} style={runs} info={info} />
         {needsWeb ? (
-          <span className="inline-flex items-center gap-1 text-fg-attention">
-            <InfoIcon size={12} />
-            needs web access: delegate or mix
+          <span className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-fg-attention" title="Working directly, it has no network. Delegate or mix for this one.">
+            <AlertIcon size={12} />
+            Needs web
+          </span>
+        ) : template.style ? (
+          <span className="ml-auto inline-flex items-center gap-1 text-xs text-fg-muted" title={`Opens in ${STYLE_META[template.style].label}`}>
+            <StyleGlyph size={12} />
+            {STYLE_META[template.style].short}
           </span>
         ) : null}
       </span>
@@ -290,24 +168,75 @@ function TemplateCard({ template, onUse, disabled, style }: { readonly template:
   );
 }
 
-export function BlueprintCard({ blueprint, badge }: { readonly blueprint: Blueprint; readonly badge?: string }) {
-  const Glyph = KIND_ICON[blueprint.kind];
+/** What a template uses, as sandbox glyphs: one per sandbox it usually creates (one in all, working directly). */
+function UsesGlyphs({ template, style, info }: { readonly template: Template; readonly style: ExecutionStyle; readonly info: StyleInfo | undefined }) {
+  const handsKind = info?.handsEnvironment ? blueprintKind(info.handsEnvironment) : "python";
+  if (style === "direct") {
+    return (
+      <span className="inline-flex" title="All of it in its own sandbox, split across sub-agents">
+        <SandboxGlyph kind={handsKind} own />
+      </span>
+    );
+  }
+  const glyphs = template.uses.flatMap((use) => Array.from({ length: use.count }, (_, index) => ({ key: `${use.kind}-${index}`, kind: use.kind })));
+  // Written for Mixed: its first part of that kind runs in the coordinator's own sandbox.
+  const own = style === "mixed" && template.style === "mixed" ? glyphs.findIndex((glyph) => glyph.kind === handsKind) : -1;
+  const others = glyphs.filter((_, index) => index !== own).map((glyph) => BLUEPRINT_LABELS[glyph.kind].toLowerCase());
+  const title =
+    own >= 0
+      ? `Its own ${BLUEPRINT_LABELS[handsKind].toLowerCase()} sandbox, plus ${others.length === 1 ? "a " : ""}${others.join(", ")} worker${others.length === 1 ? "" : "s"}`
+      : template.uses.map((use) => `${use.count} × ${BLUEPRINT_LABELS[use.kind]}`).join(" · ");
   return (
-    <div className="Box lane flex flex-col gap-1 p-3" style={{ "--lane": KIND_LANE[blueprint.kind] } as CSSProperties}>
-      <div className="flex items-center gap-2">
-        <Glyph size={16} className="lane-icon" />
-        <span className="font-semibold">{blueprint.label}</span>
-        <span className="font-mono text-xs text-fg-muted">{blueprint.name}</span>
-        {badge ? <span className="Label Label--secondary ml-auto">{badge}</span> : null}
-      </div>
-      <div className="flex flex-wrap gap-x-3 text-xs text-fg-muted">
-        <span>{sizeSummary(blueprint)}</span>
-        <span className="inline-flex items-center gap-1">
-          {blueprint.network.access === "disabled" ? <ShieldCheckIcon size={12} /> : null}
-          {networkSummary(blueprint.network, blueprint.kind)}
-        </span>
-      </div>
-      {blueprint.description ? <p className="line-clamp-3 text-sm">{blueprint.description}</p> : null}
-    </div>
+    <span className="inline-flex items-center gap-1" title={title}>
+      {glyphs.map((glyph, index) => (
+        <SandboxGlyph key={glyph.key} kind={glyph.kind} own={index === own} />
+      ))}
+    </span>
+  );
+}
+
+function SandboxGlyph({ kind, own = false }: { readonly kind: Blueprint["kind"]; readonly own?: boolean }) {
+  return (
+    <span className={cx("grid size-5 place-items-center rounded border", own ? "border-dashed border-line-accent bg-accent-muted" : "border-line bg-canvas")} aria-hidden>
+      <BlueprintIcon kind={kind} size={12} />
+    </span>
+  );
+}
+
+/** The sandboxes this style can use, as chips; their size and network are in the tooltip. */
+function BlueprintChips({ style, info, blueprints, message }: { readonly style: ExecutionStyle; readonly info: StyleInfo | undefined; readonly blueprints: readonly Blueprint[]; readonly message?: string }) {
+  const own = info?.handsEnvironment;
+  const shown =
+    style === "direct" ? blueprints.filter((blueprint) => blueprint.name === own) : info?.workers.length ? blueprints.filter((blueprint) => info.workers.includes(blueprint.name)) : blueprints;
+  return (
+    <section aria-label="Sandboxes" className="mt-8 flex flex-wrap items-center gap-2 border-t border-line-muted pt-4">
+      <span className="mr-1 inline-flex items-center gap-1.5 text-xs font-semibold text-fg-muted">
+        <ContainerIcon size={14} />
+        Sandboxes
+      </span>
+      {shown.length ? (
+        shown.map((blueprint) => <BlueprintChip key={blueprint.name} blueprint={blueprint} own={blueprint.name === own} />)
+      ) : (
+        <span className="text-xs text-fg-muted">{message ?? "They appear once Dispatch connects to Managed Copilot."}</span>
+      )}
+    </section>
+  );
+}
+
+function BlueprintChip({ blueprint, own }: { readonly blueprint: Blueprint; readonly own: boolean }) {
+  const details = `${blueprint.name} · ${sizeSummary(blueprint)} · ${networkSummary(blueprint.network, blueprint.kind)}${own ? " · its own sandbox" : ""}`;
+  return (
+    <Tooltip content={details}>
+      <span
+        tabIndex={0}
+        className={cx(
+          "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium outline-none focus-visible:shadow-[0_0_0_2px_var(--focus-outlineColor)]",
+          own ? "border-dashed border-line-accent bg-accent-muted" : "border-line bg-canvas",
+        )}
+      >
+        <BlueprintIcon kind={blueprint.kind} size={12} />
+        {blueprint.label}
+      </span>
+    </Tooltip>
   );
 }
