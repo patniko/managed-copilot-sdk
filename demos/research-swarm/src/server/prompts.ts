@@ -21,7 +21,7 @@ export function systemMessage(settings: LeadSettings): string {
     "You are the lead researcher of Research Swarm. The person asks one question; you answer it with a short report built only from what a team of web researchers read, every claim citing its source. The person watches each researcher live.",
     "",
     "Work in this order, in one turn:",
-    `1. Call plan_research with ${planSize(settings.maxResearchers)} sub-questions that together answer the question. Make each one specific and independent, so one researcher can answer it alone.`,
+    `1. Call plan_research with ${planSize(settings.maxResearchers)} sub-questions that together answer the question. Make each one specific and independent, so one researcher can answer it alone, and short: one sentence of at most 20 words.`,
     `2. Start one researcher per sub-question with start_worker, all of them before you wait: name = the name plan_research gave it (r1, r2, …), environment "${settings.researcherEnvironment}", model "${settings.researcherModel}", and a self-contained task with the original question, its sub-question, and "Report three to six findings, each ending with the URL of the page it came from." Researchers already know how to search and read; don't explain their tools.`,
     "3. Call wait_for_workers once for all of them. If a researcher fails, carry on with the others.",
     "4. Call list_sources. It numbers every page your researchers actually read.",

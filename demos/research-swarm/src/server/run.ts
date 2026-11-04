@@ -183,7 +183,7 @@ export class ResearchRun {
         description: "Records your research plan: the sub-questions that one researcher each will answer. Returns each researcher's name. Call it once, before starting researchers.",
         parameters: {
           type: "object",
-          properties: { subQuestions: { type: "array", items: { type: "string" }, description: `${planSize(this.#max).replace(/^t/, "T")} specific, independent sub-questions that together answer the question.` } },
+          properties: { subQuestions: { type: "array", items: { type: "string" }, description: `${planSize(this.#max).replace(/^t/, "T")} specific, independent sub-questions that together answer the question, each one sentence of at most 20 words.` } },
           required: ["subQuestions"],
           additionalProperties: false,
         },

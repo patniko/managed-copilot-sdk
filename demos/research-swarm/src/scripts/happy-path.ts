@@ -58,7 +58,8 @@ const settled = (run: Run, doneAt: number | undefined) => finished(run) && (run.
 
 function describe(researcher: Researcher): string {
   const pages = researcher.pages.length;
-  return `${researcher.id} ${researcher.state}${pages ? ` · ${pages} ${pages === 1 ? "page" : "pages"}` : ""} · ${researcher.question}`;
+  const question = researcher.question.length > 80 ? `${researcher.question.slice(0, 79)}…` : researcher.question;
+  return `${researcher.id} ${researcher.state}${pages ? ` · ${pages} ${pages === 1 ? "page" : "pages"}` : ""} · ${question}`;
 }
 
 /** Prints what changed since the last view of the run. */
