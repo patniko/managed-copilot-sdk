@@ -207,7 +207,12 @@ email user's session, and never for the GitHub user's.
 Deployed to Azure, the same check with two email users passed 19 of 19 against `https://front-desk.<environment-domain>`
 (`--github skip`, since a deployed Front Desk never offers this computer's GitHub sign-in): the gateway called Foundry
 with its managed identity, and Front Desk answered from outside the deployment's address allowlist, which still
-refused the apps that act as the deployer.
+refused the apps that act as the deployer. A GitHub user then signed in with **Continue with GitHub** (a GitHub App)
+and saved a secret: neither email user could list, open, send to, stop, or delete that conversation (404) or get it
+from their assistant, the GitHub user couldn't open theirs, and the deployment's own record
+(`npx managed-copilot operator sessions`) showed the GitHub user's session in `front-desk`, owned by their GitHub
+account with `inference: { route: "copilot" }`, and each email user's in `front-desk-foundry`, owned by
+`front-desk/<user ID>` with `inference: { route: "foundry", foundry: "mc-foundry-dev", deployment: "grok-4.7" }`.
 
 ## Layout
 
