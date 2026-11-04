@@ -75,7 +75,9 @@ flowchart LR
 
 > **Shortcut.** From the repository root, `npx managed-copilot deploy` runs the steps below: it checks the tools, fills
 > in the subscription, region, resource group, and (on a first deployment) you as a user and operator, passes your
-> GitHub sign-in as the apps' token without putting it on a command line, and runs `aspire deploy`.
+> GitHub sign-in as the apps' token without putting it on a command line, passes the AppHost's own parameters from its
+> user secrets the same way (for example OAuth clients; not the platform's generated keys or values the deployment
+> already keeps), and runs `aspire deploy`.
 > `npx managed-copilot access` shows and changes who may use it, operate it, and open its apps
 > ([CLI reference](../libraries/cli/README.md#deploy-and-share)). The manual steps:
 
@@ -97,8 +99,9 @@ flowchart LR
    ```
 
    `aspire deploy` runs the AppHost as Production, and with Aspire CLI 13.6.4 it doesn't load user secrets there, so
-   these settings can be missed ("has no access rules" although `aspire secret list` shows them). Pass them in the
-   environment too, as `npx managed-copilot deploy` does (`:` becomes `__`):
+   these settings, and any other parameter kept only in user secrets, can be missed ("has no access rules" although
+   `aspire secret list` shows them). Pass them in the environment too, as `npx managed-copilot deploy` does (`:` becomes
+   `__`):
 
    ```powershell
    ${env:Parameters__copilot-github-users} = "your-login"
@@ -159,7 +162,7 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the ingress of every app that isn't public (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it, looked up only when such an app exists. The platform subnet is always allowed (webhooks). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |
 | `Parameters:<name>-durable-key`, `Parameters:<name>-vault-key` | No | Secrets, 32 bytes base64. Generated and persisted with the deployment when not set, so the sealing keys never sit beside the sealed values on the NFS share. A deployment that predates them had its keys generated into `/data`. Its next gateway wraps each key file that still seals stored data under these parameters (`durable.key.wrapped`, `network/vault.key.wrapped`). The following `aspire deploy` deletes the plaintext files once a gateway that reads the wrapped keys has served for 15 minutes (so a failed rollout's fallback is never left without them). A stale key file the parameter already replaced is renamed `.replaced`. Earlier vaults and background sign-ins stay readable. Keep these parameters: without the right one the gateway refuses to start. |
-| `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. |
+| `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. `npx managed-copilot deploy` passes them from the AppHost's user secrets on the deployment that first uses them; to replace values the deployment already keeps, set `Parameters__google-client-secret` (and so on) in the environment. |
 | `Parameters:<name>-platform-key`, `Parameters:<name>-egress-key`, and the AppHost's generated secrets | Generated | Kept in the AppHost's user secrets and deployment state; deployed as Container Apps secrets (`secretRef`), never in plain configuration. The egress key links the egress proxy to the gateway. |
 
 Every AppHost secret parameter reaches the gateway as a Container Apps secret, and its `MANAGED_COPILOT_CONFIG` holds

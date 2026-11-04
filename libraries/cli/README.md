@@ -68,7 +68,11 @@ npx managed-copilot deploy --resource-group demo --location eastus
 missing: the subscription, region, and resource group, and, on a first deployment, you as a platform user and an
 operator. It shows the plan, asks before deploying (`--yes` skips the question), and runs `aspire deploy`. The published
 apps act as your GitHub sign-in (except public apps, which get no token): the token goes to `aspire deploy` in an
-environment variable, never on a command line.
+environment variable, never on a command line. `aspire deploy` doesn't load the AppHost's user secrets, so `deploy`
+passes the AppHost's own parameters from them the same way (for example an OAuth client's ID and secret, set with
+`aspire secret set Parameters:<name> ...`), and names them, never their values. It leaves out the keys the platform
+generates for a deployment and every parameter the deployment's Aspire record already keeps (the deployment keeps its
+value; set `Parameters__<name>` in the environment to replace one), and a variable you've set yourself wins.
 It won't deploy over a resource group that holds a deployment this AppHost didn't make: that deployment's generated
 keys are in Aspire's deployment record (`~/.aspire/deployments/<hash of the AppHost path>/`) for the checkout that made
 it. If that record is on this machine, it offers, in a terminal, to copy it to this AppHost so the deployment keeps its

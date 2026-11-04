@@ -1674,7 +1674,9 @@ sequenceDiagram
 - `deploy` and `access` (`src/commands/deploy.ts`, local tools in `src/host.ts`) work on the AppHost, not the gateway:
   they read and write its user secrets with `aspire secret` (`Azure:*`, `Parameters:<name>-github-users|-github-orgs|
   -operator-users|-operator-orgs`, `Parameters:app-allowed-ips`), then `deploy` runs `aspire deploy` with the caller's
-  token in `Parameters__app-github-token`. `aspire deploy` signs in as the Azure CLI's current account, so for another
+  token in `Parameters__app-github-token` and the AppHost's other `Parameters:*` user secrets as `Parameters__<name>`
+  (`aspire deploy` runs as Production without user secrets), except `<name>-platform-key|-durable-key|-vault-key|
+  -egress-key`, parameters the deployment's Aspire record already holds, and variables already in its environment. `aspire deploy` signs in as the Azure CLI's current account, so for another
   subscription `deploy` passes that subscription's tenant (`Azure__TenantId`) when the same account holds it and stops
   with `az account set --subscription <id>` when another account does. `access ips` also rewrites the running published
   apps' `allow-<n>` ingress rules with `az containerapp ingress access-restriction` (set before remove; `platform` and
