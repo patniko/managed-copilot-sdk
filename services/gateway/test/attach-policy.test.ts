@@ -230,7 +230,7 @@ describe("attach policy: what the runtime sends", () => {
     expect(encoded).toContain("%20");
     const out = scrub({
       encoded,
-      raw: `file:///${workspace.replace(/\\/g, "/")}`,
+      raw: `file:///${workspace.replace(/\\/g, "/").replace(/^\//, "")}`,
       plain: join(dataDir, "runtime", "shared", "copilot-home", "plan.md"),
       inText: `Saved to ${join(workspace, "a.txt")} just now`,
       untouched: "file:///opt/elsewhere/x.txt",

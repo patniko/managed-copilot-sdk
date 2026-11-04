@@ -682,7 +682,7 @@ describe("attach module", () => {
     await fresh();
     const workspace = join(dataDir, "runtime", "shared", "workspaces", "s1");
     listener.results.set("initialize", { protocolVersion: "0.9.0", serverSeq: 3, terminalCommandPrefix: "!", defaultDirectory: pathToFileURL(join(dataDir, "runtime", "shared")).href, snapshots: [] });
-    listener.results.set("listSessions", { items: [{ resource: "ahp-session:/s1", workingDirectories: [pathToFileURL(workspace).href, `file:///${workspace.replace(/\\/g, "/")}`] }] });
+    listener.results.set("listSessions", { items: [{ resource: "ahp-session:/s1", workingDirectories: [pathToFileURL(workspace).href, `file:///${workspace.replace(/\\/g, "/").replace(/^\//, "")}`] }] });
     listener.results.set("extensions/getPlan", { plan: { path: join(dataDir, "runtime", "shared", "copilot-home", "session-state", "s1", "plan.md") } });
     const ws = await open("s1", (await material()).token);
     ws.send(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { channel: "ahp-root://", protocolVersions: ["0.9.0"], clientId: "cli-test" } }));
