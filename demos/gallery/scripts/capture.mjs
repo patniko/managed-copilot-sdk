@@ -47,6 +47,15 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "research-swarm",
+    url: local(7425),
+    async prepare(page) {
+      // Open the most recent finished report when there is one.
+      const first = page.locator('a[href^="#/r/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
