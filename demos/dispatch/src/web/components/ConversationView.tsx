@@ -18,6 +18,7 @@ import { Timeline } from "./Timeline.js";
 import { Button } from "./ui/Button.js";
 import { EmptyState } from "./ui/Feedback.js";
 import { OverflowMenu } from "./ui/Menu.js";
+import { Spinner } from "./ui/Spinner.js";
 import { Tooltip } from "./ui/Tooltip.js";
 import { WorkerDetail } from "./WorkerDetail.js";
 
@@ -105,13 +106,20 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
           <Button size="sm" icon={TerminalIcon} onClick={() => (canLaunch ? void openInCli(view.id) : void copyAttach())} aria-label={canLaunch ? "Open in Copilot CLI" : "Copy the command that opens this conversation in Copilot CLI"}>
             <span className="max-sm:sr-only">{canLaunch ? "Open in Copilot CLI" : "Copy CLI command"}</span>
           </Button>
-          <OverflowMenu
-            label="Conversation actions"
-            items={[
-              ...(canLaunch ? [{ label: "Copy Copilot CLI command", icon: CopyIcon, onSelect: () => void copyAttach() }] : []),
-              { label: deleting ? "Deleting…" : "End and delete sandboxes", icon: TrashIcon, danger: true, disabled: deleting, onSelect: () => void remove() },
-            ]}
-          />
+          {deleting ? (
+            <span role="status" className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
+              <Spinner size={16} />
+              <span className="max-sm:sr-only">Deleting…</span>
+            </span>
+          ) : (
+            <OverflowMenu
+              label="Conversation actions"
+              items={[
+                ...(canLaunch ? [{ label: "Copy Copilot CLI command", icon: CopyIcon, onSelect: () => void copyAttach() }] : []),
+                { label: "End and delete sandboxes", icon: TrashIcon, danger: true, onSelect: () => void remove() },
+              ]}
+            />
+          )}
         </div>
       </header>
 
@@ -176,7 +184,7 @@ function StyleBadge({ view, info, blueprints }: { readonly view: View; readonly 
         <TriangleDownIcon size={12} />
       </button>
       {open ? (
-        <div role="dialog" aria-label={meta.label} className="Overlay absolute top-full left-0 z-40 mt-2 w-80 animate-scale-in max-sm:-left-24">
+        <div role="dialog" aria-label={meta.label} className="Overlay absolute top-full left-0 z-40 mt-2 w-80 animate-scale-in max-sm:fixed max-sm:inset-x-4 max-sm:top-28 max-sm:w-auto">
           <div className="border-b border-line-muted px-4 py-3">
             <div className="flex items-center gap-1.5 font-semibold">
               <Glyph size={16} className="text-fg-muted" />
@@ -220,7 +228,7 @@ function StyleBadge({ view, info, blueprints }: { readonly view: View; readonly 
 function Counter({ icon: Glyph, count, label }: { readonly icon: typeof ContainerIcon; readonly count: number; readonly label: string }) {
   return (
     <Tooltip content={label}>
-      <span className="inline-flex items-center gap-1 text-sm text-fg-muted tabular-nums" aria-label={label}>
+      <span role="img" className="inline-flex items-center gap-1 text-sm text-fg-muted tabular-nums" aria-label={label}>
         <Glyph size={16} />
         {count}
       </span>

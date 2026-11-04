@@ -53,7 +53,8 @@ export function Home() {
   const useTemplate = (template: Template): void => {
     setText(template.prompt);
     // A template written for one style picks it, when this deployment has it.
-    if (template.style && styles.some((candidate) => candidate.style === template.style && candidate.available)) setDraft({ style: template.style });
+    const opens = templateStyle(template, styles);
+    if (opens) setDraft({ style: opens });
     composer.current?.focus();
   };
 
@@ -102,7 +103,7 @@ export function Home() {
           </h2>
           <div className="mt-2 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {templates.map((template) => (
-              <TemplateCard key={template.id} template={template} onUse={() => useTemplate(template)} disabled={!ready} style={style} info={info} />
+              <TemplateCard key={template.id} template={template} onUse={() => useTemplate(template)} disabled={!ready} style={style} styles={styles} />
             ))}
           </div>
         </section>
@@ -116,22 +117,28 @@ export function Home() {
 /** The Octicons templates name (`Template.icon`). */
 const TEMPLATE_ICONS: Readonly<Record<string, Icon>> = { versions: VersionsIcon, broadcast: BroadcastIcon, graph: GraphIcon, terminal: TerminalIcon, verified: VerifiedIcon };
 
+/** The style a template switches to: the one it was written for, when this deployment has it. */
+function templateStyle(template: Template, styles: readonly StyleInfo[]): ExecutionStyle | undefined {
+  return template.style && styles.some((candidate) => candidate.style === template.style && candidate.available) ? template.style : undefined;
+}
+
 function TemplateCard({
   template,
   onUse,
   disabled,
   style,
-  info,
+  styles,
 }: {
   readonly template: Template;
   readonly onUse: () => void;
   readonly disabled: boolean;
   readonly style: ExecutionStyle;
-  readonly info: StyleInfo | undefined;
+  readonly styles: readonly StyleInfo[];
 }) {
   const Glyph = TEMPLATE_ICONS[template.icon] ?? ContainerIcon;
   // A template written for another style switches to it; otherwise it runs in the style picked now.
-  const runs = template.style ?? style;
+  const opens = templateStyle(template, styles);
+  const runs = opens ?? style;
   // Working directly, everything happens in one sandbox without network: say so where a template needs more.
   const needsWeb = runs === "direct" && template.uses.some((use) => use.kind === "web");
   const StyleGlyph = STYLE_META[runs].icon;
@@ -151,16 +158,16 @@ function TemplateCard({
         {template.description}
       </span>
       <span className="mt-1 flex min-h-5 items-center gap-1.5">
-        <UsesGlyphs template={template} style={runs} info={info} />
+        <UsesGlyphs template={template} style={runs} info={styles.find((candidate) => candidate.style === runs)} own={opens === "mixed"} />
         {needsWeb ? (
           <span className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-fg-attention" title="Working directly, it has no network. Delegate or mix for this one.">
             <AlertIcon size={12} />
             Needs web
           </span>
-        ) : template.style ? (
-          <span className="ml-auto inline-flex items-center gap-1 text-xs text-fg-muted" title={`Opens in ${STYLE_META[template.style].label}`}>
+        ) : opens ? (
+          <span className="ml-auto inline-flex items-center gap-1 text-xs text-fg-muted" title={`Opens in ${STYLE_META[opens].label}`}>
             <StyleGlyph size={12} />
-            {STYLE_META[template.style].short}
+            {STYLE_META[opens].short}
           </span>
         ) : null}
       </span>
@@ -168,8 +175,11 @@ function TemplateCard({
   );
 }
 
-/** What a template uses, as sandbox glyphs: one per sandbox it usually creates (one in all, working directly). */
-function UsesGlyphs({ template, style, info }: { readonly template: Template; readonly style: ExecutionStyle; readonly info: StyleInfo | undefined }) {
+/**
+ * What a template uses, as sandbox glyphs: one per sandbox it usually creates (one in all, working directly). `own`:
+ * written for Mixed, its first part of the coordinator's sandbox kind runs in that sandbox (dashed).
+ */
+function UsesGlyphs({ template, style, info, own: ownSandbox }: { readonly template: Template; readonly style: ExecutionStyle; readonly info: StyleInfo | undefined; readonly own: boolean }) {
   const handsKind = info?.handsEnvironment ? blueprintKind(info.handsEnvironment) : "python";
   if (style === "direct") {
     return (
@@ -179,8 +189,7 @@ function UsesGlyphs({ template, style, info }: { readonly template: Template; re
     );
   }
   const glyphs = template.uses.flatMap((use) => Array.from({ length: use.count }, (_, index) => ({ key: `${use.kind}-${index}`, kind: use.kind })));
-  // Written for Mixed: its first part of that kind runs in the coordinator's own sandbox.
-  const own = style === "mixed" && template.style === "mixed" ? glyphs.findIndex((glyph) => glyph.kind === handsKind) : -1;
+  const own = ownSandbox ? glyphs.findIndex((glyph) => glyph.kind === handsKind) : -1;
   const others = glyphs.filter((_, index) => index !== own).map((glyph) => BLUEPRINT_LABELS[glyph.kind].toLowerCase());
   const title =
     own >= 0

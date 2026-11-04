@@ -166,9 +166,10 @@ export function DecisionCard({ decisions, took, now }: { readonly decisions: rea
         {decisions.map((decision) => {
           const redone = retried.has(decision.id);
           // A failure the coordinator fixed by trying again reads as a note, not an alarm.
+          const described = describe(decision, now);
           const row = redone
-            ? { ...describe(decision, now), iconClass: "text-fg-muted", tag: <Tag tone="muted">retried</Tag>, title: decision.detail ? `Retried after: ${decision.detail}` : "Retried" }
-            : describe(decision, now);
+            ? { ...described, iconClass: "text-fg-muted", tag: <Tag tone="muted">retried</Tag>, title: decision.detail ? `Retried after: ${decision.detail}` : "Retried" }
+            : { ...described, title: described.title ?? (decision.status === "failed" ? decision.detail : undefined) };
           const Glyph = row.icon;
           return (
             <li

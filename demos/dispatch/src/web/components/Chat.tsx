@@ -198,7 +198,7 @@ function ChatComposer({ view }: { readonly view: ConversationView }) {
           sending={sending}
           disabled={Boolean(unavailable)}
           minRows={1}
-          footer={<ApprovalChoice value={view.settings.approvals} onChange={(mode) => void setApprovals(view.id, mode)} style={view.style} />}
+          footer={<ApprovalChoice value={view.settings.approvals} onChange={(mode) => void (mode !== view.settings.approvals && setApprovals(view.id, mode))} style={view.style} />}
         />
       </div>
     </div>

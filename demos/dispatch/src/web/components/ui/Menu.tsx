@@ -16,13 +16,15 @@ export interface MenuItem {
 export function OverflowMenu({ label, items, className }: { readonly label: string; readonly items: readonly MenuItem[]; readonly className?: string }) {
   const { open, toggle, close, container } = usePopover();
   const list = useRef<HTMLUListElement>(null);
-  const trigger = useRef<HTMLElement | null>(null);
+  const focusTrigger = (): void => container.current?.querySelector<HTMLButtonElement>("button[aria-haspopup=menu]")?.focus();
 
   useEffect(() => {
     if (!open) return;
-    trigger.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     list.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-    return () => trigger.current?.focus();
+    return () => {
+      // Escape or a press outside removed the focused item: back to the menu's button (a no-op behind a modal dialog).
+      if (!document.activeElement || document.activeElement === document.body) focusTrigger();
+    };
   }, [open]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLUListElement>): void => {
@@ -51,6 +53,8 @@ export function OverflowMenu({ label, items, className }: { readonly label: stri
                     disabled={item.disabled}
                     className={cx("ActionList-item", item.danger && "ActionList-item--danger")}
                     onClick={() => {
+                      // Focus the menu's button first, so a dialog the item opens returns focus there when it closes.
+                      focusTrigger();
                       close();
                       item.onSelect();
                     }}

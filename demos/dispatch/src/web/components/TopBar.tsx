@@ -95,7 +95,7 @@ function PlatformPopover({ platform, status }: { readonly platform: PlatformStat
   const coordinators = styles.filter((style) => style.available && style.coordinator);
   const account = platform?.account;
   return (
-    <div role="dialog" aria-label="Deployment details" className="Overlay absolute top-full right-0 z-40 mt-2 w-[21rem] animate-scale-in">
+    <div role="dialog" aria-label="Deployment details" className="Overlay absolute top-full right-0 z-40 mt-2 w-[21rem] animate-scale-in max-sm:fixed max-sm:inset-x-4 max-sm:top-16 max-sm:w-auto">
       <div className="flex flex-col gap-1 border-b border-line-muted px-4 py-3">
         <div className="flex items-center gap-1.5 font-semibold">
           <StatusDot tone={status.tone} />

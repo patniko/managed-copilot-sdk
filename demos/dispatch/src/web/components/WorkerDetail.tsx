@@ -29,33 +29,43 @@ function Heading({ children, action }: { readonly children: ReactNode; readonly 
   );
 }
 
-/** Content clamped to `lines` lines of text, with "Show all" when it is longer. */
-function Clamp({ lines, children }: { readonly lines: number; readonly children: ReactNode }) {
-  const box = useRef<HTMLDivElement>(null);
+/** The work given to a worker, clamped to its first three lines of text (across tasks) with "Show all". */
+function WorkList({ items }: { readonly items: readonly WorkItem[] }) {
+  const list = useRef<HTMLOListElement>(null);
   const [open, setOpen] = useState(false);
-  const [overflows, setOverflows] = useState(false);
-  useLayoutEffect(() => {
-    const element = box.current;
-    if (element && !open) setOverflows(element.scrollHeight > element.clientHeight + 1);
-  });
+  // The height that shows exactly three lines, when there's more than that.
+  const [limit, setLimit] = useState<number>();
+  const measure = useCallback((): void => {
+    const element = list.current;
+    if (!element) return;
+    const line = Number.parseFloat(getComputedStyle(element).lineHeight) || 20;
+    const top = element.getBoundingClientRect().top;
+    let seen = 0;
+    let height: number | undefined;
+    for (const item of Array.from(element.children)) {
+      const box = item.getBoundingClientRect();
+      const lines = Math.max(1, Math.round(box.height / line));
+      if (seen + lines >= 3) {
+        height = Math.round(box.top - top + (3 - seen) * line);
+        break;
+      }
+      seen += lines;
+    }
+    setLimit(height !== undefined && element.scrollHeight > height + 1 ? height : undefined);
+  }, []);
+  useLayoutEffect(measure);
+  // Tasks wrap differently when the pane's width changes.
+  useEffect(() => {
+    const element = list.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => measure());
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [measure]);
+  const clamped = limit !== undefined && !open;
   return (
     <>
-      <div ref={box} className={open ? undefined : "overflow-hidden"} style={open ? undefined : { maxHeight: `${lines * 1.25}rem` }}>
-        {children}
-      </div>
-      {overflows || open ? (
-        <button type="button" className="Link mt-1 text-xs" onClick={() => setOpen((value) => !value)}>
-          {open ? "Show less" : "Show all"}
-        </button>
-      ) : null}
-    </>
-  );
-}
-
-function WorkList({ items }: { readonly items: readonly WorkItem[] }) {
-  return (
-    <Clamp lines={3}>
-      <ol className="flex flex-col gap-1 text-sm leading-5">
+      <ol ref={list} className={cx("flex flex-col gap-1 text-sm leading-5", clamped && "overflow-hidden")} style={clamped ? { maxHeight: limit } : undefined}>
         {items.map((item) => (
           <li key={`${item.kind}-${item.at}`} className="grid grid-cols-[2.25rem_minmax(0,1fr)] gap-2">
             <span className={cx("Label justify-center tabular-nums", item.kind === "create" ? "Label--success" : "Label--accent")} title={item.kind === "create" ? "Its first task" : "A follow-up"}>
@@ -65,7 +75,12 @@ function WorkList({ items }: { readonly items: readonly WorkItem[] }) {
           </li>
         ))}
       </ol>
-    </Clamp>
+      {limit !== undefined ? (
+        <button type="button" className="Link mt-1 text-xs" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+          {open ? "Show less" : "Show all"}
+        </button>
+      ) : null}
+    </>
   );
 }
 
