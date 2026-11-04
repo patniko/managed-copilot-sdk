@@ -50,8 +50,9 @@ const APPS = [
     id: "pattern-race",
     url: local(7420),
     async prepare(page) {
-      // The board shows the last real race: wait for its scorecard.
-      await page.getByRole("region", { name: "Scorecard" }).waitFor({ timeout: 10_000 });
+      // The board shows the last race, if one ran (`pnpm --filter @managed-copilot/demo-pattern-race happy-path`).
+      await page.getByRole("region", { name: "Race board" }).waitFor({ timeout: 10_000 });
+      await page.getByRole("region", { name: "Scorecard" }).waitFor({ timeout: 3_000 }).catch(() => undefined);
     },
   },
   {
