@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Ticket, ToolItem } from "../../src/shared/types.js";
-import { customerLine, latestMessage, money, operatorOutcome, premium, STATUS, toolArgs } from "../../src/web/lib/format.js";
+import { customerLine, inlineMarkdown, latestMessage, money, operatorOutcome, plainText, premium, STATUS, toolArgs } from "../../src/web/lib/format.js";
 import { reduce, type StoreState } from "../../src/web/lib/store.js";
 
 const tool = (overrides: Partial<ToolItem>): ToolItem => ({ kind: "tool", id: "t1", name: "get_order", args: { orderId: "co-48177" }, at: "2026-11-03T10:00:00.000Z", status: "done", ...overrides });
@@ -45,6 +45,20 @@ describe("words on the wall", () => {
     expect(operatorOutcome(tool({ name: "request_refund", result: { refunded: 24 } }))).toEqual({ text: "$24.00 refunded", tone: "success" });
     expect(operatorOutcome(tool({ status: "asking" }))).toEqual({ text: "Needs approval", tone: "attention" });
     expect(toolArgs(tool({ args: { orderId: "co-1", amount: 5 } }))).toBe("CO-1 · $5.00");
+  });
+
+  it("applies the Markdown marks agents use, and drops them from previews", () => {
+    expect(inlineMarkdown("Yes! **CO-48234** ships *tomorrow*, see `track_shipment`.")).toEqual([
+      { kind: "text", text: "Yes! " },
+      { kind: "strong", text: "CO-48234" },
+      { kind: "text", text: " ships " },
+      { kind: "em", text: "tomorrow" },
+      { kind: "text", text: ", see " },
+      { kind: "code", text: "track_shipment" },
+      { kind: "text", text: "." },
+    ]);
+    expect(inlineMarkdown("$39 back, 3 * 4 = 12")).toEqual([{ kind: "text", text: "$39 back, 3 * 4 = 12" }]);
+    expect(plainText("Yes! **CO-48234** (Merino)\n- ships __tomorrow__")).toBe("Yes! CO-48234 (Merino) ships tomorrow");
   });
 });
 

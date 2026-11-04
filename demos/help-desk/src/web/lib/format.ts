@@ -118,3 +118,36 @@ export function toolArgs(item: ToolItem): string {
   if (typeof item.args["amount"] === "number") parts.push(money(item.args["amount"]));
   return parts.join(" · ");
 }
+
+export interface Span {
+  readonly kind: "text" | "strong" | "em" | "code";
+  readonly text: string;
+}
+
+const EMPHASIS = /(\*\*[^*\n]+\*\*|__[^_\n]+__|`[^`\n]+`|\*[^*\s][^*\n]*\*)/g;
+
+/** The few Markdown marks agents use in short replies (bold, italics, code), as spans; everything else is text. */
+export function inlineMarkdown(text: string): Span[] {
+  const spans: Span[] = [];
+  let last = 0;
+  for (const match of text.matchAll(EMPHASIS)) {
+    const token = match[0];
+    if (match.index > last) spans.push({ kind: "text", text: text.slice(last, match.index) });
+    if (token.startsWith("**") || token.startsWith("__")) spans.push({ kind: "strong", text: token.slice(2, -2) });
+    else if (token.startsWith("`")) spans.push({ kind: "code", text: token.slice(1, -1) });
+    else spans.push({ kind: "em", text: token.slice(1, -1) });
+    last = match.index + token.length;
+  }
+  if (last < text.length) spans.push({ kind: "text", text: text.slice(last) });
+  return spans;
+}
+
+/** A reply without its Markdown marks, for one- and two-line previews. */
+export function plainText(text: string): string {
+  return inlineMarkdown(text)
+    .map((span) => span.text)
+    .join("")
+    .replace(/^\s*(?:[-*+] |#{1,6} )/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}

@@ -1,7 +1,7 @@
 import { CopilotIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
 import type { CustomerCard, Ticket, ToolItem } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { latestMessage, money } from "../lib/format.js";
+import { latestMessage, money, plainText } from "../lib/format.js";
 import { customerHref } from "../lib/router.js";
 import { answer, useStore } from "../lib/store.js";
 import { CustomerAvatar, StatusLabel } from "./ui/Status.js";
@@ -31,9 +31,9 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
         </a>
         <StatusLabel status={ticket.status} />
       </div>
-      <p className={cx("mt-2 text-sm", bar ? "line-clamp-1" : "line-clamp-2", latest?.from === "agent" ? "text-fg" : "text-fg-muted")} title={latest?.text ?? customer.opening}>
+      <p className={cx("mt-2 text-sm", bar ? "line-clamp-1" : "line-clamp-2", latest?.from === "agent" ? "text-fg" : "text-fg-muted")} title={latest ? plainText(latest.text) : customer.opening}>
         {latest?.from === "agent" ? <CopilotIcon size={14} className="mr-1 inline-block align-[-2px] text-fg-muted" /> : null}
-        {latest?.text ?? ticket.problem ?? customer.opening}
+        {latest ? plainText(latest.text) : (ticket.problem ?? customer.opening)}
       </p>
       {bar ? <div className="mt-auto flex h-7 min-w-0 items-center gap-1.5 text-xs">{bar}</div> : null}
     </article>

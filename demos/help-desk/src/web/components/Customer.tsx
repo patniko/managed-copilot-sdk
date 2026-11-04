@@ -2,7 +2,7 @@ import { ArrowLeftIcon, CheckIcon, ContainerIcon, CopilotIcon, CpuIcon, DotFillI
 import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { CustomerCard, Ticket } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { customerLine, money, operatorOutcome, premium, toolArgs } from "../lib/format.js";
+import { customerLine, inlineMarkdown, money, operatorOutcome, premium, toolArgs } from "../lib/format.js";
 import { wallHref } from "../lib/router.js";
 import { answer, sendAsCustomer, useStore } from "../lib/store.js";
 import { CustomerAvatar, StatusLabel, TONE_TEXT } from "./ui/Status.js";
@@ -91,7 +91,9 @@ function Widget({ customer, ticket }: { readonly customer: CustomerCard; readonl
                 </li>
               ) : (
                 <AgentBubble key={item.id}>
-                  <span className={cx(item.streaming && "streaming")}>{item.text}</span>
+                  <span className={cx(item.streaming && "streaming")}>
+                    <Rich text={item.text} />
+                  </span>
                 </AgentBubble>
               );
             }
@@ -127,6 +129,23 @@ function AgentBubble({ children }: { readonly children: ReactNode }) {
       </span>
       <div className="max-w-[85%] rounded-xl rounded-bl-sm border border-line bg-canvas-muted px-3 py-2 text-sm whitespace-pre-wrap">{children}</div>
     </li>
+  );
+}
+
+/** An agent's reply with its bold, italic, and code marks applied. */
+function Rich({ text }: { readonly text: string }) {
+  return inlineMarkdown(text).map((span, index) =>
+    span.kind === "strong" ? (
+      <strong key={index}>{span.text}</strong>
+    ) : span.kind === "em" ? (
+      <em key={index}>{span.text}</em>
+    ) : span.kind === "code" ? (
+      <code key={index} className="inline-code">
+        {span.text}
+      </code>
+    ) : (
+      span.text
+    ),
   );
 }
 
