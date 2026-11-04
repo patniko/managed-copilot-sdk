@@ -1,17 +1,22 @@
-import { DotFillIcon, MarkGithubIcon, ThreeBarsIcon, TriangleDownIcon } from "@primer/octicons-react";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { CopilotIcon, DotFillIcon, MarkGithubIcon, ThreeBarsIcon, TriangleDownIcon } from "@primer/octicons-react";
+import { useState, type ReactNode } from "react";
 import type { PlatformStatus } from "../../shared/types.js";
-import { KIND_ICON, networkSummary, sizeSummary } from "../lib/blueprints.js";
+import { networkSummary, sizeSummary } from "../lib/blueprints.js";
 import { cx } from "../lib/cx.js";
 import { initials } from "../lib/format.js";
+import { pillStatus, type PillStatus } from "../lib/platform.js";
 import { homeHref } from "../lib/router.js";
 import { useStore } from "../lib/store.js";
-import { TONE_TEXT, type Tone } from "../lib/tone.js";
-import { useDismiss } from "../lib/useDismiss.js";
+import { STYLE_META } from "../lib/styles.js";
+import { usePopover } from "../lib/usePopover.js";
+import { BlueprintIcon } from "./BlueprintIcon.js";
 import { Spinner } from "./ui/Spinner.js";
 import { Tooltip } from "./ui/Tooltip.js";
 
-/** github.com's global header: logo, `Managed Copilot / Dispatch` breadcrumb, and actions on the right. */
+/**
+ * github.com's global header: the GitHub mark (home), the `Managed Copilot / Dispatch` breadcrumb, and on the right
+ * the app's own icon buttons (none here), one platform pill, a divider, and the account avatar.
+ */
 export function AppHeaderBar({ onOpenMenu, actions }: { readonly onOpenMenu?: () => void; readonly actions?: ReactNode }) {
   return (
     <header className="AppHeader relative z-30 shrink-0">
@@ -47,8 +52,7 @@ export function TopBar({ onOpenMenu }: { readonly onOpenMenu: () => void }) {
       onOpenMenu={onOpenMenu}
       actions={
         <>
-          <ConnectionIndicator />
-          <PlatformButton />
+          <PlatformPill />
           <AccountAvatar />
         </>
       }
@@ -56,122 +60,127 @@ export function TopBar({ onOpenMenu }: { readonly onOpenMenu: () => void }) {
   );
 }
 
-function ConnectionIndicator() {
-  const connection = useStore((state) => state.connection);
-  if (connection !== "reconnecting") return null;
-  return (
-    <span role="status" className="inline-flex shrink-0 animate-fade-in items-center gap-1.5 text-xs text-fg-muted">
-      <Spinner size={16} className="text-fg-attention" />
-      <span className="max-md:hidden">Reconnecting…</span>
-    </span>
-  );
+function StatusDot({ tone }: { readonly tone: PillStatus["tone"] }) {
+  if (tone === "busy") return <Spinner size={14} className="text-fg-attention" />;
+  return <DotFillIcon size={16} className={tone === "success" ? "text-fg-success" : "text-fg-danger"} />;
 }
 
-export function platformTone(platform: PlatformStatus): { tone: Tone; pulse: boolean; label: string } {
-  switch (platform.state) {
-    case "connected":
-      return { tone: "success", pulse: false, label: platform.deployment ?? "Managed Copilot" };
-    case "connecting":
-      return { tone: "active", pulse: true, label: "Connecting" };
-    case "reconnecting":
-      return { tone: "active", pulse: true, label: "Reconnecting" };
-    case "unavailable":
-      return { tone: "danger", pulse: false, label: "Unavailable" };
-  }
-}
-
-function Dot({ tone, pulse }: { readonly tone: Tone; readonly pulse: boolean }) {
-  return pulse ? <Spinner size={12} className={TONE_TEXT[tone]} /> : <DotFillIcon size={16} className={TONE_TEXT[tone]} />;
-}
-
-function PlatformButton() {
+function PlatformPill() {
   const platform = useStore((state) => state.platform);
-  const [open, setOpen] = useState(false);
-  const container = useRef<HTMLDivElement>(null);
-  const close = useCallback(() => setOpen(false), []);
-  useDismiss(container, open, close);
-  if (!platform) return null;
-  const pill = platformTone(platform);
+  const connection = useStore((state) => state.connection);
+  const { open, toggle, container } = usePopover();
+  const status = pillStatus(platform, connection);
   return (
-    <div ref={container} className="relative min-w-0">
+    <div ref={container} className="relative">
       <button
         type="button"
         aria-expanded={open}
         aria-haspopup="dialog"
-        aria-label={`Platform: ${pill.label}${platform.mode ? ` (${platform.mode})` : ""}. Show deployment details`}
-        onClick={() => setOpen((value) => !value)}
-        className="btn btn-sm max-w-full min-w-0"
+        aria-label={`${status.label}: ${status.headline}. Show deployment details`}
+        onClick={toggle}
+        className="btn btn-sm"
       >
-        <Dot tone={pill.tone} pulse={pill.pulse} />
-        <span className="max-w-[14rem] min-w-0 truncate max-sm:hidden">{pill.label}</span>
-        {platform.mode ? <span className="font-normal text-fg-muted max-sm:hidden">{platform.mode}</span> : null}
+        <StatusDot tone={status.tone} />
+        <span className="max-w-[10rem] truncate">{status.label}</span>
         <TriangleDownIcon size={16} />
       </button>
-      {open ? <PlatformPopover platform={platform} /> : null}
+      {open ? <PlatformPopover platform={platform} status={status} /> : null}
     </div>
   );
 }
 
-function PlatformPopover({ platform }: { readonly platform: PlatformStatus }) {
-  const coordinator = useStore((state) => state.coordinator);
+function PlatformPopover({ platform, status }: { readonly platform: PlatformStatus | undefined; readonly status: PillStatus }) {
+  const styles = useStore((state) => state.styles);
   const blueprints = useStore((state) => state.blueprints);
+  const coordinators = styles.filter((style) => style.available && style.coordinator);
+  const account = platform?.account;
   return (
-    <div role="dialog" aria-label="Deployment details" className="Overlay absolute top-full right-0 z-40 mt-2 w-[22rem] max-w-[calc(100vw-2rem)] animate-scale-in">
-      <div className="Overlay-body flex flex-col gap-3 p-4 text-sm">
-        <div>
-          <div className="font-semibold">{platform.state === "connected" ? `Connected to ${platform.deployment ?? "Managed Copilot"}` : platformTone(platform).label}</div>
-          {platform.url ? <div className="mt-0.5 truncate font-mono text-xs text-fg-muted">{platform.url}</div> : null}
-          {platform.message ? <p className="mt-2 text-fg-muted">{platform.message}</p> : null}
+    <div role="dialog" aria-label="Deployment details" className="Overlay absolute top-full right-0 z-40 mt-2 w-[21rem] animate-scale-in max-sm:fixed max-sm:inset-x-4 max-sm:top-16 max-sm:w-auto">
+      <div className="flex flex-col gap-1 border-b border-line-muted px-4 py-3">
+        <div className="flex items-center gap-1.5 font-semibold">
+          <StatusDot tone={status.tone} />
+          {status.headline}
         </div>
-        {coordinator ? (
-          <div>
-            <div className="text-xs font-semibold tracking-wide text-fg-muted uppercase">Coordinator</div>
-            <div className="mt-1">
-              <span className="font-mono text-xs">{coordinator.environment}</span> · {coordinator.model} · up to {coordinator.maxWorkers} sandboxes at once
-            </div>
+        {platform?.deployment ? (
+          <div className="text-sm text-fg-muted">
+            Deployment <span className="font-semibold text-fg">{platform.deployment}</span>
           </div>
         ) : null}
-        {blueprints.length ? (
-          <div>
-            <div className="text-xs font-semibold tracking-wide text-fg-muted uppercase">Sandboxes it can create</div>
-            <ul className="mt-1 flex flex-col gap-1">
-              {blueprints.map((blueprint) => {
-                const Glyph = KIND_ICON[blueprint.kind];
-                return (
-                  <li key={blueprint.name} className="flex items-center gap-2">
-                    <Glyph size={14} className="shrink-0 text-fg-muted" />
-                    <span className="font-mono text-xs">{blueprint.name}</span>
-                    <span className="truncate text-xs text-fg-muted">
-                      {sizeSummary(blueprint)} · {networkSummary(blueprint.network, blueprint.kind)}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
+        {platform?.url ? (
+          <div className="truncate font-mono text-xs text-fg-muted" title={platform.url}>
+            {platform.url}
           </div>
         ) : null}
+        {platform?.message && platform.state !== "connected" ? <p className="text-sm text-fg-muted">{platform.message}</p> : null}
       </div>
+      {account ? (
+        <div className="flex items-center gap-2 border-b border-line-muted px-4 py-2.5 text-sm">
+          <Avatar account={account} size={20} />
+          <span className="min-w-0 truncate">
+            {account.name ? <span className="font-semibold">{account.name} </span> : null}
+            <span className="text-fg-muted">@{account.login}</span>
+          </span>
+        </div>
+      ) : null}
+      {coordinators.length || blueprints.length ? (
+        <div className="px-2 py-2">
+          <div className="px-2 pb-1 text-xs font-semibold text-fg-muted">Environments</div>
+          <ul className="flex flex-col text-sm">
+            {coordinators.map((style) => (
+              <EnvironmentRow
+                key={style.environment}
+                icon={<CopilotIcon size={16} className="text-fg-muted" />}
+                name={style.environment}
+                detail={STYLE_META[style.style].short}
+                title={`Coordinator: ${STYLE_META[style.style].label.toLowerCase()} · ${style.coordinator?.model ?? ""} · on the shared runtime`}
+              />
+            ))}
+            {blueprints.map((blueprint) => (
+              <EnvironmentRow
+                key={blueprint.name}
+                icon={<BlueprintIcon kind={blueprint.kind} />}
+                name={blueprint.name}
+                detail={blueprint.label}
+                title={`Sandbox: ${sizeSummary(blueprint)} · ${networkSummary(blueprint.network, blueprint.kind)}`}
+              />
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function EnvironmentRow({ icon, name, detail, title }: { readonly icon: ReactNode; readonly name: string; readonly detail: string; readonly title: string }) {
+  return (
+    <li className="flex items-center gap-2 rounded-md px-2 py-1" title={title}>
+      {icon}
+      <span className="min-w-0 truncate font-mono text-xs">{name}</span>
+      <span className="ml-auto shrink-0 text-xs text-fg-muted">{detail}</span>
+    </li>
+  );
+}
+
+function Avatar({ account, size }: { readonly account: NonNullable<PlatformStatus["account"]>; readonly size: number }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const name = account.name ?? account.login;
+  if (account.avatarUrl && !imageFailed) return <img src={account.avatarUrl} alt="" width={size} height={size} className="avatar shrink-0" onError={() => setImageFailed(true)} />;
+  return (
+    <span className={cx("avatar avatar-initials shrink-0", size >= 32 ? "text-xs" : "text-[10px]")} style={{ width: size, height: size }} aria-hidden>
+      {initials(name)}
+    </span>
   );
 }
 
 function AccountAvatar() {
   const account = useStore((state) => state.platform?.account);
-  const [imageFailed, setImageFailed] = useState(false);
   if (!account) return null;
-  const name = account.name ?? account.login;
   return (
     <>
       <span className="AppHeader-divider max-sm:hidden" aria-hidden />
       <Tooltip content={account.name ? `${account.name} (@${account.login})` : `@${account.login}`}>
         <span className="inline-flex shrink-0">
-          {account.avatarUrl && !imageFailed ? (
-            <img src={account.avatarUrl} alt="" className="avatar size-8" onError={() => setImageFailed(true)} />
-          ) : (
-            <span className={cx("avatar avatar-initials size-8 text-xs")} aria-hidden>
-              {initials(name)}
-            </span>
-          )}
+          <Avatar account={account} size={32} />
           <span className="sr-only">Signed in as {account.login}</span>
         </span>
       </Tooltip>

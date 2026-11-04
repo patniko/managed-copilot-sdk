@@ -1,23 +1,30 @@
 import {
   AlertIcon,
+  CheckCircleIcon,
+  ChevronRightIcon,
   ClockIcon,
   CopilotIcon,
   DownloadIcon,
   FileDirectoryIcon,
+  InfoIcon,
+  KebabHorizontalIcon,
   PackageIcon,
+  PlugIcon,
   StopIcon,
   SyncIcon,
   TasklistIcon,
   TrashIcon,
   WorkflowIcon,
+  XCircleIcon,
   type Icon,
 } from "@primer/octicons-react";
-import { useEffect, useState } from "react";
-import { formatWorkOrderNumber, type WorkOrder } from "../../shared/types.js";
+import { useEffect, useState, type ReactNode } from "react";
+import { formatWorkOrderNumber, type WorkOrder, type WorkOrderMode } from "../../shared/types.js";
 import { bundleUrl, errorMessage, type ErrorInfo } from "../lib/api.js";
 import { confirmAction } from "../lib/confirm.js";
 import { cx } from "../lib/cx.js";
-import { elapsedBetween, formatClock, formatDateTime, formatDuration, formatFullDateTime, pluralize } from "../lib/format.js";
+import { elapsedBetween, formatClock, formatDuration, formatFullDateTime, pluralize } from "../lib/format.js";
+import { modeLabel } from "../lib/platform.js";
 import { homeHref, navigate, workOrderHref, type Query, type WorkOrderTab } from "../lib/router.js";
 import {
   defaultStationId,
@@ -31,13 +38,14 @@ import { cancelWorkOrder, deleteWorkOrder, ensureWorkOrder, retryWorkOrder, useS
 import { useNow } from "../lib/time.js";
 import { toast } from "../lib/toast.js";
 import { ArtifactsView } from "./ArtifactsView.js";
-import { AgentFloor } from "./AgentFloor.js";
 import { DeliverableView } from "./Deliverable.js";
-import { Pipeline } from "./Floor.js";
+import { Floor } from "./Floor.js";
 import { PlanView } from "./PlanView.js";
 import { IntakePanel, StationPanel } from "./StationPanel.js";
-import { Button, buttonClass } from "./ui/Button.js";
+import { Button, buttonClass, IconButton } from "./ui/Button.js";
 import { Callout, EmptyState, Skeleton } from "./ui/Feedback.js";
+import { MenuItem, Popover } from "./ui/Popover.js";
+import { Spinner } from "./ui/Spinner.js";
 
 export interface WorkOrderViewProps {
   readonly id: string;
@@ -85,7 +93,7 @@ export function WorkOrderView({ id, tab, query }: WorkOrderViewProps) {
 function FloorTab({ workOrder, query }: { readonly workOrder: WorkOrder; readonly query: Query }) {
   const requested = query.station;
   const stationExists = requested === "intake" || (requested !== undefined && findStation(workOrder, requested) !== undefined);
-  const placeholders = ["plan", "release"];
+  const placeholders = ["plan", "release", "coordinator"];
   const selectedId =
     requested && (stationExists || placeholders.includes(requested) || requested.startsWith("build:") || requested.startsWith("review:"))
       ? requested
@@ -98,9 +106,7 @@ function FloorTab({ workOrder, query }: { readonly workOrder: WorkOrder; readonl
 
   return (
     <div className="grid gap-4 xl:h-full xl:min-h-0 xl:grid-cols-[minmax(0,1fr)_23.75rem] 2xl:grid-cols-[minmax(0,1fr)_26.25rem]">
-      {workOrder.mode === "agent"
-        ? <AgentFloor workOrder={workOrder} selectedId={selectedId} onSelect={select} />
-        : <Pipeline workOrder={workOrder} selectedId={selectedId} onSelect={select} />}
+      <Floor workOrder={workOrder} selectedId={selectedId} onSelect={select} />
       <div className="min-w-0 xl:min-h-0">
         {selectedId === "intake" ? (
           <IntakePanel workOrder={workOrder} />
@@ -108,8 +114,8 @@ function FloorTab({ workOrder, query }: { readonly workOrder: WorkOrder; readonl
           <StationPanel key={station.id} workOrder={workOrder} station={station} />
         ) : (
           <div className="Box flex h-full min-h-60 items-center justify-center">
-            <EmptyState icon={ClockIcon} title="This station hasn't started yet" size="sm">
-              It appears here once the work before it is done.
+            <EmptyState icon={ClockIcon} title="Not started yet" size="sm">
+              It starts when the work before it is done.
             </EmptyState>
           </div>
         )}
@@ -125,7 +131,36 @@ const TABS: readonly { readonly id: WorkOrderTab; readonly label: string; readon
   { id: "deliverable", label: "Deliverable", icon: PackageIcon },
 ];
 
-/** Pull request style header: title with a muted number, a state pill and meta line, actions, and the tabs. */
+/** Agent-led or App-driven, as a Label. */
+export function ModeLabel({ mode }: { readonly mode: WorkOrderMode | undefined }) {
+  const agent = mode === "agent";
+  const Glyph = agent ? CopilotIcon : PlugIcon;
+  return (
+    <span className={cx("Label shrink-0", agent ? "Label--done" : "Label--secondary")}>
+      <Glyph size={12} />
+      {modeLabel(mode)}
+    </span>
+  );
+}
+
+/** An icon and a value; the label is in the tooltip and for screen readers. */
+function Stat({ icon: Glyph, label, title, className, children }: {
+  readonly icon: Icon;
+  readonly label: string;
+  readonly title?: string;
+  readonly className?: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1" title={title ?? label}>
+      <Glyph size={16} className={cx("shrink-0", className ?? "text-fg-muted")} />
+      <span className="sr-only">{label}:</span>
+      <span className="text-fg tabular-nums">{children}</span>
+    </span>
+  );
+}
+
+/** Pull request style header: title with a muted number, then the state, mode, and a few icon stats; tabs below. */
 function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly tab: WorkOrderTab }) {
   const active = isWorkOrderActive(workOrder.status);
   const now = useNow(1000, active);
@@ -135,56 +170,49 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
   const elapsed = elapsedBetween(started, workOrder.completedAt, now);
   const number = formatWorkOrderNumber(workOrder.number);
   const artifactCount = useStore((state) => state.artifacts[workOrder.id]?.data?.files.length);
+  const tests = workOrder.tests;
+  const startedText = `${workOrder.startedAt ? "Started" : "Created"} ${formatFullDateTime(started)}`;
 
   return (
     <header>
       <div className="px-4 pt-4 md:px-6 md:pt-6">
         <div className="flex flex-wrap items-start gap-x-4 gap-y-3">
-          <h1 className="gh-header-title min-w-0 flex-1 basis-80 break-words max-sm:text-xl">
+          <h1 className="gh-header-title min-w-0 flex-1 basis-72 break-words max-sm:text-xl">
             {workOrder.title} <span className="gh-header-number whitespace-nowrap">{number}</span>
           </h1>
-          <Actions workOrder={workOrder} />
+          <Actions workOrder={workOrder} tab={tab} />
         </div>
-        <div className="gh-header-meta mt-3 border-b-0 pb-0">
+        <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
           <span className={cx("State", STATE_CLASS[meta.state])}>
             <StateIcon size={16} />
             {meta.label}
           </span>
-          <span className={cx("Label", workOrder.mode === "agent" ? "Label--done" : "Label--secondary")}>
-            {workOrder.mode === "agent" ? <CopilotIcon size={12} /> : null}
-            {workOrder.mode === "agent" ? "Agent-led" : "Classic"}
-          </span>
-          <span title={formatFullDateTime(started)}>
-            {workOrder.startedAt ? "Started" : "Created"} {formatDateTime(started)}
-          </span>
+          <ModeLabel mode={workOrder.mode} />
           {elapsed !== undefined ? (
-            <>
-              <span aria-hidden>·</span>
-              {active ? (
-                <span>
-                  Elapsed <span className="font-mono text-fg tabular-nums">{formatClock(elapsed)}</span>
-                </span>
-              ) : (
-                <span>
-                  Took <span className="text-fg">{formatDuration(elapsed)}</span>
-                </span>
-              )}
-            </>
+            <Stat icon={ClockIcon} label={active ? "Elapsed" : "Took"} title={`${active ? "Elapsed" : `Took ${formatDuration(elapsed)}`} · ${startedText}`}>
+              {active ? formatClock(elapsed) : formatDuration(elapsed)}
+            </Stat>
           ) : null}
-          <span aria-hidden>·</span>
-          <span>{workOrder.taskCount > 0 ? pluralize(workOrder.taskCount, "task") : "No tasks yet"}</span>
-          <span aria-hidden>·</span>
-          <span>Up to {pluralize(workOrder.maxReviewRounds, "review round")}</span>
-          {workOrder.mode === "agent" ? <><span aria-hidden>·</span><span>{workOrder.workersStarted ?? 0} workers created by the coordinator</span></> : null}
+          {workOrder.taskCount > 0 ? (
+            <Stat icon={TasklistIcon} label="Tasks">
+              {pluralize(workOrder.taskCount, "task")}
+            </Stat>
+          ) : null}
+          {tests && tests.total > 0 ? (
+            <Stat
+              icon={tests.failed > 0 ? XCircleIcon : CheckCircleIcon}
+              label="Tests"
+              title={`${tests.passed} passed · ${tests.failed} failed`}
+              className={tests.failed > 0 ? "text-fg-danger" : "text-fg-success"}
+            >
+              {tests.failed > 0 ? `${tests.failed} failing` : pluralize(tests.passed, "test")}
+            </Stat>
+          ) : null}
+          <DetailsPopover workOrder={workOrder} startedText={startedText} />
         </div>
 
         {workOrder.error ? (
-          <Callout
-            tone="danger"
-            role="alert"
-            className="mt-4"
-            title={workOrder.status === "cancelled" ? "Work order cancelled" : "Work order failed"}
-          >
+          <Callout tone="danger" role="alert" compact className="mt-3">
             <span>{workOrder.error.message}</span> <code className="inline-code">{workOrder.error.code}</code>
           </Callout>
         ) : null}
@@ -226,7 +254,42 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
   );
 }
 
-function Actions({ workOrder }: { readonly workOrder: WorkOrder }) {
+/** The work order's settings and origin, one click away from the header. */
+function DetailsPopover({ workOrder, startedText }: { readonly workOrder: WorkOrder; readonly startedText: string }) {
+  const template = useStore((state) =>
+    workOrder.source.templateId ? state.templates.find((candidate) => candidate.id === workOrder.source.templateId) : undefined,
+  );
+  const source = workOrder.source.kind === "template" ? (template?.title ?? "Template") : "Custom brief";
+  return (
+    <Popover
+      label="Work order details"
+      align="start"
+      overlayClassName="w-72 max-sm:fixed max-sm:inset-x-3 max-sm:top-auto max-sm:w-auto"
+      trigger={(props) => <IconButton {...props} icon={InfoIcon} label="Work order details" size="sm" />}
+    >
+      <ul className="space-y-1.5 px-4 py-3 text-xs">
+        <li>{startedText}</li>
+        <li>Up to {pluralize(workOrder.maxReviewRounds, "review round")}</li>
+        {workOrder.mode === "agent" ? (
+          <li>{pluralize(workOrder.workersStarted ?? 0, "sandbox", "sandboxes")} created by the coordinator</li>
+        ) : null}
+        <li>
+          From {workOrder.source.kind === "template" ? "the template " : ""}
+          <span className="font-semibold">{source}</span>
+          {workOrder.owner ? ` · requested by @${workOrder.owner.login}` : ""}
+        </li>
+      </ul>
+      <div className="border-t border-line-muted px-4 py-2">
+        <a href={workOrderHref(workOrder.id, "floor", { station: "intake" })} className="inline-flex items-center gap-0.5 text-xs font-semibold">
+          Read the brief
+          <ChevronRightIcon size={12} />
+        </a>
+      </div>
+    </Popover>
+  );
+}
+
+function Actions({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly tab: WorkOrderTab }) {
   const [pending, setPending] = useState<"cancel" | "retry" | "delete">();
   const number = formatWorkOrderNumber(workOrder.number);
   const active = isWorkOrderActive(workOrder.status);
@@ -275,28 +338,59 @@ function Actions({ workOrder }: { readonly workOrder: WorkOrder }) {
   };
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      {active ? (
-        <Button variant="danger" icon={StopIcon} loading={pending === "cancel"} onClick={() => void run("cancel")}>
-          Cancel
-        </Button>
-      ) : null}
-      {isWorkOrderTerminal(workOrder.status) ? (
-        <Button variant="danger" icon={TrashIcon} loading={pending === "delete"} onClick={() => void run("delete")} aria-label={`Delete ${number}`}>
-          Delete
-        </Button>
+    <div className="flex items-center gap-2">
+      {pending === "cancel" || pending === "delete" ? (
+        <span role="status" className="inline-flex items-center gap-1.5 text-xs text-fg-muted">
+          <Spinner size={16} />
+          {pending === "cancel" ? "Cancelling…" : "Deleting…"}
+        </span>
       ) : null}
       {retryable ? (
         <Button variant="primary" icon={SyncIcon} loading={pending === "retry"} onClick={() => void run("retry")}>
           Retry
         </Button>
       ) : null}
-      {workOrder.status === "completed" ? (
+      {workOrder.status === "completed" && tab !== "deliverable" ? (
         <a href={bundleUrl(workOrder.id)} download className={buttonClass("primary")}>
           <DownloadIcon size={16} />
           Download release
         </a>
       ) : null}
+      <Popover
+        role="menu"
+        label={`${number} actions`}
+        overlayClassName="w-56 max-sm:fixed max-sm:inset-x-3 max-sm:top-auto max-sm:w-auto"
+        trigger={(props) => <IconButton {...props} icon={KebabHorizontalIcon} label="More actions" variant="default" disabled={pending !== undefined} />}
+      >
+        {(close) => (
+          <div className="ActionList">
+            {active ? (
+              <MenuItem
+                danger
+                icon={StopIcon}
+                onSelect={() => {
+                  close();
+                  void run("cancel");
+                }}
+              >
+                Cancel work order
+              </MenuItem>
+            ) : null}
+            {isWorkOrderTerminal(workOrder.status) ? (
+              <MenuItem
+                danger
+                icon={TrashIcon}
+                onSelect={() => {
+                  close();
+                  void run("delete");
+                }}
+              >
+                Delete work order
+              </MenuItem>
+            ) : null}
+          </div>
+        )}
+      </Popover>
     </div>
   );
 }

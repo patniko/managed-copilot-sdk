@@ -1,17 +1,19 @@
 import {
-  ArrowRightIcon,
+  ArrowSwitchIcon,
   CheckCircleFillIcon,
+  ChevronRightIcon,
   ClockIcon,
-  CodeIcon,
   CodeReviewIcon,
   CopilotIcon,
   FileCodeIcon,
   InfoIcon,
   PackageIcon,
+  PlugIcon,
   TableIcon,
   TasklistIcon,
   TerminalIcon,
   ToolsIcon,
+  VersionsIcon,
   type Icon,
 } from "@primer/octicons-react";
 import { useLayoutEffect, useMemo, useRef, useState, type FormEvent } from "react";
@@ -19,7 +21,7 @@ import { formatWorkOrderNumber, type WorkOrderMode, type WorkOrderTemplate } fro
 import { toErrorInfo, type ErrorInfo } from "../lib/api.js";
 import { confirmAction } from "../lib/confirm.js";
 import { cx } from "../lib/cx.js";
-import { runsBlockedReason } from "../lib/platform.js";
+import { modeLabel, runsBlockedReason } from "../lib/platform.js";
 import { navigate, workOrderHref } from "../lib/router.js";
 import { createWorkOrder, useStore } from "../lib/store.js";
 import { toast } from "../lib/toast.js";
@@ -38,6 +40,11 @@ const EMPTY_DRAFT: Draft = { title: "", brief: "", rounds: 2, mode: "agent" };
 let savedDraft: Draft = EMPTY_DRAFT;
 
 const MAX_TITLE = 120;
+
+const MODES: readonly { readonly mode: WorkOrderMode; readonly icon: Icon; readonly description: string }[] = [
+  { mode: "agent", icon: CopilotIcon, description: "A coordinator agent creates sandboxes and reuses them for fixes." },
+  { mode: "classic", icon: PlugIcon, description: "The app drives each step, with a fresh sandbox per build." },
+];
 
 export function NewWorkOrder() {
   const templates = useStore((state) => state.templates);
@@ -61,6 +68,7 @@ export function NewWorkOrder() {
   const blocked = runsBlockedReason(platform, draft.mode);
   const missingFields = !draft.title.trim() || !draft.brief.trim();
   const canSubmit = !blocked && !missingFields && !submitting;
+  const selectedMode = MODES.find((item) => item.mode === draft.mode) ?? MODES[0]!;
 
   const applyTemplate = async (template: WorkOrderTemplate): Promise<void> => {
     const custom = draft.brief.trim() && !matchingTemplate;
@@ -103,18 +111,19 @@ export function NewWorkOrder() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-[1012px] px-4 py-6 md:px-6 lg:px-8 lg:py-8">
-      <Intro />
+    <div className="mx-auto w-full max-w-[880px] px-4 py-6 md:px-6 lg:py-10">
+      <header>
+        <h1 className="text-2xl font-semibold">What should the factory build?</h1>
+        <p className="mt-1 text-fg-muted">A work order goes in; a tested, reviewed release comes out.</p>
+        <Stepper />
+      </header>
 
       {templates.length > 0 ? (
         <section aria-labelledby="templates-heading" className="mt-8">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-            <h2 id="templates-heading" className="text-base font-semibold">
-              Start from a template
-            </h2>
-            <p className="text-xs text-fg-muted">Pick one to fill in the form below.</p>
-          </div>
-          <div className="mt-3 grid gap-4 md:grid-cols-2">
+          <h2 id="templates-heading" className="text-base font-semibold">
+            Start from a template
+          </h2>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
             {templates.map((template) => (
               <TemplateCard
                 key={template.id}
@@ -131,45 +140,39 @@ export function NewWorkOrder() {
         ref={form}
         onSubmit={(event) => void submit(event)}
         noValidate
-        aria-labelledby="new-work-order-heading"
-        className="mt-10 scroll-mt-6"
+        aria-label="New work order"
+        className="Box mt-6 scroll-mt-6"
       >
-        <div className="flex flex-wrap items-center gap-2 border-b border-line-muted pb-2">
-          <h2 id="new-work-order-heading" className="text-base font-semibold">
-            New work order
-          </h2>
-          {matchingTemplate ? <span className="Label Label--accent">Template · {matchingTemplate.title}</span> : null}
-        </div>
-
-        <div className="mt-4 space-y-5">
+        <div className="space-y-4 p-4 md:p-6">
           <fieldset>
-            <legend className="FormControl-label">Execution mode</legend>
-            <div className="mt-2 grid gap-3 sm:grid-cols-2">
-              {(["agent", "classic"] as const).map((mode) => (
-                <label key={mode} className={cx("Box flex cursor-pointer items-start gap-3 p-3", draft.mode === mode && "border-line-accent ring-1 ring-line-accent")}>
-                  <input type="radio" name="execution-mode" value={mode} checked={draft.mode === mode} onChange={() => setDraft({ ...draft, mode })} className="mt-1 accent-accent-emphasis" />
-                  <span>
-                    <span className="flex items-center gap-1.5 font-semibold">
-                      {mode === "agent" ? <CopilotIcon size={16} className="text-fg-done" /> : <ToolsIcon size={16} />}
-                      {mode === "agent" ? "Agent-led" : "Classic"}
-                      {mode === "agent" ? <span className="Label Label--done">Default</span> : null}
-                    </span>
-                    <span className="mt-1 block text-xs text-fg-muted">
-                      {mode === "agent"
-                        ? "A coordinator creates builder and release sandboxes, reuses builders for fixes, and explains each decision. The factory checks the work."
-                        : "The app runs the original plan, parallel builds, review loops, and release pipeline."}
-                    </span>
-                  </span>
-                </label>
-              ))}
+            <legend className="FormControl-label">Mode</legend>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <div className="SegmentedControl">
+                {MODES.map((item) => (
+                  <label key={item.mode} className="SegmentedControl-item">
+                    <input
+                      type="radio"
+                      name="execution-mode"
+                      value={item.mode}
+                      checked={draft.mode === item.mode}
+                      onChange={() => setDraft({ ...draft, mode: item.mode })}
+                      aria-describedby="wo-mode-help"
+                      className="sr-only"
+                    />
+                    <item.icon size={16} className={item.mode === "agent" && draft.mode === "agent" ? "text-fg-done" : undefined} />
+                    {modeLabel(item.mode)}
+                  </label>
+                ))}
+              </div>
+              <p id="wo-mode-help" className="min-w-0 text-xs text-fg-muted">
+                {selectedMode.description}
+              </p>
             </div>
           </fieldset>
+
           <div className="FormControl">
             <label htmlFor="wo-title" className="FormControl-label">
               Title
-              <span className="FormControl-required" aria-hidden>
-                *
-              </span>
             </label>
             <input
               id="wo-title"
@@ -187,24 +190,25 @@ export function NewWorkOrder() {
           <div className="FormControl">
             <label htmlFor="wo-brief" className="FormControl-label">
               Brief
-              <span className="FormControl-required" aria-hidden>
-                *
-              </span>
             </label>
             <BriefInput value={draft.brief} onChange={(brief) => setDraft({ ...draft, brief })} />
-            <span id="wo-brief-help" className="FormControl-caption">
-              Markdown welcome. Be specific about inputs, outputs, and tests.
-            </span>
           </div>
 
-          <ReviewRounds value={draft.rounds} onChange={(rounds) => setDraft({ ...draft, rounds })} />
+          <details className="group">
+            <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded-md text-sm font-semibold select-none [&::-webkit-details-marker]:hidden">
+              <ChevronRightIcon size={16} className="text-fg-muted transition-transform duration-100 group-open:rotate-90" />
+              Advanced
+              <span className="font-normal text-fg-muted">· {draft.rounds} review {draft.rounds === 1 ? "round" : "rounds"}</span>
+            </summary>
+            <ReviewRounds value={draft.rounds} onChange={(rounds) => setDraft({ ...draft, rounds })} />
+          </details>
         </div>
 
-        <div className="mt-6 flex flex-col gap-3 border-t border-line-muted pt-4 sm:flex-row sm:items-center sm:justify-end">
+        <div className="flex flex-col gap-3 border-t border-line-muted px-4 py-3 sm:flex-row sm:items-center sm:justify-end md:px-6">
           {blocked || missingFields ? (
             <p id="wo-submit-help" className="flex items-start gap-1.5 text-xs text-fg-muted sm:mr-auto">
               <InfoIcon size={16} className="shrink-0" />
-              {blocked ?? "Add a title and a brief to start."}
+              {blocked ?? "Pick a template or add a title and brief."}
             </p>
           ) : null}
           <Button
@@ -219,7 +223,7 @@ export function NewWorkOrder() {
         </div>
 
         {error ? (
-          <Callout tone="danger" role="alert" title="The factory couldn't start this work order" className="mt-4">
+          <Callout tone="danger" role="alert" title="The factory couldn't start this work order" className="mx-4 mb-4 md:mx-6">
             {error.message}
           </Callout>
         ) : null}
@@ -228,45 +232,47 @@ export function NewWorkOrder() {
   );
 }
 
-function Intro() {
-  const steps: readonly { readonly icon: Icon; readonly label: string }[] = [
-    { icon: TasklistIcon, label: "Plan" },
-    { icon: ToolsIcon, label: "Build in parallel sandboxes" },
-    { icon: CodeReviewIcon, label: "Review" },
-    { icon: PackageIcon, label: "Release" },
-  ];
+const STEPS: readonly { readonly icon: Icon; readonly label: string }[] = [
+  { icon: TasklistIcon, label: "Plan" },
+  { icon: ToolsIcon, label: "Build" },
+  { icon: CodeReviewIcon, label: "Review" },
+  { icon: PackageIcon, label: "Release" },
+];
+
+/** The assembly line every work order runs down, as connected chips. */
+function Stepper() {
   return (
-    <header className="Subhead mb-0">
-      <h1 className="Subhead-heading">What should the factory build?</h1>
-      <div className="Subhead-description">
-        <p className="max-w-2xl">
-          Describe the software you need. A coordinator agent creates the sandboxes the plan needs and reuses them for
-          fixes. The factory validates the plan, reviews on a second model, and accepts only a tested release.
-        </p>
-        <ol className="mt-3 mb-1 flex flex-wrap items-center gap-x-2 gap-y-1.5" aria-label="Pipeline">
-          {steps.map((step, index) => (
-            <li key={step.label} className="flex items-center gap-2">
-              <span className="Label Label--large">
-                <step.icon size={12} className="text-fg-muted" />
-                {step.label}
-              </span>
-              {index < steps.length - 1 ? <ArrowRightIcon size={12} className="text-fg-muted" /> : null}
-            </li>
-          ))}
-        </ol>
-      </div>
-    </header>
+    <ol className="mt-4 flex items-center" aria-label="Every work order runs Plan, Build, Review, Release">
+      {STEPS.map((step, index) => (
+        <li key={step.label} className={cx("flex items-center", index < STEPS.length - 1 && "flex-1 sm:flex-none")}>
+          <span className="Label shrink-0 gap-1.5 sm:h-6 sm:px-2.5">
+            <step.icon size={14} className="text-fg-muted max-sm:hidden" />
+            {step.label}
+          </span>
+          {index < STEPS.length - 1 ? <span className="mx-1 h-px min-w-2 flex-1 bg-line-emphasis sm:mx-1.5 sm:w-10 sm:flex-none" aria-hidden /> : null}
+        </li>
+      ))}
+    </ol>
   );
 }
 
+const TEMPLATE_ICONS: Readonly<Record<string, Icon>> = {
+  "csv-json-toolkit": ArrowSwitchIcon,
+  "csv-to-json-cli": TerminalIcon,
+  "semver-toolkit": VersionsIcon,
+  "markdown-table-formatter": TableIcon,
+};
+
 function templateIcon(template: WorkOrderTemplate): Icon {
-  if (template.tags.includes("Library")) return CodeIcon;
+  const known = Object.hasOwn(TEMPLATE_ICONS, template.id) ? TEMPLATE_ICONS[template.id] : undefined;
+  if (known) return known;
+  if (template.tags.includes("Library")) return VersionsIcon;
   if (template.tags.includes("Text")) return TableIcon;
   if (template.tags.includes("CLI")) return TerminalIcon;
   return FileCodeIcon;
 }
 
-/** A selectable template card, like GitHub's template choosers. */
+/** A template: icon, title, one line, and how long it takes. Selecting one fills in the form. */
 function TemplateCard({
   template,
   selected,
@@ -283,32 +289,32 @@ function TemplateCard({
       onClick={onSelect}
       aria-pressed={selected}
       className={cx(
-        "Box flex h-full flex-col p-4 text-left transition-colors duration-100",
-        selected ? "border-line-accent ring-1 ring-line-accent" : "hover:bg-canvas-muted",
+        "Box flex h-full min-w-0 items-start gap-3 p-3 text-left transition-colors duration-100",
+        selected ? "border-line-accent bg-accent-muted/40 ring-1 ring-line-accent" : "hover:bg-canvas-muted",
       )}
     >
-      <div className="flex w-full items-start gap-2">
-        <Glyph size={16} className="mt-0.5 shrink-0 text-fg-muted" />
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <h3 className="font-semibold">{template.title}</h3>
-            {template.featured ? <span className="Label Label--accent">Scripted demo</span> : null}
-          </div>
-          <p className="mt-1 text-fg-muted">{template.tagline}</p>
-        </div>
-        {selected ? <CheckCircleFillIcon size={16} className="mt-0.5 shrink-0 text-fg-accent" /> : null}
-      </div>
-      <div className="mt-auto flex w-full flex-wrap items-center gap-1 pt-4 pl-6">
-        {template.tags.map((tag) => (
-          <span key={tag} className="topic-tag">
-            {tag}
+      <span
+        className={cx(
+          "grid size-8 shrink-0 place-items-center rounded-md border",
+          selected ? "border-line-accent bg-canvas text-fg-accent" : "border-line bg-canvas-muted text-fg-muted",
+        )}
+        aria-hidden
+      >
+        {selected ? <CheckCircleFillIcon size={16} /> : <Glyph size={16} />}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className="truncate font-semibold">{template.title}</span>
+          {template.featured ? <span className="Label Label--success shrink-0">Recommended</span> : null}
+          <span className="ml-auto inline-flex shrink-0 items-center gap-1 pl-1 text-xs text-fg-muted tabular-nums max-sm:hidden">
+            <ClockIcon size={12} />
+            {template.estimate}
           </span>
-        ))}
-        <span className="ml-auto inline-flex items-center gap-1 text-xs text-fg-muted">
-          <ClockIcon size={12} />
-          {template.estimate}
         </span>
-      </div>
+        <span className="mt-0.5 block truncate text-xs text-fg-muted" title={template.tagline}>
+          {template.tagline}
+        </span>
+      </span>
     </button>
   );
 }
@@ -319,17 +325,16 @@ function BriefInput({ value, onChange }: { readonly value: string; readonly onCh
     const element = ref.current;
     if (!element) return;
     element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight + 2, 640)}px`;
+    element.style.height = `${Math.min(element.scrollHeight + 2, 240)}px`;
   }, [value]);
   return (
     <textarea
       id="wo-brief"
       ref={ref}
-      rows={10}
+      rows={6}
       value={value}
       spellCheck
       aria-required="true"
-      aria-describedby="wo-brief-help"
       placeholder={"Build a zero-dependency Node.js CLI that…\n\n- Inputs and outputs\n- Edge cases to handle\n- How it should be tested"}
       onChange={(event) => onChange(event.target.value)}
       className="form-control input-block resize-y"
@@ -339,12 +344,12 @@ function BriefInput({ value, onChange }: { readonly value: string; readonly onCh
 
 function ReviewRounds({ value, onChange }: { readonly value: number; readonly onChange: (value: number) => void }) {
   return (
-    <fieldset>
+    <fieldset className="mt-3 pl-5">
       <legend className="FormControl-label">Review rounds</legend>
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <div className="SegmentedControl">
+        <div className="SegmentedControl SegmentedControl--sm">
           {[1, 2, 3].map((rounds) => (
-            <label key={rounds} className="SegmentedControl-item w-11">
+            <label key={rounds} className="SegmentedControl-item w-10">
               <input
                 type="radio"
                 name="review-rounds"
@@ -357,7 +362,7 @@ function ReviewRounds({ value, onChange }: { readonly value: number; readonly on
             </label>
           ))}
         </div>
-        <p className="FormControl-caption">How many times the reviewer can send a task back before it's accepted.</p>
+        <p className="text-xs text-fg-muted">Times a reviewer can send a task back.</p>
       </div>
     </fieldset>
   );

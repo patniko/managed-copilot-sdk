@@ -1,20 +1,22 @@
 # AI software factory
 
-A work order goes in; a tested, reviewed, and documented release comes out. In **Agent-led** mode (the default), a
-coordinator agent decides when to create builder sandboxes, when to reuse them for fixes, and when to create the
-release sandbox. The floor shows those workers and the coordinator's decisions live. The factory still validates the
-plan, checks real test reports, reviews on a second model, and accepts the deliverable.
+A work order goes in; a tested, reviewed, and documented release comes out. It runs down an assembly line: **Plan →
+Build → Review → Release**, and the product is the release. In **Agent-led** mode (the default), a coordinator agent
+decides when to create builder sandboxes, when to reuse them for fixes, and when to create the release sandbox. The
+floor shows those workers and the coordinator's decisions live. The factory still validates the plan, checks real test
+reports, reviews on a second model, and accepts the deliverable.
 
-**Classic** keeps the original app-orchestrated pipeline. Choose either mode on the new-work-order form or in the
-API. Both use the same planners, builders, reviewers, harness, and release gates, built on the stock
-`@github/copilot-sdk` and `@managed-copilot/sdk` with no runtime modifications.
+**App-driven** mode (API value `classic`) keeps the original pipeline that the app orchestrates itself. Choose either
+mode on the new-work-order form or in the API. Both use the same planners, builders, reviewers, harness, and release
+gates, built on the stock `@github/copilot-sdk` and `@managed-copilot/sdk` with no runtime modifications.
 
-![The agent-led floor: a coordinator, two builder sandboxes reused for review fixes, and a live log of its decisions](docs/screenshots/floor-building.png)
+![The agent-led floor: a coordinator, two builder sandboxes (one reused for review fixes), and a live log of its decisions](docs/screenshots/floor-building.png)
 
-*A real run of the CSV ⇄ JSON toolkit, not fixture data. The coordinator creates a worker per task, sends review
-findings back to the same workers, then creates the release worker and copies in the accepted outputs. In the first
-verified agent-led run, both builders were reused for round two and the release passed **45 tests in 5m 17s**. A second
-run restarted the factory mid-build, preserved the coordinator and both worker IDs, and passed **58 tests in 6m 31s**.*
+*A real run of the CSV ⇄ JSON toolkit, not fixture data. The coordinator created a builder per task; the reviewer sent
+two findings back on one of them, and the coordinator gave them to the **same builder** (marked **Reused**) for round
+two. It then created the release worker and copied in the accepted outputs; the release passed **45 tests in 4m 40s**.
+An earlier run restarted the factory mid-build, preserved the coordinator and both worker IDs, and passed **58 tests in
+6m 31s**.*
 
 ```mermaid
 flowchart LR
@@ -43,7 +45,7 @@ flowchart LR
 | Release | `factory-release` | a fresh sandbox | After the factory accepts every task, the coordinator creates this worker and copies the builders' published files into it. The factory verifies those bytes before preparing the inputs. The `release` agent adds integration tests and a README, runs the full suite, and publishes the bundle, patch, test report, and release notes. |
 
 The model creates **sessions and sandboxes from declared environments**, not arbitrary new environment definitions.
-Classic mode uses the same four original station environments without a coordinator.
+App-driven mode uses the same four original station environments without a coordinator.
 
 Managed Copilot features in play (see the [developer experience spec](../../docs/spec/developer-experience.md)):
 
@@ -65,14 +67,15 @@ Managed Copilot features in play (see the [developer experience spec](../../docs
 
 | | |
 | --- | --- |
-| ![Review station sending work back to the builder with a finding](docs/screenshots/review.png) | ![Deliverable: release notes, tests, and the bundle](docs/screenshots/deliverable.png) |
-| **Review sends work back.** The factory's reviewer runs on another model family. The coordinator sends its findings to the **same builder** for the next round, rather than provisioning another sandbox. | **The deliverable.** The release station integrates the tasks, adds integration tests and a README, and publishes the bundle, a patch, a test report, and release notes. |
-| ![Artifacts: the release patch in the diff viewer](docs/screenshots/artifacts-patch.png) | ![Home: templates and the new work order form](docs/screenshots/home.png) |
-| **Every artifact, every version.** Each station's published files, per round, with code, diff, Markdown, and test report viewers. | **Start from a template**, choose Agent-led or Classic, or describe your own work order; history survives restarts. |
+| ![Review station: round 1 sent findings back to the builder; round 2 approved](docs/screenshots/review.png) | ![Deliverable: one download, the release notes, checks, and each task's outcome](docs/screenshots/deliverable.png) |
+| **Review sends work back.** The factory's reviewer runs on another model family. Round 1's findings went to the **same builder** for round 2 (●● on the cards), rather than to a new sandbox. | **The deliverable.** The release station integrates the tasks, adds integration tests and a README, and publishes the bundle, a patch, a test report, and release notes. |
+| ![Artifacts: the release patch in the diff viewer](docs/screenshots/artifacts-patch.png) | ![Home: four templates, the mode switch, and the work order form](docs/screenshots/home.png) |
+| **Every artifact, every version.** Each station's published files, per round, with code, diff, Markdown, and test report viewers. | **Start from a template**, choose Agent-led or App-driven, or describe your own work order; history survives restarts. |
 
 <img src="docs/screenshots/mobile-floor.png" alt="The floor on a phone-sized screen" width="260" align="right">
 
-The floor adapts down to phone widths: stations stack top to bottom and the work order list becomes a drawer.
+The floor adapts down to phone widths: each lane's Build and Review stack top to bottom, and the work order list
+becomes a drawer.
 
 <br clear="right">
 
@@ -88,10 +91,13 @@ aspire run --non-interactive  # the platform, sandboxes, and the factory; open "
 ```
 
 The factory floor opens at <http://localhost:7480>. Pick the **CSV ⇄ JSON toolkit** template and press
-**Start work order** with Agent-led selected. Watch the coordinator create the builders, reuse them for any review
-fixes, and create the release sandbox only after the tasks pass. The decision log is the default side panel; select a
-station to see its reports, tests, and reviews. **Open in Copilot CLI** on the coordinator reaches the same session.
-Classic retains the original pipeline view and streamed station activity.
+**Start work order** with Agent-led selected. The floor is the pipeline: Plan and the coordinator on top, one lane per
+task (Build → Review, with ●●○ round dots), then Release and the deliverable. Watch the coordinator create the
+builders, reuse them for review fixes (a **Reused** marker on the build), and create the release sandbox only after
+the tasks pass. Each card shows where it runs (the coordinator, the shared runtime, or its own sandbox), its status,
+and one number; hover for the worker, sandbox ID, agent, and model. The coordinator's decisions are the default side
+panel; select a station for its reports, tests, and reviews. **Open in Copilot CLI** on the coordinator reaches the
+same session. App-driven shows the same pipeline without the coordinator.
 
 ### Scripted happy path
 
@@ -154,7 +160,8 @@ environments.
   only the files a builder added or changed. In Agent-led mode a new worker's first task is just to reply `READY`;
   preparation waits for that turn to finish, then writes the seed before returning the real task to the coordinator.
   For release, `copy_worker_files` stages `outputs/files` under `.factory/incoming/<task>/`. `prepare_release` verifies
-  those copied files against the accepted artifacts, then assembles them and handles conflicts just as Classic does.
+  those copied files against the accepted artifacts, then assembles them and handles conflicts just as App-driven mode
+  does.
 - **Tests are a gate.** A station passes only when the harness's report shows tests ran and none failed. If a turn
   ends without a passing check, the factory sends the agent back up to twice before failing the station. It also
   notices when a builder skipped re-running the check after a fix.
@@ -173,7 +180,7 @@ environments.
   than blindly resending their tasks. Interrupted preparation is idempotent; an uncertain review is run again.
   Cancelling stops workers through the platform's session-delete API without attaching to them; retry reuses the
   accepted plan and creates replacements for workers that were deleted.
-- **Classic restarts resume work as before.** A work order that was running when the factory stopped resumes from its
+- **App-driven restarts resume work as before.** A work order that was running when the factory stopped resumes from its
   last checkpoint. Plans and reviews are re-run, because they're cheap. Builders and the release reattach to their sandboxes and wait
   for the in-flight turn. If that turn didn't finish, the factory doesn't assume any of it did. It notes why on the
   floor and asks the agent to check its workspace and continue, telling it that the commands it was running may have
@@ -197,7 +204,7 @@ environments.
 | `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `FACTORY_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
 | `FACTORY_MODEL_PLANNER` / `_BUILDER` / `_REVIEWER` / `_RELEASE` / `_COORDINATOR` | first available preference | Override a station's model; agent-led builders and reviewers must use different models |
-| `FACTORY_MAX_SANDBOXES` | `4` | Sandboxes Classic runs at once across work orders; agent-led limits are the coordinator environment's `maxWorkers` |
+| `FACTORY_MAX_SANDBOXES` | `4` | Sandboxes App-driven work orders run at once; agent-led limits are the coordinator environment's `maxWorkers` |
 | `FACTORY_BUILD_TIMEOUT_MINUTES` and similar | 5 to 20 | Turn timeouts per station |
 | `FACTORY_COORDINATE_TIMEOUT_MINUTES` | `60` | A coordinator turn covers the whole job, including waits with no model calls |
 | `FACTORY_DATA_DIR` | `.data` | The factory's SQLite store |

@@ -1,0 +1,22 @@
+# Build context for demos/repo-doctor/Dockerfile (the repository root): only what the Repo Doctor build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!libraries/protocol/**
+!libraries/sdk/**
+!libraries/github-theme/**
+!demos/repo-doctor/**
+!deployments/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+# The sample project's tests are part of the sample, uploaded into sandboxes.
+!demos/repo-doctor/sample/test
+!demos/repo-doctor/sample/test/**
+demos/repo-doctor/docs
+deployments/azure/hosting
+deployments/azure/sandbox

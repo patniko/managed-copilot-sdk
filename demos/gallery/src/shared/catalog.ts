@@ -81,6 +81,77 @@ export const APPS: readonly AppEntry[] = [
     healthPath: "/healthz",
     readme: "demos/assistant/README.md",
   },
+  {
+    id: "research-swarm",
+    title: "Research Swarm",
+    tagline: "One question, many researchers, one cited report",
+    description:
+      "A lead on the shared runtime splits your question across web researchers, each in its own sandbox, and writes a report where every claim cites a page they read.",
+    tryIt: "Ask how WebAssembly garbage collection works.",
+    app: "research-swarm",
+    port: 7425,
+    healthPath: "/api/health",
+    readme: "demos/research-swarm/README.md",
+  },
+  {
+    id: "pattern-race",
+    title: "Pattern Race",
+    tagline: "One job raced through all six patterns at once",
+    description:
+      "Sends the same prompt to six real sessions, one per pattern environment, and compares where each agent thinks and acts, its time, sandboxes, and premium requests.",
+    tryIt: "Race Run code, then Split the work, and compare Delegate with Mixed.",
+    app: "pattern-race",
+    port: 7420,
+    healthPath: "/api/health",
+    readme: "demos/pattern-race/README.md",
+  },
+  {
+    id: "data-desk",
+    title: "Data Desk",
+    tagline: "Chat with a spreadsheet; it moves to a sandbox for code",
+    description:
+      "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it.",
+    tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
+    app: "data-desk",
+    port: 7430,
+    healthPath: "/api/health",
+    readme: "demos/data-desk/README.md",
+  },
+  {
+    id: "help-desk",
+    title: "Help Desk",
+    tagline: "25 customers, 25 private sessions, one shared runtime",
+    description: "A support rush where every customer chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you.",
+    tryIt: "Simulate 25 customers, then approve a refund.",
+    app: "help-desk",
+    port: 7440,
+    healthPath: "/api/health",
+    readme: "demos/help-desk/README.md",
+  },
+  {
+    id: "incident-commander",
+    title: "Incident Commander",
+    tagline: "On call: triage, fix, and deploy when you say so",
+    description:
+      "An alert opens an incident: Copilot triages in its own sandbox, hands the repro and the fix to workers, and waits for your OK to deploy, even with the tab closed.",
+    tryIt: "Simulate an incident, close the tab, then reopen it and deploy.",
+    app: "incident-commander",
+    port: 7445,
+    healthPath: "/api/health",
+    readme: "demos/incident-commander/README.md",
+  },
+  {
+    id: "repo-doctor",
+    title: "Repo Doctor",
+    tagline: "A failing test in, a verified patch out",
+    description:
+      "Paste a public GitHub repository: one sandbox clones it, Copilot fixes the failing tests, and Repo Doctor verifies the patch, while a strip shows which hosts the sandbox reached and which were blocked.",
+    tryIt: "Run the sample and watch two failing tests turn green.",
+    app: "repo-doctor",
+    port: 7435,
+    healthPath: "/api/health",
+    readme: "demos/repo-doctor/README.md",
+  },
   CONSOLE,
 ];
 
@@ -107,7 +178,7 @@ export const WALKTHROUGHS: readonly Walkthrough[] = [
   { id: "13", folder: "13-your-own-harness", title: "Your own harness", youSee: "Commands run directly in a sandbox, and a stock client whose sub-agents' hands are there", minutes: 1, runnable: true },
 ];
 
-/** Screenshot file for an app or walkthrough, served at /shots/<file>. */
+/** An app's screenshot file, served at /shots/<file>. */
 export const shotFile = (id: string): string => `${id}.png`;
 
 /** The three building blocks every pattern is made of. */
@@ -159,7 +230,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "coder",
     settings: ['type: "isolated"'],
     walkthrough: "03",
-    demos: [{ app: "software-factory", where: "Classic mode" }],
+    demos: [
+      { app: "repo-doctor", where: "every run" },
+      { app: "software-factory", where: "App-driven mode" },
+    ],
   },
   {
     id: "shared",
@@ -170,7 +244,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "chat",
     settings: ['type: "shared"'],
     walkthrough: "02",
-    demos: [{ app: "software-factory", where: "its planner and reviewer" }],
+    demos: [
+      { app: "software-factory", where: "its planner and reviewer" },
+      { app: "help-desk", where: "25 customers, one runtime" },
+    ],
   },
   {
     id: "promotable",
@@ -181,7 +258,7 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "helper",
     settings: ['type: "promotable"', 'promoteTo: "coder"'],
     walkthrough: "04",
-    demos: [],
+    demos: [{ app: "data-desk", where: "every analysis" }],
   },
   {
     id: "direct",
@@ -207,6 +284,7 @@ export const PATTERNS: readonly Pattern[] = [
       { app: "dispatch", where: "Delegate to workers" },
       { app: "software-factory", where: "Agent-led mode" },
       { app: "assistant", where: "its sandboxes" },
+      { app: "research-swarm", where: "its researchers" },
     ],
   },
   {
@@ -218,7 +296,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "lead",
     settings: ['type: "orchestrator"', 'execution: "mixed"'],
     walkthrough: "12",
-    demos: [{ app: "dispatch", where: "Mixed" }],
+    demos: [
+      { app: "dispatch", where: "Mixed" },
+      { app: "incident-commander", where: "every incident" },
+    ],
   },
 ];
 

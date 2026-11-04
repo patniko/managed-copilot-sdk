@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { APPS, BUILDING_BLOCKS, PATTERNS, WALKTHROUGHS, type GalleryState } from "../src/shared/catalog.js";
+import { APPS, BUILDING_BLOCKS, PATTERNS, WALKTHROUGHS, type BuildingBlock, type GalleryState } from "../src/shared/catalog.js";
 import { createGallery, type CloudLookup, type GalleryOptions } from "../src/server/gallery.js";
 import { capture, cloudUrls, isLocalUrl, localUrls, normalizeGatewayUrl, probe } from "../src/server/targets.js";
+import { appHref, COMPARE_APP_ID, compareApp, patternsOf, SHAPES, walkthroughCommand } from "../src/web/model.js";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -22,12 +23,28 @@ async function listen(handler: Parameters<typeof createServer>[1]): Promise<stri
 }
 
 describe("links", () => {
+  const appIds = (apps: typeof APPS) => apps.map((app) => app.id).sort();
+  const withoutConsole = APPS.filter((app) => app.id !== "console");
+
   it("uses the AppHost's fixed local ports, shifted by the port offset", () => {
-    expect(localUrls(0)).toEqual({
-      gatewayUrl: "http://localhost:7400",
-      apps: { dispatch: "http://localhost:7470", "software-factory": "http://localhost:7480", assistant: "http://localhost:7490", console: "/open/console?target=local" },
+    const { gatewayUrl, apps } = localUrls(0);
+    expect(gatewayUrl).toBe("http://localhost:7400");
+    expect(apps).toMatchObject({
+      dispatch: "http://localhost:7470",
+      "software-factory": "http://localhost:7480",
+      assistant: "http://localhost:7490",
+      console: "/open/console?target=local",
     });
+    expect(Object.keys(apps).sort()).toEqual(appIds(APPS));
+    for (const app of withoutConsole) expect(apps[app.id]).toBe(`http://localhost:${app.port}`);
     expect(localUrls(300).apps.dispatch).toBe("http://localhost:7770");
+  });
+
+  it("gives every app its own local port, apart from the gateway's and the gallery's", () => {
+    const ports = withoutConsole.map((app) => app.port);
+    expect(new Set(ports).size).toBe(ports.length);
+    expect(ports).not.toContain(7400);
+    expect(ports).not.toContain(7460);
   });
 
   it("puts deployed apps beside the gateway on the environment's domain", () => {
@@ -39,7 +56,10 @@ describe("links", () => {
   });
 
   it("leaves the console out when asked (a hosted gallery)", () => {
-    expect(cloudUrls("https://copilot.d.io", { console: false }).apps).toEqual({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io" });
+    const { apps } = cloudUrls("https://copilot.d.io", { console: false });
+    expect(apps).toMatchObject({ dispatch: "https://dispatch.d.io", "software-factory": "https://software-factory.d.io", assistant: "https://assistant.d.io" });
+    expect(Object.keys(apps).sort()).toEqual(appIds(withoutConsole));
+    for (const app of withoutConsole) expect(apps[app.id]).toBe(`https://${app.app}.d.io`);
   });
 
   it("offers only the console for a gateway on a custom host", () => {
@@ -56,8 +76,7 @@ describe("links", () => {
   });
 
   it("has a unique id for every app and walkthrough", () => {
-    const ids = [...APPS.map((app) => app.id), ...WALKTHROUGHS.map((w) => `sample-${w.id}`)];
-    expect(new Set(ids).size).toBe(ids.length);
+    for (const ids of [APPS.map((app) => app.id), WALKTHROUGHS.map((walkthrough) => walkthrough.id)]) expect(new Set(ids).size).toBe(ids.length);
   });
 });
 
@@ -222,7 +241,7 @@ describe("gallery server", () => {
       expect(state.hosted).toBe(true);
       expect(state.local).toBeUndefined();
       expect(state.cloud.gatewayUrl).toBe("https://copilot.d.invalid");
-      expect(Object.keys(state.cloud.links).sort()).toEqual(["assistant", "dispatch", "software-factory"]);
+      expect(Object.keys(state.cloud.links).sort()).toEqual(APPS.filter((app) => app.id !== "console").map((app) => app.id).sort());
     });
 
     it("never mints a console sign-in link, and says how to open it", async () => {
@@ -242,5 +261,51 @@ describe("gallery server", () => {
       }
       expect(asked).toEqual([]);
     });
+  });
+});
+
+describe("page", () => {
+  it("draws every pattern, and each diagram agrees with the pattern's building blocks", () => {
+    expect(Object.keys(SHAPES).sort()).toEqual(PATTERNS.map((pattern) => pattern.id).sort());
+    for (const pattern of PATTERNS) {
+      const { brain, hands } = SHAPES[pattern.id]!;
+      const places = [...brain, ...hands.map((hand) => hand.place)];
+      const blocks = new Set<BuildingBlock>();
+      if (brain.includes("runtime")) blocks.add("multi-tenant");
+      if (places.some((place) => place === "sandbox" || place === "worker")) blocks.add("container");
+      // Sandboxes made while the session runs: workers, or hands for a brain that stays on the shared runtime.
+      if (hands.some((hand) => hand.place === "worker") || (brain.length === 1 && brain[0] === "runtime" && hands.some((hand) => hand.place === "sandbox"))) blocks.add("orchestration");
+      expect(blocks, pattern.id).toEqual(new Set(pattern.blocks));
+    }
+  });
+
+  it("links the side-by-side comparison only when its app is listed", () => {
+    const others = APPS.filter((app) => app.id !== COMPARE_APP_ID);
+    expect(compareApp(others)).toBeUndefined();
+    const race = { ...APPS[0]!, id: COMPARE_APP_ID, title: "Pattern Race" };
+    expect(compareApp([...others, race])).toBe(race);
+    expect(compareApp(APPS)?.id).toBe(COMPARE_APP_ID);
+  });
+
+  it("finds the patterns an app shows, and where it opens", () => {
+    const [app] = APPS;
+    const patterns = PATTERNS.map((pattern, index) => ({ ...pattern, demos: index % 2 ? [{ app: app!.id, where: "somewhere" }] : [] }));
+    expect(patternsOf(app!.id, patterns).map((pattern) => pattern.id)).toEqual(["shared", "direct", "mixed"]);
+    // The side-by-side comparison shows every pattern, though no pattern lists it.
+    expect(patternsOf(COMPARE_APP_ID, patterns)).toEqual(patterns);
+
+    const state: GalleryState = {
+      local: { gatewayUrl: "http://localhost:7400", gateway: "online", links: { [app!.id]: { url: "http://localhost:7470", health: "offline" } } },
+      cloud: { gatewayUrl: "https://copilot.d.io", gateway: "online", links: { [app!.id]: { url: "https://dispatch.d.io", health: "online" } } },
+      repoUrl: "https://github.com/o/r/blob/main/",
+      checkedAt: new Date(0).toISOString(),
+    };
+    expect(appHref(app!, state)).toEqual({ href: "https://dispatch.d.io", online: true });
+    expect(appHref(app!, { ...state, cloud: { links: {} } })).toEqual({ href: `https://github.com/o/r/blob/main/${app!.readme}`, online: false });
+  });
+
+  it("copies walkthrough commands that name their gateway in the visitor's shell", () => {
+    expect(walkthroughCommand("03", "http://localhost:7400", "powershell")).toBe('$env:MANAGED_COPILOT_URL = "http://localhost:7400"; pnpm walkthrough 03');
+    expect(walkthroughCommand("03", "https://copilot.d.io", "posix")).toBe('export MANAGED_COPILOT_URL="https://copilot.d.io"; pnpm walkthrough 03');
   });
 });

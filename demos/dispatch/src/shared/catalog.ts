@@ -21,10 +21,37 @@ export const BLUEPRINT_LABELS: Readonly<Record<BlueprintKind, string>> = {
 
 export const TEMPLATES: readonly Template[] = [
   {
+    id: "estimate-pi",
+    title: "Estimate π three ways",
+    icon: "graph",
+    description: "Three methods race to converge",
+    prompt:
+      "Estimate π three ways in parallel: a Monte Carlo simulation, the Leibniz series, and the Nilakantha series. Report each estimate and its error after 10, 1,000, and 1,000,000 steps, and say which converges fastest.",
+    uses: [{ kind: "python", count: 3 }],
+    minutes: 2,
+    followUps: ["Run the Monte Carlo one again with 10 million samples.", "Chart the error of all three as the steps grow."],
+  },
+  {
+    // Written for Mixed: math in the coordinator's own sandbox (no network), and a lookup that needs `dispatch-web`.
+    id: "prime-check",
+    title: "Prime check, with sources",
+    icon: "verified",
+    description: "Its own math, cited by a web worker",
+    prompt:
+      "Is 2^89 − 1 prime? And 2^97 − 1? Test both yourself with the Lucas–Lehmer test, in your own sandbox (Python's standard library is enough; it has no network). At the same time, have a web research worker check Wikipedia's Mersenne prime article for those exponents. Then say whether your results agree, with the link.",
+    uses: [
+      { kind: "python", count: 1 },
+      { kind: "web", count: 1 },
+    ],
+    minutes: 2,
+    followUps: ["Now test 2^107 − 1 and 2^127 − 1 too, and time each test.", "Ask the web worker when the most recent Mersenne prime was found, and by whom."],
+    style: "mixed",
+  },
+  {
     id: "sorting-showdown",
     title: "Sorting showdown",
     icon: "versions",
-    description: "Benchmark sorts in Python and JavaScript on identical data, then write it up.",
+    description: "Python vs. JavaScript, then a write-up",
     prompt:
       "Benchmark quicksort, merge sort, and the built-in sort in Python and in JavaScript on the same 100,000 random integers (generate the data once and use it in both). Then have a writer produce a one-page report with a results table.",
     uses: [
@@ -39,28 +66,17 @@ export const TEMPLATES: readonly Template[] = [
     id: "release-radar",
     title: "Release radar",
     icon: "broadcast",
-    description: "What's new in the latest Node.js and Python releases, from their official sources.",
+    description: "What's new in Node.js and Python",
     prompt: "What's new in the latest releases of Node.js and Python? Research each from its official documentation in parallel, then summarize the highlights with links.",
     uses: [{ kind: "web", count: 2 }],
     minutes: 3,
     followUps: ["Which of those changes matter most for a team upgrading this quarter?", "Turn the summary into a short report with a comparison table."],
   },
   {
-    id: "estimate-pi",
-    title: "Estimate π three ways",
-    icon: "graph",
-    description: "Monte Carlo, Leibniz, and Nilakantha in parallel; compare how fast they converge.",
-    prompt:
-      "Estimate π three ways in parallel: a Monte Carlo simulation, the Leibniz series, and the Nilakantha series. Report each estimate and its error after 10, 1,000, and 1,000,000 steps, and say which converges fastest.",
-    uses: [{ kind: "python", count: 3 }],
-    minutes: 2,
-    followUps: ["Run the Monte Carlo one again with 10 million samples.", "Chart the error of all three as the steps grow."],
-  },
-  {
     id: "cli-build-review",
     title: "Build and review a CLI",
     icon: "terminal",
-    description: "One worker builds a tested Node CLI; another reviews a copy, and the first fixes what it finds.",
+    description: "One worker builds it, another reviews",
     prompt:
       "Build a small Node.js command-line tool that converts CSV to JSON, with tests. Then have a second worker review a copy of it, and have the first worker fix whatever the review finds.",
     uses: [{ kind: "node", count: 2 }],

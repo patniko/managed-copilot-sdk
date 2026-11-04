@@ -15,7 +15,7 @@ export interface ComposerProps {
 }
 
 /** The message box, like Copilot Chat's on github.com: a bordered field with a toolbar and a send button. */
-export function Composer({ disabled, disabledReason, busy, hint = "Sending mail and changing your calendar always asks you first", onSend, onStop, draft }: ComposerProps) {
+export function Composer({ disabled, disabledReason, busy, hint = "Asks before sending or booking", onSend, onStop, draft }: ComposerProps) {
   const [text, setText] = useState("");
   const area = useRef<HTMLTextAreaElement>(null);
   const ready = !disabled && text.trim().length > 0;
@@ -75,11 +75,11 @@ export function Composer({ disabled, disabledReason, busy, hint = "Sending mail 
           className="block max-h-[200px] min-h-11 w-full resize-none bg-transparent px-3 pt-3 pb-1 text-base leading-normal outline-none focus-visible:outline-none disabled:cursor-not-allowed sm:text-sm"
         />
         <div className="flex items-center gap-2 px-2 pb-2" onMouseDown={focusBox}>
-          <span className="ml-1 hidden min-w-0 items-center gap-1.5 truncate text-xs text-fg-muted sm:inline-flex">
-            <ShieldIcon size={12} />
+          <span className="ml-1 inline-flex min-w-0 items-center gap-1.5 text-xs text-fg-muted" title={hint}>
+            <ShieldIcon size={12} className="shrink-0" />
             <span className="truncate">{hint}</span>
           </span>
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto flex shrink-0 items-center gap-1">
             {busy && (
               <button type="button" onClick={onStop} className="btn btn-sm btn-icon btn-invisible" aria-label="Stop" title="Stop">
                 <SquareFillIcon />
@@ -97,11 +97,6 @@ export function Composer({ disabled, disabledReason, busy, hint = "Sending mail 
             </button>
           </div>
         </div>
-      </div>
-      <div className="mt-2 hidden justify-center text-xs text-fg-muted sm:flex">
-        <span>
-          <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line
-        </span>
       </div>
     </div>
   );

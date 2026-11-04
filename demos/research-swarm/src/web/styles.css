@@ -1,0 +1,90 @@
+@import "tailwindcss";
+@import "@managed-copilot/github-theme";
+
+/*
+ * Research Swarm additions: only what Primer has no class for (the fan-out's wires, citations, and a source's
+ * highlight). Every color is a Primer variable.
+ */
+
+@keyframes wire-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+
+@keyframes source-flash {
+  from {
+    background-color: var(--bgColor-attention-muted);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+@layer components {
+  .wire {
+    fill: none;
+    stroke: var(--borderColor-default);
+    stroke-width: 2;
+    stroke-linecap: round;
+    transition: stroke 0.3s;
+  }
+  .wire-queued {
+    stroke: var(--borderColor-muted);
+    stroke-dasharray: 3 6;
+  }
+  /* Work flowing along the wire: out to a researcher, or findings back into the report. */
+  .wire-active {
+    stroke: var(--fgColor-accent);
+    stroke-dasharray: 6 6;
+    animation: wire-flow 0.9s linear infinite;
+  }
+  .wire-done {
+    stroke: var(--borderColor-success-emphasis);
+  }
+  .wire-failed {
+    stroke: var(--borderColor-danger-emphasis);
+    stroke-dasharray: 3 6;
+  }
+
+  /* A citation in the report: a small numbered pill that opens its source. */
+  .citation {
+    display: inline-grid;
+    place-items: center;
+    min-width: 1.125rem;
+    height: 1.125rem;
+    padding: 0 0.3125rem;
+    margin: 0 0.0625rem;
+    font-size: 0.6875rem;
+    font-weight: var(--base-text-weight-semibold);
+    line-height: 1;
+    color: var(--fgColor-accent);
+    vertical-align: 0.125em;
+    cursor: pointer;
+    background-color: var(--bgColor-accent-muted);
+    border: 0;
+    border-radius: var(--borderRadius-full);
+  }
+  .citation:hover {
+    color: var(--fgColor-onEmphasis);
+    background-color: var(--bgColor-accent-emphasis);
+  }
+  .citation:focus-visible {
+    outline: 2px solid var(--focus-outlineColor);
+    outline-offset: 1px;
+  }
+
+  .report-summary {
+    font-size: 1.0625rem;
+  }
+
+  .source-flash {
+    animation: source-flash 1.6s ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .wire-active {
+      animation: none;
+    }
+  }
+}

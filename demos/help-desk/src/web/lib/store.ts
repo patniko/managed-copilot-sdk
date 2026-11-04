@@ -1,0 +1,241 @@
+import { useSyncExternalStore } from "react";
+import { SIMULATION_SIZES, type Counters, type CustomerCard, type DeskInfo, type PlatformStatus, type RunInfo, type ServerEvent, type SimulationSize, type Ticket } from "../../shared/types.js";
+import { api, errorMessage } from "./api.js";
+
+export type Connection = "connecting" | "open" | "reconnecting";
+
+export interface Toast {
+  readonly id: number;
+  readonly title: string;
+  readonly detail?: string;
+}
+
+export interface StoreState {
+  readonly phase: "loading" | "ready" | "error";
+  readonly loadError?: string;
+  readonly connection: Connection;
+  readonly platform?: PlatformStatus;
+  readonly desk?: DeskInfo;
+  readonly customers: readonly CustomerCard[];
+  readonly run?: RunInfo;
+  /** The current simulation's tickets, by customer ID. */
+  readonly tickets: Readonly<Record<string, Ticket>>;
+  readonly counters: Counters;
+  /** How many customers the next simulation starts (remembered in this browser). */
+  readonly size: SimulationSize;
+  /** A simulation is being started or ended from this page. */
+  readonly working?: "simulate" | "end";
+  /** Approvals being answered from this page, by approval ID. */
+  readonly answering: Readonly<Record<string, true>>;
+  readonly toasts: readonly Toast[];
+}
+
+const SIZE_KEY = "help-desk.size";
+const ZERO: Counters = { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 };
+
+function savedSize(): SimulationSize {
+  try {
+    const value = Number(globalThis.localStorage?.getItem(SIZE_KEY));
+    return (SIMULATION_SIZES as readonly number[]).includes(value) ? (value as SimulationSize) : 25;
+  } catch {
+    return 25;
+  }
+}
+
+let state: StoreState = {
+  phase: "loading",
+  connection: "connecting",
+  customers: [],
+  tickets: {},
+  counters: ZERO,
+  size: savedSize(),
+  answering: {},
+  toasts: [],
+};
+const listeners = new Set<() => void>();
+
+function setState(update: (current: StoreState) => StoreState): void {
+  const next = update(state);
+  if (next === state) return;
+  state = next;
+  for (const listener of listeners) listener();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Subscribes to a slice of the store. Selectors must return existing references (no new objects or arrays). */
+export function useStore<T>(selector: (current: StoreState) => T): T {
+  return useSyncExternalStore(subscribe, () => selector(state));
+}
+
+const byCustomer = (tickets: readonly Ticket[]): Record<string, Ticket> => Object.fromEntries(tickets.map((ticket) => [ticket.customerId, ticket]));
+
+/** Applies one server event. Exported for tests. */
+export function reduce(current: StoreState, event: ServerEvent): StoreState {
+  switch (event.type) {
+    case "platform":
+      return { ...current, platform: event.platform, desk: event.desk };
+    case "run": {
+      const { run: _previous, ...rest } = current;
+      return { ...(event.run ? { ...rest, run: event.run } : rest), tickets: byCustomer(event.tickets) };
+    }
+    case "ticket":
+      // Only the current simulation's customers: a late update of an ended one is dropped.
+      if (!current.run || !(event.ticket.customerId in current.tickets)) return current;
+      return { ...current, tickets: { ...current.tickets, [event.ticket.customerId]: event.ticket } };
+    case "counters":
+      return { ...current, counters: event.counters };
+  }
+}
+
+async function loadState(): Promise<void> {
+  try {
+    const loaded = await api.state();
+    setState((current) => {
+      const { run: _previous, ...rest } = current;
+      return {
+        ...(loaded.run ? { ...rest, run: loaded.run } : rest),
+        phase: "ready",
+        platform: loaded.platform,
+        desk: loaded.desk,
+        customers: loaded.customers,
+        tickets: byCustomer(loaded.tickets),
+        counters: loaded.counters,
+      };
+    });
+  } catch (error) {
+    setState((current) => (current.phase === "ready" ? current : { ...current, phase: "error", loadError: errorMessage(error) }));
+  }
+}
+
+// ─── Server-sent events ──────────────────────────────────────────────────────────────────────────────────────
+
+const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "counters"];
+let source: EventSource | undefined;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+let backoffMs = 1_000;
+
+function connectEvents(): void {
+  if (reconnectTimer !== undefined) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+  }
+  source?.close();
+  const events = new EventSource("/api/events");
+  source = events;
+  events.onopen = () => {
+    backoffMs = 1_000;
+    setState((current) => (current.connection === "open" ? current : { ...current, connection: "open" }));
+    // Anything may have changed while the page wasn't listening.
+    void loadState();
+  };
+  events.onerror = () => {
+    if (source !== events) return;
+    setState((current) => (current.connection === "reconnecting" ? current : { ...current, connection: "reconnecting" }));
+    if (events.readyState === EventSource.CLOSED) scheduleReconnect();
+  };
+  const onMessage = (message: MessageEvent): void => {
+    try {
+      const event = JSON.parse(String(message.data)) as ServerEvent;
+      if (typeof event?.type === "string") setState((current) => reduce(current, event));
+    } catch {
+      // Ignore malformed messages.
+    }
+  };
+  for (const type of EVENT_TYPES) events.addEventListener(type, onMessage as EventListener);
+}
+
+function scheduleReconnect(): void {
+  if (reconnectTimer !== undefined) return;
+  const delay = backoffMs + Math.round(Math.random() * 400);
+  backoffMs = Math.min(backoffMs * 2, 15_000);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    connectEvents();
+  }, delay);
+}
+
+let started = false;
+
+/** Loads `/api/state` and opens the event stream. Safe to call more than once. */
+export function startHelpDesk(): void {
+  if (started) return;
+  started = true;
+  connectEvents();
+  void loadState();
+}
+
+// ─── Actions ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+let toastId = 0;
+
+export function showToast(title: string, detail?: string): void {
+  const toast: Toast = { id: ++toastId, title, ...(detail ? { detail } : {}) };
+  setState((current) => ({ ...current, toasts: [...current.toasts, toast].slice(-3) }));
+  setTimeout(() => dismissToast(toast.id), 6_000);
+}
+
+export function dismissToast(id: number): void {
+  setState((current) => (current.toasts.some((toast) => toast.id === id) ? { ...current, toasts: current.toasts.filter((toast) => toast.id !== id) } : current));
+}
+
+export function chooseSize(size: SimulationSize): void {
+  try {
+    globalThis.localStorage?.setItem(SIZE_KEY, String(size));
+  } catch {
+    // Private browsing: the choice lasts for this page only.
+  }
+  setState((current) => ({ ...current, size }));
+}
+
+export async function simulate(): Promise<void> {
+  if (state.working) return;
+  setState((current) => ({ ...current, working: "simulate" }));
+  try {
+    await api.simulate(state.size);
+  } catch (error) {
+    showToast("Couldn't start the simulation", errorMessage(error));
+  } finally {
+    setState((current) => ({ ...current, working: undefined }));
+  }
+}
+
+export async function endSimulation(): Promise<void> {
+  if (state.working) return;
+  setState((current) => ({ ...current, working: "end" }));
+  try {
+    await api.end();
+  } catch (error) {
+    showToast("Couldn't end the simulation", errorMessage(error));
+  } finally {
+    setState((current) => ({ ...current, working: undefined }));
+  }
+}
+
+export async function answer(customerId: string, approvalId: string, approve: boolean): Promise<void> {
+  if (state.answering[approvalId]) return;
+  setState((current) => ({ ...current, answering: { ...current.answering, [approvalId]: true } }));
+  try {
+    await api.answer(customerId, approvalId, approve);
+  } catch (error) {
+    showToast("Couldn't answer the request", errorMessage(error));
+  } finally {
+    setState((current) => {
+      const { [approvalId]: _done, ...answering } = current.answering;
+      return { ...current, answering };
+    });
+  }
+}
+
+export async function sendAsCustomer(customerId: string, text: string): Promise<boolean> {
+  try {
+    await api.send(customerId, text);
+    return true;
+  } catch (error) {
+    showToast("The message wasn't sent", errorMessage(error));
+    return false;
+  }
+}

@@ -1,0 +1,131 @@
+@import "tailwindcss";
+@import "@managed-copilot/github-theme";
+
+/*
+ * Data Desk additions: only what Primer has no class for (the placement track and the streaming caret).
+ * Every color is a Primer variable.
+ */
+
+@keyframes blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes march {
+  to {
+    background-position: 28px 0;
+  }
+}
+
+@keyframes asking-ring {
+  0% {
+    box-shadow: 0 0 0 0 var(--borderColor-attention-emphasis);
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes moving-ring {
+  0% {
+    box-shadow: 0 0 0 0 var(--borderColor-done-emphasis);
+  }
+  70% {
+    box-shadow: 0 0 0 8px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+@keyframes arrive {
+  0% {
+    transform: scale(0.8);
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@layer components {
+  /* Blinking caret after the last block of a message that is still streaming. */
+  .markdown-streaming > :last-child::after {
+    display: inline-block;
+    width: 0.5em;
+    height: 1.1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    content: "";
+    background-color: var(--fgColor-accent);
+    border-radius: 1px;
+    animation: blink 1.1s steps(1, end) infinite;
+  }
+
+  /* The session on the placement track: `--at` is 0 on the shared runtime, 1 in the sandbox. */
+  .track-puck {
+    z-index: 1;
+    left: calc(var(--at, 0) * 100%);
+    transform: translateX(calc(var(--at, 0) * -100%));
+    transition:
+      left 0.9s cubic-bezier(0.65, 0, 0.35, 1),
+      transform 0.9s cubic-bezier(0.65, 0, 0.35, 1);
+  }
+  .track-fill {
+    background: linear-gradient(90deg, var(--bgColor-accent-emphasis), var(--bgColor-done-emphasis));
+    transition: width 0.9s cubic-bezier(0.65, 0, 0.35, 1);
+  }
+  .track-marching {
+    background: repeating-linear-gradient(90deg, var(--bgColor-done-emphasis) 0 10px, transparent 10px 14px);
+    background-size: 28px 100%;
+    opacity: 0.5;
+    animation: march 0.7s linear infinite;
+  }
+  .puck-asking {
+    animation: asking-ring 1.6s ease-out infinite;
+  }
+  .puck-moving {
+    animation: moving-ring 1.4s ease-out infinite;
+  }
+  .station-waiting {
+    animation: breathe 1.4s ease-in-out infinite;
+  }
+  .station-arrive {
+    animation: arrive 0.6s cubic-bezier(0.2, 1.4, 0.4, 1);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .track-puck,
+    .track-fill {
+      transition: none;
+    }
+    .track-marching,
+    .puck-asking,
+    .puck-moving,
+    .station-waiting,
+    .station-arrive {
+      animation: none;
+    }
+  }
+}

@@ -1,13 +1,13 @@
 import { CopilotIcon, TerminalIcon } from "@primer/octicons-react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Blueprint, ConversationView, WorkerState } from "../../shared/types.js";
-import { KIND_ICON, KIND_LANE, WORKER_STATE } from "../lib/blueprints.js";
+import { KIND_ICON, KIND_LANE } from "../lib/blueprints.js";
 import { kindOf } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { formatClock, formatDuration, parseTime } from "../lib/format.js";
 import { conversationHref, navigate } from "../lib/router.js";
 import { useNow } from "../lib/useNow.js";
-import { handsTitle } from "./Environments.js";
+import { handsTitle, STATE_WORD } from "./Sandboxes.js";
 import { EmptyState } from "./ui/Feedback.js";
 
 const STEPS = [10, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14_400].map((seconds) => seconds * 1000);
@@ -17,6 +17,14 @@ const BAR: Readonly<Record<Exclude<WorkerState, "stopped">, string>> = {
   working: "tl-working",
   idle: "tl-idle",
   failed: "tl-failed",
+};
+
+/** What each bar means, for its tooltip (the timeline has no legend). */
+const BAR_LABEL: Readonly<Record<Exclude<WorkerState, "stopped">, string>> = {
+  starting: "Preparing its sandbox",
+  working: "Working",
+  idle: "Idle, sandbox kept",
+  failed: "Failed",
 };
 
 interface Segment {
@@ -65,19 +73,11 @@ export function Timeline({ view, blueprints, selected }: { readonly view: Conver
   const waits = users.flatMap((message) => (message.decisions ?? []).filter((decision) => decision.kind === "wait"));
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
-        <Swatch className="tl-starting">Preparing its sandbox</Swatch>
-        <Swatch className="tl-working">Working</Swatch>
-        <Swatch className="tl-idle">Idle, sandbox kept</Swatch>
-        <Swatch className="tl-failed">Failed</Swatch>
-        <span>A bar ends when its worker stopped and its sandbox was deleted.</span>
-      </div>
-      <div className="rounded-lg border border-line bg-canvas p-3">
-        <div className="grid grid-cols-[10rem_minmax(0,1fr)] gap-x-3 gap-y-2 text-xs">
-          {/* Axis with the person's messages. */}
-          <div />
-          <div className="relative h-9 border-b border-line-muted">
+    <div className="rounded-lg border border-line bg-canvas p-3">
+      <div className="grid grid-cols-[8.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-xs">
+        {/* Axis with the person's messages. */}
+        <div />
+        <div className="relative h-9 border-b border-line-muted">
             {ticks.map((tick) => (
               <span key={tick} className="absolute bottom-0 -translate-x-1/2 font-mono text-fg-muted tabular-nums" style={{ left: x(start + tick) }}>
                 {formatDuration(tick)}
@@ -136,7 +136,7 @@ export function Timeline({ view, blueprints, selected }: { readonly view: Conver
                   onClick={() => navigate(conversationHref(view.id, { tab: "timeline", ...(worker.id === selected ? {} : { worker: worker.id }) }), { replace: true })}
                   className={cx("flex min-w-0 items-center gap-1.5 rounded-md px-1 text-left hover:bg-canvas-muted", worker.id === selected && "bg-accent-muted")}
                   style={{ "--lane": KIND_LANE[kind] } as CSSProperties}
-                  title={`${worker.role === "hands" ? handsTitle(view, worker) : worker.name} in ${worker.environment}: ${worker.role === "hands" ? "no agent in it" : WORKER_STATE[worker.state].label}`}
+                  title={`${worker.role === "hands" ? handsTitle(view, worker) : worker.name} (${worker.environment}): ${STATE_WORD[worker.state]}`}
                 >
                   <Glyph size={14} className="lane-icon shrink-0" />
                   <span className="min-w-0 truncate font-semibold">{worker.role === "hands" ? handsTitle(view, worker) : worker.name}</span>
@@ -147,14 +147,13 @@ export function Timeline({ view, blueprints, selected }: { readonly view: Conver
                       key={`${segment.state}-${segment.from}`}
                       className={cx("absolute inset-y-1 rounded-sm", BAR[segment.state])}
                       style={{ left: x(segment.from), width: width(segment.from, segment.to) }}
-                      title={`${WORKER_STATE[segment.state].label}: ${formatDuration(segment.to - segment.from)} (from ${formatClock(new Date(segment.from).toISOString())})`}
+                      title={`${BAR_LABEL[segment.state]}: ${formatDuration(segment.to - segment.from)} (from ${formatClock(new Date(segment.from).toISOString())})`}
                     />
                   ))}
                 </Track>
               </div>
             );
           })}
-        </div>
       </div>
     </div>
   );
@@ -162,20 +161,11 @@ export function Timeline({ view, blueprints, selected }: { readonly view: Conver
 
 function Track({ users, x, style, children }: { readonly users: readonly number[]; readonly x: (time: number) => string; readonly style?: CSSProperties; readonly children: ReactNode }) {
   return (
-    <div className="relative h-7 rounded-md bg-canvas-inset" style={style}>
+    <div className="relative h-6 rounded-md bg-canvas-inset" style={style}>
       {users.map((time) => (
         <span key={time} className="absolute inset-y-0 w-px bg-[var(--borderColor-accent-muted)]" style={{ left: x(time) }} aria-hidden />
       ))}
       {children}
     </div>
-  );
-}
-
-function Swatch({ className, children }: { readonly className: string; readonly children: ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-1.5" style={{ "--lane": "var(--fgColor-accent)" } as CSSProperties}>
-      <span className={cx("inline-block h-3 w-5 rounded-sm", className)} aria-hidden />
-      {children}
-    </span>
   );
 }

@@ -2,6 +2,7 @@
 // volumes for /workspace, HOME, and runtime state, and a relay container the host gateway reaches each sandboxd through.
 import { createHash } from "node:crypto";
 import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, ManagedCopilotError, type EnvironmentConfig, type InfraFact } from "@managed-copilot/protocol";
+import { DEFAULT_NETWORK_SUBNET_POOL, isSubnetOverlap, sharedNetworkSubnets } from "../../../../docker-subnets.js";
 import type { Logger } from "../../../../log.js";
 import type { SandboxEndpoint, SandboxImageRef, SandboxProvider, SandboxProviderDeps, SandboxSpec, SandboxStartResult } from "../types.js";
 import { DockerClient, DockerError, discoverDockerEndpoints } from "./docker.js";
@@ -39,6 +40,8 @@ export interface ProviderOptions {
   readonly log: Logger;
   /** Base of the subnet pool for per-sandbox networks, e.g. 10.213.0.0 (a /16), carved into /28s. */
   readonly subnetPool?: string;
+  /** Base of the subnet pool for the instance's edge and sandboxes networks, e.g. 10.214.0.0 (a /16), carved into /24s. */
+  readonly networkSubnetPool?: string;
 }
 
 function hashKey(value: string): string {
@@ -67,6 +70,7 @@ export function createDockerSandboxProvider(deps: SandboxProviderDeps): DockerSa
     platformKey: deps.platformKey,
     log,
     ...(env.MANAGED_COPILOT_SANDBOX_SUBNET_POOL ? { subnetPool: env.MANAGED_COPILOT_SANDBOX_SUBNET_POOL } : {}),
+    ...(env.MANAGED_COPILOT_NETWORK_SUBNET_POOL ? { networkSubnetPool: env.MANAGED_COPILOT_NETWORK_SUBNET_POOL } : {}),
   });
 }
 
@@ -141,7 +145,7 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   describe(): InfraFact[] {
-    const { docker, images, instance, subnetPool } = this.#options;
+    const { docker, images, instance, subnetPool, networkSubnetPool } = this.#options;
     const engine = this.#engine;
     const base = images.base;
     return [
@@ -157,6 +161,7 @@ export class DockerSandboxProvider implements SandboxProvider {
         ? { label: "Relay", value: `${this.relayName} at ${new URL(this.#relayTarget.baseUrl).host}`, mono: true }
         : { label: "Relay", value: "Not started: starts with the first sandbox" },
       { label: "Subnet pool", value: `${subnetPool ?? "10.213.0.0"}/16, one /28 network per sandbox`, mono: true },
+      { label: "Shared network pool", value: `${networkSubnetPool ?? DEFAULT_NETWORK_SUBNET_POOL}/16, one /24 per edge, sandboxes, and egress network`, mono: true },
     ];
   }
 
@@ -204,13 +209,19 @@ export class DockerSandboxProvider implements SandboxProvider {
 
   // Infrastructure -----------------------------------------------------------------------------------------------
 
+  /** Creates a shared network on an explicit /24 (see docker-subnets.ts), probing past subnets already in use. */
   async #ensureNetwork(name: string, spec: Record<string, unknown>): Promise<void> {
     if (await this.#options.docker.inspectNetwork(name)) return;
-    try {
-      await this.#options.docker.createNetwork({ Name: name, CheckDuplicate: true, ...spec });
-    } catch (error) {
-      if (!isConflict(error)) throw error;
+    for (const subnet of sharedNetworkSubnets(name, this.#options.networkSubnetPool)) {
+      try {
+        await this.#options.docker.createNetwork({ Name: name, CheckDuplicate: true, ...spec, IPAM: { Driver: "default", Config: [{ Subnet: subnet }] } });
+        return;
+      } catch (error) {
+        if (isConflict(error)) return;
+        if (!(error instanceof DockerError && isSubnetOverlap(error.message))) throw error;
+      }
     }
+    throw new ManagedCopilotError("capability_unavailable", `No free subnet is available for the ${name} network; remove unused Docker networks or set MANAGED_COPILOT_NETWORK_SUBNET_POOL.`);
   }
 
   /** The relay's address, (re)creating it when missing, stale, or started with another platform key. */

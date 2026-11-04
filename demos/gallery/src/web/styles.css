@@ -4,60 +4,250 @@
 /* Gallery additions: only what Primer has no class for. Every color is a Primer variable. */
 
 @layer components {
+  .hero {
+    background:
+      radial-gradient(1200px 300px at 10% -50%, var(--bgColor-accent-muted), transparent 70%),
+      radial-gradient(900px 260px at 95% -40%, var(--bgColor-done-muted), transparent 70%);
+  }
+
+  /* ------------------------------------------------------------------------------ Building blocks */
+  .pip {
+    display: inline-block;
+    flex: none;
+    width: 0.625rem;
+    height: 0.625rem;
+    border-radius: 2px;
+  }
+  .pip-container {
+    background-color: var(--bgColor-accent-emphasis);
+  }
+  .pip-multi-tenant {
+    background-color: var(--bgColor-success-emphasis);
+  }
+  .pip-orchestration {
+    background-color: var(--bgColor-done-emphasis);
+  }
+
+  /* ------------------------------------------------------------------------- Brain/hands diagram */
+  .diagram {
+    display: grid;
+    grid-template-columns: auto minmax(1.5rem, 1fr) auto;
+    grid-template-areas:
+      "brain-label . hands-label"
+      "brain link hands"
+      "brain-caption . hands-caption";
+    align-items: center;
+    gap: 0.375rem 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--borderRadius-medium);
+    background-color: var(--bgColor-muted);
+  }
+  .diagram-brain-label {
+    grid-area: brain-label;
+  }
+  .diagram-hands-label {
+    grid-area: hands-label;
+    justify-self: end;
+  }
+  .diagram-brain {
+    grid-area: brain;
+  }
+  .diagram-link {
+    grid-area: link;
+  }
+  .diagram-hands {
+    grid-area: hands;
+    justify-self: end;
+  }
+  .diagram-brain-caption {
+    grid-area: brain-caption;
+  }
+  .diagram-hands-caption {
+    grid-area: hands-caption;
+    justify-self: end;
+    text-align: right;
+  }
+  .diagram-label {
+    font-size: 0.6875rem;
+    font-weight: var(--base-text-weight-semibold);
+    line-height: 1;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--fgColor-muted);
+  }
+  .diagram-caption {
+    font-size: var(--text-body-size-small);
+    line-height: 1.25;
+    color: var(--fgColor-default);
+  }
+  .diagram-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    /* Room for the agent badges. */
+    padding-top: 0.25rem;
+  }
+  /* Brain to hands: a line that ends in an arrowhead. */
+  .diagram-link {
+    position: relative;
+    height: 1px;
+    margin-top: 0.25rem;
+    background-color: var(--borderColor-emphasis);
+  }
+  .diagram-link::after,
+  .diagram-move::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    right: 0;
+    width: 0.375rem;
+    height: 0.375rem;
+    border-top: 1px solid var(--borderColor-emphasis);
+    border-right: 1px solid var(--borderColor-emphasis);
+    transform: translateY(-50%) rotate(45deg);
+  }
+  /* Promotable: the one move from the shared runtime into a sandbox. */
+  .diagram-move {
+    position: relative;
+    width: 0.875rem;
+    height: 0;
+    border-top: 1px dashed var(--borderColor-emphasis);
+  }
+  /* Isolated: brain and hands inside one sandbox. */
+  .diagram-together::before {
+    content: "";
+    grid-area: 2 / 1 / 3 / 4;
+    align-self: stretch;
+    margin: 0 -0.375rem -0.125rem;
+    border: 1px dashed var(--borderColor-accent-emphasis);
+    border-radius: var(--borderRadius-medium);
+  }
+  .tile {
+    position: relative;
+    display: inline-grid;
+    flex: none;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border: 1px solid;
+    border-radius: var(--borderRadius-medium);
+  }
+  .tile-runtime {
+    color: var(--fgColor-success);
+    background-color: var(--bgColor-success-muted);
+    border-color: var(--borderColor-success-muted);
+  }
+  .tile-sandbox {
+    color: var(--fgColor-accent);
+    background-color: var(--bgColor-accent-muted);
+    border-color: var(--borderColor-accent-muted);
+  }
+  .tile-app {
+    color: var(--fgColor-muted);
+    background-color: var(--bgColor-default);
+    border-color: var(--borderColor-default);
+  }
+  .tile-later {
+    background-color: transparent;
+    border-style: dashed;
+    border-color: currentColor;
+  }
+  .tile-agent {
+    position: absolute;
+    top: -0.4375rem;
+    right: -0.4375rem;
+    display: grid;
+    place-items: center;
+    width: 1rem;
+    height: 1rem;
+    color: var(--fgColor-default);
+    background-color: var(--bgColor-default);
+    border: 1px solid var(--borderColor-default);
+    border-radius: var(--borderRadius-full);
+  }
+
+  /* ----------------------------------------------------------------------------------------- Cards */
+  .pattern-card,
+  .app-card {
+    transition:
+      box-shadow 150ms ease,
+      border-color 150ms ease;
+  }
+  .app-card:hover {
+    border-color: var(--borderColor-accent-muted);
+    box-shadow: var(--shadow-resting-medium);
+  }
+  .pattern-card:target,
+  .walkthrough:target {
+    animation: gallery-target 2.4s ease-out;
+  }
+  @keyframes gallery-target {
+    from {
+      background-color: var(--bgColor-attention-muted);
+    }
+  }
   .shot {
+    display: block;
     aspect-ratio: 16 / 10;
-    background: var(--bgColor-muted);
-    border-bottom: 1px solid var(--borderColor-default);
     overflow: hidden;
+    background-color: var(--bgColor-muted);
+    border-bottom: 1px solid var(--borderColor-default);
   }
   .shot img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     object-position: top left;
-    transition: transform 400ms cubic-bezier(0.2, 0.8, 0.2, 1);
   }
-  .card {
-    transition:
-      box-shadow 150ms ease,
-      border-color 150ms ease,
-      transform 150ms ease;
+  .shot-placeholder {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    background-image: radial-gradient(var(--borderColor-default) 1px, transparent 1px);
+    background-size: 16px 16px;
   }
-  .card:hover {
-    border-color: var(--borderColor-accent-muted, var(--borderColor-default));
-    box-shadow: var(--shadow-floating-small);
-    transform: translateY(-2px);
+  .shot-initials {
+    display: grid;
+    place-items: center;
+    width: 4rem;
+    height: 4rem;
+    font-size: 1.5rem;
+    font-weight: var(--base-text-weight-semibold);
+    border-radius: var(--borderRadius-large);
+    box-shadow: var(--shadow-resting-small);
   }
-  .card:hover .shot img {
-    transform: scale(1.025);
+  .pattern-marker {
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
+    padding: 0 0.5rem;
+    font-size: 0.75rem;
+    font-weight: var(--base-text-weight-medium);
+    color: var(--fgColor-muted);
+    white-space: nowrap;
+    text-decoration: none;
+    background-color: var(--bgColor-neutral-muted);
+    border-radius: var(--borderRadius-full);
   }
-  .dot {
-    display: inline-block;
-    width: 8px;
-    height: 8px;
-    border-radius: 999px;
+  .pattern-marker:hover {
+    color: var(--fgColor-accent);
+    text-decoration: none;
+  }
+
+  /* ---------------------------------------------------------------------------------- Walkthroughs */
+  .walkthrough {
+    padding: 0.625rem 1rem;
+  }
+  .walkthrough-id {
+    display: inline-grid;
     flex: none;
-    background: var(--fgColor-muted);
-  }
-  .dot-online {
-    background: var(--fgColor-success);
-    box-shadow: 0 0 0 3px var(--bgColor-success-muted);
-  }
-  .dot-restricted {
-    background: var(--fgColor-attention);
-    box-shadow: 0 0 0 3px var(--bgColor-attention-muted);
-  }
-  .dot-offline {
-    background: var(--fgColor-muted);
-    opacity: 0.6;
-  }
-  .btn-primary .dot-online {
-    background: var(--fgColor-onEmphasis);
-    box-shadow: none;
-  }
-  .hero {
-    background:
-      radial-gradient(1200px 300px at 10% -50%, var(--bgColor-accent-muted), transparent 70%),
-      radial-gradient(900px 260px at 95% -40%, var(--bgColor-done-muted), transparent 70%);
+    place-items: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    font: var(--base-text-weight-semibold) 0.75rem / 1 var(--fontStack-monospace);
+    color: var(--fgColor-muted);
+    background-color: var(--bgColor-neutral-muted);
+    border-radius: var(--borderRadius-medium);
   }
 }
