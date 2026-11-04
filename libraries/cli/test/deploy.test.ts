@@ -136,8 +136,12 @@ function writeRecord(host: FakeHost, appHost: string | undefined, resourceGroup:
     join(recordDir, "production.json"),
     JSON.stringify({ "Parameters:copilot-platform-key": "secret-key", "Parameters:assistant-webhook-secret": "deployed-hook-secret", "Azure:SubscriptionId": subscription, "Azure:ResourceGroup": resourceGroup }),
   );
-  // Aspire 13.6's current state, which names the parameters it holds (here one that production.json doesn't).
-  writeFileSync(join(recordDir, "production.json.migration"), JSON.stringify({ ClaimedSections: ["Azure", "Parameters:assistant-sealing-key"], CurrentState: "{}", LegacyFallbackDisabled: false }));
+  // Aspire 13.6's current state, which names the parameters it holds (here one that production.json doesn't), as a JSON
+  // string inside the document, the way Aspire writes it.
+  writeFileSync(
+    join(recordDir, "production.json.migration"),
+    JSON.stringify({ ClaimedSections: JSON.stringify(["Azure", "Parameters:assistant-sealing-key"]), CurrentState: "{}", LegacyFallbackDisabled: false }),
+  );
   return recordDir;
 }
 

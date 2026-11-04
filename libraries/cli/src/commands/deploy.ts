@@ -442,7 +442,9 @@ function readRecord(directory: string): DeploymentRecord | undefined {
 
 function claimedSections(file: string): string[] {
   try {
-    const { ClaimedSections: sections } = JSON.parse(readFileSync(file, "utf8")) as { ClaimedSections?: unknown };
+    // Aspire serializes the list as a JSON string inside the JSON document.
+    const { ClaimedSections: raw } = JSON.parse(readFileSync(file, "utf8")) as { ClaimedSections?: unknown };
+    const sections: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
     return Array.isArray(sections) ? sections.filter((section): section is string => typeof section === "string") : [];
   } catch {
     return [];
