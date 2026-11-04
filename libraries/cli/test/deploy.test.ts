@@ -45,9 +45,12 @@ class FakeHost implements HostTools {
   tenants: Record<string, { tenantId: string; user: string }> = {};
   /** The AppHost's parameters in the manifest `aspire do publish-manifest` writes: name → generated. */
   manifest: Record<string, boolean> = {};
-  manifestFails = false;
-  /** A future Aspire that runs its parameter step for the manifest, saving the values it's given into the record. */
+  /** How many of the next `aspire do publish-manifest` runs fail. */
+  manifestFailures = 0;
+  /** A future Aspire that runs its parameter step for the manifest, saving the values it's given into its environment's state. */
   manifestSavesValues = false;
+  /** Another deployment of the same AppHost writes its Production state while the check runs. */
+  concurrentDeployment = false;
   readonly calls: { command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }[] = [];
 
   has(command: string) {
@@ -73,15 +76,22 @@ class FakeHost implements HostTools {
       const appHost = args[args.indexOf("--apphost") + 1]!;
       const recordDir = join(this.records, createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
       mkdirSync(recordDir, { recursive: true });
+      // Aspire keeps deployment state per environment: <record>/<environment>.json.
+      const environment = args.includes("--environment") ? args[args.indexOf("--environment") + 1]! : "production";
       if (this.manifestSavesValues) {
-        // As Aspire's parameter step does in publish mode: every value it resolves goes into the deployment record.
-        const file = join(recordDir, "production.json");
+        // As Aspire's parameter step does in publish mode: every value it resolves goes into the environment's state.
+        const file = join(recordDir, `${environment}.json`);
         const state = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, string>) : {};
         for (const [variable, value] of Object.entries(options?.env ?? {})) if (variable.startsWith("Parameters__")) state[`Parameters:${variable.slice("Parameters__".length)}`] = value;
         writeFileSync(file, JSON.stringify(state));
-        writeFileSync(join(recordDir, "production.json.lock"), "");
+        writeFileSync(join(recordDir, `${environment}.json.migration`), "{}");
       }
-      if (this.manifestFails) return { code: 1, stdout: "", stderr: "The AppHost failed to start." };
+      if (this.concurrentDeployment) writeFileSync(join(recordDir, "production.json"), JSON.stringify({ "Parameters:copilot-platform-key": "other-deployment-key" }));
+      if (this.manifestFailures > 0) {
+        this.manifestFailures--;
+        // An AppHost's error can repeat a value it was given; only the log path may be shown.
+        return { code: 6, stdout: "Error: google-client-secret google-secret-value was rejected", stderr: "❌ An unexpected error occurred.\n📄 See logs at /home/dev/.aspire/logs/cli_20261104T160709_61ce18a3.log" };
+      }
       const resources = Object.fromEntries(
         Object.entries(this.manifest).map(([parameter, generated]) => [
           parameter,
@@ -436,9 +446,11 @@ describe("deploy", () => {
     expect(h.out()).toContain("Passing 2 parameters from the AppHost's user secrets: google-client-id, google-client-secret");
     expect(h.out() + h.err()).not.toMatch(/google-secret-value|local-durable-key|local-sealing-key|local-session-secret|local-app-key|do-not-print-me|from-user-secrets/);
     expect(host.calls.some((call) => call.args.some((arg) => arg.includes("google-secret-value")))).toBe(false);
-    // The AppHost is asked with the environment the deployment gets, so it declares the same parameters, but never the token.
+    // The AppHost is asked with the environment variables the deployment gets, so it declares the same parameters, but
+    // never the token, and under an Aspire environment of its own.
     const asked = host.calls.find((call) => call.command === "aspire" && call.args[0] === "do")!;
     expect(asked.args.slice(0, 2)).toEqual(["do", "publish-manifest"]);
+    expect(asked.args[asked.args.indexOf("--environment") + 1]).toBe("managed-copilot-parameter-check");
     expect(asked.env).toMatchObject({ "Parameters__copilot-github-users": "patniko", "Parameters__google-client-secret": "google-secret-value" });
     expect(Object.keys(asked.env!).filter((variable) => /app-github-token/i.test(variable))).toEqual([]);
     expect(Object.values(asked.env!)).not.toContain(TOKEN);
@@ -454,18 +466,28 @@ describe("deploy", () => {
     expect(aliased.out()).toContain("Passing 1 parameter from the AppHost's user secrets: front-desk-github-client-secret");
   });
 
-  it("passes no parameters when it can't tell which ones the AppHost generates, and asks only when there are any", async () => {
+  it("stops before deploying when it can't tell which parameters the AppHost generates, and asks only when there are any", async () => {
     const host = deployedHost();
     host.secrets["Parameters:google-client-secret"] = "google-secret-value";
-    host.manifestFails = true;
+    host.manifestFailures = 2;
     const h = harness(host);
     writeRecord(host, thisAppHost(), "managed-copilot-dev");
-    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
-    expect(h.err()).toContain("Couldn't tell which parameters the AppHost generates");
-    expect(h.err()).toContain("The AppHost failed to start.");
-    expect(h.out()).not.toContain("Passing");
-    const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
-    expect(Object.keys(env).filter((variable) => variable.startsWith("Parameters__google"))).toEqual([]);
+    expect(await run(["deploy", "--yes"], h.io)).toBe(1);
+    expect(h.err()).toContain("Couldn't tell which parameters the AppHost generates (`aspire do publish-manifest` failed twice), so nothing was deployed.");
+    // Only the log's path: never the AppHost's output, which can repeat a value it was given.
+    expect(h.err()).toContain("Aspire's log: /home/dev/.aspire/logs/cli_20261104T160709_61ce18a3.log.");
+    expect(h.out() + h.err()).not.toContain("google-secret-value");
+    expect(host.calls.filter((call) => call.command === "aspire" && call.args[0] === "do")).toHaveLength(2);
+    expect(host.calls.some((call) => call.command === "aspire" && (call.args[0] === "deploy" || call.args[1] === "set"))).toBe(false);
+
+    // One failure (Aspire stumbles while other Aspire commands are busy) is tried again.
+    const flaky = deployedHost();
+    flaky.secrets["Parameters:google-client-secret"] = "google-secret-value";
+    flaky.manifestFailures = 1;
+    const flakyRun = harness(flaky);
+    writeRecord(flaky, thisAppHost(), "managed-copilot-dev");
+    expect(await run(["deploy", "--yes"], flakyRun.io)).toBe(0);
+    expect(flakyRun.out()).toContain("Passing 1 parameter from the AppHost's user secrets: google-client-secret");
 
     const quiet = new FakeHost();
     expect(await run(["deploy", "--yes"], harness(quiet).io)).toBe(0);
@@ -481,10 +503,9 @@ describe("deploy", () => {
     expect(host.calls.some((call) => call.command === "aspire" && call.args[0] === "do")).toBe(true);
     expect(readdirSync(host.records)).toEqual([]);
     expect(h.out()).toContain("Passing 1 parameter from the AppHost's user secrets: google-client-id");
-    expect(h.err()).not.toContain("deployment record");
   });
 
-  it("puts the deployment record back if reading the manifest saved the local values into it", async () => {
+  it("keeps what the check might save out of the deployment's state, and leaves other deployments' files alone", async () => {
     const host = deployedHost();
     Object.assign(host.secrets, { "Parameters:google-client-secret": "google-secret-value", "Parameters:front-desk-session-secret": "local-session-secret" });
     host.manifest = { "google-client-secret": false, "front-desk-session-secret": true };
@@ -494,23 +515,25 @@ describe("deploy", () => {
     const files = () => Object.fromEntries(readdirSync(recordDir).map((file) => [file, readFileSync(join(recordDir, file), "utf8")]));
     const before = files();
     expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    // The values it saved went to the check's own environment, which is gone; Production's state is untouched.
     expect(files()).toEqual(before);
-    expect(h.err()).toContain("`aspire do publish-manifest` changed this AppHost's Aspire deployment record; it's back as it was.");
     const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
     expect(env).toMatchObject({ "Parameters__google-client-secret": "google-secret-value" });
     expect(env).not.toHaveProperty("Parameters__front-desk-session-secret");
     expect(h.out() + h.err()).not.toMatch(/google-secret-value|local-session-secret/);
 
-    // A first deployment has no record: whatever the manifest step wrote goes.
-    const first = new FakeHost();
-    first.records = join(directory, "first-deployments");
-    first.secrets = { "Parameters:front-desk-session-secret": "local-session-secret", "Parameters:google-client-id": "google-id-value" };
-    first.manifest = { "front-desk-session-secret": true, "google-client-id": false };
-    first.manifestSavesValues = true;
-    const firstRun = harness(first);
-    expect(await run(["deploy", "--yes"], firstRun.io)).toBe(0);
-    expect(readdirSync(first.records)).toEqual([]);
-    expect(firstRun.err()).toContain("it's back as it was");
+    // A first deployment: the check's files and the directory it made go, but not another deployment's state written meanwhile.
+    for (const concurrentDeployment of [false, true]) {
+      const first = new FakeHost();
+      first.records = join(directory, `first-deployments-${concurrentDeployment}`);
+      first.secrets = { "Parameters:front-desk-session-secret": "local-session-secret", "Parameters:google-client-id": "google-id-value" };
+      first.manifest = { "front-desk-session-secret": true, "google-client-id": false };
+      first.manifestSavesValues = true;
+      first.concurrentDeployment = concurrentDeployment;
+      expect(await run(["deploy", "--yes"], harness(first).io)).toBe(0);
+      const left = readdirSync(first.records).flatMap((name) => readdirSync(join(first.records, name)).map((file) => readFileSync(join(first.records, name, file), "utf8")));
+      expect(left).toEqual(concurrentDeployment ? [JSON.stringify({ "Parameters:copilot-platform-key": "other-deployment-key" })] : []);
+    }
   });
 
   it("says public apps are open to any address, and lists them once deployed", async () => {

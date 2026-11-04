@@ -587,6 +587,11 @@ identities. Your AppHost's user secrets stay on your machine.
   `az account set --subscription <id>` and deploy again. (A subscription of the current account in another tenant
   needs nothing: `deploy` passes its tenant as `Azure__TenantId`. With `aspire deploy` alone, set `Azure__TenantId` in
   the environment.)
+- **"Couldn't tell which parameters the AppHost generates … so nothing was deployed"** (`npx managed-copilot deploy`):
+  before passing the AppHost's user-secret parameters, `deploy` asks the AppHost which ones it generates with
+  `aspire do publish-manifest`, and that failed twice. Aspire's log (named in the message) says why. It can fail while
+  other Aspire commands are busy, so try again; if it keeps failing, run
+  `aspire do publish-manifest --apphost apphost.mts -o <folder>` to see the error, which is usually the AppHost's own.
 - **"Foundry account unavailable"** in the gateway's log, or sessions failing with `inference_unavailable`: the message
   names the problem. "was not found": check the account name, resource group, and subscription in `foundry`. A 403
   or "Cognitive Services OpenAI User": the role assignment is missing or still propagating (a few minutes); locally,

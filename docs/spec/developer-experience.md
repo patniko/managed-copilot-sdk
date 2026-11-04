@@ -1364,7 +1364,7 @@ passed to `aspire deploy` in `Parameters__app-github-token`, never as an argumen
 user secrets go the same way (`aspire deploy` doesn't load user secrets), except values the deployment's Aspire record
 already keeps and every parameter the AppHost generates (`addParameterWithGeneratedValue`, including the platform's and
 apps' keys: each deployment makes its own), which `deploy` learns from the manifest `aspire do publish-manifest` writes;
-if it can't tell, it passes none. `deploy` names them, never their values. It asks before deploying
+if it can't tell, it stops before deploying. `deploy` names them, never their values. It asks before deploying
 (`--yes` skips the question). If the resource group already holds a deployment, it deploys only when this AppHost's Aspire
 deployment record (`~/.aspire/deployments/<SHA-256 of the lowercased AppHost path>/`) targets it; otherwise, in a
 terminal, it offers to adopt another checkout's record for that target so the deployment keeps its generated keys. User
