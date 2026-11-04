@@ -91,12 +91,15 @@ flowchart TD
 
 | Pattern | Scenarios it fits | Try it | See it in an app |
 | --- | --- | --- | --- |
-| **Isolated** | A coding agent that edits, builds, and tests a repository; data jobs | [Walkthrough 03](../../walkthroughs/03-sandbox/README.md) | The [software factory](../../demos/software-factory/README.md)'s App-driven mode: a sandbox per build task |
-| **Shared** | Support, sales, and Q&A chat over your own data, at volume | [Walkthrough 02](../../walkthroughs/02-your-own-tools/README.md) | The factory's planner and reviewer |
-| **Promotable** | An assistant that usually chats but sometimes needs to run code | [Walkthrough 04](../../walkthroughs/04-promotion/README.md) | — |
+| **Isolated** | A coding agent that edits, builds, and tests a repository; data jobs | [Walkthrough 03](../../walkthroughs/03-sandbox/README.md) | [Repo Doctor](../../demos/repo-doctor/README.md): one sandbox clones a repository, fixes a failing test, and returns a patch; the [software factory](../../demos/software-factory/README.md)'s App-driven mode: a sandbox per build task |
+| **Shared** | Support, sales, and Q&A chat over your own data, at volume | [Walkthrough 02](../../walkthroughs/02-your-own-tools/README.md) | [Help Desk](../../demos/help-desk/README.md): 25 customer sessions on one runtime, no sandboxes; the factory's planner and reviewer |
+| **Promotable** | An assistant that usually chats but sometimes needs to run code | [Walkthrough 04](../../walkthroughs/04-promotion/README.md) | [Data Desk](../../demos/data-desk/README.md): answers with your app's tools, then moves into a sandbox to chart |
 | **Direct** | A harness with its own planning and sub-agents that must not run code on your host; tight edit-and-run loops | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | [Dispatch](../../demos/dispatch/README.md), **Work directly** |
-| **Delegate** | Software factories and research swarms: independent, long-running parts in parallel | [Walkthrough 11](../../walkthroughs/11-orchestrator/README.md) | Dispatch, **Delegate to workers**; the factory's agent-led mode; the [assistant](../../demos/assistant/README.md)'s sandboxes |
-| **Mixed** | One conversation that does quick work itself and hands big or differently permitted parts to new agents | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | Dispatch, **Mixed** |
+| **Delegate** | Software factories and research swarms: independent, long-running parts in parallel | [Walkthrough 11](../../walkthroughs/11-orchestrator/README.md) | [Research Swarm](../../demos/research-swarm/README.md); Dispatch, **Delegate to workers**; the factory's agent-led mode; the [assistant](../../demos/assistant/README.md)'s sandboxes |
+| **Mixed** | One conversation that does quick work itself and hands big or differently permitted parts to new agents | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | [Incident Commander](../../demos/incident-commander/README.md): triage in its own sandbox, the fix and repro to workers; Dispatch, **Mixed** |
+
+To compare them, [Pattern Race](../../demos/pattern-race/README.md) runs one job through all six at once and scores
+the time, sandboxes, agents, and premium requests each one used.
 
 **Bring your own brain.** If you already have an agent loop, keep it in your process and give it hands in a sandbox:
 `managed.sandboxes.create` and `managed.exec` use the single-container block directly
@@ -123,9 +126,9 @@ The patterns are the combinations the platform supports. These are not:
 - **Promotion moves a session into an isolated environment**, not into a coordinator.
 
 > [!TIP]
-> **Try it:** run the six patterns' walkthroughs (`pnpm walkthrough 02`, `03`, `04`, `11`, and `12`) or open
-> [Dispatch](../../demos/dispatch/README.md) and send the same request with each of its three styles. `pnpm gallery`
-> lists every pattern with its walkthrough and app.
+> **Try it:** run the six patterns' walkthroughs (`pnpm walkthrough 02`, `03`, `04`, `11`, and `12`), or start a race
+> in [Pattern Race](../../demos/pattern-race/README.md) and watch one job run all six ways. `pnpm gallery` lists every
+> pattern with its walkthrough and apps.
 
 <details>
 <summary><strong>Under the hood</strong></summary>
