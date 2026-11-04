@@ -534,6 +534,7 @@ function summaryOf(record: SessionRecord, snapshot: LiveSessionSnapshot | undefi
     state: record.state,
     generation: record.generation,
     ...(record.model ? { model: record.model } : {}),
+    ...(record.kind === "workspace" ? {} : { inference: record.inference ?? { route: "copilot" as const } }),
     ...(record.agent ? { agent: record.agent } : {}),
     ...(record.clientName ? { clientName: record.clientName } : {}),
     ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),

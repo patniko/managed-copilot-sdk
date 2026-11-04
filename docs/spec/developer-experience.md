@@ -240,8 +240,8 @@ const sessions = await alice.sessions.list();
 - **The app vouches; the platform scopes.** The gateway takes the app's word for who the user is, so the app key is a
   server-side secret like any API key. Every request through the key may use only the app's `environments`. A
   session belongs to the app user (`owner.kind` is `"app-user"`, `owner.app` the app, `owner.userId` the ID the app
-  sent): another app, or this app naming another user, never reaches it. An app user is never a GitHub account and
-  never satisfies `access` or `operators`.
+  sent, `owner.name` the last `name` it sent): another app, or this app naming another user, never reaches it. An
+  app user is never a GitHub account and never satisfies `access` or `operators`.
 - **Model calls go to Foundry, never to a Copilot plan.** An app user's sessions run only in environments that route
   inference to Foundry; anything that needs a GitHub entitlement fails explicitly: a Copilot-billed environment
   (`inference_unavailable`), and background sign-in, schedules, and Copilot CLI attach (`capability_unavailable`).

@@ -6,7 +6,7 @@
  *
  * Browser-safe: types and constants only (the console imports `@managed-copilot/protocol/operator`).
  */
-import type { AccountInfo, ActionKind, ActionState, Placement, SandboxState, ScheduleInfo, ScheduleRun, SessionState } from "./api.js";
+import type { AccountInfo, ActionKind, ActionState, Placement, SandboxState, ScheduleInfo, ScheduleRun, SessionInference, SessionState } from "./api.js";
 import type { EnvironmentType, Packages, SandboxSize } from "./config.js";
 import type { PlatformEventType } from "./events.js";
 import type { EgressBlockReason, NetworkPolicy } from "./network.js";
@@ -502,6 +502,8 @@ export interface OperatorSessionSummary {
   readonly state: SessionState;
   readonly generation: number;
   readonly model?: string;
+  /** Where its model calls go: each user's Copilot plan, or an Azure AI Foundry account (absent for workspace sandboxes). */
+  readonly inference?: SessionInference;
   readonly agent?: string;
   readonly clientName?: string;
   readonly scheduleId?: string;
@@ -786,4 +788,20 @@ export interface OperatorActionResult {
   readonly ok: true;
   readonly message: string;
   readonly audit: OperatorAuditEntry;
+}
+
+// Browser-safe (the console imports this module): how the platform names accounts to people.
+/**
+ * How to name an account to people: `@login` for a GitHub account; an app user's `<app>/<id>` and an app's name are
+ * shown without the `@`, so neither reads as a GitHub handle.
+ */
+export function accountLabel(account: Pick<AccountInfo, "login" | "kind">): string {
+  return account.kind === "app-user" || account.kind === "app" ? account.login : `@${account.login}`;
+}
+
+/** What kind of account it is, in words, for anything that isn't a GitHub account (undefined for GitHub). */
+export function accountKindLabel(account: Pick<AccountInfo, "kind" | "app">): string | undefined {
+  if (account.kind === "app-user") return `${account.app ?? "app"} user`;
+  if (account.kind === "app") return "app";
+  return undefined;
 }

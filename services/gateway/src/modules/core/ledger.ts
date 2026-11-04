@@ -222,10 +222,12 @@ export class SessionLedger {
       const now = new Date().toISOString();
       const existing = this.#db.prepare("SELECT * FROM core_accounts WHERE app = ? AND app_user_id = ?").get(app, userId) as AccountRow | undefined;
       if (existing) {
-        if ((name ?? null) !== existing.name || Date.parse(existing.last_seen_at) < Date.now() - 60_000) {
-          this.#db.prepare("UPDATE core_accounts SET name = ?, last_seen_at = ? WHERE id = ?").run(name ?? null, now, existing.id);
+        // A request without a display name keeps the last one the app sent.
+        const current = name ?? existing.name;
+        if (current !== existing.name || Date.parse(existing.last_seen_at) < Date.now() - 60_000) {
+          this.#db.prepare("UPDATE core_accounts SET name = ?, last_seen_at = ? WHERE id = ?").run(current, now, existing.id);
         }
-        return accountOf({ ...existing, name: name ?? null });
+        return accountOf({ ...existing, name: current });
       }
       const lowest = this.#db.prepare("SELECT MIN(id) AS id FROM core_accounts").get() as { id: number | null };
       const id = Math.min(0, Number(lowest.id ?? 0)) - 1;

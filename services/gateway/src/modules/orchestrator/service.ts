@@ -252,10 +252,16 @@ export class WorkerManager {
       }
     }
     let model = optionalText(input["model"]);
-    if (model !== undefined && workerConfig.models && !workerConfig.models.includes(model)) {
-      throw new ManagedCopilotError("policy_violation", `Model "${model}" is not allowed in worker environment "${environment}" (allowed: ${workerConfig.models.join(", ")}).`);
+    // A Foundry worker environment's models are its account's deployments unless it narrows them (spec section 15).
+    const deployment = this.#app.config.deployment;
+    const workerFoundry = workerConfig.inference?.foundry;
+    const workerModels = workerConfig.models ?? (workerFoundry ? deployment.foundry?.[workerFoundry]?.deployments : undefined);
+    if (model !== undefined && workerModels && !workerModels.includes(model)) {
+      throw new ManagedCopilotError("policy_violation", `Model "${model}" is not allowed in worker environment "${environment}" (allowed: ${workerModels.join(", ")}).`);
     }
-    if (model === undefined && coordinator.model && (!workerConfig.models || workerConfig.models.includes(coordinator.model))) model = coordinator.model;
+    // The coordinator's model carries over only within one billing route: a Copilot model means nothing to Foundry.
+    const sameRoute = (deployment.environments[coordinator.environment]?.inference?.foundry ?? null) === (workerFoundry ?? null);
+    if (model === undefined && sameRoute && coordinator.model && (!workerModels || workerModels.includes(coordinator.model))) model = coordinator.model;
 
     // The same tool call again (a replay after a restart) answers with the worker it started.
     const existing = this.#store.byStartKey(context.idempotencyKey);
