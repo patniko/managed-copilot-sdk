@@ -12,18 +12,23 @@ const ENVIRONMENT = "/subscriptions/x/resourceGroups/managed-copilot-dev/provide
 
 interface App {
   name: string;
+  tags?: Record<string, string>;
   properties: { managedEnvironmentId: string; configuration: { ingress: { external: boolean; fqdn: string; ipSecurityRestrictions: { name: string; ipAddressRange: string; action: string }[] } } };
 }
 
-function app(name: string, rules: [string, string][], environment = ENVIRONMENT): App {
+function app(name: string, rules: [string, string][], environment = ENVIRONMENT, tags?: Record<string, string>): App {
   return {
     name,
+    ...(tags ? { tags } : {}),
     properties: {
       managedEnvironmentId: environment,
       configuration: { ingress: { external: true, fqdn: `${name}.bravedesert.westus2.azurecontainerapps.io`, ipSecurityRestrictions: rules.map(([n, ip]) => ({ name: n, ipAddressRange: ip, action: "Allow" })) } },
     },
   };
 }
+
+/** An app published with `publishApp({ public: true })`: no IP rules, tagged by the Azure integration. */
+const publicApp = (name: string) => app(name, [], ENVIRONMENT, { "aspire-resource-name": name, "managed-copilot-access": "public" });
 
 class FakeHost implements HostTools {
   secrets: Record<string, string> = {};
@@ -225,6 +230,7 @@ describe("access", () => {
     expect(await run(["access", "ips", "set", "*"], declined.io)).toBe(1);
     expect(host.secrets["Parameters:app-allowed-ips"]).toBeUndefined();
     expect(declined.err()).toContain("anyone on the Internet");
+    expect(declined.err()).toContain("publish it with public: true instead");
 
     const h = harness(host);
     expect(await run(["access", "ips", "set", "*", "--yes"], h.io)).toBe(0);
@@ -239,6 +245,37 @@ describe("access", () => {
     const h = harness(host);
     expect(await run(["access", "ips", "add", "203.0.113.50", "--name", "misspelled"], h.io)).toBe(0);
     expect(h.out()).toContain('No gateway named "misspelled"');
+    expect(host.calls.some((call) => call.args.includes("access-restriction"))).toBe(false);
+  });
+
+  it("shows public apps apart from the allowlist and never changes their ingress", async () => {
+    const host = deployedHost();
+    host.apps!.push(publicApp("front-desk"), app("gallery", []));
+    const h = harness(host);
+    expect(await run(["access"], h.io)).toBe(0);
+    expect(h.out()).toContain("                gallery now: any address\nPublic apps     front-desk now: any address\n");
+    expect(h.out()).toContain("publishApp's public: true");
+
+    const json = harness(host);
+    expect(await run(["access", "--json"], json.io)).toBe(0);
+    expect(JSON.parse(json.out())).toMatchObject({ publicApps: [{ name: "front-desk", allowed: [] }], openApps: ["gallery"] });
+
+    const update = harness(host);
+    expect(await run(["access", "ips", "add", "203.0.113.50"], update.io)).toBe(0);
+    expect(update.out()).toContain("Applied now to dispatch, assistant.");
+    expect(update.out()).toContain("front-desk is public: open to any address, whatever this list says.");
+    expect(host.apps!.find((candidate) => candidate.name === "front-desk")!.properties.configuration.ingress.ipSecurityRestrictions).toEqual([]);
+    expect(host.calls.filter((call) => call.args.includes("access-restriction") && call.args.includes("front-desk"))).toEqual([]);
+  });
+
+  it("leaves a public app alone even if someone gave it a platform rule by hand", async () => {
+    const host = deployedHost();
+    const frontDesk = publicApp("front-desk");
+    frontDesk.properties.configuration.ingress.ipSecurityRestrictions.push({ name: "platform", ipAddressRange: "10.42.0.0/23", action: "Allow" });
+    host.apps = [app("copilot", []), frontDesk];
+    const h = harness(host);
+    expect(await run(["access", "ips", "set", "203.0.113.50", "--json"], h.io)).toBe(0);
+    expect(JSON.parse(h.out())).toMatchObject({ live: { status: "deferred", public: ["front-desk"] } });
     expect(host.calls.some((call) => call.args.includes("access-restriction"))).toBe(false);
   });
 
@@ -313,6 +350,16 @@ describe("deploy", () => {
     expect(host.secrets["Parameters:copilot-operator-users"]).toBe("alice");
     expect(h.out()).toContain("updates the deployment there");
     expect(h.out()).not.toContain("Added you");
+  });
+
+  it("says public apps are open to any address, and lists them once deployed", async () => {
+    const host = deployedHost();
+    host.apps!.push(publicApp("front-desk"));
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(h.out()).toContain("Apps open to    198.51.100.9/32 (this machine); public apps: any address");
+    expect(h.out()).toContain("Public apps: https://front-desk.bravedesert.westus2.azurecontainerapps.io (any address)");
   });
 
   it("asks first in a terminal, and needs --yes otherwise", async () => {

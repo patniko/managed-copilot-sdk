@@ -67,11 +67,12 @@ npx managed-copilot deploy --resource-group demo --location eastus
 `deploy` checks that the Aspire CLI, the Azure CLI (signed in), and Docker (running) are ready, then fills in what's
 missing: the subscription, region, and resource group, and, on a first deployment, you as a platform user and an
 operator. It shows the plan, asks before deploying (`--yes` skips the question), and runs `aspire deploy`. The published
-apps act as your GitHub sign-in: the token goes to `aspire deploy` in an environment variable, never on a command line.
+apps act as your GitHub sign-in (except public apps, which get no token): the token goes to `aspire deploy` in an
+environment variable, never on a command line.
 It won't deploy over a resource group that holds a deployment this AppHost didn't make: that deployment's generated
 keys are in Aspire's deployment record (`~/.aspire/deployments/<hash of the AppHost path>/`) for the checkout that made
 it. If that record is on this machine, it offers, in a terminal, to copy it to this AppHost so the deployment keeps its
-keys. When it's done, it prints the gateway URL.
+keys. When it's done, it prints the gateway URL and the URLs of any public apps.
 
 ```powershell
 npx managed-copilot access                           # the lists, and each running app's allowlist
@@ -88,3 +89,7 @@ Each list is one setting (`Parameters:<name>-github-users`, `-github-orgs`, `-op
 to the running apps at once through the Azure CLI. An unset allowlist means the deploying machine's address, so the
 first `ips add` keeps that address. `ips set "*"` opens the apps to any address as your account; it asks first, and
 takes effect on the next deploy.
+
+Public apps, which the AppHost publishes with `publishApp({ public: true })` because they sign in their own users,
+are open to any address and get no GitHub token. `access` lists them under **Public apps**; the allowlist never
+applies to them, and `ips` never changes their ingress.
