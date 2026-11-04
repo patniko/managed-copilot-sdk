@@ -216,6 +216,6 @@ chosen from what your Copilot entitlement offers (`client.listModels()`).
 | `customizations/office` | `planner` and `reviewer` agents, `task-decomposition` and `review-rubric` skills |
 | `customizations/workshop` | `builder` and `release` agents, `factory-check` (harness), `node-project`, and `release-checklist` skills |
 | `src/server` | Pipeline orchestrator, platform connection, REST and server-sent events, SQLite store |
-| `src/web` | The factory floor (React, Tailwind, and GitHub's Primer look from [`packages/github-theme`](../../packages/github-theme); light and dark follow the OS) |
+| `src/web` | The factory floor (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `src/scripts` | `happy-path` and `smoke-office` |
 | `test` | Unit tests, including the orchestrator against an in-memory platform and the harness end to end |

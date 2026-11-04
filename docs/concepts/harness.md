@@ -29,7 +29,7 @@ Point an environment's `customizations` at a folder in the formats Copilot CLI a
 mounts it read-only; every session in that environment gets it.
 
 ```text
-copilot/chat/
+customizations/chat/
 ├── agents/triage.agent.md
 ├── skills/refund-policy/SKILL.md
 └── instructions/contoso.instructions.md
@@ -114,8 +114,8 @@ and when a session's options change.
 - **TypeScript only, for now.** The SDK integration is built for TypeScript; .NET and Python are not started.
 
 > [!TIP]
-> **Try it:** [walkthrough 02](../../samples/02-your-own-tools/README.md) shows tools and approvals;
-> [walkthrough 06](../../samples/06-harness/README.md) runs one harness in three environments and, with `--attach`,
+> **Try it:** [walkthrough 02](../../walkthroughs/02-your-own-tools/README.md) shows tools and approvals;
+> [walkthrough 06](../../walkthroughs/06-harness/README.md) runs one harness in three environments and, with `--attach`,
 > opens it in Copilot CLI.
 
 <details>
@@ -123,7 +123,7 @@ and when a session's options change.
 
 - [Spec section 3](../spec/developer-experience.md#3-shared-a-chat-agent-with-your-own-tools) and
   [section 10: ship agents with an environment](../spec/developer-experience.md#10-ship-agents-with-an-environment).
-- [`platform/gateway/src/modules/core/admission.ts`](../../platform/gateway/src/modules/core/admission.ts): every
+- [`services/gateway/src/modules/core/admission.ts`](../../services/gateway/src/modules/core/admission.ts): every
   session option and the rule for each placement.
 
 </details>

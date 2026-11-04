@@ -25,7 +25,7 @@ sequenceDiagram
   C-->>App: the answer
 ```
 
-This is a live run of [walkthrough 11](../../samples/11-orchestrator/README.md): two workers in two sandboxes, both
+This is a live run of [walkthrough 11](../../walkthroughs/11-orchestrator/README.md): two workers in two sandboxes, both
 done inside one `sendAndWait`.
 
 ## Declare one
@@ -150,8 +150,8 @@ client's network narrowing applies to workers too, and workers cannot start work
 its workers.
 
 > [!TIP]
-> **Try it:** [walkthrough 11](../../samples/11-orchestrator/README.md) runs two workers in parallel and prints
-> their sandboxes, and [walkthrough 12](../../samples/12-direct-execution/README.md) runs the same job directly and
+> **Try it:** [walkthrough 11](../../walkthroughs/11-orchestrator/README.md) runs two workers in parallel and prints
+> their sandboxes, and [walkthrough 12](../../walkthroughs/12-direct-execution/README.md) runs the same job directly and
 > then gives a mixed coordinator the choice. [Dispatch](../../demos/dispatch/README.md) is a whole app around one coordinator, with a
 > switch for all three styles: each message shows the sandboxes it created or reused, or the commands it and its
 > sub-agents ran, you approve each new sandbox or command, and Copilot CLI can join the same conversation.

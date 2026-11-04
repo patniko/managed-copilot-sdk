@@ -9,7 +9,7 @@
   <a href="docs/README.md">Start here</a> ·
   <a href="docs/tutorial/README.md">Video tour</a> ·
   <a href="#run-it-locally">Run it locally</a> ·
-  <a href="samples/README.md">Walkthroughs</a> ·
+  <a href="walkthroughs/README.md">Walkthroughs</a> ·
   <a href="#the-demos">Demos</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/deployment.md">Deploy to Azure</a> ·
@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <a href="docs/tutorial/README.md"><img src="docs/images/tour.png" alt="Watch the six-minute video tour of Managed Copilot" width="820"></a>
+  <a href="docs/tutorial/README.md"><img src="docs/images/tour.png" alt="The six-minute video tour of Managed Copilot" width="820"></a>
 </p>
 
 ## Overview
@@ -39,7 +39,7 @@ const reply = await session.sendAndWait({ prompt: "Summarize what changed in Asp
 console.log(reply?.data.content);
 ```
 
-You declare environments once in an [Aspire AppHost](packages/aspire/README.md). `aspire run` brings the platform up
+You declare environments once in an [Aspire AppHost](libraries/aspire/README.md). `aspire run` brings the platform up
 on your machine, and `aspire deploy` puts the same AppHost on Azure Container Apps. Your code keeps using genuine
 `CopilotClient` and `CopilotSession` objects, standard session events, and `defineTool` tools. What works today, end
 to end with real models:
@@ -224,9 +224,9 @@ npx managed-copilot console            # the operator console: health, sessions,
 pnpm gallery                           # every demo and walkthrough on one page, local and Azure
 ```
 
-To run every snippet from the spec against your platform, start **quickstart** in the Aspire dashboard, or run
-`pnpm --filter @managed-copilot/quickstart acceptance`. To learn by doing, follow the
-[walkthroughs](samples/README.md): `pnpm sample 01` is your first agent, in about a minute.
+To run every snippet from the spec against your platform, start **snippets** in the Aspire dashboard, or run
+`pnpm --filter @managed-copilot/snippets acceptance`. To learn by doing, follow the
+[walkthroughs](walkthroughs/README.md): `pnpm walkthrough 01` is your first agent, in about a minute.
 
 - **Stuck at "Trusting certificates…".** The first `aspire run` asks to trust the dashboard's development
   certificate, and the prompt can be hidden. Run `aspire certs trust` once, or use `aspire run --non-interactive`,
@@ -281,13 +281,13 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 | --- | --- |
 | [Start here](docs/README.md) | A learning path, twelve visual concept pages, an "I want to…" index, and a glossary |
 | [Demo walkthrough](docs/walkthrough.md) | Every demo locally, then deployed to Azure, then shared with teammates: commands and what to check |
-| [Walkthroughs](samples/README.md) | Thirteen hands-on walkthroughs with runnable code (`pnpm sample 01`) and real output |
-| [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and two demos running for real. Recorded before the direct, delegate, and mixed patterns and Dispatch |
-| [Quickstart](demos/quickstart/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
+| [Walkthroughs](walkthroughs/README.md) | Thirteen hands-on walkthroughs with runnable code (`pnpm walkthrough 01`) and real output |
+| [Video tour](docs/tutorial/README.md) | Six narrated minutes: the idea, how it works, and two demos running for real. Recorded before the direct, delegate, and mixed patterns and Dispatch; build the video from its source |
+| [Spec snippets](tests/snippets/README.md) | Every spec snippet as a runnable script, plus one acceptance run against your platform |
 | [AI software factory](demos/software-factory/README.md) | A work order goes in; parallel sandboxed agents build, review, and release it |
 | [Long-running assistant](demos/assistant/README.md) | A bot you chat with that keeps working while you're away, with Gmail, Google Calendar, and sandboxes for hands-on work |
 | [Dispatch](demos/dispatch/README.md) | A chat with an orchestrator agent that creates a sandbox for each part of a request, or reuses the ones it has |
-| [`managed-copilot` CLI](packages/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
+| [`managed-copilot` CLI](libraries/cli/README.md) | Background sign-in, sessions, Copilot CLI attach, promotion, artifacts, schedules, and the operator console |
 | [Deploy to Azure](docs/deployment.md) | The same AppHost on Azure Container Apps in your subscription |
 | [Developer experience spec](docs/spec/developer-experience.md) | The customer contract, decisions, and delivery gates |
 | [Architecture](docs/architecture.md) | Topology, protocol facts, and how the pieces fit |
@@ -296,17 +296,18 @@ Your code connects exactly as it does locally, with `MANAGED_COPILOT_URL` or `Ma
 
 | Path | Contents |
 | --- | --- |
-| `packages/protocol` | Shared contracts: AppHost config schema, REST DTOs, errors, events, network policy |
-| `packages/sdk` | `@managed-copilot/sdk`: `ManagedCopilot.connect()`, stock clients over a secure bridge |
-| `packages/aspire` | `@managed-copilot/aspire`: `addManagedCopilot(builder, name, options)` for Aspire TypeScript AppHosts |
-| `packages/cli` | `npx managed-copilot`: background sign-in, sessions, Copilot CLI attach, artifacts, schedules |
-| `platform/gateway` | Authenticated gateway: admission, routing, session ledger, platform services, operator API |
-| `platform/console` | The operator console the gateway serves at `/console` |
-| `platform/sandbox`, `platform/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
-| `deploy/azure` | The Azure integration for `aspire deploy`: hosting, the gateway's lease supervisor, and qualification probes |
+| `libraries/protocol` | Shared contracts: AppHost config schema, REST DTOs, errors, events, network policy |
+| `libraries/sdk` | `@managed-copilot/sdk`: `ManagedCopilot.connect()`, stock clients over a secure bridge |
+| `libraries/aspire` | `@managed-copilot/aspire`: `addManagedCopilot(builder, name, options)` for Aspire TypeScript AppHosts |
+| `libraries/cli` | `npx managed-copilot`: background sign-in, sessions, Copilot CLI attach, artifacts, schedules |
+| `services/gateway` | Authenticated gateway: admission, routing, session ledger, platform services, operator API |
+| `services/console` | The operator console the gateway serves at `/console` |
+| `services/sandbox`, `services/egress` | The sandbox image and its agent; the egress proxy that enforces network policy and vaults |
+| `deployments/azure` | The Azure integration for `aspire deploy`: hosting, the gateway's lease supervisor, and qualification probes |
 | `apphost.mts` | The AppHost: `aspire run` starts the platform, its environments, and the demos |
-| `demos/quickstart` | Every spec snippet as a runnable script and one acceptance run |
-| `samples` | The walkthroughs' code: small, commented scripts you run with `pnpm sample <number>` |
+| `customizations/chat` | The agents, skills, and instructions of the AppHost's `chat` environment |
+| `tests/snippets` | Every spec snippet as a runnable script and one acceptance run |
+| `walkthroughs` | The walkthroughs: small, commented scripts you run with `pnpm walkthrough <number>` |
 | `demos/software-factory`, `demos/assistant`, `demos/dispatch` | The AI software factory, the long-running assistant, and Dispatch |
 | `demos/gallery` | `pnpm gallery`: every demo and walkthrough on one page, with local and Azure links |
 | `docs/` | Start here and the concept pages, spec, architecture, deployment, and the video tour |

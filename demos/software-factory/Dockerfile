@@ -6,7 +6,7 @@
 #     --build-arg NPM_REGISTRY="$(npm config get registry)" -t managed-copilot-software-factory .
 #
 # The deployment supplies MANAGED_COPILOT_URL, the GitHub identity the factory acts as, and a persistent data
-# directory (FACTORY_DATA_DIR, default /data). The entrypoint is the lease supervisor from deploy/azure: only one
+# directory (FACTORY_DATA_DIR, default /data). The entrypoint is the lease supervisor from deployments/azure: only one
 # replica at a time runs the server against /data (MANAGED_COPILOT_DATA_DIR; MANAGED_COPILOT_LEASE_STAMP orders
 # deployments).
 ARG NODE_IMAGE=node:24-bookworm-slim
@@ -26,27 +26,27 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json tsconfig.base.json ./
 RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; esac)" \
  && printf '\nsupportedArchitectures:\n  os: [current, linux]\n  cpu: [current, %s]\n  libc: [current, glibc]\n' "${cpu}" >> pnpm-workspace.yaml \
  && pnpm fetch
-COPY packages/protocol/ packages/protocol/
-COPY packages/sdk/ packages/sdk/
-COPY packages/github-theme/ packages/github-theme/
+COPY libraries/protocol/ libraries/protocol/
+COPY libraries/sdk/ libraries/sdk/
+COPY libraries/github-theme/ libraries/github-theme/
 COPY demos/software-factory/ demos/software-factory/
-COPY deploy/azure/ deploy/azure/
+COPY deployments/azure/ deployments/azure/
 RUN pnpm install --offline --frozen-lockfile --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/github-theme --filter @managed-copilot/demo-software-factory --filter @managed-copilot/azure \
  && pnpm --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-software-factory --filter @managed-copilot/azure run build
 # The single-writer lease supervisor (no dependencies): one replica at a time owns the app's data directory.
 RUN mkdir -p /out-azure \
- && cp deploy/azure/package.json /out-azure/ && cp -r deploy/azure/dist /out-azure/ \
+ && cp deployments/azure/package.json /out-azure/ && cp -r deployments/azure/dist /out-azure/ \
  && find /out-azure -name '*.map' -delete
 # A production-only install in its own workspace root (/out) with only the target platform's native packages.
 # Install scripts are skipped because they would probe the build platform; the final stage checks native packages.
 # @github/copilot-sdk is hoisted so @managed-copilot/sdk resolves its peer dependency without dev links.
 # The server locates its package root by apphost.mts and package.json, so both are kept.
 RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; esac)" \
- && mkdir -p /out/packages/protocol /out/packages/sdk /out/demos/software-factory \
+ && mkdir -p /out/libraries/protocol /out/libraries/sdk /out/demos/software-factory \
  && cp package.json pnpm-lock.yaml /out/ \
  && sed '/^supportedArchitectures:/,$d' pnpm-workspace.yaml > /out/pnpm-workspace.yaml \
  && printf 'supportedArchitectures:\n  os: [linux]\n  cpu: [%s]\n  libc: [glibc]\npublicHoistPattern:\n  - "@github/copilot-sdk"\n' "${cpu}" >> /out/pnpm-workspace.yaml \
- && for pkg in packages/protocol packages/sdk demos/software-factory; do cp "${pkg}/package.json" "/out/${pkg}/" && cp -r "${pkg}/dist" "/out/${pkg}/"; done \
+ && for pkg in libraries/protocol libraries/sdk demos/software-factory; do cp "${pkg}/package.json" "/out/${pkg}/" && cp -r "${pkg}/dist" "/out/${pkg}/"; done \
  && cp demos/software-factory/apphost.mts /out/demos/software-factory/ \
  && cd /out \
  && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-software-factory \

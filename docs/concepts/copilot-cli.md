@@ -89,8 +89,8 @@ The first attach asks you to trust an empty folder, `~/.managed-copilot/attach`.
 working directory; the agent's files are in the remote `/workspace`.
 
 > [!TIP]
-> **Try it:** [walkthrough 01](../../samples/01-first-agent/README.md) ends with an attach. [Walkthrough
-> 06](../../samples/06-harness/README.md) opens a session with your own harness in Copilot CLI, and your app's tool
+> **Try it:** [walkthrough 01](../../walkthroughs/01-first-agent/README.md) ends with an attach. [Walkthrough
+> 06](../../walkthroughs/06-harness/README.md) opens a session with your own harness in Copilot CLI, and your app's tool
 > keeps answering.
 
 <details>
@@ -98,7 +98,7 @@ working directory; the agent's files are in the remote `/workspace`.
 
 - [Architecture: Copilot CLI attach](../architecture.md#copilot-cli-attach-spec-section-14): the relay, what the
   CLI may send, path scrubbing, promotion fencing, and reconnects.
-- [`managed-copilot` CLI](../../packages/cli/README.md#attach).
+- [`managed-copilot` CLI](../../libraries/cli/README.md#attach).
 - [Spec section 14](../spec/developer-experience.md#14-open-a-session-in-copilot-cli-or-the-github-copilot-app).
 
 </details>

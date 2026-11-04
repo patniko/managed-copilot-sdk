@@ -46,7 +46,7 @@ await addManagedCopilot(builder, "copilot", {
   environments: {
     chat: {
       type: "shared",
-      customizations: "./copilot/chat",            // agents, skills, and instructions
+      customizations: "./customizations/chat",            // agents, skills, and instructions
       models: ["claude-sonnet-5", "claude-haiku-5.5"],
       network: ["learn.microsoft.com"],            // only this host
     },
@@ -92,9 +92,9 @@ environments as plain data: the software factory's [`apphost.mts`](../../demos/s
 four of them, which the root AppHost spreads into its list.
 
 > [!TIP]
-> **Try it:** [walkthrough 05](../../samples/05-choose-environments/README.md) creates a session each way and shows the
-> sandbox each one got. [Walkthrough 03](../../samples/03-sandbox/README.md) shows one client getting two sandboxes,
-> and [walkthrough 11](../../samples/11-orchestrator/README.md) a coordinator splitting a job across two workers.
+> **Try it:** [walkthrough 05](../../walkthroughs/05-choose-environments/README.md) creates a session each way and shows the
+> sandbox each one got. [Walkthrough 03](../../walkthroughs/03-sandbox/README.md) shows one client getting two sandboxes,
+> and [walkthrough 11](../../walkthroughs/11-orchestrator/README.md) a coordinator splitting a job across two workers.
 
 <details>
 <summary><strong>Under the hood</strong></summary>
@@ -102,7 +102,7 @@ four of them, which the root AppHost spreads into its list.
 - [Spec section 1: declare your environments](../spec/developer-experience.md#1-declare-your-environments) and the
   [environment types table](../spec/developer-experience.md#environment-types).
 - `EnvironmentConfigSchema` and `EnvironmentRequestSchema` in
-  [`packages/protocol/src/config.ts`](../../packages/protocol/src/config.ts) list every field and its rules.
+  [`libraries/protocol/src/config.ts`](../../libraries/protocol/src/config.ts) list every field and its rules.
 - [Architecture: isolated placement](../architecture.md#isolated-placement): one sandbox per session, images, setup.
 
 </details>

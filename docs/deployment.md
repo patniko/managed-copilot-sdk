@@ -66,7 +66,7 @@ flowchart LR
 | One container app per `publishApp` | Your apps (the demos, and the demo gallery at `https://gallery.<environment-domain>`): external HTTPS ingress restricted to `Parameters:app-allowed-ips`, one replica, their own NFS directory. The gallery gets no GitHub token. |
 | `copilot-gateway-identity` | User-assigned identity of the gateway. Its roles: **Container Apps SandboxGroup Data Owner** on the sandbox group, and **AcrPull** on the registry (for the registry tokens it hands to disk-image imports). |
 | Sandboxes group (`Microsoft.App/sandboxGroups`) + VNet connection | Isolated placement. Created only when the AppHost declares isolated environments. |
-| Internal Container Apps environment `mc-egress-<suffix>` + `egress` container app | The sandboxes' only way out: the platform's egress proxy (`platform/egress`, external mode) on TCP 3128 of the environment's internal load balancer, one replica, linked to the gateway over HTTPS. Created with the sandbox group. |
+| Internal Container Apps environment `mc-egress-<suffix>` + `egress` container app | The sandboxes' only way out: the platform's egress proxy (`services/egress`, external mode) on TCP 3128 of the environment's internal load balancer, one replica, linked to the gateway over HTTPS. Created with the sandbox group. |
 | Log Analytics workspace | Container logs (both environments). |
 
 ## Prerequisites
@@ -75,7 +75,7 @@ flowchart LR
   Based Access Control Administrator), in a region that offers Container Apps Sandboxes
   (`az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='sandboxGroups'].locations"`).
 - Azure CLI, signed in (`az login`); `aspire deploy` uses its credential, and the image step uses `az acr login`.
-- Aspire CLI 13.6, Node 24, pnpm 10, and the .NET 10 SDK (the Azure integration in `deploy/azure/hosting` is a C#
+- Aspire CLI 13.6, Node 24, pnpm 10, and the .NET 10 SDK (the Azure integration in `deployments/azure/hosting` is a C#
   project the CLI builds).
 - Docker with BuildKit. Images are built for `linux/amd64`; on ARM64 machines the build stages run natively and only
   the final stages are emulated, so the first sandbox image build takes several minutes.
@@ -88,7 +88,7 @@ flowchart LR
 > in the subscription, region, resource group, and (on a first deployment) you as a user and operator, passes your
 > GitHub sign-in as the apps' token without putting it on a command line, and runs `aspire deploy`.
 > `npx managed-copilot access` shows and changes who may use it, operate it, and open its apps
-> ([CLI reference](../packages/cli/README.md#deploy-and-share)). The manual steps:
+> ([CLI reference](../libraries/cli/README.md#deploy-and-share)). The manual steps:
 
 1. Choose where it goes (stored in the AppHost's user secrets; `aspire deploy` prompts for anything missing):
 
@@ -254,7 +254,7 @@ customizations on an **Azure Files NFS 4.1** share mounted at `/data`.
   the NFS deployment keeps that layer unchanged.
 - **Single writer.** Container Apps can run an old and a new revision side by side during a deployment, and can pre-warm
   a replacement replica during maintenance, even with one replica. The image's entrypoint is a lease supervisor
-  (`deploy/azure/src/lease`): it holds an exclusive SQLite lock on `/data/.lease/gateway.lease` for the life of the
+  (`deployments/azure/src/lease`): it holds an exclusive SQLite lock on `/data/.lease/gateway.lease` for the life of the
   process and starts the gateway only while it holds the lease, with a fencing generation and a heartbeat every 5 s. A
   detected lease or heartbeat failure terminates the gateway and its process group. A waiting replica answers `503`
   (readiness fails, so it gets no traffic). A newer deployment (higher `MANAGED_COPILOT_LEASE_STAMP`, set per publish) asks the holder to hand
@@ -280,14 +280,14 @@ HA guarantee or run multiple active writers.
 ## Isolated placement on Azure
 
 Isolated sessions run in **Azure Container Apps Sandboxes** (`Microsoft.App/sandboxGroups`): one microVM per session in
-the deployment's sandbox group (`platform/gateway/src/modules/sandbox/providers/azure`, selected with
+the deployment's sandbox group (`services/gateway/src/modules/sandbox/providers/azure`, selected with
 `MANAGED_COPILOT_SANDBOX_PROVIDER=azure`). It was chosen from the spec's Azure candidates (Container Apps dynamic
 sessions, Container Apps jobs, managed session-worker containers) because it gives per-session microVMs, data disks that
 outlive their compute, and a default-deny egress engine. Managed session-worker containers remain a candidate fallback,
 not an implemented or automatic alternative.
 
 - **Images.** `aspire deploy` builds the base sandbox image, each isolated environment's own `image` folder FROM it, its
-  `packages.system` in a layer of their own (as `aspire run` does), and an Azure layer (`deploy/azure/sandbox`) on top,
+  `packages.system` in a layer of their own (as `aspire run` does), and an Azure layer (`deployments/azure/sandbox`) on top,
   for `linux/amd64`, tagged by content and pushed to the registry. The gateway imports each into a disk image when it
   starts (`prepare`), pinned per sandbox. An environment that declares system packages never falls back to the base
   image. The service cannot pull with a managed identity, so the gateway exchanges its own Entra token for a
@@ -309,7 +309,7 @@ not an implemented or automatic alternative.
   (`llmInference`), as locally, so they need no direct network access from the sandbox.
 - **Egress.** Every sandbox gets a platform egress policy that denies all HTTP(S) and allows one TCP destination: the
   egress proxy's internal address on port 3128 (`MANAGED_COPILOT_AZURE_EGRESS_PROXY`). The proxy is the same
-  `platform/egress` as locally, in external mode: sandboxd's `HTTP(S)_PROXY` carries per-sandbox credentials, so the
+  `services/egress` as locally, in external mode: sandboxd's `HTTP(S)_PROXY` carries per-sandbox credentials, so the
   proxy enforces each environment's allowlist, injects vault credentials, reports `network.blocked`, and applies policy
   changes live, while the platform policy keeps a sandbox that ignores its proxy settings off the Internet. Limits: DNS
   resolution stays available to sandboxes (connections still need the proxy); the proxy sees translated source
@@ -318,8 +318,8 @@ not an implemented or automatic alternative.
   makes only that mounted directory writable by uid 1000; the proxy remains non-root. Atomic CA creation makes
   overlapping revisions share the same key pair. An intentional CA rotation still requires sandbox re-registration.
 
-Qualification (2026-10-24, westus2): a probe deployment (`deploy/azure/qualify`) checked the service directly, and a
-gateway using this provider passed the isolated end-to-end suite (`deploy/azure/qualify/isolated.live.ts`: session
+Qualification (2026-10-24, westus2): a probe deployment (`deployments/azure/qualify`) checked the service directly, and a
+gateway using this provider passed the isolated end-to-end suite (`deployments/azure/qualify/isolated.live.ts`: session
 create in about 8 s, a real model reply, files, uid 10001, idle stop, and resume over the same disks in about 8 s).
 
 ## Who can open the apps
@@ -371,7 +371,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | --- | --- |
 | `aspire deploy` | All 37 pipeline steps succeeded; normal entrypoint, Single revision mode, latest ready gateway receiving 100% of traffic |
 | Spec snippets 01-09, 11, 13 | **11 passed**: genuine SDK objects/tools/streaming, repository work, setup, artifacts, network/vault behavior, promotion, resume, durable polling, and AHP attach |
-| Spec snippets 10 and 12 | **2 skipped**, not passed: they require the local quickstart receiver and its `COPILOT_WEBHOOK_SECRET`, deliberately not published by the root AppHost |
+| Spec snippets 10 and 12 | **2 skipped**, not passed: they require the local spec snippets receiver and its `COPILOT_WEBHOOK_SECRET`, deliberately not published by the root AppHost |
 | Isolated idle/recreate probe | **8/8 passed** in Phase A; real-model create and resume each took about 8 seconds; compute was replaced over retained disks |
 | Explicit isolated compute replacement | A new microVM retained the same three data disks, workspace and HOME markers, declared Python package version, and conversation-only native history marker; workload remained uid 10001 before and after |
 | NFS and lease | **10/10 storage checks**; a second host's contender was excluded while the original gateway served |
@@ -394,11 +394,11 @@ To rerun the applicable snippets against your deployment:
 
 ```powershell
 $env:MANAGED_COPILOT_URL = "https://copilot.<environment-domain>"
-pnpm --filter @managed-copilot/quickstart acceptance 01 02 03 04 05 06 07 08 09 11 13 14 --strict
+pnpm --filter @managed-copilot/snippets acceptance 01 02 03 04 05 06 07 08 09 11 13 14 --strict
 ```
 
-`deploy/azure/qualify/isolated.live.ts` covers idle compute replacement (use an environment with a short idle timeout,
-or allow the default 900 seconds). `deploy/azure/qualify/revision.live.mjs` prepares session canaries before a deploy
+`deployments/azure/qualify/isolated.live.ts` covers idle compute replacement (use an environment with a short idle timeout,
+or allow the default 900 seconds). `deployments/azure/qualify/revision.live.mjs` prepares session canaries before a deploy
 and verifies them afterwards, deleting only its own test sessions.
 
 ## Cost

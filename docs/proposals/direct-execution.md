@@ -212,11 +212,11 @@ The probe proves the mechanism; these are what make it a platform feature rather
 
 ## Demos
 
-- **Walkthrough 12 · Direct execution** ([built](../../samples/12-direct-execution/README.md)), the twin of walkthrough 11: the same primes and Fibonacci prompt against
+- **Walkthrough 12 · Direct execution** ([built](../../walkthroughs/12-direct-execution/README.md)), the twin of walkthrough 11: the same primes and Fibonacci prompt against
   `team` and then `operator`, printing which agent ran which command, how many sandboxes and model loops each used,
   and the wall time. One script shows both shapes, then a `lead` (mixed) session gets a job with a long test suite and
   a quick fix, and the script prints which parts the model chose to do itself and which it gave to a worker.
-- **Walkthrough 13 · Your own harness** ([built](../../samples/13-your-own-harness/README.md)): `managed.sandboxes.create`, `managed.exec` with a background command, and
+- **Walkthrough 13 · Your own harness** ([built](../../walkthroughs/13-your-own-harness/README.md)): `managed.sandboxes.create`, `managed.exec` with a background command, and
   a stock client whose overridden `bash` and file tools run through `managed.exec`: the probe, on the platform.
 - **Dispatch** ([built](../../demos/dispatch/README.md#three-ways-to-get-the-work-done)): a three-way switch beside the composer, "Delegate to workers" / "Work directly" / "Mixed". The
   message's sandbox cards stay the same; direct work lists the commands the brain and its sub-agents ran.

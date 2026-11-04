@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 const root = new URL("../../../", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
-const sdk = await import(pathToFileURL(root + "/packages/sdk/node_modules/@github/copilot-sdk/dist/index.js").href);
+const sdk = await import(pathToFileURL(root + "/libraries/sdk/node_modules/@github/copilot-sdk/dist/index.js").href);
 const C = "mc-hands-probe";
 const PROMPT = "Use two sub-agents in parallel (the task tool, general-purpose agents). One writes /workspace/primes.py that counts primes below 100000 and runs it. The other writes /workspace/fib.py that prints how many digits the 1000th Fibonacci number has and runs it. Then report both answers and the OS name from /etc/os-release.";
 

@@ -44,7 +44,7 @@ pnpm --filter @managed-copilot/gateway dev   # gateway alone, dev default enviro
 ## Conventions
 
 - TypeScript ESM, Node 24, `strict`. Tests live in `<package>/test` and use vitest.
-- Shared contracts live in `packages/protocol`. Changes there must be additive; coordinate breaking changes with the
+- Shared contracts live in `libraries/protocol`. Changes there must be additive; coordinate breaking changes with the
   coordinator before making them.
 - Gateway modules own their SQLite tables (prefix with the module name) and register migrations with `migrate()`.
   Modules expose capabilities to each other through `app.provide(...)` / `app.service(...)`.

@@ -20,7 +20,7 @@ const ports = {
   gateway: 7400 + offset,
   dispatch: DISPATCH_DEFAULT_PORT + offset,
   factory: 7480 + offset,
-  quickstartWebhook: 7485 + offset,
+  snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
@@ -32,7 +32,7 @@ const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue
 const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
-const quickstartWebhook = { port: ports.quickstartWebhook, secret: await generatedSecret("quickstart-webhook-secret") };
+const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 
 const copilot = await addManagedCopilot(builder, "copilot", {
   port: ports.gateway,
@@ -44,7 +44,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   environments: {
     chat: {
       type: "shared",
-      customizations: "./copilot/chat", // agents, skills, and instructions (section 10)
+      customizations: "./customizations/chat", // agents, skills, and instructions (section 10)
       models: ["claude-sonnet-5", "claude-haiku-5.5"],
       network: ["learn.microsoft.com"], // only this host
     },
@@ -65,15 +65,15 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   inline: { types: ["shared", "isolated"], sizes: ["small"] },
 
   webhooks: {
-    // The quickstart's offline snippets answer tool calls here while their app is away (section 12). Local only.
+    // The spec snippets' offline checks answer tool calls here while their app is away (section 12). Local only.
     ...(publishing
       ? {}
       : {
-          quickstart: {
-            url: `http://localhost:${quickstartWebhook.port}/api/copilot-events`,
+          snippets: {
+            url: `http://localhost:${snippetsWebhook.port}/api/copilot-events`,
             environments: ["chat"],
             events: ["session.action_required", "session.idle", "session.failed", "schedule.run_started"],
-            secret: quickstartWebhook.secret,
+            secret: snippetsWebhook.secret,
           },
         }),
     ...assistant.webhooks,
@@ -143,11 +143,11 @@ if (publishing) {
 // Every spec snippet as an acceptance check against this platform. Start it from the dashboard. Local only: against
 // Azure, run it from your machine with MANAGED_COPILOT_URL set to the deployed gateway.
 if (!publishing) await builder
-  .addJavaScriptApp("quickstart", "./demos/quickstart", { runScriptName: "acceptance" })
+  .addJavaScriptApp("snippets", "./tests/snippets", { runScriptName: "acceptance" })
   .withPnpm({ install: false })
   .withEnvironment("MANAGED_COPILOT_URL", copilot.url)
-  .withEnvironment("COPILOT_WEBHOOK_SECRET", quickstartWebhook.secret)
-  .withEnvironment("QUICKSTART_WEBHOOK_PORT", String(quickstartWebhook.port))
+  .withEnvironment("COPILOT_WEBHOOK_SECRET", snippetsWebhook.secret)
+  .withEnvironment("SNIPPETS_WEBHOOK_PORT", String(snippetsWebhook.port))
   .waitFor(copilot.gateway)
   .withExplicitStart();
 

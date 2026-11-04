@@ -16,9 +16,9 @@ flowchart LR
 
 | I'm… | Read | Then run |
 | --- | --- | --- |
-| **Evaluating it** | [How it works](concepts/how-it-works.md), then [patterns](concepts/patterns.md) | [01 · Your first agent](../samples/01-first-agent/README.md) |
-| **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../samples/README.md), and [11](../samples/11-orchestrator/README.md) to [13](../samples/13-your-own-harness/README.md) for multi-agent jobs and direct execution |
-| **Running the platform** | [Local and Azure](concepts/local-and-azure.md), then [identity and access](concepts/identity.md) | [10 · Azure from your laptop](../samples/10-azure/README.md) |
+| **Evaluating it** | [How it works](concepts/how-it-works.md), then [patterns](concepts/patterns.md) | [01 · Your first agent](../walkthroughs/01-first-agent/README.md) |
+| **Building an app** | The concept page linked from each walkthrough | [Walkthroughs 01 to 09](../walkthroughs/README.md), and [11](../walkthroughs/11-orchestrator/README.md) to [13](../walkthroughs/13-your-own-harness/README.md) for multi-agent jobs and direct execution |
+| **Running the platform** | [Local and Azure](concepts/local-and-azure.md), then [identity and access](concepts/identity.md) | [10 · Azure from your laptop](../walkthroughs/10-azure/README.md) |
 
 ## Concepts
 
@@ -44,19 +44,19 @@ Each page answers one question, diagram first.
 | I want to… | Read | Run |
 | --- | --- | --- |
 | Compare the ways an agent can run: isolated, shared, promotable, direct, delegate, mixed | [Patterns](concepts/patterns.md) | `pnpm gallery` |
-| Run an agent in Azure from a TypeScript script on my laptop | [Local and Azure](concepts/local-and-azure.md) | [10](../samples/10-azure/README.md) |
-| Build a chat agent that uses my app's data | [The harness](concepts/harness.md) | [02](../samples/02-your-own-tools/README.md) |
-| Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../samples/03-sandbox/README.md) |
-| Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../samples/04-promotion/README.md) |
-| Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../samples/11-orchestrator/README.md) |
-| Have a coordinator and its sub-agents run commands in a sandbox themselves, or choose between that and workers | [Orchestrator](concepts/orchestrator.md#three-ways-to-get-work-done) | [12](../samples/12-direct-execution/README.md) |
-| Run my own agent loop with its hands in a sandbox, or run commands in a sandbox from code | [Sandboxes](concepts/sandboxes.md#run-commands-directly) | [13](../samples/13-your-own-harness/README.md) |
-| Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../samples/05-choose-environments/README.md), [06](../samples/06-harness/README.md) |
-| Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../samples/01-first-agent/README.md), [06](../samples/06-harness/README.md) |
-| Give an agent an API key without putting it in the sandbox | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
-| Limit which hosts an agent can reach | [Network and secrets](concepts/network-and-secrets.md) | [07](../samples/07-network-and-secrets/README.md) |
-| Keep working while my app is offline | [Work while you're away](concepts/offline-work.md) | [08](../samples/08-offline/README.md) |
-| Run an agent every weekday morning | [Work while you're away](concepts/offline-work.md#run-on-a-schedule) | [09](../samples/09-schedules/README.md) |
+| Run an agent in Azure from a TypeScript script on my laptop | [Local and Azure](concepts/local-and-azure.md) | [10](../walkthroughs/10-azure/README.md) |
+| Build a chat agent that uses my app's data | [The harness](concepts/harness.md) | [02](../walkthroughs/02-your-own-tools/README.md) |
+| Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../walkthroughs/03-sandbox/README.md) |
+| Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../walkthroughs/04-promotion/README.md) |
+| Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../walkthroughs/11-orchestrator/README.md) |
+| Have a coordinator and its sub-agents run commands in a sandbox themselves, or choose between that and workers | [Orchestrator](concepts/orchestrator.md#three-ways-to-get-work-done) | [12](../walkthroughs/12-direct-execution/README.md) |
+| Run my own agent loop with its hands in a sandbox, or run commands in a sandbox from code | [Sandboxes](concepts/sandboxes.md#run-commands-directly) | [13](../walkthroughs/13-your-own-harness/README.md) |
+| Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../walkthroughs/05-choose-environments/README.md), [06](../walkthroughs/06-harness/README.md) |
+| Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../walkthroughs/01-first-agent/README.md), [06](../walkthroughs/06-harness/README.md) |
+| Give an agent an API key without putting it in the sandbox | [Network and secrets](concepts/network-and-secrets.md) | [07](../walkthroughs/07-network-and-secrets/README.md) |
+| Limit which hosts an agent can reach | [Network and secrets](concepts/network-and-secrets.md) | [07](../walkthroughs/07-network-and-secrets/README.md) |
+| Keep working while my app is offline | [Work while you're away](concepts/offline-work.md) | [08](../walkthroughs/08-offline/README.md) |
+| Run an agent every weekday morning | [Work while you're away](concepts/offline-work.md#run-on-a-schedule) | [09](../walkthroughs/09-schedules/README.md) |
 | Serve many signed-in users from one backend | [Identity and access](concepts/identity.md#serving-many-users-from-one-backend) | |
 | Let teammates use our Azure deployment | [Identity and access](concepts/identity.md#let-people-in) | |
 | See every session and sandbox that's running | [Local and Azure](concepts/local-and-azure.md#watch-it-run) | `npx managed-copilot console` |
@@ -97,6 +97,6 @@ Each page answers one question, diagram first.
 | [Security model and threat model](threat-model.md) | Trust boundaries between your machine and the cloud, STRIDE threats, and review findings |
 | [Proposal: direct execution](proposals/direct-execution.md) | Built: the design and evidence behind the direct and mixed patterns, where one brain's tools and sub-agents act inside sandboxes |
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
-| [`managed-copilot` CLI](../packages/cli/README.md) | Every command |
-| [Quickstart](../demos/quickstart/README.md) | Every spec snippet as an automated acceptance check |
+| [`managed-copilot` CLI](../libraries/cli/README.md) | Every command |
+| [Spec snippets](../tests/snippets/README.md) | Every spec snippet as an automated acceptance check |
 | [AI software factory](../demos/software-factory/README.md), [assistant](../demos/assistant/README.md), and [Dispatch](../demos/dispatch/README.md) | Three complete apps built on the platform |

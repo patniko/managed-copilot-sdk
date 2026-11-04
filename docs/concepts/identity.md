@@ -91,7 +91,7 @@ and it must be the session's owner.
 
 > [!TIP]
 > **Try it:** `npx managed-copilot status` shows the deployment, who you're signed in as, and whether background
-> sign-in is on. [Walkthrough 09](../../samples/09-schedules/README.md) runs a schedule as you.
+> sign-in is on. [Walkthrough 09](../../walkthroughs/09-schedules/README.md) runs a schedule as you.
 
 <details>
 <summary><strong>Under the hood</strong></summary>

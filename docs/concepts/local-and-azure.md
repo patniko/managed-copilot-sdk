@@ -59,7 +59,7 @@ Point your code and the CLI at it, and everything works as it did locally:
 ```powershell
 $env:MANAGED_COPILOT_URL = "https://copilot.<environment-domain>"
 npx managed-copilot status    # Deployment  copilot · azure · …
-pnpm sample 03                # the same sample, now in an Azure sandbox
+pnpm walkthrough 03                # the same sample, now in an Azure sandbox
 ```
 
 To let more people in, set `Parameters:copilot-github-users` to the full list (or name organizations with
@@ -96,7 +96,7 @@ The console shows health, every owner's sessions with their placement and harnes
 and a live event feed. Operators see configuration, never conversation content, and secrets are always redacted.
 
 > [!TIP]
-> **Try it:** [walkthrough 10](../../samples/10-azure/README.md) runs the samples against an Azure deployment from
+> **Try it:** [walkthrough 10](../../walkthroughs/10-azure/README.md) runs the samples against an Azure deployment from
 > your laptop and opens one of its sandboxes in Copilot CLI.
 
 <details>

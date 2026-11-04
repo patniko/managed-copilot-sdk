@@ -50,7 +50,7 @@ const APPS = [
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
-      const cli = join(repo, "packages/cli/bin/managed-copilot.mjs");
+      const cli = join(repo, "libraries/cli/bin/managed-copilot.mjs");
       const result = spawnSync(process.execPath, [cli, "console", "--json", "--no-open", "--url", local(7400)], { encoding: "utf8" });
       if (result.status !== 0) throw new Error(`managed-copilot console failed: ${result.stderr.trim()}`);
       return JSON.parse(result.stdout).url;
@@ -104,7 +104,7 @@ function fencedBlocks(markdown) {
  * command from "Run it".
  */
 function readmeRun(folder, { section = "What you'll see", outputs = 1 } = {}) {
-  const text = readFileSync(join(repo, "samples", folder, "README.md"), "utf8");
+  const text = readFileSync(join(repo, "walkthroughs", folder, "README.md"), "utf8");
   const title = text.match(/^# (.+)$/m)?.[1] ?? folder;
   const blocks = fencedBlocks(text);
   const commands = (block) => block.body.split("\n").filter((line) => line.trim() && !line.trim().startsWith("#"));
@@ -120,7 +120,7 @@ function readmeRun(folder, { section = "What you'll see", outputs = 1 } = {}) {
     }
     if (shown >= outputs) break;
   }
-  if (!steps.some((step) => step.command)) steps.unshift({ command: `pnpm sample ${folder.slice(0, 2)}` });
+  if (!steps.some((step) => step.command)) steps.unshift({ command: `pnpm walkthrough ${folder.slice(0, 2)}` });
   return { title, steps };
 }
 

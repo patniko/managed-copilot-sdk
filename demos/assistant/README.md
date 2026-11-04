@@ -77,7 +77,7 @@ $env:ASSISTANT_SEALING_KEY = "<another long random string>"
 # 1. The platform, with the assistant's environment and webhook
 node demos/assistant/scripts/platform-config.mjs          # writes demos/assistant/.data/apphost.json
 $env:MANAGED_COPILOT_CONFIG_FILE = "demos/assistant/.data/apphost.json"
-node platform/gateway/dist/main.js                        # prints its URL, e.g. http://127.0.0.1:7400
+node services/gateway/dist/main.js                        # prints its URL, e.g. http://127.0.0.1:7400
 
 # 2. In another terminal (same two secrets): the assistant. It finds the local platform through its discovery
 #    file; if you set MANAGED_COPILOT_URL, use exactly the URL the gateway prints.
@@ -314,7 +314,7 @@ logs. Google tokens are sealed with AES-256-GCM and bound to their purpose.
 | [`src/server/environments.ts`](src/server/environments.ts) | The kinds of sandbox, from the deployment's worker environments |
 | [`src/server/background.ts`](src/server/background.ts) | Background work status, one-click turn on and off (`/v1/credentials/background`) |
 | [`src/server/tools/`](src/server/tools) | Tools, Google OAuth and REST clients, the demo workspace, free-time search |
-| [`src/web/`](src/web) | The web UI, styled with [`@managed-copilot/github-theme`](../../packages/github-theme) (Primer tokens, components, and Octicons); sandbox cards are in `src/web/src/components/Sandbox.tsx` and `src/web/src/sandboxCards.ts`; `src/web/src/dev/` is the development-only preview |
+| [`src/web/`](src/web) | The web UI, styled with [`@managed-copilot/github-theme`](../../libraries/github-theme) (Primer tokens, components, and Octicons); sandbox cards are in `src/web/src/components/Sandbox.tsx` and `src/web/src/sandboxCards.ts`; `src/web/src/dev/` is the development-only preview |
 | [`scripts/happy-path.ts`](scripts/happy-path.ts) | The automated journey and screenshot capture |
 | [`test/`](test) | Unit tests (`pnpm --filter @managed-copilot/demo-assistant test`) |
 

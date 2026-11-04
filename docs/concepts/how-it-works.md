@@ -89,7 +89,7 @@ The same AppHost runs in both places, and your code doesn't change.
 | Your code finds it with | Nothing: `connect()` reads a local discovery file | `MANAGED_COPILOT_URL` or `connect({ url })` |
 
 > [!TIP]
-> **Try it:** [walkthrough 01](../../samples/01-first-agent/README.md) connects, chats, and opens the same session in
+> **Try it:** [walkthrough 01](../../walkthroughs/01-first-agent/README.md) connects, chats, and opens the same session in
 > Copilot CLI in about a minute.
 
 <details>

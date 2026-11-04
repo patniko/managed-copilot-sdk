@@ -1,5 +1,5 @@
 // Writes a gateway configuration with the assistant's environment and webhook, for running the platform without
-// Aspire: MANAGED_COPILOT_CONFIG_FILE=<this file> node platform/gateway/dist/main.js
+// Aspire: MANAGED_COPILOT_CONFIG_FILE=<this file> node services/gateway/dist/main.js
 // Usage: node demos/assistant/scripts/platform-config.mjs [output path]
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";

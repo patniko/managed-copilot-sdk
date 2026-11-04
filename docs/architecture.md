@@ -85,22 +85,24 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 
 | Component | Path | Runs as | Responsibility |
 | --- | --- | --- | --- |
-| Protocol | `packages/protocol` | library | AppHost config schema, REST DTOs, errors, events, bridge constants, network policy math |
-| SDK | `packages/sdk` | library | `ManagedCopilot` API; stock `CopilotClient` over the bridge; REST features |
-| Aspire integration | `packages/aspire` | library | `addManagedCopilot(builder, name, options)` for TypeScript AppHosts |
-| CLI | `packages/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator`, `deploy`, `access` |
-| Gateway | `platform/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
-| Console | `platform/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
-| GitHub theme | `packages/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
-| Sandbox | `platform/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
-| Egress | `platform/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
-| Demos | `demos/*` | apps | Quickstart snippets, AI software factory, long-running assistant, Dispatch |
-| Samples | `samples` | scripts (`pnpm sample <nn>`) | The walkthroughs' runnable code, documented in `samples/*/README.md` |
+| Protocol | `libraries/protocol` | library | AppHost config schema, REST DTOs, errors, events, bridge constants, network policy math |
+| SDK | `libraries/sdk` | library | `ManagedCopilot` API; stock `CopilotClient` over the bridge; REST features |
+| Aspire integration | `libraries/aspire` | library | `addManagedCopilot(builder, name, options)` for TypeScript AppHosts |
+| CLI | `libraries/cli` | `managed-copilot` bin | `login`, `logout`, `sessions`, `new`, `attach`, `promote`, `artifacts`, `schedules`, `console`, `operator`, `deploy`, `access` |
+| Gateway | `services/gateway` | Node service | Auth, admission, routing, ledger, REST, events, schedules, webhooks, operator API |
+| Console | `services/console` | static files served by the gateway | Operator console at `/console`: health, deployed state, sessions, harness configuration, guarded actions |
+| GitHub theme | `libraries/github-theme` | CSS library (build time) | GitHub look and feel for every web UI: Primer tokens and light/dark themes, Mona Sans, Primer component classes for Tailwind v4 |
+| Sandbox | `services/sandbox` | image + `sandboxd` + relay | Base image with the stock runtime, in-sandbox agent, gateway relay |
+| Egress | `services/egress` | container | Network policy enforcement and vault substitution for sandbox traffic |
+| Demos | `demos/*` | apps | AI software factory, long-running assistant, Dispatch, and the gallery |
+| Walkthroughs | `walkthroughs` | scripts (`pnpm walkthrough <nn>`) | The walkthroughs' runnable code, documented in `walkthroughs/*/README.md` |
+| Spec snippets | `tests/snippets` | scripts (Aspire resource `snippets`) | Every spec snippet as an acceptance check against a running platform |
+| Chat customizations | `customizations/chat` | files | Agents, skills, and instructions for the root AppHost's `chat` environment |
 
 ### Web UI look and feel
 
 Every web UI (the console, the software factory, the assistant, and Dispatch) looks like part of github.com. The shared
-`@managed-copilot/github-theme` package (`packages/github-theme`) is the single source: GitHub's Primer design tokens
+`@managed-copilot/github-theme` package (`libraries/github-theme`) is the single source: GitHub's Primer design tokens
 from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
 Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
 `font-src 'self'` holds), Tailwind v4 names for the tokens with the default palette removed, and Primer component
@@ -126,7 +128,7 @@ gateway and demo images copy it into their build stage and install it with the a
 6. `session.event` notifications fan out to every attached client and observer. Execution-bearing events
    (`external_tool.requested`, `permission.requested`, ...) are **claimed before emission**: exactly one responder
    receives the actionable event; others get progress-only views. Unclaimed actions stay durable for webhook or poll
-   responders. The contract is `platform/gateway/src/modules/durable/contract.ts`.
+   responders. The contract is `services/gateway/src/modules/durable/contract.ts`.
 7. Server-to-client requests for platform concerns (`gitHubToken.getToken`, `llmInference.*`, `sessionFs.*`) are
    answered by the gateway, never forwarded to customer code.
 8. Connection-global RPCs are **virtualized per client connection, deny by default**. The stock `client.stop()` over
@@ -136,7 +138,7 @@ gateway and demo images copy it into their build stage and install it with the a
    rejected by the gateway, scoped to the caller.
 
 **SDK call deadlines.** The SDK's REST calls never wait indefinitely; an ingress can hold a request for minutes while
-the gateway behind it is replaced. The bounds are internal defaults (`timings` in `packages/sdk/src/http.ts`), not
+the gateway behind it is replaced. The bounds are internal defaults (`timings` in `libraries/sdk/src/http.ts`), not
 public API:
 - `ManagedCopilot.connect()` and the event stream's connection get 45 s, and other calls 60 s for their answer. Both
   exceed the gateway's 35 s GitHub verification, so its explicit errors win.
@@ -234,9 +236,9 @@ denies configuration RPCs it does not understand.
 
 ### Isolated placement
 
-As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts in
-`platform/gateway/src/modules/sandbox/contract.ts`, `.../sandbox/providers/types.ts`, and
-`packages/protocol/src/sandbox.ts`):
+As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts in
+`services/gateway/src/modules/sandbox/contract.ts`, `.../sandbox/providers/types.ts`, and
+`libraries/protocol/src/sandbox.ts`):
 
 - **Backends.** The service owns policy and lifecycle (setup, egress registration, the runtime, idle stop,
   reconciliation, artifacts); a `SandboxProvider` (`providers/types.ts`) owns compute, persistent storage,
@@ -265,7 +267,7 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   exhausted. The relay and the egress proxy (`<instance>-egress`, alias `mc-egress`) are connected to each sandbox
   network by the gateway on create and resume; nothing else is. The end-to-end test verifies a peer sandbox's IP is
   unreachable and that `network: false` sandboxes have no Internet route.
-- **sandboxd** (`platform/sandbox/src/sandboxd`) runs as root, never as uid 10001. It serves, behind a per-sandbox
+- **sandboxd** (`services/sandbox/src/sandboxd`) runs as root, never as uid 10001. It serves, behind a per-sandbox
   bearer key: health/status, `POST /v1/start` (NDJSON progress: egress CA trust, one-time setup, runtime start),
   `/v1/runtime` (WebSocket ⇄ the runtime's loopback TCP port 7790), `/v1/tunnel?port=` (loopback TCP for CLI
   attach), `POST /v1/runtime/restart` (replaces the runtime process; health reports a new `runtime.instance` for
@@ -293,7 +295,7 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
   sandboxd state. Installs obey the session's network policy; an offline failure says so. Resume never replays
   setup: an interrupted or failed setup makes the sandbox `state_restore_failed`. System packages are built into a
   derived image layer at environment preparation, never installed per session.
-- **Images.** The gateway builds the base image from `platform/sandbox/image/Dockerfile` (content-hash tag
+- **Images.** The gateway builds the base image from `services/sandbox/image/Dockerfile` (content-hash tag
   `managed-copilot-sandbox:<hash>`, also tagged `ghcr.io/patniko/managed-copilot-sandbox:0.1.0` for customer `FROM`
   lines) with the operator's npm registry and pip index baked in as session defaults. Those URLs reach every
   workload's npm and pip configuration and are recorded as build arguments in the image history, so they must not
@@ -384,9 +386,9 @@ As built (`platform/gateway/src/modules/sandbox`, `platform/sandbox`; contracts 
 ### Commands run directly in sandboxes (as built)
 
 `managed.exec`, `managed.sandboxes.create`, and the sandbox service's `exec` API (spec section 18; the proposal
-[direct execution](proposals/direct-execution.md)). Code: `platform/sandbox/src/sandboxd/execs.ts`,
-`platform/gateway/src/modules/sandbox/execs.ts` (with `store.ts`, `routes.ts`, `service.ts`), core's workspace-only
-session kind in `core/sessions.ts`, `packages/sdk/src/features/exec.ts`, and `packages/cli/src/commands/exec.ts`.
+[direct execution](proposals/direct-execution.md)). Code: `services/sandbox/src/sandboxd/execs.ts`,
+`services/gateway/src/modules/sandbox/execs.ts` (with `store.ts`, `routes.ts`, `service.ts`), core's workspace-only
+session kind in `core/sessions.ts`, `libraries/sdk/src/features/exec.ts`, and `libraries/cli/src/commands/exec.ts`.
 
 - **sandboxd command journal.** `POST /v1/exec` (`SandboxExecRequest { id, command, timeoutMs?, stdin? }`) runs
   `bash -c <command>` through `asWorkload` (uid/gid 10001, `no_new_privs`, empty capability sets) in `/workspace` with
@@ -460,9 +462,9 @@ session kind in `core/sessions.ts`, `packages/sdk/src/features/exec.ts`, and `pa
   `ExecResult`; with `background: true` it resolves an `ExecHandle` (`output` async iterable, `result`, `write`, `end`,
   `stop`, `info`). `managed.exec.list(ref)` lists. `npx managed-copilot exec <session> [--timeout <s>] -- <command>`
   streams output and exits with the command's code (124 timed out, 130 stopped).
-- **Verified.** Unit suites for the journal (`platform/sandbox/test/execs.test.ts`, run on Windows and in a Linux
+- **Verified.** Unit suites for the journal (`services/sandbox/test/execs.test.ts`, run on Windows and in a Linux
   container, where process-group kills are checked), the gateway service (`test/sandbox-exec.test.ts`), core
-  (`test/core.workspace.test.ts`), and the CLI; `platform/sandbox/test/exec.e2e.test.ts` (opt-in, real Docker) runs
+  (`test/core.workspace.test.ts`), and the CLI; `services/sandbox/test/exec.e2e.test.ts` (opt-in, real Docker) runs
   uid, cwd, env, stdin, stop, timeout, idempotency, files, publication, and policy against real sandboxes; walkthrough
   13 ran live against `aspire run` with real models (a stock client whose sub-agents' `bash`/`create` ran through
   `managed.exec`). The Azure provider needs no change: exec uses the same sandboxd endpoint, and long polls stay under
@@ -492,7 +494,7 @@ applies the session's policy and attaches vault credentials. Anything else is re
   once at startup: the source comes from a pending snapshot or core's ledger, and fails closed (no access) when only
   promotion records show the promotion. Only isolated sessions have sandbox egress: `registerSandbox` refuses shared and
   promotable sessions, and a sandbox left behind by a reverted promotion is pushed with no access.
-- **Shared decision logic.** `evaluateDestination` in `packages/protocol/src/network.ts` is the single rule set for the
+- **Shared decision logic.** `evaluateDestination` in `libraries/protocol/src/network.ts` is the single rule set for the
   proxy, `web_fetch`, and the MCP adapter: host patterns (`*.x` matches subdomains, not the apex; IP addresses and
   numeric final labels are not patterns), ports (default
   80/443), canonical hosts (numeric forms such as `2130706433` or `0x7f.1` are rejected before DNS), IP literals
@@ -502,7 +504,7 @@ applies the session's policy and attaches vault credentials. Anything else is re
   apply to every address, public ones included, and to the IPv4 address inside IPv4-mapped and NAT64 forms. Callers
   connect only to the returned addresses, so rebinding cannot redirect them. `.invalid`, `.local`, and `.onion` fail
   without a lookup.
-- **Egress proxy** (`platform/egress`, one bundled file, image `managed-copilot-egress:<content hash>`). The gateway's
+- **Egress proxy** (`services/egress`, one bundled file, image `managed-copilot-egress:<content hash>`). The gateway's
   supervisor runs it as `${MANAGED_COPILOT_INSTANCE:-mc}-egress` (read-only root, no capabilities, CA volume
   `${instance}-egress-data`) on `${instance}-egress-wan` (its default route) and `${instance}-sandboxes`; the sandbox
   provider connects it to each per-sandbox network with alias `mc-egress`. It listens on `0.0.0.0:3128` and calls the
@@ -575,8 +577,8 @@ applies the session's policy and attaches vault credentials. Anything else is re
 
 ### Durable actions and schedules
 
-As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; live acceptance:
-`npx tsx packages/sdk/test/acceptance/durable.live.ts` after `pnpm build`).
+As built in `services/gateway/src/modules/durable` (contract: `contract.ts`; live acceptance:
+`npx tsx libraries/sdk/test/acceptance/durable.live.ts` after `pnpm build`).
 
 - **One ledger for every responder.** Execution-bearing events are recorded in `durable_actions` (keyed by session,
   kind, runtime `requestId`; carrying tool call, provider, placement generation, deadline) and claimed before
@@ -719,8 +721,8 @@ As built in `platform/gateway/src/modules/durable` (contract: `contract.ts`; liv
 ### Promotion (as built)
 
 A promotable session moves once, from the shared runtime into its own sandbox, with the same session ID, history,
-and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, contract in `contract.ts`; core's
-`PlacementCutover` in `modules/core/contracts.ts`; acceptance in `platform/gateway/test/promotion.e2e.test.ts`).
+and genuine `CopilotSession` objects (`services/gateway/src/modules/promotion`, contract in `contract.ts`; core's
+`PlacementCutover` in `modules/core/contracts.ts`; acceptance in `services/gateway/test/promotion.e2e.test.ts`).
 
 - **Stock mechanism (verified on runtime 1.0.103).** A session's whole runtime state is the
   `session-state/<sessionId>/` directory of its runtime's `COPILOT_HOME` (`events.jsonl`, `workspace.yaml`,
@@ -837,8 +839,8 @@ and genuine `CopilotSession` objects (`platform/gateway/src/modules/promotion`, 
 ### Orchestrator (as built)
 
 An orchestrator session (spec section 17) is a coordinator on shared placement; its workers are ordinary sessions of
-declared isolated environments, each in its own sandbox (`platform/gateway/src/modules/orchestrator`; DTOs in
-`packages/protocol/src/workers.ts`; acceptance in `test/orchestrator.test.ts`, `test/orchestrator-recovery.test.ts`,
+declared isolated environments, each in its own sandbox (`services/gateway/src/modules/orchestrator`; DTOs in
+`libraries/protocol/src/workers.ts`; acceptance in `test/orchestrator.test.ts`, `test/orchestrator-recovery.test.ts`,
 and quickstart snippet 14).
 
 - **Configuration.** `type: "orchestrator"` needs `workers` (isolated environments, the first is the default) and
@@ -1113,7 +1115,7 @@ and quickstart snippet 14).
     direct (two `task` sub-agents' `bash` calls in one hands sandbox, each recorded with its `agentId`), and mixed;
     quickstart snippet 15 created, edited (compare-and-replace), and `cat`-ed a file and saw it published; a
     `subagents: "own"` run gave two sub-agents their own sandboxes, released both on `subagent.completed`, and copied
-    their outputs under `outputs/<agentId>/`. `platform/sandbox/test/exec.e2e.test.ts` checks `ifMatch` against real
+    their outputs under `outputs/<agentId>/`. `services/sandbox/test/exec.e2e.test.ts` checks `ifMatch` against real
     sandboxes (a stale write and one of two concurrent edits fail with `conflict`). Copilot CLI 1.0.92 attached to a
     direct coordinator shows an overridden `bash` call as the stock shell line (`$ Shell <command>`) and asks in a
     custom-tool dialog titled `bash` with the JSON arguments (**1. Approve once** / **2. Deny**); its footer reads
@@ -1122,9 +1124,9 @@ and quickstart snippet 14).
 
 ### Operator control plane (spec section 16)
 
-The operator module (`platform/gateway/src/modules/operator`, registered last) serves the operator API under
-`/v1/operator/*` and the console (`platform/console`, a React SPA built with Vite) at `/console`. The contract is
-`packages/protocol/src/operator.ts` (`OPERATOR_ROUTES`, DTOs; the browser-safe `@managed-copilot/protocol/operator`
+The operator module (`services/gateway/src/modules/operator`, registered last) serves the operator API under
+`/v1/operator/*` and the console (`services/console`, a React SPA built with Vite) at `/console`. The contract is
+`libraries/protocol/src/operator.ts` (`OPERATOR_ROUTES`, DTOs; the browser-safe `@managed-copilot/protocol/operator`
 export). The CLI's `console` and `operator` commands use the same API.
 
 - **Who.** `OperatorAccess` reads the AppHost's `operators` (`githubUsers`, `githubOrgs`) and checks them with
@@ -1196,12 +1198,12 @@ export). The CLI's `console` and `operator` commands use the same API.
   `metrics.ts` counts per-minute traffic for the last hour (HTTP requests and errors outside the operator API, RPC
   requests and notifications, connections, events, sessions created, inference requests).
 - **Static files.** `/console` redirects to `/console/`; files come from `MANAGED_COPILOT_CONSOLE_DIR` or
-  `platform/console/dist` beside the gateway (copied into the gateway image). Only `assets/` and root-level files
+  `services/console/dist` beside the gateway (copied into the gateway image). Only `assets/` and root-level files
   (`index.html`) are files; every other path is a console route answered with `index.html` (deep links work, IDs with
   dots included). Responses carry a
   strict CSP (`default-src 'self'`, no inline scripts, `frame-ancestors 'none'`), `nosniff`, `no-referrer`, and
   immutable caching for hashed assets. An unbuilt console serves a page that says to run `pnpm build`.
-- **Console app** (`platform/console`, details in its README). React SPA on the History API under `/console/`,
+- **Console app** (`services/console`, details in its README). React SPA on the History API under `/console/`,
   filters and tabs in the query string. Sign-in strips `#ticket=` from the address bar before rendering and redeems
   it once (a retry checks `me` instead of posting it again). Every request is same-origin with the console header;
   a 401 shows the signed-out screen (`details.reason`: `signed_out`, `session_ended`, `credential_rejected`) and a 403
@@ -1213,8 +1215,8 @@ export). The CLI's `console` and `operator` commands use the same API.
 
 ## Gateway extension points
 
-Modules register in `platform/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
-and `app.service(key)`. Core's consumer contracts live in `platform/gateway/src/modules/core/contracts.ts`; durable's
+Modules register in `services/gateway/src/modules/index.ts` and share capabilities through `app.provide(key, value)`
+and `app.service(key)`. Core's consumer contracts live in `services/gateway/src/modules/core/contracts.ts`; durable's
 in `modules/durable/contract.ts`; sandbox's in `modules/sandbox/contract.ts`. Providers implement the shapes below
 structurally (they may add members).
 
@@ -1512,7 +1514,7 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   `.waitFor(copilot.gateway)`. Demo folders export plain data descriptors (no Aspire imports); the root AppHost adds
   them as Node apps on fixed ports with `withPnpm({ install: false })` (the workspace is installed once at the root).
 - `aspire run` from the repository root starts: the gateway (7400), `dispatch` (7470), `software-factory` (7480),
-  `assistant` (7490), and `quickstart` (explicit start; runs every spec snippet). The quickstart webhook receives on
+  `assistant` (7490), and `snippets` (explicit start; runs every spec snippet). The snippets webhook receives on
   7485. `MANAGED_COPILOT_PORT_OFFSET` shifts all five ports for a second copy, which also sets `discovery: false`
   (`MANAGED_COPILOT_WRITE_DISCOVERY=0`) so it never takes over zero-config discovery from the first.
 
@@ -1581,7 +1583,7 @@ sequenceDiagram
     and on shared placement host slash commands other than `/compact` (`/chronicle` reads every session on the runtime).
 - **What the CLI sees.** Runtime frames go through core's `pathScrubber` (with every escape in a `file:` URI decoded
   first, `%3A` and `%23` included, a URI's server read as a UNC path, and the URI re-encoded), so working directories,
-  plan paths, and context read `/workspace`, `/platform/...`, or `/opt/managed-copilot/customizations/...`; state nested
+  plan paths, and context read `/workspace`, `/services/...`, or `/opt/managed-copilot/customizations/...`; state nested
   deeper than 128 levels is replaced rather than passed on unscrubbed. Every result loses the host's `terminalCommandPrefix` and
   `defaultDirectory`, shared sessions' completions lose host commands they can't run, the host's requests to the
   client (its resources) are answered with an error, and OTLP telemetry is not forwarded. A message the relay can't
@@ -1661,9 +1663,9 @@ sequenceDiagram
   environment sets `github.publish: true` is refused at gateway startup with `transport_unsupported`, naming the
   environment (never silently ignored).
 
-### CLI and quickstart
+### CLI and spec snippets
 
-- `npx managed-copilot` (`packages/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
+- `npx managed-copilot` (`libraries/cli`): `status`, `login`/`logout` (`ROUTES.backgroundCredential`), `sessions`,
   `new`, `attach`, `promote`, `workers`, `artifacts`, `schedules`, `console` (mints a console ticket and opens the
   sign-in link; `--no-open` prints it), and `operator [overview|infra|environments|sessions|sandboxes|schedules|webhooks]`. It uses
   the SDK and `@managed-copilot/sdk/internal` (first-party only:
@@ -1683,13 +1685,13 @@ sequenceDiagram
   nothing (`{ kind: "no-result" }`, so the inventory records `requestPermission` and prompts reach the `cli`
   responder), stops its SDK client (the session is detached, not deleted), then launches Copilot CLI on it. The model
   defaults to the environment's first allowed model, as admission does for any create.
-- `demos/quickstart` reports each snippet as pass, fail, **not available yet** (a capability missing from
+- `tests/snippets` reports each snippet as pass, fail, **not available yet** (a capability missing from
   `/v1/info`, or `capability_unavailable`), or skipped (a local prerequisite such as background sign-in).
 
 ## Azure deployment (`aspire deploy`)
 
-As built (`packages/aspire/src/publish`, `deploy/azure`, gateway `modules/sandbox/providers/azure`); operator guide and
-capability matrix in [deployment.md](deployment.md). A sandbox-service probe (`deploy/azure/qualify`) and the root
+As built (`libraries/aspire/src/publish`, `deployments/azure`, gateway `modules/sandbox/providers/azure`); operator guide and
+capability matrix in [deployment.md](deployment.md). A sandbox-service probe (`deployments/azure/qualify`) and the root
 AppHost deployment ran in westus2 (2026-10-24). Eleven spec snippets, both deployed demos, ten NFS checks, healthy
 cross-host lease exclusion, revision canaries, scheduled recovery, and persistent proxy-CA checks passed. Explicit
 isolated compute replacement also retained workspace/HOME markers, the declared Python package, and native
@@ -1705,11 +1707,11 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 
 - **Publish path.** In publish mode `addManagedCopilot` calls `publishManagedCopilot`: a Container Apps environment in
   a new VNet (`platform` and `sandboxes` /23 subnets, `egress` /24) with an Azure Files NFS 4.1 share, and the gateway as a
-  Dockerfile container (`platform/gateway/Dockerfile`, stage `azure`, plus a generated stage that copies the AppHost's
+  Dockerfile container (`services/gateway/Dockerfile`, stage `azure`, plus a generated stage that copies the AppHost's
   customization folders to `/opt/managed-copilot/apphost`) with external HTTPS ingress. Apps that use the platform
   are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist, by default the deployer's
   public address). The C# integration in
-  `deploy/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
+  `deployments/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
   revision mode, IP rules). Publishing refuses an open gateway: access rules come from the AppHost or from
   `Parameters:<name>-github-users`/`-github-orgs`. Loopback webhooks are rewritten to the published app on that port, by
   its HTTPS address in the environment (`https://<app>.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/...`, filled in by the
@@ -1720,7 +1722,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   already-authorized background credential, without changing its account or re-enabling revoked consent.
 - **Durable state.** The gateway's data directory is `/data` on the NFS share (SQLite needs POSIX locks; SMB failed in
   the earlier Copilot SDK Aspire deployment). One replica, Single revision mode, and a lease supervisor as the
-  entrypoint (`deploy/azure/src/lease`): an exclusive SQLite lock on `/data/.lease/gateway.lease` held for the
+  entrypoint (`deployments/azure/src/lease`): an exclusive SQLite lock on `/data/.lease/gateway.lease` held for the
   process's life, a fencing generation with a 5 s heartbeat (losing it kills the gateway), 503 while waiting, and
   handover to strictly newer deployments (`MANAGED_COPILOT_LEASE_STAMP`). The gateway runs in its own process group;
   the lease is released only after every process in it (the shared runtime included) has exited. The demo images use
@@ -1732,11 +1734,11 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   a root disk plus three data disks per sandbox within the service's 20 GiB-per-vCPU budget, disks that outlive
   compute (stop deletes the microVM; resume recreates it over the disks), and sandboxd reached through the sandbox's
   port URL with its per-sandbox key. `aspire deploy` builds and pushes content-tagged sandbox images (base, environment
-  images, a `packages.system` layer, and the `deploy/azure/sandbox` layer that runs the entrypoint as root and seeds
+  images, a `packages.system` layer, and the `deployments/azure/sandbox` layer that runs the entrypoint as root and seeds
   empty disks) and creates the group and its VNet connection; the gateway's identity has SandboxGroup Data Owner on
   the group and AcrPull on the registry. Disk-image imports cannot use a managed identity, so the gateway exchanges its
   Entra token for an ACR refresh token (`registry.ts`) and passes it as `registryCredentials`.
-- **Egress (isolated).** `platform/egress` in external mode runs as the `egress` app in an internal Container Apps
+- **Egress (isolated).** `services/egress` in external mode runs as the `egress` app in an internal Container Apps
   environment on the `egress` subnet (TCP 3128 on its internal load balancer, one replica,
   `EGRESS_PROTECTED_CIDRS` = the VNet). The gateway runs `MANAGED_COPILOT_EGRESS=external` with a generated
   `MANAGED_COPILOT_EGRESS_KEY` and gives each sandbox a platform egress policy that denies HTTP(S) and allows only TCP
@@ -1763,7 +1765,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_RUNTIME_PATH` / `_URL` / `_TOKEN` / `_LOG_LEVEL` | SDK headless runtime | Override the binary, or attach to an external runtime |
 | `MANAGED_COPILOT_ATTACH_TICKET_TTL_MS` / `_IDLE_MS` / `_MAX_LIFETIME_MS` | 60 s / 5 min / 8 h | Attach ticket lifetime, idle AHP host disposal, maximum attachment length |
 | `MANAGED_COPILOT_ATTACH_LEDGER_WAIT_MS` / `_RECONNECT_GRACE_MS` | 5 s / 60 s | How long a CLI answer waits for the ledger to record its request; how long a CLI's credential is kept after a move for it to reconnect |
-| Demo ports | 7470, 7480, 7490, 7485 | Dispatch, software factory, assistant (fixed for its Google OAuth redirect), quickstart webhook receiver |
+| Demo ports | 7470, 7480, 7490, 7485 | Dispatch, software factory, assistant (fixed for its Google OAuth redirect), spec snippets webhook receiver |
 | Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
@@ -1773,12 +1775,12 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64` | none | Extra CA certificates (base64 PEM) the proxy trusts for vault hosts |
 | `MANAGED_COPILOT_VAULT_KEY` | `<data>/network/vault.key` | 32-byte base64 key that seals vault values; wraps an existing key file like `MANAGED_COPILOT_DURABLE_KEY`. `aspire deploy` generates both as secret parameters |
 | `MANAGED_COPILOT_MCP_ADAPTER_URL` | `http://127.0.0.1:<port>` | Base URL the shared runtime uses for the MCP adapter |
-| `MANAGED_COPILOT_CONSOLE_DIR` | `platform/console/dist` beside the gateway | Built operator console the gateway serves at `/console` |
+| `MANAGED_COPILOT_CONSOLE_DIR` | `services/console/dist` beside the gateway | Built operator console the gateway serves at `/console` |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix and `managed-copilot.instance` label for Docker networks, containers, and volumes (use a unique value per parallel gateway) |
 | `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs; must not contain credentials, a query, a fragment, or spaces, backslashes, or control characters (refused) |
 | `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images (empty: pip's default index); same restrictions as the npm registry |
-| `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `platform/sandbox` | Use a prebuilt base image instead (must carry the base label) |
+| `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `services/sandbox` | Use a prebuilt base image instead (must carry the base label) |
 | `MANAGED_COPILOT_SANDBOX_PROVIDER` | `docker` | Sandbox backend: `docker` (local) or `azure` |
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
 | `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
@@ -1791,18 +1793,18 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 
 | Workstream | Owns | Delivers |
 | --- | --- | --- |
-| **core** | `platform/gateway/src/{app,http,server,config,main,log,db}.ts`, `modules/core/**`; SDK `bridge.ts`, `connection.ts`, `features/{client,sessions,events}.ts`, `managed.ts` | G1: bridge, router, shared runtime, admission, ledger, auth, `/v1/info`, `/v1/me`, sessions, SSE events, platform-tool registry |
-| **sandbox** | `platform/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
-| **network** | `platform/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
+| **core** | `services/gateway/src/{app,http,server,config,main,log,db}.ts`, `modules/core/**`; SDK `bridge.ts`, `connection.ts`, `features/{client,sessions,events}.ts`, `managed.ts` | G1: bridge, router, shared runtime, admission, ledger, auth, `/v1/info`, `/v1/me`, sessions, SSE events, platform-tool registry |
+| **sandbox** | `services/sandbox/**`, gateway `modules/sandbox/**`, SDK `features/{files,artifacts}.ts` | Isolated placement: image, `sandboxd`, relay, Docker provider, setup, files, artifacts, idle/resume/delete |
+| **network** | `services/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | G2: durable actions, webhooks, polling, schedules, agent scheduling, background login |
-| **attach** (was devloop) | `packages/aspire/**` (except `src/publish/**`, azure), `packages/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `copilot/chat/**`, `demos/quickstart/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
+| **attach** (was devloop) | `libraries/aspire/**` (except `src/publish/**`, azure), `libraries/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `customizations/chat/**`, `tests/snippets/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
 | **factory** | `demos/software-factory/**` | AI software factory demo |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
 | **gallery** | `demos/gallery/**`, the root `gallery` script | `pnpm gallery`: one page with the six patterns (each tied to a root AppHost environment its tests check), and every demo and walkthrough linked locally and in Azure, with live status and screenshots. `aspire deploy` also publishes it (`GALLERY_HOSTED=1`: Azure links only, no GitHub token, console opened from each operator's terminal) |
-| **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `packages/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
-| **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `packages/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
-| **azure** | `deploy/azure/**`, `packages/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `platform/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
-| **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `platform/console/**`, `packages/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
-| **design** | `packages/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |
-| **guides** | `docs/README.md`, `docs/concepts/**`, `samples/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |
+| **promotion** | gateway `modules/promotion/**`, SDK `features/promote.ts`, `libraries/protocol/src/promotion.ts` | G5: one-way promotion, `request_sandbox`, `session.promoted`, attached-session continuity with core and devloop |
+| **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
+| **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
+| **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `services/console/**`, `libraries/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
+| **design** | `libraries/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |
+| **guides** | `docs/README.md`, `docs/concepts/**`, `walkthroughs/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |

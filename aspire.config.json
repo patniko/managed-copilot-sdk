@@ -9,6 +9,6 @@
   "packages": {
     "Aspire.Hosting.JavaScript": "13.6.0",
     "Aspire.Hosting.Azure.AppContainers": "13.6.0",
-    "ManagedCopilot.Hosting.Azure": "./deploy/azure/hosting/ManagedCopilot.Hosting.Azure.csproj"
+    "ManagedCopilot.Hosting.Azure": "./deployments/azure/hosting/ManagedCopilot.Hosting.Azure.csproj"
   }
 }
