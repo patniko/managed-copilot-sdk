@@ -1,4 +1,4 @@
-// Owner: core workstream. GitHub authentication and access rules, the /v1/connect JSON-RPC router, the shared
+// GitHub authentication and access rules, the /v1/connect JSON-RPC router, the shared
 // runtime, admission, the session ledger, /v1/info, /v1/me, /v1/sessions, and /v1/events.
 import { join } from "node:path";
 import { ROUTES } from "@managed-copilot/protocol";

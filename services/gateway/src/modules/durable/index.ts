@@ -1,4 +1,4 @@
-// Owner: durable workstream. Durable actions, webhooks, polling, schedules, agent scheduling tools, and
+// Durable actions, webhooks, polling, schedules, agent scheduling tools, and
 // background credentials (spec sections 2, 12, 13; gate G2). The contract with core is ./contract.ts.
 import type { PlatformEvent } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";

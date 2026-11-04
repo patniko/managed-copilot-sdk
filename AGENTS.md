@@ -1,62 +1,52 @@
-# Repository guidance
+# Guidance for coding agents
 
-Managed Copilot runs **stock** Copilot SDK clients and sessions in environments the customer deploys: locally under
-Aspire or in their Azure subscription.
+Managed Copilot runs **stock** GitHub Copilot SDK clients and sessions in environments you deploy: locally under
+Aspire, or in your Azure subscription. The [README](README.md) has the quickstart and repository layout.
 
-- **The plan:** [`docs/spec/developer-experience.md`](docs/spec/developer-experience.md) is the customer contract
-  (snippets, decisions, platform contracts, delivery gates). Implement what it specifies; do not invent new API.
-- **The build:** [`docs/architecture.md`](docs/architecture.md) is the as-built topology, protocol facts, workstream
-  ownership, and integration interfaces. Keep it current when you change behavior.
+- **The contract:** [`docs/spec/developer-experience.md`](docs/spec/developer-experience.md) is the customer-facing
+  contract (snippets, decisions, platform contracts). Implement what it specifies; do not invent new API.
+- **The implementation:** [`docs/architecture.md`](docs/architecture.md) records the topology, protocol facts, and
+  where each area lives in the code. Keep it current when you change behavior.
 
-## Hard rules
+## Rules
 
-1. **Stock SDK and runtime only.** Use the published `@github/copilot-sdk` (1.0.26) and `@github/copilot` runtime
-   (1.0.103) from npm. No patched, forked, hybrid, or locally built runtimes; no private SDK internals
+1. **Stock SDK and runtime only.** Use the published `@github/copilot-sdk` and `@github/copilot` runtime from npm, at
+   the versions pinned in the workspace. No patched, forked, or locally built runtimes, and no private SDK internals
    (`_internal*`, handler maps, monkey patching). If a behavior needs an upstream change, fail with
-   `capability_unavailable`, document the gap, and tell the coordinator.
+   `capability_unavailable` and document the gap.
 2. **Genuine SDK objects.** Customer code gets real `CopilotClient` / `CopilotSession` objects, standard session
    events, and standard `defineTool` tools.
-3. **Real end to end.** Demos and acceptance samples run against the real platform with real models. Fakes are fine
-   inside unit tests; never present a mock-only flow as working. A clearly labeled demo data provider is acceptable
-   for third-party services only when a real provider is also implemented.
+3. **Real end to end.** Demos and acceptance samples run against the real platform with real models. Fakes belong in
+   unit tests only. A clearly labeled demo data provider is acceptable for a third-party service only when a real
+   provider is also implemented.
 4. **No secrets in logs, commits, command lines, or sandboxes.** GitHub tokens never enter sandbox environment
    variables or files. Use the gateway logger's `redact`.
 5. **Explicit failures.** Use the stable error codes in `@managed-copilot/protocol`; never fall back silently to a
    weaker mode, another account, or another billing route.
 
-## Environment facts
+## Environment
 
-- Windows 11 on **ARM64**; Node 24 (arm64); pnpm 10; Docker Desktop with **linux/arm64** containers; Aspire CLI 13.6;
-  .NET 10; Azure CLI signed in.
-- npm traffic must go through the configured registry proxy (`npm config get registry`). Never hardcode
-  `registry.npmjs.org`; pass the host's registry into Docker builds (for example `--build-arg NPM_REGISTRY=...`).
-- Paths in code must work on Windows hosts and Linux containers.
+- Node 24+, pnpm 10, Docker (Desktop or Engine), Aspire CLI 13.6. Code must work on Windows, macOS, and Linux hosts,
+  on x64 and arm64, and in Linux containers.
+- Respect the configured npm registry (`npm config get registry`). Never hardcode `registry.npmjs.org`; Docker builds
+  take the host's registry as `--build-arg NPM_REGISTRY=...`.
+- Keep `pnpm build` and `pnpm test` green on every commit.
 
 ## Commands
 
 ```powershell
 pnpm install
-pnpm build          # every workspace package, in dependency order
-pnpm test           # every package's vitest suite
-pnpm --filter @managed-copilot/gateway dev   # gateway alone, dev default environments
+pnpm build                                  # every workspace package, in dependency order
+pnpm test                                   # every package's vitest suite
+pnpm --filter @managed-copilot/gateway test # one package
+aspire run                                  # the platform and demos locally
 ```
 
 ## Conventions
 
-- TypeScript ESM, Node 24, `strict`. Tests live in `<package>/test` and use vitest.
-- Shared contracts live in `libraries/protocol`. Changes there must be additive; coordinate breaking changes with the
-  coordinator before making them.
-- Gateway modules own their SQLite tables (prefix with the module name) and register migrations with `migrate()`.
-  Modules expose capabilities to each other through `app.provide(...)` / `app.service(...)`.
-- Edit only the paths your workstream owns (see `docs/architecture.md`). If you need something from another
-  workstream, ask for it rather than editing its files.
-- User-facing experiences (UI, CLI output, error messages, docs) must be polished: clear copy, loading and error
-  states, no raw stack traces.
-
-## Workflow
-
-- Commit early and often with descriptive messages. Keep `pnpm build` and `pnpm test` green on every commit.
-- Merge the latest `main` into your branch before handing work back, and resolve conflicts on your branch.
-- Before handing off a milestone, have the work reviewed by **both** the Argon (`gemini-4-argon`) and Astra
-  (`gpt-6-astra`) models, for example with code-review or rubber-duck sub-agents using those models, and address
-  their findings.
+- TypeScript ESM, `strict`. Tests live in `<package>/test` and use vitest.
+- Shared contracts live in `libraries/protocol`; keep changes there additive.
+- Gateway modules own their SQLite tables (prefixed with the module name), register migrations with `migrate()`, and
+  expose capabilities to each other through `app.provide(...)` / `app.service(...)`.
+- User-facing text (UI, CLI output, error messages, docs) should be clear and complete: loading and error states, no
+  raw stack traces.

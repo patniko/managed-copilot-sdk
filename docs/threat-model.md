@@ -1,7 +1,7 @@
 # Security model and threat model
 
 How Managed Copilot keeps your machine, your GitHub identity, your secrets, and other people's sessions safe when a
-local app or Copilot CLI drives agents running in the cloud. This page is the as-built picture: each claim links to
+local app or Copilot CLI drives agents running in the cloud. This page describes the current implementation: each claim links to
 the [architecture](architecture.md) section or code that implements it. Review findings and open risks are at the
 end.
 

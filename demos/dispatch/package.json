@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/demo-dispatch",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Dispatch: talk to an orchestrator agent that creates a sandbox for each part of the job, or sends work to the ones it has, and watch it happen.",
   "type": "module",

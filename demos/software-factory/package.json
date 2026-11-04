@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/demo-software-factory",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "AI software factory demo: plans work orders, builds tasks in parallel sandboxes, reviews with a second model, and releases a tested bundle, all on Managed Copilot.",
   "type": "module",

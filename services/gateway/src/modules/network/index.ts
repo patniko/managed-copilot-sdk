@@ -1,4 +1,4 @@
-// Owner: network workstream. Effective network policy, vaults (AppHost and per-user), the egress proxy's internal
+// Effective network policy, vaults (AppHost and per-user), the egress proxy's internal
 // API and container, the shared-placement `web_fetch` platform tool, and the shared-placement MCP adapter.
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";

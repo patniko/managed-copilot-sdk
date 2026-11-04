@@ -7,21 +7,10 @@ reads `MANAGED_COPILOT_URL`, which the deployment sets to the gateway's public U
 
 AWS is planned as a second target, not built: see the plan in [deployments/aws](../deployments/aws/README.md).
 
-> **Status.** The root AppHost deploys and both demo happy paths pass in westus2 (2026-10-24), using stock
-> SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
-> with the deployed assistant's webhook and reminder journeys checked separately. Orchestrator environments (snippet
-> 14 and every coordinator tool) passed on 2026-10-27, as did two apps built on them: Dispatch and the factory's
-> agent-led mode. The assistant's sandboxes, also built on them, have not been checked on Azure yet. NFS locking,
-> revision recovery, and persistent proxy trust have been exercised. This is a single-writer deployment, not a
-> partition-tolerant HA claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for
-> example isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`,
-> and requests for them fail with `capability_unavailable` naming what is missing.
->
-> **Recovery contract.** A gateway-only rollover recovered both services in 26.3 seconds without restarting the
-> factory. A native turn cut off by runtime replacement is ended visibly as failed/idle, not left falsely running.
-> Retained files and history support a new, workspace-checking continuation or checkpoint Retry; they do not resume
-> a killed process. The preserved Azure work order completed through explicit Retry with its original builder
-> sessions and a 44-test release. Unknown external effects still require reconciliation, not blind replay.
+> **Status.** The root AppHost, all three demos, and the spec snippets that don't need a local webhook receiver run on
+> Azure with real models. This is a single-writer deployment, not a highly available one. Capabilities whose backend
+> isn't ready aren't advertised and fail with `capability_unavailable`. Details, dates, and remaining limits are in
+> [Live qualification](#live-qualification) and the [capability matrix](#capability-matrix).
 
 ## What gets deployed
 
@@ -357,13 +346,29 @@ Alternatives when an address allowlist does not fit:
 | Isolated sessions with network allowlists or vault credentials | Yes (egress proxy) | Enabled network returns 200; vault substitution and response redaction pass; CA fingerprint is unchanged across proxy revisions |
 | Files and artifacts in sandboxes | Yes | File injection, upload/read, report output and real PNG artifact pass |
 | Promotion (shared → isolated) | Yes | Explicit promotion and continuation pass; broader interactive CLI continuity is a separate gate |
-| Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every coordinator tool live) | Yes: snippet 14, walkthrough 11, and every coordinator tool passed (2026-10-27). Workers run in Container Apps Sandboxes, and their files move through the sandbox file API, not a shared disk. A gateway restart during worker runs has been tested only locally |
+| Orchestrator environments (coordinator with workers in their own sandboxes) | Yes (Docker; snippet 14 and every orchestrator tool live) | Yes: snippet 14, walkthrough 11, and every orchestrator tool passed (2026-10-27). Workers run in Container Apps Sandboxes, and their files move through the sandbox file API, not a shared disk. A gateway restart during worker runs has been tested only locally |
 | Direct and mixed orchestrators (the coordinator's own hands sandbox) | Yes (Docker; snippet 15, walkthrough 12, and `subagents: "own"` live) | Not yet run; no provider change: hands sandboxes are workspace-only sandboxes reached through the exec and file APIs |
 | CLI attachment | Yes (AHP relay) | Non-interactive AHP probe passes for shared and isolated sessions; this does not claim a complete interactive terminal qualification |
 | Warm sandboxes (`warm > 0`) | No | No |
 | Demos (software factory, assistant, Dispatch) | Yes | Happy paths, factory connection recovery and explicit checkpoint Retry after interrupted execution pass; the factory's agent-led mode and Dispatch pass with their workers in Container Apps Sandboxes; assistant uses labelled demo Google data, and its sandboxes (added 2026-10-27) are verified locally only |
 
 ## Live qualification
+
+> **Summary.** The root AppHost deploys and both demo happy paths pass in westus2 (2026-10-24), using stock
+> SDK 1.0.26 and runtime 1.0.103 with real models. Eleven spec snippets pass; two local-webhook snippets are skipped,
+> with the deployed assistant's webhook and reminder journeys checked separately. Orchestrator environments (snippet
+> 14 and every orchestrator tool) passed on 2026-10-27, as did two apps built on them: Dispatch and the factory's
+> agent-led mode. The assistant's sandboxes, also built on them, have not been checked on Azure yet. NFS locking,
+> revision recovery, and persistent proxy trust have been exercised. This is a single-writer deployment, not a
+> partition-tolerant HA claim; the evidence and remaining limits are below. Capabilities whose backend is not ready (for
+> example isolated sessions before the sandbox group and its role assignment work) are not advertised in `/v1/info`,
+> and requests for them fail with `capability_unavailable` naming what is missing.
+>
+> **Recovery contract.** A gateway-only rollover recovered both services in 26.3 seconds without restarting the
+> factory. A native turn cut off by runtime replacement is ended visibly as failed/idle, not left falsely running.
+> Retained files and history support a new, workspace-checking continuation or checkpoint Retry; they do not resume
+> a killed process. The preserved Azure work order completed through explicit Retry with its original builder
+> sessions and a 44-test release. Unknown external effects still require reconciliation, not blind replay.
 
 The checks below used the deployed platform and real model calls, not a fake backend (westus2, 2026-10-24):
 
@@ -382,7 +387,7 @@ The checks below used the deployed platform and real model calls, not a fake bac
 | Software factory | Initial happy path: **9 files, 37/37 tests**, parallel builds and a reviewer-requested fix/review loop (319 seconds). A checkpoint retry produced a 37-test release, independently checked offline |
 | Interrupted factory work | The previously stuck native turns became **failed/idle** with their original turn IDs. Explicit checkpoint Retry retained both builder session IDs, verified the current workspace, passed review/fix rounds and produced a downloadable **9-file, 44/44-test** release. No killed-process continuation or unknown-effect replay is claimed |
 | Assistant | Browser triage, approval before a demo calendar action, background-work consent, one-minute reminder, and tab-closed webhook handling passed; light/dark/mobile views checked |
-| Orchestrator (2026-10-27) | Snippet 14 (34 s) and walkthrough 11 (50 s) passed, each worker in its own sandbox. A run of every coordinator tool passed 10/10 checks: a builder's script read with `read_worker_file`, copied to a second worker's sandbox with `copy_worker_files` and run there after `message_worker`, worker prompts answered as `platform:orchestrator`, `stop_worker` deleting the builder's session, and deleting the coordinator deleting the other |
+| Orchestrator (2026-10-27) | Snippet 14 (34 s) and walkthrough 11 (50 s) passed, each worker in its own sandbox. A run of every orchestrator tool passed 10/10 checks: a builder's script read with `read_worker_file`, copied to a second worker's sandbox with `copy_worker_files` and run there after `message_worker`, worker prompts answered as `platform:orchestrator`, `stop_worker` deleting the builder's session, and deleting the coordinator deleting the other |
 | Software factory, agent-led (2026-10-27) | Run from this machine against the deployed gateway (the apps' allowlist excluded this machine's tunnel). The coordinator created two builders and later a release worker, each in its own Container Apps sandbox. It reused one builder for two fix rounds until the second-model review approved it, then copied both builders' files into the release sandbox. Completed in 541 s: **9 files, 47/47 tests**, which also passed in an offline, read-only container. The coordinator stopped all three workers afterwards |
 | Dispatch (2026-10-27) | The deployed app started and connected to the gateway. This machine's network tunnel reaches the apps from an address outside their allowlist, so the app was driven through its own API from inside its container (`az containerapp exec`). Two approved requests each created a worker in its own sandbox: Python (`dispatch-python`) and web research (`dispatch-web`, which read en.wikipedia.org through its allowlist). A follow-up typed in Copilot CLI, attached to the same coordinator, reused the Python worker without a new approval; Dispatch labeled it "from Copilot CLI" and showed the reuse. Deleting the conversation removed the coordinator and both workers |
 

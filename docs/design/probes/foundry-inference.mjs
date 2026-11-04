@@ -11,7 +11,7 @@
 //
 //   $env:FOUNDRY_ENDPOINT = "https://<account>.openai.azure.com/openai/v1"; $env:FOUNDRY_MODEL = "<deployment>"
 //   $env:AZURE_SUBSCRIPTION = "<subscription id>"   # optional: the subscription whose tenant issues the token
-//   node docs/proposals/probes/foundry-inference.mjs
+//   node docs/design/probes/foundry-inference.mjs
 import { execFile } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";

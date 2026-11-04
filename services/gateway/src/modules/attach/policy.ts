@@ -497,8 +497,9 @@ export function uriAwareScrubber(scrub: (value: unknown) => unknown): (value: un
   };
   const scrubText = (text: string): string => {
     const out = scrub(/file:/i.test(text) ? text.replace(FILE_URI, scrubUri) : text) as string;
-    // A drive path rewritten inside a URI that wasn't percent-encoded (a raw space) leaves `file:///` + `/workspace`.
-    return out.includes("file:////") ? out.replace(/file:\/\/\/\/(?=workspace|platform|opt\/managed-copilot)/gi, "file:///") : out;
+    // A path rewritten inside a URI that wasn't percent-encoded (a raw space) loses or gains slashes: a drive path leaves
+    // `file:///` + `/workspace`, and a POSIX path's leading separators take the URI's own, leaving `file:/workspace`.
+    return /file:\//i.test(out) ? out.replace(/file:(?:\/(?!\/)|\/{4,})(?=workspace|platform|opt\/managed-copilot)/gi, "file:///") : out;
   };
   const walk = (value: unknown, depth: number): unknown => {
     if (typeof value === "string") return scrubText(value);

@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/github-theme",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "GitHub look and feel for Managed Copilot web apps: Primer design tokens, light and dark themes, Mona Sans, and Primer-compatible component classes for Tailwind CSS v4.",
   "type": "module",

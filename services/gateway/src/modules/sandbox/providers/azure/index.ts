@@ -1,4 +1,4 @@
-// Owner: azure workstream. Isolated placement on Azure Container Apps Sandboxes (see provider.ts).
+// Isolated placement on Azure Container Apps Sandboxes (see provider.ts).
 // Selected with MANAGED_COPILOT_SANDBOX_PROVIDER=azure; `aspire deploy` sets the MANAGED_COPILOT_AZURE_* settings.
 import type { SandboxProvider, SandboxProviderDeps } from "../types.js";
 import { SandboxApi } from "./api.js";

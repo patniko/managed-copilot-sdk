@@ -528,7 +528,7 @@ export class SessionManager implements SessionsService {
   }
 
   // ------------------------------------------------------------------------------------------------------------
-  // Optional services from other workstreams
+  // Optional services from other modules
 
   get #actions(): ActionsService | undefined {
     return this.#options.app.services.actions;

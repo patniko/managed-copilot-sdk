@@ -1,4 +1,4 @@
-// Owner: attach workstream. Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
+// Copilot CLI attach (spec section 14): short-lived, owner-scoped attach material and a
 // WebSocket that mediates the stock CLI's AHP connection to a per-session listener on the session's own runtime.
 // The CLI is a `cli` responder of the session (core's `attachCli`): its turns and cancels are admitted and fenced by
 // core, its approvals and answers go through the actions ledger, and anything else it may not do is refused
@@ -101,7 +101,7 @@ export const attachModule: GatewayModule = {
      * Presences kept for the CLIs a fence ended: from the fence until a CLI attaches to the session again, or for
      * `reconnectGraceMs` after the move ends (`timer`), whichever comes first.
      */
-    const heldPresences = new Map<string, { readonly releases: (() => void)[]; timer: NodeJS.Timeout | undefined }>();
+    const heldPresences = new Map<string, { readonly releases: (() => void)[]; readonly connections: Set<string>; timer: NodeJS.Timeout | undefined }>();
 
     /**
      * A fence ends the attached CLIs' attachments, and with them their credential, but the person is still there (the
@@ -117,10 +117,13 @@ export const attachModule: GatewayModule = {
       const principals = attachedPrincipals.get(sessionId);
       const sessions = (app.services as Record<string, unknown>).sessions as AttachSessions | undefined;
       if (!principals?.size || !sessions?.presence) return;
-      if (!held) heldPresences.set(sessionId, (held = { releases: [], timer: undefined }));
-      for (const principal of principals.values()) {
+      if (!held) heldPresences.set(sessionId, (held = { releases: [], connections: new Set(), timer: undefined }));
+      for (const [connectionId, principal] of principals) {
+        // A relay the last fence ended may not have finished closing yet: its credential is already kept.
+        if (held.connections.has(connectionId)) continue;
         try {
           held.releases.push(sessions.presence(sessionId, principal));
+          held.connections.add(connectionId);
         } catch (error) {
           log.warn("Could not keep an attached Copilot CLI's credential through a move", { sessionId, error: (error as Error).message });
         }

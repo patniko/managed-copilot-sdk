@@ -1,4 +1,4 @@
-// Owner: orchestrator workstream. Orchestrator environments (spec section 17): an orchestrator session, on shared
+// Orchestrator environments (spec section 17): an orchestrator session, on shared
 // placement, coordinates workers. Each worker is an ordinary session of a declared isolated environment, in its own
 // sandbox, owned by the coordinator's owner and linked to it as its parent session.
 //

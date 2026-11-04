@@ -1,4 +1,4 @@
-// Owner: core workstream. Subscribes to `GET /v1/events` (server-sent events) for `managed.on(...)`.
+// Subscribes to `GET /v1/events` (server-sent events) for `managed.on(...)`.
 import { ROUTES, type PlatformEvent } from "@managed-copilot/protocol";
 import { timings } from "../http.js";
 import type { ManagedContext } from "../types.js";
