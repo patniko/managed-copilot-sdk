@@ -1,7 +1,7 @@
 # Guidance for coding agents
 
 Managed Copilot runs **stock** GitHub Copilot SDK clients and sessions in environments you deploy: locally under
-Aspire, or in your Azure subscription. Read [CONTRIBUTING.md](CONTRIBUTING.md) for commands, layout, and conventions.
+Aspire, or in your Azure subscription. The [README](README.md) has the quickstart and repository layout.
 
 - **The contract:** [`docs/spec/developer-experience.md`](docs/spec/developer-experience.md) is the customer-facing
   contract (snippets, decisions, platform contracts). Implement what it specifies; do not invent new API.
@@ -31,3 +31,22 @@ Aspire, or in your Azure subscription. Read [CONTRIBUTING.md](CONTRIBUTING.md) f
 - Respect the configured npm registry (`npm config get registry`). Never hardcode `registry.npmjs.org`; Docker builds
   take the host's registry as `--build-arg NPM_REGISTRY=...`.
 - Keep `pnpm build` and `pnpm test` green on every commit.
+
+## Commands
+
+```powershell
+pnpm install
+pnpm build                                  # every workspace package, in dependency order
+pnpm test                                   # every package's vitest suite
+pnpm --filter @managed-copilot/gateway test # one package
+aspire run                                  # the platform and demos locally
+```
+
+## Conventions
+
+- TypeScript ESM, `strict`. Tests live in `<package>/test` and use vitest.
+- Shared contracts live in `libraries/protocol`; keep changes there additive.
+- Gateway modules own their SQLite tables (prefixed with the module name), register migrations with `migrate()`, and
+  expose capabilities to each other through `app.provide(...)` / `app.service(...)`.
+- User-facing text (UI, CLI output, error messages, docs) should be clear and complete: loading and error states, no
+  raw stack traces.
