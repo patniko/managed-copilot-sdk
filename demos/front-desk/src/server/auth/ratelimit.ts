@@ -21,12 +21,10 @@ export class RateLimiter {
     return { allowed: true, retryAfterMs: 0 };
   }
 
-  /** Whether `key` is out of attempts, without counting one. */
-  blocked(key: string, limit: number): { blocked: boolean; retryAfterMs: number } {
-    const at = this.#now();
+  /** Gives back one attempt `take` counted, when it turned out not to be one (a correct password, a busy server). */
+  refund(key: string): void {
     const window = this.#windows.get(key);
-    if (!window || window.resetAt <= at) return { blocked: false, retryAfterMs: 0 };
-    return { blocked: window.count >= limit, retryAfterMs: window.resetAt - at };
+    if (window && window.count > 0) window.count--;
   }
 
   reset(key: string): void {

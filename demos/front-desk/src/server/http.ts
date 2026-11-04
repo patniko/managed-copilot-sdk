@@ -19,7 +19,7 @@ import type { Hub } from "./hub.js";
 import { log } from "./log.js";
 import type { People } from "./people.js";
 import type { Platform } from "./platform.js";
-import type { Store, UserRecord } from "./store.js";
+import { hashSecret, type Store, type UserRecord } from "./store.js";
 
 export interface ServerContext {
   readonly config: FrontDeskConfig;
@@ -280,6 +280,8 @@ export function createRequestHandler(ctx: ServerContext, ui?: Middleware): (req:
       const value = readCookies(req).get(cookieName);
       clearCookie(res, cookieName, { secure: config.secureCookies });
       const userId = value ? store.deleteBrowserSession(value) : undefined;
+      // This browser stops receiving live events now, even while the person is still signed in somewhere else.
+      if (value) hub.disconnectSession(hashSecret(value));
       if (userId && store.countBrowserSessions(userId) === 0) {
         // Signed out everywhere: let go of their connection, and keep no GitHub token for them.
         hub.disconnect(userId);
@@ -329,7 +331,9 @@ export function createRequestHandler(ctx: ServerContext, ui?: Middleware): (req:
       { type: "billing", billing: people.billing(user) },
       { type: "memories", memories: memories(user.id) },
     ];
-    hub.attach(user.id, req, res, initial);
+    // The stream lasts only as long as this browser's sign-in: signing out, or its expiry, ends it.
+    const session = hashSecret(readCookies(req).get(cookieName) ?? "");
+    hub.attach(user.id, req, res, { session, active: () => store.browserSessionActive(session) }, initial);
   });
 
   function takeMessage(user: UserRecord): void {

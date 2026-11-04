@@ -7,6 +7,29 @@ const ev = (type: string, data: Record<string, unknown> = {}, extra: Record<stri
   ({ id: `e${++counter}`, parentId: null, timestamp: new Date(Date.UTC(2026, 10, 4, 6, 0, counter)).toISOString(), type, data, ...extra }) as unknown as SessionEvent;
 
 describe("transcript", () => {
+  it("ignores pieces of an answer it already has in full, as when a conversation reopens mid-answer", () => {
+    const transcript = new Transcript();
+    const answer = ev("assistant.message", { messageId: "a1", content: "Hello world" });
+    transcript.replaceAll([ev("user.message", { messageId: "u1", content: "Hi" }), ev("assistant.turn_start"), answer]);
+    // Live events that arrived while the history loaded: the same answer's pieces, the answer, then the end of the turn.
+    for (const event of [ev("assistant.message_delta", { messageId: "a1", deltaContent: "Hello" }), ev("assistant.message_delta", { messageId: "a1", deltaContent: " world" }), answer, ev("session.idle")]) {
+      transcript.apply(event);
+    }
+    expect(transcript.items).toEqual([expect.objectContaining({ kind: "user", text: "Hi" }), expect.objectContaining({ kind: "assistant", id: "a1", text: "Hello world" })]);
+    expect(transcript.items[1]).not.toHaveProperty("streaming", true);
+    expect(transcript.busy).toBe(false);
+  });
+
+  it("numbers the turns it works on, so a late stop can tell its turn from the next", () => {
+    const transcript = new Transcript();
+    transcript.markBusy();
+    const stopped = transcript.turn;
+    transcript.apply(ev("abort"));
+    expect(transcript.busy).toBe(false);
+    transcript.markBusy();
+    expect(transcript.turn).toBe(stopped + 1);
+  });
+
   it("streams an answer, then settles it when the session goes idle", () => {
     const transcript = new Transcript();
     transcript.apply(ev("user.message", { messageId: "u1", content: "Hi" }));

@@ -315,6 +315,12 @@ export class Store {
     return row ? String(row.user_id) : undefined;
   }
 
+  /** Whether a browser sign-in, by the hash of its cookie value, still exists and hasn't expired. */
+  browserSessionActive(idHash: string): boolean {
+    const row = this.db.prepare("SELECT expires_at FROM browser_sessions WHERE id_hash = ?").get(idHash) as Row | undefined;
+    return row !== undefined && Date.parse(String(row.expires_at)) > Date.now();
+  }
+
   countBrowserSessions(userId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS n FROM browser_sessions WHERE user_id = ? AND expires_at > ?").get(userId, now()) as Row;
     return num(row.n) ?? 0;

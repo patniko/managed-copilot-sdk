@@ -84,19 +84,29 @@ export class EmailAccounts {
     const password = String(request.password ?? "");
     const emailKey = `signin:email:${email}`;
     const addressKey = `signin:address:${address}`;
+    // Count the attempt before checking the password, so guesses sent all at once can't start before any of them counts.
+    const taken: string[] = [];
     for (const [key, limit] of [[emailKey, SIGN_IN_FAILURES.perEmail], [addressKey, SIGN_IN_FAILURES.perAddress]] as const) {
-      const state = this.#limiter.blocked(key, limit);
-      if (state.blocked) throw new AppError("rate_limited", `Too many sign-in attempts. Try again ${retryAfterText(state.retryAfterMs)}.`, 429);
+      const attempt = this.#limiter.take(key, limit, SIGN_IN_FAILURES.windowMs);
+      if (!attempt.allowed) {
+        for (const done of taken) this.#limiter.refund(done);
+        throw new AppError("rate_limited", `Too many sign-in attempts. Try again ${retryAfterText(attempt.retryAfterMs)}.`, 429);
+      }
+      taken.push(key);
     }
     const user = email ? this.#store.findByEmail(email) : undefined;
-    // Unknown addresses cost the same as wrong passwords, so the answer time doesn't reveal who has an account.
-    const ok = await verifyPassword(password, user?.passwordHash ?? (await decoyHash()));
-    if (!user || !ok || password.length === 0) {
-      this.#limiter.take(emailKey, SIGN_IN_FAILURES.perEmail, SIGN_IN_FAILURES.windowMs);
-      this.#limiter.take(addressKey, SIGN_IN_FAILURES.perAddress, SIGN_IN_FAILURES.windowMs);
-      throw new AppError("invalid_credentials", "That email and password don't match an account.", 401);
+    let ok: boolean;
+    try {
+      // Unknown addresses cost the same as wrong passwords, so the answer time doesn't reveal who has an account.
+      ok = await verifyPassword(password, user?.passwordHash ?? (await decoyHash()));
+    } catch (error) {
+      // Nothing was checked (Front Desk was too busy): not a guess.
+      for (const done of taken) this.#limiter.refund(done);
+      throw error;
     }
+    if (!user || !ok || password.length === 0) throw new AppError("invalid_credentials", "That email and password don't match an account.", 401);
     this.#limiter.reset(emailKey);
+    this.#limiter.refund(addressKey);
     this.#store.touchUser(user.id);
     return user;
   }

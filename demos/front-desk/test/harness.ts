@@ -40,8 +40,8 @@ export interface Browser {
   get<T = any>(path: string, headers?: Record<string, string>): Promise<Response<T>>;
   post<T = any>(path: string, body?: unknown, headers?: Record<string, string>): Promise<Response<T>>;
   delete<T = any>(path: string, headers?: Record<string, string>): Promise<Response<T>>;
-  /** Opens `/api/events` and collects what arrives. */
-  events(): Promise<{ readonly received: ServerEvent[]; close(): void }>;
+  /** Opens `/api/events` and collects what arrives; `ended` says whether the server closed it. */
+  events(): Promise<{ readonly received: ServerEvent[]; ended(): boolean; close(): void }>;
 }
 
 export async function startHarness(env: Record<string, string> = {}, options: { gh?: () => Promise<string> } = {}): Promise<Harness> {
@@ -70,7 +70,7 @@ export async function startHarness(env: Record<string, string> = {}, options: { 
   const platform = new FakePlatform();
   const githubAuth = new GitHubAuth({ config, store, sealer, ...(options.gh ? { ghToken: options.gh } : {}) });
   const email = new EmailAccounts(store, limiter, config.inviteCode);
-  const people = new People(store, githubAuth, platform, config);
+  const people = new People(store, githubAuth, config);
   const hub = new Hub();
   const conversations = new Conversations({
     store,
@@ -129,6 +129,7 @@ export async function startHarness(env: Record<string, string> = {}, options: { 
         if (!response.ok || !response.body) throw new Error(`events: HTTP ${response.status}`);
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
+        let ended = false;
         void (async () => {
           let buffer = "";
           try {
@@ -147,8 +148,9 @@ export async function startHarness(env: Record<string, string> = {}, options: { 
           } catch {
             // Closed.
           }
+          ended = true;
         })();
-        return { received, close: () => controller.abort() };
+        return { received, ended: () => ended, close: () => controller.abort() };
       },
     };
   };

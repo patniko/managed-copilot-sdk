@@ -106,9 +106,16 @@ export const setSidebarOpen = (sidebarOpen: boolean) => set({ sidebarOpen });
 
 // ---- sign-in -------------------------------------------------------------------------------------------------------
 
+/**
+ * Changes whenever who is signed in here changes. A reply to a request made for someone else (they signed out, and
+ * maybe another person signed in, while it was on its way) is dropped, so nothing of theirs lands in the next person's view.
+ */
+let identity = 0;
+
 handleSignedOut((reason) => signedOut(reason));
 
 function signedOut(reason?: string): void {
+  identity++;
   stopEvents();
   set((current) => ({
     me: current.me ? { ...current.me, user: null } : current.me,
@@ -134,7 +141,18 @@ export async function loadMe(): Promise<void> {
   }
 }
 
+/** Asks again what Front Desk offers, e.g. whether people without GitHub can chat yet (it may still be connecting). */
+export async function refreshOptions(): Promise<void> {
+  try {
+    const { options } = await api.get<MeResponse>("/api/me");
+    set((current) => (current.me ? { me: { ...current.me, options } } : {}));
+  } catch {
+    // The next check tries again.
+  }
+}
+
 function startSignedIn(user: UserView): void {
+  identity++;
   set({ billing: user.billing, signedOutReason: undefined });
   startEvents();
   void loadConversations();
@@ -166,17 +184,29 @@ export async function signOut(): Promise<void> {
 const byRecent = (a: ConversationSummary, b: ConversationSummary) => b.updatedAt.localeCompare(a.updatedAt);
 
 export async function loadConversations(): Promise<void> {
+  const who = identity;
   try {
     const conversations = await api.get<ConversationSummary[]>("/api/conversations");
+    if (who !== identity) return;
     set({ conversations: [...conversations].sort(byRecent), conversationsLoaded: true });
   } catch (error) {
-    if (error instanceof ApiError && error.status === 401) return;
+    if (who !== identity || (error instanceof ApiError && error.status === 401)) return;
     set({ conversationsLoaded: true });
     toast(`Couldn't load your conversations: ${message(error)}`);
   }
 }
 
+/** Drops "Sending…" placeholders for messages a loaded transcript already shows. */
+function withoutDelivered(outgoing: State["outgoing"], conversationId: string, items: readonly ChatItem[]): State["outgoing"] {
+  const pending = outgoing[conversationId];
+  if (!pending?.length) return outgoing;
+  const shown = new Set(items.map((item) => item.id));
+  const next = pending.filter((item) => !item.messageId || !shown.has(item.messageId));
+  return next.length === pending.length ? outgoing : { ...outgoing, [conversationId]: next };
+}
+
 export async function openConversation(id: string): Promise<void> {
+  const who = identity;
   set((current) => {
     const viewErrors = { ...current.viewErrors };
     delete viewErrors[id];
@@ -184,11 +214,22 @@ export async function openConversation(id: string): Promise<void> {
   });
   try {
     const view = await api.get<ConversationView>(`/api/conversations/${encodeURIComponent(id)}`);
-    set((current) => ({ views: { ...current.views, [id]: view } }));
+    if (who !== identity) return;
+    set((current) => ({ views: { ...current.views, [id]: view }, outgoing: withoutDelivered(current.outgoing, id, view.items) }));
   } catch (error) {
-    if (error instanceof ApiError && error.status === 401) return;
+    if (who !== identity || (error instanceof ApiError && error.status === 401)) return;
     const code = error instanceof ApiError ? error.code : "error";
-    set((current) => ({ viewErrors: { ...current.viewErrors, [id]: { code, message: message(error) } } }));
+    set((current) => {
+      // Not (or no longer) this person's: forget anything kept for it.
+      const gone = error instanceof ApiError && (error.status === 404 || error.status === 410);
+      const views = { ...current.views };
+      const outgoing = { ...current.outgoing };
+      if (gone) {
+        delete views[id];
+        delete outgoing[id];
+      }
+      return { views, outgoing, viewErrors: { ...current.viewErrors, [id]: { code, message: message(error) } } };
+    });
   }
 }
 
@@ -212,10 +253,12 @@ let outgoingKey = 0;
 
 /** Starts a conversation with its first message; resolves false (keeping the text) when it couldn't. */
 export async function startConversation(prompt: string): Promise<boolean> {
+  const who = identity;
   const key = `out-${++outgoingKey}`;
   addOutgoing("new", { key, text: prompt });
   try {
     const { conversation, messageId } = await api.post<{ conversation: ConversationSummary; messageId: string }>("/api/conversations", { prompt });
+    if (who !== identity) return false;
     updateOutgoing("new", key, null);
     set((current) => ({
       conversations: [conversation, ...current.conversations.filter((item) => item.id !== conversation.id)].sort(byRecent),
@@ -225,6 +268,7 @@ export async function startConversation(prompt: string): Promise<boolean> {
     navigate(conversationHref(conversation.id));
     return true;
   } catch (error) {
+    if (who !== identity) return false;
     updateOutgoing("new", key, null);
     if (!(error instanceof ApiError && error.status === 401)) toast(message(error));
     return false;
@@ -232,34 +276,40 @@ export async function startConversation(prompt: string): Promise<boolean> {
 }
 
 export async function sendMessage(conversationId: string, prompt: string): Promise<boolean> {
+  const who = identity;
   const key = `out-${++outgoingKey}`;
   addOutgoing(conversationId, { key, text: prompt });
   try {
     const { messageId } = await api.post<{ messageId: string }>(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, { prompt });
+    if (who !== identity) return false;
     if (getState().views[conversationId]?.items.some((item) => item.id === messageId)) updateOutgoing(conversationId, key, null);
     else updateOutgoing(conversationId, key, { messageId });
     return true;
   } catch (error) {
+    if (who !== identity) return false;
     updateOutgoing(conversationId, key, { failed: message(error) });
     return false;
   }
 }
 
 export async function stopConversation(conversationId: string): Promise<void> {
+  const who = identity;
   try {
     await api.post(`/api/conversations/${encodeURIComponent(conversationId)}/stop`);
   } catch (error) {
-    toast(`Couldn't stop it: ${message(error)}`);
+    if (who === identity) toast(`Couldn't stop it: ${message(error)}`);
   }
 }
 
 export async function deleteConversation(conversationId: string): Promise<void> {
+  const who = identity;
   try {
     await api.delete(`/api/conversations/${encodeURIComponent(conversationId)}`);
+    if (who !== identity) return;
     removeConversation(conversationId);
     toast("Conversation deleted.", "success");
   } catch (error) {
-    toast(`Couldn't delete it: ${message(error)}`);
+    if (who === identity) toast(`Couldn't delete it: ${message(error)}`);
   }
 }
 
@@ -275,18 +325,20 @@ function removeConversation(id: string): void {
 // ---- memory --------------------------------------------------------------------------------------------------------
 
 export async function deleteMemory(id: string): Promise<void> {
+  const who = identity;
   try {
     await api.delete(`/api/memories/${encodeURIComponent(id)}`);
   } catch (error) {
-    toast(`Couldn't remove it: ${message(error)}`);
+    if (who === identity) toast(`Couldn't remove it: ${message(error)}`);
   }
 }
 
 export async function clearMemories(): Promise<void> {
+  const who = identity;
   try {
     await api.delete("/api/memories");
   } catch (error) {
-    toast(`Couldn't clear your memory: ${message(error)}`);
+    if (who === identity) toast(`Couldn't clear your memory: ${message(error)}`);
   }
 }
 

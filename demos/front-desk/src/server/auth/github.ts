@@ -64,9 +64,20 @@ function sameText(a: string, b: string): boolean {
 }
 
 /** Only same-app paths: never an open redirect. */
+/**
+ * Where to go after signing in: a path on Front Desk itself, or `/`. Browsers drop control characters from URLs and
+ * read backslashes as slashes, so `/\t/evil.example` would become another site: anything that doesn't resolve to the
+ * same origin is refused.
+ */
 export function safeReturnTo(value: string | null | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//") || value.startsWith("/\\")) return "/";
-  return value.length > 300 ? "/" : value;
+  if (!value || value.length > 300 || !value.startsWith("/") || /[\u0000-\u0020\u007f\\]/.test(value)) return "/";
+  const origin = "https://front-desk.invalid";
+  try {
+    const url = new URL(value, origin);
+    return url.origin === origin ? `${url.pathname}${url.search}${url.hash}` : "/";
+  } catch {
+    return "/";
+  }
 }
 
 export class GitHubAuth {

@@ -23,7 +23,7 @@ const platform = new ManagedPlatform({ config, ...(process.env.MANAGED_COPILOT_A
 platform.start();
 const github = new GitHubAuth({ config, store, sealer });
 const email = new EmailAccounts(store, limiter, config.inviteCode);
-const people = new People(store, github, platform, config);
+const people = new People(store, github, config);
 const hub = new Hub();
 const conversations = new Conversations({
   store,

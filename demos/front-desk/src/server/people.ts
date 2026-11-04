@@ -3,7 +3,7 @@ import type { BillingInfo, UserView } from "../shared/types.js";
 import { GitHubSignInError, type GitHubAuth } from "./auth/github.js";
 import type { FrontDeskConfig } from "./config.js";
 import { AppError } from "./errors.js";
-import type { Person, Platform } from "./platform.js";
+import type { Person } from "./platform.js";
 import type { Store, UserRecord } from "./store.js";
 
 /** The day the daily allowance counts against (UTC). */
@@ -12,13 +12,11 @@ export const today = (at = new Date()) => at.toISOString().slice(0, 10);
 export class People {
   readonly #store: Store;
   readonly #github: GitHubAuth;
-  readonly #platform: Platform;
   readonly #config: FrontDeskConfig;
 
-  constructor(store: Store, github: GitHubAuth, platform: Platform, config: FrontDeskConfig) {
+  constructor(store: Store, github: GitHubAuth, config: FrontDeskConfig) {
     this.#store = store;
     this.#github = github;
-    this.#platform = platform;
     this.#config = config;
   }
 
@@ -57,7 +55,10 @@ export class People {
     };
   }
 
-  /** How this person acts on Managed Copilot: their own GitHub token, or the app vouching for them. */
+  /**
+   * How this person acts on Managed Copilot: their own GitHub token, or the app vouching for them. Whether the app can
+   * vouch for people right now is the platform's call when it opens their connection, after (re)connecting if needed.
+   */
   async person(user: UserRecord): Promise<Person> {
     if (user.kind === "github") {
       try {
@@ -66,9 +67,6 @@ export class People {
         if (error instanceof GitHubSignInError) throw new AppError("github_sign_in_expired", error.message, 401);
         throw error;
       }
-    }
-    if (!this.#platform.appUsers().available) {
-      throw new AppError("app_users_unavailable", this.#platform.appUsers().reason ?? "People without GitHub can't chat on this deployment yet.", 503);
     }
     return { kind: "app", userId: user.id, name: user.name, ...(user.email ? { email: user.email } : {}) };
   }

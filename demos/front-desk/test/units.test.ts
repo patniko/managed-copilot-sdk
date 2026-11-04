@@ -1,4 +1,5 @@
 import type { Tool } from "@github/copilot-sdk";
+import { EventEmitter } from "node:events";
 import { ManagedCopilotError } from "@managed-copilot/protocol";
 import { describe, expect, it } from "vitest";
 import { EmailAccounts, normalizeEmail, normalizeName } from "../src/server/auth/email.js";
@@ -7,6 +8,7 @@ import { safeReturnTo } from "../src/server/auth/github.js";
 import { loadConfig } from "../src/server/config.js";
 import { instructions, titleFrom } from "../src/server/conversations.js";
 import { AppError } from "../src/server/errors.js";
+import { Hub } from "../src/server/hub.js";
 import { hashPassword, verifyPassword } from "../src/server/passwords.js";
 import { describePlatformError, managedErrorOf } from "../src/server/platform.js";
 import { Sealer } from "../src/server/seal.js";
@@ -82,10 +84,71 @@ describe("email accounts", () => {
     await expect(emails.signIn({ email: "a@example.com", password: "correct horse battery" }, "3.3.3.3")).rejects.toMatchObject({ code: "rate_limited", status: 429 });
   });
 
+  it("counts guesses sent all at once before checking any of them", async () => {
+    const { accounts: emails } = accounts();
+    await emails.signUp({ name: "A", email: "a@example.com", password: "correct horse battery" }, "1.1.1.1");
+    const guesses = Array.from({ length: 20 }, (_, i) => (i === 19 ? "correct horse battery" : `wrong-${i}`));
+    const results = await Promise.allSettled(guesses.map((password) => emails.signIn({ email: "a@example.com", password }, "2.2.2.2")));
+    const codes = results.map((result) => (result.status === "fulfilled" ? "signed_in" : (result.reason as AppError).code));
+    expect(codes.filter((code) => code === "invalid_credentials")).toHaveLength(8);
+    expect(codes.filter((code) => code === "rate_limited")).toHaveLength(12);
+    expect(codes).not.toContain("signed_in");
+  });
+
+  it("doesn't count a correct password against the address", async () => {
+    const { accounts: emails } = accounts();
+    await emails.signUp({ name: "A", email: "a@example.com", password: "correct horse battery" }, "1.1.1.1");
+    for (let i = 0; i < 31; i++) await expect(emails.signIn({ email: "a@example.com", password: "correct horse battery" }, "2.2.2.2")).resolves.toMatchObject({ email: "a@example.com" });
+  });
+
   it("keeps names and addresses tidy", () => {
     expect(normalizeName("  Ada \n\u200b Lovelace ")).toBe("Ada Lovelace");
     expect(() => normalizeName("   ")).toThrow(AppError);
     expect(normalizeEmail(" Ada@Example.COM ")).toBe("ada@example.com");
+  });
+});
+
+describe("live events", () => {
+  const stream = () => {
+    const req = new EventEmitter();
+    const res = Object.assign(new EventEmitter(), {
+      written: [] as string[],
+      ended: false,
+      writeHead() {
+        return res;
+      },
+      write(chunk: string) {
+        res.written.push(chunk);
+        return true;
+      },
+      end() {
+        res.ended = true;
+      },
+    });
+    return { req, res };
+  };
+
+  it("last only as long as the browser sign-in that opened them", () => {
+    const hub = new Hub(undefined, 60_000);
+    let laptopSignedIn = true;
+    const laptop = stream();
+    const phone = stream();
+    hub.attach("u_1", laptop.req as never, laptop.res as never, { session: "laptop", active: () => laptopSignedIn });
+    hub.attach("u_1", phone.req as never, phone.res as never, { session: "phone", active: () => true });
+
+    // The laptop's sign-in expires: the next sweep ends its stream, and nothing more reaches it.
+    laptopSignedIn = false;
+    hub.sweep();
+    expect(laptop.res.ended).toBe(true);
+    hub.publish("u_1", { type: "memories", memories: [] });
+    expect(laptop.res.written.some((chunk) => chunk.startsWith("event: memories"))).toBe(false);
+    expect(phone.res.written.some((chunk) => chunk.startsWith("event: memories"))).toBe(true);
+
+    // Signing out on the phone ends its stream too, whoever else is still signed in.
+    hub.disconnectSession("phone");
+    expect(phone.res.ended).toBe(true);
+    expect(hub.count("u_1")).toBe(0);
+    hub.close();
   });
 });
 
@@ -116,9 +179,13 @@ describe("small pieces", () => {
 
   it("never redirects outside Front Desk after sign-in", () => {
     expect(safeReturnTo("/c/abc")).toBe("/c/abc");
+    expect(safeReturnTo("/c/abc?open=memory#latest")).toBe("/c/abc?open=memory#latest");
     expect(safeReturnTo("https://evil.example")).toBe("/");
     expect(safeReturnTo("//evil.example")).toBe("/");
     expect(safeReturnTo("/\\evil.example")).toBe("/");
+    // Browsers drop tabs and line breaks from URLs, which would turn these into //evil.example.
+    expect(safeReturnTo("/\t/evil.example")).toBe("/");
+    expect(safeReturnTo("/\n/evil.example")).toBe("/");
     expect(safeReturnTo(null)).toBe("/");
   });
 

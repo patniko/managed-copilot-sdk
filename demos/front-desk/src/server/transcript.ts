@@ -41,7 +41,10 @@ export class Transcript {
   #items: ChatItem[] = [];
   readonly #index = new Map<string, number>();
   readonly #seen = new Set<string>();
+  /** Answers already complete: pieces of them that arrive late (a conversation reopened mid-answer) are dropped. */
+  readonly #finished = new Set<string>();
   #busy = false;
+  #turn = 0;
   #lastActivity = Date.now();
 
   get items(): readonly ChatItem[] {
@@ -50,6 +53,11 @@ export class Transcript {
 
   get busy(): boolean {
     return this.#busy;
+  }
+
+  /** Counts the turns this conversation started working on, so a late stop can tell its turn from a newer one. */
+  get turn(): number {
+    return this.#turn;
   }
 
   /** When the last event arrived (to notice a turn that will never finish). */
@@ -62,6 +70,7 @@ export class Transcript {
     this.#items = [];
     this.#index.clear();
     this.#seen.clear();
+    this.#finished.clear();
     this.#busy = false;
     for (const event of events) this.apply(event);
     this.#busy = this.#unfinished(events);
@@ -89,7 +98,7 @@ export class Transcript {
       case "assistant.message_delta": {
         const id = String(data.messageId ?? "");
         const delta = String(data.deltaContent ?? "");
-        if (!id || !delta) break;
+        if (!id || !delta || this.#finished.has(id)) break;
         const existing = this.#get(id);
         if (existing?.kind === "assistant") {
           this.#replace({ ...existing, text: existing.text + delta, streaming: true });
@@ -104,6 +113,7 @@ export class Transcript {
         const id = String(data.messageId ?? event.id);
         const text = String(data.content ?? "");
         const existing = this.#get(id);
+        this.#finished.add(id);
         if (!text.trim()) {
           // A message that only asks for tools: drop any empty streaming placeholder.
           if (existing?.kind === "assistant" && !existing.text.trim()) this.#remove(id);
@@ -211,6 +221,7 @@ export class Transcript {
   #setBusy(busy: boolean): TranscriptChange[] {
     if (this.#busy === busy) return [];
     this.#busy = busy;
+    if (busy) this.#turn++;
     return [{ type: "busy", busy }];
   }
 

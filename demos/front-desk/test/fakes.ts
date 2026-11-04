@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import type { CopilotClient, SessionEvent, Tool } from "@github/copilot-sdk";
 import { ManagedCopilotError, type SessionInfo } from "@managed-copilot/protocol";
+import { AppError } from "../src/server/errors.js";
 import type { Person, PersonalConnection, Platform, Route } from "../src/server/platform.js";
 
 interface FakeSessionRecord {
@@ -12,6 +13,8 @@ interface FakeSessionRecord {
   readonly owner: string;
   readonly environment: string;
   readonly events: SessionEvent[];
+  /** Every client attached to the session gets its events, as with the gateway. */
+  readonly listeners: Set<(event: SessionEvent) => void>;
   deleted: boolean;
 }
 
@@ -63,9 +66,11 @@ class FakeConnection implements PersonalConnection {
     const owner = this.#owner;
     const environment = this.route.environment;
     const attach = (record: FakeSessionRecord, config: { onEvent?: (event: SessionEvent) => void; tools?: Tool<any>[] }) => {
+      const listener = (item: SessionEvent) => config.onEvent?.(item);
+      record.listeners.add(listener);
       const emit = (item: SessionEvent) => {
         record.events.push(item);
-        config.onEvent?.(item);
+        for (const each of [...record.listeners]) each(item);
       };
       return {
         sessionId: record.id,
@@ -77,16 +82,28 @@ class FakeConnection implements PersonalConnection {
           const messageId = randomUUID();
           emit(event("user.message", { messageId, content: prompt }));
           void answer(prompt, config.tools ?? [], emit);
+          if (platform.dropNextSendReply) {
+            // The platform took the message, but the connection dropped before its reply arrived.
+            platform.dropNextSendReply = false;
+            throw new Error("Connection is closed.");
+          }
           return messageId;
         },
-        getEvents: async () => [...record.events],
+        getEvents: async () => {
+          platform.historyLoads++;
+          await platform.holdHistory;
+          return [...record.events];
+        },
         abort: async () => emit(event("abort", { reason: "user" })),
-        disconnect: async () => undefined,
+        disconnect: async () => {
+          record.listeners.delete(listener);
+          platform.disconnects.push(record.id);
+        },
       };
     };
     return {
       createSession: async (config: { sessionId?: string; onEvent?: (event: SessionEvent) => void; tools?: Tool<any>[] }) => {
-        const record: FakeSessionRecord = { id: config.sessionId ?? randomUUID(), owner, environment, events: [], deleted: false };
+        const record: FakeSessionRecord = { id: config.sessionId ?? randomUUID(), owner, environment, events: [], listeners: new Set(), deleted: false };
         platform.sessions.set(record.id, record);
         return attach(record, config);
       },
@@ -137,9 +154,21 @@ export class FakePlatform implements Platform {
   readonly sessions = new Map<string, FakeSessionRecord>();
   readonly opened: Person[] = [];
   readonly resumes: { sessionId: string; owner: string }[] = [];
+  /** Sessions Front Desk let go of (`disconnect`), by ID. */
+  readonly disconnects: string[] = [];
   appUsersAvailable = false;
   failNextSend = false;
+  /** The next send reaches the session, then fails as if the connection dropped before the reply. */
+  dropNextSendReply = false;
+  /** While set, loading a resumed session's history waits for it (to test what happens while a conversation reopens). */
+  holdHistory: Promise<void> | undefined;
+  historyLoads = 0;
   readonly #connections = new Map<string, FakeConnection>();
+
+  /** Whether Front Desk holds a connection for this person. */
+  connected(userId: string): boolean {
+    return this.#connections.has(userId);
+  }
 
   routeFor(kind: Person["kind"]): Route {
     return kind === "github" ? { route: "copilot", environment: "front-desk", model: "claude-sonnet-5" } : { route: "foundry", environment: "front-desk-foundry", model: "gpt-test" };
@@ -150,7 +179,8 @@ export class FakePlatform implements Platform {
   }
 
   async open(person: Person): Promise<PersonalConnection> {
-    if (person.kind === "app" && !this.appUsersAvailable) throw new ManagedCopilotError("capability_unavailable", "No app users here.");
+    // As ManagedPlatform does once it knows whether the deployment can serve people without GitHub.
+    if (person.kind === "app" && !this.appUsersAvailable) throw new AppError("app_users_unavailable", "No app users here.", 503);
     this.opened.push(person);
     let connection = this.#connections.get(person.userId);
     if (!connection) {

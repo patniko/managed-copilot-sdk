@@ -128,6 +128,83 @@ describe("people and their conversations", () => {
     expect([202, 409]).toContain(second.status);
     if (second.status === 409) expect(second.body.error.code).toBe("busy");
   });
+
+  it("leaves no empty conversation behind when the first message can't be delivered", async () => {
+    const alice = harness.browser();
+    await signUp(alice, "Alice", "alice@example.com");
+    harness.platform.failNextSend = true;
+    const created = await alice.post("/api/conversations", { prompt: "hello" });
+    expect(created.status).toBeGreaterThanOrEqual(500);
+    expect((await alice.get("/api/conversations")).body).toEqual([]);
+    expect([...harness.platform.sessions.values()].map((record) => record.deleted)).toEqual([true]);
+    expect((await alice.get("/api/me")).body.user.billing.remainingToday).toBe(50);
+  });
+
+  it("never sends a message twice when the connection drops after the platform took it", async () => {
+    const alice = harness.browser();
+    await signUp(alice, "Alice", "alice@example.com");
+    const id = (await alice.post("/api/conversations", { prompt: "hello" })).body.conversation.id as string;
+    await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
+    harness.platform.dropNextSendReply = true;
+    expect((await alice.post(`/api/conversations/${id}/messages`, { prompt: "again" })).status).toBe(202);
+    await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
+    const sent = (await view(alice, id)).items.filter((item) => item.kind === "user").map((item) => ("text" in item ? item.text : ""));
+    expect(sent).toEqual(["hello", "again"]);
+  });
+
+  it("lets go of a conversation that was deleted while it was reopening", async () => {
+    const alice = harness.browser();
+    await signUp(alice, "Alice", "alice@example.com");
+    const id = (await alice.post("/api/conversations", { prompt: "hello" })).body.conversation.id as string;
+    await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
+    await harness.conversations.release(harness.store.findByEmail("alice@example.com")!.id);
+    let finishLoading!: () => void;
+    harness.platform.holdHistory = new Promise<void>((resolve) => (finishLoading = resolve));
+    const reopening = alice.get(`/api/conversations/${id}`);
+    await eventually(() => expect(harness.platform.historyLoads).toBe(1));
+    expect((await alice.delete(`/api/conversations/${id}`)).status).toBe(204);
+    finishLoading();
+    expect((await reopening).status).toBe(404);
+    expect(harness.platform.disconnects).toContain(id);
+    expect((await alice.get("/api/conversations")).body).toEqual([]);
+  });
+
+  it("lets go of a person's connection once they've left, even after they deleted their last conversation", async () => {
+    await harness.close();
+    harness = await startHarness({ FRONT_DESK_IDLE_CLOSE_MS: "1" });
+    harness.platform.appUsersAvailable = true;
+    const alice = harness.browser();
+    const user = await signUp(alice, "Alice", "alice@example.com");
+    const id = (await alice.post("/api/conversations", { prompt: "hello" })).body.conversation.id as string;
+    await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
+    expect((await alice.delete(`/api/conversations/${id}`)).status).toBe(204);
+    expect(harness.platform.connected(user.id)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await harness.conversations.sweep();
+    expect(harness.platform.connected(user.id)).toBe(false);
+  });
+});
+
+describe("signing out", () => {
+  it("ends that browser's live events, even while the person is signed in elsewhere", async () => {
+    harness = await startHarness();
+    harness.platform.appUsersAvailable = true;
+    const laptop = harness.browser();
+    const phone = harness.browser();
+    await signUp(laptop, "Alice", "alice@example.com");
+    expect((await phone.post("/api/auth/signin", { email: "alice@example.com", password: "correct horse battery" })).status).toBe(200);
+    const stream = await laptop.events();
+    await eventually(() => expect(stream.received.length).toBeGreaterThan(0));
+    expect((await laptop.post("/api/auth/signout")).status).toBe(204);
+    await eventually(() => expect(stream.ended()).toBe(true));
+    const seen = stream.received.length;
+
+    // Alice keeps going on her phone; none of it reaches the laptop that signed out.
+    const id = (await phone.post("/api/conversations", { prompt: "remember: favorite color is teal" })).body.conversation.id as string;
+    await eventually(async () => expect((await view(phone, id)).busy).toBe(false));
+    expect(stream.received.length).toBe(seen);
+    stream.close();
+  });
 });
 
 describe("the daily allowance of people the app pays for", () => {

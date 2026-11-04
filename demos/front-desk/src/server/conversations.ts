@@ -6,13 +6,13 @@
 import { randomUUID } from "node:crypto";
 import type { CopilotSession, PermissionHandler, SessionEvent } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/protocol";
-import { LIMITS, type ConversationSummary, type ConversationView, type PlatformRecord, type ServerEvent } from "../shared/types.js";
+import { LIMITS, type ChatItem, type ConversationSummary, type ConversationView, type PlatformRecord, type ServerEvent } from "../shared/types.js";
 import type { FrontDeskConfig } from "./config.js";
 import { AppError, notFound } from "./errors.js";
 import type { Hub } from "./hub.js";
 import { log } from "./log.js";
 import { today, type People } from "./people.js";
-import { describePlatformError, managedErrorOf, type PersonalConnection, type Platform } from "./platform.js";
+import { describePlatformError, managedErrorOf, type Person, type PersonalConnection, type Platform } from "./platform.js";
 import type { ConversationRecord, Store, UserRecord } from "./store.js";
 import { isMemoryTool, memoryTools } from "./tools.js";
 import { Transcript, type TranscriptChange } from "./transcript.js";
@@ -67,6 +67,8 @@ function checkPrompt(value: unknown): string {
 
 const busy = () => new AppError("busy", "Front Desk is still answering. Wait for it to finish, or stop it first.", 409);
 
+const userMessages = (transcript: Transcript) => transcript.items.filter((item): item is Extract<ChatItem, { kind: "user" }> => item.kind === "user");
+
 /** The platform's own record of a session, as Front Desk shows it. */
 function platformRecord(info: SessionInfo): PlatformRecord {
   const inference = info.inference;
@@ -88,13 +90,20 @@ const permit: PermissionHandler = (request) => {
 export class Conversations {
   readonly #deps: ConversationsDeps;
   readonly #live = new Map<string, Live>();
-  readonly #opening = new Map<string, Promise<Live>>();
+  /** Conversations being reopened, so concurrent requests share one resume. */
+  readonly #opening = new Map<string, { readonly userId: string; readonly promise: Promise<Live> }>();
+  /** Counts how often each person's connection was let go: a reopen that started before that lets its session go. */
+  readonly #epochs = new Map<string, number>();
+  readonly #deleting = new Set<string>();
+  /** People with a platform connection open, and when it was last opened, so an idle one is let go. */
+  readonly #connected = new Map<string, number>();
   readonly #watch: NodeJS.Timeout;
   #generation = 0;
+  #closed = false;
 
   constructor(deps: ConversationsDeps) {
     this.#deps = deps;
-    this.#watch = setInterval(() => void this.#check(), WATCH_INTERVAL_MS);
+    this.#watch = setInterval(() => void this.sweep(), WATCH_INTERVAL_MS);
     this.#watch.unref();
   }
 
@@ -122,7 +131,7 @@ export class Conversations {
     let delivered = false;
     try {
       const person = await this.#deps.people.person(user);
-      const connection = await this.#deps.platform.open(person).catch((error: unknown) => Promise.reject(this.#fail(user, error)));
+      const connection = await this.#open(user, person).catch((error: unknown) => Promise.reject(this.#fail(user, error)));
       const client = await connection.client().catch((error: unknown) => Promise.reject(this.#fail(user, error, connection)));
       const generation = ++this.#generation;
       const transcript = new Transcript();
@@ -150,11 +159,19 @@ export class Conversations {
         ...(route.model ? { model: route.model } : {}),
       });
       live = { id, userId: user.id, session, transcript, connection, generation };
-      this.#live.set(id, live);
-      for (const event of early) this.#apply(live, event);
+      const started = live;
+      this.#live.set(id, started);
+      for (const event of early) this.#apply(started, event);
       this.#publish(user.id, { type: "conversation", conversation: this.#summary(record) });
       log.info("Started a conversation", { user: user.id, conversation: id, route: route.route, environment: route.environment });
-      const messageId = await this.#deliver(user, live, prompt);
+      let messageId: string;
+      try {
+        messageId = await this.#deliver(user, started, prompt);
+      } catch (error) {
+        // The first message never went through: leave no empty conversation behind, here or on the platform.
+        await this.#discard(user, started);
+        throw error;
+      }
       delivered = true;
       return { conversation: this.#summary(this.#deps.store.getConversation(user.id, id) ?? record), messageId };
     } finally {
@@ -172,6 +189,7 @@ export class Conversations {
     try {
       let live = await this.#ensureLive(user, record);
       if (live.transcript.busy) throw busy();
+      const known = userMessages(live.transcript).length;
       let messageId: string;
       try {
         messageId = await this.#deliver(user, live, prompt);
@@ -181,7 +199,11 @@ export class Conversations {
         log.warn("Sending failed; reconnecting and trying once more", { user: user.id, conversation: id, error: error.message });
         await this.release(user.id);
         live = await this.#ensureLive(user, record);
-        messageId = await this.#deliver(user, live, prompt);
+        // The first try may have reached the runtime before the connection dropped: never send the same message twice.
+        const arrived = userMessages(live.transcript)
+          .slice(known)
+          .find((item) => item.text === prompt);
+        messageId = arrived ? arrived.id : await this.#deliver(user, live, prompt);
       }
       delivered = true;
       this.#deps.store.touchConversation(user.id, id);
@@ -194,45 +216,58 @@ export class Conversations {
 
   async stop(user: UserRecord, id: string): Promise<void> {
     this.#owned(user, id);
-    const live = this.#live.get(id);
+    // A conversation that is still being reopened (after a refresh or a restart) is stopped once it's open.
+    const live = this.#live.get(id) ?? (await this.#opening.get(id)?.promise.catch(() => undefined));
     if (!live?.transcript.busy) return;
+    const turn = live.transcript.turn;
     try {
       await live.session.abort();
     } catch (error) {
       throw this.#fail(user, error, live.connection);
     }
-    // The runtime doesn't always report a stop; settle the conversation if nothing arrives soon.
+    // The runtime doesn't always report a stop; settle the stopped turn (never a newer one) if nothing arrives soon.
     setTimeout(() => {
-      if (this.#live.get(id) === live && live.transcript.busy) this.#changes(live, live.transcript.settle("Stopped."));
+      if (this.#live.get(id) === live && live.transcript.busy && live.transcript.turn === turn) this.#changes(live, live.transcript.settle("Stopped."));
     }, 4_000).unref();
   }
 
   async delete(user: UserRecord, id: string): Promise<void> {
     const record = this.#owned(user, id);
-    const live = this.#live.get(id);
-    if (live) await this.#drop(live);
+    // A reopen under way for this conversation lets its session go when it sees this (see #resume).
+    this.#deleting.add(id);
     try {
-      const person = await this.#deps.people.person(user);
-      const connection = await this.#deps.platform.open(person);
-      await connection.deleteSession(record.id);
-    } catch (error) {
-      const managed = managedErrorOf(error);
-      // Already gone from the platform: finish deleting it here.
-      if (managed?.code !== "not_found") throw this.#fail(user, error);
+      const live = this.#live.get(id);
+      if (live) await this.#drop(live);
+      try {
+        const person = await this.#deps.people.person(user);
+        const connection = await this.#open(user, person);
+        await connection.deleteSession(record.id);
+      } catch (error) {
+        const managed = managedErrorOf(error);
+        // Already gone from the platform: finish deleting it here.
+        if (managed?.code !== "not_found") throw this.#fail(user, error);
+      }
+      this.#deps.store.deleteConversation(user.id, id);
+    } finally {
+      this.#deleting.delete(id);
     }
-    this.#deps.store.deleteConversation(user.id, id);
     this.#publish(user.id, { type: "conversation.deleted", id });
     log.info("Deleted a conversation", { user: user.id, conversation: id });
   }
 
   /** Lets go of everything live for a person (they signed out, or went idle). Sessions keep running on the platform. */
   async release(userId: string): Promise<void> {
+    this.#epochs.set(userId, this.#epoch(userId) + 1);
+    this.#connected.delete(userId);
+    // Reopens already under way finish on their own and let their sessions go; new requests start afresh.
+    for (const [id, pending] of this.#opening) if (pending.userId === userId) this.#opening.delete(id);
     const mine = [...this.#live.values()].filter((live) => live.userId === userId);
     await Promise.all(mine.map((live) => this.#drop(live)));
     await this.#deps.platform.release(userId);
   }
 
   async close(): Promise<void> {
+    this.#closed = true;
     clearInterval(this.#watch);
     await Promise.all([...this.#live.values()].map((live) => this.#drop(live)));
     await this.#deps.platform.closeAll();
@@ -294,17 +329,30 @@ export class Conversations {
   async #ensureLive(user: UserRecord, record: ConversationRecord): Promise<Live> {
     const live = this.#live.get(record.id);
     if (live) return live;
-    let opening = this.#opening.get(record.id);
-    if (!opening) {
-      opening = this.#resume(user, record).finally(() => this.#opening.delete(record.id));
-      this.#opening.set(record.id, opening);
-    }
-    return opening;
+    const pending = this.#opening.get(record.id);
+    if (pending) return pending.promise;
+    const promise: Promise<Live> = this.#resume(user, record).finally(() => {
+      if (this.#opening.get(record.id)?.promise === promise) this.#opening.delete(record.id);
+    });
+    this.#opening.set(record.id, { userId: user.id, promise });
+    return promise;
+  }
+
+  #epoch(userId: string): number {
+    return this.#epochs.get(userId) ?? 0;
+  }
+
+  /** Opens (or reuses) a person's connection, noted so it's let go once they're idle, with or without conversations. */
+  async #open(user: UserRecord, person: Person): Promise<PersonalConnection> {
+    const connection = await this.#deps.platform.open(person);
+    this.#connected.set(user.id, Date.now());
+    return connection;
   }
 
   async #resume(user: UserRecord, record: ConversationRecord): Promise<Live> {
+    const epoch = this.#epoch(user.id);
     const person = await this.#deps.people.person(user);
-    const connection = await this.#deps.platform.open(person).catch((error: unknown) => Promise.reject(this.#fail(user, error)));
+    const connection = await this.#open(user, person).catch((error: unknown) => Promise.reject(this.#fail(user, error)));
     if (connection.route.environment !== record.environment) {
       throw new AppError("route_changed", "This conversation started in a different place than your account uses now, so Front Desk can't continue it.", 409);
     }
@@ -330,6 +378,13 @@ export class Conversations {
         throw new AppError("gone", "This conversation no longer exists on Managed Copilot.", 410);
       }
       throw this.#fail(user, error, connection);
+    }
+    // Deleted, signed out, or shutting down while this was reopening: let the session go rather than keep it live.
+    const gone = this.#deleting.has(record.id) || !this.#deps.store.getConversation(user.id, record.id);
+    if (gone || this.#closed || this.#epoch(user.id) !== epoch) {
+      await session.disconnect().catch(() => undefined);
+      if (gone) throw notFound();
+      throw new AppError("platform_unavailable", "Front Desk reconnected to Managed Copilot while opening this conversation. Try again.", 503);
     }
     transcript.replaceAll(history);
     live = { id: record.id, userId: user.id, session, transcript, connection, generation };
@@ -371,6 +426,14 @@ export class Conversations {
     await live.session.disconnect().catch(() => undefined);
   }
 
+  /** Removes a conversation whose first message never went through, here and on the platform. */
+  async #discard(user: UserRecord, live: Live): Promise<void> {
+    await this.#drop(live);
+    await live.connection.deleteSession(live.id).catch(() => undefined);
+    this.#deps.store.deleteConversation(user.id, live.id);
+    this.#publish(user.id, { type: "conversation.deleted", id: live.id });
+  }
+
   /** Describes a failure for the person, and handles one that means their GitHub sign-in ended. */
   #fail(user: UserRecord, error: unknown, connection?: PersonalConnection): AppError {
     const who = { kind: user.kind === "github" ? ("github" as const) : ("app" as const), ...(user.githubLogin ? { login: user.githubLogin } : {}) };
@@ -396,8 +459,8 @@ export class Conversations {
     this.#publish(user.id, { type: "billing", billing: this.#deps.people.billing(user) });
   }
 
-  /** Every 30 s: report turns that stopped arriving, and let go of people who left. */
-  async #check(): Promise<void> {
+  /** Reports turns that stopped arriving, and lets go of people who left. The watch runs it every 30 s. */
+  async sweep(): Promise<void> {
     const now = Date.now();
     const byUser = new Map<string, Live[]>();
     for (const live of this.#live.values()) {
@@ -405,6 +468,14 @@ export class Conversations {
         this.#changes(live, live.transcript.settle("This answer stopped arriving. Send your message again."));
       }
       byUser.set(live.userId, [...(byUser.get(live.userId) ?? []), live]);
+    }
+    // Connected with nothing open (they deleted their last conversation, say): let go once they've left and gone quiet.
+    for (const [userId, openedAt] of [...this.#connected]) {
+      if (byUser.has(userId) || [...this.#opening.values()].some((pending) => pending.userId === userId)) continue;
+      if (this.#deps.hub.count(userId) === 0 && now - openedAt > this.#deps.config.idleCloseMs) {
+        log.info("Closing an idle person's connection", { user: userId, conversations: 0 });
+        await this.release(userId).catch(() => undefined);
+      }
     }
     for (const [userId, lives] of byUser) {
       const quiet = lives.every((live) => !live.transcript.busy && now - live.transcript.lastActivity > this.#deps.config.idleCloseMs);
@@ -419,8 +490,7 @@ export class Conversations {
         await connection.ping();
       } catch (error) {
         log.warn("Lost a person's connection to Managed Copilot; it reconnects on their next request", { user: userId, error: (error as Error).message });
-        await Promise.all(lives.map((live) => this.#drop(live)));
-        await this.#deps.platform.release(userId).catch(() => undefined);
+        await this.release(userId).catch(() => undefined);
         for (const live of lives) {
           const record = this.#deps.store.getConversation(userId, live.id);
           if (record) this.#publish(userId, { type: "conversation", conversation: this.#summary(record) });

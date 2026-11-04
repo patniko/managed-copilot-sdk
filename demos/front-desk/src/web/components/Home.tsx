@@ -1,8 +1,8 @@
 import { CloudIcon, CopilotIcon, LightBulbIcon, LockIcon } from "@primer/octicons-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UserView } from "../../shared/types.js";
 import { greeting } from "../lib/format.js";
-import { startConversation, useStore } from "../lib/store.js";
+import { refreshOptions, startConversation, useStore } from "../lib/store.js";
 import { Composer, type ComposerHandle } from "./Composer.js";
 import { BillingChip } from "./Header.js";
 import { Callout, Spinner } from "./ui/index.js";
@@ -22,6 +22,13 @@ export function Home({ user }: { readonly user: UserView }) {
   const composer = useRef<ComposerHandle>(null);
   const blocked = user.kind !== "github" && appUsers && !appUsers.available ? appUsers.reason : undefined;
   const outOfMessages = user.billing.remainingToday === 0;
+
+  // Front Desk may still be connecting to Managed Copilot: check again until people without GitHub can chat.
+  useEffect(() => {
+    if (!blocked) return;
+    const timer = setInterval(() => void refreshOptions(), 10_000);
+    return () => clearInterval(timer);
+  }, [blocked]);
 
   const submit = async (prompt = text) => {
     setText(prompt);
