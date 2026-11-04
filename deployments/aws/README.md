@@ -111,7 +111,7 @@ flowchart LR
 | Platform identity | User-assigned managed identity + Azure RBAC | ECS task role + IAM policies | Gateway needs `ecs:RegisterTaskDefinition`/`DeregisterTaskDefinition`/`RunTask`/`StopTask`/`DescribeTasks`/`TagResource`, `iam:PassRole` for the sandbox roles, and EFS access point create/delete, all scoped by tag or ARN |
 | Secrets (durable key, vault key, app token) | Secure parameters / Container Apps secrets | Secrets Manager, referenced from task definitions | Never in logs, command lines, or the sandbox task definition |
 | Logs | Log Analytics | CloudWatch Logs | Gateway logger `redact` unchanged |
-| Infrastructure as code | C# hosting integration (`deploy/azure/hosting`) | `Aspire.Hosting.AWS` (CDK → CloudFormation) or our own CDK app; see [open question 1](#open-questions) | |
+| Infrastructure as code | C# hosting integration (`deployments/azure/hosting`) | `Aspire.Hosting.AWS` (CDK → CloudFormation) or our own CDK app; see [open question 1](#open-questions) | |
 
 ### Isolated placement options
 
@@ -152,7 +152,7 @@ Option A notes:
   `dockerSecurityOptions`, so the AWS entrypoint sets `no_new_privs` itself (for example with `setpriv`) before it
   executes sandboxd; sandboxd already starts every workload process with `no_new_privs` and empty capability sets.
 - **Images.** `aspire deploy` builds the same base, environment, and `packages.system` layers plus an AWS layer
-  (`deploy/aws/sandbox`: the entrypoint above, and seeding empty storage on first boot) and pushes them to ECR.
+  (`deployments/aws/sandbox`: the entrypoint above, and seeding empty storage on first boot) and pushes them to ECR.
 - **Sizes.** Map small / medium / large to Fargate CPU and memory pairs (to confirm). EFS has no per-directory quota,
   so workspace size limits need enforcement in sandboxd or a documented limit.
 - **Warm sandboxes.** `capabilities.warm = false`, like Azure.
@@ -172,10 +172,10 @@ Adopting this plan amends the spec, which is the customer contract:
 
 | Area | Change | Owner today |
 | --- | --- | --- |
-| `deploy/aws/**` (this folder) | AWS package: infrastructure, sandbox image layer, qualification probes, live checks | new **aws** workstream |
+| `deployments/aws/**` (this folder) | AWS package: infrastructure, sandbox image layer, qualification probes, live checks | new **aws** workstream |
 | `packages/aspire/src/publish/**` | Split into cloud-neutral publish logic plus `azure/` and `aws/` targets chosen by `Deploy:Target` | azure |
 | gateway `modules/sandbox/providers/aws/**` | `SandboxProvider` over ECS RunTask and EFS access points; `MANAGED_COPILOT_SANDBOX_PROVIDER=aws` | new **aws** workstream |
-| `deploy/azure/src/lease`, `deploy/azure/src/probe` | Cloud-neutral already; move to a shared package (for example `deploy/common`) used by both targets' images | azure |
+| `deployments/azure/src/lease`, `deployments/azure/src/probe` | Cloud-neutral already; move to a shared package (for example `deployments/common`) used by both targets' images | azure |
 | `platform/gateway/Dockerfile`, `demos/*/Dockerfile` | An `aws` stage beside `azure`, or one neutral stage | azure |
 | `packages/cli` `deploy` / `access` | `--target aws`, AWS CLI checks, ALB allowlist updates instead of Container Apps ingress rules | attach |
 | `docs/deployment.md`, `docs/architecture.md`, the spec | AWS sections, capability matrix column, cost, teardown | azure / aws |
@@ -198,7 +198,7 @@ and reviews from both Argon and Astra, as for Azure.
 
 | # | Question | Leaning | Status |
 | --- | --- | --- | --- |
-| 1 | IaC: the official `Aspire.Hosting.AWS` integration (CDK, preview, C#) through a hosting project like `deploy/azure/hosting`, or our own TypeScript CDK app run as an `aspire deploy` pipeline step? Does the AWS integration work from our TypeScript AppHost, and does it cover VPC, EFS, NLB, and IAM? | Try the official integration in A0; fall back to our own CDK app | Open |
+| 1 | IaC: the official `Aspire.Hosting.AWS` integration (CDK, preview, C#) through a hosting project like `deployments/azure/hosting`, or our own TypeScript CDK app run as an `aspire deploy` pipeline step? Does the AWS integration work from our TypeScript AppHost, and does it cover VPC, EFS, NLB, and IAM? | Try the official integration in A0; fall back to our own CDK app | Open |
 | 2 | HTTPS without a customer domain: an ALB needs an ACM certificate for a domain we control. Options: require a Route 53 hosted zone; or put CloudFront (default `*.cloudfront.net` certificate, WebSockets supported, VPC origin) in front of the ALB and enforce `app-allowed-ips` with WAF. Check in A0 whether ECS Express Mode offers an AWS-managed HTTPS URL | CloudFront by default; a customer domain when provided | Open |
 | 3 | Sandbox storage: EFS access points (A) or EBS snapshots (B)? Decide on measured `npm install` / `pip install` times and resume latency | A | Open |
 | 4 | Fargate start latency for sandboxes: is the default 60 s `startTimeoutMs` enough, and does SOCI help with our image sizes? | Measure in A0 | Open |
