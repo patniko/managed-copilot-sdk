@@ -92,7 +92,7 @@ function SidebarContent({
       <nav aria-label="Work order list" className="min-h-0 flex-1 overflow-y-auto border-t border-line-muted px-2 pt-2 pb-4">
         {summaries.length === 0 ? (
           <EmptyState icon={WorkflowIcon} title="No work orders yet" size="sm">
-            Pick a template to watch the factory build something.
+            Pick a template to start one.
           </EmptyState>
         ) : (
           <ul className="NavList">

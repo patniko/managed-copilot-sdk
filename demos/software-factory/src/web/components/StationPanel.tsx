@@ -166,7 +166,7 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
           ) : null}
         </div>
       </div>
-      {showJump ? (
+      {showJump && live ? (
         <button
           type="button"
           onClick={jump}
