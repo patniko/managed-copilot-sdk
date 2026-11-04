@@ -239,7 +239,7 @@ export class AttachRelay {
     const token = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? "")?.[1];
     const { owner, sessionId } = this.#options;
     if (!token) {
-      return { code: "authentication_required", message: `Copilot CLI did not send a GitHub credential for attachment. Check that it is signed in as @${owner.login} and that Managed Copilot is up to date, then attach to ${sessionId} again.` };
+      return { code: "authentication_required", message: `Copilot CLI did not send a GitHub credential for attachment to session ${sessionId}.` };
     }
     const key = createHash("sha256").update(token).digest("hex");
     let lookup = this.#verifying.get(key);
