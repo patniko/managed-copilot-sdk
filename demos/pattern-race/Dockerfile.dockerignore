@@ -1,0 +1,19 @@
+# Build context for demos/pattern-race/Dockerfile (the repository root): only what the Pattern Race build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!libraries/protocol/**
+!libraries/sdk/**
+!libraries/github-theme/**
+!demos/pattern-race/**
+!deployments/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/test
+demos/pattern-race/docs
+deployments/azure/hosting
+deployments/azure/sandbox

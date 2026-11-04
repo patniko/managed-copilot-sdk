@@ -58,13 +58,10 @@ function deadline<T>(promise: Promise<T>, ms: number, what: string): Promise<T> 
 
 /** Plain words for why connecting failed. */
 export function describeConnectError(error: unknown): string {
-  if (isManagedCopilotError(error)) {
-    if (error.code === "authentication_required") return "Sign in to GitHub (gh auth login) or set GH_TOKEN, then Pattern Race connects by itself.";
-    if (error.code === "forbidden") return "This GitHub account can't use this Managed Copilot deployment.";
-    return error.message;
-  }
+  if (isManagedCopilotError(error, "authentication_required")) return "Sign in to GitHub (gh auth login) or set GH_TOKEN, then Pattern Race connects by itself.";
+  if (isManagedCopilotError(error, "forbidden")) return "This GitHub account can't use this Managed Copilot deployment.";
   const message = (error as Error)?.message ?? String(error);
-  if (/ECONNREFUSED|fetch failed|ENOTFOUND|did not answer/i.test(message)) return "Managed Copilot isn't reachable yet. Start it with `aspire run`, or set MANAGED_COPILOT_URL.";
+  if (/cannot reach|ECONNREFUSED|fetch failed|ENOTFOUND|did not answer/i.test(message)) return "Managed Copilot isn't reachable yet. Start it with `aspire run`, or set MANAGED_COPILOT_URL.";
   return message;
 }
 

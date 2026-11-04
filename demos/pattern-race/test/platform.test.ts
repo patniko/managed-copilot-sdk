@@ -70,6 +70,9 @@ describe("connecting", () => {
   it("explains failures in plain words", () => {
     expect(describeConnectError(new ManagedCopilotError("authentication_required", "x"))).toMatch(/gh auth login/);
     expect(describeConnectError(new Error("fetch failed"))).toMatch(/aspire run/);
+    expect(describeConnectError(new ManagedCopilotError("upstream_unavailable", "Cannot reach the Managed Copilot deployment at http://localhost:8899: fetch failed"))).toBe(
+      "Managed Copilot isn't reachable yet. Start it with `aspire run`, or set MANAGED_COPILOT_URL.",
+    );
     expect(describeConnectError(new ManagedCopilotError("forbidden", "x"))).toBe("This GitHub account can't use this Managed Copilot deployment.");
   });
 

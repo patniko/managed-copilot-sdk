@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentCount, bests, elapsedMs, formatClock, formatCount, ordinal, premiumRequests, sandboxCount } from "../src/shared/score.js";
+import { agentCount, bests, elapsedMs, formatClock, formatCount, ordinal, plural, premiumRequests, sandboxCount } from "../src/shared/score.js";
 import type { LaneRun, RaceSnapshot } from "../src/shared/types.js";
 
 function run(fields: Partial<LaneRun> & Pick<LaneRun, "lane">): LaneRun {
@@ -47,5 +47,6 @@ describe("score", () => {
     expect([formatClock(undefined), formatClock(7_449), formatClock(75_000), formatClock(3_600_000)]).toEqual(["0:00.0", "0:07.4", "1:15.0", "60:00.0"]);
     expect([formatCount(1), formatCount(2.5), formatCount(1 / 3)]).toEqual(["1", "2.5", "0.33"]);
     expect([1, 2, 3, 4, 11, 12, 13, 21, 22].map(ordinal)).toEqual(["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd"]);
+    expect([plural(1, "sandbox", "sandboxes"), plural(0, "sandbox", "sandboxes"), plural(1.5, "request", "requests")]).toEqual(["1 sandbox", "0 sandboxes", "1.5 requests"]);
   });
 });

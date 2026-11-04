@@ -53,3 +53,8 @@ export function ordinal(place: number): string {
   if (tens >= 11 && tens <= 13) return `${place}th`;
   return `${place}${["th", "st", "nd", "rd"][place % 10] ?? "th"}`;
 }
+
+/** `1 sandbox`, `2 sandboxes`. */
+export function plural(count: number, one: string, many: string): string {
+  return `${formatCount(count)} ${count === 1 ? one : many}`;
+}

@@ -1,7 +1,7 @@
 import { TrophyIcon } from "@primer/octicons-react";
 import { jobById } from "../../shared/jobs.js";
 import { laneById } from "../../shared/lanes.js";
-import { agentCount, bests, elapsedMs, formatClock, formatCount, ordinal, premiumRequests, sandboxCount } from "../../shared/score.js";
+import { agentCount, bests, elapsedMs, formatClock, formatCount, ordinal, plural, premiumRequests, sandboxCount } from "../../shared/score.js";
 import type { LaneRun, RaceSnapshot } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { openLane, useStore } from "../lib/store.js";
@@ -107,7 +107,7 @@ function Row({ race, run, now, longest, best }: { readonly race: RaceSnapshot; r
         <span className={cx("hidden text-right tabular-nums sm:block", highlight(requests, best.requests))}>{run.status === "skipped" ? "–" : formatCount(requests)}</span>
         <span className={cx("col-start-3 row-start-1 text-right font-semibold sm:col-start-auto sm:row-start-auto sm:text-left", result.tone)}>{result.text}</span>
         <span className="col-span-3 text-xs text-fg-muted sm:hidden">
-          {run.status === "skipped" ? "" : `${sandboxes} sandboxes · ${agentCount(run)} agents · ${formatCount(requests)} requests`}
+          {run.status === "skipped" ? "" : [plural(sandboxes, "sandbox", "sandboxes"), plural(agentCount(run), "agent", "agents"), plural(requests, "request", "requests")].join(" · ")}
         </span>
       </button>
     </li>
