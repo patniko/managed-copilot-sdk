@@ -115,6 +115,7 @@ All three run under `aspire run` with real models and deploy to Azure with the s
 | [AI software factory](demos/software-factory/README.md) | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
 | [Long-running assistant](demos/assistant/README.md) | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 | [Dispatch](demos/dispatch/README.md) | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
+| [Repo Doctor](demos/repo-doctor/README.md) | Paste a repository: one sandbox clones it, Copilot fixes its failing tests, and a live strip shows the hosts its network rules allowed and blocked |
 
 ## Deploy to Azure
 
