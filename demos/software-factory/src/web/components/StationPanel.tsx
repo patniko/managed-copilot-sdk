@@ -2,9 +2,11 @@ import {
   ArrowDownIcon,
   CheckCircleFillIcon,
   CheckCircleIcon,
-  ChevronDownIcon,
+  ChevronRightIcon,
   FileDiffIcon,
-  InboxIcon,
+  InfoIcon,
+  NoteIcon,
+  SyncIcon,
   TerminalIcon,
   XIcon,
 } from "@primer/octicons-react";
@@ -24,25 +26,35 @@ import {
   shortImage,
   summarizeNetwork,
 } from "../lib/format.js";
-import { isStationActive, stationElapsed, stationStatusMeta } from "../lib/stations.js";
+import { isReusedWorker, isStationActive, stationElapsed, stationStatusMeta } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
 import type { Tone } from "../lib/tone.js";
 import { ActivityStream } from "./ActivityStream.js";
 import { CoordinatorDecisions } from "./CoordinatorDecisions.js";
-import { NetworkChip, useEnvironment } from "./StationCard.js";
+import { NetworkChip, RoundDots, stationPlacement, useEnvironment } from "./StationCard.js";
 import { Button, IconButton } from "./ui/Button.js";
 import { Chip, StatusIcon } from "./ui/Chip.js";
 import { CopyButton } from "./ui/CopyButton.js";
 import { Callout } from "./ui/Feedback.js";
+import { Tooltip } from "./ui/Tooltip.js";
 import { MarkdownView } from "./viewers/MarkdownView.js";
+
 /** Keeps a scroll container pinned to the bottom while new content arrives, unless the user scrolls up. */
 function useStickToBottom(
   scrollRef: RefObject<HTMLDivElement | null>,
   contentRef: RefObject<HTMLDivElement | null>,
   startAtBottom: boolean,
-): { readonly showJump: boolean; readonly hasNew: boolean; readonly jump: () => void; readonly pin: () => void } {
+): {
+  readonly showJump: boolean;
+  readonly hasNew: boolean;
+  readonly jump: () => void;
+  readonly pin: () => void;
+  readonly unpin: () => void;
+} {
   const pinned = useRef(startAtBottom);
+  /** The next size change is the user's own (opening details), not new output. */
+  const ownResize = useRef(false);
   const [away, setAway] = useState(false);
   const [hasNew, setHasNew] = useState(false);
 
@@ -69,7 +81,9 @@ function useStickToBottom(
     };
     const observer = new ResizeObserver(() => {
       const height = content.offsetHeight;
-      if (pinned.current) {
+      if (ownResize.current) {
+        ownResize.current = false;
+      } else if (pinned.current) {
         scroller.scrollTop = scroller.scrollHeight;
         lastTop = scroller.scrollTop;
       } else if (height > lastHeight && distance() > 40) {
@@ -105,20 +119,26 @@ function useStickToBottom(
     scroller.scrollTop = scroller.scrollHeight;
   }, [scrollRef]);
 
-  return { showJump: away || (hasNew && !pinned.current), hasNew, jump, pin };
+  /** Stops following output, so opening something near the top doesn't scroll it away. */
+  const unpin = useCallback(() => {
+    pinned.current = false;
+    ownResize.current = true;
+  }, []);
+
+  return { showJump: away || (hasNew && !pinned.current), hasNew, jump, pin, unpin };
 }
 
 const PANEL_CLASS = "Box relative flex min-w-0 flex-col overflow-clip xl:h-full";
 const SCROLL_CLASS = "min-h-0 flex-1 overflow-y-auto overscroll-contain max-xl:max-h-[80vh]";
 
-/** The selected station, like a GitHub Actions job: header, details, review rounds, and the live activity log. */
+/** The selected station, like a GitHub Actions job: header, a one-line summary that opens the details, then its work. */
 export function StationPanel({ workOrder, station }: { readonly workOrder: WorkOrder; readonly station: Station }) {
   // Follow live output for stations that are running (or about to); start the others at the top (details, reviews).
   const live = isStationActive(station.status) || station.status === "waiting";
   const [startAtBottom] = useState(live);
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const { showJump, hasNew, jump, pin } = useStickToBottom(scroller, content, startAtBottom);
+  const { showJump, hasNew, jump, pin, unpin } = useStickToBottom(scroller, content, startAtBottom);
   const wasLive = useRef(live);
   useEffect(() => {
     if (live && !wasLive.current) pin();
@@ -127,15 +147,15 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
 
   return (
     <section aria-label={`${station.title} station`} className={PANEL_CLASS}>
-      <PanelHeader station={station} title={station.kind === "coordinate" ? "Coordinator decisions" : undefined} />
+      <PanelHeader station={station} workOrder={workOrder} />
       <div ref={scroller} className={SCROLL_CLASS}>
-        <div ref={content} className="space-y-6 p-4">
+        <div ref={content} className="space-y-5 p-4">
+          <Details workOrder={workOrder} station={station} onToggle={unpin} />
           {station.kind === "coordinate" ? <CoordinatorDecisions workOrder={workOrder} /> : null}
-          <Details workOrder={workOrder} station={station} />
           {station.kind === "review" ? <ReviewHistory station={station} /> : null}
           {station.acceptedWithFindings ? (
             <Callout tone="warning" compact title="Accepted with open findings">
-              The reviewer still had findings after the last allowed round, so the factory accepted the work and moved on.
+              Findings remained after the last review round.
             </Callout>
           ) : null}
           {station.error ? (
@@ -143,16 +163,26 @@ export function StationPanel({ workOrder, station }: { readonly workOrder: WorkO
               <span>{station.error.message}</span> <code className="inline-code">{station.error.code}</code>
             </Callout>
           ) : null}
-          {station.kind !== "coordinate" ? <section aria-label="Activity">
-            <h3 className="text-sm font-semibold">{station.worker ? "Worker reports" : "Activity"}</h3>
-            {station.worker ? <p className="mt-1 text-xs text-fg-muted">The factory observes this worker through the platform, without attaching a client that would take over its approvals.</p> : null}
-            <div className="mt-2">
-              <ActivityStream workOrder={workOrder} station={station} />
-            </div>
-          </section> : null}
+          {station.kind !== "coordinate" ? (
+            <section aria-labelledby={`activity-${station.id}`}>
+              <h3 id={`activity-${station.id}`} className="flex items-center gap-1.5 text-sm font-semibold">
+                Activity
+                {station.worker ? (
+                  <Tooltip content="The factory follows this worker through the platform, without attaching to it.">
+                    <span tabIndex={0} className="inline-flex rounded-md text-fg-muted" aria-label="Followed through the platform">
+                      <InfoIcon size={16} />
+                    </span>
+                  </Tooltip>
+                ) : null}
+              </h3>
+              <div className="mt-2">
+                <ActivityStream workOrder={workOrder} station={station} />
+              </div>
+            </section>
+          ) : null}
         </div>
       </div>
-      {showJump ? (
+      {showJump && live ? (
         <button
           type="button"
           onClick={jump}
@@ -171,7 +201,7 @@ type AttachState =
   | { readonly sessionId: string; readonly status: "pending" }
   | { readonly sessionId: string; readonly status: "done"; readonly result: AttachResponse; readonly failed: boolean };
 
-function PanelHeader({ station, title }: { readonly station: Station; readonly title?: string }) {
+function PanelHeader({ station, workOrder }: { readonly station: Station; readonly workOrder: WorkOrder }) {
   const meta = stationStatusMeta(station);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
@@ -183,6 +213,8 @@ function PanelHeader({ station, title }: { readonly station: Station; readonly t
   const sessionDeleted = station.sessionState === "deleted";
   // A retried or replaced station has a new session: an earlier attach result no longer applies.
   const attach = attachState?.sessionId === sessionId ? attachState : undefined;
+  const rounds = station.kind === "build" || station.kind === "review";
+  const detail = station.detail && station.detail !== meta.label ? station.detail : undefined;
 
   const onAttach = async (): Promise<void> => {
     if (!sessionId) return;
@@ -204,26 +236,42 @@ function PanelHeader({ station, title }: { readonly station: Station; readonly t
   return (
     <header className="border-b border-line bg-canvas-muted px-4 py-3">
       <div className="flex items-start gap-2">
-        <StatusIcon meta={meta} className="mt-1" />
+        <StatusIcon meta={meta} className="mt-1 shrink-0" />
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-base font-semibold" title={station.title}>
-            {title ?? station.title}
-          </h2>
-          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
-            <span>{meta.label}</span>
-            {station.round > 1 ? <Chip tone="warning">Round {station.round}</Chip> : null}
+          <div className="flex items-baseline gap-2">
+            <h2 className="min-w-0 truncate text-base font-semibold" title={station.title}>
+              {station.title}
+            </h2>
             {elapsed !== undefined ? (
-              <span className="font-mono tabular-nums" title={active ? "Elapsed" : "Duration"}>
+              <span className="ml-auto shrink-0 font-mono text-xs text-fg-muted tabular-nums" title={active ? "Elapsed" : "Duration"}>
                 {active ? formatClock(elapsed) : formatDuration(elapsed)}
               </span>
             ) : null}
+          </div>
+          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-fg-muted">
+            <span className="text-fg">{meta.label}</span>
+            {rounds && station.round > 0 ? (
+              <span className="inline-flex items-center gap-1.5">
+                <RoundDots round={station.round} max={workOrder.maxReviewRounds} active={active} />
+                Round {station.round} of {Math.max(workOrder.maxReviewRounds, station.round)}
+              </span>
+            ) : null}
+            {isReusedWorker(station) ? (
+              <span className="inline-flex items-center gap-0.5 font-semibold text-fg-accent">
+                <SyncIcon size={12} />
+                Reused
+              </span>
+            ) : null}
           </p>
+          {detail ? (
+            <p className="mt-0.5 truncate text-xs text-fg-muted" title={detail}>
+              {detail}
+            </p>
+          ) : null}
         </div>
       </div>
-      {station.detail && station.detail !== meta.label ? <p className="mt-2 text-fg-muted">{station.detail}</p> : null}
-      {station.kind === "coordinate" ? <p className="mt-1 text-xs text-fg-muted">{station.environment} · {station.model}</p> : null}
       {sessionId && attachAllowed ? (
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 pl-6">
           <Button
             size="sm"
             icon={TerminalIcon}
@@ -314,8 +362,7 @@ function Mono({ children, title }: { readonly children: ReactNode; readonly titl
   );
 }
 
-function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readonly station: Station }) {
-  const [open, setOpen] = useState(station.kind !== "coordinate");
+function Details({ workOrder, station, onToggle }: { readonly workOrder: WorkOrder; readonly station: Station; readonly onToggle: () => void }) {
   const environment = useEnvironment(station.environment);
   const active = isStationActive(station.status);
   const now = useNow(1000, active);
@@ -324,168 +371,180 @@ function Details({ workOrder, station }: { readonly workOrder: WorkOrder; readon
   const elapsed = stationElapsed(station, now);
   const usage = station.usage;
   const model = station.model ?? environment?.model;
+  const placement = stationPlacement(station);
+  const summary = [station.worker?.name ?? station.environment, sandbox ? shortId(sandbox.id, 8) : undefined, `@${station.agent}`, model]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
-    <section aria-label="Details">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="-mx-1 flex items-center gap-1 rounded-md px-1 text-left text-sm font-semibold hover:bg-control-transparent-hover"
+    <details className="group">
+      <summary
+        onClick={onToggle}
+        className="-mx-1 flex cursor-pointer list-none items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-fg-muted select-none hover:bg-control-transparent-hover [&::-webkit-details-marker]:hidden"
+        title={placement.label}
       >
-        <ChevronDownIcon size={16} className={cx("text-fg-muted transition-transform duration-100", !open && "-rotate-90")} />
-        Details
-      </button>
-      {open ? (
-        <dl className="mt-2 grid grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2">
-          <Row label="Session">
-            {station.sessionId ? (
-              <span className="flex min-w-0 flex-wrap items-center gap-1">
-                <Mono title={station.sessionId}>{shortId(station.sessionId, 14)}</Mono>
-                <CopyButton text={station.sessionId} label="Copy session id" />
-                {station.sessionState ? (
-                  <Chip tone={sessionStateTone(station.sessionState)} title="Session state on the platform">
-                    {station.sessionState}
-                  </Chip>
-                ) : null}
-              </span>
-            ) : (
-              <span className="text-fg-muted">Not started</span>
-            )}
-          </Row>
-          {station.turn ? (
-            <Row label="Turn">
-              <span>
-                {TURN_LABELS[station.turn.kind] ?? station.turn.kind}
-                <span className="text-fg-muted">
-                  {" "}
-                  · round {station.turn.round} ·{" "}
-                  {station.turn.completedAt
-                    ? `finished ${formatRelative(station.turn.completedAt, now)}`
-                    : `sent ${formatRelative(station.turn.sentAt, now)}`}
-                </span>
-              </span>
-            </Row>
-          ) : null}
-          <Row label="Environment">
-            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <Mono>{station.environment || "—"}</Mono>
-              {environment ? <Chip>{environment.type === "orchestrator" ? "Orchestrator" : environment.type === "shared" ? "Shared" : "Isolated"}</Chip> : null}
-            </span>
-          </Row>
-          <Row label="Placement">{station.placement === "sandbox" ? "Fresh isolated sandbox" : "Shared environment (no sandbox)"}</Row>
-          {station.worker ? <Row label="Worker"><span className="font-mono text-xs">{station.worker.name}</span> <Chip tone="success">created by coordinator</Chip>{station.round > station.worker.createdRound ? <Chip tone="accent">reused for round {station.round}</Chip> : null}</Row> : null}
-          <Row label="Agent">
-            <span>
-              @{station.agent} <span className="text-fg-muted">· {station.role}</span>
-            </span>
-          </Row>
-          {model ? (
-            <Row label="Model">
-              <Mono title={model}>{model}</Mono>
-            </Row>
-          ) : null}
-          {sandbox ? (
-            <>
-              <Row label="Sandbox">
-                <span className="flex min-w-0 items-center gap-1">
-                  <Mono title={sandbox.id}>{shortId(sandbox.id, 14)}</Mono>
-                  <CopyButton text={sandbox.id} label="Copy sandbox id" />
-                </span>
-              </Row>
-              <Row label="Size">{formatSandboxSize(sandbox.size)}</Row>
-              <Row label="Sandbox state">
-                <Chip tone={sandbox.state === "running" || sandbox.state === "ready" ? "accent" : "plain"}>{sandbox.state}</Chip>
-              </Row>
-              {sandbox.image ? (
-                <Row label="Image">
-                  <span className="block truncate">
-                    <Mono title={sandbox.image}>{shortImage(sandbox.image)}</Mono>
-                  </span>
-                </Row>
+        <ChevronRightIcon size={16} className="shrink-0 transition-transform duration-100 group-open:rotate-90" />
+        <placement.icon size={16} className={cx("shrink-0", placement.className)} />
+        <span className="sr-only">Details:</span>
+        <span className="min-w-0 truncate">{summary}</span>
+      </summary>
+      <dl className="mt-3 grid grid-cols-[7rem_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2">
+        <Row label="Session">
+          {station.sessionId ? (
+            <span className="flex min-w-0 flex-wrap items-center gap-1">
+              <Mono title={station.sessionId}>{shortId(station.sessionId, 14)}</Mono>
+              <CopyButton text={station.sessionId} label="Copy session id" />
+              {station.sessionState ? (
+                <Chip tone={sessionStateTone(station.sessionState)} title="Session state on the platform">
+                  {station.sessionState}
+                </Chip>
               ) : null}
-            </>
-          ) : station.placement === "sandbox" && environment?.size ? (
-            <Row label="Size">{formatSandboxSize(environment.size)}</Row>
-          ) : null}
-          {network ? (
-            <Row label="Network">
-              <div className="space-y-1.5">
-                <NetworkChip network={network} />
-                {network.hosts.length > 0 ? (
-                  <ul className="flex flex-wrap gap-1">
-                    {network.hosts.map((host) => (
-                      <li key={host}>
-                        <Chip mono>{host}</Chip>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </div>
-            </Row>
-          ) : null}
-          {station.startedAt ? (
-            <Row label="Started">
-              <span title={formatFullDateTime(station.startedAt)}>
-                {formatDateTime(station.startedAt)} <span className="text-fg-muted">· {formatRelative(station.startedAt, now)}</span>
+            </span>
+          ) : (
+            <span className="text-fg-muted">Not started</span>
+          )}
+        </Row>
+        {station.turn ? (
+          <Row label="Turn">
+            <span>
+              {TURN_LABELS[station.turn.kind] ?? station.turn.kind}
+              <span className="text-fg-muted">
+                {" "}
+                · round {station.turn.round} ·{" "}
+                {station.turn.completedAt
+                  ? `finished ${formatRelative(station.turn.completedAt, now)}`
+                  : `sent ${formatRelative(station.turn.sentAt, now)}`}
+              </span>
+            </span>
+          </Row>
+        ) : null}
+        <Row label="Environment">
+          <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <Mono>{station.environment || "—"}</Mono>
+            {environment ? <Chip>{environment.type === "orchestrator" ? "Orchestrator" : environment.type === "shared" ? "Shared" : "Isolated"}</Chip> : null}
+          </span>
+        </Row>
+        <Row label="Placement">{station.placement === "sandbox" ? "Its own sandbox" : "Shared runtime (no sandbox)"}</Row>
+        {station.worker ? (
+          <Row label="Worker">
+            <span className="font-mono text-xs">{station.worker.name}</span>
+            <span className="text-fg-muted">
+              {" "}
+              · created by the coordinator in round {station.worker.createdRound}
+              {isReusedWorker(station) ? `, reused for round ${station.round}` : ""}
+            </span>
+          </Row>
+        ) : null}
+        <Row label="Agent">
+          <span>
+            @{station.agent} <span className="text-fg-muted">· {station.role}</span>
+          </span>
+        </Row>
+        {model ? (
+          <Row label="Model">
+            <Mono title={model}>{model}</Mono>
+          </Row>
+        ) : null}
+        {sandbox ? (
+          <>
+            <Row label="Sandbox">
+              <span className="flex min-w-0 items-center gap-1">
+                <Mono title={sandbox.id}>{shortId(sandbox.id, 14)}</Mono>
+                <CopyButton text={sandbox.id} label="Copy sandbox id" />
               </span>
             </Row>
-          ) : null}
-          {station.finishedAt ? (
-            <Row label="Finished">
-              <span title={formatFullDateTime(station.finishedAt)}>
-                {formatDateTime(station.finishedAt)}
-                {elapsed !== undefined ? <span className="text-fg-muted"> · took {formatDuration(elapsed)}</span> : null}
-              </span>
+            <Row label="Size">{formatSandboxSize(sandbox.size)}</Row>
+            <Row label="Sandbox state">
+              <Chip tone={sandbox.state === "running" || sandbox.state === "ready" ? "accent" : "plain"}>{sandbox.state}</Chip>
             </Row>
-          ) : active && elapsed !== undefined ? (
-            <Row label="Elapsed">
-              <span className="font-mono text-xs tabular-nums">{formatClock(elapsed)}</span>
-            </Row>
-          ) : null}
-          {station.kind === "build" || station.kind === "review" ? (
-            <Row label="Round">
-              {Math.max(station.round, 1)} <span className="text-fg-muted">of up to {workOrder.maxReviewRounds}</span>
-            </Row>
-          ) : null}
-          {station.tests ? (
-            <Row label="Tests">
-              <span>
-                <span className="text-fg-success">{station.tests.passed} passed</span>
-                <span className="text-fg-muted"> · </span>
-                <span className={station.tests.failed > 0 ? "text-fg-danger" : "text-fg-muted"}>{station.tests.failed} failed</span>
-                {station.tests.skipped > 0 ? <span className="text-fg-muted"> · {station.tests.skipped} skipped</span> : null}
-                {station.tests.durationMs !== undefined ? (
-                  <span className="text-fg-muted"> · {formatDuration(station.tests.durationMs)}</span>
-                ) : null}
-              </span>
-            </Row>
-          ) : null}
-          {usage ? (
-            <Row label="Tokens">
-              <span>
-                {formatCount(usage.inputTokens)} in <span className="text-fg-muted">·</span> {formatCount(usage.outputTokens)} out
-                {usage.cacheReadTokens > 0 ? <span className="text-fg-muted"> · {formatCount(usage.cacheReadTokens)} cached</span> : null}
-                <span className="text-fg-muted"> · </span>
-                {usage.requests} {usage.requests === 1 ? "request" : "requests"}
-              </span>
-            </Row>
-          ) : null}
-          {station.previousSessionIds && station.previousSessionIds.length > 0 ? (
-            <Row label="Earlier">
-              <ul className="space-y-1">
-                {station.previousSessionIds.map((id) => (
-                  <li key={id} className="flex min-w-0 items-center gap-1">
-                    <Mono title={id}>{shortId(id, 14)}</Mono>
-                    <CopyButton text={id} label="Copy earlier session id" />
-                  </li>
-                ))}
-              </ul>
-            </Row>
-          ) : null}
-        </dl>
-      ) : null}
-    </section>
+            {sandbox.image ? (
+              <Row label="Image">
+                <span className="block truncate">
+                  <Mono title={sandbox.image}>{shortImage(sandbox.image)}</Mono>
+                </span>
+              </Row>
+            ) : null}
+          </>
+        ) : station.placement === "sandbox" && environment?.size ? (
+          <Row label="Size">{formatSandboxSize(environment.size)}</Row>
+        ) : null}
+        {network ? (
+          <Row label="Network">
+            <div className="space-y-1.5">
+              <NetworkChip network={network} />
+              {network.hosts.length > 0 ? (
+                <ul className="flex flex-wrap gap-1">
+                  {network.hosts.map((host) => (
+                    <li key={host}>
+                      <Chip mono>{host}</Chip>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </Row>
+        ) : null}
+        {station.startedAt ? (
+          <Row label="Started">
+            <span title={formatFullDateTime(station.startedAt)}>
+              {formatDateTime(station.startedAt)} <span className="text-fg-muted">· {formatRelative(station.startedAt, now)}</span>
+            </span>
+          </Row>
+        ) : null}
+        {station.finishedAt ? (
+          <Row label="Finished">
+            <span title={formatFullDateTime(station.finishedAt)}>
+              {formatDateTime(station.finishedAt)}
+              {elapsed !== undefined ? <span className="text-fg-muted"> · took {formatDuration(elapsed)}</span> : null}
+            </span>
+          </Row>
+        ) : active && elapsed !== undefined ? (
+          <Row label="Elapsed">
+            <span className="font-mono text-xs tabular-nums">{formatClock(elapsed)}</span>
+          </Row>
+        ) : null}
+        {station.kind === "build" || station.kind === "review" ? (
+          <Row label="Round">
+            {Math.max(station.round, 1)} <span className="text-fg-muted">of up to {workOrder.maxReviewRounds}</span>
+          </Row>
+        ) : null}
+        {station.tests ? (
+          <Row label="Tests">
+            <span>
+              <span className="text-fg-success">{station.tests.passed} passed</span>
+              <span className="text-fg-muted"> · </span>
+              <span className={station.tests.failed > 0 ? "text-fg-danger" : "text-fg-muted"}>{station.tests.failed} failed</span>
+              {station.tests.skipped > 0 ? <span className="text-fg-muted"> · {station.tests.skipped} skipped</span> : null}
+              {station.tests.durationMs !== undefined ? (
+                <span className="text-fg-muted"> · {formatDuration(station.tests.durationMs)}</span>
+              ) : null}
+            </span>
+          </Row>
+        ) : null}
+        {usage ? (
+          <Row label="Tokens">
+            <span>
+              {formatCount(usage.inputTokens)} in <span className="text-fg-muted">·</span> {formatCount(usage.outputTokens)} out
+              {usage.cacheReadTokens > 0 ? <span className="text-fg-muted"> · {formatCount(usage.cacheReadTokens)} cached</span> : null}
+              <span className="text-fg-muted"> · </span>
+              {usage.requests} {usage.requests === 1 ? "request" : "requests"}
+            </span>
+          </Row>
+        ) : null}
+        {station.previousSessionIds && station.previousSessionIds.length > 0 ? (
+          <Row label="Earlier">
+            <ul className="space-y-1">
+              {station.previousSessionIds.map((id) => (
+                <li key={id} className="flex min-w-0 items-center gap-1">
+                  <Mono title={id}>{shortId(id, 14)}</Mono>
+                  <CopyButton text={id} label="Copy earlier session id" />
+                </li>
+              ))}
+            </ul>
+          </Row>
+        ) : null}
+      </dl>
+    </details>
   );
 }
 
@@ -503,10 +562,12 @@ export function VerdictBadge({ verdict }: { readonly verdict: ReviewRecord["verd
 function ReviewHistory({ station }: { readonly station: Station }) {
   const reviews = [...(station.reviews ?? [])].sort((a, b) => a.round - b.round);
   return (
-    <section aria-label="Review history">
-      <h3 className="text-sm font-semibold">Review history</h3>
+    <section aria-labelledby="review-history-heading">
+      <h3 id="review-history-heading" className="text-sm font-semibold">
+        Reviews
+      </h3>
       {reviews.length === 0 ? (
-        <p className="mt-1 text-fg-muted">No reviews yet. The reviewer starts when the build is ready.</p>
+        <p className="mt-1 text-xs text-fg-muted">No reviews yet.</p>
       ) : (
         <ol className="mt-2 space-y-3">
           {reviews.map((review) => {
@@ -562,37 +623,24 @@ export function IntakePanel({ workOrder }: { readonly workOrder: WorkOrder }) {
   const template = useStore((state) =>
     workOrder.source.templateId ? state.templates.find((candidate) => candidate.id === workOrder.source.templateId) : undefined,
   );
+  const source = workOrder.source.kind === "template" ? (template?.title ?? workOrder.source.templateId ?? "Template") : "Custom brief";
   return (
     <section aria-label="Work order brief" className={PANEL_CLASS}>
       <header className="border-b border-line bg-canvas-muted px-4 py-3">
         <div className="flex items-start gap-2">
-          <InboxIcon size={16} className="mt-1 text-fg-muted" />
+          <NoteIcon size={16} className="mt-1 shrink-0 text-fg-muted" />
           <div className="min-w-0">
-            <h2 className="text-base font-semibold">Intake</h2>
-            <p className="text-xs text-fg-muted">The brief the factory is working from.</p>
+            <h2 className="text-base font-semibold">Brief</h2>
+            <p className="truncate text-xs text-fg-muted" title={formatFullDateTime(workOrder.createdAt)}>
+              {source} · {formatDateTime(workOrder.createdAt)}
+              {workOrder.owner ? ` · @${workOrder.owner.login}` : ""}
+            </p>
           </div>
         </div>
       </header>
       <div className={SCROLL_CLASS}>
-        <div className="space-y-4 p-4">
-          <dl className="grid grid-cols-[7rem_minmax(0,1fr)] gap-x-3 gap-y-2">
-            <Row label="Source">
-              {workOrder.source.kind === "template" ? `Template · ${template?.title ?? workOrder.source.templateId ?? "unknown"}` : "Custom brief"}
-            </Row>
-            <Row label="Review rounds">Up to {workOrder.maxReviewRounds}</Row>
-            <Row label="Created">
-              <span title={formatFullDateTime(workOrder.createdAt)}>{formatDateTime(workOrder.createdAt)}</span>
-            </Row>
-            {workOrder.owner ? <Row label="Requested by">@{workOrder.owner.login}</Row> : null}
-          </dl>
-          <div className="timeline-comment">
-            <div className="timeline-comment-header">
-              <span className="font-semibold text-fg">Brief</span>
-            </div>
-            <div className="comment-body">
-              <MarkdownView source={workOrder.brief} />
-            </div>
-          </div>
+        <div className="p-4">
+          <MarkdownView source={workOrder.brief} />
         </div>
       </div>
     </section>

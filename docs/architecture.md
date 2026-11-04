@@ -1001,10 +1001,10 @@ and quickstart snippet 14).
     as new work and a repeated call consumes no nudge or review round. Release inputs arrive by `copy_worker_files`
     under `.factory/incoming/<task>/` and are verified against the accepted artifacts. After a restart the factory
     resumes the same coordinator with its tools, stops only the coordinator's unfinished turn, and reconciles worker
-    IDs; cancelling deletes worker sessions through the REST API. Classic mode keeps the app-orchestrated pipeline on
-    the four station environments. On Azure (westus2, 2026-10-27), a factory run against the deployed gateway
-    completed a work order with three Container Apps sandboxes, one builder reused for two fix rounds, and a 47-test
-    release.
+    IDs; cancelling deletes worker sessions through the REST API. App-driven mode (API value `classic`) keeps the
+    app-orchestrated pipeline on the four station environments. On Azure (westus2, 2026-10-27), a factory run against
+    the deployed gateway completed a work order with three Container Apps sandboxes, one builder reused for two fix
+    rounds, and a 47-test release.
   - *Dispatch* (`demos/dispatch`). A conversation is a session of the `dispatch` orchestrator (four worker
     environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
     view is projected from the coordinator's own events (worker tool calls and the permission events above), so a

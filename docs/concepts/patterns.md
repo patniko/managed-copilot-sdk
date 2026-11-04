@@ -91,7 +91,7 @@ flowchart TD
 
 | Pattern | Scenarios it fits | Try it | See it in an app |
 | --- | --- | --- | --- |
-| **Isolated** | A coding agent that edits, builds, and tests a repository; data jobs | [Walkthrough 03](../../walkthroughs/03-sandbox/README.md) | The [software factory](../../demos/software-factory/README.md)'s Classic mode: a sandbox per build task |
+| **Isolated** | A coding agent that edits, builds, and tests a repository; data jobs | [Walkthrough 03](../../walkthroughs/03-sandbox/README.md) | The [software factory](../../demos/software-factory/README.md)'s App-driven mode: a sandbox per build task |
 | **Shared** | Support, sales, and Q&A chat over your own data, at volume | [Walkthrough 02](../../walkthroughs/02-your-own-tools/README.md) | The factory's planner and reviewer |
 | **Promotable** | An assistant that usually chats but sometimes needs to run code | [Walkthrough 04](../../walkthroughs/04-promotion/README.md) | — |
 | **Direct** | A harness with its own planning and sub-agents that must not run code on your host; tight edit-and-run loops | [Walkthrough 12](../../walkthroughs/12-direct-execution/README.md) | [Dispatch](../../demos/dispatch/README.md), **Work directly** |
