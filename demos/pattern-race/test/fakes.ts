@@ -20,6 +20,8 @@ export class FakeSession implements LaneSession {
   prompt: string | undefined;
   aborted = false;
   usage = { totalPremiumRequestCost: 1, totalUserRequests: 1, modelMetrics: { "claude-sonnet-5": { requests: { count: 2, cost: 1 } } } };
+  /** While set, reading usage waits for it. */
+  gate: Promise<void> | undefined;
   readonly #handlers = new Set<(event: SessionEvent) => void>();
   #settle: { resolve: (reply: AssistantMessageEvent | undefined) => void; reject: (error: Error) => void } | undefined;
   readonly #sent: Promise<void>;
@@ -31,7 +33,14 @@ export class FakeSession implements LaneSession {
     this.#sent = new Promise((resolve) => (this.#markSent = resolve));
   }
 
-  readonly rpc = { usage: { getMetrics: async () => this.usage as unknown as UsageGetMetricsResult } };
+  readonly rpc = {
+    usage: {
+      getMetrics: async () => {
+        await this.gate;
+        return this.usage as unknown as UsageGetMetricsResult;
+      },
+    },
+  };
 
   on(handler: (event: SessionEvent) => void): () => void {
     this.#handlers.add(handler);
@@ -79,6 +88,8 @@ export class FakePlatform implements RacePlatform {
   readonly sessions = new Map<LaneId, FakeSession>();
   readonly deleted: string[] = [];
   readonly workerLists = new Map<string, WorkerInfo[]>();
+  /** What `sessions.get` reports for a session, over the defaults. */
+  readonly infos = new Map<string, Partial<SessionInfo>>();
   leftovers: string[] = [];
   readonly #created = new Map<LaneId, (session: FakeSession) => void>();
   readonly #eventListeners = new Set<(event: PlatformEvent) => void>();
@@ -120,7 +131,7 @@ export class FakePlatform implements RacePlatform {
   }
 
   async sessionInfo(sessionId: string): Promise<SessionInfo> {
-    return { id: sessionId, sandbox: { id: `sandbox-of-${sessionId}` } } as unknown as SessionInfo;
+    return { id: sessionId, placement: "shared", sandbox: { id: `sandbox-of-${sessionId}` }, ...this.infos.get(sessionId) } as unknown as SessionInfo;
   }
 
   async workers(sessionId: string): Promise<WorkerInfo[]> {

@@ -2,6 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PermissionRequest } from "@github/copilot-sdk";
+import type { SessionInfo } from "@managed-copilot/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { expectedValue } from "../src/server/checks.js";
 import { RaceError } from "../src/server/errors.js";
@@ -74,6 +75,22 @@ describe("a race", () => {
     expect(platform.deleted).toHaveLength(6);
   });
 
+  it("ends a lane the moment its answer arrives, then reads its final usage", async () => {
+    const { platform, races, lane, tick } = setup();
+    races.start("code");
+    const session = await platform.session("direct");
+    let release!: () => void;
+    session.gate = new Promise((resolve) => (release = resolve));
+    session.usage = { ...session.usage, totalPremiumRequestCost: 2, totalUserRequests: 2 };
+    tick(8_900);
+    session.answer(HASH);
+    await vi.waitFor(() => expect(lane("direct")).toMatchObject({ status: "done", place: 1, finishedAt: 1_008_900 }));
+    expect(lane("direct").premium.session).not.toBe(2);
+    release();
+    await vi.waitFor(() => expect(lane("direct").premium.session).toBe(2));
+    await races.close();
+  });
+
   it("shows what each lane is doing, from its own session events", async () => {
     const { platform, races, lane } = setup();
     races.start("code");
@@ -100,7 +117,10 @@ describe("a race", () => {
 
     const promotable = await platform.session("promotable");
     expect(lane("promotable")).toMatchObject({ brain: "runtime", sandboxes: [] });
+    promotable.emit("tool.execution_start", { toolName: "request_sandbox", toolCallId: "move" });
+    expect(lane("promotable")).toMatchObject({ brain: "runtime", sandboxes: [{ id: "pending", kind: "own", state: "starting" }] });
     platform.emit({ type: "session.promoted", sessionId: promotable.sessionId, sandboxId: "sbx-moved" });
+    promotable.emit("tool.execution_complete", { toolCallId: "move", success: true });
     expect(lane("promotable")).toMatchObject({ brain: "sandbox", sandboxes: [{ id: "sbx-moved", kind: "own", environment: "coder" }] });
 
     const delegate = await platform.session("delegate");
@@ -118,6 +138,19 @@ describe("a race", () => {
     await races.close();
     // A lane's session is deleted when it ends, and its sandboxes with it.
     expect(lane("delegate").sandboxes.every((token) => token.state === "stopped")).toBe(true);
+  });
+
+  it("finds a move into a sandbox by the session's placement, and drops a move that failed", async () => {
+    const { platform, races, lane } = setup();
+    races.start("code");
+    const promotable = await platform.session("promotable");
+    promotable.emit("tool.execution_start", { toolName: "request_sandbox", toolCallId: "move-1" });
+    promotable.emit("tool.execution_complete", { toolCallId: "move-1", success: false });
+    expect(lane("promotable")).toMatchObject({ brain: "runtime", sandboxes: [] });
+    promotable.emit("tool.execution_start", { toolName: "request_sandbox", toolCallId: "move-2" });
+    platform.infos.set(promotable.sessionId, { placement: "sandbox", sandbox: { id: "sbx-2" } as SessionInfo["sandbox"] });
+    await vi.waitFor(() => expect(lane("promotable")).toMatchObject({ brain: "sandbox", sandboxes: [{ id: "sbx-2", kind: "own", state: "working" }] }));
+    await races.close();
   });
 
   it("approves each lane's requests and counts them", async () => {

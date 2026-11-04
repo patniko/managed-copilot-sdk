@@ -96,7 +96,10 @@ class LaneRunner {
   readonly #changed: () => void;
   session: LaneSession | undefined;
   stopping = false;
-  observing = false;
+  /** A read of its usage and workers in flight. */
+  observation: Promise<void> | undefined;
+  /** Its `request_sandbox` call while a promotable lane moves into its own sandbox. */
+  #moving: string | undefined;
   /** Tool calls in progress, oldest first: the newest is what the lane is doing. */
   readonly #tools = new Map<string, string>();
   readonly #subagents = new Set<string>();
@@ -158,9 +161,18 @@ class LaneRunner {
         const activity = describeTool(toolName, event.data.arguments);
         this.#tools.set(toolCallId, activity);
         this.#activity("working", activity);
+        // The sandbox it asked for appears at once, starting; the platform's `session.promoted` replaces it.
+        if (toolName === "request_sandbox" && this.#run.brain === "runtime") {
+          this.#moving = toolCallId;
+          this.ownSandbox("pending", "starting");
+        }
         break;
       }
       case "tool.execution_complete": {
+        if (event.data.toolCallId === this.#moving) {
+          this.#moving = undefined;
+          if (!event.data.success && this.#run.brain === "runtime") this.update({ sandboxes: this.#run.sandboxes.filter((token) => token.id !== "pending") });
+        }
         if (!this.#tools.delete(event.data.toolCallId)) break;
         const latest = [...this.#tools.values()].at(-1);
         this.#activity(latest ? "working" : "thinking", latest ?? "Thinking");
@@ -178,6 +190,13 @@ class LaneRunner {
   #activity(status: "thinking" | "working", activity: string): void {
     if (!this.running || this.stopping) return;
     this.update({ status, activity: clip(activity, ACTIVITY_LIMIT) });
+  }
+
+  /** A promotable lane moved into its own sandbox (`session.promoted`, or its placement when that event was missed). */
+  moved(sandboxId: string): void {
+    if (this.#run.brain === "sandbox") return;
+    this.update({ brain: "sandbox" });
+    this.ownSandbox(sandboxId, "working");
   }
 
   /** A `worker.*` platform event of this lane's coordinator. */
@@ -397,11 +416,11 @@ export class RaceManager {
       const answeredAt = this.#now();
       clearInterval(poll);
       if (runner.stopping) return;
-      await this.#observe(runner);
       const answer = reply?.data.content?.trim();
       const judged = judge(answer, checks);
       runner.finish({ status: "done", ...(answer ? { answer: answer.slice(0, ANSWER_LIMIT) } : {}), verdict: judged.verdict, checks: judged.checks }, answeredAt);
       this.#rank(race);
+      await this.#observe(runner, { final: true });
     } catch (error) {
       if (runner.stopping) return;
       log.warn("A lane failed", { race: race.id, lane: lane.id, error: errorText(error) });
@@ -421,31 +440,45 @@ export class RaceManager {
     });
   }
 
-  /** Reads a running lane's usage and, for a coordinator, its workers and hands sandboxes. */
-  async #observe(runner: LaneRunner): Promise<void> {
-    const session = runner.session;
-    if (!session || runner.observing) return;
-    runner.observing = true;
-    try {
-      const reads: Promise<void>[] = [
-        session.rpc.usage.getMetrics().then(
-          (metrics) => runner.usage(metrics),
-          (error: unknown) => log.debug("Couldn't read a lane's usage", { lane: runner.lane.id, error: errorText(error) }),
-        ),
-      ];
-      if (runner.lane.type === "orchestrator") {
-        reads.push(
-          this.#platform.workers(session.sessionId).then(
-            (workers) => runner.workers(workers),
-            (error: unknown) => log.debug("Couldn't list a lane's workers", { lane: runner.lane.id, error: errorText(error) }),
-          ),
-        );
-      }
-      await Promise.all(reads);
-      runner.workerPremium((model) => this.#platform.multiplier(model), this.#active?.model ?? this.#platform.model.id);
-    } finally {
-      runner.observing = false;
+  /** Reads a lane's usage and, for a coordinator, its workers and hands sandboxes; `final` waits for a read in flight, then reads once more. */
+  async #observe(runner: LaneRunner, options: { readonly final?: boolean } = {}): Promise<void> {
+    if (runner.observation) {
+      await runner.observation;
+      if (!options.final) return;
     }
+    runner.observation = this.#read(runner).finally(() => (runner.observation = undefined));
+    await runner.observation;
+  }
+
+  async #read(runner: LaneRunner): Promise<void> {
+    const session = runner.session;
+    if (!session) return;
+    const reads: Promise<void>[] = [
+      session.rpc.usage.getMetrics().then(
+        (metrics) => runner.usage(metrics),
+        (error: unknown) => log.debug("Couldn't read a lane's usage", { lane: runner.lane.id, error: errorText(error) }),
+      ),
+    ];
+    if (runner.lane.type === "orchestrator") {
+      reads.push(
+        this.#platform.workers(session.sessionId).then(
+          (workers) => runner.workers(workers),
+          (error: unknown) => log.debug("Couldn't list a lane's workers", { lane: runner.lane.id, error: errorText(error) }),
+        ),
+      );
+    }
+    if (runner.lane.type === "promotable") {
+      reads.push(
+        this.#platform.sessionInfo(session.sessionId).then(
+          (info) => {
+            if (info.placement === "sandbox") runner.moved(info.sandbox?.id ?? session.sessionId);
+          },
+          (error: unknown) => log.debug("Couldn't read a lane's placement", { lane: runner.lane.id, error: errorText(error) }),
+        ),
+      );
+    }
+    await Promise.all(reads);
+    runner.workerPremium((model) => this.#platform.multiplier(model), this.#active?.model ?? this.#platform.model.id);
   }
 
   /** Deletes the lane's session: its sandboxes, hands sandboxes, and workers go with it. */
@@ -466,8 +499,7 @@ export class RaceManager {
     const runner = race.runners.find((candidate) => candidate.session?.sessionId === event.sessionId);
     if (!runner?.running) return;
     if (event.type === "session.promoted") {
-      runner.update({ brain: "sandbox" });
-      runner.ownSandbox(event.sandboxId ?? event.sessionId, "working");
+      runner.moved(event.sandboxId ?? event.sessionId);
     } else if (event.type.startsWith("worker.")) {
       runner.workerEvent(event.data as unknown as WorkerEventData);
     }
