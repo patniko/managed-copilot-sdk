@@ -28,7 +28,7 @@ It opens http://localhost:7460 in your browser.
     when they're up, their README otherwise; hover for where in the app).
 
   When the catalog lists Pattern Race (`pattern-race`), which runs one job through all six side by side, the section
-  links it as **Compare all six**.
+  links it as **Compare all six**, and its app card says **All six patterns**; no pattern card lists it.
 - **Apps**: a card per demo app and the operator console, with its screenshot (or its initials until one is captured),
   tagline (hover for more), the patterns it shows, what to try first, a **Local** and an **Azure** button with a live
   status dot, and its README.

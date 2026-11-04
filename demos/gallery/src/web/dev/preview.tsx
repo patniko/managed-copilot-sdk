@@ -32,8 +32,7 @@ function sample(id: string, title: string, tagline: string, tryIt: string): AppE
   return { id, title, tagline, description: `${tagline}. A sample entry for the gallery's preview.`, tryIt, app: id, port: 7400, healthPath: "/api/health", readme: `demos/${id}/README.md` };
 }
 
-const withSamples = (patterns: readonly Pattern[]): readonly Pattern[] =>
-  patterns.map((pattern) => ({ ...pattern, demos: [...pattern.demos, ...(SAMPLE_DEMOS[pattern.id] ?? []), { app: "pattern-race", where: "its lane" }] }));
+const withSamples = (patterns: readonly Pattern[]): readonly Pattern[] => patterns.map((pattern) => ({ ...pattern, demos: [...pattern.demos, ...(SAMPLE_DEMOS[pattern.id] ?? [])] }));
 
 function target(apps: readonly AppEntry[], url: (app: AppEntry) => string | undefined, health: (app: AppEntry) => Health, gatewayUrl: string, note: string): TargetState {
   const links = Object.fromEntries(apps.flatMap((app) => (url(app) ? [[app.id, { url: url(app)!, health: health(app) }]] : [])));

@@ -264,6 +264,8 @@ describe("page", () => {
     const [app] = APPS;
     const patterns = PATTERNS.map((pattern, index) => ({ ...pattern, demos: index % 2 ? [{ app: app!.id, where: "somewhere" }] : [] }));
     expect(patternsOf(app!.id, patterns).map((pattern) => pattern.id)).toEqual(["shared", "direct", "mixed"]);
+    // The side-by-side comparison shows every pattern, though no pattern lists it.
+    expect(patternsOf(COMPARE_APP_ID, patterns)).toEqual(patterns);
 
     const state: GalleryState = {
       local: { gatewayUrl: "http://localhost:7400", gateway: "online", links: { [app!.id]: { url: "http://localhost:7470", health: "offline" } } },

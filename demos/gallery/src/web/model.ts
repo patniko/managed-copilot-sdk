@@ -6,8 +6,12 @@ export const COMPARE_APP_ID = "pattern-race";
 
 export const compareApp = (apps: readonly AppEntry[]): AppEntry | undefined => apps.find((app) => app.id === COMPARE_APP_ID);
 
-/** The patterns an app shows, in the catalog's order. */
-export const patternsOf = (appId: string, patterns: readonly Pattern[]): readonly Pattern[] => patterns.filter((pattern) => pattern.demos.some((demo) => demo.app === appId));
+/**
+ * The patterns an app shows, in the catalog's order: every one for the side-by-side comparison (which no pattern lists,
+ * so it doesn't repeat under all six), the ones that list it otherwise.
+ */
+export const patternsOf = (appId: string, patterns: readonly Pattern[]): readonly Pattern[] =>
+  appId === COMPARE_APP_ID ? patterns : patterns.filter((pattern) => pattern.demos.some((demo) => demo.app === appId));
 
 /** Where an app opens: its first target that answers (local first), or its README when none does. */
 export function appHref(app: AppEntry, state: GalleryState | undefined): { readonly href: string; readonly online: boolean } {

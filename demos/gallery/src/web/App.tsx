@@ -30,7 +30,7 @@ import {
   type TargetState,
   type Walkthrough,
 } from "../shared/catalog.js";
-import { appHref, compareApp, patternsOf, walkthroughCommand, type Shell } from "./model.js";
+import { appHref, COMPARE_APP_ID, compareApp, patternsOf, walkthroughCommand, type Shell } from "./model.js";
 import { PatternDiagram } from "./PatternDiagram.js";
 import { CopyButton, cx, Spinner, Tooltip, useDismiss } from "./ui.js";
 
@@ -366,17 +366,17 @@ function ReadmeLink({ href, name }: { readonly href: string; readonly name: stri
 }
 
 function PatternMarkers({ app, patterns }: { readonly app: AppEntry; readonly patterns: readonly Pattern[] }) {
-  const shown = patternsOf(app.id, patterns);
-  if (!shown.length) return null;
-  if (shown.length === patterns.length && patterns.length > 1) {
+  if (app.id === COMPARE_APP_ID) {
     return (
       <div className="flex">
         <a className="pattern-marker" href="#patterns">
-          All {patterns.length === 6 ? "six" : patterns.length} patterns
+          All six patterns
         </a>
       </div>
     );
   }
+  const shown = patternsOf(app.id, patterns);
+  if (!shown.length) return null;
   return (
     <ul className="flex flex-wrap gap-1" aria-label="Patterns it shows">
       {shown.map((pattern) => {
