@@ -75,6 +75,8 @@ flowchart LR
 | TB8 | Gateway → your webhooks / your workers → gateway | Events, capability tokens, answers | HMAC-SHA256 signatures; capabilities scoped to one session's pending actions, 15 min, audience-bound |
 | TB9 | Browser → operator console | Ticket, cookie | One-time `mcct_` ticket in URL fragment; HttpOnly `SameSite=Strict` `__Host-` cookie; custom header + Origin check; strict CSP; no content shown |
 | TB10 | Gateway → storage | Ledger, sealed vaults, background tokens | AES-256-GCM with row AAD; keys outside the DB when configured; single-writer lease |
+| TB11 | Your app's server → gateway, for its own users | App key, app user ID, prompts | Key compared by SHA-256 digest in constant time; every request limited to the app's environments; app users own only their own sessions (negative, app-scoped account IDs) and only use Foundry |
+| TB12 | Gateway → Azure AI Foundry | Model requests with an Entra ID token | Token from `az login` (local) or the gateway's managed identity (Azure), with only Cognitive Services OpenAI User on the declared accounts; sandboxes hold a placeholder and reach only their account's host through the gateway |
 
 ### Assets
 
@@ -86,6 +88,9 @@ flowchart LR
 | Conversation content and workspace files | Runtime `COPILOT_HOME`, sandbox disks, artifacts on `/data` | Operators (configuration only), other accounts |
 | Platform, durable, egress, vault keys | Gateway environment / `/data` | Sandboxes, clients |
 | Your Copilot quota | Billed per session owner | Another account (no fallback) |
+| App keys | Aspire secret parameters (`<name>-app-<app>-key`); the app's server environment; digests in gateway memory | Sandboxes, the ledger, logs, any API response |
+| The platform's Azure token (Foundry) | Gateway memory (from `az` or the managed identity) | Sandboxes, disk, logs, runtime env |
+| Your Foundry usage | Billed to the Azure subscription of each declared account | A Copilot plan (app users never use one); an undeclared account |
 
 ## How a local client connects to cloud agents
 
@@ -187,6 +192,18 @@ tests; ⚠️ = partial or depends on operator configuration; ❌ = open.
 | CLI approves a prompt your app owns, or enables allow-all | Tampering | Ledger claim; approval-mode changes refused; request IDs taken only from runtime frames | ✅ |
 | Host paths/usernames leak to CLI | Info disclosure | `pathScrubber` on every frame; verified on 700+ frames | ✅ |
 
+### TB11/TB12 · Apps acting for their users, and Azure AI Foundry
+
+| Threat | Category | Mitigation | Status |
+| --- | --- | --- | --- |
+| Stolen app key acts for any of the app's users, or any GitHub user via `anyGitHubUser` | Spoofing | Server-side secret like any API key; limited to the app's environments; app users can't use background sign-in, schedules, operators, or Copilot CLI; GitHub users still need their own valid token. A stolen key is a full app credential by design: rotate it by replacing the parameter | ⚠️ inherent |
+| App A reads app B's users, or an app user reads another user's session | Info disclosure / EoP | Accounts keyed by (app, user ID) with distinct negative IDs; every session route checks the owner ID; other apps' environments are `environment_not_found` | ✅ |
+| An app user is confused with a GitHub account (`access`, `operators`, a login that matches) | Spoofing / EoP | Logins are `<app>/<id>` (no GitHub login contains `/`); operator and access checks accept only GitHub principals | ✅ |
+| `anyGitHubUser` opens the deployment to everyone | EoP | Admission through the key only; the same token without it stays `forbidden`; sessions are scoped to the app's environments | ✅ |
+| An app user's model calls bill a Copilot plan, or silently fall back to one | Repudiation / EoP | App users only in Foundry environments (`inference_unavailable` elsewhere); a session's route is fixed at create and checked on resume and promotion | ✅ |
+| Foundry token leaks into a sandbox or to another host | Info disclosure | Placeholder in the sandbox; the broker forwards only to the session's own account host on 443 and refuses `api-key` headers and other hosts | ✅ |
+| Foundry spend runs away | DoS (cost) | Per-deployment capacity and quotas are set on the Foundry account; the platform adds no per-user limit yet | ⚠️ operator configuration |
+
 ### TB5–TB7 · Sandboxes and egress
 
 | Threat | Category | Mitigation | Status |
@@ -232,6 +249,8 @@ For each Azure deployment:
 6. Treat tool arguments from the agent as untrusted input in your `defineTool` handlers; require approval for
    anything with side effects.
 7. Watch the console's attention items: open access, unsigned webhooks, broken background sign-ins.
+8. Keep app keys on your app's server only, give each app the fewest environments it needs, and set
+   `anyGitHubUser` only for apps meant for the public. Size each Foundry deployment's capacity for the spend you accept.
 
 ## Findings from the security review
 

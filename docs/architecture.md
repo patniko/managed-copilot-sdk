@@ -60,6 +60,12 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 - Runtime → client requests include `userInput.request`, `exitPlanMode.request`, `autoModeSwitch.request`,
   `systemMessage.transform`, `gitHubToken.getToken`, `providerToken.getToken`, `llmInference.httpRequestStart`/`Chunk`
   (the experimental public request-handler hook), `sessionFs.*`, `workflow.*`, `tasks.cancel`, and `host.*` (AHP).
+- A whole-session BYOK `provider` (`session.create`/`session.resume` params) works with **no GitHub credential at all**
+  (verified live on 1.0.103 against Azure AI Foundry, `docs/proposals/probes/foundry-inference.mjs`): with
+  `hasBearerTokenProvider: true` the runtime asks its client `providerToken.getToken({ sessionId, providerName })`
+  before each model call; with a static `bearerToken` and `llmInference.setProvider`, every call goes through the
+  client carrying that value. Tool calls work, a new runtime process resumes the session when `provider` is sent
+  again, and neither the token nor the static value lands in `COPILOT_HOME`.
 - AHP: the runtime exposes `host.start`, `host.publishSession`, `host.unpublishSession`, `host.setSessionCreationPolicy`;
   the SDK exposes `AhpHost`. Copilot CLI attaches with `copilot --ahp <url>` (interactive only).
 - `systemMessage` is per-resume configuration, not session state (verified live on 1.0.103): a runtime that resumes a
@@ -173,7 +179,8 @@ denies configuration RPCs it does not understand.
 
 - Gateway callers are one of: a GitHub **user principal**, an internal **platform service** (platform key), or a
   scoped **action capability** (webhook workers). Capabilities authorize only their exact session/action operations
-  and are rejected on general user routes.
+  and are rejected on general user routes. Requests through an **app key** add three more: one of the app's own
+  users, a GitHub user through the app, and the app itself ([Apps and Azure AI Foundry](#apps-and-azure-ai-foundry)).
 - `managed.client(env, { gitHubToken })` creates sessions owned by that account. SDK helpers (`files`, `artifacts`,
   `sessions`, actions) must use the identity of the client that created or resumed a session, tracked from the stock
   client's session lifecycle events. Owner checks are never weakened to make a helper work.
@@ -227,12 +234,74 @@ denies configuration RPCs it does not understand.
   back. Afterwards neither the placeholder nor the token appeared anywhere under `COPILOT_HOME` or in runtime output.
   Limits: runtime features that call GitHub services directly rather than through `llmInference` (the built-in GitHub
   MCP server, telemetry) only ever see the placeholder and fail or are blocked by egress policy; the identity and quota
-  snapshot is taken at create/resume time; BYOK providers are not available in sandboxes; when the owner has no usable
-  credential, inference fails with `authentication_required` and never falls back to another account.
+  snapshot is taken at create/resume time; a client-supplied BYOK `provider` is refused (the only provider a session
+  gets is the platform's own Foundry route, below); when the owner has no usable credential, inference fails with
+  `authentication_required` and never falls back to another account.
 - Runtime binary: the stock SDK spawns the dedicated headless runtime shipped in `@github/copilot-sdk-<platform>`;
   `@github/copilot` is the larger interactive CLI. The sandbox image installs `@github/copilot-sdk@1.0.26` and runs its
   headless `copilot-runtime` (1.0.103); the shared runtime should use the same binary, resolved through public package
   metadata.
+
+### Apps and Azure AI Foundry
+
+As built (spec section 2, "Your app's own users", and section 15; decisions 5 and 41-43). Gateway `modules/core/apps.ts`,
+`modules/foundry/**`, the Foundry parts of `modules/core/sessions.ts` and `modules/sandbox/broker.ts`; protocol
+`apps.ts`; SDK `identity.ts`.
+
+- **App keys.** The normalized config carries `apps: { <app>: { environments, anyGitHubUser?, key: { secretEnv } } }`.
+  The AppHost generates each key as the persistent secret parameter `<name>-app-<app>-key` (48 characters), hands it
+  to the gateway in that `secretEnv`, and to the app with `copilot.appKey(app)` (`aspire run`) or
+  `publishApp(..., { app })` (`aspire deploy`). `AppRegistry` keeps SHA-256 digests only and compares them in
+  constant time; an app with a missing or short (< 32 characters) key, or two apps with the same key, are refused and
+  logged at startup.
+- **Callers through an app** send `x-managed-copilot-app-key`:
+  - **App user**: plus `x-managed-copilot-app-user` (percent-encoded UTF-8, 1-256 printable characters, no surrounding
+    whitespace) and optionally `-app-user-name`, with no `Authorization` (both together are `invalid_request`). The
+    account comes from `core_accounts` by `(app, app_user_id)`: kind `app-user`, login `<app>/<id>` (no GitHub login
+    has a `/`), and a negative ID (`MIN(id) - 1`; GitHub IDs are positive), so an app user can never own, list, or
+    reach a GitHub account's session, another app's user's, or another user's of the same app. A request without a
+    name keeps the last one sent. App users are never verified with GitHub and never satisfy `access`, `operators`,
+    or operator authorization.
+  - **GitHub user through the app**: plus `Authorization: Bearer <GitHub token>`, verified with GitHub as usual and
+    admitted by `access`, or by the app's `anyGitHubUser`. A token admitted only through an app is refused when it
+    comes without the key. Sessions are the GitHub account's own (not app-scoped).
+  - **The app itself**: the key alone, only on `auth: "user-or-app"` routes: `/v1/info` (the app's environments, no
+    `inline`) and `/v1/me` (`{ id: 0, kind: "app" }`). Anything else answers 401 "needs a person to act for".
+- **App scope.** Every request through a key stays in the app's `environments` (`assertAppEnvironment` at bridge
+  welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator). An app user
+  in a Copilot-billed environment gets `inference_unavailable` (bridge welcome, session create, and the SDK's
+  pre-check). Background sign-in and schedules are refused for app users and for any request through an app, and
+  Copilot CLI attach for app users (`capability_unavailable`).
+- **Foundry accounts.** `FoundryService` resolves each declared account through Azure Resource Manager
+  (`GET .../Microsoft.CognitiveServices/accounts/<name>?api-version=2024-10-01`): the endpoint is
+  `properties.endpoints["OpenAI Language Model Instance API"]` (or `https://<customSubDomainName>.openai.azure.com/`),
+  and each declared deployment must exist and be `Succeeded`. Model calls go to `<endpoint>openai/v1` with an Entra ID
+  token for `https://cognitiveservices.azure.com`: the Azure CLI's sign-in locally (`az account get-access-token
+  --subscription <account's subscription>`, so the right tenant is used), the gateway's user-assigned managed identity
+  in Azure (`MANAGED_COPILOT_AZURE_CREDENTIAL`, `MANAGED_COPILOT_AZURE_CLIENT_ID`). Transient ARM failures are retried
+  (0.5, 1.5, 4 s); a definite problem (no account, no access, a missing deployment) is kept for 30 s and a resolved
+  account for 10 minutes. Startup checks every account in the background and logs "Foundry account ready" or the
+  problem; a session in an unusable account fails with `inference_unavailable` and that problem.
+- **Shared sessions.** For a Foundry environment, `#routeInference` strips every GitHub credential field and any
+  client `provider`, pins `model` and `allowedModels` to the deployment, and adds the provider
+  `{ type: "openai", baseUrl, wireApi: "completions", wireModel: <deployment>, modelId: <model>, hasBearerTokenProvider:
+  true }`. The shared runtime then asks the gateway `providerToken.getToken` before each call; the gateway answers
+  only for Foundry sessions (a Copilot session's request is refused) with the platform's token. `gitHubToken.getToken`
+  is never answered with a GitHub token for them.
+- **Sandboxes.** The broker gets the account's host and token source: `sessionOpened` installs no GitHub credential,
+  the session's `provider` carries the per-session placeholder as its `bearerToken`, and each `llmInference` request
+  is answered only for that one host on 443, only with the placeholder as its credential (an `api-key` header is
+  refused), swapping in the platform's token. The Copilot API and every other host are refused, so the token never
+  enters the sandbox.
+- **The route is part of the session.** `core_sessions.inference` (null for Copilot) is fixed at create and exposed
+  as `SessionInfo.inference` (`{ route: "copilot" }` or `{ route: "foundry", foundry }`) and on operator summaries.
+  Resume and promotion check it against the environment's current route (`capability_unavailable` when they differ:
+  never a silent switch), `models.list` returns the deployments, and switching models or Auto routing is refused.
+  An orchestrator's workers inherit its model only on the same route. A Foundry environment's custom agents may name
+  only its deployments.
+- **Observability.** Each Foundry session's creation is logged (`Session model calls go to Azure AI Foundry`, with the
+  account, deployment, and owner); token refreshes and brokered calls are logged at debug level, and refused tokens
+  as warnings. Per-call usage is in Foundry's own metrics for the account.
 
 ### Isolated placement
 
@@ -1738,6 +1807,12 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   empty disks) and creates the group and its VNet connection; the gateway's identity has SandboxGroup Data Owner on
   the group and AcrPull on the registry. Disk-image imports cannot use a managed identity, so the gateway exchanges its
   Entra token for an ACR refresh token (`registry.ts`) and passes it as `registryCredentials`.
+- **Azure AI Foundry.** When the AppHost declares `foundry`, the gateway gets its user-assigned identity even without
+  sandboxes, and each account gets a nested deployment into its own resource group (and subscription) that grants
+  that identity **Cognitive Services OpenAI User** on the account (`publish/foundry.ts`). The deploying user needs
+  permission to assign roles there. Accounts that name no subscription use the deployment's (`Azure:SubscriptionId`,
+  else the template's), passed as `MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION`. The accounts and model deployments are
+  yours: `aspire deploy` never creates or changes them.
 - **Egress (isolated).** `services/egress` in external mode runs as the `egress` app in an internal Container Apps
   environment on the `egress` subnet (TCP 3128 on its internal load balancer, one replica,
   `EGRESS_PROTECTED_CIDRS` = the VNet). The gateway runs `MANAGED_COPILOT_EGRESS=external` with a generated
@@ -1774,6 +1849,8 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_EGRESS_ALLOWED_PORTS` / `_PRIVATE_HOSTS` / `_PROTECTED_CIDRS` / `_BLOCKED_CIDRS` | `80,443` / none / `10.213.0.0/16` / none | Operator destination rules shared by the proxy and gateway-side fetches |
 | `MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64` | none | Extra CA certificates (base64 PEM) the proxy trusts for vault hosts |
 | `MANAGED_COPILOT_VAULT_KEY` | `<data>/network/vault.key` | 32-byte base64 key that seals vault values; wraps an existing key file like `MANAGED_COPILOT_DURABLE_KEY`. `aspire deploy` generates both as secret parameters |
+| `MANAGED_COPILOT_AZURE_CREDENTIAL` / `_CLIENT_ID` | `cli` locally, `managed-identity` in Azure | The platform's Azure identity for sandboxes and Azure AI Foundry; the client ID selects a user-assigned identity |
+| `MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION` | `Azure:SubscriptionId`, else `az account show` locally | Subscription of Foundry accounts that name none |
 | `MANAGED_COPILOT_MCP_ADAPTER_URL` | `http://127.0.0.1:<port>` | Base URL the shared runtime uses for the MCP adapter |
 | `MANAGED_COPILOT_CONSOLE_DIR` | `services/console/dist` beside the gateway | Built operator console the gateway serves at `/console` |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
@@ -1806,5 +1883,6 @@ Each workstream is one session and one branch. Edit only owned paths; request ch
 | **orchestrator** | gateway `modules/orchestrator/**`, SDK `features/workers.ts`, `libraries/protocol/src/workers.ts`, CLI `workers` command | G6: orchestrator environments, the worker tools, approvals within a worker's start, `worker.*` events, cleanup and recovery |
 | **azure** | `deployments/azure/**`, `libraries/aspire/src/publish/**`, gateway `modules/sandbox/providers/azure/**`, `services/gateway/Dockerfile`, `demos/*/Dockerfile`, `docs/deployment.md` | G3: `aspire deploy` to Azure Container Apps, durable state, Azure isolated placement |
 | **operator** | gateway `modules/operator/**`, `src/{metrics,redaction}.ts`, core `operator.ts`/`harness.ts`, `services/console/**`, `libraries/protocol/src/operator.ts`, CLI `commands/operator.ts` (each module keeps its own `operator*` views) | Spec section 16: operator API, console, operator CLI commands, audit log |
+| **foundry** | gateway `modules/foundry/**`, `modules/core/apps.ts`, `libraries/protocol/src/apps.ts`, SDK `identity.ts`, `libraries/aspire/src/publish/foundry.ts` (with core, sandbox, and azure for the routing in their files) | Spec section 2 "Your app's own users" and section 15: app keys and app users, `anyGitHubUser` admission, the Azure AI Foundry inference route |
 | **design** | `libraries/github-theme/**`, the tour slides' styles (`docs/tutorial/source/slides.html`) | The GitHub look and feel shared by the console and the demos; app workstreams build their screens from it |
 | **guides** | `docs/README.md`, `docs/concepts/**`, `walkthroughs/**`, their images in `docs/images/` | Start here, the visual concept pages, and the walkthroughs with runnable samples; they summarize the spec and this document, which stay the sources of truth |
