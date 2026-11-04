@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/cli",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "managed-copilot: sign in for background work, list sessions, attach Copilot CLI, and manage artifacts and schedules.",
   "type": "module",
   "bin": {

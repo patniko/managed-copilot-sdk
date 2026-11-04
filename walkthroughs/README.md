@@ -29,7 +29,7 @@ flowchart LR
   Where --> Many
 ```
 
-| # | Walkthrough | You'll see | Time |
+| # | Walkthrough | You'll see | Run time |
 | --- | --- | --- | --- |
 | 01 | [Your first agent](01-first-agent/README.md) | Connect, chat, then open the same conversation in Copilot CLI | 1 min |
 | 02 | [Give it your own tools](02-your-own-tools/README.md) | Tools that run in your process, and an approval prompt | 1 min |
@@ -44,6 +44,9 @@ flowchart LR
 | 11 | [Split a job across workers](11-orchestrator/README.md) | A coordinator starts two workers in their own sandboxes and puts their reports together | 1 min |
 | 12 | [Direct execution](12-direct-execution/README.md) | The same job delegated to workers and done directly by a coordinator and its sub-agents, then a coordinator that can do both | 2 min |
 | 13 | [Your own harness](13-your-own-harness/README.md) | Commands run directly in a sandbox, and a stock client whose sub-agents' hands are there | 1 min |
+
+Run times assume the platform is already up ([Before you start](#before-you-start)); a first `pnpm install`,
+`pnpm build`, and `aspire run` take a few minutes more.
 
 ## Before you start
 
@@ -67,7 +70,7 @@ To browse them, with their output and a copyable command for your local platform
 - **Where it runs.** Samples connect like any app: to your local `aspire run`, or to the deployment in
   `MANAGED_COPILOT_URL` ([walkthrough 10](10-azure/README.md)).
 - **Who you are.** Your GitHub sign-in: `gh auth login`, or `GH_TOKEN`. Model calls use your Copilot plan.
-- **Why here.** `@managed-copilot/sdk` isn't published to npm yet, so the samples live in this workspace. Copy one
+- **Why here.** The samples import `@managed-copilot/sdk` from this workspace rather than npm. Copy one
   into another workspace package to build on it.
 - **Cleanup.** Each sample deletes the sessions, vaults, and schedules it creates, even when it stops early, except 01,
   which leaves its session running so you can open it in Copilot CLI. `npx managed-copilot sessions` lists what you

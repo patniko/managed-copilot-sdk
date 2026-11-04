@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/sdk",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "Run stock Copilot SDK clients and sessions in environments you deploy: locally under Aspire or in your Azure subscription.",
   "type": "module",
   "main": "./dist/index.js",

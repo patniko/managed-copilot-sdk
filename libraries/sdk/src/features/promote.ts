@@ -1,4 +1,4 @@
-// Owner: promotion workstream. One-way promotion into a sandbox (spec section 9).
+// One-way promotion into a sandbox (spec section 9).
 import { ROUTES, type PromoteResult } from "@managed-copilot/protocol";
 import type { ManagedContext } from "../types.js";
 

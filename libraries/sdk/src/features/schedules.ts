@@ -1,4 +1,4 @@
-// Owner: durable workstream. Schedules that start or continue sessions (spec section 13).
+// Schedules that start or continue sessions (spec section 13).
 import { createHash, randomUUID } from "node:crypto";
 import type { Tool } from "@github/copilot-sdk";
 import {

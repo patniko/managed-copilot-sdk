@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/azure",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Azure deployment for Managed Copilot: the gateway's single-writer lease supervisor, the storage qualification probe, and deployment assets.",
   "type": "module",

@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/aspire",
   "version": "0.1.0",
+  "license": "MIT",
   "description": "addManagedCopilot(builder, name, options): run the Managed Copilot platform from an Aspire TypeScript AppHost.",
   "type": "module",
   "main": "./dist/index.js",

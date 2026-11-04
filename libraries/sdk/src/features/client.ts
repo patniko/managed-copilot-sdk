@@ -1,4 +1,4 @@
-// Owner: core workstream. Builds a stock CopilotClient whose transport is the stdio-to-WSS bridge.
+// Builds a stock CopilotClient whose transport is the stdio-to-WSS bridge.
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { CopilotClient, RuntimeConnection, type CopilotSession } from "@github/copilot-sdk";

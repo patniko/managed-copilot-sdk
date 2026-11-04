@@ -1,7 +1,7 @@
 /**
  * AppHost fragment for the long-running assistant demo (a data descriptor; no Aspire imports).
  *
- * The root `apphost.mts` (devloop workstream) merges `assistantCopilotOptions(...)` into its
+ * The root `apphost.mts` merges `assistantCopilotOptions(...)` into its
  * `addManagedCopilot(builder, "copilot", ...)` call and starts the server described by `ASSISTANT_DEMO`. The root AppHost
  * owns the parameters: `assistant-webhook-secret` → `ASSISTANT_WEBHOOK_SECRET`, `assistant-sealing-key` →
  * `ASSISTANT_SEALING_KEY`, and the optional `google-client-id` / `google-client-secret` → `GOOGLE_CLIENT_ID` /

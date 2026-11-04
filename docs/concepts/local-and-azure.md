@@ -36,7 +36,7 @@ Runtime       Copilot SDK 1.0.26, runtime 1.0.103
 
 `isolated`, `files`, and `promotion` appear once Docker is running and the sandbox backend is ready. If `aspire run`
 stops at "Trusting certificates…", run `aspire certs trust` once or use `aspire run --non-interactive`. The
-[README](../../README.md#run-it-locally) covers ports, NuGet proxies, and running a second copy.
+[README](../../README.md#quickstart) covers ports, NuGet proxies, and running a second copy.
 
 ## Deploy to Azure
 

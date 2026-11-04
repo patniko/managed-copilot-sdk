@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/demo-gallery",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "One page with every demo and walkthrough, linked to your local platform and your Azure deployment. `pnpm gallery` opens it.",
   "type": "module",

@@ -1,5 +1,5 @@
 /**
- * Promotion workstream contract (spec section 9 and its Promotion contract, gate G5; architecture "Promotion").
+ * Promotion module contract (spec section 9 and its Promotion contract, gate G5; architecture "Promotion").
  *
  * Types only, so other modules can import it without the implementation.
  *
@@ -137,7 +137,7 @@ export interface PromotionParticipant {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Ports consumed from other workstreams
+// Ports consumed from other modules
 // ---------------------------------------------------------------------------------------------------------------
 
 /** From sandbox: `sandboxes`. */

@@ -59,7 +59,7 @@ There are no workspace files to carry: a shared session never had a filesystem, 
 <details>
 <summary><strong>Under the hood</strong></summary>
 
-- [Architecture: promotion (as built)](../architecture.md#promotion-as-built): admission, the fence, state export and
+- [Architecture: promotion](../architecture.md#promotion): admission, the fence, state export and
   import, and the atomic commit.
 - [Spec section 9: the promotion contract](../spec/developer-experience.md#promotion-contract).
 

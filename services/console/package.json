@@ -1,6 +1,7 @@
 {
   "name": "@managed-copilot/console",
   "version": "0.1.0",
+  "license": "MIT",
   "private": true,
   "description": "Managed Copilot operator console: infrastructure health, deployed state, sessions, and harness configuration. The gateway serves the built files at /console.",
   "type": "module",
