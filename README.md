@@ -107,7 +107,7 @@ pnpm gallery                        # every demo and walkthrough on one page
 All three run under `aspire run` with real models and deploy to Azure with the same AppHost.
 
 <p align="center">
-  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The software factory floor: a coordinator that created two builder sandboxes and reused them for review fixes" width="900">
+  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The software factory floor: a coordinator that created two builder sandboxes and reused one for review fixes" width="900">
 </p>
 
 | Demo | What it shows |
