@@ -128,11 +128,17 @@ export function TodayCard({ agenda, timeZone, demo }: { agenda?: AgendaView; tim
                 {group.events.map((event) => {
                   const live = !event.allDay && Date.parse(event.start) <= now;
                   const when = event.allDay ? "All day" : timeRange(event.start, event.end, timeZone);
+                  const details = [when, event.location].filter(Boolean).join(" · ");
                   return (
-                    <Tooltip key={event.id} content={[when, event.location].filter(Boolean).join(" · ")} describe={false}>
+                    <Tooltip key={event.id} content={details} describe={false}>
                       <li className="flex min-h-8 items-center gap-3 px-3">
-                        <span className="w-16 shrink-0 text-xs text-fg-muted tabular-nums">{event.allDay ? "All day" : timeOf(event.start, timeZone)}</span>
-                        <span className="min-w-0 flex-1 truncate">{event.title}</span>
+                        <span className="w-16 shrink-0 text-xs text-fg-muted tabular-nums" aria-hidden>
+                          {event.allDay ? "All day" : timeOf(event.start, timeZone)}
+                        </span>
+                        <span className="min-w-0 flex-1 truncate">
+                          {event.title}
+                          <span className="sr-only">, {details}</span>
+                        </span>
                         {live ? (
                           <span className="Label Label--success shrink-0">Now</span>
                         ) : event.id === nextId ? (
@@ -375,6 +381,13 @@ function ScheduleDetails({ schedule, timeZone }: { schedule: ScheduleView; timeZ
   );
 }
 
+/** The empty reminders list in one line: what reminders do, or what they wait for. */
+function emptyLine(background?: BackgroundView): string {
+  if (background?.state === "off") return "Reminders need background work.";
+  if (background?.state === "unavailable") return "Reminders aren't available on this deployment.";
+  return "Reminders keep running when this tab is closed.";
+}
+
 export function AutomationsCard(props: {
   schedules: readonly ScheduleView[];
   error?: string;
@@ -410,7 +423,7 @@ export function AutomationsCard(props: {
       <div className="Box">
         {schedules.length === 0 ? (
           <div className="flex flex-col gap-2 p-3">
-            <p className="text-fg-muted">{props.background?.state === "off" ? "Reminders need background work." : "Reminders keep running when this tab is closed."}</p>
+            {!props.error && <p className="text-fg-muted">{emptyLine(props.background)}</p>}
             <Tooltip content={briefingBlocked ?? "Every weekday at 8:00 AM: your calendar and important unread mail"}>
               <button
                 type="button"
@@ -653,33 +666,37 @@ export function ConnectionsCard({ connections, ready, actions }: { connections?:
   return (
     <Section title="Mail & calendar">
       {google?.connected ? (
-        <div className="Box flex items-center gap-2.5 px-3 py-2.5">
-          <GoogleMark />
-          <div className="min-w-0 flex-1">
-            <div className="truncate font-semibold" title={google.email}>
-              {google.email ?? "Google account"}
+        <div className="Box">
+          <div className="flex items-center gap-2.5 px-3 py-2.5">
+            <GoogleMark />
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-semibold" title={google.email}>
+                {google.email ?? "Google account"}
+              </div>
+              {google.status === "needs_reconnect" ? (
+                <div className="flex items-center gap-1 text-xs text-fg-attention">
+                  <AlertIcon size={12} />
+                  Access expired
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 text-xs text-fg-muted">
+                  <CheckCircleFillIcon size={12} className="text-fg-success" />
+                  Connected
+                </div>
+              )}
             </div>
-            {google.status === "needs_reconnect" ? (
-              <div className="flex items-center gap-1 text-xs text-fg-attention">
-                <AlertIcon size={12} />
-                Access expired
-              </div>
-            ) : (
-              <div className="flex items-center gap-1 text-xs text-fg-muted">
-                <CheckCircleFillIcon size={12} className="text-fg-success" />
-                Connected
-              </div>
-            )}
+            {overflow("More actions for Google", [
+              { key: "disconnect", label: "Disconnect Google", icon: SignOutIcon, danger: true, onSelect: () => void act("disconnect", () => actions.disconnectGoogle()) },
+            ])}
           </div>
           {google.status === "needs_reconnect" && (
-            <button type="button" className="btn btn-sm shrink-0" disabled={busy === "connect"} onClick={() => void act("connect", () => actions.connectGoogle())}>
-              {busy === "connect" && <Spinner />}
-              Reconnect
-            </button>
+            <div className="Box-footer px-3 py-2">
+              <button type="button" className="btn btn-sm btn-block" disabled={busy === "connect"} onClick={() => void act("connect", () => actions.connectGoogle())}>
+                {busy === "connect" ? <Spinner /> : <GoogleMark small />}
+                Reconnect Google
+              </button>
+            </div>
           )}
-          {overflow("More actions for Google", [
-            { key: "disconnect", label: "Disconnect Google", icon: SignOutIcon, danger: true, onSelect: () => void act("disconnect", () => actions.disconnectGoogle()) },
-          ])}
         </div>
       ) : (
         <div className="Box">

@@ -112,11 +112,32 @@ async function approveSandbox(page: Page, environment: string, screenshot?: stri
   if (screenshot) await shot(page, screenshot);
   await approval.getByRole("button", { name: "Start sandbox" }).click();
   // Once approved, the approval card turns into the sandbox's own card.
-  await page.locator(`[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"]`).last().waitFor({ timeout: 60_000 });
+  const card = `[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"]`;
+  await page.locator(card).last().waitFor({ timeout: 60_000 });
   ok(`created sandbox ${worker}${options.wait === false ? "" : "; waiting for its work"}`);
+  await approveRetry(page, worker, card);
   if (options.wait === false) return worker;
-  await page.locator(`[data-testid="sandbox-card"][data-action="start"][data-worker="${worker}"][data-phase="done"]`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
+  await page.locator(`${card}[data-phase="done"]`).last().waitFor({ timeout: SANDBOX_TIMEOUT });
   return worker;
+}
+
+/**
+ * When the start call itself fails (for example the model named a custom agent the sandbox doesn't have; the platform
+ * checks that only after you approve), the assistant asks again for the same sandbox. Approves that one retry.
+ */
+async function approveRetry(page: Page, worker: string, card: string): Promise<void> {
+  const failed = page.locator(`${card}[data-phase="call-failed"]`).last();
+  const started = page.locator(`${card}:not([data-phase="call-failed"]):not([data-phase="calling"])`).last();
+  await Promise.race([failed.waitFor({ timeout: 60_000 }).catch(() => undefined), started.waitFor({ timeout: 60_000 }).catch(() => undefined)]);
+  if (!(await failed.count()) || (await started.count())) return;
+  const retry = page
+    .locator('[data-testid="approval"][data-tool="start_worker"][data-status="pending"][data-actionable="true"]')
+    .filter({ has: page.locator('[data-testid="sandbox-approval"]', { hasText: worker }) })
+    .last();
+  await retry.waitFor({ timeout: TURN_TIMEOUT });
+  ok(`the start failed (${(await failed.innerText()).replace(/\s+/g, " ").slice(0, 120)}); approving the assistant's retry`);
+  await retry.getByRole("button", { name: "Start sandbox" }).click();
+  await started.waitFor({ timeout: 60_000 });
 }
 
 /**
