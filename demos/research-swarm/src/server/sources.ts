@@ -8,7 +8,7 @@ export const SOURCE_LOG = "research/sources.jsonl";
 /** Pages taken from one researcher's log. */
 const PAGES_PER_RESEARCHER = 40;
 
-export function hostOf(url: string): string {
+function hostOf(url: string): string {
   try {
     return new URL(url).hostname.toLowerCase();
   } catch {
@@ -17,7 +17,7 @@ export function hostOf(url: string): string {
 }
 
 /** An http(s) URL without its fragment, or undefined. */
-export function canonicalUrl(url: string): string | undefined {
+function canonicalUrl(url: string): string | undefined {
   try {
     const parsed = new URL(url.trim());
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;

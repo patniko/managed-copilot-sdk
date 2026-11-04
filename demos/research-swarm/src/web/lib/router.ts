@@ -10,7 +10,7 @@ function safeDecode(value: string): string {
   }
 }
 
-export function parseHash(hash: string): Route {
+function parseHash(hash: string): Route {
   const [first, id] = (hash.startsWith("#") ? hash.slice(1) : hash).split("/").filter(Boolean).map(safeDecode);
   return first === "r" && id ? { kind: "run", id } : { kind: "home" };
 }

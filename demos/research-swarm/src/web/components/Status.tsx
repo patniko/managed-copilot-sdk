@@ -9,17 +9,13 @@ type Look = "busy" | "waiting" | "done" | "failed" | "stopped";
 const RUN_LOOK: Readonly<Record<RunStatus, Look>> = { planning: "busy", researching: "busy", writing: "busy", done: "done", failed: "failed", stopped: "stopped" };
 const RESEARCHER_LOOK: Readonly<Record<ResearcherState, Look>> = { queued: "waiting", starting: "busy", reading: "busy", done: "done", failed: "failed", stopped: "stopped" };
 
-export const LOOK_TEXT: Readonly<Record<Look, string>> = {
+const LOOK_TEXT: Readonly<Record<Look, string>> = {
   busy: "text-fg-accent",
   waiting: "text-fg-muted",
   done: "text-fg-success",
   failed: "text-fg-danger",
   stopped: "text-fg-muted",
 };
-
-export function researcherLook(state: ResearcherState): Look {
-  return RESEARCHER_LOOK[state];
-}
 
 function Glyph({ look, size }: { readonly look: Look; readonly size: number }) {
   switch (look) {

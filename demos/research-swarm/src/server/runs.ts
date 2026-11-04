@@ -14,7 +14,7 @@ import type { Store } from "./store.js";
 
 const PUBLISH_MS = 150;
 
-export function summarize(run: Run): RunSummary {
+function summarize(run: Run): RunSummary {
   return {
     id: run.id,
     question: run.question,

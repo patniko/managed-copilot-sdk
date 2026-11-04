@@ -9,7 +9,7 @@ const CITATION = /\[(\d{1,3})\]/g;
 const CITE = "cite:";
 
 /** Scrolls to a source in the list and highlights it for a moment. */
-export function showSource(n: number): void {
+function showSource(n: number): void {
   const element = document.getElementById(`source-${n}`);
   if (!element) return;
   element.scrollIntoView({ behavior: "smooth", block: "center" });
