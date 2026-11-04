@@ -62,6 +62,8 @@ await builder.build().run();
   }
   ```
 
-  `public: true` with `githubToken: true` is refused: a public app can't act as your account.
+  `public: true` with `githubToken: true` is refused: a public app can't act as your account. An app that acts as your
+  account becomes public in two deploys (`githubToken: false`, then `public: true`); `aspire deploy` refuses to open an
+  app while a running revision still holds the token.
 
 Run `pnpm build` before `aspire run`; the gateway starts from its built output.

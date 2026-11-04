@@ -356,6 +356,11 @@ await publishApp(builder, copilot, {
   access rules must admit them), or as users it vouches for with an app credential.
 - **The other apps keep their protection.** Apps that act as your account stay behind `Parameters:app-allowed-ips`;
   only an explicit `"*"` opens them, and `access ips set "*"` asks first.
+- **Switching an app that acts as your account takes two deploys.** Container Apps applies ingress to every revision
+  at once, while the token leaves only with the new revision, so opening the app in the same deploy would expose the
+  old revision, token and all, until the new one took over. Before a public app's ingress changes, `aspire deploy`
+  lists the app's active revisions and stops if one still holds `MANAGED_COPILOT_GITHUB_TOKEN`. Deploy it first with
+  `githubToken: false` (still behind the allowlist), then with `public: true`.
 
 Verified on Azure on 2026-11-04 with [`deployments/azure/qualify/public-apps`](../deployments/azure/qualify/public-apps/README.md)
 (see "Live qualification").
@@ -494,6 +499,10 @@ identities. Your AppHost's user secrets stay on your machine.
 - **"is public, so it can't act as your GitHub account"**: a public app can't hold `Parameters:app-github-token`. Sign
   its users in (their own GitHub tokens, or users it vouches for with an app credential) and remove
   `githubToken: true`, or remove `public: true` to keep it behind the allowlist.
+- **"runs now as an app that acts as your GitHub account … githubToken: false instead of public: true"**: the app is
+  deployed with your token, and opening it in the same deploy would expose that revision. Deploy it once with
+  `githubToken: false`, then with `public: true` (see "Public apps"). If a revision that holds the token stays active
+  (a rollout that never became ready), fix or deactivate it first.
 - **An app answers `403 RBAC: access denied`** (some or all requests): its ingress allowlist does not include the
   address Azure sees for your machine. See "Who can open the apps".
 - **"belongs to another account than the Azure CLI's current one"** (`npx managed-copilot deploy`): `aspire deploy`

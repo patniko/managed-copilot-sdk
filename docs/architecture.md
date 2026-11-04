@@ -1716,7 +1716,10 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
   are published with `publishApp` (their own Dockerfile, NFS directory, and IP allowlist, by default the deployer's
   public address, resolved only when such an app exists). With `public: true` an app gets no IP rules, is tagged
   `managed-copilot-access: public` (`PublishAsManagedCopilotPublicApp`), and never gets `Parameters:app-github-token`
-  (`githubToken: true` is refused before anything is declared); the deploy summary lists allowlisted and public apps
+  (`githubToken: true` is refused before anything is declared). A `check-<app>-public` pipeline step runs after the
+  environment is provisioned and before the app's container app is: it lists the app's active revisions
+  (`az containerapp revision list`) and refuses to open an app while one still holds the token, since ingress applies
+  to every revision at once. The deploy summary lists allowlisted and public apps
   separately. The C# integration in
   `deployments/azure/hosting` adds what the TypeScript AppHost API cannot express (VNet, NFS storage, volumes, probes,
   revision mode, IP rules, tags). Publishing refuses an open gateway: access rules come from the AppHost or from

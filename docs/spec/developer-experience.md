@@ -1299,7 +1299,9 @@ By default a published app acts as the deploying account (`Parameters:app-github
 holds that token: `public: true` with `githubToken: true` is refused, and neither the allowlist nor `access ips`
 applies to it. It calls the platform as its signed-in users (section 2), never as the deployer. Only the AppHost makes
 an app public; the deploy summary, `npx managed-copilot access`, and the container app's tag
-`managed-copilot-access: public` name every public app.
+`managed-copilot-access: public` name every public app. An app that acts as the deployer becomes public in two deploys
+(`githubToken: false`, then `public: true`): `aspire deploy` refuses to open an app while one of its active revisions
+still holds the token, because ingress applies to every revision at once.
 
 ## 17. Orchestrator: a coordinator with workers
 

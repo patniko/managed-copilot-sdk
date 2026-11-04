@@ -507,9 +507,9 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (!RESOURCE_GROUP.test(resourceGroup)) throw new UsageError(`"${resourceGroup}" is not a valid resource group name.`);
   // `aspire deploy` signs in as the Azure CLI's current account, to the tenant of its default subscription unless told
   // otherwise (Azure:TenantId). Another subscription of that account can be in another tenant; another account's can't
-  // be used without switching the Azure CLI to it, which is the caller's choice.
+  // be used without switching the Azure CLI to it, which is the caller's choice, so a configured tenant doesn't skip this.
   let tenant = settings.get("Azure:TenantId");
-  if (!tenant && subscription.toLowerCase() !== azAccount.id.toLowerCase()) {
+  if (subscription.toLowerCase() !== azAccount.id.toLowerCase()) {
     const target = await host.capture("az", ["account", "show", "--subscription", subscription, "-o", "json"]);
     const found = target.code === 0 ? parseAccount(target.stdout) : undefined;
     if (!found?.tenantId) {
@@ -522,7 +522,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
         hint: `Switch the Azure CLI to it with \`az account set --subscription ${subscription}\`, then deploy again.`,
       });
     }
-    tenant = found.tenantId;
+    tenant ??= found.tenantId;
   }
 
   const token = await host.githubToken();
