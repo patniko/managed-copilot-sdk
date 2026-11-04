@@ -744,6 +744,7 @@ export class SandboxService implements SandboxesService {
       invalidateToken: (token) => this.#invalidateToken(token),
       githubApiUrl: this.#options.app.config.githubApiUrl,
       log: this.#log,
+      ...(options.inference ? { foundry: { account: options.inference.account, host: options.inference.host, token: () => options.inference!.token() } } : {}),
     });
     const deferredAgents = new Map<string, string>();
     // Counted for the operator console's traffic view: model calls the gateway brokers for sandboxes.
@@ -772,7 +773,8 @@ export class SandboxService implements SandboxesService {
       prepareSessionParams: async (_method, params) => {
         const deferred = deferAgentSelection(rewriteSessionParams(params, row.customizations));
         if (deferred.agent) deferredAgents.set(typeof params["sessionId"] === "string" ? params["sessionId"] : sessionId, deferred.agent);
-        return deferred.params;
+        // A Foundry session's model calls go to its account with the placeholder, which the broker swaps (never a token).
+        return options.inference ? { ...deferred.params, provider: { ...options.inference.provider, bearerToken: row.placeholder } } : deferred.params;
       },
       sessionOpened: async (id) => {
         live.lastActivity = Date.now();

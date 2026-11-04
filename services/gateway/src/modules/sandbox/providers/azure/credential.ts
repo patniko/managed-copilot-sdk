@@ -84,17 +84,23 @@ export class ManagedIdentityTokenSource extends CachingTokenSource {
 /** `az account get-access-token` (the signed-in Azure CLI), for qualification runs outside Azure. */
 export class AzureCliTokenSource extends CachingTokenSource {
   readonly #az: string;
+  readonly #subscription: string | undefined;
 
-  constructor(options: { az?: string; now?: () => number } = {}) {
+  /**
+   * `subscription`: get tokens from that subscription's tenant, which may not be the Azure CLI's default (the CLI can be
+   * signed in to several tenants at once).
+   */
+  constructor(options: { az?: string; subscription?: string; now?: () => number } = {}) {
     super(options.now);
     this.#az = options.az ?? (process.platform === "win32" ? "az.cmd" : "az");
+    this.#subscription = options.subscription && /^[0-9a-fA-F-]{36}$/.test(options.subscription) ? options.subscription : undefined;
   }
 
   protected fetchToken(resource: string): Promise<CachedToken> {
     return new Promise((resolve, reject) => {
       execFile(
         this.#az,
-        ["account", "get-access-token", "--resource", resource, "--output", "json"],
+        ["account", "get-access-token", "--resource", resource, ...(this.#subscription ? ["--subscription", this.#subscription] : []), "--output", "json"],
         { windowsHide: true, timeout: 60_000, shell: process.platform === "win32" },
         (error, stdout) => {
           if (error) {

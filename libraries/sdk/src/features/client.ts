@@ -49,11 +49,19 @@ export function toEnvironmentRequest(selector: EnvironmentSelector, options: Man
 }
 
 /** Fails early, at `managed.client(...)`, for environments the deployment does not offer. */
-export function checkEnvironment(info: DeploymentInfo, request: EnvironmentRequest): void {
+export function checkEnvironment(info: DeploymentInfo, request: EnvironmentRequest, identity?: Identity): void {
   if (request.name !== undefined) {
-    if (!info.environments.some((environment) => environment.name === request.name)) {
+    const declared = info.environments.find((environment) => environment.name === request.name);
+    if (!declared) {
       const known = info.environments.map((environment) => environment.name);
       throw new ManagedCopilotError("environment_not_found", `Unknown environment "${request.name}".${known.length > 0 ? ` This deployment offers: ${known.join(", ")}.` : ""}`);
+    }
+    // An app's own users have no Copilot plan: the gateway refuses them anywhere model calls would use one.
+    if (identity?.appUser && !declared.inference?.foundry) {
+      throw new ManagedCopilotError(
+        "inference_unavailable",
+        `Environment "${request.name}" sends model calls to each user's GitHub Copilot plan, and app users have none. Use an environment with inference: { foundry } for your app's own users.`,
+      );
     }
     return;
   }
@@ -97,10 +105,10 @@ function bridgeEnvironment(config: BridgeConfig): Record<string, string> {
 
 export async function createClient(ctx: ManagedState, environment: EnvironmentSelector, options: ManagedClientOptions = {}): Promise<CopilotClient> {
   const request = toEnvironmentRequest(environment, options);
-  checkEnvironment(ctx.info, request);
   const { gitHubToken, appUser, vaults: _vaults, network: _network, packages: _packages, env: _env, files: _files, ...clientOptions } = options;
   const identity = actingIdentity(ctx.identity, { ...(gitHubToken !== undefined ? { gitHubToken } : {}), ...(appUser !== undefined ? { appUser } : {}) });
   requireActor(identity, "managed.client(...)");
+  checkEnvironment(ctx.info, request, identity);
   const config: BridgeConfig = {
     url: connectUrl(ctx.url),
     ...(identity.token ? { token: identity.token } : {}),

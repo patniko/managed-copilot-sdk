@@ -1,6 +1,8 @@
 // Core REST routes: deployment info, the caller's account, owner-scoped sessions, and platform events (SSE).
 import { isManagedCopilotError, ManagedCopilotError, ROUTES, type DeploymentInfo, type SessionState } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
+import type { Principal } from "../../http.js";
+import { appAllows } from "./apps.js";
 import { accountInfo } from "./auth.js";
 import type { Environments } from "./environments.js";
 import type { PlatformEvents } from "./events.js";
@@ -23,7 +25,11 @@ const SERVICE_CAPABILITIES: Record<string, readonly string[]> = {
 /** Module capabilities (`app.capabilities`) that need a working sandbox backend. */
 const SANDBOX_BACKED_CAPABILITIES: ReadonlySet<string> = new Set(["promotion", "orchestrator"]);
 
-export function deploymentInfo(app: GatewayApp, environments: Environments, runtime: SharedRuntime | undefined): DeploymentInfo {
+/**
+ * What the deployment offers. A request through an app sees only the app's environments, and no inline ones (an app
+ * names the environments it uses).
+ */
+export function deploymentInfo(app: GatewayApp, environments: Environments, runtime: SharedRuntime | undefined, principal?: Principal): DeploymentInfo {
   const capabilities = new Set<string>(["events"]);
   if (runtime) capabilities.add("shared");
   const services = app.services as Record<string, unknown>;
@@ -36,12 +42,16 @@ export function deploymentInfo(app: GatewayApp, environments: Environments, runt
   }
   for (const capability of app.capabilities) if (sandboxesWork || !SANDBOX_BACKED_CAPABILITIES.has(capability)) capabilities.add(capability);
   const deployment = app.config.deployment;
+  if (deployment.foundry && Object.keys(deployment.foundry).length > 0 && (app.services as Record<string, unknown>)["foundry"]) capabilities.add("foundry");
+  if ((app.services.apps?.size ?? 0) > 0) capabilities.add("apps");
+  const throughApp = principal?.app !== undefined;
+  const offered = environments.info().filter((environment) => !principal || appAllows(app.services.apps, principal, environment.name));
   return {
     name: deployment.name,
     version: app.config.version,
     mode: app.config.mode,
-    environments: environments.info(),
-    ...(deployment.inline ? { inline: deployment.inline } : {}),
+    environments: offered,
+    ...(deployment.inline && !throughApp ? { inline: deployment.inline } : {}),
     capabilities: [...capabilities].sort(),
     sdk: { copilotSdk: "1.0.26", copilotRuntime: runtime?.current()?.version ?? "1.0.103" },
   };
@@ -50,9 +60,10 @@ export function deploymentInfo(app: GatewayApp, environments: Environments, runt
 export function registerRoutes(app: GatewayApp, options: { manager: SessionManager; environments: Environments; events: PlatformEvents; runtime: SharedRuntime | undefined }): void {
   const { manager, environments, events, runtime } = options;
 
-  app.routes.get(ROUTES.info, () => deploymentInfo(app, environments, runtime));
+  // An app acting for itself may read these two: what it can use, and who it is.
+  app.routes.get(ROUTES.info, (ctx) => deploymentInfo(app, environments, runtime, ctx.principal), { auth: "user-or-app" });
 
-  app.routes.get(ROUTES.me, (ctx) => accountInfo(ctx.principal!));
+  app.routes.get(ROUTES.me, (ctx) => accountInfo(ctx.principal!), { auth: "user-or-app" });
 
   app.routes.get(ROUTES.sessions, async (ctx) => {
     const state = ctx.query.get("state") ?? undefined;
@@ -82,7 +93,8 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
 
   app.routes.get(ROUTES.events, (ctx) =>
     events.stream(ctx, async () => {
-      const principal = await app.service("auth").authenticate(ctx.principal!.token);
+      const auth = app.service("auth");
+      const principal = auth.reverify ? await auth.reverify(ctx.principal!) : await auth.authenticate(ctx.principal!.token ?? "");
       if (principal.accountId !== ctx.principal!.accountId) throw new ManagedCopilotError("authentication_required", "The credential now belongs to another account");
     }),
   );

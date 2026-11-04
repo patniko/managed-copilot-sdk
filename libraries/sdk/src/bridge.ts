@@ -160,6 +160,36 @@ function main(): void {
   let ready = false;
   let stdinEnded = false;
 
+  /**
+   * The gateway refused the connection before welcoming it (an environment this caller may not use, for example). The
+   * SDK is waiting on requests it already sent (`connect`): answer each with the refusal, so the caller gets that
+   * explicit error instead of a dropped connection, then end.
+   */
+  const refuse = (message: string): never => {
+    let answered = 0;
+    if (!ready) {
+      for (const body of pending.splice(0)) {
+        let request: { id?: unknown; method?: unknown };
+        try {
+          request = JSON.parse(body) as { id?: unknown; method?: unknown };
+        } catch {
+          continue;
+        }
+        if ((typeof request.id !== "number" && typeof request.id !== "string") || typeof request.method !== "string") continue;
+        writeFrame(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: `${PREFIX} ${message}` } }));
+        answered++;
+      }
+    }
+    process.stderr.write(`${PREFIX} ${message}\n`);
+    if (answered > 0) {
+      // Let the answers reach the SDK before the process ends.
+      process.stdout.write("", () => process.exit(1));
+      setTimeout(() => process.exit(1), 2000).unref();
+      return undefined as never;
+    }
+    process.exit(1);
+  };
+
   const send = (body: string) => {
     if (ready && ws.readyState === WebSocket.OPEN) ws.send(body);
     else pending.push(body);
@@ -186,7 +216,7 @@ function main(): void {
       } catch {
         // Keep the status-only message.
       }
-      fail(`Managed Copilot rejected the connection: ${message}`);
+      refuse(`Managed Copilot rejected the connection: ${message}`);
     });
   });
 
@@ -232,7 +262,7 @@ function main(): void {
 
   ws.on("close", (code, reasonBuffer) => {
     if (stdinEnded || code === 1000) process.exit(0);
-    fail(describeClose(code, reasonBuffer.toString("utf8")));
+    refuse(describeClose(code, reasonBuffer.toString("utf8")));
   });
 
   ws.on("error", (error: Error & { code?: string }) => {

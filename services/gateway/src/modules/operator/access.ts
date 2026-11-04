@@ -6,7 +6,7 @@ import { createHash, randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { CONSOLE_REQUEST_HEADER, CONSOLE_TICKET_TTL_SECONDS, ManagedCopilotError, type OperatorGrant } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
-import type { Principal } from "../../http.js";
+import { isGitHubPrincipal, type Principal } from "../../http.js";
 import type { Logger } from "../../log.js";
 
 export interface OperatorRules {
@@ -98,6 +98,8 @@ export class OperatorAccess {
 
   /** The principal's operator grant; `forbidden` (naming who may operate, and the caller's login) when it has none. */
   async authorize(principal: Principal): Promise<OperatorGrant> {
+    // Operators are GitHub users: never an app's own user, whatever the deployment's rules say.
+    if (!isGitHubPrincipal(principal)) throw new ManagedCopilotError("forbidden", "Only GitHub users can operate this deployment.", { login: principal.login });
     if (this.configured) {
       if (await this.#auth().satisfies(principal, this.rules)) return "configured";
       const allowed = [...this.rules.githubUsers.map((user) => `@${user}`), ...this.rules.githubOrgs.map((org) => `members of ${org}`)].join(", ");

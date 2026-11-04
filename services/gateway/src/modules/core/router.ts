@@ -19,6 +19,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { GatewayApp } from "../../app.js";
 import type { Principal } from "../../http.js";
 import type { Logger } from "../../log.js";
+import { assertAppEnvironment, assertAppUserInference } from "./apps.js";
 import type { ResolvedEnvironment } from "./contracts.js";
 import type { Environments } from "./environments.js";
 import { RpcEndpoint, unsupportedMethod, webSocketTransport, type IncomingRequestContext } from "./rpc.js";
@@ -105,7 +106,13 @@ export class ClientConnection implements ClientPeer {
       case "status.get":
         return { version: this.#runtimeVersion(), protocolVersion: this.#protocolVersion() };
       case "auth.getStatus":
-        return { isAuthenticated: true, authType: "token", host: "https://github.com", login: this.principal.login, statusMessage: `Signed in to ${this.#app.config.deployment.name} as ${this.principal.login}` };
+        return {
+          isAuthenticated: true,
+          authType: "token",
+          host: "https://github.com",
+          login: this.principal.login,
+          statusMessage: `Signed in to ${this.#app.config.deployment.name} as ${this.principal.kind === "app-user" ? `${this.principal.login} (a user of the ${this.principal.app} app)` : this.principal.login}`,
+        };
       case "models.list":
         return this.#manager.listModels(this);
       case "session.create": {
@@ -165,7 +172,8 @@ export class ClientConnection implements ClientPeer {
   async #reverify(): Promise<void> {
     if (Date.now() - this.#verifiedAt < REVERIFY_INTERVAL_MS) return;
     try {
-      const principal = await this.#app.service("auth").authenticate(this.principal.token);
+      const auth = this.#app.service("auth");
+      const principal = auth.reverify ? await auth.reverify(this.principal) : await auth.authenticate(this.principal.token ?? "");
       if (principal.accountId !== this.principal.accountId) throw new ManagedCopilotError("authentication_required", "The connection's credential now belongs to a different account");
       this.#verifiedAt = Date.now();
     } catch (error) {
@@ -253,6 +261,9 @@ export function registerConnectRoute(options: ConnectRouterOptions, path: string
     if (hello.type !== BRIDGE_HELLO) throw new ManagedCopilotError("invalid_request", "The first frame must be a managed-copilot hello");
     if (hello.version !== 1) throw new ManagedCopilotError("invalid_request", `Unsupported bridge version ${String(hello.version)}; update @managed-copilot/sdk`);
     const environment = environments.resolve((hello.environment ?? {}) as never);
+    // Through an app: only its environments, and for its own users only those that bill to Foundry.
+    assertAppEnvironment(app.services.apps, principal, environment.name);
+    assertAppUserInference(principal, environment.name, environment.config);
     const clientName = typeof hello.clientName === "string" ? hello.clientName.slice(0, 200) : undefined;
     const connection = new ClientConnection(ws, { principal, environment, clientName, manager, runtime, app, log });
     connections.add(connection);

@@ -126,8 +126,7 @@ function addDemo(demo: Demo, deployment: DemoDeployment) {
     .withHttpHealthCheck({ path: demo.healthPath })
     .withEnvironment("MANAGED_COPILOT_URL", copilot.url)
     .waitFor(copilot.gateway);
-  // `appKey` returns the generated parameter resource, typed as `object` by the integration.
-  if (deployment.app) app = app.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(deployment.app) as Parameters<typeof app.withEnvironment>[1]);
+  if (deployment.app) app = app.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(deployment.app));
   for (const [name, value] of Object.entries(demo.env ?? {})) app = app.withEnvironment(name, value);
   return app;
 }

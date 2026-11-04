@@ -1,6 +1,6 @@
 import { ManagedCopilotError, type AccountInfo, type BackgroundCredentialStatus } from "@managed-copilot/protocol";
 import type { Database } from "../../../db.js";
-import type { Principal } from "../../../http.js";
+import { isGitHubPrincipal, type Principal } from "../../../http.js";
 import type { Logger } from "../../../log.js";
 import type { CredentialsService, DurableAuthPort, SchedulesService } from "../contract.js";
 import { toIso } from "../ids.js";
@@ -53,6 +53,15 @@ export class DurableCredentials implements CredentialsService {
   }
 
   store(principal: Principal): BackgroundCredentialStatus {
+    if (!isGitHubPrincipal(principal)) {
+      throw new ManagedCopilotError(
+        "capability_unavailable",
+        "Background sign-in stores a GitHub credential, and an app's own users have none. Their sessions call Foundry with the platform's identity, so they need no sign-in to keep working.",
+      );
+    }
+    if (principal.app) {
+      throw new ManagedCopilotError("capability_unavailable", `Background sign-in is your own, from the CLI (\`npx managed-copilot login\`), not through the "${principal.app}" app.`);
+    }
     const now = this.#now();
     // A new sign-in replaces the previous credential: core forgets the old one, as on logout.
     const previous = this.#row(principal.accountId)?.sealed_token ?? null;
