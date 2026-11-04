@@ -4,6 +4,7 @@ import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
+import { DATA_DESK_DEFAULT_PORT, dataDesk } from "./demos/data-desk/apphost.mjs";
 
 const builder = await createBuilder();
 // `aspire deploy` publishes the same platform and demos to Azure Container Apps (docs/deployment.md).
@@ -22,6 +23,7 @@ const ports = {
   factory: 7480 + offset,
   snippetsWebhook: 7485 + offset,
   assistant: ASSISTANT_PORT + offset,
+  dataDesk: DATA_DESK_DEFAULT_PORT + offset,
 };
 const assistantUrl = `http://localhost:${ports.assistant}`;
 
@@ -31,6 +33,7 @@ const generatedSecret = (name: string) => builder.addParameterWithGeneratedValue
 // The demos bring their own environments (and the assistant its webhook) as plain data.
 const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
+const dataDeskDemo = dataDesk({ port: ports.dataDesk });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 
@@ -59,6 +62,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...factory.environments,
     ...assistant.environments,
     ...dispatchDemo.environments,
+    ...dataDeskDemo.environments,
   },
 
   // Optional: lets code request { type, size } without a name, using the default sandbox image and settings.
@@ -106,6 +110,10 @@ await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", al
 // Dispatch: one conversation with an orchestrator agent that, message by message, creates a sandbox for each part of
 // the work or sends it to a sandbox it already has.
 await addDemo(dispatchDemo.app, { dockerfile: "demos/dispatch/Dockerfile", allowedHostsEnv: "DISPATCH_ALLOWED_HOSTS", gatewayUrlEnv: ["DISPATCH_ATTACH_URL"] });
+
+// Data Desk: chat with a spreadsheet. The session answers on the shared runtime, then moves once into a Python sandbox
+// when a request needs code, and an attached Copilot CLI follows it.
+await addDemo(dataDeskDemo.app, { dockerfile: "demos/data-desk/Dockerfile", allowedHostsEnv: "DATA_DESK_ALLOWED_HOSTS", gatewayUrlEnv: ["DATA_DESK_ATTACH_URL"] });
 
 // A long-running assistant you talk to like a bot: reminders, briefings, Gmail, Google Calendar, and sandboxes it starts
 // for hands-on work.
