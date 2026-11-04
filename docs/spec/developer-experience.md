@@ -238,8 +238,8 @@ const sessions = await alice.sessions.list();
 ```
 
 - **The app vouches; the platform scopes.** The gateway takes the app's word for who the user is, so the app key is a
-  server-side secret like any API key. Every request through the key may use only the app's `environments`. A
-  session belongs to the app user (`owner.kind` is `"app-user"`, `owner.app` the app, `owner.userId` the ID the app
+  server-side secret like any API key. Every request through the key may use, and see, only the app's `environments`
+  (and the workers of its orchestrator sessions). A session belongs to the app user (`owner.kind` is `"app-user"`, `owner.app` the app, `owner.userId` the ID the app
   sent, `owner.name` the last `name` it sent): another app, or this app naming another user, never reaches it. An
   app user is never a GitHub account and never satisfies `access` or `operators`.
 - **Model calls go to Foundry, never to a Copilot plan.** An app user's sessions run only in environments that route
@@ -257,8 +257,8 @@ const sessions = await alice.sessions.list();
   },
   ```
 
-  Their sessions are their accounts' own, as if they had connected directly; another app they sign in to with
-  GitHub can reach them too.
+  Their sessions are their GitHub accounts' own. Through an app, a request reaches only those in the app's
+  environments; another app, or a direct connection where `access` allows one, sees the rest.
 
 ### Work that continues without you
 
@@ -1799,7 +1799,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 39 | Connector API shape | AppHost `connectors` (`mcpServer`, `oauth`, `token`, `env`, `account: "user"` or `"service"`), environment `connectors` that join every session, and `connectorReturnUrls`; `connect` (with `--token`), `connectors` (with `import`), and `disconnect` in the CLI; `managed.connectors` (`connect`, `complete`, `list`, `create`, `disconnect`, `delete`); `sign_in` actions and the `request_sign_in` platform tool; runtime credentials only through host-answered MCP headers | Proposed | Not built |
 | 40 | GitHub Connectors as a source | Optionally use connections made on GitHub once the stock runtime can use them without a GitHub token in the sandbox; never required | Later | Not built: sandboxes hold only a placeholder GitHub token |
 | 41 | Users without GitHub | Your app signs them in with any provider and vouches for each with an app key the AppHost issues (`apps`, `managed.client(env, { appUser })`, `managed.as(...)`); their sessions belong to that app user, scoped to the app and never a GitHub account, and bill to the deployment's Foundry; anything that needs a GitHub entitlement fails explicitly. People who sign in with GitHub keep `{ gitHubToken }` and their own plan | Decided | In progress |
-| 42 | GitHub users of a public app | `anyGitHubUser: true` on an app admits any GitHub account that comes through that app's key; `access` still decides who may use the deployment directly. Such sessions are the GitHub account's own, not scoped to the app | Proposed | In progress |
+| 42 | GitHub users of a public app | `anyGitHubUser: true` on an app admits any GitHub account that comes through that app's key; `access` still decides who may use the deployment directly. Such sessions are the GitHub account's own; a request through an app reaches only those in its environments | Proposed | In progress |
 | 43 | Declaring Foundry | AppHost `foundry` names existing AIServices accounts (resource group, optional subscription, deployments). The platform's Azure identity calls them: `az login` locally, the gateway's managed identity in Azure with a role `aspire deploy` assigns. Stock runtime BYOK provider: a token the gateway answers per call on the shared runtime, a placeholder the gateway swaps in sandboxes. A session's route is fixed at creation | Proposed | In progress |
 
 ## Platform contracts

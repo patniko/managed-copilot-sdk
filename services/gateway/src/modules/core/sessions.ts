@@ -42,7 +42,7 @@ import {
   type OrchestratorBrief,
   type WorkerEnvironmentBrief,
 } from "./admission.js";
-import { appUserPrincipal, assertAppEnvironment, assertAppUserInference } from "./apps.js";
+import { appAllows, appUserPrincipal, assertAppEnvironment, assertAppUserInference } from "./apps.js";
 import { accountInfo, type GitHubAuthenticator } from "./auth.js";
 import {
   optionalService,
@@ -559,6 +559,27 @@ export class SessionManager implements SessionsService {
     const record = this.get(sessionId);
     if (!record || record.ownerId !== accountId) throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
     return record;
+  }
+
+  /**
+   * Whether a session is within the app a request came through (spec section 2): one of the app's environments, or an
+   * orchestrator's worker whose coordinator is. Requests without an app see all of their own sessions.
+   */
+  inAppScope(principal: Principal, record: SessionRecord): boolean {
+    if (!principal.app) return true;
+    const apps = this.#options.app.services.apps;
+    if (appAllows(apps, principal, record.environment)) return true;
+    const parent = record.parentSessionId ? this.get(record.parentSessionId) : undefined;
+    return parent !== undefined && parent.ownerId === record.ownerId && appAllows(apps, principal, parent.environment);
+  }
+
+  /** Answers `not_found` for the caller's own session outside the app its request came through, as for anyone else's. */
+  assertAppScope(principal: Principal, sessionId: string): void {
+    if (!principal.app) return;
+    const record = this.get(sessionId);
+    if (record && record.ownerId === principal.accountId && !this.inAppScope(principal, record)) {
+      throw new ManagedCopilotError("not_found", `Session ${sessionId} was not found`, { sessionId });
+    }
   }
 
   async info(accountId: number, sessionId: string): Promise<SessionInfo> {
@@ -1393,6 +1414,7 @@ export class SessionManager implements SessionsService {
     const sessionId = params["sessionId"];
     if (typeof sessionId !== "string") throw new ManagedCopilotError("invalid_request", "session.resume needs a sessionId");
     const record = this.getOwned(peer.principal.accountId, sessionId);
+    this.assertAppScope(peer.principal, sessionId);
     if (record.environment !== peer.environment.name) {
       throw new ManagedCopilotError("invalid_request", `Session ${sessionId} belongs to environment "${record.environment}"; resume it with a client for that environment`);
     }
@@ -1418,6 +1440,9 @@ export class SessionManager implements SessionsService {
       const binding = await this.#policy?.session?.(sessionId);
       const network = binding?.policy ?? record.network;
       const admitted = await this.#admit(live.environment, placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
+      // A Foundry session keeps its deployment: a resume that names another model fails rather than being rewritten.
+      if (params["model"] !== undefined) this.#checkModelSwitch(live, params["model"]);
+      const foundry = this.#foundryRoute(sessionId);
       await this.#checkRemoteMcp(admitted, sessionId, placement, network);
       if (live.moves !== moves) continue;
       // The session's option changes this resume does not set again stay in effect (as a restore applies them).
@@ -1432,8 +1457,9 @@ export class SessionManager implements SessionsService {
         // A resume without `agent` keeps the session's current agent (stock runtime behavior), while it still resolves.
         const kept = stored.params["agent"];
         if (stable["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, stable)) stable["agent"] = kept;
-        // Likewise its model: restores select the model the session last had.
+        // Likewise its model: restores select the model the session last had (a Foundry session, its deployment).
         if (stable["model"] === undefined && typeof stored.params["model"] === "string") stable["model"] = stored.params["model"];
+        if (foundry) stable["model"] = foundry.deployment;
         // A resume configures the session again: what it sets replaces earlier option changes, and it is the caller's
         // configuration from now on (restores and placement changes apply the same thing; model and agent come from
         // the ledger).
@@ -1450,7 +1476,7 @@ export class SessionManager implements SessionsService {
       const current = this.get(sessionId) ?? record;
       this.#ledger.update(sessionId, {
         state: current.state === "failed" || current.state === "stopped" ? "ready" : current.state,
-        ...(admitted.model ? { model: admitted.model } : {}),
+        ...(foundry ? { model: foundry.deployment } : admitted.model ? { model: admitted.model } : {}),
         ...(admitted.agent ? { agent: admitted.agent } : {}),
       });
       return { result: this.#scrub(live, this.#sanitizeResponse(live, outcome.result, placement), placement), after: () => this.#afterAttach(peer, sessionId) };
@@ -1589,6 +1615,7 @@ export class SessionManager implements SessionsService {
           break;
         case "session.options.update":
           patch = admitOptionsUpdate(params, context());
+          if (patch["model"] !== undefined) this.#checkModelSwitch(live, patch["model"]);
           forwarded = { ...patch, sessionId };
           break;
         case "session.tools.set": {
@@ -1981,7 +2008,7 @@ export class SessionManager implements SessionsService {
         network,
         environmentRequest: environment.request,
         admitted: stored,
-        ...(foundry ? { model: foundry.deployment, inference: { route: "foundry" as const, foundry: foundry.account } } : admitted.model ? { model: admitted.model } : {}),
+        ...(foundry ? { model: foundry.deployment, inference: { route: "foundry" as const, foundry: foundry.account, deployment: foundry.deployment } } : admitted.model ? { model: admitted.model } : {}),
         ...(admitted.agent ? { agent: admitted.agent } : {}),
         ...(input.clientName ? { clientName: input.clientName } : {}),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
@@ -2099,8 +2126,10 @@ export class SessionManager implements SessionsService {
   #foundryRoute(sessionId: string): { readonly account: string; readonly deployment: string } | undefined {
     const record = this.get(sessionId);
     if (record?.inference?.route !== "foundry") return undefined;
-    if (!record.model) throw new ManagedCopilotError("state_restore_failed", `Session ${sessionId} has no recorded Foundry deployment`, { sessionId });
-    return { account: record.inference.foundry, deployment: record.model };
+    // Fixed at creation; `model` (from older records) only stands in for it.
+    const deployment = record.inference.deployment ?? record.model;
+    if (!deployment) throw new ManagedCopilotError("state_restore_failed", `Session ${sessionId} has no recorded Foundry deployment`, { sessionId });
+    return { account: record.inference.foundry, deployment };
   }
 
   /**
@@ -2193,7 +2222,8 @@ export class SessionManager implements SessionsService {
     );
     if (placement === "sandbox") delete admitted.params["gitHubTokenProviderRegistrationId"];
     if (admitted.callerToken) {
-      const owner = await this.#options.auth.authenticate(admitted.callerToken);
+      // Verified as the connection was: through its app, which may admit any GitHub account.
+      const owner = await this.#options.auth.authenticate(admitted.callerToken, principal.app ? { app: principal.app } : {});
       if (owner.accountId !== principal.accountId) {
         throw new ManagedCopilotError("forbidden", "The session's gitHubToken belongs to a different GitHub account; a managed client cannot switch owners");
       }

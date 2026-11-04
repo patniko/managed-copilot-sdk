@@ -31,6 +31,9 @@ const PING_INTERVAL_MS = (() => {
   return Number.isSafeInteger(override) && override > 0 ? override : 30_000;
 })();
 
+/** How long a refused bridge keeps answering requests the SDK sent meanwhile before it ends. */
+const REFUSAL_GRACE_MS = 1000;
+
 function fail(message: string): never {
   process.stderr.write(`${PREFIX} ${message}\n`);
   process.exit(1);
@@ -161,37 +164,38 @@ function main(): void {
   let stdinEnded = false;
 
   /**
-   * The gateway refused the connection before welcoming it (an environment this caller may not use, for example). The
-   * SDK is waiting on requests it already sent (`connect`): answer each with the refusal, so the caller gets that
-   * explicit error instead of a dropped connection, then end.
+   * The gateway refused the connection, or could not be reached, before welcoming it (an environment this caller may
+   * not use, for example). The SDK is waiting on requests it already sent (`connect`), or is about to send them: answer
+   * each with the refusal, so the caller gets that explicit error instead of a dropped connection, then end.
    */
-  const refuse = (message: string): never => {
-    let answered = 0;
-    if (!ready) {
-      for (const body of pending.splice(0)) {
-        let request: { id?: unknown; method?: unknown };
-        try {
-          request = JSON.parse(body) as { id?: unknown; method?: unknown };
-        } catch {
-          continue;
-        }
-        if ((typeof request.id !== "number" && typeof request.id !== "string") || typeof request.method !== "string") continue;
-        writeFrame(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: `${PREFIX} ${message}` } }));
-        answered++;
-      }
+  let refusal: string | undefined;
+  const answer = (body: string): void => {
+    let request: { id?: unknown; method?: unknown };
+    try {
+      request = JSON.parse(body) as { id?: unknown; method?: unknown };
+    } catch {
+      return;
     }
+    if ((typeof request.id !== "number" && typeof request.id !== "string") || typeof request.method !== "string") return;
+    writeFrame(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: `${PREFIX} ${refusal}` } }));
+  };
+  const refuse = (message: string): void => {
+    // Once, and nothing more from the gateway afterwards (an error is followed by a close).
+    if (refusal !== undefined) return;
+    refusal = message;
+    ws.removeAllListeners();
+    ws.on("error", () => undefined);
+    ws.terminate();
     process.stderr.write(`${PREFIX} ${message}\n`);
-    if (answered > 0) {
-      // Let the answers reach the SDK before the process ends.
-      process.stdout.write("", () => process.exit(1));
-      setTimeout(() => process.exit(1), 2000).unref();
-      return undefined as never;
-    }
-    process.exit(1);
+    if (ready) process.exit(1);
+    for (const body of pending.splice(0)) answer(body);
+    // Requests still on their way get the same answer; then the bridge ends, once its answers are written.
+    setTimeout(() => process.stdout.write("", () => process.exit(1)), REFUSAL_GRACE_MS);
   };
 
   const send = (body: string) => {
-    if (ready && ws.readyState === WebSocket.OPEN) ws.send(body);
+    if (refusal !== undefined) answer(body);
+    else if (ready && ws.readyState === WebSocket.OPEN) ws.send(body);
     else pending.push(body);
   };
 
@@ -246,13 +250,20 @@ function main(): void {
   ws.on("message", (data, isBinary) => {
     const text = isBinary ? Buffer.from(data as Buffer).toString("utf8") : data.toString();
     if (!ready) {
-      let welcome: Partial<BridgeWelcome>;
+      let welcome: Partial<BridgeWelcome> | undefined;
       try {
         welcome = JSON.parse(text) as Partial<BridgeWelcome>;
       } catch {
-        fail("The gateway answered the handshake with an invalid frame.");
+        welcome = undefined;
       }
-      if (welcome.type !== BRIDGE_WELCOME) fail("The gateway answered the handshake with an unexpected frame.");
+      if (!welcome || typeof welcome !== "object") {
+        refuse("The gateway answered the handshake with an invalid frame. (capability_unavailable)");
+        return;
+      }
+      if (welcome.type !== BRIDGE_WELCOME) {
+        refuse("The gateway answered the handshake with an unexpected frame. (capability_unavailable)");
+        return;
+      }
       ready = true;
       for (const body of pending.splice(0)) ws.send(body);
       return;
@@ -267,7 +278,8 @@ function main(): void {
 
   ws.on("error", (error: Error & { code?: string }) => {
     if (stdinEnded) process.exit(0);
-    fail(`Cannot reach Managed Copilot at ${url.origin}: ${error.code ?? error.message}`);
+    // Before the welcome, the SDK is waiting on requests it sent: they get this error rather than a dropped connection.
+    refuse(`Cannot reach Managed Copilot at ${url.origin}: ${error.code ?? error.message} (capability_unavailable)`);
   });
 }
 

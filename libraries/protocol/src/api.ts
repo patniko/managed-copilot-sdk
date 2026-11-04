@@ -28,7 +28,8 @@ export interface AccountInfo {
 export type AccountKind = "github" | "app-user" | "app";
 
 /** Where a session's model calls go, fixed when it is created (spec section 15). */
-export type SessionInference = { readonly route: "copilot" } | { readonly route: "foundry"; readonly foundry: string };
+/** Where a session's model calls go: its owner's Copilot plan, or an Azure AI Foundry account's deployment. */
+export type SessionInference = { readonly route: "copilot" } | { readonly route: "foundry"; readonly foundry: string; readonly deployment?: string };
 
 export interface EnvironmentInfo {
   readonly name: string;

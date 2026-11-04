@@ -129,10 +129,11 @@ export class ClientConnection implements ClientPeer {
       case "session.detach":
         return this.#manager.detach(this, body["sessionId"]);
       case "session.list":
-        return { sessions: this.#manager.list(this.principal.accountId).map((record) => metadata(record)) };
+        // Through an app, only the sessions within its environments (spec section 2).
+        return { sessions: this.#manager.list(this.principal.accountId).filter((record) => this.#manager.inAppScope(this.principal, record)).map((record) => metadata(record)) };
       case "session.getMetadata": {
         const record = typeof body["sessionId"] === "string" ? this.#manager.get(body["sessionId"]) : undefined;
-        return { session: record && record.ownerId === this.principal.accountId ? metadata(record) : undefined };
+        return { session: record && record.ownerId === this.principal.accountId && this.#manager.inAppScope(this.principal, record) ? metadata(record) : undefined };
       }
       case "session.getLastId": {
         const [latest] = this.#manager.list(this.principal.accountId, { environment: this.environment.name, limit: 1 });
@@ -140,6 +141,7 @@ export class ClientConnection implements ClientPeer {
       }
       case "session.delete": {
         if (typeof body["sessionId"] !== "string") throw new ManagedCopilotError("invalid_request", "session.delete needs a sessionId");
+        this.#manager.assertAppScope(this.principal, body["sessionId"]);
         await this.#manager.delete(this.principal.accountId, body["sessionId"]);
         return { success: true };
       }

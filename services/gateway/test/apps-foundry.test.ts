@@ -229,6 +229,49 @@ describe("apps and Azure AI Foundry through the gateway", () => {
     });
   });
 
+  describe("app scope and fixed deployments", () => {
+    it("keeps a GitHub user's sessions outside an app's environments out of reach through that app", async () => {
+      const direct = await connect("open", ALICE);
+      const sessionId = randomUUID();
+      await direct.request("session.create", { sessionId });
+      const throughKiosk = { token: ALICE, headers: { [APP_KEY_HEADER]: KIOSK_KEY } };
+      expect((await call(`/v1/sessions/${sessionId}`, throughKiosk)).status).toBe(404);
+      expect((await call(`/v1/sessions/${sessionId}/actions`, throughKiosk)).status).toBe(404);
+      expect(((await call("/v1/sessions", throughKiosk)).json as unknown as SessionInfo[]).some((session) => session.id === sessionId)).toBe(false);
+      expect((await call(`/v1/sessions/${sessionId}`, { ...throughKiosk, method: "DELETE" })).status).toBe(404);
+      // Directly, it is still theirs.
+      expect((await call(`/v1/sessions/${sessionId}`, { token: ALICE })).status).toBe(200);
+      expect(((await call("/v1/sessions", { token: ALICE })).json as unknown as SessionInfo[]).some((session) => session.id === sessionId)).toBe(true);
+    });
+
+    it("refuses a resume that names another model for a Foundry session, and keeps its deployment", async () => {
+      const first = await connect("support", "", appUser(FRONT_DESK_KEY, "erin"));
+      const sessionId = randomUUID();
+      await first.request("session.create", { sessionId });
+      const second = await connect("support", "", appUser(FRONT_DESK_KEY, "erin"));
+      await expect(second.request("session.resume", { sessionId, model: "grok-4.7" })).rejects.toThrow(/keeps it for its whole life/);
+      const info = (await call(`/v1/sessions/${sessionId}`, { headers: appUser(FRONT_DESK_KEY, "erin") })).json as unknown as SessionInfo;
+      expect(info).toMatchObject({ model: "gpt-5-mini", inference: { route: "foundry", foundry: ACCOUNT, deployment: "gpt-5-mini" } });
+      await second.request("session.resume", { sessionId, model: "gpt-5-mini" });
+    });
+
+    it("lets an app user reach their own pending actions, and nobody else's", async () => {
+      const client = await connect("support", "", appUser(FRONT_DESK_KEY, "frank"));
+      const sessionId = randomUUID();
+      await client.request("session.create", { sessionId });
+      expect((await call(`/v1/sessions/${sessionId}/actions`, { headers: appUser(FRONT_DESK_KEY, "frank") })).status).toBe(200);
+      expect((await call(`/v1/sessions/${sessionId}/actions`, { headers: appUser(FRONT_DESK_KEY, "grace") })).status).toBe(404);
+      expect((await call(`/v1/sessions/${sessionId}/actions`, { headers: { [APP_KEY_HEADER]: FRONT_DESK_KEY } })).status).toBe(401);
+    });
+
+    it("verifies a session's own GitHub token through the app its connection came through", async () => {
+      const client = await connect("chat", BOB, { [APP_KEY_HEADER]: FRONT_DESK_KEY });
+      const sessionId = randomUUID();
+      await client.request("session.create", { sessionId, gitHubToken: BOB });
+      expect((await call(`/v1/sessions/${sessionId}`, { token: BOB, headers: { [APP_KEY_HEADER]: FRONT_DESK_KEY } })).json).toMatchObject({ owner: { login: "bob" } });
+    });
+  });
+
   describe("FoundryService", () => {
     const service = (fetchImpl: typeof fetch, deployments = ["gpt-5-mini"]) =>
       new FoundryService({

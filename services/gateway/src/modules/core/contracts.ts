@@ -327,6 +327,8 @@ export interface SessionsService {
   get(sessionId: string): SessionRecord | undefined;
   /** Owner-scoped lookup; throws `not_found` for other accounts (existence is not revealed). */
   getOwned(accountId: number, sessionId: string): SessionRecord;
+  /** Throws `not_found` for the caller's own session outside the app its request came through (spec section 2). */
+  assertAppScope?(principal: Principal, sessionId: string): void;
   /** Owner-scoped `SessionInfo` (REST shape, including sandbox and pending actions). */
   info(accountId: number, sessionId: string): Promise<SessionInfo>;
   list(accountId: number, query?: { readonly environment?: string; readonly state?: SessionState; readonly limit?: number }): SessionRecord[];
