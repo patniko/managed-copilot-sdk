@@ -167,6 +167,8 @@ describe("apps and Azure AI Foundry through the gateway", () => {
       expect(throughApp.json.error).toMatchObject({ code: "capability_unavailable" });
       const schedule = await call("/v1/schedules", { method: "POST", headers: appUser(FRONT_DESK_KEY, "user-1"), body: { name: "daily", cron: "0 9 * * *", environment: "support", prompt: "hi" } });
       expect(schedule.json.error).toMatchObject({ code: "capability_unavailable" });
+      const attach = await call(`/v1/sessions/${randomUUID()}/attach`, { method: "POST", headers: appUser(FRONT_DESK_KEY, "user-1") });
+      expect(attach.json.error).toMatchObject({ code: "capability_unavailable", message: expect.stringMatching(/Copilot CLI attaches for a GitHub account/) });
     });
   });
 

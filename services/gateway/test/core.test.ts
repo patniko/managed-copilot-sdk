@@ -158,6 +158,20 @@ describe("environment resolution", () => {
   it("parses YAML list tools in agent frontmatter", () => {
     expect(parseAgentFile("planner.agent.md", "---\ndescription: Plans\ntools:\n  - submit_plan\n  - skill\n---\nPlan.")).toEqual({ name: "planner", description: "Plans", tools: ["submit_plan", "skill"], executableKeys: [] });
   });
+
+  it("holds a Foundry environment's agents to its account's deployments", () => {
+    const source = mkdtempSync(join(tmpdir(), "mc-bundle-"));
+    mkdirSync(join(source, "agents"));
+    writeFileSync(join(source, "agents", "pirate.agent.md"), "---\nname: pirate\nmodel: grok-4.7\n---\nArr.");
+    const foundry = { contoso: { resourceGroup: "ai", deployments: ["grok-4.7"] } };
+    expect(environments({ foundry, environments: { support: { type: "shared", inference: { foundry: "contoso" }, customizations: source } } }).resolve("support").customizations?.agents).toEqual([
+      { name: "pirate", model: "grok-4.7" },
+    ]);
+    writeFileSync(join(source, "agents", "sonnet.agent.md"), "---\nname: sonnet\nmodel: claude-sonnet-5\n---\nVerse.");
+    const outside = environments({ foundry, environments: { support: { type: "shared", inference: { foundry: "contoso" }, customizations: source } } });
+    expect(() => outside.resolve("support")).toThrowError(/models that are not deployments of Azure AI Foundry account "contoso": sonnet uses claude-sonnet-5/);
+    rmSync(source, { recursive: true, force: true });
+  });
 });
 
 describe("shared admission", () => {
