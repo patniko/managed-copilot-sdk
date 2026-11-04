@@ -157,7 +157,6 @@ export function App({ preview }: { preview?: ReactNode }) {
   const platformDown = platform !== undefined && platform.state !== "ready" && platform.state !== "connecting";
   const loading = !snapshot || (!platformDown && items.length === 0 && pending.length === 0 && conversation?.attach !== "live" && conversation?.attach !== "error");
   const disabledReason = platformDown ? "Managed Copilot isn't reachable" : conversation?.attach === "error" ? "Couldn't open the conversation" : "Connecting to your assistant…";
-  const demo = snapshot?.connections.provider !== "google";
 
   const rail = !snapshot ? (
     <RailSkeleton />
@@ -240,7 +239,6 @@ export function App({ preview }: { preview?: ReactNode }) {
                   name={snapshot?.account?.name}
                   login={snapshot?.account?.login}
                   timeZone={timeZone}
-                  demo={demo}
                   background={snapshot?.background}
                   sandboxes={sandboxes?.enabled ?? false}
                   onPick={(text) => void actions.send(text)}

@@ -25,7 +25,6 @@ export function EmptyState({
   name,
   login,
   timeZone,
-  demo,
   background,
   sandboxes = false,
   onPick,
@@ -34,7 +33,6 @@ export function EmptyState({
   name?: string;
   login?: string;
   timeZone: string;
-  demo: boolean;
   /** Scheduling suggestions wait until background work is confirmed on. */
   background?: BackgroundView;
   /** The assistant can start sandboxes, so a hands-on suggestion is offered too. */
@@ -50,13 +48,6 @@ export function EmptyState({
         {greeting(timeZone)}, {firstName(name, login)}
       </h1>
       <p className="mt-1 text-fg-muted">I handle your mail and calendar, and keep working while you're away.</p>
-      {demo && (
-        <Tooltip content="A sample inbox and calendar. Connect Google in the side panel to use yours.">
-          <span className="Label Label--attention mt-3" tabIndex={0}>
-            Demo data
-          </span>
-        </Tooltip>
-      )}
       <div className="mt-8 grid w-full grid-cols-1 gap-2 min-[480px]:grid-cols-2 md:grid-cols-3">
         {suggestions.map(({ icon: Icon, title, text, scheduling }) => {
           const blockedReason = scheduling ? schedulingBlockedReason(background) : undefined;

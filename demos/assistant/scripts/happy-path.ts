@@ -235,6 +235,8 @@ async function ensureBackgroundWork(page: Page): Promise<void> {
   step("Turn on background work (one click, with consent)");
   const card = page.locator('#background-work[data-state="off"]');
   await card.waitFor({ timeout: 10_000 });
+  // Show what turning it on means (the consent) before turning it on.
+  await card.locator("summary").click();
   await shot(page, "background");
   await card.getByRole("button", { name: /Turn (on background work|background work back on)/ }).click();
   await page.locator('[data-testid="background"][data-state="on"]').waitFor({ timeout: 30_000 });
