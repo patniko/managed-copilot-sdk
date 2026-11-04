@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import { describe, expect, it } from "vitest";
-import { AgentObserver, displayPath, fixPrompt, testCommandTool } from "../src/server/agent.js";
+import { AgentObserver, displayPath, fixPrompt, noTestsTool, testCommandTool } from "../src/server/agent.js";
 import type { LogLine } from "../src/shared/types.js";
 
 function observe() {
@@ -80,6 +80,21 @@ describe("prompts and tools", () => {
     expect(await call({ command: "" })).toMatchObject({ resultType: "failure" });
     expect(await call({ command: "npm test\nrm -rf /" })).toMatchObject({ resultType: "failure" });
     expect(await call({})).toMatchObject({ resultType: "failure" });
+    for (const placeholder of ['echo "No tests found"', "true", "exit 0", ":"]) {
+      expect(await call({ command: placeholder }), placeholder).toMatchObject({ resultType: "failure", textResultForLlm: expect.stringContaining("report_no_tests") });
+    }
     expect(reported).toEqual(["npm test"]);
+  });
+
+  it("takes a reason for a repository without tests", async () => {
+    const reasons: string[] = [];
+    const tool = noTestsTool((reason) => {
+      reasons.push(reason);
+      return "Recorded.";
+    });
+    const call = (args: unknown) => tool.handler!(args as never, {} as never);
+    expect(await call({ reason: " Only a README. " })).toBe("Recorded.");
+    expect(await call({ reason: "" })).toMatchObject({ resultType: "failure" });
+    expect(reasons).toEqual(["Only a README."]);
   });
 });

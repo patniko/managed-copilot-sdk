@@ -18,6 +18,7 @@ export const SETUP_PROMPT = [
   "2. Install the dependencies the tests need.",
   "3. Run the tests once to check the command works. Failing tests are expected: don't fix anything yet.",
   `4. Call report_test_command with the exact command that runs the whole test suite from ${REPO_DIR}.`,
+  "If the repository has no automated tests, call report_no_tests instead, and stop.",
 ].join("\n");
 
 export function fixPrompt(report: TestReport): string {
@@ -41,6 +42,12 @@ export function fixPrompt(report: TestReport): string {
 }
 
 const COMMAND_LIMIT = 500;
+/** Commands that print or exit instead of running tests. */
+const PLACEHOLDER = /^(?:echo|printf|true|false|:|exit)(?:\s|$)/;
+
+function failure(text: string) {
+  return { resultType: "failure" as const, textResultForLlm: text };
+}
 
 /** The tool Copilot reports the test command with. Its handler runs in this app; `onCommand` answers it. */
 export function testCommandTool(onCommand: (command: string) => string): Tool {
@@ -57,10 +64,28 @@ export function testCommandTool(onCommand: (command: string) => string): Tool {
     skipPermission: true,
     handler: (args: unknown) => {
       const command = typeof (args as { command?: unknown })?.command === "string" ? (args as { command: string }).command.trim() : "";
-      if (!command || command.length > COMMAND_LIMIT || /[\r\n]/.test(command)) {
-        return { resultType: "failure", textResultForLlm: `Pass the test command as one line of at most ${COMMAND_LIMIT} characters.` };
-      }
+      if (!command || command.length > COMMAND_LIMIT || /[\r\n]/.test(command)) return failure(`Pass the test command as one line of at most ${COMMAND_LIMIT} characters.`);
+      if (PLACEHOLDER.test(command)) return failure("That command doesn't run tests. If the repository has no automated tests, call report_no_tests.");
       return onCommand(command);
+    },
+  });
+}
+
+/** The tool Copilot reports a repository without tests with. */
+export function noTestsTool(onNoTests: (reason: string) => string): Tool {
+  return defineTool("report_no_tests", {
+    description: `Report that ${REPO_DIR} has no automated tests to run, with the reason in one sentence. Repo Doctor then ends the run.`,
+    parameters: {
+      type: "object",
+      properties: { reason: { type: "string", description: "One sentence, for example: \"The repository has only a README.\"" } },
+      required: ["reason"],
+      additionalProperties: false,
+    },
+    skipPermission: true,
+    handler: (args: unknown) => {
+      const reason = typeof (args as { reason?: unknown })?.reason === "string" ? (args as { reason: string }).reason.trim() : "";
+      if (!reason) return failure("Pass the reason in one sentence.");
+      return onNoTests(reason.slice(0, 300));
     },
   });
 }
@@ -78,7 +103,7 @@ const SHELL_TOOLS = new Set(["bash", "shell", "sh", "powershell"]);
 const SHELL_IO_TOOLS = new Set(["read_bash", "write_bash", "stop_bash"]);
 const EDIT_TOOLS = new Set(["edit", "create", "str_replace_editor", "str_replace", "apply_patch", "write", "write_file", "insert"]);
 const READ_TOOLS = new Set(["view", "read", "read_file", "glob", "grep", "rg", "search", "list_dir", "ls"]);
-const QUIET_TOOLS = new Set(["report_intent", "report_test_command", "think", "update_todo"]);
+const QUIET_TOOLS = new Set(["report_intent", "report_test_command", "report_no_tests", "think", "update_todo"]);
 const OUTPUT_LIMIT = 4_000;
 
 function record(value: unknown): Record<string, unknown> {

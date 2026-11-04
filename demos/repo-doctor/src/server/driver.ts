@@ -4,7 +4,7 @@ import { approveAll } from "@github/copilot-sdk";
 import { diffTotals, parseDiff } from "../shared/diff.js";
 import { cloneUrl } from "../shared/repo.js";
 import type { PatchView, RunStatus, StepId, TestReport } from "../shared/types.js";
-import { AgentObserver, fixPrompt, REPO_DIR, SETUP_PROMPT, SYSTEM_MESSAGE, testCommandTool } from "./agent.js";
+import { AgentObserver, fixPrompt, noTestsTool, REPO_DIR, SETUP_PROMPT, SYSTEM_MESSAGE, testCommandTool } from "./agent.js";
 import type { DoctorConfig } from "./config.js";
 import { errorText } from "./errors.js";
 import { describeAllowed, hostsReachedBy, parseRegistries, REGISTRY_PROBE, type Registries } from "./inference.js";
@@ -22,11 +22,12 @@ export interface DriverDeps {
   readonly onSession: (run: Run) => void;
 }
 
-/** A step that couldn't do its job: the run fails with this code and message. */
+/** A step that couldn't do its job: the run fails with this code and message, and the step shows `summary`. */
 class StepFailure extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly summary?: string,
   ) {
     super(message);
   }
@@ -123,6 +124,7 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
   let detach: (() => void) | undefined;
   let registries: Registries = { npm: [], pip: [] };
   let testCommand: string | undefined;
+  let noTests: string | undefined;
   let status: RunStatus = "failed";
   const gitRemote = source.kind === "github" ? "github.com" : undefined;
 
@@ -212,6 +214,11 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
           run.log("setup", { kind: "note", text: `Test command: ${reported}` });
           return "Recorded. Repo Doctor runs it next, so this step is done.";
         }),
+        noTestsTool((reason) => {
+          noTests ??= reason;
+          run.log("setup", { kind: "note", text: `No tests: ${reason}` });
+          return "Recorded. Repo Doctor ends the run, so you're done.";
+        }),
       ],
       onPermissionRequest: approveAll,
     });
@@ -256,6 +263,7 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
     // Set up: Copilot installs what the tests need and reports how to run them.
     run.start("setup");
     await turn(SETUP_PROMPT, timeouts.setupMs);
+    if (!testCommand && noTests) throw new StepFailure("no_tests", `Copilot found no tests to run in ${run.view.title}.`, "No tests");
     if (!testCommand) throw new StepFailure("no_test_command", "Copilot didn't find a way to run the tests.");
     run.finish("setup", "passed", testCommand);
 
@@ -314,8 +322,9 @@ export async function drive(run: Run, deps: DriverDeps): Promise<void> {
       run.update({ error: { code, message } });
     }
     const now = new Date().toISOString();
+    const summary = stopped ? "Stopped" : error instanceof StepFailure ? error.summary : undefined;
     for (const step of run.view.steps) {
-      if (step.status === "running") run.step(step.id, { status: "failed", finishedAt: now, activity: undefined, summary: stopped ? "Stopped" : step.summary ?? "Failed" });
+      if (step.status === "running") run.step(step.id, { status: "failed", finishedAt: now, activity: undefined, summary: summary ?? step.summary ?? "Failed" });
       else if (step.status === "pending") run.step(step.id, { status: "skipped" });
     }
   } finally {

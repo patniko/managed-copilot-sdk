@@ -79,7 +79,7 @@ sequenceDiagram
 | Step | Who acts in the sandbox | What happens |
 | --- | --- | --- |
 | Checkout | Repo Doctor | `git clone --depth 1`, or the sample's files uploaded and committed |
-| Set up | Copilot | installs the dependencies, finds the test command, and reports it with `report_test_command` |
+| Set up | Copilot | installs the dependencies, finds the test command, and reports it with `report_test_command` (or that there are no tests, with `report_no_tests`) |
 | Reproduce | Repo Doctor | runs the test command; if everything passes, the run ends **Healthy** |
 | Fix | Copilot | changes the code until the tests pass, and replies with the root cause |
 | Patch | Repo Doctor | diffs the working tree before and after the fix (through a temporary git index; the repository's history is untouched) |
@@ -91,7 +91,8 @@ sequenceDiagram
   `REPO_DOCTOR_EXTRA_HOSTS`.
 - **The code:** [`src/server/driver.ts`](src/server/driver.ts) runs one run; [`platform.ts`](src/server/platform.ts)
   keeps the stock `CopilotClient` connected and subscribes to `network.blocked`; [`agent.ts`](src/server/agent.ts)
-  holds the prompts and the tool and turns the session's standard events into step logs;
+  holds the prompts and the two tools (their handlers run in this app; a placeholder such as `echo` is refused as a
+  test command) and turns the session's standard events into step logs;
   [`inference.ts`](src/server/inference.ts) works out which allowed hosts a successful command reached;
   [`testsummary.ts`](src/server/testsummary.ts) reads counts from node:test, Jest, Vitest, Mocha, pytest, unittest,
   Go, Cargo, and TAP output.

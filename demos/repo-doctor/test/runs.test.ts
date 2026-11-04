@@ -131,6 +131,20 @@ describe("a run", () => {
     expect(run.sandbox.state).toBe("deleted");
   });
 
+  it("ends with No tests when Copilot reports a repository without any", async () => {
+    const platform = new FakePlatform({
+      script: async (session) => {
+        await session.callTool("report_no_tests", { reason: "The repository has only a README." });
+        return "There's nothing to test.";
+      },
+    });
+    const { manager } = setup(platform);
+    const run = await finished(manager, manager.create({ repo: "octocat/Hello-World" }).id);
+    expect(run).toMatchObject({ status: "failed", error: { code: "no_tests", message: "Copilot found no tests to run in octocat/Hello-World." } });
+    expect(step(run, "setup")).toMatchObject({ status: "failed", summary: "No tests" });
+    expect(manager.detail(run.id).logs.setup.some((line) => line.text === "No tests: The repository has only a README.")).toBe(true);
+  });
+
   it("stops: aborts Copilot's turn and deletes the sandbox", async () => {
     let turn: FakeSession | undefined;
     const platform = new FakePlatform({
