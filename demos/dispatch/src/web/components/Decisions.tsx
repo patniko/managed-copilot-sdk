@@ -15,6 +15,7 @@ import {
 import { useState, type ReactNode } from "react";
 import type { Approval, Decision } from "../../shared/types.js";
 import { BLUEPRINT_LABELS, blueprintKind } from "../../shared/catalog.js";
+import { retriedSteps } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { between, formatDuration, oneLine, plural } from "../lib/format.js";
 import { answerApproval } from "../lib/store.js";
@@ -79,6 +80,7 @@ function describe(decision: Decision, now: number): RowParts {
             </>
           ),
           tag: <Tag tone="muted">declined</Tag>,
+          ...(reason ? { title: `You declined: ${reason}` } : {}),
         };
       }
       if (failed) return { icon: XCircleIcon, iconClass: "text-fg-danger", text: <>Couldn't create <Name>{worker}</Name>{detail}</>, tag: <Tag tone="danger">failed</Tag> };
@@ -149,9 +151,10 @@ export function DecisionCard({ decisions, took, now }: { readonly decisions: rea
   const created = decisions.filter((decision) => decision.kind === "create" && (decision.status === "done" || decision.status === "running")).length;
   const askingCount = decisions.filter((decision) => decision.status === "asking").length;
   const asking = askingCount > 0;
+  const retried = retriedSteps(decisions);
   const summary = [created > 0 ? plural(created, "new sandbox", "new sandboxes") : asking ? "" : "No new sandboxes", asking ? `${askingCount} asking you` : ""].filter(Boolean).join(", ");
   return (
-    <section aria-label="What the agent did" className={cx("overflow-hidden rounded-lg border bg-canvas", asking ? "border-[var(--borderColor-attention-emphasis)]" : "border-line")}>
+    <section aria-label="What the agent did" className={cx("overflow-hidden rounded-lg border bg-canvas", asking ? "border-line-attention" : "border-line")}>
       <header className={cx("flex items-center gap-2 px-3 py-1.5 text-xs font-semibold", asking ? "bg-attention-muted text-fg-attention" : "bg-canvas-muted text-fg-muted")}>
         <WorkflowIcon size={14} />
         What the agent did
@@ -161,10 +164,18 @@ export function DecisionCard({ decisions, took, now }: { readonly decisions: rea
       </header>
       <ul>
         {decisions.map((decision) => {
-          const row = describe(decision, now);
+          const redone = retried.has(decision.id);
+          // A failure the coordinator fixed by trying again reads as a note, not an alarm.
+          const row = redone
+            ? { ...describe(decision, now), iconClass: "text-fg-muted", tag: <Tag tone="muted">retried</Tag>, title: decision.detail ? `Retried after: ${decision.detail}` : "Retried" }
+            : describe(decision, now);
           const Glyph = row.icon;
           return (
-            <li key={decision.id} className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 border-t border-line-muted px-3 py-1.5 text-sm first:border-t-0" title={row.title}>
+            <li
+              key={decision.id}
+              className={cx("grid grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 border-t border-line-muted px-3 py-1.5 text-sm first:border-t-0", redone && "text-fg-muted")}
+              title={row.title}
+            >
               {row.spin ? <Spinner size={14} className={row.iconClass} /> : <Glyph size={14} className={row.iconClass} />}
               <span className="min-w-0 truncate">{row.text}</span>
               {row.tag ?? <span />}

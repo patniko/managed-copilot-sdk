@@ -47,12 +47,14 @@ export function commandsIn(view: ConversationView, worker: WorkerView): Command[
   return view.messages.flatMap((message) => (message.commands ?? []).filter((command) => command.kind === "run" && command.status !== "denied" && command.status !== "asking" && (!own || command.agentId === worker.agentId)));
 }
 
-/** `#1`-style badges: the message that created a sandbox, and the ones that reused it (the latest two, then a count). */
+/** `#1`-style badges: the message that created a sandbox, and the latest that reused it (its tooltip lists them all). */
 export function MessageBadges({ worker }: { readonly worker: WorkerView }) {
   const hands = worker.role === "hands";
-  const reused = worker.sentWorkBy.slice(-2);
-  const earlier = worker.sentWorkBy.slice(0, -2);
+  // Work sent by the message that created it is part of its creation.
+  const later = worker.sentWorkBy.filter((index) => index !== worker.createdBy);
+  const latest = later.at(-1);
   const verb = hands ? "Used again" : "Reused";
+  const reusedBy = later.length > 1 ? `${verb} by messages ${later.slice(0, -1).map((index) => `#${index}`).join(", ")} and #${latest}` : `${verb} by message #${latest}`;
   return (
     <span className="flex shrink-0 items-center gap-1">
       {worker.createdBy !== undefined ? (
@@ -60,16 +62,11 @@ export function MessageBadges({ worker }: { readonly worker: WorkerView }) {
           <span className="Label Label--success px-1 tabular-nums">#{worker.createdBy}</span>
         </Tooltip>
       ) : null}
-      {earlier.length ? (
-        <Tooltip content={`${verb} by messages ${earlier.map((index) => `#${index}`).join(", ")}`}>
-          <span className="Label Label--accent px-1 tabular-nums">+{earlier.length}</span>
+      {latest !== undefined ? (
+        <Tooltip content={reusedBy}>
+          <span className="Label Label--accent px-1 tabular-nums">#{latest}</span>
         </Tooltip>
       ) : null}
-      {reused.map((index) => (
-        <Tooltip key={index} content={`${verb} by message #${index}`}>
-          <span className="Label Label--accent px-1 tabular-nums">#{index}</span>
-        </Tooltip>
-      ))}
     </span>
   );
 }
