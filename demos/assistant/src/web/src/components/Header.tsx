@@ -1,90 +1,284 @@
 import {
   AlertIcon,
-  DeviceDesktopIcon,
+  ContainerIcon,
+  CpuIcon,
   DotFillIcon,
   GearIcon,
   KeyIcon,
   MarkGithubIcon,
-  MoonIcon,
   PlugIcon,
   StopIcon,
-  SunIcon,
   SyncIcon,
+  TerminalIcon,
   ThreeBarsIcon,
-  XCircleFillIcon,
+  TriangleDownIcon,
   type Icon,
 } from "@primer/octicons-react";
-import type { ReactNode } from "react";
-import type { AccountView, ConversationStatus, PlatformStatus } from "../../../shared/protocol";
+import { useEffect, useState, type ReactNode } from "react";
+import type { AccountView, ConversationStatus, OfflineView, PlatformStatus, SandboxEnvironmentView, SandboxesView } from "../../../shared/protocol";
 import { relativeTime } from "../format";
-import { setTheme, useTheme, type Theme } from "../theme";
 import type { AssistantState } from "../useAssistant";
-import { cx, Menu, Spinner } from "./ui";
+import { capitalize, networkLabel } from "./Sandbox";
+import { CopyButton, cx, Popover, Spinner, Tooltip } from "./ui";
 
 type Tone = "ok" | "busy" | "warn" | "error";
 
-export function statusOf(stream: AssistantState["stream"], platform: PlatformStatus | undefined, conversation: ConversationStatus | undefined): { tone: Tone; text: string } {
+export interface StatusView {
+  tone: Tone;
+  text: string;
+}
+
+/**
+ * The assistant's connection, for the header's platform pill: `ok` and `busy` (a turn is running) are both connected.
+ * Its tone is the pill's `data-status`, which scripts wait on.
+ */
+export function statusOf(stream: AssistantState["stream"], platform: PlatformStatus | undefined, conversation: ConversationStatus | undefined): StatusView {
   if (stream !== "open") return { tone: "warn", text: "Reconnecting to the assistant server…" };
   if (!platform || platform.state === "connecting") return { tone: "warn", text: "Connecting to Managed Copilot…" };
   if (platform.state !== "ready") return { tone: "error", text: platform.state === "unauthenticated" ? "Sign-in required" : platform.state === "misconfigured" ? "Setup needed" : "Managed Copilot is unreachable" };
   if (!conversation || conversation.attach === "attaching" || conversation.attach === "detached") return { tone: "warn", text: "Opening your conversation…" };
   if (conversation.attach === "reconnecting") return { tone: "warn", text: "Reconnecting…" };
   if (conversation.attach === "error") return { tone: "error", text: "Couldn't open the conversation" };
-  if (conversation.busy) return { tone: "busy", text: "Working on it…" };
-  const where = platform.deployment?.mode === "azure" ? "Azure" : "local";
-  return { tone: "ok", text: `Online · Managed Copilot (${where})` };
+  if (conversation.busy) return { tone: "busy", text: "Connected · working on a reply" };
+  return { tone: "ok", text: "Connected" };
 }
 
-export const THEMES: readonly { value: Theme; label: string; icon: Icon }[] = [
-  { value: "system", label: "System", icon: DeviceDesktopIcon },
-  { value: "light", label: "Light", icon: SunIcon },
-  { value: "dark", label: "Dark", icon: MoonIcon },
-];
+type Deployment = NonNullable<PlatformStatus["deployment"]>;
 
-/** Connection status, the GitHub way: an icon and text (the text is for screen readers and tooltips on phones). */
-function Status({ status }: { status: { tone: Tone; text: string } }) {
-  const icon =
-    status.tone === "ok" ? (
-      <DotFillIcon className="text-fg-success" />
-    ) : status.tone === "busy" ? (
-      <Spinner className="text-fg-attention" />
-    ) : status.tone === "warn" ? (
-      <DotFillIcon className="text-fg-attention" />
-    ) : (
-      <XCircleFillIcon className="text-fg-danger" />
-    );
+/** Where the platform runs, in one word: "Local" or "Azure" (its mode), else the deployment's name. */
+export function platformLabel(deployment: Deployment | undefined): string | undefined {
+  if (!deployment) return undefined;
+  if (deployment.mode === "local") return "Local";
+  if (deployment.mode === "azure") return "Azure";
+  return deployment.name || undefined;
+}
+
+/** The status dot: green when connected, a spinner while connecting, red when unavailable. */
+function StatusDot({ tone }: { tone: Tone }) {
+  if (tone === "warn") return <Spinner size={12} className="text-fg-attention" />;
+  return <DotFillIcon className={tone === "error" ? "text-fg-danger" : "text-fg-success"} />;
+}
+
+/** A row of the platform popover's "Where it runs": the agent's brain, this app's tools, and its sandboxes. */
+function Where({ icon: Glyph, title, detail, name }: { icon: Icon; title: string; detail?: string; name?: string }) {
   return (
-    <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted" data-testid="status" data-status={status.tone} title={status.text}>
-      {icon}
-      <span className="hidden truncate md:inline">{status.text}</span>
-      <span className="sr-only md:hidden">{status.text}</span>
-    </span>
+    <li className="flex items-start gap-2">
+      <Glyph className="mt-0.5 shrink-0 text-fg-muted" />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-baseline gap-2">
+          <span className="font-semibold">{title}</span>
+          {name && (
+            <code className="ml-auto truncate font-mono text-xs text-fg-muted" title={name}>
+              {name}
+            </code>
+          )}
+        </div>
+        {detail && <div className="text-xs text-fg-muted">{detail}</div>}
+      </div>
+    </li>
   );
 }
 
-function ThemeMenu() {
-  const theme = useTheme();
-  const current = THEMES.find((option) => option.value === theme) ?? THEMES[0]!;
-  return (
-    <Menu
-      label="Theme"
-      heading="Theme"
-      width="w-44"
-      items={THEMES.map((option) => ({ key: option.value, label: option.label, icon: option.icon, checked: option.value === theme, onSelect: () => setTheme(option.value) }))}
-      renderTrigger={(trigger) => (
-        // Phones keep the header for the conversation; the theme is also in Settings.
-        <button type="button" className="AppHeader-button hidden sm:inline-grid" aria-label={`Theme: ${current.label}`} title="Theme" {...trigger}>
-          <current.icon />
-        </button>
-      )}
-    />
-  );
-}
-
-/** github.com's global header: menu, GitHub mark, "Managed Copilot / Assistant", then status and account actions. */
-export function Header(props: {
-  status: { tone: Tone; text: string };
+function PlatformDetails({
+  status,
+  platform,
+  deployment,
+  conversation,
+  account,
+  environments,
+  offline,
+}: {
+  status: StatusView;
+  platform?: PlatformStatus;
+  deployment?: Deployment;
+  conversation?: ConversationStatus;
   account?: AccountView;
+  environments: readonly SandboxEnvironmentView[];
+  offline?: OfflineView;
+}) {
+  const connected = status.tone === "ok" || status.tone === "busy";
+  const label = platformLabel(deployment);
+  const kind = label && label !== deployment?.name ? `${label} deployment` : "Deployment";
+  const named = deployment && deployment.name.toLowerCase() !== deployment.mode ? ` “${deployment.name}”` : "";
+  const where = deployment ? `${kind}${named} · v${deployment.version}` : undefined;
+  return (
+    <div className="text-sm">
+      <div className="flex items-start gap-2 border-b border-line px-4 py-3">
+        <span className="mt-0.5 flex shrink-0">
+          <StatusDot tone={status.tone} />
+        </span>
+        <div className="min-w-0">
+          <div className="font-semibold">{connected ? "Connected to Managed Copilot" : status.text}</div>
+          {(connected ? where : (platform?.message ?? where)) && <div className="mt-0.5 line-clamp-2 text-xs text-fg-muted">{connected ? where : (platform?.message ?? where)}</div>}
+        </div>
+      </div>
+      <div className="px-4 py-3">
+        <h3 className="text-xs font-semibold text-fg-muted">Where it runs</h3>
+        <ul className="mt-2 space-y-2">
+          <Where icon={CpuIcon} title="Your assistant" detail="Shared runtime" name={platform?.environment} />
+          <Where icon={PlugIcon} title="Mail and calendar tools" detail="In this app, so your mail never leaves it" />
+          {environments.map((environment) => (
+            <Where
+              key={environment.name}
+              icon={ContainerIcon}
+              title={capitalize(environment.label)}
+              detail={["Sandbox on demand", environment.size, networkLabel(environment.network)].filter(Boolean).join(" · ")}
+              name={environment.name}
+            />
+          ))}
+        </ul>
+      </div>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-1.5 border-t border-line-muted px-4 py-3 text-xs">
+        <dt className="text-fg-muted">URL</dt>
+        <dd className="flex min-w-0 items-center gap-1">
+          {platform?.url ? (
+            <>
+              <span className="truncate font-mono" title={platform.url}>
+                {platform.url}
+              </span>
+              <CopyButton text={platform.url} label="Copy URL" />
+            </>
+          ) : (
+            <span className="text-fg-muted">Not known yet</span>
+          )}
+        </dd>
+        {account && (
+          <>
+            <dt className="text-fg-muted">Account</dt>
+            <dd className="truncate">@{account.login}</dd>
+          </>
+        )}
+        {conversation?.model && (
+          <>
+            <dt className="text-fg-muted">Model</dt>
+            <dd className="truncate font-mono">{conversation.model}</dd>
+          </>
+        )}
+        {offline && (
+          <>
+            <dt className="text-fg-muted">Webhook</dt>
+            <dd>{offline.webhookConfigured ? "On" : "Off · polling only"}</dd>
+          </>
+        )}
+      </dl>
+    </div>
+  );
+}
+
+/**
+ * The platform pill: a status dot and where the platform runs ("Local" or "Azure"), opening the details. It carries
+ * `data-testid="status"` with `data-status` ok, busy, warn, or error.
+ */
+function PlatformPill(props: {
+  status: StatusView;
+  platform?: PlatformStatus;
+  conversation?: ConversationStatus;
+  account?: AccountView;
+  sandboxes?: SandboxesView;
+  offline?: OfflineView;
+}) {
+  const { status, platform } = props;
+  // A dropped connection keeps the last deployment's name.
+  const [known, setKnown] = useState(platform?.deployment);
+  useEffect(() => {
+    if (platform?.deployment) setKnown(platform.deployment);
+  }, [platform?.deployment]);
+  const deployment = platform?.deployment ?? known;
+  const label = platformLabel(deployment) ?? (status.tone === "error" ? "Unavailable" : "Connecting");
+  return (
+    <Popover
+      label="Managed Copilot"
+      width="w-80"
+      renderTrigger={(trigger) => (
+        <Tooltip content={status.text} describe={false}>
+          <button
+            type="button"
+            className="btn btn-sm min-w-0 shrink-0"
+            data-testid="status"
+            data-status={status.tone}
+            aria-label={`Managed Copilot ${label}: ${status.text}`}
+            {...trigger}
+          >
+            <StatusDot tone={status.tone} />
+            <span className="truncate max-sm:hidden">{label}</span>
+            <TriangleDownIcon />
+          </button>
+        </Tooltip>
+      )}
+    >
+      <PlatformDetails
+        status={status}
+        platform={platform}
+        deployment={deployment}
+        conversation={props.conversation}
+        account={props.account}
+        environments={props.sandboxes?.environments ?? []}
+        offline={props.offline}
+      />
+    </Popover>
+  );
+}
+
+/** Copilot CLI: the command that opens this same conversation in a terminal. */
+function CliButton({ sessionId }: { sessionId?: string }) {
+  const command = sessionId ? `npx managed-copilot attach ${sessionId}` : undefined;
+  return (
+    <Popover
+      label="Open in Copilot CLI"
+      width="w-[22rem]"
+      renderTrigger={(trigger) => (
+        <Tooltip content="Open in Copilot CLI" describe={false}>
+          {/* Phones have no terminal; the button starts at the small breakpoint. */}
+          <button type="button" className="AppHeader-button hidden sm:inline-grid" aria-label="Open in Copilot CLI" {...trigger}>
+            <TerminalIcon />
+          </button>
+        </Tooltip>
+      )}
+    >
+      <div className="p-4 text-sm">
+        <div className="flex items-center gap-2 font-semibold">
+          <TerminalIcon className="text-fg-muted" />
+          Open in Copilot CLI
+        </div>
+        <p className="mt-1 text-fg-muted">Continue this conversation in your terminal.</p>
+        {command ? (
+          <div className="mt-3 flex items-center gap-1 rounded-md border border-line bg-canvas-inset py-1 pr-1 pl-2">
+            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={command}>
+              {command}
+            </code>
+            <CopyButton text={command} label="Copy command" />
+          </div>
+        ) : (
+          <p className="mt-3 text-xs text-fg-muted">Available after your first message.</p>
+        )}
+      </div>
+    </Popover>
+  );
+}
+
+function Avatar({ account }: { account: AccountView }) {
+  const label = `Signed in as @${account.login}`;
+  return (
+    <Tooltip content={label} describe={false}>
+      {account.avatarUrl ? (
+        <img src={account.avatarUrl} alt={label} className="avatar size-8" />
+      ) : (
+        <span className="avatar avatar-initials size-8 text-xs" role="img" aria-label={label}>
+          {account.login.slice(0, 2).toUpperCase()}
+        </span>
+      )}
+    </Tooltip>
+  );
+}
+
+/** github.com's global header: menu, GitHub mark, "Managed Copilot / Assistant", then app buttons, the platform pill, and the account. */
+export function Header(props: {
+  status: StatusView;
+  platform?: PlatformStatus;
+  conversation?: ConversationStatus;
+  account?: AccountView;
+  sandboxes?: SandboxesView;
+  offline?: OfflineView;
   unread: number;
   /** Something in the side panel needs the person (shown as a dot on the menu button on narrow screens). */
   panelAttention?: string;
@@ -94,7 +288,7 @@ export function Header(props: {
   onOpenPanel(): void;
   onOpenSettings(): void;
 }) {
-  const { status, account } = props;
+  const { account } = props;
   return (
     <header className="AppHeader shrink-0">
       <div className="AppHeader-globalBar gap-2 px-3 sm:gap-3 sm:px-4">
@@ -132,20 +326,26 @@ export function Header(props: {
         )}
         {props.preview}
         <div className="AppHeader-actions min-w-0">
-          <Status status={status} />
-          <span className="AppHeader-divider hidden sm:block" aria-hidden />
-          <ThemeMenu />
-          <button type="button" className="AppHeader-button" onClick={props.onOpenSettings} aria-label="Settings" title="Settings">
-            <GearIcon />
-          </button>
-          {account &&
-            (account.avatarUrl ? (
-              <img src={account.avatarUrl} alt={`@${account.login}`} title={`Signed in to Managed Copilot as @${account.login}`} className="avatar size-8" />
-            ) : (
-              <span className="avatar avatar-initials size-8 text-xs" title={`Signed in to Managed Copilot as @${account.login}`}>
-                {account.login.slice(0, 2).toUpperCase()}
-              </span>
-            ))}
+          <CliButton sessionId={props.conversation?.sessionId} />
+          <Tooltip content="Settings" describe={false}>
+            <button type="button" className="AppHeader-button" onClick={props.onOpenSettings} aria-label="Settings">
+              <GearIcon />
+            </button>
+          </Tooltip>
+          <PlatformPill
+            status={props.status}
+            platform={props.platform}
+            conversation={props.conversation}
+            account={account}
+            sandboxes={props.sandboxes}
+            offline={props.offline}
+          />
+          {account && (
+            <>
+              <span className="AppHeader-divider hidden sm:block" aria-hidden />
+              <Avatar account={account} />
+            </>
+          )}
         </div>
       </div>
     </header>

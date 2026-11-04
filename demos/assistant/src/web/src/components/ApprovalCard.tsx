@@ -1,9 +1,9 @@
-import { CheckIcon, ClockIcon, CommentIcon, LocationIcon, PeopleIcon, ShieldCheckIcon, ShieldIcon, ShieldXIcon, XIcon } from "@primer/octicons-react";
-import { useState, type ReactNode } from "react";
+import { CheckIcon, ClockIcon, CloudOfflineIcon, CommentIcon, EyeClosedIcon, GlobeIcon, LocationIcon, PeopleIcon, ShieldCheckIcon, ShieldIcon, ShieldXIcon, XIcon } from "@primer/octicons-react";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ApprovalItem, ApprovalPreview, ToolItem } from "../../../shared/protocol";
 import { dayLabel, timeOf, timeRange } from "../format";
-import { SANDBOX_ICONS } from "./Sandbox";
-import { cx, Spinner } from "./ui";
+import { networkLabel, SANDBOX_ICONS } from "./Sandbox";
+import { cx, Spinner, Tooltip } from "./ui";
 
 const LABELS: Record<string, { approve: string; deny: string }> = {
   send_email: { approve: "Send email", deny: "Don't send" },
@@ -127,34 +127,70 @@ const RESOLVED = {
   expired: { label: "No longer waiting", className: "Label--secondary", icon: ClockIcon },
 } as const;
 
-/** Starting a sandbox: which kind, what it can reach, and the exact task it gets. */
+/** The exact task a sandbox would get: three lines at rest, all of it one click away. */
+function TaskWell({ task }: { task: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const text = useRef<HTMLDivElement>(null);
+  const id = useId();
+  useLayoutEffect(() => {
+    const element = text.current;
+    if (!element || expanded) return;
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [expanded, task]);
+  return (
+    <Well>
+      <div ref={text} id={id} className={cx("whitespace-pre-wrap break-words", expanded ? "max-h-72 overflow-y-auto" : "line-clamp-3")}>
+        <span className="text-fg-muted">Task: </span>
+        {task || "(no task given)"}
+      </div>
+      {(overflows || expanded) && (
+        <button type="button" className="Link mt-1 text-xs font-semibold" aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded((value) => !value)}>
+          {expanded ? "Show less" : "Show full task"}
+        </button>
+      )}
+    </Well>
+  );
+}
+
+/** Starting a sandbox: which one, the exact task it gets, and what it can reach. */
 function SandboxPreview({ preview }: { preview: Extract<ApprovalPreview, { type: "sandbox" }> }) {
   const KindIcon = SANDBOX_ICONS[preview.kind];
-  const reach =
-    preview.network === "network off"
-      ? "It runs in its own sandbox with no network, and can't use your mail or calendar."
-      : preview.network?.startsWith("can reach")
-        ? "It runs in its own sandbox, can reach only the hosts above, and can't use your mail or calendar."
-        : "It runs in its own sandbox and can't use your mail or calendar.";
+  const NetworkIcon = preview.network === "network off" ? CloudOfflineIcon : GlobeIcon;
+  const runsAs = [preview.agent ? `Agent ${preview.agent}` : undefined, preview.model ? `Model ${preview.model}` : undefined].filter(Boolean).join(" · ");
   return (
     <div className="space-y-2" data-testid="sandbox-approval">
-      <div className="flex items-start gap-2">
-        <KindIcon className="mt-0.5 shrink-0 text-fg-muted" />
-        <div className="min-w-0 break-words">
-          <span className="font-semibold">{preview.worker}</span>
-          {[preview.environment, preview.size, preview.network, preview.agent ? `agent ${preview.agent}` : undefined, preview.model].filter(Boolean).map((part) => (
-            <span key={part} className="text-fg-muted">
-              {" · "}
-              {part}
-            </span>
-          ))}
-        </div>
+      <div className="flex min-w-0 items-center gap-2">
+        <KindIcon className="shrink-0 text-fg-muted" />
+        <Tooltip content={runsAs || undefined} describe={false}>
+          <div className="min-w-0 truncate">
+            <span className="font-semibold">{preview.worker}</span>
+            {[preview.environment, preview.size].filter(Boolean).map((part) => (
+              <span key={part} className="text-fg-muted">
+                {" · "}
+                {part}
+              </span>
+            ))}
+          </div>
+        </Tooltip>
       </div>
-      <Well className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
-        <span className="text-fg-muted">Task: </span>
-        {preview.task || "(no task given)"}
-      </Well>
-      <p className="text-xs text-fg-muted">{reach} Approving lets it run code and save files there until your assistant stops it.</p>
+      <TaskWell task={preview.task} />
+      <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
+        {preview.network && (
+          <li className="inline-flex items-center gap-1.5">
+            <NetworkIcon size={12} className="shrink-0" />
+            {networkLabel(preview.network)}
+          </li>
+        )}
+        <li className="inline-flex items-center gap-1.5">
+          <EyeClosedIcon size={12} className="shrink-0" />
+          Can't see your mail or calendar
+        </li>
+      </ul>
     </div>
   );
 }
@@ -228,10 +264,12 @@ export function ApprovalCard({
                 />
               )}
               <div className="flex flex-wrap items-center gap-2">
-                <button type="button" className="btn btn-primary" disabled={!item.actionable || busy !== undefined} onClick={() => void decide("approve")}>
-                  {busy === "approve" ? <Spinner /> : <CheckIcon />}
-                  {labels.approve}
-                </button>
+                <Tooltip content={item.tool === "start_worker" ? "Lets it run code and save files in its sandbox until your assistant stops it" : undefined}>
+                  <button type="button" className="btn btn-primary" disabled={!item.actionable || busy !== undefined} onClick={() => void decide("approve")}>
+                    {busy === "approve" ? <Spinner /> : <CheckIcon />}
+                    {labels.approve}
+                  </button>
+                </Tooltip>
                 <button type="button" className="btn" disabled={!item.actionable || busy !== undefined} onClick={() => void decide("deny")}>
                   {busy === "deny" ? <Spinner /> : <XIcon />}
                   {labels.deny}

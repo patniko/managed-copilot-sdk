@@ -16,7 +16,7 @@ import { useEffect, useId, useState } from "react";
 import type { ApprovalItem, SandboxKind, SandboxOutputView, WorkerItem } from "../../../shared/protocol";
 import { timeOf } from "../format";
 import { formatElapsed, type CardState, type ReplyImage } from "../sandboxCards";
-import { cx, Spinner } from "./ui";
+import { cx, Spinner, Tooltip } from "./ui";
 
 export const SANDBOX_ICONS: Record<SandboxKind, Icon> = { python: BeakerIcon, web: GlobeIcon, general: ContainerIcon };
 
@@ -27,6 +27,15 @@ export function withArticle(label: string): string {
 
 export function capitalize(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** What a sandbox can reach, in a few words: "No network", "Only github.com and api.github.com", "Full network". */
+export function networkLabel(network: string | undefined): string | undefined {
+  if (!network) return undefined;
+  if (network === "network off") return "No network";
+  if (network === "full network access") return "Full network";
+  const only = /^can reach (.+?) only$/.exec(network);
+  return only ? `Only ${only[1]}` : capitalize(network);
 }
 
 export function fileName(path: string): string {
@@ -43,11 +52,6 @@ export function useNow(active: boolean): number {
     return () => clearInterval(timer);
   }, [active]);
   return now;
-}
-
-function Detail({ parts }: { parts: readonly (string | undefined)[] }) {
-  const shown = parts.filter(Boolean);
-  return shown.length ? <div className="break-words text-xs text-fg-muted">{shown.join(" · ")}</div> : null;
 }
 
 function OutputChips({ outputs }: { outputs: readonly SandboxOutputView[] }) {
@@ -161,6 +165,7 @@ export function SandboxCard({ item, state, approval, timeZone, highlight }: { it
 
   const title = start ? `${state.phase === "calling" ? "Creating" : "Created"} ${withArticle(label)} · ${item.worker}` : `${state.phase === "calling" ? "Sending" : "Sent"} the follow-up to ${item.worker}`;
   const environment = state.environment;
+  const where = [item.environment ?? state.worker?.environment, environment?.size, networkLabel(environment?.network)].filter(Boolean).join(" · ");
   return (
     <div
       className="ml-11 animate-slide-up"
@@ -171,19 +176,21 @@ export function SandboxCard({ item, state, approval, timeZone, highlight }: { it
       data-phase={state.phase ?? "unknown"}
     >
       <div className={cx("Box flex items-start gap-3 p-3 transition-shadow duration-200", highlight && "ring-2 ring-line-accent")}>
-        <span className="grid size-8 shrink-0 place-items-center rounded-full bg-accent-muted text-fg-accent" aria-hidden>
-          <KindIcon />
-        </span>
+        <Tooltip content={where || undefined} describe={false}>
+          <span className="grid size-8 shrink-0 place-items-center rounded-full bg-accent-muted text-fg-accent" aria-hidden>
+            <KindIcon />
+          </span>
+        </Tooltip>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
             <span className="min-w-0 break-words font-semibold">{title}</span>
             {start ? (
               <span className="Label Label--success" title="A new sandbox for this work">
-                new
+                New
               </span>
             ) : (
               <span className="Label Label--accent" title="The same sandbox, which still has its data and files">
-                reused
+                Reused
               </span>
             )}
             {elapsed && (
@@ -192,26 +199,29 @@ export function SandboxCard({ item, state, approval, timeZone, highlight }: { it
               </span>
             )}
           </div>
-          <Detail parts={[item.environment ?? state.worker?.environment, environment?.size, environment?.network]} />
-          <div className="mt-1 text-xs text-fg-muted">
+          <div className="mt-0.5 text-xs text-fg-muted">
             <Status item={item} state={state} />
           </div>
           <OutputChips outputs={state.outputs} />
-          {item.text && (
-            <div className="mt-1.5">
-              <button type="button" className="inline-flex items-center gap-1 rounded-md text-xs text-fg-muted hover:text-fg" aria-expanded={open} aria-controls={textId} onClick={() => setOpen((value) => !value)}>
-                <ChevronRightIcon size={12} className={cx("transition-transform duration-150", open && "rotate-90")} />
-                {start ? "Task" : "Follow-up"}
-              </button>
-              <div id={textId} hidden={!open} className="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line-muted bg-canvas-muted p-2 text-xs">
-                {item.text}
-              </div>
+          {(item.text || approval?.decidedAt) && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-muted">
+              {item.text && (
+                <button type="button" className="inline-flex items-center gap-1 rounded-md hover:text-fg" aria-expanded={open} aria-controls={textId} onClick={() => setOpen((value) => !value)}>
+                  <ChevronRightIcon size={12} className={cx("transition-transform duration-150", open && "rotate-90")} />
+                  {start ? "Task" : "Follow-up"}
+                </button>
+              )}
+              {approval?.decidedAt && (
+                <span className="inline-flex items-center gap-1">
+                  <ShieldCheckIcon size={12} className="text-fg-success" />
+                  You approved it · <time dateTime={approval.decidedAt}>{timeOf(approval.decidedAt, timeZone)}</time>
+                </span>
+              )}
             </div>
           )}
-          {approval?.decidedAt && (
-            <div className="mt-1.5 flex items-center gap-1 text-xs text-fg-muted">
-              <ShieldCheckIcon size={12} className="text-fg-success" />
-              You approved it · <time dateTime={approval.decidedAt}>{timeOf(approval.decidedAt, timeZone)}</time>
+          {item.text && (
+            <div id={textId} hidden={!open} className="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-line-muted bg-canvas-muted p-2 text-xs">
+              {item.text}
             </div>
           )}
         </div>
