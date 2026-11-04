@@ -7,10 +7,15 @@ and a memory that only they can see. Nobody, not even someone who guesses a conv
 It shows how to build an app for other people on the platform: the app never acts as whoever deployed it, and every
 call it makes to Managed Copilot carries the signed-in person's own credential.
 
-![A GitHub user in Front Desk: a conversation where the assistant saved their secret word to memory, and the memory panel listing what it remembers about them](docs/screenshots/github-user.png)
+![A GitHub user in Front Desk: the assistant outlined their talk and saved it to memory; the chips say their own Copilot plan pays, on claude-sonnet-5](docs/screenshots/github-user.png)
 
-*A GitHub user's conversation. The assistant called its `remember` tool (it runs in Front Desk, bound to this person),
-and the memory panel lists what it remembers about them. The chip at the top says where their model use goes.*
+*A GitHub user's conversation, on their own Copilot plan. The assistant called its `remember` tool (it runs in Front
+Desk, bound to this person), and the memory panel lists what it remembers about them.*
+
+![Maya, who signed up with an email: the assistant planned her Lisbon trip and remembered she's vegetarian; the chips say Front Desk's Azure AI Foundry pays, on grok-4.7, with 49 of 50 messages left today](docs/screenshots/email-user.png)
+
+*Maya has no GitHub account. Front Desk vouches for her with its app key, so her conversation runs as her own app user
+on the platform and Front Desk's Azure AI Foundry pays, within her daily allowance.*
 
 | Who | Signs in with | Their conversations run as | Model use billed to |
 | --- | --- | --- | --- |
@@ -184,7 +189,18 @@ pnpm --filter @managed-copilot/demo-front-desk e2e -- --url http://localhost:745
 
 Each person saves a secret to their memory, then every other person is checked to see none of it: their list,
 opening, sending to, stopping, or deleting the conversation by ID, their memory, their live events, and asking their own
-assistant. It prints where each person's model use went.
+assistant. Then it reads Managed Copilot's own record of each session (`SessionInfo.owner` and `SessionInfo.inference`)
+and prints where each person's model use went. A run with Foundry configured (34 of 34 checks passed):
+
+```text
+Where each person's model use went (Managed Copilot's own record of each session):
+  email user 1   front-desk-e2e-89b913-1@example.com  →  Azure AI Foundry (mc-foundry-dev), grok-4.7  [owner app-user front-desk/u_oq91jSJ_o381AVDD]
+  email user 2   front-desk-e2e-89b913-2@example.com  →  Azure AI Foundry (mc-foundry-dev), grok-4.7  [owner app-user front-desk/u_W-DFZqgOUF_AL3nn]
+  GitHub user    @patniko  →  their Copilot plan, claude-sonnet-5  [owner github patniko]
+```
+
+The gateway's log agrees: it logs "Session model calls go to Azure AI Foundry" with the session ID and owner for each
+email user's session, and never for the GitHub user's.
 
 ## Layout
 
