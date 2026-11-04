@@ -264,7 +264,10 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   `no-new-privileges`.
 - **Networks.** Every sandbox gets its **own internal Docker network** on an explicit /28 from `10.213.0.0/16`
   (probing on overlap), so sandboxes can never reach each other's ports and Docker's default pools are not
-  exhausted. The relay and the egress proxy (`<instance>-egress`, alias `mc-egress`) are connected to each sandbox
+  exhausted. Each gateway's shared networks (`<instance>-edge`, `<instance>-sandboxes`, `<instance>-egress-wan`) get
+  an explicit /24 from `10.214.0.0/16` the same way, because Docker's default pools hold only about thirty networks and
+  a handful of local platforms (checkouts, port-offset copies, end-to-end tests) would otherwise exhaust them.
+  The relay and the egress proxy (`<instance>-egress`, alias `mc-egress`) are connected to each sandbox
   network by the gateway on create and resume; nothing else is. The end-to-end test verifies a peer sandbox's IP is
   unreachable and that `network: false` sandboxes have no Internet route.
 - **sandboxd** (`services/sandbox/src/sandboxd`) runs as root, never as uid 10001. It serves, behind a per-sandbox
@@ -1785,6 +1788,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_SANDBOX_PREPARE` | `0` | `1` builds the base image and starts the relay when the gateway starts (instead of on first use) |
 | `MANAGED_COPILOT_SANDBOX_IDLE_SECONDS` | `900` | Default idle stop when an environment sets no `idleTimeoutSeconds` |
 | `MANAGED_COPILOT_SANDBOX_SUBNET_POOL` | `10.213.0.0` | /16 carved into per-sandbox /28 networks |
+| `MANAGED_COPILOT_NETWORK_SUBNET_POOL` | `10.214.0.0` | /16 carved into /24s for each gateway's edge, sandboxes, and egress WAN networks |
 | `DOCKER_HOST` | Docker Desktop pipe / `/var/run/docker.sock` | Docker Engine API endpoint for sandboxes |
 
 ## Code map
