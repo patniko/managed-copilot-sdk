@@ -271,8 +271,13 @@ As built (spec section 2, "Your app's own users", and section 15; decisions 5 an
 - **App scope.** Every request through a key stays in the app's `environments` (`assertAppEnvironment` at bridge
   welcome, `create()`, and `createWorkspace()`; an orchestrator's workers belong to its coordinator), and sees only
   the sessions there (`SessionManager.inAppScope`): the router answers `not_found` for any other `/v1/sessions/:id/...`
-  route (and the action routes, which authenticate themselves, do the same), and the session list, the event stream,
-  and the bridge's `session.list`, `getMetadata`, `delete`, and `resume` leave them out. An app user's
+  route (and the action routes, which authenticate themselves, do the same), and the session list (scoped in SQL, before
+  its limit), the event stream, and the bridge's `session.list`, `getMetadata`, `delete`, and `resume` leave them out.
+  A worker is in scope through the incarnation of its coordinator that started it. An event is decided by the
+  environment it recorded, never by a session that reused its ID; a worker's events after it was deleted are not
+  replayed through an app. Schedules (every route) are not available through an app, and webhook deliveries are
+  limited to the app's environments. A GitHub user's vaults stay their account's: any app they sign in to can manage
+  them and use them in its sessions (an app's own users' vaults are per app user). An app user's
   session in a Copilot-billed environment gets `inference_unavailable` (bridge welcome, session create, an
   orchestrator's `start_worker`, and the SDK's pre-check); workspace-only sandboxes make no model calls and may use any
   of the app's environments. Background sign-in and schedules are refused for app users and for any request through an app, and

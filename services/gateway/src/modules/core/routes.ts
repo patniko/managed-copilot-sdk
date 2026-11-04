@@ -74,15 +74,12 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
     const limit = limitText === null ? undefined : Number(limitText);
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw new ManagedCopilotError("invalid_request", "limit must be a positive integer");
     const environment = ctx.query.get("environment") ?? undefined;
-    const principal = ctx.principal!;
-    // Through an app: only the sessions within its environments (the limit applies after that).
-    const scoped = principal.app !== undefined;
-    const listed = manager.list(principal.accountId, {
+    // Through an app: only the sessions within its environments.
+    const records = manager.listFor(ctx.principal!, {
       ...(environment ? { environment } : {}),
       ...(state ? { state: state as SessionState } : {}),
-      ...(limit !== undefined && !scoped ? { limit } : {}),
+      ...(limit !== undefined ? { limit } : {}),
     });
-    const records = scoped ? listed.filter((record) => manager.inAppScope(principal, record)).slice(0, limit ?? listed.length) : listed;
     // A session deleted while its details were read is left out.
     const infos = await Promise.all(records.map((record) => manager.toInfo(record).catch((error: unknown) => (isManagedCopilotError(error, "not_found") ? undefined : Promise.reject(error)))));
     return infos.filter((info) => info !== undefined);
@@ -109,13 +106,20 @@ export function registerRoutes(app: GatewayApp, options: { manager: SessionManag
   );
 }
 
-/** Whether a platform event belongs to a session within the app a request came through (or names no session). */
-function eventInAppScope(app: GatewayApp, manager: SessionManager, principal: Principal, event: PlatformEvent): boolean {
-  const sessionId = (event as { sessionId?: unknown }).sessionId;
-  if (typeof sessionId !== "string") return true;
-  const record = manager.get(sessionId);
-  if (record) return manager.inAppScope(principal, record);
-  // A session deleted since: its event names its environment.
-  const environment = (event as { environment?: unknown }).environment;
-  return typeof environment === "string" && appAllows(app.services.apps, principal, environment);
+/**
+ * Whether a platform event is within the app a request came through. An event that recorded its environment is decided
+ * by it, never by whichever session holds its ID now (an ID can be reused after a delete); only a worker's, whose own
+ * environment the app may not list, is decided by its coordinator. An event without one (`artifact.published`) is
+ * decided by its session's current record, while that record is the session the event is about.
+ */
+export function eventInAppScope(app: Pick<GatewayApp, "services">, manager: Pick<SessionManager, "get" | "inAppScope">, principal: Principal, event: PlatformEvent): boolean {
+  if (event.environment !== undefined && appAllows(app.services.apps, principal, event.environment)) return true;
+  if (typeof event.sessionId !== "string") return event.environment === undefined;
+  // A worker event without its coordinator's environment is about an earlier incarnation of the coordinator.
+  if (event.environment === undefined && event.type.startsWith("worker.")) return false;
+  const record = manager.get(event.sessionId);
+  // Created after the event: the ID was reused, so this is another session.
+  if (!record || Date.parse(record.createdAt) > Date.parse(event.createdAt)) return false;
+  if (event.environment !== undefined && (record.environment !== event.environment || !record.parentSessionId)) return false;
+  return manager.inAppScope(principal, record);
 }

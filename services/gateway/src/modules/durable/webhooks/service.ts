@@ -176,11 +176,11 @@ export class DurableWebhooks implements WebhooksService {
     return queued;
   }
 
-  deliveries(options: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number } = {}): WebhookDeliveryInfo[] {
+  deliveries(options: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number; readonly environments?: readonly string[] } = {}): WebhookDeliveryInfo[] {
     return this.#deliveryRows(options).map(toDeliveryInfo);
   }
 
-  #deliveryRows(options: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number; readonly sessionId?: string }): DeliveryRow[] {
+  #deliveryRows(options: { readonly state?: WebhookDeliveryState; readonly limit?: number; readonly ownerId?: number; readonly sessionId?: string; readonly environments?: readonly string[] }): DeliveryRow[] {
     const limit = Math.min(Math.max(options.limit ?? 100, 1), 1000);
     const conditions: string[] = [];
     const params: (string | number)[] = [];
@@ -195,6 +195,11 @@ export class DurableWebhooks implements WebhooksService {
     if (options.sessionId !== undefined) {
       conditions.push("session_id = ?");
       params.push(options.sessionId);
+    }
+    if (options.environments !== undefined) {
+      if (options.environments.length === 0) return [];
+      conditions.push(`environment IN (${options.environments.map(() => "?").join(", ")})`);
+      params.push(...options.environments);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     return this.#deps.db.prepare(`SELECT * FROM durable_webhook_deliveries ${where} ORDER BY created_at DESC, rowid DESC LIMIT ?`).all(...params, limit) as unknown as DeliveryRow[];

@@ -130,7 +130,7 @@ export class ClientConnection implements ClientPeer {
         return this.#manager.detach(this, body["sessionId"]);
       case "session.list":
         // Through an app, only the sessions within its environments (spec section 2).
-        return { sessions: this.#manager.list(this.principal.accountId).filter((record) => this.#manager.inAppScope(this.principal, record)).map((record) => metadata(record)) };
+        return { sessions: this.#manager.listFor(this.principal).map((record) => metadata(record)) };
       case "session.getMetadata": {
         const record = typeof body["sessionId"] === "string" ? this.#manager.get(body["sessionId"]) : undefined;
         return { session: record && record.ownerId === this.principal.accountId && this.#manager.inAppScope(this.principal, record) ? metadata(record) : undefined };
