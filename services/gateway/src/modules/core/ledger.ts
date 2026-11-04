@@ -281,12 +281,21 @@ export class SessionLedger {
     return row ? (JSON.parse(row.admitted) as AdmittedConfig) : undefined;
   }
 
-  list(ownerId: number, query: { environment?: string; state?: SessionState; limit?: number } = {}): SessionRecord[] {
+  list(ownerId: number, query: { environment?: string; state?: SessionState; limit?: number; environments?: readonly string[] } = {}): SessionRecord[] {
     const clauses = ["s.owner_id = ?", "s.state NOT IN ('deleted')"];
     const args: (string | number)[] = [ownerId];
     if (query.environment) {
       clauses.push("s.environment = ?");
       args.push(query.environment);
+    }
+    if (query.environments) {
+      // Sessions in these environments, and the workers of this incarnation of such a session (an app's scope).
+      if (query.environments.length === 0) return [];
+      const marks = query.environments.map(() => "?").join(", ");
+      clauses.push(
+        `(s.environment IN (${marks}) OR EXISTS (SELECT 1 FROM core_sessions p WHERE p.id = s.parent_session_id AND p.owner_id = s.owner_id AND p.incarnation = s.parent_incarnation AND p.state NOT IN ('deleted') AND p.environment IN (${marks})))`,
+      );
+      args.push(...query.environments, ...query.environments);
     }
     if (query.state) {
       clauses.push("s.state = ?");

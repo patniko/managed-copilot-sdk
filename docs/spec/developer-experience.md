@@ -258,7 +258,8 @@ const sessions = await alice.sessions.list();
   ```
 
   Their sessions are their GitHub accounts' own. Through an app, a request reaches only those in the app's
-  environments; another app, or a direct connection where `access` allows one, sees the rest.
+  environments; another app, or a direct connection where `access` allows one, sees the rest. Schedules and
+  background sign-in are managed outside apps; vaults are the account's own, usable through any app they sign in to.
 
 ### Work that continues without you
 

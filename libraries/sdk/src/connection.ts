@@ -188,7 +188,8 @@ export async function createContext(options: ConnectOptions = {}): Promise<Manag
 export async function createView(ctx: ManagedState, identity: Identity): Promise<ManagedState> {
   const root = ctx.root ?? ctx;
   const key = identityKey(identity);
-  if (key === identityKey(root.identity)) return root;
+  // A view even for the connection's own identity: a view always acts for its person, while the connection falls back
+  // to whoever created or resumed a session in this process.
   let pending = root.views.get(key);
   if (!pending) {
     pending = (async () => {

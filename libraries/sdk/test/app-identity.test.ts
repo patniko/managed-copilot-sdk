@@ -122,6 +122,14 @@ describe("app connections", () => {
     expect(asked[APP_USER_HEADER]).toBe("bob");
   });
 
+  it("gives as(...) a view bound to its person even when it is the connection's own identity", async () => {
+    const github = await ManagedCopilot.connect({ url, gitHubToken: "gho_direct" });
+    const self = await github.as({ gitHubToken: "gho_direct" });
+    expect(self).not.toBe(github);
+    expect(await github.as({ gitHubToken: "gho_direct" })).toBe(self);
+    await github.close();
+  });
+
   it("refuses what the gateway would, before sending anything", async () => {
     const managed = await ManagedCopilot.connect({ url, appKey: APP_KEY });
     await expect(managed.as({ appUser: { id: "zoe" }, gitHubToken: "gho_x" } as never)).rejects.toMatchObject({ code: "invalid_request" });

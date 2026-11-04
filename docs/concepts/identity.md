@@ -99,7 +99,8 @@ const alice = await managed.as({ appUser: { id: user.id } }); // their sessions,
   the app's environments). Background sign-in, schedules, and Copilot CLI attach fail with `capability_unavailable`.
 - **Your GitHub users keep their own plan.** The same connection acts for someone who signed in with GitHub:
   `managed.client(env, { gitHubToken })` or `managed.as({ gitHubToken })`. Their sessions are their own account's;
-  through your app, only those in its environments are visible.
+  through your app, only those in its environments are visible. Their schedules and background sign-in are managed
+  outside apps; their vaults are their account's, usable through any app they sign in to.
 - **Public apps.** A deployment admits only the GitHub accounts in `access`. `anyGitHubUser: true` on an app admits
   every GitHub account that comes through the app's key, without opening the deployment to them directly.
 

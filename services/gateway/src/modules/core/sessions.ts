@@ -569,8 +569,16 @@ export class SessionManager implements SessionsService {
     if (!principal.app) return true;
     const apps = this.#options.app.services.apps;
     if (appAllows(apps, principal, record.environment)) return true;
+    // A worker belongs to the incarnation of its coordinator that started it, never to a session that reused its ID.
     const parent = record.parentSessionId ? this.get(record.parentSessionId) : undefined;
-    return parent !== undefined && parent.ownerId === record.ownerId && appAllows(apps, principal, parent.environment);
+    return parent !== undefined && parent.ownerId === record.ownerId && parent.incarnation === record.parentIncarnation && appAllows(apps, principal, parent.environment);
+  }
+
+  /** A principal's sessions, limited (before the listing's own limit) to its app's scope when it came through one. */
+  listFor(principal: Principal, query: { environment?: string; state?: SessionState; limit?: number } = {}): SessionRecord[] {
+    if (!principal.app) return this.list(principal.accountId, query);
+    const environments = this.#options.app.services.apps?.get(principal.app)?.environments ?? [];
+    return this.list(principal.accountId, { ...query, environments }).filter((record) => this.inAppScope(principal, record));
   }
 
   /** Answers `not_found` for the caller's own session outside the app its request came through, as for anyone else's. */
@@ -586,7 +594,7 @@ export class SessionManager implements SessionsService {
     return this.toInfo(this.getOwned(accountId, sessionId));
   }
 
-  list(accountId: number, query?: { environment?: string; state?: SessionState; limit?: number }): SessionRecord[] {
+  list(accountId: number, query?: { environment?: string; state?: SessionState; limit?: number; environments?: readonly string[] }): SessionRecord[] {
     return this.#ledger.list(accountId, query).filter((record) => !this.#interrupted(record));
   }
 

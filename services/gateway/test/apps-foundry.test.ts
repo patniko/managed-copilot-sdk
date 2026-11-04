@@ -3,7 +3,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { APP_KEY_HEADER, APP_USER_HEADER, APP_USER_NAME_HEADER, type AccountInfo, type DeploymentInfo, type SessionInfo } from "@managed-copilot/protocol";
+import { openDatabase } from "../src/db.js";
 import { createLogger } from "../src/log.js";
+import { SessionLedger } from "../src/modules/core/ledger.js";
+import { eventInAppScope } from "../src/modules/core/routes.js";
 import { FoundryService } from "../src/modules/foundry/service.js";
 import { FakeRuntime, RawClient, startGitHubStub, startTestGateway, type TestGateway } from "./harness.js";
 
@@ -264,6 +267,26 @@ describe("apps and Azure AI Foundry through the gateway", () => {
       expect((await call(`/v1/sessions/${sessionId}/actions`, { headers: { [APP_KEY_HEADER]: FRONT_DESK_KEY } })).status).toBe(401);
     });
 
+    it("lists a GitHub user's sessions through an app within its scope before applying the limit", async () => {
+      const throughKiosk = { token: ALICE, headers: { [APP_KEY_HEADER]: KIOSK_KEY } };
+      const inScope = await connect("support", ALICE, { [APP_KEY_HEADER]: KIOSK_KEY });
+      const kept = randomUUID();
+      await inScope.request("session.create", { sessionId: kept });
+      const direct = await connect("open", ALICE);
+      await direct.request("session.create", { sessionId: randomUUID() });
+      const listed = (await call("/v1/sessions?limit=1", throughKiosk)).json as unknown as SessionInfo[];
+      expect(listed.map((session) => session.id)).toEqual([kept]);
+    });
+
+    it("keeps schedules and other environments' webhook deliveries out of reach through an app", async () => {
+      const throughKiosk = { token: ALICE, headers: { [APP_KEY_HEADER]: KIOSK_KEY } };
+      expect((await call("/v1/schedules", throughKiosk)).json.error).toMatchObject({ code: "capability_unavailable" });
+      expect((await call("/v1/schedules/sch_any/run", { ...throughKiosk, method: "POST", body: {} })).json.error).toMatchObject({ code: "capability_unavailable" });
+      expect((await call("/v1/schedules", { headers: appUser(FRONT_DESK_KEY, "erin") })).json.error).toMatchObject({ code: "capability_unavailable" });
+      expect((await call("/v1/schedules", { token: ALICE })).status).toBe(200);
+      expect((await call("/v1/webhooks/deliveries", throughKiosk)).status).toBe(200);
+    });
+
     it("verifies a session's own GitHub token through the app its connection came through", async () => {
       const client = await connect("chat", BOB, { [APP_KEY_HEADER]: FRONT_DESK_KEY });
       const sessionId = randomUUID();
@@ -304,5 +327,53 @@ describe("apps and Azure AI Foundry through the gateway", () => {
       expect((await service(flaky).route(ACCOUNT)).host).toBe("contoso-foundry.openai.azure.com");
       expect(await service(arm.fetch).token(ACCOUNT)).toBe(ENTRA_TOKEN);
     });
+  });
+});
+
+describe("app scope rules", () => {
+  it("lists sessions in an app's environments and the workers of their current incarnation, before the limit", () => {
+    const db = openDatabase(":memory:");
+    const ledger = new SessionLedger(db);
+    const owner = { id: 7, login: "alice" };
+    const base = { owner, placement: "shared" as const, network: { access: "enabled", allowedDomains: [] } as never, environmentRequest: {} as never, admitted: { params: {}, optionsPatch: {} } as never };
+    const coordinator = ledger.insert({ ...base, id: "p1", environment: "front", type: "orchestrator" });
+    ledger.insert({ ...base, id: "w1", environment: "coder", type: "isolated", placement: "sandbox", parentSessionId: "p1", parentIncarnation: coordinator.incarnation });
+    ledger.insert({ ...base, id: "x1", environment: "private", type: "shared" });
+    expect(ledger.list(7, { environments: ["front"] }).map((record) => record.id).sort()).toEqual(["p1", "w1"]);
+    expect(ledger.list(7, { environments: ["front"], limit: 1 })).toHaveLength(1);
+    expect(ledger.list(7, { environments: [] })).toEqual([]);
+    // The coordinator's ID reused by another session: the old worker is not its.
+    ledger.remove("p1");
+    ledger.insert({ ...base, id: "p1", environment: "front", type: "shared" });
+    expect(ledger.list(7, { environments: ["front"] }).map((record) => record.id)).toEqual(["p1"]);
+    db.close();
+  });
+
+  it("decides an event by the environment it recorded, not by a session that reused its ID", () => {
+    const apps = { get: (name: string) => (name === "site" ? { name: "site", environments: ["public"], anyGitHubUser: true } : undefined) };
+    const principal = { accountId: 7, login: "alice", token: "t", app: "site" } as never;
+    const at = (minutes: number) => new Date(Date.UTC(2026, 10, 4, 8, minutes)).toISOString();
+    const records = new Map<string, { id: string; environment: string; createdAt: string; parentSessionId?: string }>();
+    const manager = {
+      get: (id: string) => records.get(id) as never,
+      inAppScope: (_principal: unknown, record: { environment: string; parentSessionId?: string }) => record.environment === "public" || record.parentSessionId === "coordinator",
+    };
+    const app = { services: { apps } } as never;
+    const event = (fields: Record<string, unknown>) => ({ id: "evt", type: "session.idle", createdAt: at(10), data: {}, ...fields }) as never;
+    // The session in "private" was deleted, and its ID reused in "public" afterwards.
+    records.set("s1", { id: "s1", environment: "public", createdAt: at(20) });
+    expect(eventInAppScope(app, manager, principal, event({ sessionId: "s1", environment: "private" }))).toBe(false);
+    expect(eventInAppScope(app, manager, principal, event({ sessionId: "s1", environment: "public" }))).toBe(true);
+    // An event without an environment: only while its session is the one it is about.
+    expect(eventInAppScope(app, manager, principal, event({ type: "artifact.published", sessionId: "s1" }))).toBe(false);
+    records.set("s2", { id: "s2", environment: "public", createdAt: at(5) });
+    expect(eventInAppScope(app, manager, principal, event({ type: "artifact.published", sessionId: "s2" }))).toBe(true);
+    // A worker in an environment the app does not list, of an in-scope coordinator.
+    records.set("w1", { id: "w1", environment: "coder", createdAt: at(5), parentSessionId: "coordinator" });
+    expect(eventInAppScope(app, manager, principal, event({ sessionId: "w1", environment: "coder" }))).toBe(true);
+    expect(eventInAppScope(app, manager, principal, event({ type: "worker.idle", sessionId: "s2" }))).toBe(false);
+    // No session: by its environment, if it has one.
+    expect(eventInAppScope(app, manager, principal, event({ type: "schedule.run_started", environment: "private" }))).toBe(false);
+    expect(eventInAppScope(app, manager, principal, event({ type: "schedule.run_started" }))).toBe(true);
   });
 });

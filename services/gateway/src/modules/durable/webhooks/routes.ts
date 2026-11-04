@@ -21,6 +21,11 @@ function query(ctx: RequestContext): { state?: WebhookDeliveryState; limit?: num
  * ones), and the operator view `GET /v1/webhooks/deliveries/all` (platform key) shows every delivery.
  */
 export function registerWebhookRoutes(app: GatewayApp, webhooks: WebhooksService): void {
-  app.routes.get("/v1/webhooks/deliveries", (ctx) => webhooks.deliveries({ ...query(ctx), ownerId: ctx.principal!.accountId }));
+  app.routes.get("/v1/webhooks/deliveries", (ctx) => {
+    const principal = ctx.principal!;
+    // Through an app (spec section 2): only deliveries of events in the app's environments.
+    const environments = principal.app ? (app.services.apps?.get(principal.app)?.environments ?? []) : undefined;
+    return webhooks.deliveries({ ...query(ctx), ownerId: principal.accountId, ...(environments ? { environments } : {}) });
+  });
   app.routes.get("/v1/webhooks/deliveries/all", (ctx) => webhooks.deliveries(query(ctx)), { auth: "platform" });
 }
