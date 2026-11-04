@@ -183,7 +183,8 @@ export class CoreOperator {
   /** The account ID an owner filter names (a login or a numeric ID); undefined when no account matches. */
   #ownerId(owner: string): number | undefined {
     const trimmed = owner.trim().replace(/^@/, "");
-    if (/^\d+$/.test(trimmed)) return Number(trimmed);
+    // App users have negative IDs (spec section 2).
+    if (/^-?\d+$/.test(trimmed)) return Number(trimmed);
     return this.#options.ledger.accounts().find((account) => account.login.toLowerCase() === trimmed.toLowerCase())?.id;
   }
 
@@ -534,6 +535,7 @@ function summaryOf(record: SessionRecord, snapshot: LiveSessionSnapshot | undefi
     state: record.state,
     generation: record.generation,
     ...(record.model ? { model: record.model } : {}),
+    ...(record.kind === "workspace" ? {} : { inference: record.inference ?? { route: "copilot" as const } }),
     ...(record.agent ? { agent: record.agent } : {}),
     ...(record.clientName ? { clientName: record.clientName } : {}),
     ...(record.scheduleId ? { scheduleId: record.scheduleId } : {}),

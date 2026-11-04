@@ -1,4 +1,4 @@
-// Owner: foundry. Azure AI Foundry as an inference route (spec section 15): see service.ts. Core routes Foundry sessions
+// Azure AI Foundry as an inference route (spec section 15): see service.ts. Core routes Foundry sessions
 // through the `foundry` service; the sandbox broker brokers their model calls.
 import type { GatewayModule } from "../../app.js";
 import { FoundryService } from "./service.js";

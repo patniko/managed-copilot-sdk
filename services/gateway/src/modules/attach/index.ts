@@ -8,7 +8,7 @@ import type { IncomingMessage } from "node:http";
 import { ATTACH_CLOSE_CODES, ManagedCopilotError, ROUTES, parseWebSocketProtocols, type AttachMaterial, type SessionInfo } from "@managed-copilot/protocol";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { GatewayApp, GatewayModule } from "../../app.js";
-import type { Principal } from "../../http.js";
+import { isGitHubPrincipal, type Principal } from "../../http.js";
 import { pathScrubber } from "../core/sessions.js";
 import type { PromotionParticipant } from "../promotion/contract.js";
 import { AhpHosts } from "./hosts.js";
@@ -168,6 +168,10 @@ export const attachModule: GatewayModule = {
       const principal = ctx.principal;
       const sessionId = ctx.params.id;
       if (!principal || !sessionId) throw new ManagedCopilotError("authentication_required", "Sign in to attach to a session");
+      // Copilot CLI is a GitHub user's own tool: an app's users reach their sessions only through the app.
+      if (!isGitHubPrincipal(principal)) {
+        throw new ManagedCopilotError("capability_unavailable", "Copilot CLI attaches for a GitHub account; an app's own users can't attach it. Show their sessions in your app instead.");
+      }
       const host = await hosts.ensure(sessionId, currentRuntime(principal.accountId, sessionId));
       const incarnation = sessionsOf(app).get?.(sessionId)?.incarnation;
       // The principal stays in memory with the ticket: the attached CLI is the session's connected credential.

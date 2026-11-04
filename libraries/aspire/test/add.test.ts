@@ -190,4 +190,27 @@ describe("addManagedCopilot", () => {
     const builder = new FakeBuilder(appHost);
     await expect(addManagedCopilot(builder, "Copilot_1", { gatewayDirectory, environments: { chat: { type: "shared" } } })).rejects.toThrow(/must start with a lowercase letter/);
   });
+
+  it("issues each app a generated secret key, and names the deployment's subscription for Foundry accounts without one", async () => {
+    const builder = Object.assign(new FakeBuilder(appHost), {
+      getConfiguration: () =>
+        Promise.resolve({ exists: (key: string) => Promise.resolve(key === "Azure:SubscriptionId"), getConfigValue: () => Promise.resolve(" 0000-sub ") }),
+    });
+    const copilot = await addManagedCopilot(builder, "copilot", {
+      gatewayDirectory,
+      foundry: { contoso: { resourceGroup: "ai", deployments: ["gpt-5-mini"] } },
+      environments: { support: { type: "shared", inference: { foundry: "contoso" } }, chat: { type: "shared" } },
+      apps: { "support-site": { environments: ["support", "chat"], anyGitHubUser: true } },
+    });
+    expect(builder.parameters).toContainEqual({ name: "copilot-app-support-site-key", options: { secret: true, persist: true } });
+    const key = copilot.appKey("support-site");
+    expect(key).toEqual(new FakeParameter("copilot-app-support-site-key"));
+    const env = environmentOf(builder.apps[0]!.builder);
+    const config = JSON.parse(env.get("MANAGED_COPILOT_CONFIG") as string);
+    expect(config.apps["support-site"]).toMatchObject({ environments: ["support", "chat"], anyGitHubUser: true, key: { secretEnv: expect.stringMatching(/^MANAGED_COPILOT_SECRET_APP_/) } });
+    expect(env.get(config.apps["support-site"].key.secretEnv)).toBe(key);
+    expect(config.foundry).toEqual({ contoso: { resourceGroup: "ai", deployments: ["gpt-5-mini"] } });
+    expect(env.get("MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION")).toBe("0000-sub");
+    expect(() => copilot.appKey("kiosk")).toThrow(/declares no app "kiosk"\. Its apps: support-site\./);
+  });
 });

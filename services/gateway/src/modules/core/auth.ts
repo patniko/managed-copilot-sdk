@@ -162,8 +162,18 @@ export class GitHubAuthenticator implements Authenticator {
 
   #admit(key: string, verified: Verified, options: AuthenticateOptions, behavior: { readonly remember?: boolean } = {}): Principal {
     if (!this.#admits(verified, options)) throw verified.denied!;
+    // Admitted through an app that admits anyone: the verification stands as long as an allowed one would, rather than
+    // being checked with GitHub again every 30 seconds. Direct use stays refused, since the entry keeps its denial.
+    if (verified.denied) this.#extend(key);
     if (!options.background && behavior.remember !== false) this.#remember(key, verified.principal);
     return verified.principal;
+  }
+
+  #extend(key: string): void {
+    const entry = this.#cache.get(key);
+    if (!entry?.denied || entry.outage || entry.verifiedAt === undefined) return;
+    const expiresAt = Math.min(entry.verifiedAt + (this.#options.cacheTtlMs ?? 5 * 60_000), entry.tokenExpiresAt ?? Number.POSITIVE_INFINITY);
+    if (expiresAt > entry.expiresAt) this.#cache.set(key, { ...entry, expiresAt });
   }
 
   /**
@@ -402,9 +412,10 @@ export class GitHubAuthenticator implements Authenticator {
       }
       if (response.status >= 500) throw new GitHubUnavailable(`GitHub returned HTTP ${response.status} for an organization membership check`);
     }
-    // The account lost (or never had) access: its live credential must not keep serving its sessions' runtimes. A
-    // connection through an app that admits any GitHub user remembers it again.
-    if (this.#credentials.get(principal.accountId)) this.#credentials.delete(principal.accountId);
+    // The account lost (or never had) access: its live credential must not keep serving its sessions' runtimes. Unless
+    // an app admits any GitHub account: then its sessions through that app still need it.
+    const anyoneThroughAnApp = this.#options.apps?.list().some((app) => app.anyGitHubUser) === true;
+    if (!anyoneThroughAnApp && this.#credentials.get(principal.accountId)) this.#credentials.delete(principal.accountId);
     const allowed = [...orgs.map((org) => `members of ${org}`), ...users.map((user) => `@${user}`)].join(", ");
     return new ManagedCopilotError("forbidden", `@${principal.login} is not allowed to use this deployment (allowed: ${allowed})`);
   }

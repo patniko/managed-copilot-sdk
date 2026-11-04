@@ -256,8 +256,13 @@ export class PromotionManager implements PromotionService {
     }
     // The session keeps its own policy (models, approvals) and billing route; a target that would change the
     // billing route is incompatible rather than silently ignored.
-    if (targetConfig.inference?.foundry) {
-      throw new ManagedCopilotError("capability_unavailable", `Environment "${target}" routes inference to Azure AI Foundry; promotion cannot change a session's billing route`);
+    const route = record.inference?.route === "foundry" ? record.inference.foundry : undefined;
+    if ((targetConfig.inference?.foundry ?? null) !== (route ?? null)) {
+      const describe = (account: string | undefined) => (account ? `to Azure AI Foundry account "${account}"` : "to each user's Copilot plan");
+      throw new ManagedCopilotError(
+        "capability_unavailable",
+        `Session ${record.id} sends model calls ${describe(route)}, and environment "${target}" sends them ${describe(targetConfig.inference?.foundry)}; promotion cannot change a session's billing route`,
+      );
     }
     const sessions = this.#sessions();
     const sandboxes = this.#sandboxes();
