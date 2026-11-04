@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PermissionRequest } from "@github/copilot-sdk";
-import type { SessionInfo } from "@managed-copilot/sdk";
+import { ManagedCopilotError, type SessionInfo } from "@managed-copilot/sdk";
 import { describe, expect, it, vi } from "vitest";
 import { expectedValue } from "../src/server/checks.js";
 import { RaceError } from "../src/server/errors.js";
@@ -172,6 +172,15 @@ describe("a race", () => {
     expect(lane("isolated")).toMatchObject({ verdict: "failed", error: "It didn't finish within 15 minutes." });
     expect(session.aborted).toBe(true);
     await vi.waitFor(() => expect(platform.deleted).toContain(session.sessionId));
+    await races.close();
+  });
+
+  it("fails a lane whose session can't be created, with the platform's words and no sandbox left starting", async () => {
+    const { platform, races, lane } = setup();
+    platform.refusals.set("isolated", new ManagedCopilotError("setup_failed", "The sandbox couldn't start: no space left on the device."));
+    races.start("answer");
+    await vi.waitFor(() => expect(lane("isolated").status).toBe("failed"));
+    expect(lane("isolated")).toMatchObject({ verdict: "failed", error: "The sandbox couldn't start: no space left on the device.", sandboxes: [] });
     await races.close();
   });
 

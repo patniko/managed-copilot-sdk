@@ -10,7 +10,7 @@ import { useNow } from "../lib/useNow.js";
 const ORDER: Readonly<Record<LaneRun["status"], number>> = { done: 0, thinking: 1, working: 1, starting: 1, ready: 1, failed: 2, stopped: 3, skipped: 4 };
 
 /** Lanes in finishing order: correct answers first, then the rest by when they ended. */
-export function rankLanes(race: RaceSnapshot, now: number): LaneRun[] {
+function rankLanes(race: RaceSnapshot, now: number): LaneRun[] {
   return [...race.lanes].sort((a, b) => {
     if (a.place !== undefined || b.place !== undefined) return (a.place ?? Infinity) - (b.place ?? Infinity);
     if (ORDER[a.status] !== ORDER[b.status]) return ORDER[a.status] - ORDER[b.status];

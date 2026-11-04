@@ -19,10 +19,6 @@ export class StateHub {
     this.#keepAlive.unref();
   }
 
-  get clientCount(): number {
-    return this.#clients.size;
-  }
-
   /** Takes over the response as an SSE stream that starts with the current state. */
   attach(req: IncomingMessage, res: ServerResponse): void {
     res.writeHead(200, {

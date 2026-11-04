@@ -26,7 +26,7 @@ export interface Job {
   readonly checks: readonly Check[];
 }
 
-export const SHA_TEXT = "Managed Copilot pattern race";
+const SHA_TEXT = "Managed Copilot pattern race";
 
 export const JOBS: readonly Job[] = [
   {

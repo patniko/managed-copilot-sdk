@@ -38,7 +38,7 @@ function argument(args: unknown, key: string): string {
 }
 
 /** What a tool call is doing, in a few words. */
-export function describeTool(name: string, args: unknown): string {
+function describeTool(name: string, args: unknown): string {
   switch (name) {
     case "bash":
       return `$ ${argument(args, "command").split("\n")[0]}`;
@@ -106,6 +106,8 @@ class LaneRunner {
   readonly #workers = new Map<string, WorkerInfo>();
   /** Premium requests per user request its session measured: the multiplier of a model the deployment didn't describe. */
   #measuredRate: number | undefined;
+  /** Worker models it found no multiplier for (warned about once). */
+  readonly #unpriced = new Set<string>();
 
   constructor(lane: Lane, sandboxEnvironment: string | undefined, changed: () => void) {
     this.lane = lane;
@@ -226,17 +228,20 @@ class LaneRunner {
       if (worker.role === "hands") continue;
       const model = worker.model ?? laneModel;
       const rate = multiplier(model) ?? (model === laneModel ? this.#measuredRate : undefined);
-      if (rate === undefined) log.warn("No premium request multiplier for a worker's model; counting it at 1", { model });
+      if (rate === undefined && !this.#unpriced.has(model)) {
+        this.#unpriced.add(model);
+        log.warn("No premium request multiplier for a worker's model; counting it at 1", { model });
+      }
       total += worker.messages * (rate ?? 1);
     }
     if (total !== this.#run.premium.workers) this.update({ premium: { ...this.#run.premium, workers: total } });
   }
 
-  /** Ends the lane at `at`, when its answer arrived, it failed, or the race stopped. */
+  /** Ends the lane at `at`, when its answer arrived, it failed, or the race stopped. A sandbox still pending never came. */
   finish(patch: Partial<LaneRun>, at: number): void {
     this.#tools.clear();
     delete this.#run.activity;
-    this.update({ ...patch, finishedAt: at });
+    this.update({ sandboxes: this.#run.sandboxes.filter((token) => token.id !== "pending"), ...patch, finishedAt: at });
   }
 
   /** Its session was deleted, and its sandboxes, hands sandboxes, and workers with it. */

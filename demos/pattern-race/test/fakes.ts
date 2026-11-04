@@ -90,6 +90,8 @@ export class FakePlatform implements RacePlatform {
   readonly workerLists = new Map<string, WorkerInfo[]>();
   /** What `sessions.get` reports for a session, over the defaults. */
   readonly infos = new Map<string, Partial<SessionInfo>>();
+  /** Lanes whose session can't be created, and why. */
+  readonly refusals = new Map<LaneId, Error>();
   leftovers: string[] = [];
   readonly #created = new Map<LaneId, (session: FakeSession) => void>();
   readonly #eventListeners = new Set<(event: PlatformEvent) => void>();
@@ -112,6 +114,8 @@ export class FakePlatform implements RacePlatform {
   }
 
   async createSession(lane: LaneId, config: SessionConfig): Promise<LaneSession> {
+    const refusal = this.refusals.get(lane);
+    if (refusal) throw refusal;
     const session = new FakeSession(config);
     this.sessions.set(lane, session);
     this.#created.get(lane)?.(session);

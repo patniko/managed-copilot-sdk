@@ -41,7 +41,7 @@ export function useStore<T>(selector: (current: StoreState) => T): T {
   return useSyncExternalStore(subscribe, () => selector(state));
 }
 
-export function receive(app: AppState): void {
+function receive(app: AppState): void {
   setState((current) => ({
     ...current,
     app,
