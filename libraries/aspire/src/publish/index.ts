@@ -56,9 +56,13 @@ interface Deployment {
   readonly appsByPort: Map<number, string>;
   /** One value per publish: a newer deployment's replicas take over the data volume's leases from older ones. */
   readonly stamp: string;
-  /** Source ranges allowed to open the published apps (Parameters:app-allowed-ips, or this machine's public address). */
+  /** Source ranges allowed to open the apps that aren't public (Parameters:app-allowed-ips, or this machine's public address). */
   allowedSources?: string;
   appToken?: object;
+  /** Apps behind `allowedSources`, and whether each acts as the deployment's GitHub account. */
+  readonly restrictedApps: { readonly name: string; readonly actsAsAccount: boolean }[];
+  /** Apps open to any address (`public: true`). */
+  readonly publicApps: string[];
 }
 
 const deployments = new WeakMap<object, Deployment>();
@@ -131,8 +135,8 @@ async function publicAddress(): Promise<string | undefined> {
 }
 
 /**
- * Who may open the published apps, which act as the deployer's GitHub account: Parameters:app-allowed-ips (IPv4 CIDRs,
- * comma-separated, or "*"), else this machine's public address.
+ * Who may open the published apps that aren't public (`public: true`), most of which act as the deployer's GitHub
+ * account: Parameters:app-allowed-ips (IPv4 CIDRs, comma-separated, or "*"), else this machine's public address.
  */
 async function appAllowedSources(builder: PublishBuilder): Promise<string> {
   const configured = await setting(builder, "Parameters:app-allowed-ips");
@@ -140,8 +144,9 @@ async function appAllowedSources(builder: PublishBuilder): Promise<string> {
   const address = await publicAddress();
   if (!address) {
     throw new AzurePublishError(
-      "The published apps act as your GitHub account, so their public address must be restricted, and this machine's public address could not be detected. " +
-        'Set Parameters:app-allowed-ips to the IPv4 ranges allowed to open your apps (for example "203.0.113.7/32"), or to "*" to allow any address.',
+      "Apps that aren't public open only from Parameters:app-allowed-ips, which defaults to this machine's public address, and this machine's public address could not be detected. " +
+        'Set Parameters:app-allowed-ips to the IPv4 ranges allowed to open them (for example "203.0.113.7/32"), or to "*" to allow any address. ' +
+        "An app that signs in its own users can be published with public: true instead.",
     );
   }
   return `${address}/32`;
@@ -186,7 +191,17 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
   const files = writeGatewayBuildFiles({ appHostDirectory: input.appHostDirectory, name, customizations: prepared.customizations });
   const platformKey = await builder.addParameterWithGeneratedValue(`${name}-platform-key`, { minLength: 48, special: false }, { secret: true, persist: true });
 
-  const deployment: Deployment = { name, builder, environment, context: files.context, npmRegistry, appsByPort: new Map(), stamp: String(Date.now()) };
+  const deployment: Deployment = {
+    name,
+    builder,
+    environment,
+    context: files.context,
+    npmRegistry,
+    appsByPort: new Map(),
+    stamp: String(Date.now()),
+    restrictedApps: [],
+    publicApps: [],
+  };
   let gateway = amd64(builder.addDockerfile(name, files.context, { dockerfilePath: files.dockerfile }).withBuildArg("NPM_REGISTRY", npmRegistry))
     .withHttpEndpoint({ targetPort: GATEWAY_TARGET_PORT, env: "PORT" })
     .withExternalHttpEndpoints()
@@ -241,9 +256,7 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
       const domain = await (await environment.getOutput("AZURE_CONTAINER_APPS_ENVIRONMENT_DEFAULT_DOMAIN")).value();
       const summary = await context.summary();
       await summary.add("Managed Copilot", `https://${name}.${domain} (ManagedCopilot.connect({ url }), MANAGED_COPILOT_URL, or managed-copilot attach --url)`);
-      if (deployment.allowedSources) {
-        await summary.add("Apps open to", `${deployment.allowedSources === "*" ? "any address" : deployment.allowedSources} (change with Parameters:app-allowed-ips)`);
-      }
+      for (const [key, value] of appAccessSummary(deployment, domain ?? "")) await summary.add(key, value);
     },
     { dependsOn: ["provision-azure-bicep-resources"], requiredBy: ["deploy"] },
   );
@@ -351,15 +364,47 @@ export interface PublishAppOptions {
   /** More environment variables that receive the gateway's public URL (`MANAGED_COPILOT_URL` is always set). */
   readonly gatewayUrlEnv?: readonly string[];
   /**
-   * Whether the app gets the deployment's GitHub token (`MANAGED_COPILOT_GITHUB_TOKEN`) to act as that account. Default
-   * true; set false for an app that never calls the platform as a user (a static page). It stays IP-restricted.
+   * Whether the app gets the deployment's GitHub token (`Parameters:app-github-token`, as `MANAGED_COPILOT_GITHUB_TOKEN`)
+   * and acts as that account. Default true, except for a public app. Set false for an app that never calls the platform
+   * as one account (a static page, or an app that signs in its own users); it stays behind `Parameters:app-allowed-ips`
+   * unless it is also public. A public app can't have it.
    */
   readonly githubToken?: boolean;
+  /**
+   * Opens the app to any address on the Internet, for an app that signs in its own users (with their own GitHub tokens,
+   * or users it vouches for with an app credential). It gets no GitHub token (`githubToken: true` is refused), and
+   * `Parameters:app-allowed-ips` doesn't apply to it. Default false: only the addresses in `Parameters:app-allowed-ips`
+   * (by default the deploying machine's) can open the app.
+   */
+  readonly public?: boolean;
 }
 
 /**
- * Publishes an app that uses the platform (a demo or your own service). It acts as one GitHub account
- * (`app-github-token`), so its ingress only admits the source ranges in `Parameters:app-allowed-ips`.
+ * The deploy summary's lines about who can open the published apps: the allowlisted apps, then the public ones. Empty
+ * when the AppHost publishes no apps.
+ */
+export function appAccessSummary(
+  deployment: { readonly allowedSources?: string; readonly restrictedApps: readonly { readonly name: string; readonly actsAsAccount: boolean }[]; readonly publicApps: readonly string[] },
+  domain: string,
+): [string, string][] {
+  const lines: [string, string][] = [];
+  const restricted = deployment.restrictedApps;
+  if (restricted.length > 0 && deployment.allowedSources) {
+    const any = deployment.allowedSources === "*";
+    const acting = any ? restricted.filter((app) => app.actsAsAccount).map((app) => app.name) : [];
+    const warning = acting.length > 0 ? `${acting.join(", ")} act${acting.length === 1 ? "s" : ""} as your GitHub account for anyone; ` : "";
+    lines.push(["Apps open to", `${any ? "any address" : deployment.allowedSources}: ${restricted.map((app) => app.name).join(", ")} (${warning}change with Parameters:app-allowed-ips)`]);
+  }
+  if (deployment.publicApps.length > 0) {
+    lines.push(["Public apps", `${deployment.publicApps.map((app) => `https://${app}.${domain}`).join(", ")} (any address; they sign in their own users)`]);
+  }
+  return lines;
+}
+
+/**
+ * Publishes an app that uses the platform (a demo or your own service). By default it acts as one GitHub account
+ * (`Parameters:app-github-token`), so its ingress only admits the source ranges in `Parameters:app-allowed-ips`. An
+ * app that signs in its own users can be `public` instead: open to any address, with no GitHub token.
  * Pass the AppHost's builder and the value `addManagedCopilot` returned (in publish mode).
  */
 export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilotResource, app: PublishAppOptions): Promise<PublishContainerResource> {
@@ -369,18 +414,33 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   const gatewayUrl = copilot.url as object;
   const holder = deployment.appsByPort.get(app.port);
   if (holder) throw new AzurePublishError(`Apps "${holder}" and "${app.name}" both use port ${app.port}; webhooks address apps by port.`);
-  deployment.allowedSources ??= await appAllowedSources(publisher);
-  const allowed = deployment.allowedSources;
+  // Only `true` opens an app: anything else keeps it behind the allowlist.
+  const isPublic = app.public === true;
+  if (isPublic && app.githubToken === true) {
+    throw new AzurePublishError(
+      `App "${app.name}" is public, so it can't act as your GitHub account: anyone on the Internet could use it as you. ` +
+        "Sign its users in instead (with their own GitHub tokens, or users it vouches for with an app credential) and remove githubToken: true, " +
+        "or remove public: true to keep it behind Parameters:app-allowed-ips.",
+    );
+  }
+  const actsAsAccount = !isPublic && app.githubToken !== false;
+  if (!isPublic) deployment.allowedSources ??= await appAllowedSources(publisher);
   deployment.appsByPort.set(app.port, app.name);
-  const actsAsAccount = app.githubToken !== false;
+  if (isPublic) deployment.publicApps.push(app.name);
+  else deployment.restrictedApps.push({ name: app.name, actsAsAccount });
   if (actsAsAccount) deployment.appToken ??= await publisher.addParameter("app-github-token", appTokenParameterOptions());
 
   const dataDirectory = app.dataDirectory ?? "/data";
+  const subPath = `apps/${app.name}`;
   let container = amd64(publisher.addDockerfile(app.name, deployment.context, { dockerfilePath: app.dockerfile }).withBuildArg("NPM_REGISTRY", deployment.npmRegistry))
     .withHttpEndpoint({ targetPort: app.port, env: "PORT" })
     .withExternalHttpEndpoints()
-    .withComputeEnvironment(deployment.environment)
-    .publishAsManagedCopilotApp(deployment.environment, `apps/${app.name}`, dataDirectory, app.port, app.healthPath, allowed === "*" ? "" : allowed)
+    .withComputeEnvironment(deployment.environment);
+  const allowed = deployment.allowedSources;
+  container = isPublic
+    ? container.publishAsManagedCopilotPublicApp(deployment.environment, subPath, dataDirectory, app.port, app.healthPath)
+    : container.publishAsManagedCopilotApp(deployment.environment, subPath, dataDirectory, app.port, app.healthPath, allowed === "*" ? "" : allowed!);
+  container = container
     // For the lease supervisor the app's image starts with (see demos/*/Dockerfile).
     .withEnvironment("MANAGED_COPILOT_DATA_DIR", dataDirectory)
     .withEnvironment("MANAGED_COPILOT_LEASE_STAMP", deployment.stamp)
