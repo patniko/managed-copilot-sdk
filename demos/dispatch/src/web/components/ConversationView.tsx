@@ -182,7 +182,7 @@ function StyleBadge({ view, info, blueprints }: { readonly view: View; readonly 
               <Glyph size={16} className="text-fg-muted" />
               {meta.label}
             </div>
-            <StyleDiagram style={view.style} className="mt-2.5" />
+            <StyleDiagram style={view.style} className="mt-2.5" stacked />
           </div>
           <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 px-4 py-3 text-sm">
             <dt className="text-fg-muted">Coordinator</dt>

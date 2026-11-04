@@ -2,6 +2,7 @@ import { AlertIcon, SyncIcon } from "@primer/octicons-react";
 import { useStore } from "../lib/store.js";
 import { AppHeaderBar } from "./TopBar.js";
 import { Button } from "./ui/Button.js";
+import { Spinner } from "./ui/Spinner.js";
 
 export function AppSkeleton() {
   return (
@@ -50,7 +51,7 @@ export function PlatformBanner() {
   const connecting = platform.state === "connecting" || platform.state === "reconnecting";
   return (
     <div className={connecting ? "flash flash-full" : "flash flash-full flash-warn"} role="status">
-      <AlertIcon size={16} />
+      {connecting ? <Spinner size={16} /> : <AlertIcon size={16} />}
       <span>
         <strong>{connecting ? "Connecting to Managed Copilot…" : "Managed Copilot isn't available."}</strong> {platform.message ?? ""}
       </span>

@@ -4,8 +4,9 @@ import type { PlatformStatus } from "../../shared/types.js";
 import { networkSummary, sizeSummary } from "../lib/blueprints.js";
 import { cx } from "../lib/cx.js";
 import { initials } from "../lib/format.js";
+import { pillStatus, type PillStatus } from "../lib/platform.js";
 import { homeHref } from "../lib/router.js";
-import { useStore, type Connection } from "../lib/store.js";
+import { useStore } from "../lib/store.js";
 import { STYLE_META } from "../lib/styles.js";
 import { usePopover } from "../lib/usePopover.js";
 import { BlueprintIcon } from "./BlueprintIcon.js";
@@ -57,24 +58,6 @@ export function TopBar({ onOpenMenu }: { readonly onOpenMenu: () => void }) {
       }
     />
   );
-}
-
-export interface PillStatus {
-  readonly tone: "success" | "busy" | "danger";
-  /** The pill's label: `Local` or `Azure`, else the deployment's name. */
-  readonly label: string;
-  /** The popover's first line. */
-  readonly headline: string;
-}
-
-/** The platform pill: where the app runs, and whether it's connected (Dispatch's own event stream included). */
-export function pillStatus(platform: PlatformStatus | undefined, connection: Connection): PillStatus {
-  const label = platform?.mode === "azure" ? "Azure" : platform?.mode === "local" ? "Local" : (platform?.deployment ?? "Managed Copilot");
-  if (!platform || platform.state === "connecting") return { tone: "busy", label, headline: "Connecting to Managed Copilot…" };
-  if (platform.state === "reconnecting") return { tone: "busy", label, headline: "Reconnecting to Managed Copilot…" };
-  if (platform.state === "unavailable") return { tone: "danger", label, headline: "Managed Copilot isn't available" };
-  if (connection === "reconnecting") return { tone: "busy", label, headline: "Reconnecting to Dispatch's server…" };
-  return { tone: "success", label, headline: `Connected · ${label}` };
 }
 
 function StatusDot({ tone }: { readonly tone: PillStatus["tone"] }) {

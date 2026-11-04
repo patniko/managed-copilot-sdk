@@ -127,10 +127,10 @@ function Box({ agent = false }: { readonly agent?: boolean }) {
   );
 }
 
-/** One line that shows a style: the coordinator, an arrow, and the sandboxes it works through, with a caption. */
-export function StyleDiagram({ style, className }: { readonly style: ExecutionStyle; readonly className?: string }) {
+/** One line that shows a style: the coordinator, an arrow, and the sandboxes it works through, with a caption (below it, `stacked`). */
+export function StyleDiagram({ style, className, stacked = false }: { readonly style: ExecutionStyle; readonly className?: string; readonly stacked?: boolean }) {
   return (
-    <div className={cx("flex min-w-0 items-center gap-3", className)} aria-live="polite">
+    <div className={cx("flex min-w-0", stacked ? "flex-col items-start gap-2" : "items-center gap-3", className)} aria-live="polite">
       <span role="img" aria-label={DIAGRAM_LABEL[style]} className="flex shrink-0 items-center gap-2">
         <Brain subagents={style === "direct" ? 2 : 0} />
         <ArrowRightIcon size={16} className="text-fg-muted" />
