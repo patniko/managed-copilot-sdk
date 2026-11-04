@@ -47,6 +47,15 @@ const APPS = [
   },
   { id: "assistant", url: local(7490) },
   {
+    id: "data-desk",
+    url: local(7430),
+    async prepare(page) {
+      // Open the most recent analysis when there is one (after the move, it shows the session docked in its sandbox).
+      const first = page.locator('a[href^="#/a/"]').first();
+      if (await first.count()) await first.click();
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
