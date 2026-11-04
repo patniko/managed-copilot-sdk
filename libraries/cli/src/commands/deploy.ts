@@ -427,6 +427,22 @@ function readRecord(directory: string): DeploymentRecord | undefined {
 const targets = (record: DeploymentRecord | undefined, subscription: string, resourceGroup: string) =>
   Boolean(record && record.subscription?.toLowerCase() === subscription.toLowerCase() && record.resourceGroup?.toLowerCase() === resourceGroup.toLowerCase());
 
+/** `az account show` output; the account's name is compared, never printed. */
+interface AzAccount {
+  readonly id: string;
+  readonly name?: string;
+  readonly tenantId?: string;
+  readonly user?: { readonly name?: string };
+}
+
+function parseAccount(text: string): AzAccount | undefined {
+  try {
+    return JSON.parse(text) as AzAccount;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * When the resource group already has a deployment, deploys only if this AppHost's record made it, or, in a terminal,
  * after adopting another checkout's record for it or an explicit "deploy over it".
@@ -480,7 +496,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (docker.code !== 0) throw new CommandError("Docker isn't running.", { hint: "Start Docker Desktop, then deploy again." });
   const account = await host.capture("az", ["account", "show", "-o", "json"]);
   if (account.code !== 0) throw new CommandError("The Azure CLI isn't signed in.", { hint: "Run `az login`, then deploy again." });
-  const azAccount = JSON.parse(account.stdout) as { id: string; name?: string };
+  const azAccount = JSON.parse(account.stdout) as AzAccount;
 
   const option = (key: string) => (typeof ctx.options[key] === "string" ? (ctx.options[key] as string) : undefined);
   const subscription = option("subscription") ?? settings.get("Azure:SubscriptionId") ?? azAccount.id;
@@ -489,6 +505,25 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (!SUBSCRIPTION.test(subscription)) throw new UsageError(`"${subscription}" is not an Azure subscription ID.`);
   if (!LOCATION.test(location)) throw new UsageError(`"${location}" is not an Azure region name, such as westus2.`);
   if (!RESOURCE_GROUP.test(resourceGroup)) throw new UsageError(`"${resourceGroup}" is not a valid resource group name.`);
+  // `aspire deploy` signs in as the Azure CLI's current account, to the tenant of its default subscription unless told
+  // otherwise (Azure:TenantId). Another subscription of that account can be in another tenant; another account's can't
+  // be used without switching the Azure CLI to it, which is the caller's choice.
+  let tenant = settings.get("Azure:TenantId");
+  if (!tenant && subscription.toLowerCase() !== azAccount.id.toLowerCase()) {
+    const target = await host.capture("az", ["account", "show", "--subscription", subscription, "-o", "json"]);
+    const found = target.code === 0 ? parseAccount(target.stdout) : undefined;
+    if (!found?.tenantId) {
+      throw new CommandError(`The Azure CLI can't use subscription ${subscription}.`, {
+        hint: "Check the ID with `az account list`. If it's in another tenant, sign in to that tenant too (`az login --tenant <tenant-id>`).",
+      });
+    }
+    if (found.user?.name && azAccount.user?.name && found.user.name.toLowerCase() !== azAccount.user.name.toLowerCase()) {
+      throw new CommandError(`Subscription ${subscription} belongs to another account than the Azure CLI's current one, and aspire deploy signs in as the current account.`, {
+        hint: `Switch the Azure CLI to it with \`az account set --subscription ${subscription}\`, then deploy again.`,
+      });
+    }
+    tenant = found.tenantId;
+  }
 
   const token = await host.githubToken();
   const login = await host.githubLogin(token);
@@ -548,6 +583,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
     const value = settings.get(key);
     if (value) env[key.replaceAll(":", "__")] = value;
   }
+  if (tenant) env.Azure__TenantId = tenant;
 
   const code = await host.stream("aspire", ["deploy", "--apphost", settings.path, ...(ctx.interactive ? [] : ["--non-interactive"])], { env });
   if (code !== 0) throw new CommandError(`aspire deploy failed (exit ${code}).`, { hint: "Its output above says why. Fix that, then run `npx managed-copilot deploy` again." });

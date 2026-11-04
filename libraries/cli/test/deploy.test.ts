@@ -41,6 +41,8 @@ class FakeHost implements HostTools {
   failList = false;
   failUpdates = false;
   records = "";
+  /** Subscriptions the Azure CLI can use besides its default one: their tenant and signed-in account. */
+  tenants: Record<string, { tenantId: string; user: string }> = {};
   readonly calls: { command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }[] = [];
 
   has(command: string) {
@@ -64,7 +66,16 @@ class FakeHost implements HostTools {
     if (command === "docker") return this.dockerRunning ? ok("29.0.0") : { code: 1, stdout: "", stderr: "Cannot connect" };
     if (command === "az") {
       const line = args.join(" ");
-      if (line.startsWith("account show")) return this.azSignedIn ? ok(JSON.stringify({ id: SUBSCRIPTION, name: "Demo subscription" })) : { code: 1, stdout: "", stderr: "Please run az login" };
+      if (line.startsWith("account show --subscription")) {
+        const id = args[args.indexOf("--subscription") + 1]!;
+        const found = this.tenants[id];
+        return found ? ok(JSON.stringify({ id, name: "Other subscription", tenantId: found.tenantId, user: { name: found.user, type: "user" } })) : { code: 1, stdout: "", stderr: "Subscription not found" };
+      }
+      if (line.startsWith("account show")) {
+        return this.azSignedIn
+          ? ok(JSON.stringify({ id: SUBSCRIPTION, name: "Demo subscription", tenantId: "tenant-a", user: { name: "dev@contoso.example", type: "user" } }))
+          : { code: 1, stdout: "", stderr: "Please run az login" };
+      }
       if (line.startsWith("containerapp list") && this.failList) return { code: 1, stdout: "", stderr: "AuthorizationFailed" };
       if (line.startsWith("containerapp list")) return this.apps ? ok(JSON.stringify(this.apps)) : { code: 3, stdout: "", stderr: "ResourceGroupNotFound" };
       if (line.startsWith("containerapp show")) {
@@ -360,6 +371,33 @@ describe("deploy", () => {
     expect(await run(["deploy", "--yes"], h.io)).toBe(0);
     expect(h.out()).toContain("Apps open to    198.51.100.9/32 (this machine); public apps: any address");
     expect(h.out()).toContain("Public apps: https://front-desk.bravedesert.westus2.azurecontainerapps.io (any address)");
+  });
+
+  it("deploys to a subscription in another tenant with that tenant, and says how to use another account's", async () => {
+    const other = "99999999-8888-7777-6666-555555555555";
+    const host = new FakeHost();
+    host.tenants[other] = { tenantId: "tenant-b", user: "DEV@contoso.example" };
+    const h = harness(host);
+    expect(await run(["deploy", "--yes", "--subscription", other], h.io)).toBe(0);
+    const deployCall = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!;
+    expect(deployCall.env).toMatchObject({ Azure__SubscriptionId: other, Azure__TenantId: "tenant-b" });
+
+    const elsewhere = new FakeHost();
+    elsewhere.tenants[other] = { tenantId: "tenant-c", user: "someone@fabrikam.example" };
+    const switching = harness(elsewhere);
+    expect(await run(["deploy", "--yes", "--subscription", other], switching.io)).toBe(1);
+    expect(switching.err()).toContain("belongs to another account than the Azure CLI's current one");
+    expect(switching.err()).toContain(`az account set --subscription ${other}`);
+    expect(switching.err()).not.toContain("someone@fabrikam.example");
+    expect(elsewhere.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+
+    const unknown = new FakeHost();
+    const refused = harness(unknown);
+    expect(await run(["deploy", "--yes", "--subscription", "12345678-1234-1234-1234-123456789012"], refused.io)).toBe(1);
+    expect(refused.err()).toContain("The Azure CLI can't use subscription 12345678-1234-1234-1234-123456789012.");
+    expect(refused.err()).toContain("az login --tenant");
+    expect(unknown.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+    expect(unknown.secrets).toEqual({});
   });
 
   it("asks first in a terminal, and needs --yes otherwise", async () => {

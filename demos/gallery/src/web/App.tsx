@@ -69,15 +69,31 @@ function Dot({ health }: { readonly health?: Health }) {
   return <span className={`dot ${health ? `dot-${health}` : ""}`} aria-hidden />;
 }
 
-function healthTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted?: boolean): string {
-  if (link && hosted && link.health === "online") return `${link.url} is up. It opens from allowed networks only (npx managed-copilot access ips).`;
+function healthTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted?: boolean, open?: boolean): string {
+  if (link && hosted && link.health === "online") {
+    return open ? `${link.url} is up and open to anyone: it signs in its own users.` : `${link.url} is up. It opens from allowed networks only (npx managed-copilot access ips).`;
+  }
   if (!link) return target === "cloud" ? (state?.searching ? "Looking for your Azure deployment…" : (state?.note ?? "No Azure deployment")) : "Not available";
   if (link.health === "restricted") return `${link.url} refused this network: its ingress only allows the addresses in Parameters:app-allowed-ips.`;
   if (link.health === "offline") return target === "local" ? `${link.url} isn't answering. Start the platform with aspire run.` : `${link.url} isn't answering.`;
   return link.url;
 }
 
-function TargetButton({ target, link, state, primary, hosted }: { readonly target: Target; readonly link?: Link; readonly state?: TargetState; readonly primary?: boolean; readonly hosted?: boolean }) {
+function TargetButton({
+  target,
+  link,
+  state,
+  primary,
+  hosted,
+  open,
+}: {
+  readonly target: Target;
+  readonly link?: Link;
+  readonly state?: TargetState;
+  readonly primary?: boolean;
+  readonly hosted?: boolean;
+  readonly open?: boolean;
+}) {
   const Icon = target === "local" ? DeviceDesktopIcon : CloudIcon;
   const label = (
     <>
@@ -86,7 +102,7 @@ function TargetButton({ target, link, state, primary, hosted }: { readonly targe
       <Dot health={link?.health} />
     </>
   );
-  const title = healthTitle(target, link, state, hosted);
+  const title = healthTitle(target, link, state, hosted, open);
   if (!link) {
     return (
       <button type="button" className="btn btn-sm inline-flex items-center gap-2" disabled title={title}>
@@ -153,7 +169,14 @@ function AppCard({ app, state }: { readonly app: AppEntry; readonly state?: Gall
       <Shot id={app.id} alt={`${app.title}: ${app.tagline}`} href={best?.url} />
       <div className="p-4 flex flex-col gap-2 grow">
         <div>
-          <h3 className="text-lg font-semibold leading-tight">{app.title}</h3>
+          <h3 className="text-lg font-semibold leading-tight flex flex-wrap items-center gap-2">
+            {app.title}
+            {app.public ? (
+              <span className="Label Label--success" title="Anyone can open the deployed app: it signs in its own users">
+                Public
+              </span>
+            ) : null}
+          </h3>
           <p className="text-fg-muted">{app.tagline}</p>
         </div>
         <p className="text-sm">{app.description}</p>
@@ -168,7 +191,7 @@ function AppCard({ app, state }: { readonly app: AppEntry; readonly state?: Gall
           // The console signs each operator in with their own GitHub account, from their terminal.
           state?.cloud.gatewayUrl ? <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy command" /> : null
         ) : (
-          <TargetButton target="cloud" link={cloud} state={state?.cloud} primary={local?.health !== "online"} hosted={hosted} />
+          <TargetButton target="cloud" link={cloud} state={state?.cloud} primary={local?.health !== "online"} hosted={hosted} open={app.public === true} />
         )}
         <a className="btn btn-sm btn-invisible inline-flex items-center gap-2 ml-auto" href={`${state?.repoUrl ?? ""}${app.readme}`} target="_blank" rel="noreferrer">
           <BookIcon size={16} />
@@ -360,7 +383,7 @@ export function App() {
             {hosted ? (
               <Notice tone="neutral">
                 {renderCode(
-                  "The apps open only from allowed networks. If one answers `403 RBAC: access denied`, ask the deployment's owner to add your address with `npx managed-copilot access ips add <your address>`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.",
+                  `${APPS.some((app) => app.public) ? "Apps marked Public open from anywhere and sign in their own users. The others open only from allowed networks." : "The apps open only from allowed networks."} If one answers \`403 RBAC: access denied\`, ask the deployment's owner to add your address with \`npx managed-copilot access ips add <your address>\`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.`,
                 )}
               </Notice>
             ) : null}
