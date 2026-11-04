@@ -22,7 +22,7 @@ flowchart LR
   A["Alice<br/>(GitHub)"] --> FD["Front Desk<br/>sign-in, memory, conversation list"]
   B["Bob<br/>(email)"] --> FD
   FD -- "Alice's own token" --> GW["Managed Copilot gateway"]
-  FD -- "app credential, vouching for Bob" --> GW
+  FD -- "app key, vouching for Bob" --> GW
   GW --> SR["Shared runtime<br/>one session per conversation"]
   SR -- "Alice's sessions" --> CP["Alice's Copilot plan"]
   SR -- "Bob's sessions" --> AF["Front Desk's Azure AI Foundry"]
@@ -32,8 +32,9 @@ flowchart LR
 
 - **Many people, one app, no shared account.** Front Desk holds no GitHub token of its own (`publishApp` gives a public
   app none). A GitHub user's sessions are created with their token, so the platform binds them to their GitHub account
-  and their Copilot plan pays. Everything else in the app follows from the signed-in person, never from a request
-  body or the model's arguments.
+  and their Copilot plan pays. Everyone else is one of Front Desk's own app users, vouched for with its app key: their
+  sessions belong to that app user, and your Azure AI Foundry pays. Everything else in the app follows from the
+  signed-in person, never from a request body or the model's arguments.
 - **Isolation at every layer.** Front Desk checks ownership in its own records before any operation (listing, opening,
   sending, stopping, deleting), its live events go to the owner's browser tabs only, and the agent's memory tools are
   created per session, bound to that session's person. The platform checks ownership again for the session itself.
@@ -61,6 +62,23 @@ open it and:
 `MANAGED_COPILOT_PORT_OFFSET` moves Front Desk with the rest of the platform (for example to 9450 with an offset of
 2000).
 
+### People without GitHub
+
+Front Desk vouches for people without GitHub with the **app key** the AppHost issues it (`apps: { "front-desk": … }`,
+passed in as `MANAGED_COPILOT_APP_KEY`), and their conversations run in `front-desk-foundry`, which sends model calls to
+your Azure AI Foundry. Name an existing Foundry account and its model deployments, and your Azure identity (`az login`)
+needs the **Cognitive Services OpenAI User** role on it:
+
+```powershell
+aspire secret set Foundry:Account <account-name>
+aspire secret set Foundry:ResourceGroup <its-resource-group>
+aspire secret set Foundry:Deployments <deployment-name>        # several: a,b; the first is the default
+aspire secret set Foundry:Subscription <subscription-id>        # only when it isn't the deployment's
+```
+
+Without them, people can still create an account and sign in, and Front Desk tells them that chatting needs GitHub
+on this deployment.
+
 ### Continue with GitHub
 
 "Continue with GitHub" needs a GitHub OAuth app (or a GitHub App with user authorization; its expiring tokens are
@@ -72,32 +90,52 @@ for your Copilot plan.
    `http://localhost:7450/auth/github/callback` locally (shifted by any port offset), and
    `https://front-desk.<environment-domain>/auth/github/callback` once it's deployed.
 3. Note the **Client ID**, and generate a **client secret**.
-4. Give both to the AppHost. The ID can go on the command line; the secret goes in the user-secrets file that
-   `aspire secret path` names, never on a command line:
+4. Give both to the AppHost. This asks for them (the secret isn't shown as you type) and saves them in the AppHost's
+   user secrets, so the secret never appears on a command line:
 
    ```powershell
-   aspire secret set Parameters:front-desk-github-client-id <client-id>
-   aspire secret path   # add "Parameters:front-desk-github-client-secret": "<secret>" to this JSON file
+   pnpm --filter @managed-copilot/demo-front-desk setup-github
    ```
 
-5. Restart `aspire run` (or run `aspire deploy` again).
+5. Restart `aspire run`.
 
 Without them, Front Desk still runs: people sign in with an email, and locally with your GitHub CLI's account.
 
 ### Deploy it
 
-`aspire deploy` publishes Front Desk as a **public** app (`publishApp({ public: true })`): its address,
-`https://front-desk.<environment-domain>`, opens from anywhere, because it signs in its own users. It gets no GitHub
-token, a generated sealing key for the GitHub tokens it keeps, and its data directory on the platform's Azure Files
-share. Add the deployed callback URL to the GitHub OAuth app (step 2 above).
+`aspire deploy` publishes Front Desk as a **public** app (`publishApp({ public: true, app: "front-desk" })`): its
+address, `https://front-desk.<environment-domain>`, opens from anywhere, because it signs in its own users. It gets its
+app key and no GitHub token, a generated sealing key for the GitHub tokens it keeps, and its data directory on the
+platform's Azure Files share. Any GitHub account that signs in through it may use the deployment (`anyGitHubUser`);
+using the deployment directly still takes `access`. Deploying also gives the gateway's managed identity the Cognitive
+Services OpenAI User role on the Foundry account, so you need permission to assign roles in its resource group.
+
+`aspire deploy` runs the AppHost as Production, which doesn't read user secrets, so give it the Foundry and GitHub
+settings as environment variables for that run (`A__B` for `A:B`). Read the secret from a prompt, not a command line:
+
+```powershell
+$env:Foundry__Account = "<account-name>"; $env:Foundry__ResourceGroup = "<its-resource-group>"; $env:Foundry__Deployments = "<deployment-name>"
+${env:Parameters__front-desk-github-client-id} = "<client-id>"
+${env:Parameters__front-desk-github-client-secret} = Read-Host "Client secret" -MaskInput
+npx managed-copilot deploy
+Remove-Item Env:Parameters__front-desk-github-client-secret
+```
+
+Then add the deployed callback URL to the GitHub OAuth app (step 2 above).
 
 ## How it works
 
-- **One connection per person** ([`platform.ts`](src/server/platform.ts)). For a GitHub user, Front Desk opens
-  `ManagedCopilot.connect({ gitHubToken })` with their token and a stock `CopilotClient` for the `front-desk` environment
-  from it. It never calls `connect()` without a person's credential, so the SDK's fallbacks (environment variables, the
-  GitHub CLI) can't make it act as whoever runs the server. A connection closes after 10 minutes without a browser tab
-  or a running answer; the person's sessions keep running on the platform.
+- **One app connection, acting for each person** ([`platform.ts`](src/server/platform.ts)). With its app key, Front
+  Desk connects once as itself (`ManagedCopilot.connect()` reads `MANAGED_COPILOT_APP_KEY`) and acts for each person
+  with `managed.as(...)`: `{ gitHubToken }` for a GitHub user (their sessions in `front-desk`, their own Copilot plan),
+  `{ appUser: { id, name } }` for everyone else (their sessions in `front-desk-foundry`, your Foundry). Each person gets
+  their own stock `CopilotClient` from that view. An app connection is never a GitHub account, so nothing can make it
+  act as whoever runs the server. Without an app key, Front Desk connects as each GitHub user with their token, and
+  people without GitHub can't chat. A person's connection closes after 10 minutes without a browser tab or a running
+  answer; their sessions keep running on the platform.
+- **The platform's own record.** Opening a conversation reads its session's `SessionInfo`: the owner (a GitHub
+  account, or `front-desk/<user ID>` for an app user) and `inference` (the owner's Copilot plan, or the Foundry
+  account). The conversation's header shows it.
 - **Conversations** ([`conversations.ts`](src/server/conversations.ts)). Each is one session, created with the
   person's memory tools, Front Desk's instructions, and `streaming: true`, and resumed with the same when the person
   comes back. Front Desk rebuilds the chat from `session.getEvents()` and streams live events to the person's tabs over
@@ -117,10 +155,13 @@ share. Add the deployed callback URL to the GitHub OAuth app (step 2 above).
 | --- | --- | --- |
 | `PORT` | `7450` | Port for the UI and API |
 | `MANAGED_COPILOT_URL` | the local platform | The Managed Copilot deployment |
+| `MANAGED_COPILOT_APP_KEY` | none | Front Desk's app key, from the AppHost's `apps`; without it, only GitHub users can chat |
 | `FRONT_DESK_PUBLIC_URL` | `http://localhost:<PORT>` | Front Desk's address; GitHub returns to `<it>/auth/github/callback` |
 | `FRONT_DESK_ALLOWED_HOSTS` | none | More host names Front Desk answers (comma-separated) |
 | `FRONT_DESK_ENVIRONMENT` | `front-desk` | The environment GitHub users' conversations run in |
-| `FRONT_DESK_MODEL` | `claude-sonnet-5` | The model conversations use |
+| `FRONT_DESK_MODEL` | `claude-sonnet-5` | The model GitHub users' conversations use |
+| `FRONT_DESK_FOUNDRY_ENVIRONMENT` | `<FRONT_DESK_ENVIRONMENT>-foundry` | The environment everyone else's conversations run in |
+| `FRONT_DESK_FOUNDRY_MODEL` | the environment's default | Their model (a Foundry deployment) |
 | `FRONT_DESK_GITHUB_CLIENT_ID` / `_SECRET` | none | "Continue with GitHub" |
 | `FRONT_DESK_SEALING_KEY` | a key file in the data directory | Seals the GitHub tokens Front Desk keeps |
 | `FRONT_DESK_INVITE_CODE` | none | Creating an account needs this code |
