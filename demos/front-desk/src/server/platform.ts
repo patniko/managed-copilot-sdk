@@ -1,13 +1,19 @@
 /**
- * Front Desk's connections to Managed Copilot: one per person, acting as that person. Nothing here ever connects
- * without the person's own credential, so Front Desk never acts as whoever deployed it, and the platform keeps each
+ * Front Desk's connections to Managed Copilot, each acting for one person. Nothing here ever connects without a
+ * credential naming who it acts for, so Front Desk never acts as whoever deployed it, and the platform keeps each
  * person's sessions to themselves.
  *
- * - People who sign in with GitHub: `ManagedCopilot.connect({ gitHubToken })` with their token, so their sessions
- *   belong to their GitHub account and model use goes to their own Copilot plan.
- * - People without GitHub: the app vouches for them with its app credential, and their model use goes to the app's
- *   Azure AI Foundry. Until this deployment offers that, they can sign in but not chat, and Front Desk says why.
+ * With an app key (`MANAGED_COPILOT_APP_KEY`, issued by the AppHost's `apps`), one connection is Front Desk itself, and
+ * `managed.as(...)` acts for each person:
+ * - People who sign in with GitHub: `{ gitHubToken }`, their own token, so their sessions belong to their GitHub
+ *   account and model use goes to their own Copilot plan.
+ * - People without GitHub: `{ appUser }`, Front Desk vouching for them, so their sessions belong to that app user and
+ *   model use goes to the deployment's Azure AI Foundry.
+ *
+ * Without an app key, Front Desk connects as each GitHub user with their token, and people without GitHub can sign in
+ * but not chat (Front Desk says why).
  */
+import { createHash } from "node:crypto";
 import type { CopilotClient } from "@github/copilot-sdk";
 import { ERROR_CODES, ManagedCopilotError, type ErrorCode } from "@managed-copilot/protocol";
 import { ManagedCopilot } from "@managed-copilot/sdk";
@@ -24,7 +30,8 @@ export type Person =
 export interface Route {
   readonly route: BillingRoute;
   readonly environment: string;
-  readonly model: string;
+  /** The model new conversations use; absent: the environment's default. */
+  readonly model?: string;
 }
 
 /** One person's connection: everything it does acts as them. */
@@ -112,17 +119,21 @@ function deadline<T>(promise: Promise<T>, ms: number, what: string): Promise<T> 
   ]).finally(() => clearTimeout(timer));
 }
 
-/** A GitHub user's connection: their own `ManagedCopilot` handle and stock client, both with their token. */
-class GitHubConnection implements PersonalConnection {
+/**
+ * One person's connection: a `ManagedCopilot` that acts for them (a view of Front Desk's app connection, or their own
+ * GitHub connection) and their stock client, started on first use.
+ */
+class PersonConnection implements PersonalConnection {
   readonly userId: string;
   readonly route: Route;
-  readonly token: string;
+  /** Identifies the credential it acts with: a new GitHub token gets a new connection. */
+  readonly credential: string;
   readonly #managed: ManagedCopilot;
   #client: Promise<CopilotClient> | undefined;
 
-  constructor(userId: string, token: string, route: Route, managed: ManagedCopilot) {
+  constructor(userId: string, credential: string, route: Route, managed: ManagedCopilot) {
     this.userId = userId;
-    this.token = token;
+    this.credential = credential;
     this.route = route;
     this.#managed = managed;
   }
@@ -147,65 +158,86 @@ class GitHubConnection implements PersonalConnection {
     await deadline((await this.#client).ping(), 8_000, "Managed Copilot");
   }
 
+  /** A view of the app connection closes only its own clients; a person's own connection closes entirely. */
   async close(): Promise<void> {
     this.#client = undefined;
     await this.#managed.close().catch(() => undefined);
   }
 }
 
+const credentialOf = (person: Person) => (person.kind === "github" ? `github:${createHash("sha256").update(person.token).digest("base64url")}` : `app:${person.userId}`);
+
 export interface ManagedPlatformOptions {
   readonly config: FrontDeskConfig;
-  /** Opens a connection as a GitHub user (tests replace it). */
-  readonly connectAsGitHubUser?: (token: string) => Promise<ManagedCopilot>;
+  /**
+   * Front Desk's app key (`MANAGED_COPILOT_APP_KEY`, issued by the AppHost): one app connection then acts for
+   * everyone, GitHub users with their own token and everyone else as Front Desk's own users. Without one, Front Desk
+   * connects as each GitHub user, and people without GitHub can't chat.
+   */
+  readonly appKey?: string;
+  /** Opens a connection (tests replace it). */
+  readonly connect?: (options: { readonly gitHubToken?: string; readonly appKey?: string }) => Promise<ManagedCopilot>;
 }
 
 export class ManagedPlatform implements Platform {
   readonly #config: FrontDeskConfig;
-  readonly #connectAsGitHubUser: (token: string) => Promise<ManagedCopilot>;
-  readonly #connections = new Map<string, Promise<PersonalConnection>>();
+  readonly #appKey: string | undefined;
+  readonly #connect: (options: { readonly gitHubToken?: string; readonly appKey?: string }) => Promise<ManagedCopilot>;
+  readonly #connections = new Map<string, Promise<PersonConnection>>();
+  #app: Promise<ManagedCopilot> | undefined;
+  #appState: { available: boolean; reason?: string; model?: string } = { available: false, reason: "Front Desk is connecting to Managed Copilot. Try again in a moment." };
+  #retry: NodeJS.Timeout | undefined;
+  #stopped = false;
 
   constructor(options: ManagedPlatformOptions) {
     this.#config = options.config;
-    // Always the person's own token: never the SDK's fallbacks (environment variables, the GitHub CLI), which would be
+    this.#appKey = options.appKey?.trim() || undefined;
+    // Always an explicit credential: never the SDK's fallbacks (environment variables, the GitHub CLI), which would be
     // whoever runs this server.
-    this.#connectAsGitHubUser = options.connectAsGitHubUser ?? ((token) => ManagedCopilot.connect({ gitHubToken: token, clientName: "front-desk" }));
+    this.#connect =
+      options.connect ??
+      ((credential) =>
+        ManagedCopilot.connect({ clientName: "front-desk", ...(credential.appKey ? { appKey: credential.appKey } : { gitHubToken: credential.gitHubToken! }) }));
+  }
+
+  /** Whether Front Desk connects as an app (with an app key) rather than as each GitHub user. */
+  get appMode(): boolean {
+    return this.#appKey !== undefined;
+  }
+
+  /** Connects the app (app mode), so whether people without GitHub can chat is known before anyone asks. */
+  start(): void {
+    if (this.#appKey) void this.#appConnection().catch(() => undefined);
   }
 
   routeFor(kind: Person["kind"]): Route {
     if (kind === "github") return { route: "copilot", environment: this.#config.environment, model: this.#config.model };
-    return { route: "foundry", environment: `${this.#config.environment}-foundry`, model: this.#config.model };
+    const model = this.#config.foundryModel ?? this.#appState.model;
+    return { route: "foundry", environment: this.#config.foundryEnvironment, ...(model ? { model } : {}) };
   }
 
   appUsers(): { available: boolean; reason?: string } {
-    return {
-      available: false,
-      reason: "This Managed Copilot deployment can't run conversations for people without GitHub yet. Sign in with GitHub to chat.",
-    };
+    if (!this.#appKey) {
+      return {
+        available: false,
+        reason: "This Front Desk has no app key, so it can't vouch for people without GitHub. Sign in with GitHub to chat.",
+      };
+    }
+    return { available: this.#appState.available, ...(this.#appState.reason ? { reason: this.#appState.reason } : {}) };
   }
 
   async open(person: Person): Promise<PersonalConnection> {
-    if (person.kind === "app") {
-      const { reason } = this.appUsers();
-      throw new AppError("app_users_unavailable", reason ?? "People without GitHub can't chat on this deployment yet.", 503);
-    }
+    const credential = credentialOf(person);
     const current = this.#connections.get(person.userId);
     if (current) {
       const connection = await current.catch(() => undefined);
       // A new GitHub token (signed in again, or refreshed) gets a new connection; the old one is closed.
-      if (connection instanceof GitHubConnection && connection.token === person.token) return connection;
+      if (connection && connection.credential === credential) return connection;
       if (this.#connections.get(person.userId) === current) this.#connections.delete(person.userId);
       await connection?.close();
     }
-    const route = this.routeFor("github");
-    const opening = (async () => {
-      try {
-        const managed = await deadline(this.#connectAsGitHubUser(person.token), 45_000, "Managed Copilot");
-        log.info("Connected to Managed Copilot as a GitHub user", { user: person.userId, login: managed.account.login, url: managed.url });
-        return new GitHubConnection(person.userId, person.token, route, managed);
-      } catch (error) {
-        throw describePlatformError(error, person, route);
-      }
-    })();
+    const route = this.routeFor(person.kind);
+    const opening = this.#appKey ? this.#openThroughApp(person, credential) : this.#openAsGitHubUser(person, credential, route);
     this.#connections.set(person.userId, opening);
     opening.catch(() => {
       if (this.#connections.get(person.userId) === opening) this.#connections.delete(person.userId);
@@ -222,7 +254,91 @@ export class ManagedPlatform implements Platform {
   }
 
   async closeAll(): Promise<void> {
+    this.#stopped = true;
+    if (this.#retry) clearTimeout(this.#retry);
     const all = [...this.#connections.keys()];
     await Promise.all(all.map((userId) => this.release(userId)));
+    const app = this.#app;
+    this.#app = undefined;
+    await app?.then((managed) => managed.close()).catch(() => undefined);
+  }
+
+  /** Without an app key: the GitHub user's own connection, with their token. */
+  async #openAsGitHubUser(person: Person, credential: string, route: Route): Promise<PersonConnection> {
+    if (person.kind !== "github") throw new AppError("app_users_unavailable", this.appUsers().reason ?? "People without GitHub can't chat here yet.", 503);
+    try {
+      const managed = await deadline(this.#connect({ gitHubToken: person.token }), 45_000, "Managed Copilot");
+      log.info("Connected to Managed Copilot as a GitHub user", { user: person.userId, login: managed.account.login, url: managed.url });
+      return new PersonConnection(person.userId, credential, route, managed);
+    } catch (error) {
+      throw describePlatformError(error, person, route);
+    }
+  }
+
+  /** With an app key: a view of the app connection acting for this person. */
+  async #openThroughApp(person: Person, credential: string): Promise<PersonConnection> {
+    const app = await this.#appConnection();
+    if (person.kind === "app" && !this.#appState.available) {
+      throw new AppError("app_users_unavailable", this.#appState.reason ?? "People without GitHub can't chat here yet.", 503);
+    }
+    const route = this.routeFor(person.kind);
+    try {
+      const view = await deadline(
+        person.kind === "github" ? app.as({ gitHubToken: person.token }) : app.as({ appUser: { id: person.userId, name: person.name } }),
+        45_000,
+        "Managed Copilot",
+      );
+      return new PersonConnection(person.userId, credential, route, view);
+    } catch (error) {
+      throw describePlatformError(error, person, route);
+    }
+  }
+
+  /** Front Desk's own connection (app mode), opened once and again after a failure. */
+  #appConnection(): Promise<ManagedCopilot> {
+    if (!this.#app) {
+      const connecting = deadline(this.#connect({ appKey: this.#appKey! }), 45_000, "Managed Copilot").then((managed) => {
+        this.#appState = this.#describe(managed);
+        log.info("Connected to Managed Copilot as Front Desk", { url: managed.url, appUsers: this.#appState.available ? "on" : `off: ${this.#appState.reason}` });
+        return managed;
+      });
+      this.#app = connecting;
+      connecting.catch((error: unknown) => {
+        if (this.#app === connecting) this.#app = undefined;
+        const managed = managedErrorOf(error);
+        const reason =
+          managed?.code === "authentication_required" || managed?.code === "forbidden"
+            ? "Managed Copilot didn't accept Front Desk's app key. Whoever runs Front Desk needs to check its MANAGED_COPILOT_APP_KEY."
+            : describePlatformError(error).message;
+        this.#appState = { available: false, reason };
+        log.warn("Front Desk couldn't connect to Managed Copilot; trying again soon", { error: reason });
+        if (!this.#stopped) {
+          if (this.#retry) clearTimeout(this.#retry);
+          this.#retry = setTimeout(() => this.start(), 15_000);
+          this.#retry.unref();
+        }
+      });
+    }
+    return this.#app.catch((error: unknown) => {
+      const managed = managedErrorOf(error);
+      if (managed?.code === "authentication_required" || managed?.code === "forbidden") {
+        throw new AppError("app_key_rejected", "Managed Copilot didn't accept Front Desk's app key. Whoever runs Front Desk needs to check it.", 503);
+      }
+      throw describePlatformError(error);
+    });
+  }
+
+  /** Whether this deployment gives Front Desk a Foundry environment for people without GitHub. */
+  #describe(managed: ManagedCopilot): { available: boolean; reason?: string; model?: string } {
+    const name = this.#config.foundryEnvironment;
+    const environment = managed.info.environments.find((candidate) => candidate.name === name);
+    if (!environment) {
+      return { available: false, reason: `This Managed Copilot deployment has no "${name}" environment, so people without GitHub can't chat here yet. Sign in with GitHub to chat.` };
+    }
+    if (!environment.inference?.foundry) {
+      return { available: false, reason: `"${name}" doesn't send model calls to Azure AI Foundry, so it can't be used by people without GitHub. Sign in with GitHub to chat.` };
+    }
+    const model = environment.models?.[0];
+    return { available: true, ...(model ? { model } : {}) };
   }
 }

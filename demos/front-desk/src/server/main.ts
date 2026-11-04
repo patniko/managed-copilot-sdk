@@ -17,7 +17,10 @@ const config = loadConfig();
 const store = new Store(join(config.dataDir, "front-desk.db"));
 const sealer = Sealer.fromSecret(config.sealingKey ?? loadOrCreateDevSealingKey(config.dataDir));
 const limiter = new RateLimiter();
-const platform = new ManagedPlatform({ config });
+// With an app key (from the AppHost's `apps`), Front Desk connects as itself and acts for each person; otherwise it
+// connects as each GitHub user. It never reads a GitHub token from this server's environment.
+const platform = new ManagedPlatform({ config, ...(process.env.MANAGED_COPILOT_APP_KEY ? { appKey: process.env.MANAGED_COPILOT_APP_KEY } : {}) });
+platform.start();
 const github = new GitHubAuth({ config, store, sealer });
 const email = new EmailAccounts(store, limiter, config.inviteCode);
 const people = new People(store, github, platform, config);

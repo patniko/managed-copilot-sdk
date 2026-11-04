@@ -23,6 +23,10 @@ export interface FrontDeskConfig {
   /** The environment conversations of people who sign in with GitHub run in. */
   readonly environment: string;
   readonly model: string;
+  /** The environment the conversations of people without GitHub run in: one that sends model calls to Foundry. */
+  readonly foundryEnvironment: string;
+  /** Their model (a Foundry deployment); absent: the environment's default. */
+  readonly foundryModel: string | undefined;
   /** Seals the GitHub tokens Front Desk keeps (`FRONT_DESK_SEALING_KEY`; a generated file locally when unset). */
   readonly sealingKey: string | undefined;
   /** "Continue with GitHub": a GitHub OAuth app (or GitHub App) client. */
@@ -87,6 +91,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
   const clientId = env.FRONT_DESK_GITHUB_CLIENT_ID?.trim();
   const clientSecret = env.FRONT_DESK_GITHUB_CLIENT_SECRET?.trim();
   const deployed = env.FRONT_DESK_DEPLOYED === "1";
+  const environment = env.FRONT_DESK_ENVIRONMENT?.trim() || "front-desk";
   return {
     port,
     host: env.HOST ?? "127.0.0.1",
@@ -96,8 +101,10 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     dev: here.endsWith(".ts") && env.FRONT_DESK_DEV !== "0",
     packageRoot,
     webRoot: join(packageRoot, "dist", "web"),
-    environment: env.FRONT_DESK_ENVIRONMENT?.trim() || "front-desk",
+    environment,
     model: env.FRONT_DESK_MODEL?.trim() || "claude-sonnet-5",
+    foundryEnvironment: env.FRONT_DESK_FOUNDRY_ENVIRONMENT?.trim() || `${environment}-foundry`,
+    foundryModel: env.FRONT_DESK_FOUNDRY_MODEL?.trim() || undefined,
     sealingKey: env.FRONT_DESK_SEALING_KEY?.trim() || undefined,
     github: clientId && clientSecret ? { clientId, clientSecret } : undefined,
     githubUrl: githubEndpoint(env.FRONT_DESK_GITHUB_URL, "https://github.com", "FRONT_DESK_GITHUB_URL"),

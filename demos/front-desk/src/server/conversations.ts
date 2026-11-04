@@ -120,12 +120,19 @@ export class Conversations {
       let session: CopilotSession;
       try {
         // Our own ID, so events that arrive while the session is being created already have a conversation.
-        session = await client.createSession({ ...this.#sessionConfig(user, onEvent), sessionId: randomUUID(), model: route.model });
+        session = await client.createSession({ ...this.#sessionConfig(user, onEvent), sessionId: randomUUID(), ...(route.model ? { model: route.model } : {}) });
       } catch (error) {
         throw this.#fail(user, error, connection);
       }
       const id = session.sessionId;
-      const record = this.#deps.store.addConversation({ id, userId: user.id, title: titleFrom(prompt), environment: route.environment, route: route.route, model: route.model });
+      const record = this.#deps.store.addConversation({
+        id,
+        userId: user.id,
+        title: titleFrom(prompt),
+        environment: route.environment,
+        route: route.route,
+        ...(route.model ? { model: route.model } : {}),
+      });
       live = { id, userId: user.id, session, transcript, connection, generation };
       this.#live.set(id, live);
       for (const event of early) this.#apply(live, event);

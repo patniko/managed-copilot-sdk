@@ -14,6 +14,7 @@
     "start": "node dist/server/main.js",
     "test": "vitest run",
     "e2e": "tsx scripts/e2e.ts",
+    "setup-github": "tsx scripts/setup-github.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
