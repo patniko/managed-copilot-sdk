@@ -75,7 +75,7 @@ a link you can share. The deployed copy shows that deployment only:
   which each operator runs with their own sign-in. The gallery holds no GitHub token (`publishApp`'s
   `githubToken: false`).
 - **Same audience as the demos.** It opens only from `Parameters:app-allowed-ips` (`npx managed-copilot access ips`).
-  It checks the apps from inside the deployment, which the allowlist always admits, so its dots say whether an app is
+  It checks the apps from inside the deployment, by their names in its environment (which the allowlist always admits), so its dots say whether an app is
   up, not whether a visitor's network may open it; the page says so, and says which apps are public.
 
 The image is [`Dockerfile`](Dockerfile) (`GALLERY_HOSTED=1`; `GALLERY_ALLOWED_HOSTS` names the host names it answers).

@@ -99,7 +99,9 @@ export function createGallery(options: GalleryOptions): (req: IncomingMessage, r
     else if (!cloud.url) cloudState = { links: {}, note: cloud.note };
     else {
       const urls = cloudUrls(cloud.url, { console: !hosted });
-      const checked = await checkTarget(urls);
+      // Hosted, the gallery runs in the deployment's own environment: it checks each app by its name there. An app's
+      // public address would loop out of the environment and back in from an outbound address its allowlist refuses.
+      const checked = await checkTarget(urls, hosted ? (app) => `http://${app.app}` : undefined);
       cloudState = { gatewayUrl: urls.gatewayUrl, gateway: checked.gateway, links: checked.links, note: cloud.note };
     }
     const localChecked = await localCheck;
