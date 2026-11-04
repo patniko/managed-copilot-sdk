@@ -101,7 +101,7 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
 
 ### Web UI look and feel
 
-Every web UI (the console, the software factory, the assistant, and Dispatch) looks like part of github.com. The shared
+Every web UI (the console, the gallery, and every demo) looks like part of github.com. The shared
 `@managed-copilot/github-theme` package (`libraries/github-theme`) is the single source: GitHub's Primer design tokens
 from `@primer/primitives` (light and dark themes selected by `data-color-mode` on `<html>`, `auto` following the OS),
 Mona Sans bundled from `@fontsource-variable/mona-sans` (no runtime font fetches, so the console's
@@ -110,6 +110,17 @@ classes under github.com's own names (`btn`, `Label`, `State`, `Box`, `Underline
 ...). Icons are Octicons (`@primer/octicons-react`). Each app's `styles.css` starts with
 `@import "tailwindcss"; @import "@managed-copilot/github-theme";`. The package is CSS only (no build step); the
 gateway and demo images copy it into their build stage and install it with the app.
+
+The demos share one header and one visual vocabulary, so they read as one product family:
+
+- **Header.** The GitHub mark and the breadcrumb `Managed Copilot / <App>` (`AppHeader`), the app's own icon buttons,
+  then one platform pill (`btn btn-sm`: a status dot, `Local` or `Azure`, a caret) and the account avatar. The pill's
+  popover lists the connection status, the deployment and its URL, the account, then the app's environments or where
+  it runs. Dispatch's `TopBar.tsx` is the reference.
+- **Where it runs.** `CopilotIcon` marks an agent's brain, `CpuIcon` the shared runtime, `ContainerIcon` a sandbox,
+  `PlugIcon` the app's own tools, `TerminalIcon` Copilot CLI, and `ShieldIcon` an approval.
+- **Copy.** A screen leads with one primary action; technical facts (sandbox IDs, environment and model names, sizes,
+  network rules) sit in tooltips, popovers, or a detail pane rather than on resting cards.
 
 ### Data plane
 
