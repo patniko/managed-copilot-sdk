@@ -1,9 +1,10 @@
 // Data Desk's own tools: they run in this server, so they answer the same way on the shared runtime and after the
-// session moves into its sandbox. Each analysis gets its own set, bound to its dataset.
+// session moves into its sandbox. Each analysis gets its own set, bound to its dataset, whose table they read per call.
 import { defineTool, type Tool } from "@github/copilot-sdk";
 import { z } from "zod";
 import type { Dataset } from "./datasets.js";
-import { TableError, type AggregateSpec, type QuerySpec, type TableResult } from "./table.js";
+import { DeskError } from "./errors.js";
+import { TableError, type AggregateSpec, type QuerySpec, type Table, type TableResult } from "./table.js";
 
 /** Where a sandbox finds the dataset once the session moved. */
 export const sandboxPath = (dataset: Dataset): string => `/workspace/data/${dataset.summary.fileName}`;
@@ -56,51 +57,47 @@ function answer(result: TableResult, heading: string): Record<string, unknown> {
   };
 }
 
-function failure(error: unknown): Record<string, unknown> {
-  if (error instanceof TableError) return { error: error.message };
-  throw error;
+/**
+ * Runs a tool on the dataset's table. A mistake the agent can fix, or a dataset that's no longer available, comes back
+ * as `error` for the agent to act on.
+ */
+function withTable(dataset: Dataset, run: (table: Table) => Record<string, unknown>): Record<string, unknown> {
+  try {
+    return run(dataset.table());
+  } catch (error) {
+    if (error instanceof TableError || error instanceof DeskError) return { error: error.message };
+    throw error;
+  }
 }
 
 export function dataTools(host: ToolHost): Tool<any>[] {
   const { dataset } = host;
-  const table = dataset.table;
 
   return [
     defineTool("describe_dataset", {
       description: "Describes the dataset open in Data Desk: its row count, each column's type and summary (range, mean, most common values), and the first rows.",
       parameters: z.object({}),
       skipPermission: true,
-      handler: () => ({
-        name: dataset.summary.name,
-        rows: table.rows.length,
-        columns: table.columns,
-        firstRows: table.rows.slice(0, 5),
-        inSandbox: `Once you move into a sandbox, the file is at ${sandboxPath(dataset)}.`,
-      }),
+      handler: () =>
+        withTable(dataset, (table) => ({
+          name: dataset.summary.name,
+          rows: table.rows.length,
+          columns: table.columns,
+          firstRows: table.rows.slice(0, 5),
+          inSandbox: `Once you move into a sandbox, the file is at ${sandboxPath(dataset)}.`,
+        })),
     }),
     defineTool("query_rows", {
       description: "Finds rows in the dataset: filter by column values, pick columns, sort, and limit. Data Desk shows the rows in its grid.",
       parameters: queryParameters,
       skipPermission: true,
-      handler: (args) => {
-        try {
-          return answer(table.query(args as QuerySpec), args.title);
-        } catch (error) {
-          return failure(error);
-        }
-      },
+      handler: (args) => withTable(dataset, (table) => answer(table.query(args as QuerySpec), args.title)),
     }),
     defineTool("aggregate", {
       description: "Groups the dataset's rows and computes count, sum, avg, min, or max per group, optionally on filtered rows. Data Desk shows the table in its grid.",
       parameters: aggregateParameters,
       skipPermission: true,
-      handler: (args) => {
-        try {
-          return answer(table.aggregate(args as AggregateSpec), args.title);
-        } catch (error) {
-          return failure(error);
-        }
-      },
+      handler: (args) => withTable(dataset, (table) => answer(table.aggregate(args as AggregateSpec), args.title)),
     }),
   ];
 }
@@ -109,9 +106,10 @@ const CHART_COLORS = ["#0969da", "#1a7f37", "#bf3989", "#9a6700", "#8250df", "#c
 
 /** Data Desk's instructions, added to the platform's: the same before and after the move. */
 export function systemMessage(dataset: Dataset): string {
-  const columns = dataset.table.columns.map((column) => `${column.name} (${column.type})`).join(", ");
+  const { summary } = dataset;
+  const columns = summary.columns.map((column) => `${column.name} (${column.type})`).join(", ");
   return [
-    `You are Data Desk, an analyst working on one dataset: "${dataset.summary.name}", ${dataset.table.rows.length} rows with columns ${columns}.`,
+    `You are Data Desk, an analyst working on one dataset: "${summary.name}", ${summary.rows} rows with columns ${columns}.`,
     "- Answer with Data Desk's tools when they can: describe_dataset, query_rows (filter and sort rows), and aggregate (group and total). They run in the app, wherever you are, and Data Desk shows their tables in its grid.",
     `- Charts, statistics the tools don't offer (correlation, regression, forecasts, percentiles), and anything else that needs code need Python: call request_sandbox first. In the sandbox the dataset is at ${sandboxPath(dataset)}.`,
     "- In the sandbox, use Python 3's standard library only: there's no network and no pip.",

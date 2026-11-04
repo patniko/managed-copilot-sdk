@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DECLINED, NOT_AVAILABLE } from "../src/server/analysis.js";
-import { Datasets } from "../src/server/datasets.js";
+import { Datasets, type UploadLimits } from "../src/server/datasets.js";
 import { EventHub } from "../src/server/hub.js";
 import { AnalysisManager } from "../src/server/manager.js";
 import { Store } from "../src/server/store.js";
@@ -30,9 +30,9 @@ afterEach(() => {
   hubs = [];
 });
 
-function desk(platform = new FakePlatform(), store = new Store(dataDir)) {
+function desk(platform = new FakePlatform(), store = new Store(dataDir), limits: Partial<UploadLimits> = {}) {
   const config = testConfig(dataDir);
-  const datasets = new Datasets(config.samplesDir, dataDir, config.maxUploadBytes);
+  const datasets = new Datasets(config.samplesDir, dataDir, config.maxUploadBytes, limits);
   datasets.load();
   const hub = new EventHub();
   hubs.push(hub);
@@ -211,5 +211,32 @@ describe("analyses across restarts", () => {
     expect(platform.deleted).toEqual([id]);
     expect(store.get(id)).toBeUndefined();
     await expect(manager.view(id)).rejects.toThrow(/no such analysis/);
+  });
+});
+
+describe("an analysis whose upload was dropped for newer ones", () => {
+  it("says so to the agent and the person, and can still be deleted", async () => {
+    const { manager, platform } = desk(undefined, undefined, { maxUploads: 1 });
+    const first = manager.upload("first.csv", Buffer.from("store,revenue\nDowntown,10\n"));
+    const { id } = await manager.create(first.id);
+    const session = platform.sessions.get(id)!;
+    manager.upload("second.csv", Buffer.from("store,revenue\nHarbor,12\n"));
+
+    const query = session.config.tools!.find((tool) => tool.name === "query_rows")!;
+    const result = await query.handler?.({ title: "All rows" }, { sessionId: id, toolCallId: "call-1", toolName: "query_rows", arguments: { title: "All rows" } });
+    expect(result).toEqual({ error: "That dataset isn't available anymore. Pick another one." });
+    expect((await manager.view(id)).dataset).toBeUndefined();
+    expect(() => manager.rows(first.id, 0, 10)).toThrow(/isn't available/);
+    platform.publish({ type: "session.promoted", sessionId: id, sandboxId: "sbx_1", data: {} });
+    await settle();
+    expect((await manager.view(id)).problem).toBe("This analysis's dataset isn't available anymore.");
+    expect(platform.written).toEqual([]);
+
+    platform.connect();
+    await settle();
+    expect((await manager.view(id)).problem).toBe("This analysis's dataset isn't available anymore.");
+    await expect(manager.send(id, "Anything else?")).rejects.toThrow(/isn't available anymore/);
+    await manager.delete(id);
+    expect(platform.deleted).toEqual([id]);
   });
 });

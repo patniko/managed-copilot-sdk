@@ -19,6 +19,8 @@ export const DECLINED = "The person chose not to move into a sandbox for this. D
 /** Anything but commands and files in the sandbox. */
 export const NOT_AVAILABLE = "Data Desk's sandbox has no network or other services. Work with Python's standard library on the files in /workspace.";
 const COPY_FAILED = "Couldn't copy the dataset into the sandbox.";
+/** An upload dropped for newer ones, or a file that can't be read. */
+const DATASET_GONE = "This analysis's dataset isn't available anymore.";
 const CHART = /\.(svg|png|jpe?g|gif|webp)$/i;
 const OUTPUT_CACHE = 24;
 /** After a turn, published outputs are listed again in case their event was missed. */
@@ -160,7 +162,7 @@ export class Analysis {
     const dataset = this.dataset;
     if (!dataset) {
       this.#state = "failed";
-      this.#problem = "This analysis's dataset isn't available anymore.";
+      this.#problem = DATASET_GONE;
       this.#changed();
       return;
     }
@@ -347,15 +349,20 @@ export class Analysis {
 
   async #upload(): Promise<boolean> {
     const dataset = this.dataset;
-    if (!dataset) return false;
+    if (!dataset) {
+      this.#problem = DATASET_GONE;
+      this.#changed();
+      return false;
+    }
     const path = `data/${dataset.summary.fileName}`;
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.#host.platform.writeFile(this.#id, path, dataset.bytes);
+        const bytes = dataset.bytes();
+        await this.#host.platform.writeFile(this.#id, path, bytes);
         this.#host.store.update(this.#id, (stored) => {
           stored.uploadedAt = new Date().toISOString();
         });
-        log.info("Copied the dataset into the sandbox", { sessionId: this.#id, path, bytes: dataset.bytes.length });
+        log.info("Copied the dataset into the sandbox", { sessionId: this.#id, path, bytes: bytes.length });
         if (this.#problem === COPY_FAILED) {
           this.#problem = undefined;
           this.#changed();
