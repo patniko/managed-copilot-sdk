@@ -8,13 +8,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import type { ManagedCopilotConfig } from "@managed-copilot/protocol";
-import type { ManagedCopilotResource } from "../add.js";
+import { appKeyLookup, type ManagedCopilotResource } from "../add.js";
 import type { AspireBuilder } from "../aspire.js";
-import type { ManagedCopilotOptions, SecretBinding } from "../options.js";
+import { appKeyParameterName, type AppKeyBinding, type ManagedCopilotOptions, type SecretBinding } from "../options.js";
 import { AzurePublishError, applyAccessRules, applyOperators, listSetting, prepareAzureConfig, rewriteWebhooks } from "./config.js";
 import { expr, joinExpression } from "./expressions.js";
 import { writeGatewayBuildFiles } from "./gateway-image.js";
 import { EGRESS_BICEP } from "./egress.js";
+import { FOUNDRY_ACCESS_BICEP } from "./foundry.js";
 import { SANDBOX_GROUP_BICEP } from "./sandbox-group.js";
 import { imageMap, planEgressImage, planSandboxImages, pushEgressImage, pushSandboxImages, type EgressImagePlan, type SandboxImagePlan } from "./sandbox-images.js";
 import type { PublishAzureResource, PublishBuilder, PublishContainer, PublishContainerResource, PublishEnvironmentResource, PublishValue } from "./types.js";
@@ -32,6 +33,8 @@ const AMD64 = "LinuxAmd64";
 export interface PublishInput {
   readonly config: ManagedCopilotConfig;
   readonly secrets: readonly SecretBinding[];
+  /** Declared apps and the gateway variables their generated keys go in. */
+  readonly apps?: readonly AppKeyBinding[];
   readonly options: ManagedCopilotOptions;
   readonly appHostDirectory: string;
 }
@@ -45,6 +48,8 @@ export interface PublishedManagedCopilot {
   readonly config: ManagedCopilotConfig;
   readonly port: number;
   readonly dataDirectory: string;
+  /** An app's key (spec section 2); `publishApp(..., { app })` injects it as `MANAGED_COPILOT_APP_KEY`. */
+  appKey(app: string): object;
 }
 
 interface Deployment {
@@ -63,6 +68,8 @@ interface Deployment {
   readonly restrictedApps: { readonly name: string; readonly actsAsAccount: boolean }[];
   /** Apps open to any address (`public: true`). */
   readonly publicApps: string[];
+  /** Declared apps' keys, by app name. */
+  readonly appKeys: ReadonlyMap<string, object>;
 }
 
 const deployments = new WeakMap<object, Deployment>();
@@ -190,6 +197,11 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
   const environment = await builder.addAzureContainerAppEnvironment(`${name}-env`).withManagedCopilotNetworkAndStorage(addressSpace, DATA_SHARE_GIB);
   const files = writeGatewayBuildFiles({ appHostDirectory: input.appHostDirectory, name, customizations: prepared.customizations });
   const platformKey = await builder.addParameterWithGeneratedValue(`${name}-platform-key`, { minLength: 48, special: false }, { secret: true, persist: true });
+  // The same parameters as `aspire run`, so an app keeps its key between the two (an explicit Parameters:<name> wins).
+  const appKeys = new Map<string, object>();
+  for (const { app } of input.apps ?? []) {
+    appKeys.set(app, await builder.addParameterWithGeneratedValue(appKeyParameterName(name, app), { minLength: 48, special: false }, { secret: true, persist: true }));
+  }
 
   const deployment: Deployment = {
     name,
@@ -201,6 +213,7 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     stamp: String(Date.now()),
     restrictedApps: [],
     publicApps: [],
+    appKeys,
   };
   let gateway = amd64(builder.addDockerfile(name, files.context, { dockerfilePath: files.dockerfile }).withBuildArg("NPM_REGISTRY", npmRegistry))
     .withHttpEndpoint({ targetPort: GATEWAY_TARGET_PORT, env: "PORT" })
@@ -222,6 +235,7 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     gateway = gateway.withEnvironment(variable, key);
   }
   for (const secret of input.secrets) gateway = gateway.withEnvironment(secret.env, secret.value);
+  for (const { app, env } of input.apps ?? []) gateway = gateway.withEnvironment(env, appKeys.get(app)!);
   const plan = Object.keys(prepared.sandboxImages).length > 0 ? planSandboxImages({
     name,
     sandboxContext: join(gatewayDirectory(input.options, input.appHostDirectory), "..", "sandbox"),
@@ -232,16 +246,39 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     pipIndexUrl: pipIndexUrl(),
     sdkVersion: installedVersion(gatewayDirectory(input.options, input.appHostDirectory), "@github/copilot-sdk"),
   }) : undefined;
+  const foundryAccounts = Object.entries(prepared.config.foundry ?? {});
+  // The gateway's own Azure identity: it manages the sandboxes and calls the Foundry accounts.
+  const identity = plan || foundryAccounts.length > 0 ? await builder.addAzureUserAssignedIdentity(`${name}-gateway-identity`) : undefined;
+  if (identity) {
+    gateway = gateway
+      .withAzureUserAssignedIdentity(identity)
+      .withEnvironment("MANAGED_COPILOT_AZURE_CREDENTIAL", "managed-identity")
+      .withEnvironment("MANAGED_COPILOT_AZURE_CLIENT_ID", await identity.getOutput("clientId"));
+  }
   if (plan) {
     const egress = planEgressImage(name, join(gatewayDirectory(input.options, input.appHostDirectory), "..", "egress"));
-    const sandboxes = await sandboxGroup(builder, name, environment, plan, egress, addressSpace);
-    gateway = gateway.withAzureUserAssignedIdentity(sandboxes.identity);
+    const sandboxes = await sandboxGroup(builder, name, environment, plan, egress, addressSpace, identity!);
     for (const [variable, value] of sandboxes.env) gateway = gateway.withEnvironment(variable, value);
     // As with `aspire run`: import the sandbox images into disk images at start instead of on the first session.
     if (input.options.prepareSandboxes ?? true) gateway = gateway.withEnvironment("MANAGED_COPILOT_SANDBOX_PREPARE", "1");
   } else {
     // No sandboxes: nothing needs the sandbox egress proxy (shared sessions fetch through the gateway itself).
     gateway = gateway.withEnvironment("MANAGED_COPILOT_EGRESS", "off");
+  }
+  if (identity && foundryAccounts.length > 0) {
+    const configured = await setting(builder, "Azure:SubscriptionId");
+    let deploymentSubscription: PublishValue | undefined = configured;
+    for (const [account, declared] of foundryAccounts) {
+      const access = await builder
+        .addBicepTemplateString(`${name}-foundry-${resourceSuffix(account)}`, FOUNDRY_ACCESS_BICEP)
+        .withParameter("accountName", { value: account })
+        .withParameter("accountResourceGroup", { value: declared.resourceGroup })
+        .withParameter("accountSubscription", { value: declared.subscription ?? "" })
+        .withParameter("gatewayPrincipalId", { value: await identity.getOutput("principalId") });
+      deploymentSubscription ??= await access.getOutput("deploymentSubscriptionId");
+    }
+    // Accounts that name no subscription are in the deployment's.
+    if (deploymentSubscription) gateway = gateway.withEnvironment("MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION", deploymentSubscription);
   }
   // Computed last, after every app is declared, so loopback webhooks can point at the deployed apps.
   gateway = gateway.withEnvironmentCallback(async (context) => {
@@ -260,14 +297,27 @@ export async function publishManagedCopilot(builder: PublishBuilder, name: strin
     },
     { dependsOn: ["provision-azure-bicep-resources"], requiredBy: ["deploy"] },
   );
-  const published: PublishedManagedCopilot = { name, gateway: resource, url, config: prepared.config, port: GATEWAY_TARGET_PORT, dataDirectory: "/data" };
+  const published: PublishedManagedCopilot = {
+    name,
+    gateway: resource,
+    url,
+    config: prepared.config,
+    port: GATEWAY_TARGET_PORT,
+    dataDirectory: "/data",
+    appKey: appKeyLookup(name, appKeys),
+  };
   deployments.set(published, deployment);
   return published;
 }
 
+/** A Bicep resource name segment for a Foundry account name (letters, digits, and hyphens). */
+function resourceSuffix(account: string): string {
+  return account.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "account";
+}
+
 /**
- * Isolated placement: an Azure Container Apps Sandboxes group on the platform network, a gateway identity that can
- * manage only that group, and a deploy step that builds and pushes the sandbox images before the gateway starts.
+ * Isolated placement: an Azure Container Apps Sandboxes group on the platform network, the gateway identity's access
+ * to manage only that group, and a deploy step that builds and pushes the sandbox images before the gateway starts.
  */
 async function sandboxGroup(
   builder: PublishBuilder,
@@ -276,8 +326,8 @@ async function sandboxGroup(
   plan: SandboxImagePlan,
   egressImage: EgressImagePlan,
   addressSpace: string,
-): Promise<{ identity: PublishAzureResource; env: [string, PublishValue][] }> {
-  const identity = await builder.addAzureUserAssignedIdentity(`${name}-gateway-identity`);
+  identity: PublishAzureResource,
+): Promise<{ env: [string, PublishValue][] }> {
   const group = await builder
     .addBicepTemplateString(`${name}-sandboxes`, SANDBOX_GROUP_BICEP)
     .withParameter("subnetId", { value: await environment.getOutput("MANAGED_COPILOT_SANDBOX_SUBNET_ID") })
@@ -327,10 +377,7 @@ async function sandboxGroup(
   );
 
   return {
-    identity,
     env: [
-      ["MANAGED_COPILOT_AZURE_CREDENTIAL", "managed-identity"],
-      ["MANAGED_COPILOT_AZURE_CLIENT_ID", await identity.getOutput("clientId")],
       ["MANAGED_COPILOT_AZURE_SUBSCRIPTION_ID", await group.getOutput("subscriptionId")],
       ["MANAGED_COPILOT_AZURE_RESOURCE_GROUP", await group.getOutput("resourceGroupName")],
       ["MANAGED_COPILOT_AZURE_SANDBOX_GROUP", await group.getOutput("name")],
@@ -377,6 +424,11 @@ export interface PublishAppOptions {
    * (by default the deploying machine's) can open the app.
    */
   readonly public?: boolean;
+  /**
+   * An app declared in `addManagedCopilot`'s `apps`: the app gets that app's key as `MANAGED_COPILOT_APP_KEY`, so it
+   * acts for its own users (spec section 2).
+   */
+  readonly app?: string;
 }
 
 /**
@@ -446,6 +498,7 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
     .withEnvironment("MANAGED_COPILOT_LEASE_STAMP", deployment.stamp)
     .withEnvironment("MANAGED_COPILOT_URL", gatewayUrl);
   if (actsAsAccount) container = container.withEnvironment("MANAGED_COPILOT_GITHUB_TOKEN", deployment.appToken!);
+  if (app.app !== undefined) container = container.withEnvironment("MANAGED_COPILOT_APP_KEY", appKeyLookup(deployment.name, deployment.appKeys)(app.app));
   for (const variable of app.gatewayUrlEnv ?? []) container = container.withEnvironment(variable, gatewayUrl);
   // Descriptors written for `aspire run` carry local values (for example a localhost public URL) for variables set here.
   const managed = new Set([
@@ -454,6 +507,7 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
     "MANAGED_COPILOT_LEASE_STAMP",
     "MANAGED_COPILOT_URL",
     "MANAGED_COPILOT_GITHUB_TOKEN",
+    "MANAGED_COPILOT_APP_KEY",
     ...(app.gatewayUrlEnv ?? []),
     app.publicUrlEnv,
     app.allowedHostsEnv,

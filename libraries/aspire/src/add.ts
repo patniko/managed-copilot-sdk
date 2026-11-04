@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { sandboxedType, type ManagedCopilotConfig } from "@managed-copilot/protocol";
 import type { AspireBuilder, AspireNodeAppBuilder, EndpointOf, GatewayResourceOf } from "./aspire.js";
-import { normalizeOptions, type ManagedCopilotOptions } from "./options.js";
+import { appKeyParameterName, normalizeOptions, type ManagedCopilotOptions } from "./options.js";
 
 /** Default gateway port on the developer's machine. */
 export const DEFAULT_GATEWAY_PORT = 7400;
@@ -23,6 +23,29 @@ export interface ManagedCopilotResource<TGateway = unknown, TEndpoint = unknown>
   readonly config: ManagedCopilotConfig;
   readonly port: number;
   readonly dataDirectory: string;
+  /**
+   * The key of an app declared in `apps` (spec section 2): a generated secret parameter, kept in the AppHost's user
+   * secrets. Inject it into that app as `MANAGED_COPILOT_APP_KEY`; `ManagedCopilot.connect()` reads it from there.
+   */
+  appKey(app: string): object;
+}
+
+/** `appKey(app)` for the apps an AppHost declared, with a clear error for anything else. */
+export function appKeyLookup(name: string, keys: ReadonlyMap<string, object>): (app: string) => object {
+  return (app) => {
+    const key = keys.get(app);
+    if (key) return key;
+    const declared = [...keys.keys()];
+    throw new Error(`Managed Copilot "${name}" declares no app "${app}".${declared.length > 0 ? ` Its apps: ${declared.join(", ")}.` : " Declare it in apps: { ... } first."}`);
+  };
+}
+
+/** The deployment's Azure subscription (`Azure:SubscriptionId`), the default for Foundry accounts that name none. */
+export async function configuredSubscription(builder: { getConfiguration?(): PromiseLike<{ exists(key: string): Promise<boolean>; getConfigValue(key: string): Promise<string> }> }): Promise<string | undefined> {
+  if (!builder.getConfiguration) return undefined;
+  const configuration = await builder.getConfiguration();
+  if (await configuration.exists("Azure:SubscriptionId")) return (await configuration.getConfigValue("Azure:SubscriptionId")).trim() || undefined;
+  return process.env["Azure__SubscriptionId"]?.trim() || undefined;
 }
 
 function locateGateway(): string {
@@ -68,13 +91,13 @@ export async function addManagedCopilot<B extends AspireBuilder>(
   if (await builder.executionContext().isPublishMode()) {
     // `aspire deploy`: Azure Container Apps (libraries/aspire/src/publish, owned by the azure workstream).
     const appHostDirectory = await builder.appHostDirectory();
-    const { config, secrets } = normalizeOptions(name, options, { baseDirectory: appHostDirectory });
+    const { config, secrets, apps } = normalizeOptions(name, options, { baseDirectory: appHostDirectory });
     const { publishManagedCopilot } = await import("./publish/index.js");
-    return (await publishManagedCopilot(builder as never, name, { config, secrets, options, appHostDirectory })) as never;
+    return (await publishManagedCopilot(builder as never, name, { config, secrets, apps, options, appHostDirectory })) as never;
   }
 
   const appHostDirectory = await builder.appHostDirectory();
-  const { config, secrets } = normalizeOptions(name, options, { baseDirectory: appHostDirectory });
+  const { config, secrets, apps } = normalizeOptions(name, options, { baseDirectory: appHostDirectory });
   const gatewayDirectory = options.gatewayDirectory ? resolve(appHostDirectory, options.gatewayDirectory) : locateGateway();
   if (!existsSync(join(gatewayDirectory, "dist", "main.js"))) {
     throw new Error(`The Managed Copilot gateway is not built (${join(gatewayDirectory, "dist", "main.js")} is missing). Run \`pnpm build\` first.`);
@@ -106,6 +129,18 @@ export async function addManagedCopilot<B extends AspireBuilder>(
   if (options.prepareSandboxes ?? hasSandboxes) gateway = gateway.withEnvironment("MANAGED_COPILOT_SANDBOX_PREPARE", "1");
   if (options.discovery === false) gateway = gateway.withEnvironment("MANAGED_COPILOT_WRITE_DISCOVERY", "0");
   for (const secret of secrets) gateway = gateway.withEnvironment(secret.env, secret.value);
+  // Each app's key: generated once and kept in the AppHost's user secrets, so restarts keep the same key.
+  const appKeys = new Map<string, object>();
+  for (const { app, env } of apps) {
+    const key = await builder.addParameterWithGeneratedValue(appKeyParameterName(name, app), { minLength: 48, special: false }, { secret: true, persist: true });
+    appKeys.set(app, key);
+    gateway = gateway.withEnvironment(env, key);
+  }
+  // Foundry accounts that name no subscription use the deployment's (the Azure CLI's when it has none either).
+  if (config.foundry && Object.keys(config.foundry).length > 0) {
+    const subscription = await configuredSubscription(builder);
+    if (subscription) gateway = gateway.withEnvironment("MANAGED_COPILOT_FOUNDRY_SUBSCRIPTION", subscription);
+  }
 
   const resource = await gateway;
   const url = await resource.getEndpoint("http");
@@ -116,5 +151,6 @@ export async function addManagedCopilot<B extends AspireBuilder>(
     config,
     port,
     dataDirectory,
+    appKey: appKeyLookup(name, appKeys),
   };
 }

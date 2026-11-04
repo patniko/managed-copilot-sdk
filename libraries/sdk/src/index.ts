@@ -1,7 +1,9 @@
 export { ManagedCopilot, type ManagedExec } from "./managed.js";
 export { verifyWebhook, type VerifiedWebhookEvent, type VerifyWebhookOptions, type WebhookRequestLike } from "./features/webhooks.js";
 export type {
+  ActingAs,
   ActionHandlers,
+  AppUser,
   ConnectOptions,
   CreateSandboxOptions,
   CreateScheduleOptions,
@@ -29,6 +31,7 @@ export {
   ManagedCopilotError,
   isManagedCopilotError,
   type AccountInfo,
+  type AccountKind,
   type ArtifactInfo,
   type DeploymentInfo,
   type EnvironmentInfo,
@@ -46,6 +49,7 @@ export {
   type PublicationResult,
   type ScheduleInfo,
   type ScheduleRun,
+  type SessionInference,
   type SessionInfo,
   type VaultInfo,
   type WebhookEnvelope,
