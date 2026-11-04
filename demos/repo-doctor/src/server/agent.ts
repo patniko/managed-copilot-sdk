@@ -153,9 +153,12 @@ export class AgentObserver {
     if (QUIET_TOOLS.has(tool) || SHELL_IO_TOOLS.has(tool)) return;
     const path = text(args.path) ?? text(args.file_path) ?? text(args.filePath);
     if (EDIT_TOOLS.has(tool)) {
-      this.#sink.log({ kind: "edit", text: `${tool === "create" ? "Created" : "Edited"} ${path ? displayPath(path) : "a file"}` });
+      const file = path ? displayPath(path) : "a file";
+      this.#sink.activity(`${tool === "create" ? "Creating" : "Editing"} ${file}`);
+      this.#sink.log({ kind: "edit", text: `${tool === "create" ? "Created" : "Edited"} ${file}` });
     } else if (READ_TOOLS.has(tool)) {
       const pattern = text(args.pattern) ?? text(args.query);
+      if (path || pattern) this.#sink.activity(path ? `Reading ${displayPath(path)}` : `Searching for ${oneLine(pattern!, 80)}`);
       this.#sink.log({ kind: "read", text: path ? `Read ${displayPath(path)}` : pattern ? `Searched for ${oneLine(pattern, 80)}` : tool });
     } else if (tool === "task") {
       this.#sink.log({ kind: "note", text: `Started a sub-agent${text(args.description) ? `: ${oneLine(text(args.description)!, 120)}` : ""}` });

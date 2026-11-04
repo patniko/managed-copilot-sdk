@@ -13,7 +13,7 @@ import {
 } from "@primer/octicons-react";
 import { useEffect, useState } from "react";
 import { repoUrl } from "../../shared/repo.js";
-import { STEP_IDS, type RunView, type SandboxView, type StepId } from "../../shared/types.js";
+import { STEP_ACTORS, STEP_IDS, STEP_LABELS, type RunView, type SandboxView, type StepId } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
 import { between, clock, duration } from "../lib/format.js";
@@ -62,6 +62,8 @@ function SandboxState({ sandbox }: { readonly sandbox: SandboxView }) {
 function SandboxFrame({ run, selected, onSelect, now }: { readonly run: RunView; readonly selected: StepId | undefined; readonly onSelect: (id: StepId | undefined) => void; readonly now: number }) {
   const logs = useStore((state) => state.logs[run.id]);
   const running = run.steps.find((step) => step.status === "running");
+  const activity =
+    running?.activity ?? (running ? (STEP_ACTORS[running.id] === "copilot" ? "Copilot is working…" : `${STEP_LABELS[running.id]}…`) : run.sandbox.state === "creating" ? "Starting a sandbox…" : "Finishing…");
   const selectedStep = run.steps.find((step) => step.id === selected);
   const details = [run.sandbox.environment, run.sandbox.size, run.sandbox.id].filter(Boolean).join(" · ");
   return (
@@ -87,11 +89,11 @@ function SandboxFrame({ run, selected, onSelect, now }: { readonly run: RunView;
           </Tooltip>
         </div>
         <Pipeline steps={run.steps} selected={selected} onSelect={(id) => onSelect(id === selected ? undefined : id)} now={now} />
-        {running?.activity ? (
+        {run.status === "running" ? (
           <div className="mt-2 flex min-w-0 items-center gap-2 rounded-md bg-canvas-muted px-3 py-1.5 font-mono text-xs text-fg-muted" aria-live="polite">
             <Spinner size={12} className="text-fg-attention" />
-            <span className="truncate" title={running.activity}>
-              {running.activity}
+            <span className="truncate" title={activity}>
+              {activity}
             </span>
           </div>
         ) : null}

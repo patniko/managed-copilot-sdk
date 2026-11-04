@@ -49,7 +49,7 @@ describe("AgentObserver", () => {
       { kind: "message", text: "Changed `feature` to `feat`." },
       { kind: "error", text: "Model unavailable" },
     ]);
-    expect(activity).toEqual(["Fixing the release type"]);
+    expect(activity).toEqual(["Fixing the release type", "Reading src/next-version.js", "Editing src/next-version.js", "Searching for feature"]);
     expect(observer.lastMessage).toBe("Changed `feature` to `feat`.");
   });
 
