@@ -29,7 +29,7 @@ Point an environment's `customizations` at a folder in the formats Copilot CLI a
 mounts it read-only; every session in that environment gets it.
 
 ```text
-customizations/chat/
+environments/chat/
 ├── agents/triage.agent.md
 ├── skills/refund-policy/SKILL.md
 └── instructions/contoso.instructions.md
