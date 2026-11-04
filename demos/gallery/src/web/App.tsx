@@ -1,17 +1,18 @@
 import {
   AlertIcon,
   BookIcon,
-  CheckIcon,
   CloudIcon,
-  CopyIcon,
+  ColumnsIcon,
   DeviceDesktopIcon,
+  DotFillIcon,
   LinkExternalIcon,
   MarkGithubIcon,
-  StackIcon,
+  ShieldIcon,
   SyncIcon,
   TerminalIcon,
+  TriangleDownIcon,
 } from "@primer/octicons-react";
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   APPS,
   BUILDING_BLOCKS,
@@ -29,12 +30,25 @@ import {
   type TargetState,
   type Walkthrough,
 } from "../shared/catalog.js";
+import { appHref, compareApp, patternsOf, walkthroughCommand, type Shell } from "./model.js";
+import { PatternDiagram } from "./PatternDiagram.js";
+import { CopyButton, cx, Spinner, Tooltip, useDismiss } from "./ui.js";
 
 const POLL_MS = 15_000;
 const TARGET_NAME: Record<Target, string> = { local: "Local", cloud: "Azure" };
+const TARGET_ICON = { local: DeviceDesktopIcon, cloud: CloudIcon } as const;
 const HEALTH_TEXT: Record<Health, string> = { online: "Online", restricted: "IP-restricted", offline: "Offline" };
+/** Copied walkthrough commands use the visitor's shell: PowerShell on Windows, sh elsewhere. */
+const SHELL: Shell = /^Win/i.test(navigator.platform) || /Windows/i.test(navigator.userAgent) ? "powershell" : "posix";
 
-function useGallery() {
+export interface GalleryData {
+  readonly state?: GalleryState;
+  readonly error?: string;
+  readonly refreshing: boolean;
+  readonly refresh: () => void;
+}
+
+function useGallery(): GalleryData {
   const [state, setState] = useState<GalleryState>();
   const [error, setError] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
@@ -42,11 +56,14 @@ function useGallery() {
     setRefreshing(refresh);
     try {
       const response = await fetch(`/api/gallery${refresh ? "?refresh" : ""}`);
-      if (!response.ok) throw new Error(`The gallery server answered ${response.status}.`);
+      if (!response.ok) {
+        setError(`The gallery server answered with an error (${response.status}).`);
+        return;
+      }
       setState((await response.json()) as GalleryState);
       setError(undefined);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+    } catch {
+      setError("Couldn't reach the gallery server.");
     } finally {
       setRefreshing(false);
     }
@@ -65,383 +82,600 @@ function useGallery() {
   return { state, error, refreshing, refresh: () => void load(true) };
 }
 
-function Dot({ health }: { readonly health?: Health }) {
-  return <span className={`dot ${health ? `dot-${health}` : ""}`} aria-hidden />;
-}
-
-function healthTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted?: boolean): string {
-  if (link && hosted && link.health === "online") return `${link.url} is up. It opens from allowed networks only (npx managed-copilot access ips).`;
-  if (!link) return target === "cloud" ? (state?.searching ? "Looking for your Azure deployment…" : (state?.note ?? "No Azure deployment")) : "Not available";
-  if (link.health === "restricted") return `${link.url} refused this network: its ingress only allows the addresses in Parameters:app-allowed-ips.`;
-  if (link.health === "offline") return target === "local" ? `${link.url} isn't answering. Start the platform with aspire run.` : `${link.url} isn't answering.`;
-  return link.url;
-}
-
-function TargetButton({ target, link, state, primary, hosted }: { readonly target: Target; readonly link?: Link; readonly state?: TargetState; readonly primary?: boolean; readonly hosted?: boolean }) {
-  const Icon = target === "local" ? DeviceDesktopIcon : CloudIcon;
-  const label = (
-    <>
-      <Icon size={16} />
-      <span>{TARGET_NAME[target]}</span>
-      <Dot health={link?.health} />
-    </>
+/** Text with `code` spans; `nowrap` keeps each span on one line (narrow popovers). */
+const renderCode = (text: string, nowrap = false): ReactNode[] =>
+  text.split(/`([^`]+)`/).map((part, i) =>
+    i % 2 ? (
+      <code key={i} className={cx("inline-code", nowrap && "whitespace-nowrap")}>
+        {part}
+      </code>
+    ) : (
+      part
+    ),
   );
-  const title = healthTitle(target, link, state, hosted);
-  if (!link) {
-    return (
-      <button type="button" className="btn btn-sm inline-flex items-center gap-2" disabled title={title}>
-        {label}
+
+const checkedAt = (state?: GalleryState): string => (state ? new Date(state.checkedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" }) : "…");
+
+// ------------------------------------------------------------------------------------------------ Status
+
+type Tone = "success" | "attention" | "danger" | "muted";
+const TONE_TEXT: Record<Tone, string> = { success: "text-fg-success", attention: "text-fg-attention", danger: "text-fg-danger", muted: "text-fg-muted" };
+
+/** A gateway's status: a dot (a spinner while the gallery is still looking) and a word or two. */
+function targetStatus(state: TargetState | undefined): { readonly tone: Tone; readonly busy: boolean; readonly text: string } {
+  if (!state) return { tone: "muted", busy: true, text: "Checking" };
+  if (state.searching) return { tone: "muted", busy: true, text: "Looking" };
+  if (!state.gatewayUrl) return { tone: "muted", busy: false, text: "Not found" };
+  const health = state.gateway ?? "offline";
+  return { tone: health === "online" ? "success" : health === "restricted" ? "attention" : "danger", busy: false, text: HEALTH_TEXT[health] };
+}
+
+function StatusDot({ tone, busy }: { readonly tone: Tone; readonly busy?: boolean }) {
+  return busy ? <Spinner size={12} className="mx-0.5 text-fg-muted" /> : <DotFillIcon size={16} className={TONE_TEXT[tone]} />;
+}
+
+const LINK_TONE: Record<Health, Tone> = { online: "success", restricted: "attention", offline: "muted" };
+
+/** The header's control for one target: a status pill that opens the gateway's details. */
+function TargetPill({ target, state, data }: { readonly target: Target; readonly state?: TargetState; readonly data: GalleryData }) {
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => setOpen(false), []);
+  useDismiss(container, open, close);
+  const status = targetStatus(state);
+  const Glyph = TARGET_ICON[target];
+  const title = target === "local" ? "Local platform" : "Azure deployment";
+  const notFound = target === "cloud" && state && !state.searching && !state.gatewayUrl;
+  const offline = state?.gatewayUrl && state.gateway === "offline";
+  return (
+    <div ref={container} className="relative">
+      <button
+        type="button"
+        className="btn btn-sm"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={`${title}: ${status.text}. Show details`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <StatusDot tone={status.tone} busy={status.busy} />
+        <span>{TARGET_NAME[target]}</span>
+        <TriangleDownIcon size={16} />
       </button>
-    );
-  }
-  return (
-    <a
-      className={`btn btn-sm inline-flex items-center gap-2 ${primary && link.health === "online" ? "btn-primary" : ""}`}
-      href={link.url}
-      target="_blank"
-      rel="noreferrer"
-      title={title}
-    >
-      {label}
-    </a>
-  );
-}
-
-function CopyButton({ text, label }: { readonly text: string; readonly label: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      className="btn btn-sm inline-flex items-center gap-2"
-      title={text}
-      onClick={() => {
-        void navigator.clipboard.writeText(text).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1_500);
-        });
-      }}
-    >
-      {copied ? <CheckIcon size={16} className="text-fg-success" /> : <CopyIcon size={16} />}
-      <span>{copied ? "Copied" : label}</span>
-    </button>
-  );
-}
-
-function Shot({ id, alt, href }: { readonly id: string; readonly alt: string; readonly href?: string }) {
-  const [missing, setMissing] = useState(false);
-  const image = missing ? (
-    <div className="h-full w-full grid place-items-center text-fg-muted text-sm">No screenshot yet · pnpm --filter @managed-copilot/demo-gallery capture</div>
-  ) : (
-    <img src={`/shots/${shotFile(id)}`} alt={alt} loading="lazy" onError={() => setMissing(true)} />
-  );
-  return href ? (
-    <a className="shot block" href={href} target="_blank" rel="noreferrer" tabIndex={-1} aria-hidden>
-      {image}
-    </a>
-  ) : (
-    <div className="shot">{image}</div>
-  );
-}
-
-function AppCard({ app, state }: { readonly app: AppEntry; readonly state?: GalleryState }) {
-  const hosted = state?.hosted === true;
-  const local = state?.local?.links[app.id];
-  const cloud = state?.cloud.links[app.id];
-  const best = [local, cloud].find((link) => link?.health === "online");
-  return (
-    <article className="card Box overflow-hidden flex flex-col">
-      <Shot id={app.id} alt={`${app.title}: ${app.tagline}`} href={best?.url} />
-      <div className="p-4 flex flex-col gap-2 grow">
-        <div>
-          <h3 className="text-lg font-semibold leading-tight">{app.title}</h3>
-          <p className="text-fg-muted">{app.tagline}</p>
+      {open ? (
+        <div
+          role="dialog"
+          aria-label={`${title} details`}
+          className="Overlay absolute top-full right-0 z-40 mt-2 w-[24rem] animate-scale-in max-sm:fixed max-sm:top-16 max-sm:right-4 max-sm:left-4 max-sm:w-auto"
+        >
+          <div className="Overlay-body flex flex-col gap-2 text-sm">
+            <div className="flex items-center gap-2">
+              <Glyph size={16} className="text-fg-muted" />
+              <span className="font-semibold">{title}</span>
+              <span className="ml-auto inline-flex items-center gap-1 text-fg-muted">
+                <StatusDot tone={status.tone} busy={status.busy} />
+                {status.text}
+              </span>
+            </div>
+            {state?.gatewayUrl ? <div className="truncate font-mono text-xs text-fg-muted">{state.gatewayUrl}</div> : null}
+            {state?.note ? <p className="text-fg-muted">{renderCode(state.note, true)}</p> : null}
+            {target === "local" && offline ? (
+              <div className="flex items-center gap-2">
+                <span className="text-fg-muted">Start it from the repository root:</span>
+                <CopyButton text="aspire run" label="Copy aspire run" className="ml-auto">
+                  <span className="font-mono text-xs">aspire run</span>
+                </CopyButton>
+              </div>
+            ) : null}
+            {target === "cloud" && state?.gatewayUrl && state.gateway === "restricted" ? (
+              <p className="text-fg-muted">{renderCode("It refuses this network: its ingress allows only `Parameters:app-allowed-ips`.", true)}</p>
+            ) : null}
+            {notFound ? (
+              <div className="flex items-center gap-2">
+                <span className="text-fg-muted">Or name one:</span>
+                <CopyButton text="pnpm gallery --cloud https://copilot.<environment-domain>" label="Copy the command that names a deployment" className="ml-auto">
+                  <span className="font-mono text-xs">pnpm gallery --cloud …</span>
+                </CopyButton>
+              </div>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2 border-t border-line px-4 py-2 text-xs text-fg-muted">
+            <span>Checked {checkedAt(data.state)}</span>
+            <button type="button" className="btn btn-sm btn-invisible ml-auto" onClick={data.refresh} disabled={data.refreshing}>
+              <SyncIcon size={16} className={data.refreshing ? "animate-spin" : ""} />
+              Check now
+            </button>
+          </div>
         </div>
-        <p className="text-sm">{app.description}</p>
-        <p className="text-sm text-fg-muted">
-          <span className="font-semibold text-fg">Try it: </span>
-          {app.tryIt}
-        </p>
-      </div>
-      <div className="px-4 pb-4 flex flex-wrap items-center gap-2">
-        {hosted ? null : <TargetButton target="local" link={local} state={state?.local} primary />}
-        {hosted && app === CONSOLE ? (
-          // The console signs each operator in with their own GitHub account, from their terminal.
-          state?.cloud.gatewayUrl ? <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy command" /> : null
-        ) : (
-          <TargetButton target="cloud" link={cloud} state={state?.cloud} primary={local?.health !== "online"} hosted={hosted} />
-        )}
-        <a className="btn btn-sm btn-invisible inline-flex items-center gap-2 ml-auto" href={`${state?.repoUrl ?? ""}${app.readme}`} target="_blank" rel="noreferrer">
-          <BookIcon size={16} />
-          <span>README</span>
-        </a>
-      </div>
-    </article>
-  );
-}
-
-function WalkthroughCard({ walkthrough, state }: { readonly walkthrough: Walkthrough; readonly state?: GalleryState }) {
-  const command = `pnpm walkthrough ${walkthrough.id}`;
-  // Both copies name their gateway: MANAGED_COPILOT_URL outlives the command in that terminal, and an AppHost with a
-  // port offset writes no discovery record.
-  const withUrl = (url: string) => `$env:MANAGED_COPILOT_URL = "${url}"; ${command}`;
-  const localUrl = state?.local?.gatewayUrl;
-  const cloudUrl = state?.cloud.gatewayUrl;
-  const readme = `${state?.repoUrl ?? ""}walkthroughs/${walkthrough.folder}/README.md`;
-  return (
-    <article id={`walkthrough-${walkthrough.id}`} className="card Box overflow-hidden flex flex-col scroll-mt-6">
-      <Shot id={`sample-${walkthrough.id}`} alt={`Walkthrough ${walkthrough.id}: ${walkthrough.title}`} href={readme} />
-      <div className="p-4 flex flex-col gap-1 grow">
-        <div className="flex items-center gap-2 text-fg-muted text-xs">
-          <span className="Label">{walkthrough.id}</span>
-          <span>
-            {walkthrough.minutes} min{walkthrough.runnable ? "" : " · guide"}
-          </span>
-          {walkthrough.runnable ? <code className="inline-code ml-auto">{command}</code> : null}
-        </div>
-        <h3 className="text-base font-semibold leading-snug">{walkthrough.title}</h3>
-        <p className="text-sm text-fg-muted">{walkthrough.youSee}</p>
-      </div>
-      <div className="px-4 pb-4 flex flex-wrap items-center gap-2">
-        {walkthrough.runnable ? (
-          <>
-            {localUrl ? <CopyButton text={withUrl(localUrl)} label="Local" /> : null}
-            {cloudUrl ? <CopyButton text={withUrl(cloudUrl)} label="Azure" /> : null}
-          </>
-        ) : null}
-        <a className="btn btn-sm btn-invisible inline-flex items-center gap-2 ml-auto" href={readme} target="_blank" rel="noreferrer">
-          <BookIcon size={16} />
-          <span>README</span>
-        </a>
-      </div>
-    </article>
-  );
-}
-
-const BLOCK_ORDER = Object.keys(BUILDING_BLOCKS) as BuildingBlock[];
-const BLOCK_LABEL: Record<BuildingBlock, string> = { container: "Label--accent", "multi-tenant": "Label--success", orchestration: "Label--done" };
-
-function BlockLabel({ block }: { readonly block: BuildingBlock }) {
-  return (
-    <span className={`Label ${BLOCK_LABEL[block]}`} title={BUILDING_BLOCKS[block].description}>
-      {BUILDING_BLOCKS[block].title}
-    </span>
-  );
-}
-
-/** The app's running copy (local first), or its README when neither target answers. */
-function appHref(app: AppEntry, state?: GalleryState): { readonly href: string; readonly online: boolean } {
-  const online = [state?.local?.links[app.id], state?.cloud.links[app.id]].find((link) => link?.health === "online");
-  return online ? { href: online.url, online: true } : { href: `${state?.repoUrl ?? ""}${app.readme}`, online: false };
-}
-
-function PatternCard({ pattern, state }: { readonly pattern: Pattern; readonly state?: GalleryState }) {
-  const blocks = BLOCK_ORDER.filter((block) => pattern.blocks.includes(block));
-  return (
-    <article className="card Box p-4 flex flex-col gap-3">
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h3 className="text-base font-semibold leading-snug">{pattern.title}</h3>
-        <code className="inline-code text-xs" title={`apphost.mts: ${pattern.environment}: { ${pattern.settings.join(", ")}, … }`}>
-          managed.client("{pattern.environment}")
-        </code>
-      </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt className="text-fg-muted">Brain</dt>
-        <dd>{pattern.brain}</dd>
-        <dt className="text-fg-muted">Hands</dt>
-        <dd>{pattern.hands}</dd>
-      </dl>
-      <div className="flex flex-wrap gap-1">
-        {blocks.map((block) => (
-          <BlockLabel key={block} block={block} />
-        ))}
-      </div>
-      <div className="mt-auto flex flex-col gap-3 pt-1">
-        {pattern.demos.length > 0 ? (
-          <p className="text-sm text-fg-muted">
-            See it in{" "}
-            {pattern.demos.map((demo, index) => {
-              const app = APPS.find((entry) => entry.id === demo.app);
-              if (!app) return null;
-              const { href, online } = appHref(app, state);
-              return (
-                <span key={`${demo.app}-${demo.where}`}>
-                  {index === 0 ? null : index < pattern.demos.length - 1 ? ", " : pattern.demos.length === 2 ? " and " : ", and "}
-                  <a className="Link" href={href} target="_blank" rel="noreferrer" title={online ? `Open ${app.title}` : `${app.title} isn't answering; this opens its README`}>
-                    {app.title}
-                  </a>{" "}
-                  ({demo.where})
-                </span>
-              );
-            })}
-            .
-          </p>
-        ) : (
-          <p className="text-sm text-fg-muted">A walkthrough for now; no demo app uses it yet.</p>
-        )}
-        <div>
-          <a className="btn btn-sm inline-flex items-center gap-2" href={`#walkthrough-${pattern.walkthrough}`} title={`Walkthrough ${pattern.walkthrough}: its commands are below`}>
-            <TerminalIcon size={16} />
-            <span>Walkthrough {pattern.walkthrough}</span>
-          </a>
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function TargetStatus({ target, state }: { readonly target: Target; readonly state?: TargetState }) {
-  const Icon = target === "local" ? DeviceDesktopIcon : CloudIcon;
-  const text = !state ? "Checking…" : state.searching ? "Looking…" : !state.gatewayUrl ? "Not found" : HEALTH_TEXT[state.gateway ?? "offline"];
-  return (
-    <span className="inline-flex items-center gap-2 text-sm" title={state?.gatewayUrl ? `${state.gatewayUrl}${state.note ? ` · ${state.note}` : ""}` : state?.note}>
-      <Icon size={16} className="text-fg-muted" />
-      <span className="text-fg-muted">{TARGET_NAME[target]}</span>
-      <Dot health={state?.gatewayUrl ? state.gateway : undefined} />
-      <span>{text}</span>
-    </span>
-  );
-}
-
-function Notice({ tone, children }: { readonly tone: "warn" | "neutral"; readonly children: ReactNode }) {
-  return (
-    <div className={`flash ${tone === "warn" ? "flash-warn" : ""} flex items-start gap-2`}>
-      <AlertIcon size={16} className="mt-0.5 shrink-0" />
-      <div className="min-w-0">{children}</div>
+      ) : null}
     </div>
   );
 }
 
-const renderCode = (text: string) => text.split(/`([^`]+)`/).map((part, i) => (i % 2 ? <code key={i} className="inline-code">{part}</code> : part));
+// ------------------------------------------------------------------------------------------------ Patterns
 
-export function App() {
-  const { state, error, refreshing, refresh } = useGallery();
+const BLOCK_ORDER = Object.keys(BUILDING_BLOCKS) as BuildingBlock[];
+const BLOCK_STYLE: Record<BuildingBlock, { readonly pip: string; readonly gloss: string }> = {
+  container: { pip: "pip-container", gloss: "a sandbox per session" },
+  "multi-tenant": { pip: "pip-multi-tenant", gloss: "one runtime, many sessions" },
+  orchestration: { pip: "pip-orchestration", gloss: "sandboxes on demand" },
+};
+
+function BuildingBlocks() {
+  return (
+    <ul className="mb-4 flex flex-col gap-x-6 gap-y-1 text-sm sm:flex-row sm:flex-wrap" aria-label="Building blocks">
+      {BLOCK_ORDER.map((block) => (
+        <li key={block}>
+          <Tooltip content={BUILDING_BLOCKS[block].description}>
+            <span tabIndex={0}>
+              <span className={cx("pip mr-2 align-[-1px]", BLOCK_STYLE[block].pip)} aria-hidden />
+              <span className="font-semibold">{BUILDING_BLOCKS[block].title}</span> <span className="text-fg-muted">{BLOCK_STYLE[block].gloss}</span>
+            </span>
+          </Tooltip>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function Pips({ blocks }: { readonly blocks: readonly BuildingBlock[] }) {
+  const ordered = BLOCK_ORDER.filter((block) => blocks.includes(block));
+  const names = ordered.map((block) => BUILDING_BLOCKS[block].title).join(", ");
+  return (
+    <Tooltip content={`Built from: ${names}`}>
+      <span className="inline-flex items-center gap-1 p-1" role="img" aria-label={`Built from: ${names}`}>
+        {ordered.map((block) => (
+          <span key={block} className={cx("pip", BLOCK_STYLE[block].pip)} />
+        ))}
+      </span>
+    </Tooltip>
+  );
+}
+
+function PatternCard({ pattern, apps, walkthroughs, state }: { readonly pattern: Pattern; readonly apps: readonly AppEntry[]; readonly walkthroughs: readonly Walkthrough[]; readonly state?: GalleryState }) {
+  const walkthrough = walkthroughs.find((entry) => entry.id === pattern.walkthrough);
+  const demos = pattern.demos.flatMap((demo) => {
+    const app = apps.find((entry) => entry.id === demo.app);
+    return app ? [{ demo, app, ...appHref(app, state) }] : [];
+  });
+  return (
+    <article id={`pattern-${pattern.id}`} className="pattern-card Box flex scroll-mt-4 flex-col gap-4 p-4">
+      <header className="flex items-center gap-2">
+        <h3 className="text-base font-semibold">{pattern.title}</h3>
+        <span className="ml-auto">
+          <Pips blocks={pattern.blocks} />
+        </span>
+      </header>
+      <PatternDiagram pattern={pattern} />
+      <Tooltip className="self-start" content={`apphost.mts: ${pattern.environment}: { ${pattern.settings.join(", ")}, … }`}>
+        <code className="inline-code truncate text-xs" tabIndex={0}>
+          managed.client("{pattern.environment}")
+        </code>
+      </Tooltip>
+      <footer className="mt-auto flex items-start gap-3 border-t border-line-muted pt-3 text-sm">
+        <Tooltip className="shrink-0" content={`Walkthrough ${pattern.walkthrough}${walkthrough ? `: ${walkthrough.title}` : ""}`}>
+          <a className="btn btn-sm" href={`#walkthrough-${pattern.walkthrough}`} aria-label={`Walkthrough ${pattern.walkthrough}${walkthrough ? `: ${walkthrough.title}` : ""}`}>
+            <TerminalIcon size={16} />
+            {pattern.walkthrough}
+          </a>
+        </Tooltip>
+        {demos.length ? (
+          <ul className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 pt-0.5" aria-label="Apps that show it">
+            {demos.map(({ demo, app, href, online }) => (
+              <li key={`${demo.app}-${demo.where}`}>
+                <Tooltip content={online ? `${app.title}: ${demo.where}` : `${app.title}: ${demo.where}. It isn't answering, so this opens its README.`}>
+                  <a className="Link whitespace-nowrap" href={href} target="_blank" rel="noreferrer" aria-label={`${app.title}: ${demo.where}`}>
+                    {app.title}
+                  </a>
+                </Tooltip>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+      </footer>
+    </article>
+  );
+}
+
+// ------------------------------------------------------------------------------------------------ Apps
+
+const PLACEHOLDER_TONES = [
+  "bg-display-blue-muted text-display-blue",
+  "bg-display-green-muted text-display-green",
+  "bg-display-orange-muted text-display-orange",
+  "bg-display-purple-muted text-display-purple",
+  "bg-display-pink-muted text-display-pink",
+  "bg-display-teal-muted text-display-teal",
+  "bg-display-indigo-muted text-display-indigo",
+  "bg-display-yellow-muted text-display-yellow",
+] as const;
+
+const initials = (title: string): string =>
+  title
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0]!.toUpperCase())
+    .join("");
+
+/** The app's screenshot; a tile with its initials until one is captured. */
+function Shot({ app, href }: { readonly app: AppEntry; readonly href?: string }) {
+  const [missing, setMissing] = useState(false);
+  const tone = PLACEHOLDER_TONES[[...app.id].reduce((sum, char) => sum + char.charCodeAt(0), 0) % PLACEHOLDER_TONES.length];
+  const image = missing ? (
+    <div className="shot-placeholder">
+      <span className={cx("shot-initials", tone)}>{initials(app.title)}</span>
+    </div>
+  ) : (
+    <img src={`/shots/${shotFile(app.id)}`} alt="" loading="lazy" onError={() => setMissing(true)} />
+  );
+  return href ? (
+    <a className="shot" href={href} target="_blank" rel="noreferrer" tabIndex={-1} aria-hidden>
+      {image}
+    </a>
+  ) : (
+    <div className="shot" aria-hidden>
+      {image}
+    </div>
+  );
+}
+
+function linkTitle(target: Target, link: Link | undefined, state: TargetState | undefined, hosted: boolean): string {
+  if (!link) return target === "cloud" ? (state?.searching ? "Looking for your Azure deployment…" : "No Azure deployment") : "Not available";
+  if (link.health === "restricted") return "Refuses this network: its ingress allows only Parameters:app-allowed-ips";
+  if (link.health === "offline") return target === "local" ? "Not answering. Start the platform with aspire run." : "Not answering";
+  // The console's link is the gallery's own route, which signs you in and redirects.
+  if (link.url.startsWith("/")) return "Signs you in with this machine's GitHub sign-in";
+  return hosted ? `${link.url} · opens from allowed networks only` : link.url;
+}
+
+/** Opens an app on one target, with that link's live status. */
+function OpenButton({ app, target, link, state, hosted }: { readonly app: AppEntry; readonly target: Target; readonly link?: Link; readonly state?: TargetState; readonly hosted: boolean }) {
+  const Glyph = TARGET_ICON[target];
+  const status = link ? HEALTH_TEXT[link.health] : state?.searching || !state ? "checking" : "not available";
+  const content = (
+    <>
+      <Glyph size={16} />
+      {TARGET_NAME[target]}
+      {state && !state.searching ? <StatusDot tone={link ? LINK_TONE[link.health] : "muted"} /> : <StatusDot tone="muted" busy />}
+    </>
+  );
+  const label = `Open ${app.title} (${TARGET_NAME[target]}, ${status.toLowerCase()})`;
+  return (
+    <Tooltip content={linkTitle(target, link, state, hosted)}>
+      {link ? (
+        <a className="btn btn-sm" href={link.url} target="_blank" rel="noreferrer" aria-label={label}>
+          {content}
+        </a>
+      ) : (
+        <button type="button" className="btn btn-sm" aria-disabled="true" aria-label={label}>
+          {content}
+        </button>
+      )}
+    </Tooltip>
+  );
+}
+
+function ReadmeLink({ href, name }: { readonly href: string; readonly name: string }) {
+  return (
+    <Tooltip content="README">
+      <a className="btn btn-sm btn-invisible btn-icon" href={href} target="_blank" rel="noreferrer" aria-label={`${name} README`}>
+        <BookIcon size={16} />
+      </a>
+    </Tooltip>
+  );
+}
+
+function PatternMarkers({ app, patterns }: { readonly app: AppEntry; readonly patterns: readonly Pattern[] }) {
+  const shown = patternsOf(app.id, patterns);
+  if (!shown.length) return null;
+  if (shown.length === patterns.length && patterns.length > 1) {
+    return (
+      <div className="flex">
+        <a className="pattern-marker" href="#patterns">
+          All {patterns.length === 6 ? "six" : patterns.length} patterns
+        </a>
+      </div>
+    );
+  }
+  return (
+    <ul className="flex flex-wrap gap-1" aria-label="Patterns it shows">
+      {shown.map((pattern) => {
+        const where = pattern.demos.find((demo) => demo.app === app.id)?.where;
+        return (
+          <li key={pattern.id}>
+            <Tooltip content={where ? `${pattern.title}: ${where}` : pattern.title}>
+              <a className="pattern-marker" href={`#pattern-${pattern.id}`}>
+                {pattern.title}
+              </a>
+            </Tooltip>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
   const hosted = state?.hosted === true;
-  const localDown = state?.local && state.local.gateway !== "online";
-  const cloudMissing = state && !state.cloud.searching && !state.cloud.gatewayUrl;
+  const local = state?.local?.links[app.id];
+  const cloud = state?.cloud.links[app.id];
+  const best = [local, cloud].find((link) => link?.health === "online");
+  // Without a deployment, the header's Azure control says why; the cards leave Azure out.
+  const noCloud = state !== undefined && !state.cloud.searching && !state.cloud.gatewayUrl;
+  return (
+    <article className="app-card Box flex flex-col overflow-hidden">
+      <Shot app={app} href={best?.url} />
+      <div className="flex grow flex-col gap-2 px-4 pt-3 pb-2">
+        <Tooltip block content={app.description}>
+          <h3 className="truncate text-base font-semibold leading-snug">{app.title}</h3>
+          <p className="truncate text-sm text-fg-muted">{app.tagline}</p>
+        </Tooltip>
+        <PatternMarkers app={app} patterns={patterns} />
+        <p className="mt-auto truncate text-xs text-fg-muted" title={app.tryIt}>
+          <span className="font-semibold text-fg">Try</span> {app.tryIt}
+        </p>
+      </div>
+      <div className="flex items-center gap-2 px-4 pb-4">
+        {hosted ? null : <OpenButton app={app} target="local" link={local} state={state?.local} hosted={hosted} />}
+        {hosted && app.id === CONSOLE.id ? (
+          // The console signs each operator in with their own GitHub account, from their terminal.
+          state?.cloud.gatewayUrl ? (
+            <CopyButton text={`npx managed-copilot console --url ${state.cloud.gatewayUrl}`} label="Copy the command that opens the console">
+              Copy command
+            </CopyButton>
+          ) : null
+        ) : noCloud ? null : (
+          <OpenButton app={app} target="cloud" link={cloud} state={state?.cloud} hosted={hosted} />
+        )}
+        <span className="ml-auto">
+          <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
+        </span>
+      </div>
+    </article>
+  );
+}
+
+// ------------------------------------------------------------------------------------------------ Walkthroughs
+
+function WalkthroughList({ walkthroughs, state }: { readonly walkthroughs: readonly Walkthrough[]; readonly state?: GalleryState }) {
+  const hosted = state?.hosted === true;
+  const gateways: Partial<Record<Target, TargetState>> = {
+    ...(!hosted && state?.local?.gatewayUrl ? { local: state.local } : {}),
+    ...(state?.cloud.gatewayUrl ? { cloud: state.cloud } : {}),
+  };
+  const targets = Object.keys(gateways) as Target[];
+  const [chosen, setChosen] = useState<Target>();
+  const runOn = chosen && gateways[chosen] ? chosen : (targets.find((target) => gateways[target]?.gateway === "online") ?? targets[0]);
+  const gatewayUrl = runOn ? gateways[runOn]?.gatewayUrl : undefined;
+  return (
+    <section aria-labelledby="walkthroughs-heading">
+      <div className="Subhead">
+        <h2 id="walkthroughs-heading" className="Subhead-heading inline-flex items-center gap-2">
+          Walkthroughs <span className="Counter">{walkthroughs.length}</span>
+        </h2>
+        {targets.length > 1 ? (
+          <div className="Subhead-actions">
+            <Tooltip content="The platform the copied commands run against">
+              <div className="SegmentedControl SegmentedControl--sm" role="group" aria-label="Run walkthroughs against">
+                {targets.map((target) => {
+                  const Glyph = TARGET_ICON[target];
+                  return (
+                    <button key={target} type="button" className="SegmentedControl-item" aria-pressed={target === runOn} onClick={() => setChosen(target)}>
+                      <Glyph size={16} />
+                      {TARGET_NAME[target]}
+                    </button>
+                  );
+                })}
+              </div>
+            </Tooltip>
+          </div>
+        ) : null}
+      </div>
+      <ol className="Box">
+        {walkthroughs.map((walkthrough) => {
+          const command = gatewayUrl ? walkthroughCommand(walkthrough.id, gatewayUrl, SHELL) : `pnpm walkthrough ${walkthrough.id}`;
+          const readme = `${state?.repoUrl ?? ""}walkthroughs/${walkthrough.folder}/README.md`;
+          return (
+            <li key={walkthrough.id} id={`walkthrough-${walkthrough.id}`} className="walkthrough Box-row flex scroll-mt-4 items-center gap-3">
+              <span className="walkthrough-id" aria-hidden>
+                {walkthrough.id}
+              </span>
+              <div className="min-w-0 flex-1 md:flex md:items-baseline md:gap-4">
+                <p className="truncate font-semibold md:w-64 md:shrink-0" title={walkthrough.title}>
+                  <span className="sr-only">Walkthrough {walkthrough.id}: </span>
+                  {walkthrough.title}
+                </p>
+                <p className="truncate text-sm text-fg-muted" title={walkthrough.youSee}>
+                  {walkthrough.youSee}
+                </p>
+              </div>
+              <span className="w-12 shrink-0 text-right text-xs whitespace-nowrap text-fg-muted max-sm:hidden">{walkthrough.minutes} min</span>
+              <span className="flex shrink-0 justify-end sm:w-[11.5rem]">
+                {walkthrough.runnable ? (
+                  <CopyButton
+                    text={command}
+                    label={`Copy the command for walkthrough ${walkthrough.id}`}
+                    tooltip={
+                      <span className="font-mono">
+                        {command}
+                        <span className="mt-1 block font-sans text-fg-on-emphasis/70">Run it from the repository root</span>
+                      </span>
+                    }
+                  >
+                    <span className="font-mono text-xs max-sm:hidden">pnpm walkthrough {walkthrough.id}</span>
+                  </CopyButton>
+                ) : (
+                  <span className="text-xs text-fg-muted">Guide</span>
+                )}
+              </span>
+              <ReadmeLink href={readme} name={`Walkthrough ${walkthrough.id}`} />
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------------------------------------ Page
+
+function Notice({ tone, icon, children, actions }: { readonly tone: "warn" | "error"; readonly icon: ReactNode; readonly children: ReactNode; readonly actions?: ReactNode }) {
+  return (
+    <div className={cx("flash flash-sm items-center", tone === "warn" ? "flash-warn" : "flash-error")} role="status">
+      {icon}
+      <div className="flash-content">{children}</div>
+      {actions ? <div className="flash-actions">{actions}</div> : null}
+    </div>
+  );
+}
+
+export interface GalleryProps extends GalleryData {
+  readonly apps?: readonly AppEntry[];
+  readonly patterns?: readonly Pattern[];
+  readonly walkthroughs?: readonly Walkthrough[];
+}
+
+/** The page for a given state and catalog. */
+export function Gallery(props: GalleryProps) {
+  const { state, error, refreshing, refresh, apps = APPS, patterns = PATTERNS, walkthroughs = WALKTHROUGHS } = props;
+  const hosted = state?.hosted === true;
+  const localDown = !hosted && state?.local?.gatewayUrl !== undefined && state.local.gateway !== "online";
+  const race = compareApp(apps);
+  const raceLink = race ? appHref(race, state) : undefined;
   return (
     <div className="min-h-screen bg-canvas text-fg">
       <header className="AppHeader">
-        <div className="AppHeader-globalBar gap-3">
-          <span className="AppHeader-logo" aria-hidden>
+        <div className="AppHeader-globalBar gap-2 sm:gap-3">
+          <a href="/" className="AppHeader-logo" aria-label="Demo gallery home">
             <MarkGithubIcon size={32} />
-          </span>
-          <nav className="AppHeader-context" aria-label="Breadcrumb">
-            <span className="AppHeader-context-item max-sm:hidden">Managed Copilot</span>
+          </a>
+          <nav className="AppHeader-context min-w-0" aria-label="Breadcrumb">
+            <a href="/" className="AppHeader-context-item max-sm:hidden">
+              Managed Copilot
+            </a>
             <span className="AppHeader-context-divider max-sm:hidden" aria-hidden>
               /
             </span>
-            <span className="AppHeader-context-item AppHeader-context-item--current">Demo gallery</span>
+            <a href="/" className="AppHeader-context-item AppHeader-context-item--current" aria-current="page">
+              <span className="truncate">Demo gallery</span>
+            </a>
           </nav>
-          <div className="AppHeader-actions gap-4">
-            {hosted ? null : <TargetStatus target="local" state={state?.local} />}
-            <TargetStatus target="cloud" state={state?.cloud} />
-            <button type="button" className="AppHeader-button" aria-label="Check again" title="Check again" onClick={refresh} disabled={refreshing}>
-              <SyncIcon size={16} className={refreshing ? "animate-spin" : ""} />
-            </button>
+          <div className="AppHeader-actions">
+            {hosted ? null : <TargetPill target="local" state={state?.local} data={props} />}
+            <TargetPill target="cloud" state={state?.cloud} data={props} />
           </div>
         </div>
       </header>
 
       <section className="hero border-b border-line">
-        <div className="mx-auto max-w-[1280px] px-6 py-10">
+        <div className="mx-auto max-w-[1280px] px-4 py-8 sm:px-6">
           <h1 className="text-2xl font-semibold">Demo gallery</h1>
-          <p className="mt-2 max-w-3xl text-base text-fg-muted">
-            {hosted
-              ? "The six patterns, and every demo and walkthrough in this Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."
-              : "The six patterns, and every demo and walkthrough, in one place: on this machine and in your Azure deployment. Each one runs stock Copilot SDK clients and sessions on Managed Copilot; the screens are from real runs."}
+          <p className="mt-1 text-base text-fg-muted">
+            {hosted ? "Six ways to run an agent, and the apps in this deployment that show them." : "Six ways to run an agent, and the apps and walkthroughs that show them."}
           </p>
         </div>
       </section>
 
-      <main className="mx-auto max-w-[1280px] px-6 py-8 flex flex-col gap-10">
-        {error || localDown || cloudMissing || hosted ? (
-          <div className="flex flex-col gap-3">
-            {error ? <Notice tone="warn">{error}</Notice> : null}
-            {hosted ? (
-              <Notice tone="neutral">
-                {renderCode(
-                  "The apps open only from allowed networks. If one answers `403 RBAC: access denied`, ask the deployment's owner to add your address with `npx managed-copilot access ips add <your address>`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.",
-                )}
+      <main className="mx-auto flex max-w-[1280px] flex-col gap-10 px-4 py-8 sm:px-6">
+        {error || localDown || hosted ? (
+          <div className="flex flex-col gap-2">
+            {error ? (
+              <Notice
+                tone="error"
+                icon={<AlertIcon size={16} />}
+                actions={
+                  <button type="button" className="btn btn-sm" onClick={refresh} disabled={refreshing}>
+                    Try again
+                  </button>
+                }
+              >
+                {error}
               </Notice>
             ) : null}
             {localDown ? (
-              <Notice tone="warn">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <span>The local platform isn't running at {state.local!.gatewayUrl}. Start it from the repository root, then the Local buttons light up.</span>
-                  <CopyButton text="aspire run" label="aspire run" />
-                </div>
+              <Notice
+                tone="warn"
+                icon={<AlertIcon size={16} />}
+                actions={
+                  <>
+                    <CopyButton text="aspire run" label="Copy aspire run" tooltip="Copy aspire run, then run it from the repository root">
+                      <span className="font-mono text-xs">aspire run</span>
+                    </CopyButton>
+                    <Tooltip content="Check again">
+                      <button type="button" className="btn btn-sm btn-icon" aria-label="Check again" onClick={refresh} disabled={refreshing}>
+                        <SyncIcon size={16} className={refreshing ? "animate-spin" : ""} />
+                      </button>
+                    </Tooltip>
+                  </>
+                }
+              >
+                The local platform isn't running.
               </Notice>
             ) : null}
-            {cloudMissing ? (
-              <Notice tone="neutral">
-                {renderCode(state.cloud.note ?? "No Azure deployment.")} Or name one: {renderCode("`pnpm gallery --cloud https://copilot.<environment-domain>`")}.
-              </Notice>
+            {hosted ? (
+              <div className="flash flash-neutral flash-sm items-start">
+                <ShieldIcon size={16} />
+                <details className="flash-content">
+                  <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                    Apps open from allowed networks only. <span className="Link">How to get access</span>
+                  </summary>
+                  <p className="mt-2 text-fg-muted">
+                    {renderCode(
+                      "If one answers `403 RBAC: access denied`, ask the deployment's owner to add your address with `npx managed-copilot access ips add <your address>`. Walkthroughs run from a clone of the repository and need your GitHub account on the deployment's access list.",
+                    )}
+                  </p>
+                </details>
+              </div>
             ) : null}
           </div>
         ) : null}
 
-        <section aria-labelledby="patterns">
+        <section id="patterns" className="scroll-mt-4" aria-labelledby="patterns-heading">
           <div className="Subhead">
-            <h2 id="patterns" className="Subhead-heading inline-flex items-center gap-2">
-              <StackIcon size={20} /> Patterns
+            <h2 id="patterns-heading" className="Subhead-heading inline-flex items-center gap-2">
+              Patterns <span className="Counter">{patterns.length}</span>
             </h2>
-            <div className="Subhead-description">
-              Three building blocks make six ways to run an agent. Each pattern is one environment in the AppHost, so your code changes only the name it passes to{" "}
-              {renderCode("`managed.client`")}.
-            </div>
-          </div>
-          <div className="mb-5 grid gap-5 md:grid-cols-3">
-            {BLOCK_ORDER.map((block) => (
-              <div key={block} className="Box p-3 flex flex-col gap-2">
-                <div>
-                  <BlockLabel block={block} />
-                </div>
-                <p className="text-sm text-fg-muted">{BUILDING_BLOCKS[block].description}</p>
+            {race && raceLink ? (
+              <div className="Subhead-actions">
+                <Tooltip content={raceLink.online ? `${race.title}: one job through every pattern, side by side` : `${race.title} isn't answering, so this opens its README`}>
+                  <a className="btn btn-sm" href={raceLink.href} target="_blank" rel="noreferrer">
+                    <ColumnsIcon size={16} />
+                    Compare all six
+                  </a>
+                </Tooltip>
               </div>
-            ))}
+            ) : null}
           </div>
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {PATTERNS.map((pattern) => (
-              <PatternCard key={pattern.id} pattern={pattern} state={state} />
+          <BuildingBlocks />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {patterns.map((pattern) => (
+              <PatternCard key={pattern.id} pattern={pattern} apps={apps} walkthroughs={walkthroughs} state={state} />
             ))}
           </div>
         </section>
 
-        <section aria-labelledby="apps">
+        <section aria-labelledby="apps-heading">
           <div className="Subhead">
-            <h2 id="apps" className="Subhead-heading">
-              Apps
+            <h2 id="apps-heading" className="Subhead-heading inline-flex items-center gap-2">
+              Apps <span className="Counter">{apps.length}</span>
             </h2>
-            <div className="Subhead-description">
-              {renderCode(hosted ? "Web apps for live demos, running in this deployment." : "Web apps for live demos. Local runs with `aspire run`; Azure is what `aspire deploy` published.")}
-            </div>
           </div>
-          <div className="grid gap-6 md:grid-cols-2">
-            {APPS.map((app) => (
-              <AppCard key={app.id} app={app} state={state} />
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {apps.map((app) => (
+              <AppCard key={app.id} app={app} patterns={patterns} state={state} />
             ))}
           </div>
         </section>
 
-        <section aria-labelledby="walkthroughs">
-          <div className="Subhead">
-            <h2 id="walkthroughs" className="Subhead-heading inline-flex items-center gap-2">
-              <TerminalIcon size={20} /> Walkthroughs
-            </h2>
-            <div className="Subhead-description">
-              Short scripts from {renderCode("`walkthroughs/`")}. Copy {hosted ? "the Azure" : "the Local or Azure"} command and run it from the repository root; each sets {renderCode("`MANAGED_COPILOT_URL`")}{" "}
-              to that gateway first.
-            </div>
-          </div>
-          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
-            {WALKTHROUGHS.map((walkthrough) => (
-              <WalkthroughCard key={walkthrough.id} walkthrough={walkthrough} state={state} />
-            ))}
-          </div>
-        </section>
+        <WalkthroughList walkthroughs={walkthroughs} state={state} />
 
-        <footer className="border-t border-line pt-4 pb-8 text-sm text-fg-muted flex flex-wrap gap-x-4 gap-y-1">
-          <span>Status checked {state ? new Date(state.checkedAt).toLocaleTimeString() : "…"} · every {POLL_MS / 1000}s</span>
+        <footer className="flex flex-wrap gap-x-4 gap-y-1 border-t border-line pt-4 pb-8 text-xs text-fg-muted">
+          <span>
+            Checked {checkedAt(state)} · every {POLL_MS / 1000}s
+          </span>
+          <a className="Link--muted inline-flex items-center gap-1" href={`${state?.repoUrl ?? ""}docs/concepts/patterns.md`} target="_blank" rel="noreferrer">
+            Patterns <LinkExternalIcon size={12} />
+          </a>
           <a className="Link--muted inline-flex items-center gap-1" href={`${state?.repoUrl ?? ""}docs/README.md`} target="_blank" rel="noreferrer">
             Concepts <LinkExternalIcon size={12} />
           </a>
@@ -452,4 +686,8 @@ export function App() {
       </main>
     </div>
   );
+}
+
+export function App() {
+  return <Gallery {...useGallery()} />;
 }
