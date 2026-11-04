@@ -58,6 +58,10 @@ export async function verifyPassword(password: string, stored: string): Promise<
 /** A real hash of nothing in particular, verified when an email is unknown so both answers take as long. */
 let decoy: Promise<string> | undefined;
 export function decoyHash(): Promise<string> {
-  decoy ??= hashPassword(randomBytes(18).toString("base64url"));
+  // Made again after a failure (Front Desk was too busy): a failed decoy must not keep unknown addresses failing.
+  decoy ??= hashPassword(randomBytes(18).toString("base64url")).catch((error: unknown) => {
+    decoy = undefined;
+    throw error;
+  });
   return decoy;
 }

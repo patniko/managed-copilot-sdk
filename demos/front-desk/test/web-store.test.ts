@@ -106,4 +106,36 @@ describe("the web UI's state", () => {
     await store.openConversation("c-carol");
     expect(store.getState().outgoing["c-carol"] ?? []).toEqual([]);
   });
+
+  it("forgets everything of the last person once the server says nobody is signed in here", async () => {
+    routes.set("GET /api/me", () => ({ user: user("dana", "Dana"), options }));
+    routes.set("GET /api/conversations", () => [summary("c-dana")]);
+    routes.set("GET /api/conversations/c-dana", () => ({ ...summary("c-dana"), busy: false, items: [{ kind: "user", id: "m-dana", text: "Dana's private note", at: "2026-11-04T07:00:00.000Z" }] }));
+    await store.loadMe();
+    await store.openConversation("c-dana");
+    expect(store.getState().views["c-dana"]).toBeDefined();
+
+    // Dana signed out in another tab: this tab's next check of who is signed in says nobody.
+    routes.set("GET /api/me", () => ({ user: null, options }));
+    await store.loadMe();
+    const state = store.getState();
+    expect(state.me?.user).toBeNull();
+    expect(state.conversations).toEqual([]);
+    expect(state.views).toEqual({});
+    expect(JSON.stringify(state)).not.toContain("Dana's private note");
+  });
+
+  it("keeps what the same person has in flight when it checks again who is signed in", async () => {
+    routes.set("GET /api/me", () => ({ user: user("erin", "Erin"), options }));
+    routes.set("GET /api/conversations", () => []);
+    await store.loadMe();
+    let answer!: (value: unknown) => void;
+    routes.set("POST /api/conversations", () => new Promise((resolve) => (answer = resolve)));
+    const started = store.startConversation("Plan my week");
+    // The live-events stream reconnects and checks again: still Erin.
+    await store.loadMe();
+    answer({ conversation: summary("c-erin"), messageId: "m-erin" });
+    expect(await started).toBe(true);
+    expect(store.getState().outgoing["new"] ?? []).toEqual([]);
+  });
 });

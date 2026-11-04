@@ -186,6 +186,11 @@ describe("small pieces", () => {
     // Browsers drop tabs and line breaks from URLs, which would turn these into //evil.example.
     expect(safeReturnTo("/\t/evil.example")).toBe("/");
     expect(safeReturnTo("/\n/evil.example")).toBe("/");
+    // Paths that normalize to //host, including one that only does on a second check.
+    expect(safeReturnTo("/..//evil.example")).toBe("/");
+    expect(safeReturnTo("/.%2e//evil.example")).toBe("/");
+    expect(safeReturnTo("/.//front-desk.invalid//outside.example")).toBe("/");
+    for (const value of ["/c/abc", "/a/../b", "/x?y=1"]) expect(safeReturnTo(safeReturnTo(value))).toBe(safeReturnTo(value));
     expect(safeReturnTo(null)).toBe("/");
   });
 

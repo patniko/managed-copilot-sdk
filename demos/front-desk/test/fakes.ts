@@ -79,14 +79,19 @@ class FakeConnection implements PersonalConnection {
             platform.failNextSend = false;
             throw new Error("Connection is closed.");
           }
+          if (platform.dropNextSendReply) {
+            // The platform takes the message and answers it, but the connection drops first: this client hears none of it.
+            platform.dropNextSendReply = false;
+            const unheard = (item: SessionEvent) => {
+              record.events.push(item);
+            };
+            unheard(event("user.message", { messageId: randomUUID(), content: prompt }));
+            void answer(prompt, config.tools ?? [], unheard);
+            throw new Error("Connection is closed.");
+          }
           const messageId = randomUUID();
           emit(event("user.message", { messageId, content: prompt }));
           void answer(prompt, config.tools ?? [], emit);
-          if (platform.dropNextSendReply) {
-            // The platform took the message, but the connection dropped before its reply arrived.
-            platform.dropNextSendReply = false;
-            throw new Error("Connection is closed.");
-          }
           return messageId;
         },
         getEvents: async () => {
@@ -119,6 +124,10 @@ class FakeConnection implements PersonalConnection {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
+    if (this.#platform.failNextDelete) {
+      this.#platform.failNextDelete = false;
+      throw new Error("Connection is closed.");
+    }
     const record = this.#platform.sessions.get(sessionId);
     if (!record || record.deleted || record.owner !== this.#owner) throw new ManagedCopilotError("not_found", `Session ${sessionId} not found`);
     record.deleted = true;
@@ -160,6 +169,8 @@ export class FakePlatform implements Platform {
   failNextSend = false;
   /** The next send reaches the session, then fails as if the connection dropped before the reply. */
   dropNextSendReply = false;
+  /** The next session deletion fails, as when the platform can't be reached. */
+  failNextDelete = false;
   /** While set, loading a resumed session's history waits for it (to test what happens while a conversation reopens). */
   holdHistory: Promise<void> | undefined;
   historyLoads = 0;
@@ -191,8 +202,10 @@ export class FakePlatform implements Platform {
   }
 
   async release(userId: string): Promise<void> {
-    await this.#connections.get(userId)?.close();
+    // As ManagedPlatform does: forgotten at once, closed after.
+    const connection = this.#connections.get(userId);
     this.#connections.delete(userId);
+    await connection?.close();
   }
 
   async closeAll(): Promise<void> {

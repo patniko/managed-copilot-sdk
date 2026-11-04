@@ -145,11 +145,30 @@ describe("people and their conversations", () => {
     await signUp(alice, "Alice", "alice@example.com");
     const id = (await alice.post("/api/conversations", { prompt: "hello" })).body.conversation.id as string;
     await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
+    const stream = await alice.events();
     harness.platform.dropNextSendReply = true;
     expect((await alice.post(`/api/conversations/${id}/messages`, { prompt: "again" })).status).toBe(202);
     await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
     const sent = (await view(alice, id)).items.filter((item) => item.kind === "user").map((item) => ("text" in item ? item.text : ""));
     expect(sent).toEqual(["hello", "again"]);
+    // Her open tabs heard nothing before the drop; after reconnecting, Front Desk sends them what they missed.
+    const items = () => stream.received.filter((event) => event.type === "item" && event.conversationId === id).map((event) => (event.type === "item" ? event.item : undefined));
+    await eventually(() => expect(items().some((item) => item?.kind === "user" && item.text === "again")).toBe(true));
+    await eventually(() => expect(items().some((item) => item?.kind === "assistant" && item.text.includes("again"))).toBe(true));
+    stream.close();
+  });
+
+  it("keeps a conversation whose first message failed when the platform can't confirm it's gone", async () => {
+    const alice = harness.browser();
+    await signUp(alice, "Alice", "alice@example.com");
+    harness.platform.failNextSend = true;
+    harness.platform.failNextDelete = true;
+    expect((await alice.post("/api/conversations", { prompt: "hello" })).status).toBeGreaterThanOrEqual(500);
+    // Still listed (the platform may hold it), so it can be opened later or deleted.
+    const listed = (await alice.get("/api/conversations")).body as { id: string }[];
+    expect(listed).toHaveLength(1);
+    expect(harness.platform.sessions.get(listed[0]!.id)?.deleted).toBe(false);
+    expect((await alice.delete(`/api/conversations/${listed[0]!.id}`)).status).toBe(204);
   });
 
   it("lets go of a conversation that was deleted while it was reopening", async () => {

@@ -134,8 +134,11 @@ function signedOut(reason?: string): void {
 export async function loadMe(): Promise<void> {
   try {
     const me = await api.get<MeResponse>("/api/me");
+    const previous = state.me?.user?.id;
+    // Signed out as far as the server knows (here, in another tab, or the sign-in expired): nothing of theirs stays.
+    if (!me.user && previous) signedOut();
     set({ me, meError: undefined });
-    if (me.user) startSignedIn(me.user);
+    if (me.user) startSignedIn(me.user, me.user.id !== previous);
   } catch (error) {
     set({ meError: message(error) });
   }
@@ -151,8 +154,15 @@ export async function refreshOptions(): Promise<void> {
   }
 }
 
-function startSignedIn(user: UserView): void {
-  identity++;
+/**
+ * Starts (or, for the same person, refreshes) a signed-in session. A different person starts from nothing: whatever
+ * the last one left is cleared, and replies to their requests are dropped. The same person keeps what's in flight.
+ */
+function startSignedIn(user: UserView, newPerson: boolean): void {
+  if (newPerson) {
+    identity++;
+    set({ conversations: [], conversationsLoaded: false, views: {}, viewErrors: {}, outgoing: {}, memories: [], memoryOpen: false });
+  }
   set({ billing: user.billing, signedOutReason: undefined });
   startEvents();
   void loadConversations();
@@ -160,9 +170,10 @@ function startSignedIn(user: UserView): void {
 
 async function finishSignIn(promise: Promise<{ user: UserView }>): Promise<void> {
   const { user } = await promise;
+  const previous = state.me?.user?.id;
   set((current) => ({ me: current.me ? { ...current.me, user } : { user, options: { github: false, localGitHub: false, email: true, inviteRequired: false, appUsers: { available: false } } } }));
   navigate("/", { replace: true });
-  startSignedIn(user);
+  startSignedIn(user, user.id !== previous);
 }
 
 export const signUp = (request: SignUpRequest) => finishSignIn(api.post<{ user: UserView }>("/api/auth/signup", request));

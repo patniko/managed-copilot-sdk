@@ -197,8 +197,11 @@ export class Conversations {
         // The connection behind the session may be gone (the platform restarted, or the bridge exited): reconnect once.
         if (!(error instanceof AppError) || (error.code !== "platform_error" && error.code !== "platform_unavailable")) throw error;
         log.warn("Sending failed; reconnecting and trying once more", { user: user.id, conversation: id, error: error.message });
+        // What this person's tabs show now, so they get whatever the reopened conversation has beyond it.
+        const shown = new Map(live.transcript.items.map((item) => [item.id, JSON.stringify(item)]));
         await this.release(user.id);
         live = await this.#ensureLive(user, record);
+        this.#resync(live, shown);
         // The first try may have reached the runtime before the connection dropped: never send the same message twice.
         const arrived = userMessages(live.transcript)
           .slice(known)
@@ -262,8 +265,10 @@ export class Conversations {
     // Reopens already under way finish on their own and let their sessions go; new requests start afresh.
     for (const [id, pending] of this.#opening) if (pending.userId === userId) this.#opening.delete(id);
     const mine = [...this.#live.values()].filter((live) => live.userId === userId);
-    await Promise.all(mine.map((live) => this.#drop(live)));
-    await this.#deps.platform.release(userId);
+    // The platform forgets the connection before it awaits anything, so a request that arrives meanwhile opens a new
+    // one instead of picking up this one as it closes.
+    const detached = this.#deps.platform.release(userId);
+    await Promise.all([...mine.map((live) => this.#drop(live)), detached]);
   }
 
   async close(): Promise<void> {
@@ -350,8 +355,9 @@ export class Conversations {
   }
 
   async #resume(user: UserRecord, record: ConversationRecord): Promise<Live> {
-    const epoch = this.#epoch(user.id);
     const person = await this.#deps.people.person(user);
+    // Read just before the connection is opened (nothing awaited in between): a release after this point is noticed below.
+    const epoch = this.#epoch(user.id);
     const connection = await this.#open(user, person).catch((error: unknown) => Promise.reject(this.#fail(user, error)));
     if (connection.route.environment !== record.environment) {
       throw new AppError("route_changed", "This conversation started in a different place than your account uses now, so Front Desk can't continue it.", 409);
@@ -426,12 +432,31 @@ export class Conversations {
     await live.session.disconnect().catch(() => undefined);
   }
 
-  /** Removes a conversation whose first message never went through, here and on the platform. */
+  /**
+   * Removes a conversation whose first message never went through, here and on the platform. When the platform can't
+   * confirm it's gone (it may even hold the message), it stays listed, so the person can open it later or delete it.
+   */
   async #discard(user: UserRecord, live: Live): Promise<void> {
     await this.#drop(live);
-    await live.connection.deleteSession(live.id).catch(() => undefined);
+    try {
+      await live.connection.deleteSession(live.id);
+    } catch (error) {
+      if (managedErrorOf(error)?.code !== "not_found") {
+        log.warn("Kept a conversation whose first message failed: Managed Copilot couldn't delete it", { user: user.id, conversation: live.id, error: (error as Error).message });
+        return;
+      }
+    }
     this.#deps.store.deleteConversation(user.id, live.id);
     this.#publish(user.id, { type: "conversation.deleted", id: live.id });
+  }
+
+  /** After a reconnect: sends this person's tabs whatever the reopened conversation shows beyond what they had. */
+  #resync(live: Live, shown: ReadonlyMap<string, string>): void {
+    for (const item of live.transcript.items) {
+      if (shown.get(item.id) !== JSON.stringify(item)) this.#publish(live.userId, { type: "item", conversationId: live.id, item });
+    }
+    const record = this.#deps.store.getConversation(live.userId, live.id);
+    if (record) this.#publish(live.userId, { type: "conversation", conversation: this.#summary(record) });
   }
 
   /** Describes a failure for the person, and handles one that means their GitHub sign-in ended. */
@@ -478,7 +503,10 @@ export class Conversations {
       }
     }
     for (const [userId, lives] of byUser) {
-      const quiet = lives.every((live) => !live.transcript.busy && now - live.transcript.lastActivity > this.#deps.config.idleCloseMs);
+      // Someone reopening a conversation, or who opened their connection lately, isn't idle.
+      const reopening = [...this.#opening.values()].some((pending) => pending.userId === userId);
+      const lately = now - (this.#connected.get(userId) ?? 0) <= this.#deps.config.idleCloseMs;
+      const quiet = !reopening && !lately && lives.every((live) => !live.transcript.busy && now - live.transcript.lastActivity > this.#deps.config.idleCloseMs);
       if (this.#deps.hub.count(userId) === 0 && quiet) {
         log.info("Closing an idle person's connection", { user: userId, conversations: lives.length });
         await this.release(userId).catch(() => undefined);
