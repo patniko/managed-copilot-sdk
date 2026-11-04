@@ -4,11 +4,15 @@
 // (--headless, --no-auto-update, --stdio, ...), and relays framed JSON-RPC between stdio and the gateway.
 // Starts no local agent and never prints credentials.
 import {
+  APP_KEY_HEADER,
+  APP_USER_HEADER,
+  APP_USER_NAME_HEADER,
   BRIDGE_ENV,
   BRIDGE_HELLO,
   BRIDGE_MAX_FRAME_BYTES,
   BRIDGE_SUBPROTOCOL,
   BRIDGE_WELCOME,
+  encodeHeaderValue,
   type BridgeConfig,
   type BridgeHello,
   type BridgeWelcome,
@@ -42,10 +46,30 @@ function readConfig(): BridgeConfig {
   } catch {
     fail(`${BRIDGE_ENV} is not valid JSON.`);
   }
-  if (typeof config.url !== "string" || typeof config.token !== "string" || !config.token || typeof config.environment !== "object" || config.environment === null) {
-    fail(`${BRIDGE_ENV} is incomplete (url, token, and environment are required).`);
+  if (
+    typeof config.url !== "string" ||
+    typeof config.environment !== "object" ||
+    config.environment === null ||
+    (config.token !== undefined && (typeof config.token !== "string" || !config.token)) ||
+    (config.appKey !== undefined && (typeof config.appKey !== "string" || !config.appKey)) ||
+    (config.appUser !== undefined && (typeof config.appUser !== "object" || config.appUser === null || typeof config.appUser.id !== "string")) ||
+    (!config.token && !(config.appKey && config.appUser))
+  ) {
+    fail(`${BRIDGE_ENV} is incomplete (url, environment, and a GitHub token or an app key with an app user are required).`);
   }
   return config as BridgeConfig;
+}
+
+/** The upgrade request's credentials: a GitHub token, an app key, and the app user it acts for. */
+function credentialHeaders(config: BridgeConfig): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (config.token) headers["authorization"] = `Bearer ${config.token}`;
+  if (config.appKey) headers[APP_KEY_HEADER] = config.appKey;
+  if (config.appUser) {
+    headers[APP_USER_HEADER] = encodeHeaderValue(config.appUser.id);
+    if (config.appUser.name) headers[APP_USER_NAME_HEADER] = encodeHeaderValue(config.appUser.name);
+  }
+  return headers;
 }
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
@@ -126,7 +150,7 @@ function main(): void {
   const config = readConfig();
   const url = checkUrl(config.url);
   const ws = new WebSocket(url, [BRIDGE_SUBPROTOCOL], {
-    headers: { authorization: `Bearer ${config.token}` },
+    headers: credentialHeaders(config),
     perMessageDeflate: false,
     maxPayload: BRIDGE_MAX_FRAME_BYTES,
     // Longer than the gateway's GitHub verification deadline, so its explicit error wins over a generic timeout.

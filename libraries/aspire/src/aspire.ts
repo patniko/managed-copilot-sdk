@@ -40,6 +40,8 @@ export interface AspireBuilder {
     value: { minLength?: number; special?: boolean },
     options?: { secret?: boolean; persist?: boolean },
   ): PromiseLike<object>;
+  /** The AppHost's configuration (user secrets, environment); read for `Azure:SubscriptionId`. */
+  getConfiguration?(): PromiseLike<{ exists(key: string): Promise<boolean>; getConfigValue(key: string): Promise<string> }>;
 }
 
 /** The AppHost's own gateway resource type (the generated `NodeAppResource`). */

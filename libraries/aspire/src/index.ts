@@ -4,6 +4,8 @@ export {
   ManagedCopilotOptionsError,
   normalizeOptions,
   toolDeclaration,
+  type AppKeyBinding,
+  type AppOption,
   type AspireSecret,
   type ManagedCopilotOptions,
   type McpCredentialOption,

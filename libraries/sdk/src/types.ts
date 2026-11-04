@@ -9,6 +9,7 @@ import type {
 } from "@github/copilot-sdk";
 import type {
   AccountInfo,
+  AppUser,
   ArtifactInfo,
   CreateScheduleRequest,
   CreateVaultRequest,
@@ -30,6 +31,7 @@ import type {
   WorkerInfo,
 } from "@managed-copilot/protocol";
 import type { HttpClient } from "./http.js";
+import type { Identity } from "./identity.js";
 
 export interface ConnectOptions {
   /** Deployment URL. Defaults to `MANAGED_COPILOT_URL`, then the running local AppHost. */
@@ -37,12 +39,24 @@ export interface ConnectOptions {
   /**
    * The caller's GitHub token. Defaults to `MANAGED_COPILOT_GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
    * `GITHUB_TOKEN`, then the signed-in GitHub CLI (`gh auth token`). Without one, `connect` fails with
-   * `authentication_required` rather than using another account.
+   * `authentication_required` rather than using another account. Not used by an app connection (`appKey`).
    */
   gitHubToken?: string;
+  /**
+   * This app's key, issued by the AppHost (`copilot.appKey(name)`). Defaults to `MANAGED_COPILOT_APP_KEY`. With a key,
+   * the connection is the app itself, not a GitHub account: it acts for each person through `{ appUser }` (one of your
+   * app's own users, billed to your Foundry) or `{ gitHubToken }` (someone who signed in to your app with GitHub).
+   */
+  appKey?: string;
   /** Label recorded with sessions this process creates. */
   clientName?: string;
 }
+
+/** One of your app's own users, as your app's sign-in identifies them (any identity provider). */
+export type { AppUser };
+
+/** Who an app connection acts for: one of its own users, or a person who signed in to it with GitHub. */
+export type ActingAs = { readonly appUser: AppUser; readonly gitHubToken?: never } | { readonly gitHubToken: string; readonly appUser?: never };
 
 /**
  * SDK-side environment descriptor. Same fields as the wire `EnvironmentRequest`, but `files` accept bytes
@@ -66,6 +80,11 @@ export interface ManagedClientOptions
   > {
   /** Act as this GitHub user, e.g. a backend serving signed-in users. Ownership binds to that account. */
   gitHubToken?: string;
+  /**
+   * Act for one of your app's own users (an app connection only). Their sessions are theirs, scoped to your app, and
+   * their model calls go to the environment's Azure AI Foundry account.
+   */
+  appUser?: AppUser;
   vaults?: string[];
   network?: NetworkSetting;
   /** Python/npm packages installed into each session's sandbox (system packages belong in the image). */
@@ -82,11 +101,15 @@ export type SessionRef = CopilotSession | { readonly sessionId: string } | strin
 export interface ManagedSessionConfig extends SessionConfig {
   /** Environment for this one session; per-session `files`, `packages`, and `env` apply only to it. */
   environment: EnvironmentSelector;
+  /** Create it for one of your app's own users (an app connection only); see `ManagedClientOptions.appUser`. */
+  appUser?: AppUser;
 }
 
 export interface ManagedResumeConfig extends ResumeSessionConfig {
   /** Optional; the platform resolves the session's recorded environment and placement. */
   environment?: EnvironmentSelector;
+  /** Resume it as one of your app's own users, the one who owns it (an app connection only). */
+  appUser?: AppUser;
 }
 
 export interface ActionHandlers {
@@ -237,7 +260,11 @@ export type PlatformEventHandler = (event: PlatformEvent) => void;
 /** Internal state shared by the feature modules. */
 export interface ManagedContext {
   readonly url: string;
-  readonly token: string;
+  /**
+   * Who this connection (or `managed.as(...)` view) acts for by default: a GitHub token, an app key, or an app key with
+   * one of the app's users or a GitHub token.
+   */
+  readonly identity: Identity;
   readonly clientName: string | undefined;
   readonly info: DeploymentInfo;
   readonly account: AccountInfo;
@@ -247,8 +274,9 @@ export interface ManagedContext {
   /** Resources to release on `close()` (event streams, timers). */
   readonly disposables: Set<() => void | Promise<void>>;
   /**
-   * The REST client for the identity that created or resumed a session (`managed.client(env, { gitHubToken })`),
-   * falling back to the connection's own identity. Feature helpers must use it for session-scoped calls.
+   * The REST client for the identity that created or resumed a session (`managed.client(env, { gitHubToken })`,
+   * `{ appUser }`, or a `managed.as(...)` view), falling back to this context's identity. Feature helpers must use it
+   * for session-scoped calls.
    */
   httpFor(sessionId: string): HttpClient;
 }

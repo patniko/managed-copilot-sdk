@@ -1,5 +1,4 @@
 // Owner: core workstream. Builds a stock CopilotClient whose transport is the stdio-to-WSS bridge.
-import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { CopilotClient, RuntimeConnection, type CopilotSession } from "@github/copilot-sdk";
 import {
@@ -13,8 +12,8 @@ import {
   type ErrorCode,
   type SessionInfo,
 } from "@managed-copilot/protocol";
-import type { ManagedState } from "../connection.js";
-import { HttpClient } from "../http.js";
+import { httpForIdentity, type ManagedState } from "../connection.js";
+import { actingIdentity, identityKey, requireActor, type Identity } from "../identity.js";
 import type { EnvironmentSelector, ManagedClientOptions, ManagedResumeConfig, ManagedSessionConfig } from "../types.js";
 
 const BRIDGE_PATH = fileURLToPath(new URL("../bridge.js", import.meta.url));
@@ -99,9 +98,17 @@ function bridgeEnvironment(config: BridgeConfig): Record<string, string> {
 export async function createClient(ctx: ManagedState, environment: EnvironmentSelector, options: ManagedClientOptions = {}): Promise<CopilotClient> {
   const request = toEnvironmentRequest(environment, options);
   checkEnvironment(ctx.info, request);
-  const { gitHubToken, vaults: _vaults, network: _network, packages: _packages, env: _env, files: _files, ...clientOptions } = options;
-  const token = gitHubToken ?? ctx.token;
-  const config: BridgeConfig = { url: connectUrl(ctx.url), token, environment: request, ...(ctx.clientName ? { clientName: ctx.clientName } : {}) };
+  const { gitHubToken, appUser, vaults: _vaults, network: _network, packages: _packages, env: _env, files: _files, ...clientOptions } = options;
+  const identity = actingIdentity(ctx.identity, { ...(gitHubToken !== undefined ? { gitHubToken } : {}), ...(appUser !== undefined ? { appUser } : {}) });
+  requireActor(identity, "managed.client(...)");
+  const config: BridgeConfig = {
+    url: connectUrl(ctx.url),
+    ...(identity.token ? { token: identity.token } : {}),
+    ...(identity.appKey ? { appKey: identity.appKey } : {}),
+    ...(identity.appUser ? { appUser: identity.appUser } : {}),
+    environment: request,
+    ...(ctx.clientName ? { clientName: ctx.clientName } : {}),
+  };
   const client = new CopilotClient({ ...clientOptions, connection: RuntimeConnection.forStdio({ path: BRIDGE_PATH, env: bridgeEnvironment(config) }) });
   try {
     await client.start();
@@ -112,33 +119,23 @@ export async function createClient(ctx: ManagedState, environment: EnvironmentSe
   // Sessions this client creates or resumes act as its identity in REST helpers (files, artifacts, actions).
   client.onLifecycle((event) => {
     if (event.type === "session.deleted") ctx.identities.delete(event.sessionId);
-    else ctx.identities.set(event.sessionId, token);
+    else ctx.identities.set(event.sessionId, identity);
   });
   ctx.clients.add(client);
   return client;
 }
 
-function cacheKey(request: EnvironmentRequest, token: string): string {
-  return `${createHash("sha256").update(token).digest("base64url").slice(0, 16)}:${JSON.stringify(request)}`;
-}
-
-/** The REST client acting as a given GitHub identity. */
-function httpForToken(ctx: ManagedState, token: string): HttpClient {
-  let client = ctx.httpClients.get(token);
-  if (!client) {
-    client = new HttpClient(ctx.url, token);
-    ctx.httpClients.set(token, client);
-  }
-  return client;
+function cacheKey(request: EnvironmentRequest, identity: Identity): string {
+  return `${identityKey(identity)}:${JSON.stringify(request)}`;
 }
 
 /** One client per environment selector and identity, reused by `managed.createSession` / `resumeSession`. */
-async function cachedClient(ctx: ManagedState, environment: EnvironmentSelector, gitHubToken: string | undefined): Promise<CopilotClient> {
-  const key = cacheKey(toEnvironmentRequest(environment), gitHubToken ?? ctx.token);
+async function cachedClient(ctx: ManagedState, environment: EnvironmentSelector, identity: Identity): Promise<CopilotClient> {
+  const key = cacheKey(toEnvironmentRequest(environment), identity);
   let pending = ctx.cachedClients.get(key);
   if (!pending) {
-    // Pass the original selector: createClient encodes files exactly once.
-    pending = createClient(ctx, environment, gitHubToken ? { gitHubToken } : {});
+    // Pass the original selector: createClient encodes files exactly once. The identity is already resolved.
+    pending = createClient({ ...ctx, identity }, environment, {});
     ctx.cachedClients.set(key, pending);
     pending.catch(() => ctx.cachedClients.delete(key));
   }
@@ -148,26 +145,32 @@ async function cachedClient(ctx: ManagedState, environment: EnvironmentSelector,
 }
 
 export async function createManagedSession(ctx: ManagedState, config: ManagedSessionConfig): Promise<CopilotSession> {
-  const { environment, ...sessionConfig } = config;
+  const { environment, appUser, ...sessionConfig } = config;
   if (environment === undefined) throw new ManagedCopilotError("invalid_request", "managed.createSession needs an environment");
-  const client = await cachedClient(ctx, environment, sessionConfig.gitHubToken);
+  const identity = actingIdentity(ctx.identity, { ...(sessionConfig.gitHubToken !== undefined ? { gitHubToken: sessionConfig.gitHubToken } : {}), ...(appUser !== undefined ? { appUser } : {}) });
+  requireActor(identity, "managed.createSession(...)");
+  const client = await cachedClient(ctx, environment, identity);
   const session = await client.createSession(sessionConfig);
   // REST helpers called right away act as the identity that created it (the lifecycle notification can come later).
-  ctx.identities.set(session.sessionId, sessionConfig.gitHubToken ?? ctx.token);
+  ctx.identities.set(session.sessionId, identity);
   return session;
 }
 
 export async function resumeManagedSession(ctx: ManagedState, sessionId: string, config: ManagedResumeConfig = {}): Promise<CopilotSession> {
-  const { environment, ...resumeConfig } = config;
+  const { environment, appUser, ...resumeConfig } = config;
+  const named = resumeConfig.gitHubToken !== undefined || appUser !== undefined;
+  const identity = named
+    ? actingIdentity(ctx.identity, { ...(resumeConfig.gitHubToken !== undefined ? { gitHubToken: resumeConfig.gitHubToken } : {}), ...(appUser !== undefined ? { appUser } : {}) })
+    : (ctx.identities.get(sessionId) ?? ctx.identity);
+  requireActor(identity, "managed.resumeSession(...)");
   let selector: EnvironmentSelector | undefined = environment;
   if (selector === undefined) {
-    const http = resumeConfig.gitHubToken ? httpForToken(ctx, resumeConfig.gitHubToken) : ctx.httpFor(sessionId);
-    const info = await http.get<SessionInfo>(ROUTES.session(sessionId));
+    const info = await httpForIdentity(ctx, identity).get<SessionInfo>(ROUTES.session(sessionId));
     const declared = ctx.info.environments.some((candidate) => candidate.name === info.environment);
     selector = declared ? info.environment : { type: info.type, ...(info.sandbox?.size && info.type !== "shared" ? { size: info.sandbox.size } : {}) };
   }
-  const client = await cachedClient(ctx, selector, resumeConfig.gitHubToken);
+  const client = await cachedClient(ctx, selector, identity);
   const session = await client.resumeSession(sessionId, resumeConfig);
-  ctx.identities.set(session.sessionId, resumeConfig.gitHubToken ?? ctx.token);
+  ctx.identities.set(session.sessionId, identity);
   return session;
 }

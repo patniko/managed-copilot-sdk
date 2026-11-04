@@ -31,6 +31,13 @@ export type SandboxSize = (typeof SIZE_NAMES)[number];
 
 const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,62}$/;
+/** An Azure AI Foundry (Cognitive Services) account name. */
+const FOUNDRY_ACCOUNT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/;
+const AZURE_SUBSCRIPTION_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+/** An Azure resource group name. */
+const RESOURCE_GROUP_NAME = /^[-\w.()]{1,89}[-\w()]$/;
+/** A model deployment name on a Foundry account. */
+const FOUNDRY_DEPLOYMENT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 const HostPatternSchema = z.string().min(1).refine(
   (value) => {
@@ -136,7 +143,11 @@ export const EnvironmentConfigSchema = z
     vaults: z.array(z.string().regex(RESOURCE_NAME)).optional(),
     /** Operator approval for the agent scheduling tools (`schedule_task`, `list_schedules`, `cancel_schedule`). */
     scheduling: z.boolean().optional(),
-    inference: z.object({ foundry: z.string().min(1) }).strict().optional(),
+    /**
+     * Sends the environment's model calls to an Azure AI Foundry account declared in `foundry`, billed to your Azure
+     * subscription, instead of each user's GitHub Copilot plan (spec section 15). `models` then names deployments.
+     */
+    inference: z.object({ foundry: z.string().regex(FOUNDRY_ACCOUNT_NAME, "Expected a Foundry account name declared in foundry") }).strict().optional(),
     github: z.object({ publish: z.boolean().optional() }).strict().optional(),
     /** Idle seconds before a sandbox may stop compute (after pending work drains). */
     idleTimeoutSeconds: z.number().int().positive().optional(),
@@ -210,6 +221,42 @@ export const InlineSchema = z
   })
   .strict();
 
+/**
+ * An existing Azure AI Foundry (AIServices) account the platform calls with its own Azure identity (spec section 15):
+ * `az login` with `aspire run`, the gateway's managed identity with `aspire deploy`, which assigns it the Cognitive
+ * Services OpenAI User role on the account. The record key is the account's name.
+ */
+export const FoundryAccountSchema = z
+  .object({
+    /** The account's resource group. */
+    resourceGroup: z.string().regex(RESOURCE_GROUP_NAME, "Expected an Azure resource group name"),
+    /** The account's subscription. Defaults to the deployment's (`Azure:SubscriptionId`), then the Azure CLI's. */
+    subscription: z.string().regex(AZURE_SUBSCRIPTION_ID, "Expected an Azure subscription ID").optional(),
+    /** Model deployments on the account that sessions may use (deployment names). The first is the default. */
+    deployments: z.array(z.string().regex(FOUNDRY_DEPLOYMENT_NAME, "Expected a model deployment name")).min(1),
+  })
+  .strict();
+export type FoundryAccount = z.infer<typeof FoundryAccountSchema>;
+
+/**
+ * An app that signs in its own users and vouches for them with its key (spec section 2). Requests carrying the key act
+ * for one of the app's users (model calls go to Foundry), a GitHub user who signed in to it, or the app itself.
+ */
+export const AppSchema = z
+  .object({
+    /** The environments any request through this app's key may use. */
+    environments: z.array(z.string().regex(RESOURCE_NAME)).min(1),
+    /**
+     * Admit every GitHub account that comes through this app's key, not only those `access` allows. Direct use of the
+     * deployment stays limited to `access`.
+     */
+    anyGitHubUser: z.boolean().optional(),
+    /** The app's key, delivered to the gateway in this environment variable (`addManagedCopilot` generates it). */
+    key: SecretRefSchema,
+  })
+  .strict();
+export type AppConfig = z.infer<typeof AppSchema>;
+
 export const ManagedCopilotConfigSchema = z
   .object({
     name: z.string().regex(RESOURCE_NAME).default("copilot"),
@@ -223,6 +270,10 @@ export const ManagedCopilotConfigSchema = z
     network: NetworkSettingSchema.optional(),
     environments: z.record(z.string().regex(RESOURCE_NAME), EnvironmentConfigSchema),
     inline: InlineSchema.optional(),
+    /** Azure AI Foundry accounts environments can send model calls to (`inference: { foundry }`), by account name. */
+    foundry: z.record(z.string().regex(FOUNDRY_ACCOUNT_NAME, "Expected an Azure AI Foundry account name"), FoundryAccountSchema).optional(),
+    /** Apps that vouch for their own users with an app key (spec section 2), by name. */
+    apps: z.record(z.string().regex(RESOURCE_NAME), AppSchema).optional(),
     vaults: z.record(z.string().regex(RESOURCE_NAME), z.array(VaultCredentialSchema).min(1)).optional(),
     webhooks: z.record(z.string().regex(RESOURCE_NAME), WebhookDeclSchema).optional(),
     schedules: z.record(z.string().regex(RESOURCE_NAME), ScheduleDeclSchema).optional(),
@@ -276,6 +327,36 @@ export const ManagedCopilotConfigSchema = z
         else if (!sandboxedType(env.type) && credentials.some((credential) => "env" in credential)) {
           ctx.addIssue({ code: "custom", path: ["environments", name, "vaults"], message: `Vault "${vault}" holds sandbox credentials, which ${env.type} environments cannot use; use MCP credentials instead` });
         }
+      }
+      const foundry = env.inference?.foundry;
+      if (foundry !== undefined) {
+        const account = config.foundry?.[foundry];
+        if (!account) {
+          ctx.addIssue({ code: "custom", path: ["environments", name, "inference", "foundry"], message: `Unknown Foundry account "${foundry}": declare it in foundry` });
+        } else {
+          for (const [index, model] of (env.models ?? []).entries()) {
+            if (!account.deployments.includes(model)) {
+              ctx.addIssue({
+                code: "custom",
+                path: ["environments", name, "models", index],
+                message: `"${model}" is not a deployment of Foundry account "${foundry}" (${account.deployments.join(", ")})`,
+              });
+            }
+          }
+        }
+      }
+      if (env.type === "promotable" && env.promoteTo !== undefined && envs[env.promoteTo] && (envs[env.promoteTo]!.inference?.foundry ?? null) !== (foundry ?? null)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["environments", name, "promoteTo"],
+          message: `Environment "${env.promoteTo}" sends model calls ${envs[env.promoteTo]!.inference?.foundry ? `to Foundry account "${envs[env.promoteTo]!.inference!.foundry}"` : "to each user's Copilot plan"}, and "${name}" ${foundry ? `to Foundry account "${foundry}"` : "to each user's Copilot plan"}: promotion keeps a session's billing route, so both must match`,
+        });
+      }
+    }
+    for (const [name, app] of Object.entries(config.apps ?? {})) {
+      for (const [index, environment] of app.environments.entries()) {
+        if (!envs[environment]) ctx.addIssue({ code: "custom", path: ["apps", name, "environments", index], message: `Unknown environment "${environment}"` });
+        else if (app.environments.indexOf(environment) !== index) ctx.addIssue({ code: "custom", path: ["apps", name, "environments", index], message: `Environment "${environment}" is listed twice` });
       }
     }
     if (config.inline?.types.includes("orchestrator")) {
