@@ -418,7 +418,11 @@ function recordDirectory(host: HostTools, appHost: string): string {
   return join(host.deploymentsDirectory(), createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
 }
 
-/** Reads only the target and parameter names of a deployment record; the file also holds secrets, which are never printed. */
+/**
+ * Reads only the target and parameter names of a deployment record; the files also hold secrets, which are never read
+ * out. Aspire 13.6 keeps its current state beside `production.json`, in `production.json.migration`, whose
+ * `ClaimedSections` name the parameters it holds.
+ */
 function readRecord(directory: string): DeploymentRecord | undefined {
   const file = join(directory, "production.json");
   try {
@@ -429,9 +433,21 @@ function readRecord(directory: string): DeploymentRecord | undefined {
     };
     const parameters = new Set(Object.keys(parsed).filter((key) => /^parameters:/i.test(key)).map((key) => key.toLowerCase()));
     if (parsed.Parameters && typeof parsed.Parameters === "object") for (const key of Object.keys(parsed.Parameters)) parameters.add(`parameters:${key}`.toLowerCase());
+    for (const section of claimedSections(join(directory, "production.json.migration"))) if (/^parameters:/i.test(section)) parameters.add(section.toLowerCase());
     return { directory, subscription: value("SubscriptionId"), resourceGroup: value("ResourceGroup"), modified: statSync(file).mtimeMs, parameters };
   } catch {
     return undefined;
+  }
+}
+
+function claimedSections(file: string): string[] {
+  try {
+    // Aspire serializes the list as a JSON string inside the JSON document.
+    const { ClaimedSections: raw } = JSON.parse(readFileSync(file, "utf8")) as { ClaimedSections?: unknown };
+    const sections: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(sections) ? sections.filter((section): section is string => typeof section === "string") : [];
+  } catch {
+    return [];
   }
 }
 
@@ -441,19 +457,28 @@ const targets = (record: DeploymentRecord | undefined, subscription: string, res
 /**
  * The AppHost's own parameters from its user secrets (OAuth clients and the like), as environment variables for
  * `aspire deploy`, which doesn't load user secrets. Left out: the settings this command passes itself, the apps' token,
- * the keys the platform generates for a deployment, and every parameter the deployment's record already keeps (the
- * deployment keeps its value; `Parameters__<name>` in the environment replaces one). A variable already in this
- * process's environment wins over the user secret.
+ * the keys the platform generates for a deployment, and every parameter the deployment's record already keeps (Aspire's
+ * saved deployment state wins over the environment, so it keeps its value either way). A value the caller already set in
+ * this process's environment, under any spelling Aspire reads the same, wins over the user secret.
  */
 function appHostParameters(ctx: Context, settings: AppHostSettings, name: string, kept: ReadonlySet<string>, own: readonly string[]): Record<string, string> {
-  const skip = new Set([...own, "Parameters:app-github-token", ...GENERATED_KEYS.map((suffix) => `Parameters:${name}-${suffix}`)].map((key) => key.toLowerCase()));
+  const skip = new Set([...own, "Parameters:app-github-token", ...GENERATED_KEYS.map((suffix) => `Parameters:${name}-${suffix}`), ...kept].map(configKey));
+  const caller = new Set(
+    Object.entries(ctx.env)
+      .filter(([, value]) => value !== undefined)
+      .map(([variable]) => configKey(variable)),
+  );
   const parameters: Record<string, string> = {};
   for (const [key, value] of settings.entries()) {
-    if (!/^Parameters:[A-Za-z0-9][A-Za-z0-9-]*$/.test(key) || skip.has(key.toLowerCase()) || kept.has(key.toLowerCase())) continue;
-    const variable = key.replace(":", "__");
-    if (ctx.env[variable] === undefined) parameters[variable] = value;
+    if (!/^Parameters:[A-Za-z0-9][A-Za-z0-9_-]*$/.test(key) || skip.has(configKey(key)) || caller.has(configKey(key))) continue;
+    parameters[key.replace(":", "__")] = value;
   }
   return parameters;
+}
+
+/** How Aspire matches a setting: case-insensitively, `__` for `:`, and `_` for `-` in a parameter's name. */
+function configKey(key: string): string {
+  return key.replace(/__/g, ":").toLowerCase().replace(/_/g, "-");
 }
 
 /** `az account show` output; the account's name is compared, never printed. */
