@@ -169,7 +169,7 @@ class PreviewServer {
     const brief = request.brief?.trim() ?? "";
     if (!title) return failure(400, "invalid_request", "Give the work order a title.");
     if (brief.length < 40) return failure(400, "invalid_request", "The brief is too short. Describe what to build in a few sentences.");
-    if (request.mode !== undefined && request.mode !== "agent" && request.mode !== "classic") return failure(400, "invalid_request", "Choose Agent-led or Classic.");
+    if (request.mode !== undefined && request.mode !== "agent" && request.mode !== "classic") return failure(400, "invalid_request", "Choose Agent-led or App-driven.");
     const now = new Date().toISOString();
     const workOrder = withPreviewCoordinator({
       id: `wo_${Date.now().toString(36)}`,
