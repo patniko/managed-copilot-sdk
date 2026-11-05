@@ -606,7 +606,14 @@ applies the session's policy and attaches vault credentials. Anything else is re
   supervisor runs it as `${MANAGED_COPILOT_INSTANCE:-mc}-egress` (read-only root, no capabilities, CA volume
   `${instance}-egress-data`) on `${instance}-egress-wan` (its default route) and `${instance}-sandboxes`; the sandbox
   provider connects it to each per-sandbox network with alias `mc-egress`. It listens on `0.0.0.0:3128` and calls the
-  gateway at `http://host.docker.internal:<port>` with an egress-scoped key (never the platform key). Every connection
+  gateway at `http://host.docker.internal:<port>` with an egress-scoped key (never the platform key). Docker Desktop
+  maps `host-gateway` to the host's loopback; native Docker Engine (Linux) maps it to a bridge address that a gateway
+  listening on `127.0.0.1` never sees. So a loopback-only gateway with no `MANAGED_COPILOT_EGRESS_GATEWAY_URL` offers
+  the egress WAN network's bridge address to `EgressListener` (`network/egress-listener.ts`): when binding it succeeds
+  (the engine shares this kernel), the gateway also listens there, on its own port when free, serving only
+  `EGRESS_ROUTES` (404 for everything else), and the container gets `--add-host host.docker.internal:<bridge>`. When
+  binding fails with `EADDRNOTAVAIL` (a VM engine), it keeps `host-gateway`. The mapping is part of the container's
+  configuration hash. Every connection
   needs the sandbox's proxy credential (Basic, `sandboxId:secret`; the proxy only holds its SHA-256), optionally
   pinned to the sandbox's address; until the first registration snapshot, or 30 s after the gateway stream drops, it
   fails closed with 503, and at that 30 s deadline it also closes every open connection. Registrations are re-checked
@@ -1947,7 +1954,7 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | Demo gallery port | 7460 | `pnpm gallery` (`demos/gallery`); shifted by `MANAGED_COPILOT_PORT_OFFSET`, like the demos it links to |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix for Docker resources (`-egress`, `-egress-wan`, `-sandboxes`, `-relay`, `-sbx-*`) |
 | `MANAGED_COPILOT_EGRESS` | `auto` | `auto` starts the egress container on first need, `docker` at gateway start, `external` expects an operator-run proxy, `off` runs none: sandboxes that need egress (network access or vault environment variables) fail at once with `capability_unavailable` unless a proxy is connected, and `network: false` sandboxes work as usual |
-| `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container |
+| `MANAGED_COPILOT_EGRESS_GATEWAY_URL` | `http://host.docker.internal:<port>` | Gateway URL as seen from the egress container. Unset, a loopback-only gateway on native Docker Engine also listens on the egress network's bridge address (egress routes only) and maps `host.docker.internal` there |
 | `MANAGED_COPILOT_EGRESS_KEY` | generated, sealed in the ledger | Egress-scoped internal API key (set it on both sides for `external`) |
 | `MANAGED_COPILOT_EGRESS_ALLOWED_PORTS` / `_PRIVATE_HOSTS` / `_PROTECTED_CIDRS` / `_BLOCKED_CIDRS` | `80,443` / none / `10.213.0.0/16` / none | Operator destination rules shared by the proxy and gateway-side fetches |
 | `MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64` | none | Extra CA certificates (base64 PEM) the proxy trusts for vault hosts |
