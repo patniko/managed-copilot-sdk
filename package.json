@@ -15,7 +15,8 @@
     "clean": "pnpm -r --if-present run clean",
     "dev": "aspire run",
     "walkthrough": "pnpm --silent --filter @managed-copilot/walkthroughs walkthrough",
-    "gallery": "pnpm --silent --filter @managed-copilot/demo-gallery start"
+    "gallery": "pnpm --silent --filter @managed-copilot/demo-gallery start",
+    "qa": "pnpm --silent --filter @managed-copilot/qa qa"
   },
   "devDependencies": {
     "@managed-copilot/aspire": "workspace:*",

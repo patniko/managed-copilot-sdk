@@ -99,4 +99,5 @@ Each page answers one question, diagram first.
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../libraries/cli/README.md) | Every command |
 | [Spec snippets](../tests/snippets/README.md) | Every spec snippet as an automated acceptance check |
+| [Quality assurance](qa.md) | Every flow mapped to its checks, the release gate, and `pnpm qa` to run them by tier |
 | [Demos](../README.md#demos) | Nine apps built on the platform, one per use case, from a 25-customer help desk to an on-call incident commander |

@@ -40,7 +40,13 @@ pnpm build                                  # every workspace package, in depend
 pnpm test                                   # every package's vitest suite
 pnpm --filter @managed-copilot/gateway test # one package
 aspire run                                  # the platform and demos locally
+pnpm qa e2e                                 # opt-in end-to-end tests (Docker, real models)
+pnpm qa local                               # every snippet, walkthrough, and demo script against aspire run
 ```
+
+`docs/qa.md` maps every user-facing flow to its checks. When you add a snippet, walkthrough, demo script, or opt-in
+test, add its check to `tests/qa/src/catalog.ts`, map it to a flow in `docs/qa.md`, and run `pnpm qa --update-docs`;
+`pnpm test` fails until you do.
 
 ## Conventions
 
