@@ -1,7 +1,6 @@
-import { AlertIcon, CommentIcon, ContainerIcon, CopyIcon, HistoryIcon, SyncIcon, TerminalIcon, TrashIcon, TriangleDownIcon } from "@primer/octicons-react";
+import { AlertIcon, CommentIcon, ContainerIcon, HistoryIcon, SyncIcon, TerminalIcon, TrashIcon, TriangleDownIcon } from "@primer/octicons-react";
 import { useEffect, useState } from "react";
 import type { Blueprint, ConversationView as View, StyleInfo } from "../../shared/types.js";
-import { copyText } from "../lib/clipboard.js";
 import { confirmAction } from "../lib/confirm.js";
 import { conversationStats, type ConversationStats } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
@@ -9,13 +8,13 @@ import { plural } from "../lib/format.js";
 import { conversationHref, homeHref, type ConversationTab } from "../lib/router.js";
 import { deleteConversation, loadConversation, openInCli, useStore } from "../lib/store.js";
 import { STYLE_META } from "../lib/styles.js";
-import { toast } from "../lib/toast.js";
 import { usePopover } from "../lib/usePopover.js";
 import { Chat } from "./Chat.js";
 import { Sandboxes } from "./Sandboxes.js";
 import { SharedRuntime, StyleDiagram } from "./Styles.js";
 import { Timeline } from "./Timeline.js";
 import { Button } from "./ui/Button.js";
+import { CopyButton } from "./ui/CopyButton.js";
 import { EmptyState } from "./ui/Feedback.js";
 import { OverflowMenu } from "./ui/Menu.js";
 import { Spinner } from "./ui/Spinner.js";
@@ -87,11 +86,6 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
     setDeleting(false);
   };
 
-  const copyAttach = async (): Promise<void> => {
-    if (await copyText(view.attachCommand)) toast.success("Copied the Copilot CLI command", view.attachCommand);
-    else toast.error("Couldn't copy to the clipboard", view.attachCommand);
-  };
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="flex min-h-14 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2 sm:px-6">
@@ -103,9 +97,20 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
         </div>
         <div className="flex shrink-0 items-center gap-3">
           <Counters view={view} stats={stats} />
-          <Button size="sm" icon={TerminalIcon} onClick={() => (canLaunch ? void openInCli(view.id) : void copyAttach())} aria-label={canLaunch ? "Open in Copilot CLI" : "Copy the command that opens this conversation in Copilot CLI"}>
-            <span className="max-sm:sr-only">{canLaunch ? "Open in Copilot CLI" : "Copy CLI command"}</span>
-          </Button>
+          <span className="inline-flex items-center gap-1">
+            {canLaunch ? (
+              <Button size="sm" icon={TerminalIcon} onClick={() => void openInCli(view.id)} aria-label="Open in Copilot CLI">
+                <span className="max-sm:sr-only">Open in Copilot CLI</span>
+              </Button>
+            ) : null}
+            {canLaunch ? (
+              <CopyButton text={view.attachCommand} label="Copy the command that opens this conversation in Copilot CLI" />
+            ) : (
+              <CopyButton text={view.attachCommand} label="Copy the command that opens this conversation in Copilot CLI" variant="default">
+                Copy CLI command
+              </CopyButton>
+            )}
+          </span>
           {deleting ? (
             <span role="status" className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
               <Spinner size={16} />
@@ -114,10 +119,7 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
           ) : (
             <OverflowMenu
               label="Conversation actions"
-              items={[
-                ...(canLaunch ? [{ label: "Copy Copilot CLI command", icon: CopyIcon, onSelect: () => void copyAttach() }] : []),
-                { label: "End and delete sandboxes", icon: TrashIcon, danger: true, onSelect: () => void remove() },
-              ]}
+              items={[{ label: "End and delete sandboxes", icon: TrashIcon, danger: true, onSelect: () => void remove() }]}
             />
           )}
         </div>

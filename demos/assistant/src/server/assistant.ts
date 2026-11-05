@@ -9,6 +9,7 @@ import type { AccountInfo, VerifiedWebhookEvent } from "@managed-copilot/sdk";
 import type { AgendaView, ConnectionsView, DecisionRequest, OfflineView, ScheduleView, SendMessageRequest, ServerEvent, Snapshot } from "../shared/protocol.js";
 import { BackgroundWork } from "./background.js";
 import type { AssistantConfig } from "./config.js";
+import { canLaunchTerminal, launchCli } from "./cli.js";
 import { Conversation, UserFacingError } from "./conversation.js";
 import { backgroundReason, isBackgroundWorkError } from "./describe.js";
 import { EffectLedger } from "./effects.js";
@@ -393,6 +394,7 @@ export class Assistant {
       offline: this.offline.view() as OfflineView,
       agenda: this.#agenda,
       sandboxes: this.sandboxes.view,
+      canLaunchTerminal: canLaunchTerminal(),
     };
   }
 
@@ -516,6 +518,15 @@ export class Assistant {
         void this.refreshAgenda();
         void this.schedules.refresh();
         return { ok: true };
+      }),
+    );
+
+    router.add("POST", "/api/cli/open", async () =>
+      run(async () => {
+        const sessionId = this.conversation.sessionId;
+        if (!sessionId) throw new HttpError(409, "no_conversation", "Send a message first.");
+        const status = this.platform.status;
+        return launchCli(sessionId, status.deployment?.mode === "local" ? status.url : undefined);
       }),
     );
 

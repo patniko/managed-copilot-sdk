@@ -1,4 +1,4 @@
-import type { ApiError, BackgroundView } from "../../shared/protocol";
+import type { ApiError, BackgroundView, OpenCliResponse } from "../../shared/protocol";
 
 export class ApiRequestError extends Error {
   readonly code: string;
@@ -41,6 +41,7 @@ export const api = {
   markRead: (at: string) => request("POST", "/api/read", { at }),
   setTimeZone: (timeZone: string) => request("POST", "/api/settings", { timeZone }),
   retry: () => request("POST", "/api/retry", {}),
+  openCli: () => request<OpenCliResponse>("POST", "/api/cli/open", {}),
   addBriefing: () => request("POST", "/api/schedules/briefing", {}),
   pauseSchedule: (id: string) => request("POST", `/api/schedules/${encodeURIComponent(id)}/pause`, {}),
   resumeSchedule: (id: string) => request("POST", `/api/schedules/${encodeURIComponent(id)}/resume`, {}),

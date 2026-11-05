@@ -55,6 +55,7 @@ function ConnectionIndicator() {
 function CliButton({ id }: { readonly id: string }) {
   const [busy, setBusy] = useState(false);
   const [command, setCommand] = useState<AttachResponse | undefined>();
+  const template = useStore((state) => state.attachCommand);
   const container = useRef<HTMLDivElement>(null);
   const close = useCallback(() => setCommand(undefined), []);
   useDismiss(container, command !== undefined, close);
@@ -64,13 +65,28 @@ function CliButton({ id }: { readonly id: string }) {
     setBusy(false);
     setCommand(result && !result.launched ? result : undefined);
   };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(template.replace("{sessionId}", id));
+      toast.success("Copied the Copilot CLI command", "Paste it in a terminal at the repository root.");
+    } catch {
+      toast.error("Couldn't copy", "Select the command and copy it yourself.");
+    }
+  };
   return (
-    <div ref={container} className="relative">
+    <div ref={container} className="relative flex items-center">
       <Tooltip content="Open in Copilot CLI">
         <button type="button" className="AppHeader-button" aria-label="Open in Copilot CLI" aria-expanded={command !== undefined} disabled={busy} onClick={() => void open()}>
           {busy ? <Spinner size={16} /> : <TerminalIcon size={16} />}
         </button>
       </Tooltip>
+      {template ? (
+        <Tooltip content="Copy Copilot CLI command">
+          <button type="button" className="btn-octicon" aria-label="Copy Copilot CLI command" onClick={() => void copy()}>
+            <CopyIcon size={16} />
+          </button>
+        </Tooltip>
+      ) : null}
       {command ? <CommandPopover result={command} onClose={close} /> : null}
     </div>
   );

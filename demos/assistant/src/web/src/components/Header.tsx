@@ -16,6 +16,7 @@ import {
 } from "@primer/octicons-react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { AccountView, ConversationStatus, OfflineView, PlatformStatus, SandboxEnvironmentView, SandboxesView } from "../../../shared/protocol";
+import { api } from "../api";
 import { relativeTime } from "../format";
 import type { AssistantState } from "../useAssistant";
 import { capitalize, networkLabel } from "./Sandbox";
@@ -219,11 +220,38 @@ function PlatformPill(props: {
   );
 }
 
-/** Copilot CLI: the command that opens this same conversation in a terminal. */
-function CliButton({ sessionId, platform }: { sessionId?: string; platform?: PlatformStatus }) {
+/** Copilot CLI: opens this same conversation in a terminal, with the command a click away to copy. */
+function CliButton({ sessionId, platform, canLaunch }: { sessionId?: string; platform?: PlatformStatus; canLaunch: boolean }) {
   // A local platform's URL works from this machine; naming it keeps the command right when discovery is off.
   const url = platform?.deployment?.mode === "local" ? platform.url : undefined;
   const command = sessionId ? `npx managed-copilot attach ${sessionId}${url ? ` --url ${url}` : ""}` : undefined;
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string>();
+  if (canLaunch) {
+    const open = async () => {
+      setBusy(true);
+      setNote(undefined);
+      try {
+        const result = await api.openCli();
+        setNote(result.launched ? undefined : result.message);
+      } catch (error) {
+        setNote(error instanceof Error ? error.message : "Couldn't open Copilot CLI.");
+      } finally {
+        setBusy(false);
+      }
+    };
+    const tip = !command ? "Open in Copilot CLI (available after your first message)" : (note ?? "Open in Copilot CLI");
+    return (
+      <span className="hidden items-center sm:inline-flex">
+        <Tooltip content={tip} describe={false}>
+          <button type="button" className="AppHeader-button" aria-label="Open in Copilot CLI" aria-disabled={!command || busy} onClick={() => command && !busy && void open()}>
+            {busy ? <Spinner /> : <TerminalIcon className={note ? "text-fg-attention" : undefined} />}
+          </button>
+        </Tooltip>
+        {command && <CopyButton text={command} label="Copy Copilot CLI command" />}
+      </span>
+    );
+  }
   return (
     <Popover
       label="Open in Copilot CLI"
@@ -281,6 +309,7 @@ export function Header(props: {
   account?: AccountView;
   sandboxes?: SandboxesView;
   offline?: OfflineView;
+  canLaunchCli?: boolean;
   unread: number;
   /** Something in the side panel needs the person (shown as a dot on the menu button on narrow screens). */
   panelAttention?: string;
@@ -328,7 +357,7 @@ export function Header(props: {
         )}
         {props.preview}
         <div className="AppHeader-actions min-w-0">
-          <CliButton sessionId={props.conversation?.sessionId} platform={props.platform} />
+          <CliButton sessionId={props.conversation?.sessionId} platform={props.platform} canLaunch={props.canLaunchCli === true} />
           <Tooltip content="Settings" describe={false}>
             <button type="button" className="AppHeader-button" onClick={props.onOpenSettings} aria-label="Settings">
               <GearIcon />
