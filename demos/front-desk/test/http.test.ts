@@ -247,6 +247,22 @@ describe("the daily allowance of people the app pays for", () => {
     expect((await carol.get("/api/me")).body.user.billing).toEqual(expect.objectContaining({ route: "copilot" }));
     expect((await carol.get("/api/me")).body.user.billing.dailyLimit).toBeUndefined();
   });
+
+  it("stops everyone the app pays for at the deployment's total for the day", async () => {
+    harness = await startHarness({ FRONT_DESK_TOTAL_DAILY_LIMIT: "1" });
+    harness.platform.appUsersAvailable = true;
+    const alice = harness.browser();
+    await signUp(alice, "Alice", "alice@example.com");
+    const id = (await alice.post("/api/conversations", { prompt: "one" })).body.conversation.id as string;
+    await eventually(async () => expect((await view(alice, id)).busy).toBe(false));
+
+    const bob = harness.browser();
+    await signUp(bob, "Bob", "bob@example.com");
+    const refused = await bob.post("/api/conversations", { prompt: "hello" });
+    expect(refused.status).toBe(429);
+    expect(refused.body.error.code).toBe("total_daily_limit");
+    expect((await bob.get("/api/me")).body.user.billing.remainingToday).toBe(50);
+  });
 });
 
 describe("people without GitHub on a deployment that can't serve them yet", () => {

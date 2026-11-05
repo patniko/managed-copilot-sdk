@@ -115,7 +115,7 @@ flowchart LR
 
    ```powershell
    ${env:Parameters__app-github-token} = (gh auth token).Trim()   # credential stays out of command arguments
-   aspire secret set Parameters:app-allowed-ips "203.0.113.7/32"   # optional; "*" allows any address
+   aspire secret set Parameters:app-allowed-ips "203.0.113.7/32"   # optional; "*" (any address) also needs Parameters:app-allow-anyone-as-me "true"
    ```
 
 4. Deploy:
@@ -161,6 +161,8 @@ new revision (see "Durable state"). `aspire deploy --clear-cache` deploys again 
 | `Parameters:<name>-operator-users`, `Parameters:<name>-operator-orgs` | No | GitHub accounts or organizations that may open the operator console and operator API (spec section 16), added to the AppHost's `operators`. Without any, the deployed console stays off. Operators must also be allowed to use the platform. |
 | `Parameters:app-github-token` | When the AppHost publishes an app that acts as your account (one that isn't public and doesn't set `githubToken: false`) | Secret. The GitHub token those apps use (`MANAGED_COPILOT_GITHUB_TOKEN`). |
 | `Parameters:app-allowed-ips` | No | IPv4 CIDRs allowed to reach the ingress of every app that isn't public (comma-separated), or `*`. Default: this machine's public IPv4 address as `api.ipify.org` reports it, looked up only when such an app exists. The platform subnet is always allowed (webhooks). |
+| `Parameters:app-allow-anyone-as-me` | When `Parameters:app-allowed-ips` is `*` and an app acts as your account | `"true"` accepts that anyone on the Internet can use those apps as your GitHub account; without it the deploy refuses. `npx managed-copilot access ips set "*"` sets it after asking, and clears it when the list changes again. |
+| `Parameters:front-desk-invite-code`, `Parameters:front-desk-open-signup`, `Parameters:front-desk-total-daily-limit` | The code (or open sign-up `"true"`) when the root AppHost names `Parameters:foundry-account` | Front Desk's email sign-up, which your Foundry pays for. Without a code or open sign-up the deploy refuses. The total caps messages a day for all its email accounts together (default 1000). See [Front Desk](../demos/front-desk/README.md). |
 | `Parameters:<name>-address-space` | No | The VNet's /16 (default `10.42.0.0/16`). Fixed after the first deploy. |
 | `Parameters:<name>-durable-key`, `Parameters:<name>-vault-key` | No | Secrets, 32 bytes base64. Generated and persisted with the deployment when not set, so the sealing keys never sit beside the sealed values on the NFS share. A deployment that predates them had its keys generated into `/data`. Its next gateway wraps each key file that still seals stored data under these parameters (`durable.key.wrapped`, `network/vault.key.wrapped`). The following `aspire deploy` deletes the plaintext files once a gateway that reads the wrapped keys has served for 15 minutes (so a failed rollout's fallback is never left without them). A stale key file the parameter already replaced is renamed `.replaced`. Earlier vaults and background sign-ins stay readable. Keep these parameters: without the right one the gateway refuses to start. |
 | `Parameters:google-client-id`, `Parameters:google-client-secret` | No | The assistant demo's Google sign-in. Add `https://assistant.<environment-domain>/api/google/callback` as a redirect URI. `npx managed-copilot deploy` passes them from the AppHost's user secrets on the deployment that first uses them; after that, see "Changing a saved parameter". |

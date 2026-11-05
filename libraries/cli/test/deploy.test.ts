@@ -292,15 +292,20 @@ describe("access", () => {
     const declined = harness(host, { confirm: async () => false });
     expect(await run(["access", "ips", "set", "*"], declined.io)).toBe(1);
     expect(host.secrets["Parameters:app-allowed-ips"]).toBeUndefined();
+    expect(host.secrets["Parameters:app-allow-anyone-as-me"]).toBeUndefined();
     expect(declined.err()).toContain("anyone on the Internet");
     expect(declined.err()).toContain("publish it with public: true instead");
 
     const h = harness(host);
     expect(await run(["access", "ips", "set", "*", "--yes"], h.io)).toBe(0);
     expect(host.secrets["Parameters:app-allowed-ips"]).toBe("*");
+    expect(host.secrets["Parameters:app-allow-anyone-as-me"]).toBe("true");
     expect(h.out()).toContain("any address");
     expect(h.out()).toContain("Takes effect on the next");
     expect(host.calls.some((call) => call.args.includes("access-restriction"))).toBe(false);
+
+    expect(await run(["access", "ips", "set", "203.0.113.7"], harness(host).io)).toBe(0);
+    expect(host.secrets["Parameters:app-allow-anyone-as-me"]).toBeUndefined();
   });
 
   it("updates nothing live when the named gateway isn't there", async () => {

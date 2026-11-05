@@ -30,6 +30,8 @@ const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const DEFAULT_LOCATION = "westus2";
 const DEFAULT_RESOURCE_GROUP = "managed-copilot-dev";
 const TOKEN_PARAMETER_ENV = "Parameters__app-github-token";
+/** `@managed-copilot/aspire` publishes apps acting as the deployer with app-allowed-ips "*" only when this is "true". */
+const ANYONE_AS_ME = "Parameters:app-allow-anyone-as-me";
 /** Keys `@managed-copilot/aspire` generates for a deployment (`Parameters:<name>-<suffix>`); local values must never replace them. */
 const GENERATED_KEYS = ["platform-key", "durable-key", "vault-key", "egress-key"];
 
@@ -311,6 +313,8 @@ export async function access(ctx: Context): Promise<number | void> {
   }
 
   await settings.set(key, next.join(","));
+  // Confirming "*" above is the deployer's explicit choice; publishing refuses "*" for apps acting as them without it.
+  if (which === "ips") await settings.set(ANYONE_AS_ME, next.includes("*") ? "true" : undefined);
   const live = which === "ips" ? await applyLive(ctx, settings, name, next) : undefined;
   const failed = live?.status === "failed";
   if (ctx.json) {

@@ -309,13 +309,24 @@ export class Conversations {
     };
   }
 
-  /** Counts a message against the daily allowance of people Front Desk pays for. Returns the day it counted on. */
+  /**
+   * Counts a message against the daily allowances of people Front Desk pays for: each person's, and everyone's together
+   * (so many accounts can't run up the deployment's Foundry bill). Returns the day it counted on.
+   */
   #countMessage(user: UserRecord): string | undefined {
     if (!this.#deps.people.appPays(user)) return undefined;
     const day = today();
-    const limit = this.#deps.config.dailyMessageLimit;
-    if (!this.#deps.store.countMessage(user.id, day, limit)) {
+    const { dailyMessageLimit: limit, totalDailyMessageLimit: totalLimit } = this.#deps.config;
+    const counted = this.#deps.store.countMessage(user.id, day, limit, totalLimit);
+    if (counted === "person") {
       throw new AppError("daily_limit", `You've used today's ${limit} messages. Your allowance starts again at midnight UTC.`, 429);
+    }
+    if (counted === "everyone") {
+      throw new AppError(
+        "total_daily_limit",
+        "Front Desk has used everything it can spend on conversations today. Try again after midnight UTC, or sign in with GitHub to use your own Copilot plan.",
+        429,
+      );
     }
     return day;
   }

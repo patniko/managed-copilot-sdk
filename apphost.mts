@@ -220,10 +220,23 @@ if (await configuration.exists("Parameters:front-desk-github-client-id")) {
     .withEnvironment("FRONT_DESK_GITHUB_CLIENT_SECRET", await builder.addParameter("front-desk-github-client-secret", { secret: true }));
 }
 // Anyone who can reach a public Front Desk can create an email account, and your Foundry pays for their messages. To
-// choose who can, set an invitation code (`Parameters:front-desk-invite-code`) and share it with them.
+// choose who can, set an invitation code (`Parameters:front-desk-invite-code`) and share it with them. Deploying with a
+// Foundry account and no code is refused unless `Parameters:front-desk-open-signup` is "true".
 if (await configuration.exists("Parameters:front-desk-invite-code")) {
   await frontDeskApp.withEnvironment("FRONT_DESK_INVITE_CODE", await builder.addParameter("front-desk-invite-code", { secret: true }));
+} else if (publishing && foundryAccount && (await setting("Parameters:front-desk-open-signup"))?.toLowerCase() !== "true") {
+  throw new Error(
+    "Front Desk is public and Parameters:foundry-account pays for its email accounts, so anyone on the Internet could sign up and spend " +
+      "your Foundry budget. Set Parameters:front-desk-invite-code (in the file `aspire secret path` names) and share it with the people " +
+      'you want, or set Parameters:front-desk-open-signup to "true" to let anyone sign up (Parameters:front-desk-total-daily-limit still caps the spend).',
+  );
 }
+// The most messages everyone Front Desk pays for may send in a day, together (default 1000).
+const frontDeskTotalDailyLimit = await setting("Parameters:front-desk-total-daily-limit");
+if (frontDeskTotalDailyLimit && !/^\d+$/.test(frontDeskTotalDailyLimit)) {
+  throw new Error(`Parameters:front-desk-total-daily-limit must be a whole number (got "${frontDeskTotalDailyLimit}").`);
+}
+if (frontDeskTotalDailyLimit) await frontDeskApp.withEnvironment("FRONT_DESK_TOTAL_DAILY_LIMIT", frontDeskTotalDailyLimit);
 
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
 // store's tools bound to that customer's orders.

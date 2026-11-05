@@ -71,6 +71,7 @@ const MIGRATIONS: readonly string[] = [
      messages INTEGER NOT NULL,
      PRIMARY KEY (user_id, day)
    );`,
+  "CREATE INDEX usage_days_day ON usage_days (day);",
 ];
 
 export interface UserRecord {
@@ -406,15 +407,24 @@ export class Store {
     return num(row?.messages) ?? 0;
   }
 
-  /** Counts one message toward today's allowance; false (and nothing counted) when the allowance is used up. */
-  countMessage(userId: string, day: string, limit: number): boolean {
+  /** Messages everyone the app pays for sent on this day. */
+  totalMessagesOn(day: string): number {
+    const row = this.db.prepare("SELECT COALESCE(SUM(messages), 0) AS n FROM usage_days WHERE day = ?").get(day) as Row | undefined;
+    return num(row?.n) ?? 0;
+  }
+
+  /**
+   * Counts one message toward today's allowances: the person's (`limit`) and everyone's together (`totalLimit`). Returns
+   * which allowance is used up instead (and counts nothing), or "counted".
+   */
+  countMessage(userId: string, day: string, limit: number, totalLimit: number): "counted" | "person" | "everyone" {
     return this.transaction(() => {
-      const used = this.messagesOn(userId, day);
-      if (used >= limit) return false;
+      if (this.messagesOn(userId, day) >= limit) return "person";
+      if (this.totalMessagesOn(day) >= totalLimit) return "everyone";
       this.db
         .prepare("INSERT INTO usage_days (user_id, day, messages) VALUES (?, ?, 1) ON CONFLICT (user_id, day) DO UPDATE SET messages = messages + 1")
         .run(userId, day);
-      return true;
+      return "counted";
     });
   }
 

@@ -126,9 +126,11 @@ npx managed-copilot deploy
 Then add the deployed callback URL to the GitHub OAuth app (step 2 above).
 
 Anyone who can reach a public Front Desk can create an email account, and your Foundry pays for their messages: each
-person gets 50 a day, and one address can create 10 accounts an hour. To choose who can, set an invitation code and
-share it with them: add `"Parameters:front-desk-invite-code": "<code>"` to the file `aspire secret path` names, then
-deploy again.
+person gets 50 a day, and one address can create 10 accounts an hour. So when the AppHost names a Foundry account,
+deploying needs an invitation code: add `"Parameters:front-desk-invite-code": "<code>"` to the file `aspire secret path`
+names, share the code with the people you want, then deploy. To let anyone sign up instead, set
+`Parameters:front-desk-open-signup` to `"true"`. Either way, everyone the app pays for shares 1,000 messages a day
+(`Parameters:front-desk-total-daily-limit` changes that).
 
 ## How it works
 
@@ -173,6 +175,7 @@ deploy again.
 | `FRONT_DESK_SEALING_KEY` | a key file in the data directory | Seals the GitHub tokens Front Desk keeps |
 | `FRONT_DESK_INVITE_CODE` | none | Creating an account needs this code (the AppHost's `Parameters:front-desk-invite-code`) |
 | `FRONT_DESK_DAILY_LIMIT` | `50` | Messages a day for each person the app pays for |
+| `FRONT_DESK_TOTAL_DAILY_LIMIT` | `1000` | Messages a day for everyone the app pays for, together (the AppHost's `Parameters:front-desk-total-daily-limit`) |
 | `FRONT_DESK_DATA_DIR` | `.data` | Front Desk's records |
 | `FRONT_DESK_LOCAL_SIGNIN` | on | `0` hides "Use this computer's GitHub sign-in" (it's never offered when deployed) |
 
@@ -229,7 +232,8 @@ account with `inference: { route: "copilot" }`, and each email user's in `front-
 ## Limits
 
 - Email accounts have no email verification or password reset; Front Desk sends no email. Set an invitation code
-  (`FRONT_DESK_INVITE_CODE`) to choose who can create one.
+  (`FRONT_DESK_INVITE_CODE`) to choose who can create one; a deployment with Foundry needs one unless
+  `Parameters:front-desk-open-signup` is `"true"`. `FRONT_DESK_TOTAL_DAILY_LIMIT` caps what all of them spend in a day.
 - Sign-in rate limits are kept in memory, which is right for the one replica Azure runs at a time.
 - Locally, everyone who opens Front Desk on your computer can use "Use this computer's GitHub sign-in", which signs in
   as your GitHub CLI's account. It's never offered by a deployed Front Desk.
