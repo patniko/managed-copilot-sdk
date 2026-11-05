@@ -191,6 +191,7 @@ export function App({ preview }: { preview?: ReactNode }) {
         account={snapshot?.account}
         sandboxes={sandboxes}
         offline={snapshot?.offline}
+        canLaunchCli={snapshot?.canLaunchTerminal === true}
         unread={unread}
         panelAttention={backgroundOff ? "Background work is off" : undefined}
         panelOpen={panelOpen && !wide}

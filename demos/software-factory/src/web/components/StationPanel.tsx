@@ -271,7 +271,7 @@ function PanelHeader({ station, workOrder }: { readonly station: Station; readon
         </div>
       </div>
       {sessionId && attachAllowed ? (
-        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 pl-6">
+        <div className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-2 pl-6">
           <Button
             size="sm"
             icon={TerminalIcon}
@@ -282,8 +282,9 @@ function PanelHeader({ station, workOrder }: { readonly station: Station; readon
           >
             Open in Copilot CLI
           </Button>
+          {attachTemplate && !sessionDeleted ? <CopyButton text={attachTemplate.replace("{sessionId}", sessionId)} label="Copy attach command" /> : null}
           {sessionDeleted ? (
-            <span id="attach-unavailable" className="text-xs text-fg-muted">
+            <span id="attach-unavailable" className="ml-2 text-xs text-fg-muted">
               This session was deleted on the platform.
             </span>
           ) : null}

@@ -339,6 +339,14 @@ export interface Snapshot {
   readonly offline: OfflineView;
   readonly agenda?: AgendaView;
   readonly sandboxes: SandboxesView;
+  /** The server can open Copilot CLI in a console window on this machine (local Windows runs). */
+  readonly canLaunchTerminal?: boolean;
+}
+
+export interface OpenCliResponse {
+  readonly command: string;
+  readonly launched: boolean;
+  readonly message: string;
 }
 
 export type ServerEvent =
