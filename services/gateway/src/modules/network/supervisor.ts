@@ -8,6 +8,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
+import { isIPv4 } from "node:net";
 import { join } from "node:path";
 import { EGRESS_PROXY_HOST } from "@managed-copilot/protocol";
 import { isSubnetOverlap, sharedNetworkSubnets } from "../../docker-subnets.js";
@@ -20,6 +21,12 @@ export interface EgressSupervisorOptions {
   readonly context: string;
   /** Gateway URL as seen from inside the container. */
   readonly gatewayUrl: () => string;
+  /**
+   * Set when the gateway listens on loopback only. Native Docker Engine maps `host-gateway` to a bridge address, which
+   * such a gateway never sees, so the supervisor offers this the egress network's bridge address: when that address is
+   * this machine's, it serves the egress routes there and returns the port, and `host.docker.internal` points at it.
+   */
+  readonly listenOnBridge?: (address: string) => Promise<number | undefined>;
   readonly key: string;
   readonly settings: { readonly allowedPorts: readonly number[]; readonly privateHosts: readonly string[]; readonly protectedCidrs: readonly string[]; readonly blockedCidrs: readonly string[] };
   /** Additional CA certificates the proxy trusts upstream (base64 PEM is passed through the environment). */
@@ -33,6 +40,21 @@ export interface EgressSupervisorOptions {
 interface Run {
   readonly stdout: string;
   readonly stderr: string;
+}
+
+/**
+ * A bridge network's host address from its IPAM entry. Docker Engine 28 and earlier leave `Gateway` empty for networks
+ * created with only `--subnet`, while the default IPAM still gives the bridge the subnet's first host address.
+ */
+export function bridgeAddress(gateway: string, subnet = ""): string | undefined {
+  if (isIPv4(gateway)) return gateway;
+  const [network, bits] = subnet.split("/");
+  const prefix = Number(bits);
+  if (!network || !isIPv4(network) || !Number.isInteger(prefix) || prefix < 0 || prefix > 30) return undefined;
+  const base = network.split(".").reduce((value, octet) => value * 256 + Number(octet), 0);
+  const size = 2 ** (32 - prefix);
+  const first = base - (base % size) + 1;
+  return [24, 16, 8, 0].map((shift) => Math.floor(first / 2 ** shift) % 256).join(".");
 }
 
 export class EgressSupervisor {
@@ -119,6 +141,27 @@ export class EgressSupervisor {
     throw new Error(`No free subnet is available for the ${name} network; remove unused Docker networks or set MANAGED_COPILOT_NETWORK_SUBNET_POOL`);
   }
 
+  /**
+   * Where `host.docker.internal` points inside the container, and the gateway URL behind it. Docker Desktop routes
+   * `host-gateway` to the host's loopback. Native Docker Engine routes it to a bridge address instead, so when the
+   * egress network's bridge address is one of this machine's, the gateway listens there and the container uses it.
+   */
+  async #gatewayHost(): Promise<{ readonly address: string; readonly url: string }> {
+    const fallback = { address: "host-gateway", url: this.#options.gatewayUrl() };
+    const listenOnBridge = this.#options.listenOnBridge;
+    if (!listenOnBridge) return fallback;
+    const { stdout } = await this.#docker(["network", "inspect", "--format", "{{range .IPAM.Config}}{{.Gateway}}|{{.Subnet}} {{end}}", this.wanNetwork]);
+    const address = stdout
+      .split(/\s+/)
+      .map((entry) => {
+        const [gateway = "", subnet] = entry.split("|");
+        return bridgeAddress(gateway, subnet);
+      })
+      .find((candidate) => candidate !== undefined);
+    const port = address ? await listenOnBridge(address) : undefined;
+    return address && port !== undefined ? { address, url: `http://host.docker.internal:${port}` } : fallback;
+  }
+
   /** Makes sure the image, networks, and container exist and match the current configuration. */
   async ensure(): Promise<void> {
     await this.#docker(["version", "--format", "{{.Server.Version}}"]).catch(() => {
@@ -127,9 +170,10 @@ export class EgressSupervisor {
     const image = await this.#image();
     await this.#network(this.wanNetwork, false);
     await this.#network(this.sandboxNetwork, true);
+    const gateway = await this.#gatewayHost();
     const settings = this.#options.settings;
     const env: Record<string, string> = {
-      EGRESS_GATEWAY_URL: this.#options.gatewayUrl(),
+      EGRESS_GATEWAY_URL: gateway.url,
       EGRESS_ALLOWED_PORTS: settings.allowedPorts.join(","),
       EGRESS_PRIVATE_HOSTS: settings.privateHosts.join(","),
       EGRESS_PROTECTED_CIDRS: settings.protectedCidrs.join(","),
@@ -137,7 +181,7 @@ export class EgressSupervisor {
       ...(this.#options.upstreamCa ? { EGRESS_UPSTREAM_CA_B64: this.#options.upstreamCa } : {}),
     };
     const configHash = createHash("sha256")
-      .update(JSON.stringify({ image, env, key: createHash("sha256").update(this.#options.key).digest("hex") }))
+      .update(JSON.stringify({ image, env, host: gateway.address, key: createHash("sha256").update(this.#options.key).digest("hex") }))
       .digest("hex")
       .slice(0, 16);
     const name = this.containerName;
@@ -170,7 +214,7 @@ export class EgressSupervisor {
         "--network",
         this.wanNetwork,
         "--add-host",
-        "host.docker.internal:host-gateway",
+        `host.docker.internal:${gateway.address}`,
         "--volume",
         `${this.volume}:/var/lib/managed-copilot-egress`,
         "--read-only",
