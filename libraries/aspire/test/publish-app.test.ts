@@ -122,6 +122,7 @@ const app = (name: string, port: number, options: Partial<PublishAppOptions> = {
 // Deploy-time settings also come from the environment (`npx managed-copilot deploy` passes them there).
 beforeEach(() => {
   vi.stubEnv("Parameters__app-allowed-ips", undefined);
+  vi.stubEnv("Parameters__app-allow-anyone-as-me", undefined);
   vi.stubEnv("Parameters__app-github-token", undefined);
 });
 
@@ -170,8 +171,15 @@ describe("publishApp access", () => {
     expect(containers.get("dispatch")!.called("publishAsManagedCopilotPublicApp")).toEqual([]);
   });
 
-  it('keeps "*" an explicit deploy-time choice for apps that aren\'t public', async () => {
-    const { publish, containers } = await deploy({ "Parameters:app-allowed-ips": "*" });
+  it('refuses "*" for an app acting as the deployment\'s GitHub account unless Parameters:app-allow-anyone-as-me is "true"', async () => {
+    const refused = await deploy({ "Parameters:app-allowed-ips": "*" });
+    await expect(refused.publish(app("dispatch", 7470))).rejects.toThrow(/"dispatch" acts as your GitHub account.*app-allow-anyone-as-me/s);
+    expect(refused.containers.has("dispatch")).toBe(false);
+    // An app without the token may open to any address.
+    await refused.publish(app("gallery", 7460, { githubToken: false }));
+    expect(refused.containers.get("gallery")!.called("publishAsManagedCopilotApp")[0]![5]).toBe("");
+
+    const { publish, containers } = await deploy({ "Parameters:app-allowed-ips": "*", "Parameters:app-allow-anyone-as-me": "true" });
     await publish(app("dispatch", 7470));
     expect(containers.get("dispatch")!.called("publishAsManagedCopilotApp")[0]![5]).toBe("");
   });

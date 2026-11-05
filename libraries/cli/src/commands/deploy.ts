@@ -30,6 +30,8 @@ const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const DEFAULT_LOCATION = "westus2";
 const DEFAULT_RESOURCE_GROUP = "managed-copilot-dev";
 const TOKEN_PARAMETER_ENV = "Parameters__app-github-token";
+/** `@managed-copilot/aspire` publishes apps acting as the deployer with app-allowed-ips "*" only when this is "true". */
+const ANYONE_AS_ME = "Parameters:app-allow-anyone-as-me";
 /** Keys `@managed-copilot/aspire` generates for a deployment (`Parameters:<name>-<suffix>`); local values must never replace them. */
 const GENERATED_KEYS = ["platform-key", "durable-key", "vault-key", "egress-key"];
 
@@ -311,6 +313,8 @@ export async function access(ctx: Context): Promise<number | void> {
   }
 
   await settings.set(key, next.join(","));
+  // Confirming "*" above is the deployer's explicit choice; publishing refuses "*" for apps acting as them without it.
+  if (which === "ips") await settings.set(ANYONE_AS_ME, next.includes("*") ? "true" : undefined);
   const live = which === "ips" ? await applyLive(ctx, settings, name, next) : undefined;
   const failed = live?.status === "failed";
   if (ctx.json) {
@@ -403,6 +407,32 @@ async function showAccess(ctx: Context, settings: AppHostSettings, name: string)
   ctx.out();
   ctx.out(style.dim("Change with: npx managed-copilot access <users|orgs|operators|operator-orgs|ips> <add|remove|set> <entries>  (\"me\" is you, or this machine for ips)"));
   if (publicApps.length) ctx.out(style.dim("Public apps sign in their own users and hold no GitHub token; the AppHost makes an app public (publishApp's public: true), not ips."));
+}
+
+/** What a Container Apps ingress answers an address its IP rules don't allow. */
+const INGRESS_REFUSED = /RBAC: access denied/i;
+
+/**
+ * Opens each allowlisted app from this machine after a deploy and, when the ingress refuses it, says how to let it in.
+ * A VPN, proxy, or tunnel can reach Azure from another address than the one `api.ipify.org` reports, which the default
+ * allowlist holds.
+ */
+async function checkAppsReachable(ctx: Context, apps: readonly ContainerApp[], ips: readonly string[], detected: string | undefined): Promise<void> {
+  if (ips.includes("*")) return;
+  const targets = apps.flatMap((app) => {
+    const fqdn = app.properties?.configuration?.ingress?.fqdn;
+    return fqdn ? [{ name: app.name, url: `https://${fqdn}/` }] : [];
+  });
+  if (targets.length === 0) return;
+  const answers = await Promise.all(targets.map(async (target) => ({ ...target, answer: await ctx.host.probe(target.url) })));
+  const refused = answers.filter(({ answer }) => answer?.status === 403 && INGRESS_REFUSED.test(answer.body)).map(({ name }) => name);
+  if (refused.length === 0) return;
+  const allowed = ips.length ? ips.join(", ") : detected ? `${detected}/32, the address api.ipify.org reports for this machine` : "this machine's address";
+  ctx.err(
+    `${ctx.errStyle.yellow(ctx.errStyle.warn)} ${refused.join(", ")} refused this machine (403 RBAC: access denied): its traffic reaches Azure from an address that isn't allowed (${allowed}).`,
+  );
+  ctx.err(ctx.errStyle.dim("  A VPN, proxy, or tunnel usually causes this. Allow the address or range your traffic leaves from; it applies at once:"));
+  ctx.err(ctx.errStyle.dim("  npx managed-copilot access ips add <address or range>"));
 }
 
 interface DeploymentRecord {
@@ -797,6 +827,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   ctx.out(`${style.green(style.ok)} Deployed${url ? `: ${style.bold(url)}` : ""}`);
   if (gallery) ctx.out(`  Demo gallery: ${style.bold(gallery)}`);
   if (publicUrls.length) ctx.out(`  Public apps: ${publicUrls.map((publicUrl) => style.bold(publicUrl)).join(", ")} ${style.dim("(any address)")}`);
+  if (deployed) await checkAppsReachable(ctx, Azure.publishedApps(deployed, name), ips, address);
   if (url) {
     ctx.out(style.dim(`  $env:MANAGED_COPILOT_URL = "${url}"`));
     ctx.out(style.dim("  npx managed-copilot status      # check it, then `npx managed-copilot login` once for background work"));

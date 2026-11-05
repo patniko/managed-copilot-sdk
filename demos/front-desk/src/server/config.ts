@@ -39,6 +39,8 @@ export interface FrontDeskConfig {
   readonly inviteCode: string | undefined;
   /** Messages a day for each person whose model use the app pays for. */
   readonly dailyMessageLimit: number;
+  /** Messages a day for everyone the app pays for together: a ceiling on the deployment's Foundry spend. */
+  readonly totalDailyMessageLimit: number;
   /** Behind a proxy that sets X-Forwarded-For (Azure Container Apps ingress): use its last entry as the client address. */
   readonly trustProxy: boolean;
   /** Secure cookies (`__Host-` prefix) when the public URL is HTTPS. */
@@ -113,6 +115,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     localGitHubSignIn: !deployed && isLoopbackHost(publicHost) && env.FRONT_DESK_LOCAL_SIGNIN !== "0",
     inviteCode: env.FRONT_DESK_INVITE_CODE?.trim() || undefined,
     dailyMessageLimit: positiveInt(env.FRONT_DESK_DAILY_LIMIT, 50, "FRONT_DESK_DAILY_LIMIT"),
+    totalDailyMessageLimit: positiveInt(env.FRONT_DESK_TOTAL_DAILY_LIMIT, 1000, "FRONT_DESK_TOTAL_DAILY_LIMIT"),
     trustProxy: env.FRONT_DESK_TRUST_PROXY === "1",
     secureCookies: publicUrl.startsWith("https://"),
     idleCloseMs: positiveInt(env.FRONT_DESK_IDLE_CLOSE_MS, 10 * 60_000, "FRONT_DESK_IDLE_CLOSE_MS"),

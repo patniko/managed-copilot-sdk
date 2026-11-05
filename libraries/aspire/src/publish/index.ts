@@ -141,6 +141,9 @@ async function publicAddress(): Promise<string | undefined> {
   }
 }
 
+/** Set to "true" to publish apps that act as the deployer's GitHub account with Parameters:app-allowed-ips "*". */
+const ANYONE_AS_ME = "Parameters:app-allow-anyone-as-me";
+
 /**
  * Who may open the published apps that aren't public (`public: true`), most of which act as the deployer's GitHub
  * account: Parameters:app-allowed-ips (IPv4 CIDRs, comma-separated, or "*"), else this machine's public address.
@@ -589,6 +592,13 @@ export async function publishApp(builder: AspireBuilder, copilot: ManagedCopilot
   }
   const actsAsAccount = !isPublic && app.githubToken !== false;
   if (!isPublic) deployment.allowedSources ??= await appAllowedSources(publisher);
+  if (actsAsAccount && deployment.allowedSources === "*" && (await setting(publisher, ANYONE_AS_ME))?.toLowerCase() !== "true") {
+    throw new AzurePublishError(
+      `Parameters:app-allowed-ips is "*", and app "${app.name}" acts as your GitHub account, so anyone on the Internet could use it as you ` +
+        "(and spend your Copilot plan and Azure sandboxes). List the IPv4 ranges allowed to open it instead, publish it with githubToken: false, " +
+        `or set ${ANYONE_AS_ME} to "true" to accept that risk.`,
+    );
+  }
   deployment.appsByPort.set(app.port, app.name);
   if (isPublic) deployment.publicApps.push(app.name);
   else deployment.restrictedApps.push({ name: app.name, actsAsAccount });
