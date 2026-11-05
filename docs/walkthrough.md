@@ -14,6 +14,10 @@ flowchart LR
 Run every command from the repository root in PowerShell. Keep three terminals: **T1** for `aspire run`, **T2** for the
 gallery, **T3** for the CLI.
 
+The scripted parts of this walkthrough (each demo's `happy-path`, the walkthroughs, and the spec snippets) also run
+unattended with `pnpm qa local`; see [quality assurance](qa.md). This walkthrough adds what only a person can check: the
+UIs, Copilot CLI in a terminal, and sharing.
+
 ## 0 · Before you start
 
 - [ ] `node -v` prints 24.x, `pnpm -v` prints 10.x, `aspire --version` prints 13.6, and Docker Desktop is running.

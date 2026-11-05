@@ -31,8 +31,11 @@ dashboard or run from a terminal:
 pnpm --filter @managed-copilot/snippets acceptance            # every snippet
 pnpm --filter @managed-copilot/snippets acceptance 02 13      # a selection
 pnpm --filter @managed-copilot/snippets acceptance --strict   # treat "not available yet" as failure
+pnpm --filter @managed-copilot/snippets acceptance 07 --report out.json   # also write each outcome as JSON
 pnpm --filter @managed-copilot/snippets snippet 13            # one snippet; attach opens Copilot CLI here
 ```
+
+`pnpm qa local` and `pnpm qa azure` run each snippet as its own check ([quality assurance](../../docs/qa.md)).
 
 Snippets 10 and 12 use the local-only `webhook-examples` environment, which shares `chat`'s settings.
 The AppHost scopes the `snippets` webhook to that environment so ordinary `chat` sessions do not send

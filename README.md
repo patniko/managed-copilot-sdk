@@ -152,6 +152,7 @@ include a single gateway replica and no warm sandbox pools; see [live qualificat
 | [Demo walkthrough](docs/walkthrough.md) | A checklist to run every demo locally and on Azure |
 | [`managed-copilot` CLI](libraries/cli/README.md) | Sign-in, sessions, Copilot CLI attach, artifacts, schedules, and the console |
 | [Spec snippets](tests/snippets/README.md) | Every spec example as a runnable script |
+| [Quality assurance](docs/qa.md) | The checks every change and release is held to, by tier, and `pnpm qa` to run them |
 | [Developer experience spec](docs/spec/developer-experience.md) | The full API contract and design decisions |
 | [Architecture](docs/architecture.md) | Topology, protocol facts, and a code map |
 | [Threat model](docs/threat-model.md) | Trust boundaries and what the platform defends against |
@@ -165,10 +166,10 @@ include a single gateway replica and no warm sandbox pools; see [live qualificat
 | `services/` | The gateway, operator console, sandbox image, and egress proxy |
 | `deployments/azure` | The Azure target for `aspire deploy` (AWS is a [roadmap](deployments/aws/README.md)) |
 | `environments/` | Per-environment agents, skills, and instructions for the root AppHost |
-| `demos/`, `walkthroughs/`, `tests/snippets` | The demo apps, walkthroughs, and spec snippets |
+| `demos/`, `walkthroughs/`, `tests/snippets`, `tests/qa` | The demo apps, walkthroughs, spec snippets, and QA checks |
 | `apphost.mts` | The root AppHost that `aspire run` starts |
 
-To work on the platform: `pnpm install`, `pnpm build`, `pnpm test`.
+To work on the platform: `pnpm install`, `pnpm build`, `pnpm test`. Before a release, run [`pnpm qa all`](docs/qa.md).
 
 ## License
 
