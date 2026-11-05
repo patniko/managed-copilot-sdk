@@ -154,6 +154,13 @@ class FakeHost implements HostTools {
     return "patniko";
   };
   publicAddress = async () => this.address;
+  /** What each URL answers this machine; unlisted URLs can't be reached. */
+  answers: Record<string, { status: number; body: string }> = {};
+  readonly probed: string[] = [];
+  probe = async (url: string) => {
+    this.probed.push(url);
+    return this.answers[url];
+  };
   deploymentsDirectory = () => this.records;
 }
 
@@ -418,6 +425,29 @@ describe("deploy", () => {
     expect(host.secrets["Parameters:copilot-operator-users"]).toBe("alice");
     expect(h.out()).toContain("updates the deployment there");
     expect(h.out()).not.toContain("Added you");
+  });
+
+  it("says how to let this machine in when an allowlisted app refuses it after deploying", async () => {
+    const host = deployedHost();
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    host.answers["https://dispatch.bravedesert.westus2.azurecontainerapps.io/"] = { status: 403, body: "RBAC: access denied" };
+    host.answers["https://assistant.bravedesert.westus2.azurecontainerapps.io/"] = { status: 200, body: "<!doctype html>" };
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(host.probed.sort()).toEqual(["https://assistant.bravedesert.westus2.azurecontainerapps.io/", "https://dispatch.bravedesert.westus2.azurecontainerapps.io/"]);
+    expect(h.err()).toContain("dispatch refused this machine (403 RBAC: access denied)");
+    expect(h.err()).toContain("198.51.100.9/32, the address api.ipify.org reports for this machine");
+    expect(h.err()).toContain("npx managed-copilot access ips add <address or range>");
+    expect(h.err()).not.toContain("assistant refused");
+  });
+
+  it("stays quiet when the allowlisted apps answer, can't be reached, or refuse for their own reasons", async () => {
+    const host = deployedHost();
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    host.answers["https://dispatch.bravedesert.westus2.azurecontainerapps.io/"] = { status: 403, body: '{"error":"forbidden"}' };
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(h.err()).not.toContain("refused this machine");
   });
 
   it("passes the AppHost's own parameters from its user secrets, never the platform's keys or ones the deployment keeps", async () => {

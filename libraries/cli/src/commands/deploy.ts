@@ -409,6 +409,32 @@ async function showAccess(ctx: Context, settings: AppHostSettings, name: string)
   if (publicApps.length) ctx.out(style.dim("Public apps sign in their own users and hold no GitHub token; the AppHost makes an app public (publishApp's public: true), not ips."));
 }
 
+/** What a Container Apps ingress answers an address its IP rules don't allow. */
+const INGRESS_REFUSED = /RBAC: access denied/i;
+
+/**
+ * Opens each allowlisted app from this machine after a deploy and, when the ingress refuses it, says how to let it in.
+ * A VPN, proxy, or tunnel can reach Azure from another address than the one `api.ipify.org` reports, which the default
+ * allowlist holds.
+ */
+async function checkAppsReachable(ctx: Context, apps: readonly ContainerApp[], ips: readonly string[], detected: string | undefined): Promise<void> {
+  if (ips.includes("*")) return;
+  const targets = apps.flatMap((app) => {
+    const fqdn = app.properties?.configuration?.ingress?.fqdn;
+    return fqdn ? [{ name: app.name, url: `https://${fqdn}/` }] : [];
+  });
+  if (targets.length === 0) return;
+  const answers = await Promise.all(targets.map(async (target) => ({ ...target, answer: await ctx.host.probe(target.url) })));
+  const refused = answers.filter(({ answer }) => answer?.status === 403 && INGRESS_REFUSED.test(answer.body)).map(({ name }) => name);
+  if (refused.length === 0) return;
+  const allowed = ips.length ? ips.join(", ") : detected ? `${detected}/32, the address api.ipify.org reports for this machine` : "this machine's address";
+  ctx.err(
+    `${ctx.errStyle.yellow(ctx.errStyle.warn)} ${refused.join(", ")} refused this machine (403 RBAC: access denied): its traffic reaches Azure from an address that isn't allowed (${allowed}).`,
+  );
+  ctx.err(ctx.errStyle.dim("  A VPN, proxy, or tunnel usually causes this. Allow the address or range your traffic leaves from; it applies at once:"));
+  ctx.err(ctx.errStyle.dim("  npx managed-copilot access ips add <address or range>"));
+}
+
 interface DeploymentRecord {
   readonly directory: string;
   readonly subscription?: string;
@@ -801,6 +827,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   ctx.out(`${style.green(style.ok)} Deployed${url ? `: ${style.bold(url)}` : ""}`);
   if (gallery) ctx.out(`  Demo gallery: ${style.bold(gallery)}`);
   if (publicUrls.length) ctx.out(`  Public apps: ${publicUrls.map((publicUrl) => style.bold(publicUrl)).join(", ")} ${style.dim("(any address)")}`);
+  if (deployed) await checkAppsReachable(ctx, Azure.publishedApps(deployed, name), ips, address);
   if (url) {
     ctx.out(style.dim(`  $env:MANAGED_COPILOT_URL = "${url}"`));
     ctx.out(style.dim("  npx managed-copilot status      # check it, then `npx managed-copilot login` once for background work"));

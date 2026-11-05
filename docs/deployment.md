@@ -584,7 +584,10 @@ identities. Your AppHost's user secrets stay on your machine.
   `githubToken: false`, then with `public: true` (see "Public apps"). If a revision that holds the token stays active
   (a rollout that never became ready), fix or deactivate it first.
 - **An app answers `403 RBAC: access denied`** (some or all requests): its ingress allowlist does not include the
-  address Azure sees for your machine. See "Who can open the apps".
+  address Azure sees for your machine. `npx managed-copilot deploy` opens each allowlisted app after deploying and
+  names the ones that refuse this machine. A VPN, proxy, or tunnel often leaves from another address than the one
+  `api.ipify.org` reports; allow that address or range with `npx managed-copilot access ips add <address or range>`
+  (applied at once). See "Who can open the apps".
 - **"belongs to another account than the Azure CLI's current one"** (`npx managed-copilot deploy`): `aspire deploy`
   signs in as the Azure CLI's current account, so it can't deploy to another signed-in account's subscription. Run
   `az account set --subscription <id>` and deploy again. (A subscription of the current account in another tenant
