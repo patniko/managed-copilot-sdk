@@ -30,7 +30,7 @@ function setup(scripts: Partial<Record<"planner" | "builder" | "reviewer" | "rel
   const fake = platform ?? new WorkerPlatform({ ...scriptsFor(), ...scripts });
   const config: FactoryOptions["config"] = {
     maxSandboxes: 4, publicationTimeoutMs: 1_000,
-    turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 10_000 },
+    turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 10_000, developer: 5_000 },
   };
   const factory = new Factory({ store: db, hub, platform: fake, config, pollMs: 5, readiness: () => ({ ready: true }), account: () => undefined });
   factories.push(factory);

@@ -1,6 +1,7 @@
 import type { Plan, PlanTask, ReviewFinding, TestReport, WorkOrder } from "../../shared/types.js";
 import { formatWorkOrderNumber } from "../../shared/types.js";
 import { MAX_TASKS } from "./plan.js";
+import { changeContinuePrompt } from "./repo.js";
 
 /** Review prompts include file contents up to this budget; larger projects are truncated with a note. */
 const REVIEW_CONTENT_BUDGET = 60_000;
@@ -107,7 +108,8 @@ Commands from that attempt may have been stopped partway, so check the workspace
 }
 
 /** When an interrupted turn didn't finish: it failed, was stopped, or the runtime running it restarted. */
-export function continuePrompt(release: boolean): string {
+export function continuePrompt(release: boolean | "change"): string {
+  if (release === "change") return changeContinuePrompt();
   const command = release ? "npm run check:release" : "npm run check";
   return `Your previous turn was interrupted before it finished, and the commands it was running may have been stopped partway. Check the workspace's current state before relying on earlier results, then continue the task, run \`${command}\` until it passes, and reply with a short summary.`;
 }

@@ -3,9 +3,10 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
 import { TEMPLATES } from "../shared/templates.js";
-import type { ApiErrorBody, CreateWorkOrderRequest, FactoryState } from "../shared/types.js";
+import type { ApiErrorBody, CreateRevisionRequest, CreateWorkOrderRequest, FactoryState, GitHubStatus, MergeRequest } from "../shared/types.js";
 import { attachCommandTemplate, canLaunchTerminal, isValidSessionId, launchAttach } from "./attach.js";
 import type { FactoryConfig } from "./config.js";
+import type { GitHubApi } from "./github.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
 import type { Factory } from "./pipeline/factory.js";
@@ -18,6 +19,8 @@ export interface ApiContext {
   readonly platform: Platform;
   readonly hub: EventHub;
   readonly config: FactoryConfig;
+  /** The factory's GitHub access, for browsing repositories and issues. */
+  readonly github?: GitHubApi;
 }
 
 type Next = () => void;
@@ -27,13 +30,18 @@ type Handler = (req: IncomingMessage, res: ServerResponse, params: Params, url: 
 
 const STATUS_BY_CODE: Record<string, number> = {
   invalid_request: 400,
+  authentication_required: 401,
   not_found: 404,
   conflict: 409,
   platform_unavailable: 503,
+  upstream_unavailable: 502,
+  rate_limited: 429,
   payload_too_large: 413,
   unsupported_media_type: 415,
   forbidden: 403,
 };
+
+const NO_GITHUB: GitHubStatus = { available: false, message: "This factory isn't set up to work with GitHub." };
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -150,14 +158,26 @@ function safeDecode(value: string): string | undefined {
   }
 }
 
-export function factoryState(ctx: ApiContext): FactoryState {
+export async function factoryState(ctx: ApiContext): Promise<FactoryState> {
   return {
     platform: ctx.platform.status,
     workOrders: ctx.factory.list(),
     templates: TEMPLATES,
     attachCommand: attachCommandTemplate(ctx.config.attachUrl),
     canLaunchTerminal: canLaunchTerminal(),
+    github: ctx.github ? await ctx.github.status() : NO_GITHUB,
   };
+}
+
+function requireGitHub(ctx: ApiContext): GitHubApi {
+  if (!ctx.github) throw new StationError("platform_unavailable", NO_GITHUB.message!);
+  return ctx.github;
+}
+
+function issueNumber(value: string): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) throw new StationError("invalid_request", "Issue numbers are positive whole numbers.");
+  return number;
 }
 
 function buildRouter(ctx: ApiContext): Router {
@@ -170,12 +190,53 @@ function buildRouter(ctx: ApiContext): Router {
   };
 
   router.add("GET", "/api/health", (_req, res) => sendJson(res, 200, { status: "ok", platform: ctx.platform.status.state }));
-  router.add("GET", "/api/state", (_req, res) => sendJson(res, 200, factoryState(ctx)));
+  router.add("GET", "/api/state", async (_req, res) => sendJson(res, 200, await factoryState(ctx)));
   router.add("GET", "/api/events", (req, res) => ctx.hub.attach(req, res, [{ type: "platform", platform: ctx.platform.status }]));
+  router.add("GET", "/api/github", async (_req, res) => sendJson(res, 200, ctx.github ? await ctx.github.status() : NO_GITHUB));
+  router.add("GET", "/api/github/repos", async (_req, res, _params, url) => {
+    sendJson(res, 200, await requireGitHub(ctx).listRepositories(url.searchParams.get("q") ?? undefined));
+  });
+  router.add("GET", "/api/github/repos/:owner/:name", async (_req, res, params) => {
+    sendJson(res, 200, await requireGitHub(ctx).repository(params.owner!, params.name!));
+  });
+  router.add("GET", "/api/github/repos/:owner/:name/issues", async (_req, res, params, url) => {
+    sendJson(res, 200, await requireGitHub(ctx).listIssues(params.owner!, params.name!, url.searchParams.get("q") ?? undefined));
+  });
+  router.add("GET", "/api/github/repos/:owner/:name/issues/:number", async (_req, res, params) => {
+    sendJson(res, 200, await requireGitHub(ctx).issue(params.owner!, params.name!, issueNumber(params.number!)));
+  });
   router.add("GET", "/api/work-orders", (_req, res) => sendJson(res, 200, factory.list()));
   router.add("POST", "/api/work-orders", async (req, res) => {
     const body = await readJson<CreateWorkOrderRequest>(req);
-    sendJson(res, 201, factory.create(body));
+    sendJson(res, 201, body && typeof body === "object" && body.github !== undefined ? await factory.createGitHub(body) : factory.create(body));
+  });
+  router.add("POST", "/api/work-orders/:id/revisions", async (req, res, params) => {
+    const body = await readJson<CreateRevisionRequest>(req);
+    sendJson(res, 200, await factory.revise(params.id!, body?.request));
+  });
+  router.add("GET", "/api/work-orders/:id/pull-request", async (_req, res, params) => sendJson(res, 200, await factory.refreshPullRequest(params.id!)));
+  router.add("POST", "/api/work-orders/:id/merge", async (req, res, params) => {
+    const body = await readJson<MergeRequest>(req);
+    sendJson(res, 200, await factory.merge(params.id!, body?.method ?? "squash"));
+  });
+  router.add("GET", "/api/work-orders/:id/media", (_req, res, params, url) => {
+    const stationId = url.searchParams.get("stationId");
+    const path = url.searchParams.get("path");
+    const versionParam = url.searchParams.get("version");
+    if (!stationId || !path) throw new StationError("invalid_request", "Pass stationId and path.");
+    const version = versionParam ? Number(versionParam) : undefined;
+    const media = factory.media(params.id!, stationId, path, Number.isInteger(version) ? version : undefined);
+    if (!media) throw new StationError("not_found", "That screenshot or recording doesn't exist.");
+    const filename = path.split("/").pop() ?? "media";
+    res.writeHead(200, {
+      "content-type": media.contentType,
+      "content-length": media.bytes.length,
+      "cache-control": "private, max-age=3600",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'",
+      "content-disposition": `inline; filename="${filename.replace(/[^A-Za-z0-9._-]/g, "_")}"`,
+    });
+    res.end(Buffer.from(media.bytes));
   });
   router.add("GET", "/api/work-orders/:id", (_req, res, params) => sendJson(res, 200, workOrder(params.id!)));
   router.add("DELETE", "/api/work-orders/:id", async (_req, res, params) => {

@@ -108,7 +108,7 @@ function setup(scripts: ConstructorParameters<typeof FakePlatform>[0], existingS
     platform,
     readiness: () => ({ ready: true }),
     account: () => ({ login: "octocat" }),
-    config: { maxSandboxes: 4, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 5_000 }, publicationTimeoutMs: 1_000 },
+    config: { maxSandboxes: 4, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 5_000, developer: 5_000 }, publicationTimeoutMs: 1_000 },
     pollMs: 10,
     ...overrides,
   });

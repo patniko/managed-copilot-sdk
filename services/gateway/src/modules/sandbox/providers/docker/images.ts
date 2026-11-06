@@ -265,7 +265,9 @@ export class SandboxImages {
           writeFileSync(
             join(dir, "Dockerfile"),
             [
-              `FROM ${current.id}`,
+              // By tag: BuildKit resolves a bare image ID as a registry reference (docker.io/library/sha256:...) and
+              // fails. The tag is content-addressed, and this layer's own tag hashes the exact image ID above.
+              `FROM ${current.tag}`,
               "USER root",
               `RUN apt-get update && apt-get install -y --no-install-recommends ${system.join(" ")} && rm -rf /var/lib/apt/lists/*`,
               "USER 10001:10001",

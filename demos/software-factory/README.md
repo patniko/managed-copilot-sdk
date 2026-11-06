@@ -10,6 +10,10 @@ reports, reviews on a second model, and accepts the deliverable.
 mode on the new-work-order form or in the API. Both use the same planners, builders, reviewers, harness, and release
 gates, built on the stock `@github/copilot-sdk` and `@managed-copilot/sdk` with no runtime modifications.
 
+Or point it at one of your GitHub repositories and an issue: the factory makes the change in a sandbox, reviews it, and
+opens a pull request with screenshots and a recording, then takes follow-up requests on the same pull request (see
+[Change a GitHub repository](#change-a-github-repository)).
+
 ![The agent-led floor: a coordinator, two builder sandboxes (one reused for review fixes), and a live log of its decisions](docs/screenshots/floor-building.png)
 
 *A real run of the CSV ⇄ JSON toolkit, not fixture data. The coordinator created a builder per task; the reviewer sent
@@ -145,6 +149,31 @@ pnpm dev                                       # server and UI with live reload 
 `pnpm smoke:office` runs the planner and reviewer stations against the platform, as a quick live check of the shared
 environments.
 
+## Change a GitHub repository
+
+The other way in: switch the new-work-order form to **GitHub repository**, pick one of your repositories (search, or
+type `owner/name`), optionally pick an issue (search, or type `#123`), and say what you want done. The factory runs
+**Checkout → Change → Review → Pull request**:
+
+| Station | Where | What happens |
+| --- | --- | --- |
+| Checkout | the factory | Downloads the default branch's head as an archive with its own GitHub token and uploads it into a fresh `factory-repo` sandbox, where it becomes a git repository tagged `factory-base`. The sandbox never gets a credential. |
+| Change | `factory-repo`, its own sandbox | The `developer` agent makes the change, runs the repository's tests, and captures screenshots and short recordings of anything visible with the `pr-media` skill (Chromium, Playwright, and ffmpeg are in the image). It reports with `submit_change`: the PR title and description, the test command, and its media. |
+| Review | `factory-reviewer`, shared | The factory re-runs the test command itself (a failure goes back to the developer first), then `pr-reviewer` on another model family reviews the diff. Requested changes go back to the same sandbox. |
+| Pull request | the factory | Pushes one commit to `factory/wo-NNNN-<title>` through GitHub's Git Data API, uploads the media as GitHub attachments, and opens the pull request: description, screenshots, an inline video, the test run, and the review, closing the issue when merged. |
+
+The **Pull request** tab shows the same: the media, the description, checks, review, and files. From there you can
+**Request changes** (the developer continues in the same sandbox, the reviewer checks it again, and the factory pushes
+another commit and comments on the pull request with fresh media) or **Squash and merge**. A request that's a question
+gets an answer and no pull request. The factory never force-pushes: if someone else pushed to its branch, it stops and
+says so.
+
+It works on repositories your account can push to, with the GitHub account the factory already signs in with (`gh auth
+login` or `GH_TOKEN` locally; the deployment's token in Azure). `factory-repo` sandboxes reach GitHub, the npm registry
+and pip index, and the hosts in `FACTORY_REPO_EXTRA_HOSTS`: list your registry's download hosts there when it hands out
+links elsewhere (an Azure Artifacts upstream: `*.pkgs.visualstudio.com,*.vsblob.vsassets.io`), and any other package
+source your repositories need.
+
 ## How it works
 
 - **The agent chooses; the factory gates.** The coordinator has `prepare_workspace`, `check_build`, `request_review`,
@@ -203,9 +232,12 @@ environments.
 | `PORT` | `7480` | HTTP port for the floor and API |
 | `HOST` | `127.0.0.1` | Interface to listen on (`0.0.0.0` in a container, together with `FACTORY_ALLOWED_HOSTS`) |
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
-| `FACTORY_MODEL_PLANNER` / `_BUILDER` / `_REVIEWER` / `_RELEASE` / `_COORDINATOR` | first available preference | Override a station's model; agent-led builders and reviewers must use different models |
+| `FACTORY_MODEL_PLANNER` / `_BUILDER` / `_REVIEWER` / `_RELEASE` / `_COORDINATOR` / `_DEVELOPER` | first available preference | Override a station's model; agent-led builders and reviewers (and GitHub work orders' developer and reviewer) must use different models |
 | `FACTORY_MAX_SANDBOXES` | `4` | Sandboxes App-driven work orders run at once; agent-led limits are the coordinator environment's `maxWorkers` |
-| `FACTORY_BUILD_TIMEOUT_MINUTES` and similar | 5 to 20 | Turn timeouts per station |
+| `FACTORY_BUILD_TIMEOUT_MINUTES` and similar | 5 to 20 | Turn timeouts per station (`FACTORY_DEVELOP_TIMEOUT_MINUTES`, 30, for GitHub work orders) |
+| `FACTORY_CHECK_TIMEOUT_MINUTES` | `10` | How long the factory's own re-run of a GitHub work order's test command may take |
+| `FACTORY_REPO_EXTRA_HOSTS` | none | Read by the AppHost: more hosts `factory-repo` sandboxes may reach, comma-separated (registry download hosts, other package sources) |
+| `FACTORY_PIP_INDEX_URL` | `MANAGED_COPILOT_PIP_INDEX_URL`, else pypi.org | Read by the AppHost: the pip index host `factory-repo` sandboxes may reach |
 | `FACTORY_COORDINATE_TIMEOUT_MINUTES` | `60` | A coordinator turn covers the whole job, including waits with no model calls |
 | `FACTORY_DATA_DIR` | `.data` | The factory's SQLite store |
 | `FACTORY_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
@@ -218,11 +250,12 @@ chosen from what your Copilot entitlement offers (`client.listModels()`).
 
 | Path | Contents |
 | --- | --- |
-| `apphost.mts` | AppHost fragment: the five environments, worker limits, and the app resource |
+| `apphost.mts` | AppHost fragment: the six environments, worker limits, and the app resource |
 | `customizations/coordinator` | The coordinator's agent and instructions for deciding, reusing, and satisfying factory gates |
-| `customizations/office` | `planner` and `reviewer` agents, `task-decomposition` and `review-rubric` skills |
+| `customizations/office` | `planner`, `reviewer`, and `pr-reviewer` agents, `task-decomposition` and `review-rubric` skills |
 | `customizations/workshop` | `builder` and `release` agents, `factory-check` (harness), `node-project`, and `release-checklist` skills |
-| `src/server` | Pipeline orchestrator, platform connection, REST and server-sent events, SQLite store |
+| `customizations/repo` | The `developer` agent for GitHub work orders and the `pr-media` skill (`capture.mjs`: screenshots, recordings, terminal captures) |
+| `src/server` | Pipeline orchestrator, platform connection, GitHub client, REST and server-sent events, SQLite store |
 | `src/web` | The factory floor (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `src/scripts` | `happy-path` and `smoke-office` |
 | `test` | Unit tests, including the orchestrator against an in-memory platform and the harness end to end |

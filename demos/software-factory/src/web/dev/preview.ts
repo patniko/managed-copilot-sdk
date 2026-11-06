@@ -132,6 +132,7 @@ class PreviewServer {
       templates: TEMPLATES,
       attachCommand: "npx managed-copilot attach {sessionId}",
       canLaunchTerminal: false,
+      github: { available: true, login: "mona", name: "Mona Octocat" },
     };
   }
 

@@ -1,4 +1,4 @@
-import { CloudOfflineIcon, ContainerIcon, CopilotIcon, CpuIcon, GlobeIcon, ShieldLockIcon, SyncIcon, type Icon } from "@primer/octicons-react";
+import { CloudOfflineIcon, ContainerIcon, CopilotIcon, CpuIcon, GitPullRequestIcon, GlobeIcon, ShieldLockIcon, SyncIcon, type Icon } from "@primer/octicons-react";
 import type { ReactNode } from "react";
 import type { EnvironmentView, Station, WorkOrder } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
@@ -50,8 +50,10 @@ export interface Placement {
 }
 
 /** Where a station's agent runs: the coordinator, the shared runtime (the "brain"), or its own sandbox (the "hands"). */
-export function stationPlacement(station: Pick<Station, "kind" | "placement">): Placement {
+export function stationPlacement(station: Pick<Station, "kind" | "placement"> & { readonly role?: Station["role"] }): Placement {
   if (station.kind === "coordinate") return { icon: CopilotIcon, label: "Coordinator agent on the shared runtime", className: "text-fg-done" };
+  // GitHub work orders: the factory itself pushes the branch and opens the pull request.
+  if (station.kind === "release" && station.role === "developer") return { icon: GitPullRequestIcon, label: "The factory pushes the change to GitHub", className: "text-fg-muted" };
   if (station.placement === "sandbox") return { icon: ContainerIcon, label: "Runs in its own sandbox", className: "text-fg-muted" };
   return { icon: CpuIcon, label: "Runs on the shared runtime", className: "text-fg-muted" };
 }

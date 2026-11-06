@@ -37,12 +37,24 @@ export interface StationSession {
 export interface StationFiles {
   write(remotePath: string, data: string | Uint8Array): Promise<FileEntry>;
   read(remotePath: string): Promise<string>;
+  readBytes(remotePath: string): Promise<Uint8Array>;
+  /** Streams a local file into the workspace (large files: a repository archive). */
+  upload(localPath: string, remotePath: string): Promise<FileEntry>;
 }
 
 export interface StationArtifacts {
   waitForPublication(options?: { turnId?: string; timeoutMs?: number }): Promise<PublicationResult>;
   list(options?: { versions?: "latest" | "all" }): Promise<ArtifactInfo[]>;
   read(path: string, options?: { version?: number }): Promise<string>;
+  readBytes(path: string, options?: { version?: number }): Promise<Uint8Array>;
+}
+
+/** A command the factory ran in a sandbox (`managed.exec`): how it ended and the end of its output. */
+export interface CommandResult {
+  /** `completed` (any exit code), `timed_out`, `stopped`, `failed`, or `uncertain`. */
+  readonly state: string;
+  readonly exitCode?: number;
+  readonly output: string;
 }
 
 /** An agent-led coordinator's workers (`managed.workers(coordinator)`). The factory only reads them: it never attaches. */
@@ -68,6 +80,8 @@ export interface FactoryPlatform {
   deleteSession(sessionId: string): Promise<void>;
   files(sessionId: string): StationFiles;
   artifacts(sessionId: string): StationArtifacts;
+  /** Runs a command in the session's sandbox, as the sandbox user in `/workspace` (GitHub work orders' checkout and diffs). */
+  exec(sessionId: string, command: string, options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<CommandResult>;
   workers(coordinatorId: string): StationWorkers;
   /** Subscribes to `worker.*` platform events (hints to look again; the worker list stays the source of truth). */
   onWorkerEvent?(listener: WorkerEventListener): () => void;
@@ -79,6 +93,9 @@ export const REQUIRED_CAPABILITIES = ["shared", "isolated", "files", "artifacts"
 
 /** The capability agent-led work orders need on top: orchestrator environments (spec section 17). */
 export const AGENT_LED_CAPABILITY = "orchestrator";
+
+/** What GitHub work orders need on top: commands the factory runs in the sandbox itself (checkout, diff, test). */
+export const GITHUB_CAPABILITY = "exec";
 
 const WORKER_EVENTS = ["worker.started", "worker.idle", "worker.failed", "worker.stopped"] as const;
 
@@ -485,7 +502,22 @@ export class Platform implements FactoryPlatform {
   }
 
   files(sessionId: string): StationFiles {
-    return this.#managedOrThrow().files(sessionId);
+    const files = this.#managedOrThrow().files(sessionId);
+    return {
+      write: (path, data) => files.write(path, data),
+      read: (path) => files.read(path),
+      readBytes: (path) => files.readBytes(path),
+      upload: (localPath, path) => files.upload(localPath, path),
+    };
+  }
+
+  async exec(sessionId: string, command: string, options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<CommandResult> {
+    const result = (await this.#managedOrThrow().exec(sessionId, command, {
+      timeoutMs: options.timeoutMs,
+      stdin: "closed",
+      ...(options.signal ? { signal: options.signal } : {}),
+    })) as { state: string; exitCode?: number; output: string };
+    return { state: result.state, output: result.output, ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}) };
   }
 
   workers(coordinatorId: string): StationWorkers {
@@ -504,6 +536,7 @@ export class Platform implements FactoryPlatform {
       list: (options) => artifacts.list(options),
       // `read(path, { version })` is an additive option; older SDK builds ignore it and return the newest version.
       read: (path, options) => (artifacts.read as (path: string, options?: { version?: number }) => Promise<string>)(path, options),
+      readBytes: (path, options) => artifacts.readBytes(path, options),
     };
   }
 
@@ -679,6 +712,15 @@ export class Platform implements FactoryPlatform {
     } else if (!capabilities.includes(AGENT_LED_CAPABILITY)) {
       agentLedHint = "This deployment can't run orchestrator environments right now: they need sandboxes and the actions ledger.";
     }
+    const repoEnvironment = declared("developer");
+    let githubHint: string | undefined;
+    if (!repoEnvironment || !declared("reviewer")) {
+      githubHint = `This deployment doesn't declare the ${FACTORY_ENVIRONMENTS.developer} environment. Add softwareFactory() from demos/software-factory/apphost.mts to your AppHost again and restart it.`;
+    } else if (repoEnvironment.type !== "isolated") {
+      githubHint = `${FACTORY_ENVIRONMENTS.developer} is a ${repoEnvironment.type} environment here; GitHub work orders need it to be isolated.`;
+    } else if (!capabilities.includes(GITHUB_CAPABILITY)) {
+      githubHint = "This deployment doesn't let apps run commands in sandboxes (exec), which GitHub work orders use to check out and diff the repository.";
+    }
     let message: string | undefined;
     let hint: string | undefined;
     if (missingClassic.length > 0) {
@@ -715,8 +757,10 @@ export class Platform implements FactoryPlatform {
         artifacts: capabilities.includes("artifacts"),
         files: capabilities.includes("files"),
         attach: capabilities.includes("attach.cli"),
+        github: ready && githubHint === undefined,
       },
       ...(ready && agentLedHint ? { agentLedHint } : {}),
+      ...(ready && githubHint ? { githubHint } : {}),
       checkedAt: new Date().toISOString(),
     };
   }
@@ -726,7 +770,7 @@ export class Platform implements FactoryPlatform {
       state,
       environments: [],
       missingEnvironments: [],
-      features: { runs: false, agentLed: false, isolated: false, artifacts: false, files: false, attach: false },
+      features: { runs: false, agentLed: false, isolated: false, artifacts: false, files: false, attach: false, github: false },
       checkedAt: new Date().toISOString(),
       ...extra,
     };

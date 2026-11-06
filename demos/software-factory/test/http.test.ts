@@ -31,7 +31,7 @@ const status = (): PlatformStatus => ({
   ...(ready ? {} : { message: "The Managed Copilot platform isn't running.", hint: "Start it with `aspire run`." }),
   environments: [],
   missingEnvironments: [],
-  features: { runs: ready, agentLed: ready, isolated: ready, artifacts: ready, files: ready, attach: false },
+  features: { runs: ready, agentLed: ready, isolated: ready, artifacts: ready, files: ready, attach: false, github: false },
   checkedAt: new Date().toISOString(),
 });
 
@@ -62,7 +62,7 @@ beforeAll(async () => {
     platform,
     readiness: () => ({ ready, reason: "The Managed Copilot platform isn't running." }),
     account: () => ({ login: "octocat" }),
-    config: { maxSandboxes: 2, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 5_000 }, publicationTimeoutMs: 1_000 },
+    config: { maxSandboxes: 2, turnTimeoutMs: { planner: 5_000, builder: 5_000, reviewer: 5_000, release: 5_000, coordinator: 5_000, developer: 5_000 }, publicationTimeoutMs: 1_000 },
   });
   const config = { ...loadConfig({}), webRoot: "Z:/nonexistent-web-root" };
   const fakePlatform = { get status() { return status(); } } as unknown as Platform;
@@ -99,7 +99,20 @@ describe("factory HTTP API", () => {
     expect(code).toBe(200);
     expect(body.templates.some((template) => template.featured)).toBe(true);
     expect(body.attachCommand).toBe("npx managed-copilot attach {sessionId}");
+    expect(body.github).toEqual({ available: false, message: "This factory isn't set up to work with GitHub." });
     expect((await json<{ status: string }>("/api/health")).body.status).toBe("ok");
+  });
+
+  it("explains that GitHub browsing and GitHub work orders need the factory's GitHub access", async () => {
+    const repos = await json<{ error: { code: string } }>("/api/github/repos?q=app");
+    expect(repos.status).toBe(503);
+    const created = await post("/api/work-orders", { title: "", brief: "Fix the greeting.", github: { repository: "octo/app" } });
+    expect(created.status).toBe(503);
+    expect(created.body).toEqual({ error: { code: "platform_unavailable", message: "This factory isn't set up to work with GitHub." } });
+    const media = await json<{ error: { code: string } }>("/api/work-orders/wo_missing/media?stationId=build:change&path=media/a.png");
+    expect(media.status).toBe(404);
+    const revise = await post("/api/work-orders/wo_missing/revisions", { request: "More, please." });
+    expect(revise.status).toBe(404);
   });
 
   it("refuses work while the platform is unavailable, with a friendly message", async () => {

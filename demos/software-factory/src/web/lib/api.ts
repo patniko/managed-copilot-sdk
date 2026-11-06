@@ -2,8 +2,14 @@ import type {
   ActivityItem,
   ArtifactIndex,
   AttachResponse,
+  CreateRevisionRequest,
   CreateWorkOrderRequest,
   FactoryState,
+  GitHubStatus,
+  IssueDetail,
+  IssueSummary,
+  MergeRequest,
+  RepositorySummary,
   WorkOrder,
 } from "../../shared/types.js";
 
@@ -67,7 +73,7 @@ async function toApiError(response: Response): Promise<ApiError> {
 
 const NETWORK_ERROR_MESSAGE = "Can't reach the factory server. Check that it's running.";
 
-async function send(method: string, url: string, body?: unknown, accept = "application/json"): Promise<Response> {
+async function send(method: string, url: string, body?: unknown, accept = "application/json", signal?: AbortSignal): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(url, {
@@ -75,16 +81,18 @@ async function send(method: string, url: string, body?: unknown, accept = "appli
       headers: body === undefined ? { Accept: accept } : { Accept: accept, "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       cache: "no-store",
+      ...(signal ? { signal } : {}),
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     throw new ApiError(NETWORK_ERROR_MESSAGE, "network_error", 0);
   }
   if (!response.ok) throw await toApiError(response);
   return response;
 }
 
-async function json<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const response = await send(method, url, body);
+async function json<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await send(method, url, body, "application/json", signal);
   if (response.status === 204) return undefined as T;
   const text = await response.text();
   if (!text) return undefined as T;
@@ -111,6 +119,18 @@ export function artifactContentUrl(workOrderId: string, stationId: string, path:
   return `${workOrderUrl(workOrderId)}/artifacts/content?${params.toString()}`;
 }
 
+/** A screenshot or recording the factory kept for a GitHub work order. */
+export function mediaUrl(workOrderId: string, stationId: string, path: string, version?: number): string {
+  const params = new URLSearchParams({ stationId, path });
+  if (version !== undefined) params.set("version", String(version));
+  return `${workOrderUrl(workOrderId)}/media?${params.toString()}`;
+}
+
+function repoUrl(fullName: string): string {
+  const [owner = "", name = ""] = fullName.split("/");
+  return `/api/github/repos/${enc(owner)}/${enc(name)}`;
+}
+
 export const api = {
   state: () => json<FactoryState>("GET", "/api/state"),
   workOrder: (id: string) => json<WorkOrder>("GET", workOrderUrl(id)),
@@ -118,6 +138,15 @@ export const api = {
   deleteWorkOrder: (id: string) => json<undefined>("DELETE", workOrderUrl(id)),
   cancelWorkOrder: (id: string) => json<WorkOrder>("POST", `${workOrderUrl(id)}/cancel`),
   retryWorkOrder: (id: string) => json<WorkOrder>("POST", `${workOrderUrl(id)}/retry`),
+  reviseWorkOrder: (id: string, request: string) => json<WorkOrder>("POST", `${workOrderUrl(id)}/revisions`, { request } satisfies CreateRevisionRequest),
+  refreshPullRequest: (id: string) => json<WorkOrder>("GET", `${workOrderUrl(id)}/pull-request`),
+  mergePullRequest: (id: string, method: MergeRequest["method"]) => json<WorkOrder>("POST", `${workOrderUrl(id)}/merge`, { method } satisfies MergeRequest),
+  github: () => json<GitHubStatus>("GET", "/api/github"),
+  repositories: (query: string, signal?: AbortSignal) =>
+    json<RepositorySummary[]>("GET", `/api/github/repos${query.trim() ? `?q=${enc(query.trim())}` : ""}`, undefined, signal),
+  issues: (repository: string, query: string, signal?: AbortSignal) =>
+    json<IssueSummary[]>("GET", `${repoUrl(repository)}/issues${query.trim() ? `?q=${enc(query.trim())}` : ""}`, undefined, signal),
+  issue: (repository: string, number: number) => json<IssueDetail>("GET", `${repoUrl(repository)}/issues/${number}`),
   activity: (id: string, stationId?: string) =>
     json<ActivityItem[]>("GET", `${workOrderUrl(id)}/activity${stationId ? `?stationId=${enc(stationId)}` : ""}`),
   artifacts: (id: string) => json<ArtifactIndex>("GET", `${workOrderUrl(id)}/artifacts`),

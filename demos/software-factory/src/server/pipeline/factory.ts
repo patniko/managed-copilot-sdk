@@ -1,23 +1,33 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { defineTool, type PermissionHandler, type SessionConfig, type SessionEvent, type Tool } from "@github/copilot-sdk";
 import { isManagedCopilotError, type ArtifactInfo, type SessionInfo, type WorkerInfo } from "@managed-copilot/sdk";
 import { z } from "zod";
-import { FACTORY_ENVIRONMENTS, ROLE_AGENTS, SANDBOX_SIZES } from "../../shared/environments.js";
+import { FACTORY_ENVIRONMENTS, PR_REVIEWER_AGENT, ROLE_AGENTS, SANDBOX_SIZES } from "../../shared/environments.js";
 import { findTemplate } from "../../shared/templates.js";
 import {
   ACTIVE_WORK_ORDER_STATUSES,
   formatWorkOrderNumber,
+  isGitHubWorkOrder,
+  mediaTypeOf,
   TERMINAL_STATION_STATUSES,
   workOrderMode,
   type ActivityItem,
   type ArtifactFileView,
   type ArtifactIndex,
+  type ChangeCheck,
+  type ChangeRevision,
   type CreateWorkOrderRequest,
   type FactoryError,
+  type GitHubWork,
+  type MediaItem,
   type NetworkView,
   type OutputManifest,
   type Plan,
   type PlanTask,
+  type PullRequestView,
   type ReleaseSummary,
   type ReviewRecord,
   type Station,
@@ -30,6 +40,8 @@ import {
   type WorkOrderSummary,
 } from "../../shared/types.js";
 import type { FactoryConfig } from "../config.js";
+import type { GitHubApi, TreeEntry } from "../github.js";
+import { parseRepository } from "../github.js";
 import type { EventHub } from "../hub.js";
 import { log } from "../log.js";
 import type { FactoryPlatform, StationSession } from "../platform.js";
@@ -65,10 +77,53 @@ import {
 } from "./prompts.js";
 import { builderSeed, DEFAULT_SKILLS_ROOT, releaseSeed, sha256, type SeedFile, type TaskOutcome } from "./seed.js";
 import { Semaphore } from "./semaphore.js";
+import {
+  blobScript,
+  branchName,
+  changeCheckFailedPrompt,
+  changeFixPrompt,
+  changeRetryPrompt,
+  changeReviewPrompt,
+  checkoutScript,
+  checkScript,
+  commitMessage,
+  developPrompt,
+  gitBlobSha,
+  MAX_MEDIA_BYTES,
+  MAX_PUSH_BYTES,
+  MAX_PUSH_FILE_BYTES,
+  MAX_PUSH_FILES,
+  outputTail,
+  parseSnapshot,
+  patchScript,
+  pullRequestBody,
+  REPO_DIR,
+  requestMarkdown,
+  revisionComment,
+  revisionPrompt,
+  snapshotScript,
+  submitChangeRetryPrompt,
+  SubmitChangeSchema,
+  validateChange,
+  workOrderTitle,
+  type Snapshot,
+  type SubmittedChange,
+} from "./repo.js";
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type MStation = Mutable<Station>;
 type MWorkOrder = Mutable<Omit<WorkOrder, "stations">> & { stations: MStation[] };
+type ReadinessKind = WorkOrderMode | "github";
+
+/** The single change lane of a GitHub work order. */
+const CHANGE_TASK = "change";
+const CHANGE_BUILD = `build:${CHANGE_TASK}`;
+const CHANGE_REVIEW = `review:${CHANGE_TASK}`;
+/** Repository archives the factory moves into a sandbox (GitHub's own limit for archives is far larger). */
+const MAX_ARCHIVE_BYTES = 500 * 1024 * 1024;
+/** Checkout and diff commands in the sandbox. */
+const SANDBOX_COMMAND_TIMEOUT_MS = 5 * 60_000;
+const MAX_PATCH_BYTES = 1024 * 1024;
 
 /** Nudges per round when the factory check fails before the station gives up. */
 const MAX_NUDGES = 2;
@@ -129,9 +184,45 @@ function parseJson<T>(text: string | undefined): T | undefined {
   }
 }
 
+/** What a work order needs from the platform: GitHub work orders need `factory-repo` and sandbox commands. */
+function readinessKind(wo: WorkOrder): ReadinessKind {
+  return isGitHubWorkOrder(wo) ? "github" : workOrderMode(wo);
+}
+
+/** Key of an uploaded media file in `GitHubWork.uploads`. */
+function mediaKey(item: Pick<MediaItem, "stationId" | "path" | "version">): string {
+  return `${item.stationId}:${item.path}@${item.version}`;
+}
+
+/** "3 files changed · tests pass · 2 media" for the change station. */
+function describeChange(revision: ChangeRevision): string {
+  const files = revision.files?.length ?? 0;
+  if (files === 0) return revision.answer ? "Answered · no changes" : "No changes";
+  const parts = [`${files} file${files === 1 ? "" : "s"} changed`];
+  if (revision.check) parts.push(revision.check.passed ? "tests pass" : "tests failing");
+  const media = revision.media?.length ?? 0;
+  if (media > 0) parts.push(`${media} media`);
+  return parts.join(" · ");
+}
+
+/**
+ * A `factory-repo` sandbox whose session-time npm install failed: most often a registry that hands out downloads from
+ * other hosts than its own, which the environment's network rules don't list yet.
+ */
+function explainSetupFailure(error: unknown): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/npm install -g .* failed/i.test(message)) return error;
+  return new StationError(
+    "setup_failed",
+    `${message.replace(/\s*\[\w+\]\s*$/, "").replace(/[.\s]+$/, "")}. If your npm registry serves package downloads from other hosts (an Azure Artifacts upstream uses *.pkgs.visualstudio.com and *.vsblob.vsassets.io), list them in FACTORY_REPO_EXTRA_HOSTS and restart the AppHost.`,
+  );
+}
+
 interface Capture {
   plan?: Plan;
   review?: ValidReview;
+  /** GitHub work orders: the developer called `submit_change` in the current turn. */
+  change?: SubmittedChange;
 }
 
 interface ActiveSession {
@@ -174,9 +265,11 @@ export interface FactoryOptions {
   readonly hub: EventHub;
   readonly platform: FactoryPlatform;
   /** Whether the platform can run work orders right now, with a user-facing reason when it can't. */
-  readonly readiness: (mode?: WorkOrderMode) => { readonly ready: boolean; readonly reason?: string };
+  readonly readiness: (mode?: ReadinessKind) => { readonly ready: boolean; readonly reason?: string };
   readonly account: () => { readonly login: string; readonly avatarUrl?: string } | undefined;
-  readonly config: Pick<FactoryConfig, "maxSandboxes" | "turnTimeoutMs" | "publicationTimeoutMs">;
+  readonly config: Pick<FactoryConfig, "maxSandboxes" | "turnTimeoutMs" | "publicationTimeoutMs"> & Partial<Pick<FactoryConfig, "checkTimeoutMs">>;
+  /** GitHub work orders: the factory's own GitHub access (repositories, archives, branches, pull requests). */
+  readonly github?: GitHubApi;
   readonly skillsRoot?: string;
   /** Poll interval while waiting for a resumed turn (tests shorten it). */
   readonly pollMs?: number;
@@ -259,7 +352,7 @@ export class Factory {
       const key = `${meta.stationId}\u0000${meta.path}`;
       let file = files.get(key);
       if (!file) {
-        file = { stationId: meta.stationId, path: meta.path, contentType: meta.contentType, versions: [], viewable: meta.hasContent };
+        file = { stationId: meta.stationId, path: meta.path, contentType: meta.contentType, versions: [], viewable: meta.hasContent, ...(meta.hasBytes ? { media: true } : {}) };
         files.set(key, file);
       }
       file.versions.push({
@@ -281,6 +374,12 @@ export class Factory {
     return this.#store.getArtifact(id, stationId, path, version);
   }
 
+  /** A screenshot or recording the factory kept (GitHub work orders). */
+  media(id: string, stationId: string, path: string, version?: number): { readonly bytes: Uint8Array; readonly contentType: string } | undefined {
+    if (!mediaTypeOf(path)) return undefined;
+    return this.#store.getArtifactBytes(id, stationId, path, version);
+  }
+
   /** The release bundle plus release notes, patch, and test report, for the zip download. */
   releaseFiles(id: string): { projectName: string; files: { path: string; content: string }[] } | undefined {
     const wo = this.get(id);
@@ -300,6 +399,7 @@ export class Factory {
     if (!request || typeof request !== "object" || typeof request.title !== "string" || typeof request.brief !== "string") {
       throw new StationError("invalid_request", "Give the work order a title and a brief.");
     }
+    if (request.github !== undefined) throw new StationError("invalid_request", "Create GitHub work orders with createGitHub.");
     const title = request.title?.trim() ?? "";
     const brief = request.brief?.trim() ?? "";
     if (title.length < 3 || title.length > 120) throw new StationError("invalid_request", "Give the work order a title of 3 to 120 characters.");
@@ -337,6 +437,154 @@ export class Factory {
     return snapshot;
   }
 
+  /**
+   * A GitHub work order: the change goes into one `factory-repo` sandbox holding the repository's default branch, a
+   * second model reviews it, and the factory pushes a branch and opens a pull request with the developer's media.
+   */
+  async createGitHub(request: CreateWorkOrderRequest): Promise<WorkOrder> {
+    if (!request || typeof request !== "object" || typeof request.brief !== "string" || !request.github || typeof request.github.repository !== "string") {
+      throw new StationError("invalid_request", "Pick a repository and say what the factory should do.");
+    }
+    const github = this.#requireGitHub();
+    const brief = request.brief.trim();
+    if (brief.length < 3 || brief.length > 8000) throw new StationError("invalid_request", "Say what the factory should do in 3 to 8,000 characters.");
+    const rounds = request.maxReviewRounds ?? 2;
+    if (!Number.isInteger(rounds) || rounds < 1 || rounds > 3) throw new StationError("invalid_request", "Review rounds must be 1, 2, or 3.");
+    const issueNumber = request.github.issue;
+    if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber < 1)) throw new StationError("invalid_request", "Pick an issue by its number.");
+    const target = parseRepository(request.github.repository);
+    if (!target) throw new StationError("invalid_request", "Pick a repository as owner/name.");
+    this.#requireReady("github");
+    if (this.#platform.models.developer === this.#platform.models.reviewer) {
+      throw new StationError("invalid_request", "Choose a reviewer model different from the developer model for independent review.");
+    }
+    const repository = await github.repository(target.owner, target.name);
+    if (repository.archived) throw new StationError("invalid_request", `${repository.fullName} is archived, so it can't take pull requests.`);
+    if (!repository.canPush) {
+      throw new StationError("forbidden", `Your GitHub account can't push to ${repository.fullName}, so the factory can't open a pull request there. Pick a repository you can push to.`);
+    }
+    const [issue, baseSha] = await Promise.all([
+      issueNumber !== undefined ? github.issue(repository.owner, repository.name, issueNumber) : Promise.resolve(undefined),
+      github.branchHead(repository.owner, repository.name, repository.defaultBranch),
+    ]);
+    if (!baseSha) throw new StationError("invalid_request", `${repository.fullName} has no commits on ${repository.defaultBranch} yet.`);
+    this.#requireReady("github");
+    const titleText = typeof request.title === "string" && request.title.trim() ? request.title.trim().slice(0, 120) : workOrderTitle(brief, issue);
+    const owner = this.#options.account();
+    const created = now();
+    const number = this.#store.nextWorkOrderNumber();
+    const revision: ChangeRevision = { number: 1, request: brief, requestedAt: created, ...(owner ? { requestedBy: owner.login } : {}) };
+    const wo: MWorkOrder = {
+      id: `wo_${randomUUID().replace(/-/g, "").slice(0, 10)}`,
+      number,
+      title: titleText,
+      brief,
+      mode: "classic",
+      source: { kind: "github" },
+      maxReviewRounds: rounds,
+      status: "queued",
+      createdAt: created,
+      updatedAt: created,
+      taskCount: 1,
+      stations: this.#changeStations(titleText),
+      github: {
+        repository,
+        ...(issue ? { issue } : {}),
+        baseSha,
+        branch: branchName(number, issue ? `${issue.number}-${issue.title}` : titleText),
+        revisions: [revision],
+      },
+      ...(owner ? { owner } : {}),
+    };
+    this.#store.saveWorkOrder(wo);
+    log.info("GitHub work order created", { id: wo.id, number: formatWorkOrderNumber(wo.number), repository: repository.fullName, issue: issue?.number });
+    const snapshot = structuredClone(wo);
+    this.#start(wo);
+    return snapshot;
+  }
+
+  /** Asks for more changes on a finished GitHub work order: the same sandbox makes them, and they're pushed to the same pull request. */
+  async revise(id: string, text: string): Promise<WorkOrder> {
+    if (this.#runs.has(id) || this.#cancelling.has(id)) throw new StationError("conflict", "This work order is still running. Wait for it to finish, then ask for more changes.");
+    const stored = this.#store.getWorkOrder(id);
+    if (!stored) throw new StationError("not_found", "That work order doesn't exist.");
+    if (!stored.github) throw new StationError("invalid_request", "Only GitHub work orders take more changes.");
+    if (stored.status !== "completed") throw new StationError("conflict", "Ask for more changes once the work order has finished; retry it if it failed.");
+    const request = typeof text === "string" ? text.trim() : "";
+    if (request.length < 3 || request.length > 8000) throw new StationError("invalid_request", "Say what to change in 3 to 8,000 characters.");
+    this.#requireGitHub();
+    this.#requireReady("github");
+    const wo = stored as MWorkOrder;
+    if (wo.github!.pullRequest) {
+      await this.#refreshPullRequest(wo).catch((error: unknown) => log.debug("Couldn't refresh the pull request", { id, error: (error as Error).message }));
+      const state = wo.github!.pullRequest!.state;
+      if (state !== "open") throw new StationError("conflict", `Pull request #${wo.github!.pullRequest!.number} is ${state}. Start a new work order for more changes.`);
+    }
+    if (this.#runs.has(id)) throw new StationError("conflict", "This work order is already running.");
+    const owner = this.#options.account();
+    const revisions = wo.github!.revisions;
+    const revision: ChangeRevision = { number: revisions.length + 1, request, requestedAt: now(), ...(owner ? { requestedBy: owner.login } : {}) };
+    wo.github = { ...wo.github!, revisions: [...revisions, revision] };
+    for (const station of wo.stations) {
+      Object.assign(station, { status: "waiting", detail: station.kind === "build" ? `Queued: revision ${revision.number}` : station.kind === "review" ? "Waits for the change" : "Waits for the review" });
+      delete station.finishedAt;
+      delete station.error;
+      delete station.acceptedWithFindings;
+    }
+    delete wo.completedAt;
+    delete wo.error;
+    wo.status = "queued";
+    this.#persist(wo);
+    this.#activity(wo, CHANGE_BUILD, `Revision ${revision.number} requested: ${request.split("\n")[0]!.slice(0, 160)}`, "info");
+    log.info("More changes requested", { id, revision: revision.number });
+    const snapshot = structuredClone(wo);
+    this.#start(wo);
+    return snapshot;
+  }
+
+  /** Re-reads the work order's pull request from GitHub (its state, checks, and merge status). */
+  async refreshPullRequest(id: string): Promise<WorkOrder> {
+    const wo = this.get(id) as MWorkOrder | undefined;
+    if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
+    if (!wo.github?.pullRequest) return structuredClone(wo);
+    this.#requireGitHub();
+    await this.#refreshPullRequest(wo);
+    return structuredClone(wo);
+  }
+
+  /** Merges the work order's pull request on GitHub. */
+  async merge(id: string, method: "merge" | "squash" | "rebase" = "squash"): Promise<WorkOrder> {
+    if (!["merge", "squash", "rebase"].includes(method)) throw new StationError("invalid_request", 'Merge with "merge", "squash", or "rebase".');
+    if (this.isActive(id)) throw new StationError("conflict", "This work order is still running. Merge once it has finished.");
+    const wo = this.#store.getWorkOrder(id) as MWorkOrder | undefined;
+    if (!wo) throw new StationError("not_found", "That work order doesn't exist.");
+    const pull = wo.github?.pullRequest;
+    if (!pull) throw new StationError("conflict", "This work order has no pull request to merge.");
+    const github = this.#requireGitHub();
+    const { owner, name } = wo.github!.repository;
+    await github.merge(owner, name, pull.number, method);
+    this.#activity(wo, "release", `Merged pull request #${pull.number} (${method})`, "success");
+    await this.#refreshPullRequest(wo).catch(() => {
+      wo.github = { ...wo.github!, pullRequest: { ...pull, state: "merged", mergedAt: now() } };
+      this.#persist(wo);
+    });
+    log.info("Pull request merged", { id, pullRequest: pull.number, method });
+    return structuredClone(wo);
+  }
+
+  async #refreshPullRequest(wo: MWorkOrder): Promise<void> {
+    const github = this.#requireGitHub();
+    const { owner, name } = wo.github!.repository;
+    const pull = await github.pullRequest(owner, name, wo.github!.pullRequest!.number);
+    wo.github = { ...wo.github!, pullRequest: pull };
+    this.#persist(wo);
+  }
+
+  #requireGitHub(): GitHubApi {
+    if (!this.#options.github) throw new StationError("platform_unavailable", "This factory isn't set up to work with GitHub.");
+    return this.#options.github;
+  }
+
   async cancel(id: string): Promise<WorkOrder> {
     if (this.#cancelling.has(id)) throw new StationError("conflict", "This work order is already being cancelled.");
     const run = this.#runs.get(id);
@@ -372,7 +620,7 @@ export class Factory {
     const stored = this.#store.getWorkOrder(id);
     if (!stored) throw new StationError("not_found", "That work order doesn't exist.");
     if (stored.status !== "failed" && stored.status !== "cancelled") throw new StationError("conflict", "Only a failed or cancelled work order can be retried.");
-    this.#requireReady(workOrderMode(stored));
+    this.#requireReady(readinessKind(stored));
     const wo = stored as MWorkOrder;
     delete wo.error;
     delete wo.completedAt;
@@ -394,7 +642,7 @@ export class Factory {
       }
     }
     this.#persist(wo);
-    this.#activity(wo, "plan", "Retrying from the last checkpoint", "info");
+    this.#activity(wo, wo.stations[0]?.id ?? "plan", "Retrying from the last checkpoint", "info");
     const snapshot = structuredClone(wo);
     this.#start(wo);
     return snapshot;
@@ -422,7 +670,7 @@ export class Factory {
   resumeInterrupted(): void {
     for (const stored of this.#store.listWorkOrders()) {
       if (!ACTIVE_WORK_ORDER_STATUSES.includes(stored.status) || this.isActive(stored.id)) continue;
-      if (!this.#options.readiness(workOrderMode(stored)).ready) continue;
+      if (!this.#options.readiness(readinessKind(stored)).ready) continue;
       this.#resume(stored as MWorkOrder);
     }
   }
@@ -434,7 +682,7 @@ export class Factory {
     this.#resumeTimers.delete(wo.id);
     log.info(paused ? "Resuming work order: the platform is back" : "Resuming work order after restart", { id: wo.id });
     const note = paused ? "Managed Copilot is back; resuming from the last checkpoint" : "The factory restarted; resuming from the last checkpoint";
-    this.#activity(wo, "plan", note, "warning");
+    this.#activity(wo, wo.stations[0]?.id ?? "plan", note, "warning");
     this.#start(wo);
   }
 
@@ -524,7 +772,7 @@ export class Factory {
 
   // ─── Run loop ───────────────────────────────────────────────────────────────────────────────────────────────
 
-  #requireReady(mode: WorkOrderMode): void {
+  #requireReady(mode: ReadinessKind): void {
     const { ready, reason } = this.#options.readiness(mode);
     if (!ready) throw new StationError("platform_unavailable", reason ?? "The Managed Copilot platform isn't ready.");
   }
@@ -551,6 +799,15 @@ export class Factory {
   async #execute(run: Run): Promise<void> {
     const { wo } = run;
     try {
+      if (wo.github) {
+        this.#setWorkOrder(run, { status: "building", startedAt: wo.startedAt ?? now() });
+        await this.#develop(run);
+        this.#setWorkOrder(run, { status: "releasing" });
+        await this.#pullRequest(run);
+        this.#setWorkOrder(run, { status: "completed", completedAt: now() });
+        log.info("GitHub work order completed", { id: wo.id, pullRequest: wo.github.pullRequest?.number });
+        return;
+      }
       if (!wo.plan) await this.#plan(run);
       this.#setWorkOrder(run, { status: "building" });
       if (workOrderMode(wo) === "agent") {
@@ -836,6 +1093,18 @@ export class Factory {
     const round = build.round;
     const existing = reuse ? review.reviews?.find((record) => record.round === round) : undefined;
     if (existing) return existing;
+    const files = [...this.#taskFiles(run, task.id)]
+      .map(([path, content]) => ({ path, content }))
+      .sort((a, b) => Number(/\.(test|spec)\./.test(a.path)) - Number(/\.(test|spec)\./.test(b.path)) || a.path.localeCompare(b.path));
+    const previous = review.reviews?.at(-1)?.findings;
+    return this.#review(run, review, build, round, () => reviewPrompt(task, round, run.wo.maxReviewRounds, { files, report, builderSummary }, previous));
+  }
+
+  /**
+   * One review turn: opens (or reuses) the review station's shared session with `submit_review`, sends the prompt, and
+   * records the verdict for the build's `round`. Requested changes are announced on the build station.
+   */
+  async #review(run: Run, review: MStation, build: MStation, round: number, prompt: () => string, label = round): Promise<ValidReview> {
     let active = run.sessions.get(review.id);
     const capture: Capture = active?.capture ?? {};
     if (!active) {
@@ -854,12 +1123,8 @@ export class Factory {
     }
     delete capture.review;
     const captured = (): ValidReview | undefined => capture.review;
-    const files = [...this.#taskFiles(run, task.id)]
-      .map(([path, content]) => ({ path, content }))
-      .sort((a, b) => Number(/\.(test|spec)\./.test(a.path)) - Number(/\.(test|spec)\./.test(b.path)) || a.path.localeCompare(b.path));
-    const previous = review.reviews?.at(-1)?.findings;
-    this.#updateStation(run, review, { round, detail: `Reviewing round ${round}` });
-    await this.#turn(run, review, active, reviewPrompt(task, round, run.wo.maxReviewRounds, { files, report, builderSummary }, previous), "review", round);
+    this.#updateStation(run, review, { round, detail: `Reviewing round ${label}` });
+    await this.#turn(run, review, active, prompt(), "review", round);
     if (!captured()) await this.#turn(run, review, active, reviewRetryPrompt(), "nudge", round);
     const verdict = captured();
     if (!verdict) throw new StationError("review_missing", "The reviewer didn't submit a verdict.");
@@ -875,7 +1140,7 @@ export class Factory {
       level: verdict.verdict === "approve" ? "success" : "warning",
     });
     if (verdict.verdict === "request_changes") {
-      this.#updateStation(run, review, { status: "changes_requested", detail: `${blocking} finding${blocking === 1 ? "" : "s"} sent back to the builder` });
+      this.#updateStation(run, review, { status: "changes_requested", detail: `${blocking} finding${blocking === 1 ? "" : "s"} sent back to the ${build.role === "developer" ? "developer" : "builder"}` });
       this.#activity(run.wo, build.id, `Reviewer requested changes: ${blocking} finding${blocking === 1 ? "" : "s"} to fix`, "warning");
     }
     return verdict;
@@ -941,6 +1206,518 @@ export class Factory {
     run.wo.release = release;
     this.#updateStation(run, station, { status: "done", detail: `Release ready · ${release.tests!.passed} tests passed`, finishedAt: now() });
     this.#activity(run.wo, station.id, `Release ready: ${release.files} files, ${release.tests!.passed} tests passed`, "success");
+  }
+
+  // ─── GitHub work orders ─────────────────────────────────────────────────────────────────────────────────────
+
+  /** One lane: the developer's change (a `factory-repo` sandbox), its review, and the pull request the factory opens. */
+  #changeStations(title: string): MStation[] {
+    return [
+      {
+        id: CHANGE_BUILD,
+        kind: "build",
+        title: `Change · ${title}`,
+        taskId: CHANGE_TASK,
+        status: "waiting",
+        detail: "Queued",
+        role: "developer",
+        environment: FACTORY_ENVIRONMENTS.developer,
+        placement: "sandbox",
+        agent: ROLE_AGENTS.developer,
+        model: this.#platform.models.developer,
+        round: 0,
+      },
+      {
+        id: CHANGE_REVIEW,
+        kind: "review",
+        title: `Review · ${title}`,
+        taskId: CHANGE_TASK,
+        status: "waiting",
+        detail: "Waits for the change",
+        role: "reviewer",
+        environment: FACTORY_ENVIRONMENTS.reviewer,
+        placement: "shared",
+        agent: PR_REVIEWER_AGENT,
+        model: this.#platform.models.reviewer,
+        round: 0,
+      },
+      {
+        id: "release",
+        kind: "release",
+        title: "Pull request",
+        status: "waiting",
+        detail: "Waits for the review",
+        role: "developer",
+        environment: FACTORY_ENVIRONMENTS.developer,
+        placement: "sandbox",
+        agent: "factory",
+        round: 0,
+      },
+    ];
+  }
+
+  #revision(run: Run): ChangeRevision {
+    return run.wo.github!.revisions.at(-1)!;
+  }
+
+  /** Updates the current revision (the last one); `undefined` values remove a field. */
+  #updateRevision(run: Run, patch: Partial<Mutable<ChangeRevision>>): ChangeRevision {
+    if (run.closed) return this.#revision(run);
+    const github = run.wo.github!;
+    const revisions = [...github.revisions];
+    const current: Record<string, unknown> = { ...revisions.at(-1)! };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete current[key];
+      else current[key] = value;
+    }
+    revisions[revisions.length - 1] = current as unknown as ChangeRevision;
+    run.wo.github = { ...github, revisions };
+    this.#persist(run.wo);
+    return revisions.at(-1)!;
+  }
+
+  #updateGitHub(run: Run, patch: Partial<Mutable<GitHubWork>>): void {
+    if (run.closed) return;
+    run.wo.github = { ...run.wo.github!, ...patch };
+    this.#persist(run.wo);
+  }
+
+  #submitChangeTool(run: Run, capture: Capture): Tool<unknown> {
+    return defineTool("submit_change", {
+      description:
+        "Submit your change to the software factory: the pull request title and description, the test command the factory re-runs, and your screenshots and recordings. If you were asked a question, put your answer in `answer`. Returns 'Recorded' or the problems to fix before calling it again.",
+      parameters: SubmitChangeSchema,
+      skipPermission: true,
+      handler: async (args: unknown) => {
+        const result = validateChange(args);
+        if (!result.ok) return `Rejected. Fix these problems and call submit_change again:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`;
+        const value = result.value;
+        capture.change = value;
+        this.#updateRevision(run, {
+          title: value.title,
+          summary: value.summary,
+          testCommand: value.testCommand,
+          answer: value.answer,
+          requestedMedia: value.media,
+        });
+        const media = value.media.length;
+        return `Recorded. The factory re-runs ${value.testCommand ? `\`${value.testCommand}\`` : "no tests (no test command)"}, collects ${media} media file${media === 1 ? "" : "s"} from /workspace/outputs/media, and sends the change to review.`;
+      },
+    }) as Tool<unknown>;
+  }
+
+  async #develop(run: Run): Promise<void> {
+    const build = this.#station(run, CHANGE_BUILD);
+    const review = this.#station(run, CHANGE_REVIEW);
+    if (this.#revision(run).acceptedRound !== undefined) return;
+    let current = build;
+    if (build.status === "waiting") this.#updateStation(run, build, { detail: "Queued for a sandbox" });
+    const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
+    try {
+      const capture: Capture = {};
+      const active = await this.#openSandboxSession(run, build, () => [{ path: ".factory/REQUEST.md", content: requestMarkdown(run.wo) }], {
+        extra: { tools: [this.#submitChangeTool(run, capture)] },
+        capture,
+        prepare: (opened) => this.#checkout(run, build, opened),
+      });
+      await this.#startRevision(run, build, active);
+
+      let nudges = 0;
+      for (;;) {
+        current = build;
+        if (build.passedRound !== build.round) {
+          const submitted = this.#revision(run);
+          if (submitted.summary === undefined && submitted.answer === undefined) {
+            if (nudges >= MAX_NUDGES) throw new StationError("change_missing", "The developer didn't submit its change with submit_change.");
+            nudges++;
+            this.#activity(run.wo, build.id, "The developer finished without calling submit_change; asking it to", "warning");
+            await this.#turn(run, build, active, submitChangeRetryPrompt(), "nudge", build.round);
+            continue;
+          }
+          const check = await this.#verifyChange(run, build);
+          if (check && !check.passed && nudges < MAX_NUDGES) {
+            nudges++;
+            this.#activity(run.wo, build.id, `\`${check.command}\` failed when the factory re-ran it; asking the developer to fix it`, "warning");
+            await this.#turn(run, build, active, changeCheckFailedPrompt(check), "nudge", build.round);
+            continue;
+          }
+          this.#updateStation(run, build, { status: "done", passedRound: build.round, detail: describeChange(this.#revision(run)), finishedAt: now() });
+        }
+        const revision = this.#revision(run);
+        if ((revision.files ?? []).length === 0) {
+          this.#updateStation(run, review, { status: "skipped", detail: "No file changes to review", round: build.round });
+          this.#updateRevision(run, { acceptedRound: build.round });
+          return;
+        }
+
+        current = review;
+        const startRound = revision.startRound ?? 1;
+        const used = build.round - startRound + 1;
+        const existing = review.reviews?.find((record) => record.round === build.round);
+        const previous = review.reviews?.filter((record) => record.round >= startRound && record.round < build.round).at(-1)?.findings;
+        const verdict =
+          existing ??
+          (await this.#review(run, review, build, build.round, () => this.#changeReviewPrompt(run, build, used, previous), used));
+        if (verdict.verdict === "approve") {
+          this.#updateStation(run, review, { status: "done", detail: `Approved in round ${used}`, finishedAt: now() });
+          this.#updateRevision(run, { acceptedRound: build.round });
+          return;
+        }
+        if (used >= run.wo.maxReviewRounds) {
+          this.#updateStation(run, review, {
+            status: "done",
+            acceptedWithFindings: true,
+            detail: `Accepted after ${used} rounds with findings open`,
+            finishedAt: now(),
+          });
+          this.#activity(run.wo, review.id, "Maximum review rounds reached: the pull request lists the open findings", "warning");
+          this.#updateRevision(run, { acceptedRound: build.round });
+          return;
+        }
+        nudges = 0;
+        current = build;
+        this.#updateStation(run, build, { finishedAt: undefined });
+        await this.#turn(run, build, active, changeFixPrompt(used + 1, run.wo.maxReviewRounds, verdict.findings, verdict.summary), "fix", build.round + 1);
+      }
+    } catch (caught) {
+      const error = explainSetupFailure(caught);
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) await this.#failStation(run, current, error);
+      throw error;
+    } finally {
+      releaseSlot();
+      if (!this.#stopping) {
+        // Detach; the session (and its sandbox, with the working tree) stays for the pull request and later revisions.
+        await this.#closeSession(run, build.id);
+        await this.#closeSession(run, review.id);
+      }
+    }
+  }
+
+  /**
+   * Makes sure the current revision's request reached the developer: its first turn (the request), a retry note, or a
+   * turn still in flight after a restart.
+   */
+  async #startRevision(run: Run, build: MStation, active: ActiveSession): Promise<void> {
+    const revision = this.#revision(run);
+    const sent = revision.startRound !== undefined && (build.turn?.round ?? 0) >= revision.startRound;
+    if (!sent) {
+      this.#updateStation(run, build, { retryNote: undefined });
+      const round = build.round + 1;
+      this.#updateRevision(run, { startRound: round });
+      // REQUEST.md lists every follow-up so far.
+      await this.#platform.files(active.session.sessionId).write(".factory/REQUEST.md", requestMarkdown(run.wo));
+      const prompt = revision.number === 1 ? developPrompt(run.wo) : revisionPrompt(revision, run.wo.github!.pullRequest);
+      await this.#turn(run, build, active, prompt, "work", round);
+    } else if (build.retryNote) {
+      const note = build.retryNote;
+      this.#updateStation(run, build, { retryNote: undefined, passedRound: undefined });
+      await this.#turn(run, build, active, changeRetryPrompt(note), "retry", Math.max(build.round, 1));
+    } else if (build.turn && !build.turn.completedAt) {
+      await this.#awaitTurn(run, build, active, "change");
+    }
+  }
+
+  /**
+   * Puts the repository into the sandbox without a credential: the factory downloads the base commit's archive with its
+   * own GitHub token and uploads it, and the sandbox unpacks it into a git repository. A replacement sandbox also gets
+   * the work already pushed to the branch.
+   */
+  async #checkout(run: Run, station: MStation, active: ActiveSession): Promise<void> {
+    const github = this.#requireGitHub();
+    const work = run.wo.github!;
+    const { owner, name, fullName } = work.repository;
+    const pushed = [...work.revisions].reverse().find((revision) => revision.pushed && revision.commitSha)?.commitSha;
+    this.#updateStation(run, station, { detail: `Checking out ${fullName}` });
+    active.mapper.status(`Checking out ${fullName} at ${work.baseSha.slice(0, 7)} (${work.repository.defaultBranch})${pushed ? `, with the work already pushed (${pushed.slice(0, 7)})` : ""}`);
+    const dir = mkdtempSync(join(tmpdir(), "factory-checkout-"));
+    try {
+      const files = this.#platform.files(active.session.sessionId);
+      const archives: [string, string][] = [[work.baseSha, "base.tar.gz"], ...(pushed ? ([[pushed, "head.tar.gz"]] as [string, string][]) : [])];
+      for (const [ref, file] of archives) {
+        const local = join(dir, file);
+        const size = await github.downloadTarball(owner, name, ref, local);
+        if (size > MAX_ARCHIVE_BYTES) throw new StationError("repository_too_large", `${fullName} is ${Math.round(size / 1024 / 1024)} MB packed; the factory checks out repositories up to ${MAX_ARCHIVE_BYTES / 1024 / 1024} MB.`);
+        this.#throwIfCancelled(run);
+        await files.upload(local, `.factory/${file}`);
+      }
+      const result = await this.#platform.exec(
+        active.session.sessionId,
+        checkoutScript({ branch: work.branch, baseArchive: ".factory/base.tar.gz", ...(pushed ? { headArchive: ".factory/head.tar.gz" } : {}), label: `${fullName}@${work.baseSha.slice(0, 12)}` }),
+        { timeoutMs: SANDBOX_COMMAND_TIMEOUT_MS, signal: run.abort.signal },
+      );
+      this.#throwIfCancelled(run);
+      if (result.state !== "completed" || result.exitCode !== 0) {
+        throw new StationError("checkout_failed", `Couldn't check out ${fullName} in the sandbox: ${outputTail(result.output, 400) || result.state}`);
+      }
+      const count = /CHECKED_OUT \S+ (\d+) files/.exec(result.output)?.[1];
+      active.mapper.status(`Checked out ${fullName}${count ? ` (${Number(count).toLocaleString("en-US")} files)` : ""} into /workspace/${REPO_DIR}, tagged factory-base`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** The developer's working tree against `factory-base`, through a temporary index (nothing in the sandbox changes). */
+  async #snapshot(run: Run, station: MStation): Promise<Snapshot> {
+    const result = await this.#platform.exec(station.sessionId!, snapshotScript(), { timeoutMs: SANDBOX_COMMAND_TIMEOUT_MS, signal: run.abort.signal });
+    this.#throwIfCancelled(run);
+    if (result.state !== "completed" || result.exitCode !== 0) {
+      throw new StationError("diff_failed", `Couldn't read the change from the sandbox: ${outputTail(result.output, 400) || result.state}`);
+    }
+    try {
+      return parseSnapshot(result.output);
+    } catch (error) {
+      throw new StationError("diff_failed", (error as Error).message);
+    }
+  }
+
+  /** Re-runs the developer's test command, collects its media, and records the change for review. */
+  async #verifyChange(run: Run, build: MStation): Promise<ChangeCheck | undefined> {
+    this.#updateStation(run, build, { status: "collecting", detail: "Collecting the change" });
+    await this.#capturePublication(run, build);
+    const revision = this.#revision(run);
+    const media = this.#matchMedia(run, build, revision.requestedMedia ?? []);
+    const snapshot = await this.#snapshot(run, build);
+    await this.#savePatch(run, build, snapshot);
+    let check: ChangeCheck | undefined;
+    if (snapshot.files.length > 0 && revision.testCommand) {
+      this.#updateStation(run, build, { detail: `Running ${revision.testCommand}` });
+      const started = Date.now();
+      const result = await this.#platform.exec(build.sessionId!, checkScript(revision.testCommand), {
+        timeoutMs: this.#options.config.checkTimeoutMs ?? 10 * 60_000,
+        signal: run.abort.signal,
+      });
+      this.#throwIfCancelled(run);
+      const passed = result.state === "completed" && result.exitCode === 0;
+      check = {
+        command: revision.testCommand,
+        passed,
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
+        durationMs: Date.now() - started,
+        output: outputTail(result.output),
+        at: now(),
+      };
+      this.#activity(
+        run.wo,
+        build.id,
+        passed
+          ? `The factory re-ran \`${check.command}\`: passed (${spokenDuration(check.durationMs)})`
+          : `The factory re-ran \`${check.command}\`: ${result.state === "timed_out" ? "it timed out" : `exit ${result.exitCode ?? result.state}`}`,
+        passed ? "success" : "warning",
+      );
+    }
+    this.#updateRevision(run, { files: snapshot.files, media, check });
+    if (snapshot.files.length === 0) this.#activity(run.wo, build.id, revision.answer ? "Answered the request without changing files" : "The developer didn't change any files", "info");
+    return check;
+  }
+
+  /** The media the developer listed, matched to what its turn actually published (and the factory kept). */
+  #matchMedia(run: Run, build: MStation, requested: readonly { readonly path: string; readonly caption: string }[]): MediaItem[] {
+    const metas = this.#store.listArtifacts(run.wo.id).filter((meta) => meta.stationId === build.id);
+    const media: MediaItem[] = [];
+    for (const item of requested) {
+      const meta = metas.find((candidate) => candidate.path === item.path && candidate.hasBytes);
+      const type = mediaTypeOf(item.path);
+      if (!meta || !type) {
+        const published = metas.find((candidate) => candidate.path === item.path);
+        this.#activity(
+          run.wo,
+          build.id,
+          published ? `${item.path} is over ${MAX_MEDIA_BYTES / 1024 / 1024} MB, so it's left out of the pull request` : `${item.path} wasn't in /workspace/outputs, so it's left out of the pull request`,
+          "warning",
+        );
+        continue;
+      }
+      media.push({ stationId: build.id, path: item.path, version: meta.version, caption: item.caption, kind: type.kind, contentType: type.contentType, size: meta.size });
+    }
+    return media;
+  }
+
+  /** Keeps the change's diff as the station's `change.patch` artifact, for the floor's diff viewer and the reviewer. */
+  async #savePatch(run: Run, build: MStation, snapshot: Snapshot): Promise<void> {
+    let content = "";
+    if (snapshot.files.length > 0) {
+      const result = await this.#platform.exec(build.sessionId!, patchScript(snapshot.tree), { timeoutMs: SANDBOX_COMMAND_TIMEOUT_MS, signal: run.abort.signal });
+      this.#throwIfCancelled(run);
+      if (result.state !== "completed" || result.exitCode !== 0) throw new StationError("diff_failed", `Couldn't read the change's diff: ${outputTail(result.output, 400) || result.state}`);
+      content = result.output;
+    }
+    const digest = `sha256:${sha256(content)}`;
+    const latest = this.#store.listArtifacts(run.wo.id).find((meta) => meta.stationId === build.id && meta.path === "change.patch");
+    if (latest?.digest === digest) return;
+    const bytes = Buffer.byteLength(content, "utf8");
+    this.#store.putArtifact({
+      workOrderId: run.wo.id,
+      stationId: build.id,
+      path: "change.patch",
+      version: this.#store.nextArtifactVersion(run.wo.id, build.id, "change.patch"),
+      round: build.round,
+      size: bytes,
+      digest,
+      contentType: "text/x-diff",
+      publishedAt: now(),
+      ...(bytes <= MAX_PATCH_BYTES ? { content } : {}),
+    });
+    this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
+  }
+
+  #changeReviewPrompt(run: Run, build: MStation, used: number, previous: ReviewRecord["findings"] | undefined): string {
+    const revision = this.#revision(run);
+    const patch = this.#store.latestArtifacts(run.wo.id, build.id).find((artifact) => artifact.path === "change.patch")?.content ?? "(The diff is too large to show.)";
+    const developerSummary = run.sessions.get(build.id)?.mapper.lastMessage;
+    return changeReviewPrompt(run.wo, used, run.wo.maxReviewRounds, { patch, files: revision.files ?? [], revision, ...(developerSummary ? { developerSummary } : {}) }, previous);
+  }
+
+  async #pullRequest(run: Run): Promise<void> {
+    const station = this.#station(run, "release");
+    const build = this.#station(run, CHANGE_BUILD);
+    const review = this.#station(run, CHANGE_REVIEW);
+    let revision = this.#revision(run);
+    if (revision.completedAt) return;
+    const work = run.wo.github!;
+    if ((revision.files ?? []).length === 0) {
+      this.#updateStation(run, station, { status: "skipped", detail: work.pullRequest ? "No new changes to push" : "No changes, so no pull request", finishedAt: now() });
+      this.#updateRevision(run, { outcome: "no_changes", completedAt: now() });
+      return;
+    }
+    const github = this.#requireGitHub();
+    const { owner, name } = work.repository;
+    try {
+      this.#updateStation(run, station, { status: "working", detail: "Pushing the change", startedAt: station.startedAt ?? now(), round: build.round });
+      if (!revision.pushed) await this.#pushRevision(run, station, build);
+      revision = this.#revision(run);
+      const urls = await this.#uploadMedia(run, station, revision.media ?? []);
+      const text = {
+        wo: run.wo,
+        revision,
+        reviews: (review.reviews ?? []).filter((record) => record.round >= (revision.startRound ?? 1)),
+        acceptedWithFindings: Boolean(review.acceptedWithFindings),
+        mediaUrls: urls,
+        mediaKey,
+        models: { developer: build.model ?? this.#platform.models.developer, reviewer: review.model ?? this.#platform.models.reviewer },
+      };
+      const existing = run.wo.github!.pullRequest;
+      if (!existing) {
+        this.#updateStation(run, station, { detail: "Opening the pull request" });
+        const pull =
+          (await github.findPullRequest(owner, name, work.branch)) ??
+          (await github.createPullRequest(owner, name, { title: revision.title ?? run.wo.title, body: pullRequestBody(text), head: work.branch, base: work.repository.defaultBranch }));
+        this.#updateGitHub(run, { pullRequest: pull });
+        this.#updateRevision(run, { outcome: "pull_request", completedAt: now() });
+        this.#activity(run.wo, station.id, `Opened pull request #${pull.number}: ${pull.title}`, "success");
+        this.#updateStation(run, station, { status: "done", detail: `Opened #${pull.number}`, finishedAt: now() });
+      } else {
+        this.#updateStation(run, station, { detail: `Commenting on #${existing.number}` });
+        const url = revision.commentUrl ?? (await github.comment(owner, name, existing.number, revisionComment(text)));
+        this.#updateRevision(run, { commentUrl: url, outcome: "pushed", completedAt: now() });
+        await this.#refreshPullRequest(run.wo).catch((error: unknown) => log.debug("Couldn't refresh the pull request", { error: (error as Error).message }));
+        this.#activity(run.wo, station.id, `Pushed revision ${revision.number} to pull request #${existing.number}`, "success");
+        this.#updateStation(run, station, { status: "done", detail: `Revision ${revision.number} pushed to #${existing.number}`, finishedAt: now() });
+      }
+    } catch (error) {
+      if (!(error instanceof CancelledError) && !run.abort.signal.aborted && !this.#stopping) await this.#failStation(run, station, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Turns the sandbox's working tree into a commit on the work order's branch with GitHub's Git Data API: a blob per
+   * changed file, a tree on top of the base commit's, and a commit whose parent is the last one the factory pushed. The
+   * branch only moves forward: commits the factory didn't make stop the push instead of being overwritten.
+   */
+  async #pushRevision(run: Run, station: MStation, build: MStation): Promise<void> {
+    const github = this.#requireGitHub();
+    const work = run.wo.github!;
+    const { owner, name } = work.repository;
+    let revision = this.#revision(run);
+    const parent = [...work.revisions].reverse().find((item) => item.number < revision.number && item.pushed && item.commitSha)?.commitSha ?? work.baseSha;
+    const remote = await github.branchHead(owner, name, work.branch);
+    const foreign = (sha: string | undefined) => sha !== undefined && sha !== parent && sha !== revision.commitSha;
+    if (foreign(remote)) {
+      throw new StationError(
+        "conflict",
+        `${work.branch} on GitHub has commits the factory didn't make (now at ${remote!.slice(0, 7)}). The factory won't overwrite them: start a new work order, or reset the branch to ${parent.slice(0, 7)}.`,
+      );
+    }
+    if (!revision.commitSha) {
+      const snapshot = await this.#snapshot(run, build);
+      if (snapshot.files.length === 0) throw new StationError("nothing_to_push", "The working tree no longer has any changes to push.");
+      this.#updateStation(run, station, { detail: `Uploading ${snapshot.files.length} file${snapshot.files.length === 1 ? "" : "s"}` });
+      const entries = await this.#treeEntries(run, build, snapshot);
+      const baseTree = await github.commitTree(owner, name, work.baseSha);
+      const tree = await github.createTree(owner, name, baseTree, entries);
+      const commit = await github.createCommit(owner, name, { message: commitMessage(run.wo, revision, work.issue), tree, parents: [parent] });
+      revision = this.#updateRevision(run, { commitSha: commit, files: snapshot.files });
+    }
+    const commit = revision.commitSha!;
+    if (remote !== commit) {
+      if (remote) await github.updateBranch(owner, name, work.branch, commit);
+      else await github.createBranch(owner, name, work.branch, commit);
+    }
+    this.#updateRevision(run, { pushed: true });
+    const files = revision.files?.length ?? 0;
+    this.#activity(run.wo, station.id, `Pushed ${files} changed file${files === 1 ? "" : "s"} to ${work.branch} (${commit.slice(0, 7)})`, "success");
+  }
+
+  async #treeEntries(run: Run, build: MStation, snapshot: Snapshot): Promise<TreeEntry[]> {
+    const github = this.#requireGitHub();
+    const { owner, name } = run.wo.github!.repository;
+    const sessionId = build.sessionId!;
+    const files = this.#platform.files(sessionId);
+    const changed = snapshot.entries.filter((entry) => entry.mode !== "160000");
+    if (changed.length > MAX_PUSH_FILES) throw new StationError("change_too_large", `The change touches ${changed.length} files; the factory pushes at most ${MAX_PUSH_FILES}.`);
+    const entries: TreeEntry[] = [];
+    let total = 0;
+    const queue = [...changed];
+    const worker = async (): Promise<void> => {
+      for (let entry = queue.shift(); entry; entry = queue.shift()) {
+        this.#throwIfCancelled(run);
+        if (entry.status === "deleted" || !entry.sha) {
+          entries.push({ path: entry.path, mode: "100644", sha: null });
+          continue;
+        }
+        let bytes: Uint8Array;
+        if (entry.mode === "120000") {
+          const result = await this.#platform.exec(sessionId, blobScript(entry.sha), { timeoutMs: 60_000, signal: run.abort.signal });
+          if (result.state !== "completed" || result.exitCode !== 0) throw new StationError("diff_failed", `Couldn't read the symbolic link ${entry.path}.`);
+          bytes = Buffer.from(result.output, "utf8");
+        } else {
+          bytes = await files.readBytes(`${REPO_DIR}/${entry.path}`);
+        }
+        if (bytes.length > MAX_PUSH_FILE_BYTES) throw new StationError("change_too_large", `${entry.path} is ${Math.round(bytes.length / 1024 / 1024)} MB; the factory pushes files up to ${MAX_PUSH_FILE_BYTES / 1024 / 1024} MB.`);
+        total += bytes.length;
+        if (total > MAX_PUSH_BYTES) throw new StationError("change_too_large", `The change is over ${MAX_PUSH_BYTES / 1024 / 1024} MB; the factory doesn't push changes that large.`);
+        if (gitBlobSha(bytes) !== entry.sha) throw new StationError("workspace_changed", `${entry.path} changed while the factory was pushing it. Retry the work order.`);
+        const sha = await github.createBlob(owner, name, bytes);
+        entries.push({ path: entry.path, mode: entry.mode === "100755" || entry.mode === "120000" ? entry.mode : "100644", sha });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, Math.max(1, changed.length)) }, worker));
+    return entries.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  /** Uploads the revision's media as GitHub attachments (once each); a failed upload is reported and left out. */
+  async #uploadMedia(run: Run, station: MStation, media: readonly MediaItem[]): Promise<Record<string, string>> {
+    const github = this.#requireGitHub();
+    const work = run.wo.github!;
+    const urls: Record<string, string> = { ...(work.uploads ?? {}) };
+    const pending = media.filter((item) => !urls[mediaKey(item)]);
+    if (pending.length > 0) this.#updateStation(run, station, { detail: `Attaching ${pending.length} screenshot${pending.length === 1 ? "" : "s"} and recording${pending.length === 1 ? "" : "s"}` });
+    for (const item of pending) {
+      this.#throwIfCancelled(run);
+      const stored = this.#store.getArtifactBytes(run.wo.id, item.stationId, item.path, item.version);
+      if (!stored) {
+        this.#activity(run.wo, station.id, `${item.path} is no longer stored, so it's left out of the pull request`, "warning");
+        continue;
+      }
+      try {
+        urls[mediaKey(item)] = await github.uploadAttachment(work.repository.id, item.path.split("/").pop() ?? item.path, item.contentType, stored.bytes);
+        this.#updateGitHub(run, { uploads: { ...(run.wo.github!.uploads ?? {}), [mediaKey(item)]: urls[mediaKey(item)]! } });
+      } catch (error) {
+        if (error instanceof CancelledError) throw error;
+        this.#activity(run.wo, station.id, `Couldn't attach ${item.path} to the pull request: ${toFactoryError(error).message}`, "warning");
+      }
+    }
+    return urls;
   }
 
   // ─── Agent-led coordination ────────────────────────────────────────────────────────────────────────────────
@@ -1635,17 +2412,28 @@ export class Factory {
     return active;
   }
 
-  /** Sandbox stations resume their existing session when they have one, so a restart or retry keeps the workspace. */
-  async #openSandboxSession(run: Run, station: MStation, seed: () => SeedFile[]): Promise<ActiveSession> {
+  /**
+   * Sandbox stations resume their existing session when they have one, so a restart or retry keeps the workspace.
+   * `extra` adds session options (a station's own tools) on create and resume; `prepare` runs after the seed files are
+   * written, before the station counts as seeded (a GitHub checkout).
+   */
+  async #openSandboxSession(
+    run: Run,
+    station: MStation,
+    seed: () => SeedFile[],
+    options: { readonly extra?: Partial<SessionConfig>; readonly capture?: Capture; readonly prepare?: (active: ActiveSession) => Promise<void> } = {},
+  ): Promise<ActiveSession> {
     this.#throwIfCancelled(run);
     const existing = run.sessions.get(station.id);
     if (existing) return existing;
+    const extra = options.extra ?? {};
+    const capture = options.capture ?? {};
     if (station.sessionId) {
       const mapper = this.#newMapper(run, station);
       let session: StationSession | undefined;
       try {
         this.#updateStation(run, station, { status: "starting", detail: "Reattaching to the sandbox" });
-        session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
+        session = await this.#platform.resumeSession(station.role, station.sessionId, this.#sessionConfig(run, station, mapper, extra), (text) => mapper.status(text, "warning"));
       } catch (error) {
         // Events reaching an abandoned resume (one that answers after its deadline) don't belong on the floor.
         mapper.close();
@@ -1680,12 +2468,12 @@ export class Factory {
         this.#options.hub.publish({ type: "artifacts", workOrderId: run.wo.id });
       }
       if (session) {
-        const active: ActiveSession = { session, mapper, capture: {} };
+        const active: ActiveSession = { session, mapper, capture };
         run.sessions.set(station.id, active);
         await this.#refreshSandbox(run, station);
         mapper.status(`Reattached to session ${session.sessionId}`);
         // Seeding was interrupted before the first prompt: finish it (writes are idempotent).
-        if (!station.seeded && !station.turn) await this.#seed(run, station, active, seed);
+        if (!station.seeded && !station.turn) await this.#seed(run, station, active, seed, options.prepare);
         return active;
       }
     }
@@ -1696,8 +2484,8 @@ export class Factory {
       model: this.#platform.models[station.role],
     });
     const mapper = this.#newMapper(run, station);
-    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, {}), (text) => mapper.status(text, "warning"));
-    const active: ActiveSession = { session, mapper, capture: {} };
+    const session = await this.#platform.createSession(station.role, this.#sessionConfig(run, station, mapper, extra), (text) => mapper.status(text, "warning"));
+    const active: ActiveSession = { session, mapper, capture };
     run.sessions.set(station.id, active);
     this.#updateStation(run, station, { sessionId: session.sessionId, seeded: false });
     await this.#refreshSandbox(run, station);
@@ -1707,16 +2495,17 @@ export class Factory {
         ? `Sandbox ${sandbox.id} ready: ${sandbox.size} (${SANDBOX_SIZES[sandbox.size].cpus} vCPU · ${SANDBOX_SIZES[sandbox.size].memoryGiB} GiB), ${describeNetwork(sandbox.network)}`
         : `Session ${session.sessionId} ready on ${station.environment}`,
     );
-    await this.#seed(run, station, active, seed);
+    await this.#seed(run, station, active, seed, options.prepare);
     return active;
   }
 
-  /** Writes the station's seed files into its sandbox, then records the checkpoint. */
-  async #seed(run: Run, station: MStation, active: ActiveSession, seed: () => SeedFile[]): Promise<void> {
+  /** Writes the station's seed files into its sandbox (and runs `prepare`), then records the checkpoint. */
+  async #seed(run: Run, station: MStation, active: ActiveSession, seed: () => SeedFile[], prepare?: (active: ActiveSession) => Promise<void>): Promise<void> {
     this.#updateStation(run, station, { status: "starting", detail: "Seeding the workspace" });
     const files = seed();
     const writer = this.#platform.files(active.session.sessionId);
     for (const file of files) await writer.write(file.path, file.content);
+    if (prepare) await prepare(active);
     this.#updateStation(run, station, { seeded: true });
     active.mapper.status(
       `Seeded ${files.length} files: ${files.map((file) => file.path).filter((path) => !path.startsWith(".factory/conflicts/")).slice(0, 8).join(", ")}${files.length > 8 ? ", …" : ""}`,
@@ -1802,7 +2591,7 @@ export class Factory {
    *   turn is stopped and the agent is asked to continue.
    * A turn the platform reports as failed or cancelled is continued too, rather than treated as complete.
    */
-  async #awaitTurn(run: Run, station: MStation, active: ActiveSession, release: boolean): Promise<void> {
+  async #awaitTurn(run: Run, station: MStation, active: ActiveSession, release: boolean | "change"): Promise<void> {
     this.#updateStation(run, station, { status: "working", detail: "Resuming the in-flight turn" });
     const deadline = Date.now() + this.#options.config.turnTimeoutMs[station.role];
     const pollMs = this.#options.pollMs ?? 3_000;
@@ -1929,7 +2718,11 @@ export class Factory {
     for (const info of list) {
       if (info.state !== "published" || this.#store.hasArtifact(run.wo.id, station.id, info.path, info.version)) continue;
       let content: string | undefined;
-      if (isTextPath(info.path) && info.size <= MAX_TEXT_BYTES) {
+      let bytes: Uint8Array | undefined;
+      const media = info.path.startsWith("media/") ? mediaTypeOf(info.path) : undefined;
+      if (media && info.size <= MAX_MEDIA_BYTES) {
+        bytes = await this.#readArtifactWith(station, info.path, () => artifacts.readBytes(info.path, { version: info.version }));
+      } else if (isTextPath(info.path) && info.size <= MAX_TEXT_BYTES) {
         const text = await this.#readArtifact(artifacts, station, info.path, info.version);
         content = text.includes("\u0000") ? undefined : text;
       }
@@ -1942,9 +2735,10 @@ export class Factory {
         round: station.round,
         size: info.size,
         digest: info.digest,
-        contentType: info.contentType ?? contentTypeFor(info.path),
+        contentType: media?.contentType ?? info.contentType ?? contentTypeFor(info.path),
         publishedAt: info.publishedAt ?? now(),
         ...(content !== undefined ? { content } : {}),
+        ...(bytes !== undefined ? { bytes } : {}),
       });
       added++;
     }
@@ -1960,10 +2754,14 @@ export class Factory {
    * than being recorded without content, so a retry downloads it again instead of silently dropping it.
    */
   async #readArtifact(artifacts: ReturnType<FactoryPlatform["artifacts"]>, station: MStation, path: string, version: number): Promise<string> {
+    return this.#readArtifactWith(station, path, () => artifacts.read(path, { version }));
+  }
+
+  async #readArtifactWith<T>(station: MStation, path: string, read: () => Promise<T>): Promise<T> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        return await artifacts.read(path, { version });
+        return await read();
       } catch (error) {
         lastError = error;
         log.warn("Couldn't read artifact", { station: station.id, path, attempt, error: (error as Error).message });
@@ -2068,7 +2866,7 @@ export class Factory {
       Object.assign(station, { status: "waiting", detail: "Paused until Managed Copilot is back" });
       this.#activity(wo, station.id, note, "warning");
     }
-    if (active.length === 0) this.#activity(wo, "plan", note, "warning");
+    if (active.length === 0) this.#activity(wo, wo.stations[0]?.id ?? "plan", note, "warning");
     this.#setWorkOrder(run, {});
     log.warn("Work order paused: lost the platform connection", { id: wo.id, pauses: this.#pauses.get(wo.id), reason });
   }
@@ -2200,5 +2998,14 @@ export function toSummary(wo: WorkOrder): WorkOrderSummary {
     taskCount: wo.taskCount,
     ...(wo.tests ? { tests: wo.tests } : {}),
     ...(wo.error ? { error: wo.error } : {}),
+    ...(wo.github
+      ? {
+          github: {
+            repository: wo.github.repository.fullName,
+            ...(wo.github.issue ? { issue: wo.github.issue.number } : {}),
+            ...(wo.github.pullRequest ? { pullRequest: wo.github.pullRequest.number, pullRequestState: wo.github.pullRequest.state } : {}),
+          },
+        }
+      : {}),
   };
 }

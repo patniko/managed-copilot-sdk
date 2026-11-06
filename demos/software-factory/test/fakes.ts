@@ -1,6 +1,7 @@
 import type { ResumeSessionConfig, SessionConfig, SessionEvent, Tool } from "@github/copilot-sdk";
 import { ManagedCopilotError, type ArtifactInfo, type EnvironmentInfo, type PublicationResult, type SessionInfo } from "@managed-copilot/sdk";
-import type { FactoryPlatform, StationArtifacts, StationFiles, StationSession, StationWorkers } from "../src/server/platform.js";
+import { readFileSync } from "node:fs";
+import type { CommandResult, FactoryPlatform, StationArtifacts, StationFiles, StationSession, StationWorkers } from "../src/server/platform.js";
 import type { OutputManifest, StationRole, TestReport } from "../src/shared/types.js";
 
 let counter = 0;
@@ -110,7 +111,7 @@ export type Script = (session: FakeSession, prompt: string, platform: FakePlatfo
 
 /** In-memory platform: sessions, sandbox workspaces, and turn-scoped artifact publication. */
 export class FakePlatform implements FactoryPlatform {
-  readonly models: Record<StationRole, string> = { planner: "fake-planner", builder: "fake-builder", reviewer: "fake-reviewer", release: "fake-release", coordinator: "fake-coordinator" };
+  readonly models: Record<StationRole, string> = { planner: "fake-planner", builder: "fake-builder", reviewer: "fake-reviewer", release: "fake-release", coordinator: "fake-coordinator", developer: "fake-developer" };
   readonly sessions = new Map<string, FakeSession>();
   readonly workspaces = new Map<string, Map<string, string>>();
   readonly outputs = new Map<string, Map<string, StoredFile>>();
@@ -133,6 +134,12 @@ export class FakePlatform implements FactoryPlatform {
   /** Errors the next resumeSession calls throw, in order (e.g. a connection that drops again while reattaching). */
   readonly resumeErrors: unknown[] = [];
   createCount = 0;
+  /** Commands the factory ran in sandboxes (`exec`), in order. */
+  readonly execs: { sessionId: string; command: string }[] = [];
+  /** Answers `exec`; GitHub work order tests script it. */
+  execHandler: ((sessionId: string, command: string) => CommandResult | Promise<CommandResult>) | undefined;
+  /** Files uploaded with `files().upload`, by session and path. */
+  readonly uploads = new Map<string, Map<string, Buffer>>();
 
   constructor(scripts: Partial<Record<StationRole, Script>>) {
     this.scripts = scripts;
@@ -188,8 +195,8 @@ export class FakePlatform implements FactoryPlatform {
     return {
       id: sessionId,
       environment: "fake",
-      type: session?.role === "builder" || session?.role === "release" ? "isolated" : "shared",
-      placement: session?.role === "builder" || session?.role === "release" ? "sandbox" : "shared",
+      type: isSandbox(session?.role) ? "isolated" : "shared",
+      placement: isSandbox(session?.role) ? "sandbox" : "shared",
       state: "idle",
       owner: { id: 1, login: "octocat" },
       createdAt: new Date().toISOString(),
@@ -199,7 +206,7 @@ export class FakePlatform implements FactoryPlatform {
         turnId: this.turnIds.get(sessionId) ?? "t", status: this.lastTurnStatus.get(sessionId) ?? "completed",
         ...(this.lastTurnStatus.get(sessionId) === "running" ? {} : { completedAt: new Date().toISOString() }),
       },
-      ...(session?.role === "builder" || session?.role === "release"
+      ...(isSandbox(session?.role)
         ? {
             sandbox: {
               id: `sbx_${sessionId}`,
@@ -238,7 +245,25 @@ export class FakePlatform implements FactoryPlatform {
         this.workspaces.get(sessionId)!.set(path, typeof data === "string" ? data : Buffer.from(data).toString("utf8"));
         return { path, type: "file", size: data.length, modifiedAt: new Date().toISOString() };
       },
+      readBytes: async (path) => {
+        const content = this.workspaces.get(sessionId)?.get(path);
+        if (content === undefined) throw new ManagedCopilotError("not_found", `No file ${path}`);
+        return new Uint8Array(Buffer.from(content, "utf8"));
+      },
+      upload: async (localPath, path) => {
+        const bytes = readFileSync(localPath);
+        const session = this.uploads.get(sessionId) ?? new Map<string, Buffer>();
+        session.set(path, bytes);
+        this.uploads.set(sessionId, session);
+        return { path, type: "file", size: bytes.length, modifiedAt: new Date().toISOString() };
+      },
     };
+  }
+
+  async exec(sessionId: string, command: string): Promise<CommandResult> {
+    this.execs.push({ sessionId, command });
+    if (!this.execHandler) throw new Error("exec is not scripted in this test");
+    return this.execHandler(sessionId, command);
   }
 
   /** What the factory-check harness would publish under outputs/. */
@@ -280,12 +305,21 @@ export class FakePlatform implements FactoryPlatform {
         if (!file) throw new Error(`No artifact ${path}`);
         return file.content;
       },
+      readBytes: async (path) => {
+        const file = outputs().get(path);
+        if (!file) throw new Error(`No artifact ${path}`);
+        return new Uint8Array(Buffer.from(file.content, "utf8"));
+      },
     };
   }
 
   environment(_role: StationRole): EnvironmentInfo | undefined {
     return undefined;
   }
+}
+
+function isSandbox(role: StationRole | undefined): boolean {
+  return role === "builder" || role === "release" || role === "developer";
 }
 
 export function testReport(passed: number, failed = 0, mode: "task" | "release" = "task"): string {

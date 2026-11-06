@@ -17,9 +17,11 @@ export interface StoredArtifact {
   readonly publishedAt: string;
   /** Text content; undefined for binary or oversized files. */
   readonly content?: string;
+  /** Media (images and recordings) the factory keeps as bytes. */
+  readonly bytes?: Uint8Array;
 }
 
-export type StoredArtifactMeta = Omit<StoredArtifact, "content"> & { readonly hasContent: boolean };
+export type StoredArtifactMeta = Omit<StoredArtifact, "content" | "bytes"> & { readonly hasContent: boolean; readonly hasBytes: boolean };
 
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS factory_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -51,6 +53,8 @@ const MIGRATIONS = [
      content TEXT,
      PRIMARY KEY (work_order_id, station_id, path, version)
    );`,
+  // GitHub work orders: screenshots and recordings, kept so the floor can show them and the pull request can attach them.
+  `ALTER TABLE factory_artifacts ADD COLUMN bytes BLOB;`,
 ];
 
 /** The factory's own records (work orders, activity, captured artifacts). Sessions themselves live in the platform. */
@@ -140,9 +144,9 @@ export class FactoryStore {
   putArtifact(artifact: StoredArtifact): void {
     this.#db
       .prepare(
-        `INSERT INTO factory_artifacts (work_order_id, station_id, path, version, round, size, digest, content_type, published_at, content)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(work_order_id, station_id, path, version) DO UPDATE SET content = excluded.content`,
+        `INSERT INTO factory_artifacts (work_order_id, station_id, path, version, round, size, digest, content_type, published_at, content, bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(work_order_id, station_id, path, version) DO UPDATE SET content = excluded.content, bytes = excluded.bytes`,
       )
       .run(
         artifact.workOrderId,
@@ -155,13 +159,36 @@ export class FactoryStore {
         artifact.contentType,
         artifact.publishedAt,
         artifact.content ?? null,
+        artifact.bytes ?? null,
       );
+  }
+
+  /** A media artifact's bytes (the newest version when `version` is omitted). */
+  getArtifactBytes(workOrderId: string, stationId: string, path: string, version?: number): { readonly bytes: Uint8Array; readonly contentType: string; readonly version: number } | undefined {
+    const row = (
+      version === undefined
+        ? this.#db
+            .prepare("SELECT bytes, content_type, version FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ? AND bytes IS NOT NULL ORDER BY version DESC LIMIT 1")
+            .get(workOrderId, stationId, path)
+        : this.#db
+            .prepare("SELECT bytes, content_type, version FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ? AND version = ? AND bytes IS NOT NULL")
+            .get(workOrderId, stationId, path, version)
+    ) as { bytes: Uint8Array; content_type: string; version: number } | undefined;
+    return row ? { bytes: new Uint8Array(row.bytes), contentType: row.content_type, version: row.version } : undefined;
+  }
+
+  /** The next version for an artifact the factory itself produces (a station's patch), not one the platform published. */
+  nextArtifactVersion(workOrderId: string, stationId: string, path: string): number {
+    const row = this.#db
+      .prepare("SELECT MAX(version) AS version FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ?")
+      .get(workOrderId, stationId, path) as { version: number | null } | undefined;
+    return (row?.version ?? 0) + 1;
   }
 
   listArtifacts(workOrderId: string): StoredArtifactMeta[] {
     const rows = this.#db
       .prepare(
-        `SELECT station_id, path, version, round, size, digest, content_type, published_at, content IS NOT NULL AS has_content
+        `SELECT station_id, path, version, round, size, digest, content_type, published_at, content IS NOT NULL AS has_content, bytes IS NOT NULL AS has_bytes
          FROM factory_artifacts WHERE work_order_id = ? ORDER BY station_id, path, version DESC`,
       )
       .all(workOrderId) as {
@@ -174,6 +201,7 @@ export class FactoryStore {
       content_type: string;
       published_at: string;
       has_content: number;
+      has_bytes: number;
     }[];
     return rows.map((row) => ({
       workOrderId,
@@ -186,6 +214,7 @@ export class FactoryStore {
       contentType: row.content_type,
       publishedAt: row.published_at,
       hasContent: row.has_content === 1,
+      hasBytes: row.has_bytes === 1,
     }));
   }
 
@@ -194,10 +223,10 @@ export class FactoryStore {
     const row = (
       version === undefined
         ? this.#db
-            .prepare("SELECT * FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ? ORDER BY version DESC LIMIT 1")
+            .prepare("SELECT station_id, path, version, round, size, digest, content_type, published_at, content FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ? ORDER BY version DESC LIMIT 1")
             .get(workOrderId, stationId, path)
         : this.#db
-            .prepare("SELECT * FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ? AND version = ?")
+            .prepare("SELECT station_id, path, version, round, size, digest, content_type, published_at, content FROM factory_artifacts WHERE work_order_id = ? AND station_id = ? AND path = ? AND version = ?")
             .get(workOrderId, stationId, path, version)
     ) as
       | {

@@ -138,7 +138,7 @@ export function platformFixture(state: PlatformStatus["state"], now: number): Pl
     account: connected ? { login: "mona", name: "Mona Octocat" } : undefined,
     environments: state === "misconfigured" ? ENVIRONMENTS.filter((environment) => environment.role !== "release" && environment.role !== "builder") : connected ? ENVIRONMENTS : [],
     missingEnvironments: state === "misconfigured" ? ["factory-builder", "factory-release"] : [],
-    features: { runs: connected, agentLed: connected, isolated: connected, artifacts: connected, files: connected, attach: connected },
+    features: { runs: connected, agentLed: connected, isolated: connected, artifacts: connected, files: connected, attach: connected, github: connected },
     checkedAt: new Date(now - 8 * SECOND).toISOString(),
   };
 }

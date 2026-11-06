@@ -6,8 +6,10 @@ import {
   CopilotIcon,
   DownloadIcon,
   FileDirectoryIcon,
+  GitPullRequestIcon,
   InfoIcon,
   KebabHorizontalIcon,
+  MarkGithubIcon,
   PackageIcon,
   PlugIcon,
   StopIcon,
@@ -41,6 +43,7 @@ import { ArtifactsView } from "./ArtifactsView.js";
 import { DeliverableView } from "./Deliverable.js";
 import { Floor } from "./Floor.js";
 import { PlanView } from "./PlanView.js";
+import { PullRequestDeliverable } from "./PullRequestDeliverable.js";
 import { IntakePanel, StationPanel } from "./StationPanel.js";
 import { Button, buttonClass, IconButton } from "./ui/Button.js";
 import { Callout, EmptyState, Skeleton } from "./ui/Feedback.js";
@@ -84,7 +87,7 @@ export function WorkOrderView({ id, tab, query }: WorkOrderViewProps) {
         {tab === "floor" ? <FloorTab workOrder={workOrder} query={query} /> : null}
         {tab === "plan" ? <PlanView workOrder={workOrder} /> : null}
         {tab === "artifacts" ? <ArtifactsView workOrder={workOrder} query={query} /> : null}
-        {tab === "deliverable" ? <DeliverableView workOrder={workOrder} /> : null}
+        {tab === "deliverable" ? workOrder.github ? <PullRequestDeliverable workOrder={workOrder} /> : <DeliverableView workOrder={workOrder} /> : null}
       </div>
     </div>
   );
@@ -130,6 +133,31 @@ const TABS: readonly { readonly id: WorkOrderTab; readonly label: string; readon
   { id: "artifacts", label: "Artifacts", icon: FileDirectoryIcon },
   { id: "deliverable", label: "Deliverable", icon: PackageIcon },
 ];
+
+/** GitHub work orders have no plan, and their deliverable is the pull request. */
+const GITHUB_TABS: readonly { readonly id: WorkOrderTab; readonly label: string; readonly icon: Icon }[] = [
+  { id: "floor", label: "Floor", icon: WorkflowIcon },
+  { id: "artifacts", label: "Artifacts", icon: FileDirectoryIcon },
+  { id: "deliverable", label: "Pull request", icon: GitPullRequestIcon },
+];
+
+/** Whether a GitHub work order has something to show on its deliverable tab: a pull request or an answer. */
+export function hasGitHubDeliverable(workOrder: WorkOrder): boolean {
+  return Boolean(workOrder.github && (workOrder.github.pullRequest || workOrder.github.revisions.some((revision) => revision.completedAt)));
+}
+
+/** The repository (and issue) a GitHub work order changes, as a Label linking to GitHub. */
+export function RepositoryLabel({ workOrder }: { readonly workOrder: WorkOrder }) {
+  const work = workOrder.github;
+  if (!work) return null;
+  return (
+    <a href={work.issue?.htmlUrl ?? work.repository.htmlUrl} target="_blank" rel="noreferrer" className="Label Label--secondary shrink-0 hover:no-underline" title={`On GitHub: ${work.repository.fullName}`}>
+      <MarkGithubIcon size={12} />
+      {work.repository.fullName}
+      {work.issue ? `#${work.issue.number}` : ""}
+    </a>
+  );
+}
 
 /** Agent-led or App-driven, as a Label. */
 export function ModeLabel({ mode }: { readonly mode: WorkOrderMode | undefined }) {
@@ -187,13 +215,13 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
             <StateIcon size={16} />
             {meta.label}
           </span>
-          <ModeLabel mode={workOrder.mode} />
+          {workOrder.github ? <RepositoryLabel workOrder={workOrder} /> : <ModeLabel mode={workOrder.mode} />}
           {elapsed !== undefined ? (
             <Stat icon={ClockIcon} label={active ? "Elapsed" : "Took"} title={`${active ? "Elapsed" : `Took ${formatDuration(elapsed)}`} · ${startedText}`}>
               {active ? formatClock(elapsed) : formatDuration(elapsed)}
             </Stat>
           ) : null}
-          {workOrder.taskCount > 0 ? (
+          {workOrder.taskCount > 0 && !workOrder.github ? (
             <Stat icon={TasklistIcon} label="Tasks">
               {pluralize(workOrder.taskCount, "task")}
             </Stat>
@@ -220,8 +248,8 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
 
       <nav aria-label="Work order sections" className="UnderlineNav mt-2 px-4 md:px-6">
         <ul className="UnderlineNav-body">
-          {TABS.map((item) => {
-            const disabled = item.id === "deliverable" && !workOrder.release;
+          {(workOrder.github ? GITHUB_TABS : TABS).map((item) => {
+            const disabled = item.id === "deliverable" && (workOrder.github ? !hasGitHubDeliverable(workOrder) : !workOrder.release);
             const count = item.id === "plan" ? workOrder.plan?.tasks.length : item.id === "artifacts" ? artifactCount : undefined;
             const content = (
               <>
@@ -236,7 +264,7 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
                   <span
                     className="UnderlineNav-item cursor-not-allowed text-fg-disabled hover:bg-transparent [&_.octicon]:text-fg-disabled"
                     aria-disabled="true"
-                    title="Available once the release is packaged"
+                    title={workOrder.github ? "Available once the pull request is open" : "Available once the release is packaged"}
                   >
                     {content}
                   </span>
@@ -259,7 +287,11 @@ function DetailsPopover({ workOrder, startedText }: { readonly workOrder: WorkOr
   const template = useStore((state) =>
     workOrder.source.templateId ? state.templates.find((candidate) => candidate.id === workOrder.source.templateId) : undefined,
   );
-  const source = workOrder.source.kind === "template" ? (template?.title ?? "Template") : "Custom brief";
+  const source = workOrder.github
+    ? workOrder.github.repository.fullName
+    : workOrder.source.kind === "template"
+      ? (template?.title ?? "Template")
+      : "Custom brief";
   return (
     <Popover
       label="Work order details"
@@ -269,9 +301,14 @@ function DetailsPopover({ workOrder, startedText }: { readonly workOrder: WorkOr
     >
       <ul className="space-y-1.5 px-4 py-3 text-xs">
         <li>{startedText}</li>
-        <li>Up to {pluralize(workOrder.maxReviewRounds, "review round")}</li>
+        <li>Up to {pluralize(workOrder.maxReviewRounds, "review round")}{workOrder.github ? " per request" : ""}</li>
         {workOrder.mode === "agent" ? (
           <li>{pluralize(workOrder.workersStarted ?? 0, "sandbox", "sandboxes")} created by the coordinator</li>
+        ) : null}
+        {workOrder.github ? (
+          <li>
+            Branch <code className="inline-code">{workOrder.github.branch}</code> from {workOrder.github.repository.defaultBranch}@{workOrder.github.baseSha.slice(0, 7)}
+          </li>
         ) : null}
         <li>
           From {workOrder.source.kind === "template" ? "the template " : ""}
@@ -350,7 +387,13 @@ function Actions({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly t
           Retry
         </Button>
       ) : null}
-      {workOrder.status === "completed" && tab !== "deliverable" ? (
+      {workOrder.status === "completed" && tab !== "deliverable" && workOrder.github?.pullRequest ? (
+        <a href={workOrderHref(workOrder.id, "deliverable")} className={buttonClass("primary")}>
+          <GitPullRequestIcon size={16} />
+          Review #{workOrder.github.pullRequest.number}
+        </a>
+      ) : null}
+      {workOrder.status === "completed" && tab !== "deliverable" && !workOrder.github ? (
         <a href={bundleUrl(workOrder.id)} download className={buttonClass("primary")}>
           <DownloadIcon size={16} />
           Download release
