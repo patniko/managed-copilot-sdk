@@ -3,7 +3,7 @@ import { useEffect, useId, useRef } from "react";
 import type { ConversationSummary } from "../../shared/types.js";
 import { buttonClass, IconButton } from "./ui/Button.js";
 import { EmptyState } from "./ui/Feedback.js";
-import { Spinner } from "./ui/Spinner.js";
+import { cx } from "../lib/cx.js";
 import { formatRelative, plural } from "../lib/format.js";
 import { conversationHref, homeHref } from "../lib/router.js";
 import { useStore } from "../lib/store.js";
@@ -81,9 +81,7 @@ function SidebarContent({ activeId, onNavigate, onClose }: { readonly activeId?:
       </div>
       <nav aria-label="Conversation list" className="min-h-0 flex-1 overflow-y-auto border-t border-line-muted px-2 pt-2 pb-4">
         {conversations.length === 0 ? (
-          <EmptyState icon={CommentDiscussionIcon} title="No conversations yet" size="sm">
-            Ask for something, and watch the agent create sandboxes for it.
-          </EmptyState>
+          <EmptyState icon={CommentDiscussionIcon} title="No conversations yet" size="sm" />
         ) : (
           <ul className="NavList">
             {conversations.map((summary) => (
@@ -98,34 +96,47 @@ function SidebarContent({ activeId, onNavigate, onClose }: { readonly activeId?:
   );
 }
 
-function StatusGlyph({ summary }: { readonly summary: ConversationSummary }) {
-  if (summary.status === "working") return <Spinner size={16} className="mt-0.5 text-fg-attention" label="Working" />;
-  if (summary.status === "asking") return <ShieldIcon size={16} className="mt-0.5 text-fg-attention" aria-label="Waiting for your approval" />;
-  // Idle: how the conversation's coordinator works.
+/** How the conversation's coordinator works, as an icon; a small dot says when it's busy or needs the person. */
+function StyleGlyph({ summary }: { readonly summary: ConversationSummary }) {
   const meta = STYLE_META[summary.style ?? "delegate"];
-  const Glyph = summary.style && summary.style !== "delegate" ? meta.icon : CommentDiscussionIcon;
-  return <Glyph size={16} className="mt-0.5 text-fg-muted" aria-label={meta.label} />;
+  const Glyph = meta.icon;
+  return (
+    <span className="relative mt-0.5 shrink-0" title={meta.label}>
+      <Glyph size={16} className="text-fg-muted" aria-label={meta.label} />
+      {summary.status === "working" || summary.status === "asking" ? (
+        <span className={cx("absolute -top-0.5 -right-1 size-2 rounded-full ring-2 ring-canvas", summary.status === "asking" ? "bg-attention-emphasis" : "animate-pulse bg-accent-emphasis")} aria-hidden />
+      ) : null}
+    </span>
+  );
 }
 
 function ConversationItem({ summary, active, now, onNavigate }: { readonly summary: ConversationSummary; readonly active: boolean; readonly now: number; readonly onNavigate?: () => void }) {
   const id = useId();
-  const state = summary.status === "asking" ? "Needs your approval" : summary.status === "working" ? "Working" : formatRelative(summary.updatedAt, now);
   return (
     <a href={conversationHref(summary.id)} onClick={onNavigate} aria-current={active ? "page" : undefined} aria-labelledby={`${id}-title ${id}-meta`} className="NavList-item items-start py-2">
-      <StatusGlyph summary={summary} />
+      <StyleGlyph summary={summary} />
       <span className="min-w-0 flex-1">
         <span id={`${id}-title`} className="block truncate" title={summary.title}>
           {summary.title}
         </span>
         <span id={`${id}-meta`} className="mt-0.5 block truncate text-xs font-normal text-fg-muted">
-          {summary.style && summary.style !== "delegate" ? `${STYLE_META[summary.style].short} · ` : ""}
-          {plural(summary.messageCount, "message")} · <span className={summary.status === "asking" ? "font-semibold text-fg-attention" : undefined}>{state}</span>
+          {plural(summary.messageCount, "message")} ·{" "}
+          {summary.status === "asking" ? (
+            <span className="inline-flex items-center gap-1 font-semibold text-fg-attention">
+              <ShieldIcon size={12} />
+              Needs you
+            </span>
+          ) : summary.status === "working" ? (
+            <span className="font-medium text-fg-accent">Working</span>
+          ) : (
+            formatRelative(summary.updatedAt, now)
+          )}
         </span>
       </span>
       {summary.sandboxCount > 0 ? (
         <span
           className="mt-0.5 inline-flex shrink-0 items-center gap-1 text-xs font-normal text-fg-muted tabular-nums"
-          title={`${plural(summary.sandboxCount, "sandbox", "sandboxes")} created, ${summary.liveSandboxes} still running`}
+          title={`${plural(summary.sandboxCount, "sandbox", "sandboxes")}, ${summary.liveSandboxes} still running`}
         >
           <ContainerIcon size={14} />
           {summary.liveSandboxes}

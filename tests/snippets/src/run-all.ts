@@ -3,7 +3,9 @@
  *   pnpm --filter @managed-copilot/snippets acceptance            # all snippets
  *   pnpm --filter @managed-copilot/snippets acceptance 01 02 13   # a selection
  *   ... acceptance --strict                                         # count unavailable features as failures
+ *   ... acceptance --report <file>                                  # also write each snippet's outcome as JSON
  */
+import { writeFileSync } from "node:fs";
 import { ManagedCopilot } from "@managed-copilot/sdk";
 import idea from "./01-the-idea.js";
 import sharedChat from "./02-shared-chat-with-a-tool.js";
@@ -26,7 +28,13 @@ const ALL = [idea, sharedChat, isolatedCoder, setup, artifacts, network, vaults,
 
 const args = process.argv.slice(2);
 const strict = args.includes("--strict");
-const selected = args.filter((arg) => !arg.startsWith("--"));
+const reportIndex = args.indexOf("--report");
+const report = reportIndex >= 0 ? args[reportIndex + 1] : undefined;
+if (reportIndex >= 0 && (!report || report.startsWith("--"))) {
+  console.error("--report needs a file path.");
+  process.exit(2);
+}
+const selected = args.filter((arg, index) => !arg.startsWith("--") && !(reportIndex >= 0 && index === reportIndex + 1));
 const snippets = selected.length === 0 ? ALL : ALL.filter((snippet) => selected.some((prefix) => snippet.id.startsWith(prefix.padStart(2, "0"))));
 if (snippets.length === 0) {
   console.error(`No snippets match ${selected.join(", ")}. Use numbers 01-${ALL.length}.`);
@@ -68,5 +76,17 @@ console.log(
     .filter(Boolean)
     .join(" · ")}`,
 );
+if (report) {
+  const entries = results.map((result) => ({
+    id: result.snippet.id,
+    title: result.snippet.title,
+    section: result.snippet.section,
+    outcome: result.outcome,
+    ...(result.detail ? { detail: result.detail } : {}),
+    checks: result.checks,
+    durationMs: result.durationMs,
+  }));
+  writeFileSync(report, `${JSON.stringify({ strict, results: entries }, null, 2)}\n`);
+}
 // Exit explicitly: a timed-out snippet's platform work cannot be cancelled from here and may hold connections open.
 process.exit(counts.fail > 0 || (strict && counts.unavailable > 0) ? 1 : 0);

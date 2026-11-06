@@ -4,6 +4,8 @@ export {
   ManagedCopilotOptionsError,
   normalizeOptions,
   toolDeclaration,
+  type AppKeyBinding,
+  type AppOption,
   type AspireSecret,
   type ManagedCopilotOptions,
   type McpCredentialOption,
@@ -15,4 +17,4 @@ export {
   type VaultCredentialOption,
   type WebhookOption,
 } from "./options.js";
-export type { AspireBuilder, AspireNodeAppBuilder, AspireNodeAppResource, AspireValue, EndpointOf, GatewayResourceOf } from "./aspire.js";
+export type { AspireBuilder, AspireNodeAppBuilder, AspireNodeAppResource, AspireValue, EndpointOf, GatewayResourceOf, ParameterOf } from "./aspire.js";

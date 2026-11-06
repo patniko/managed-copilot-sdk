@@ -1,10 +1,15 @@
-import { AlertIcon, BellIcon, CheckCircleFillIcon, CheckIcon, CopyIcon, XIcon } from "@primer/octicons-react";
+import { AlertIcon, BellIcon, CheckCircleFillIcon, CheckIcon, CopyIcon, DeviceDesktopIcon, MoonIcon, SunIcon, XIcon, type Icon } from "@primer/octicons-react";
 import { useId, useMemo, useState, type ReactNode } from "react";
 import type { Snapshot } from "../../../shared/protocol";
-import { setTheme, useTheme } from "../theme";
+import { setTheme, useTheme, type Theme } from "../theme";
 import type { AssistantActions } from "../useAssistant";
-import { THEMES } from "./Header";
 import { Spinner, useModal } from "./ui";
+
+const THEMES: readonly { value: Theme; label: string; icon: Icon }[] = [
+  { value: "system", label: "System", icon: DeviceDesktopIcon },
+  { value: "light", label: "Light", icon: SunIcon },
+  { value: "dark", label: "Dark", icon: MoonIcon },
+];
 
 function timeZones(current: string): string[] {
   let zones: string[] = [];
@@ -100,7 +105,6 @@ export function SettingsDialog({ snapshot, onClose, onOpenBackground, actions }:
                 </button>
               ))}
             </div>
-            <span className="FormControl-caption">System matches your operating system's light or dark setting.</span>
           </div>
 
           <div className="FormControl">
@@ -114,11 +118,11 @@ export function SettingsDialog({ snapshot, onClose, onOpenBackground, actions }:
                 </option>
               ))}
             </select>
-            <span className="FormControl-caption">Your calendar, reminders, and the times in this chat use it.</span>
+            <span className="FormControl-caption">For your calendar, reminders, and the times in this chat.</span>
           </div>
 
           <div className="border-t border-line-muted pt-5">
-            <SettingRow label="Notifications" caption="A browser notification when your assistant has something for you and this tab is in the background.">
+            <SettingRow label="Notifications" caption="When your assistant messages you and this tab is in the background.">
               {permission === "granted" ? (
                 <span className="inline-flex items-center gap-1.5 text-fg-success">
                   <CheckCircleFillIcon /> On for this browser
@@ -202,22 +206,12 @@ export function SettingsDialog({ snapshot, onClose, onOpenBackground, actions }:
                   "—"
                 )}
               </Detail>
-              <Detail label="Platform">
-                <span className="block truncate">{snapshot?.platform.url ?? "Not connected"}</span>
-                <span className="text-xs text-fg-muted">
-                  Environment <code className="font-mono">{snapshot?.platform.environment}</code>
-                  {snapshot?.platform.deployment ? ` · ${snapshot.platform.deployment.mode} · v${snapshot.platform.deployment.version}` : ""}
-                </span>
-              </Detail>
-              <Detail label="Model">
-                <code className="font-mono text-xs">{snapshot?.conversation.model}</code>
-              </Detail>
               <Detail label="Conversation">
                 {sessionId ? (
                   <button
                     type="button"
                     className="btn btn-sm max-w-full justify-start font-mono text-xs"
-                    title="Copy the session ID (attach with: npx managed-copilot attach <id>)"
+                    title="Copy the session ID"
                     onClick={() => {
                       void navigator.clipboard.writeText(sessionId).then(() => {
                         setCopied(true);
@@ -233,10 +227,6 @@ export function SettingsDialog({ snapshot, onClose, onOpenBackground, actions }:
                 )}
               </Detail>
             </dl>
-            <p className="mt-2 text-xs text-fg-muted">
-              Your conversation lives on Managed Copilot and survives restarts of this app and the platform. Open it in a terminal with{" "}
-              <code className="rounded-md bg-neutral-muted px-1 py-0.5 font-mono">npx managed-copilot attach</code>.
-            </p>
           </div>
 
           <div>

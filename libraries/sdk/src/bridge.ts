@@ -4,11 +4,15 @@
 // (--headless, --no-auto-update, --stdio, ...), and relays framed JSON-RPC between stdio and the gateway.
 // Starts no local agent and never prints credentials.
 import {
+  APP_KEY_HEADER,
+  APP_USER_HEADER,
+  APP_USER_NAME_HEADER,
   BRIDGE_ENV,
   BRIDGE_HELLO,
   BRIDGE_MAX_FRAME_BYTES,
   BRIDGE_SUBPROTOCOL,
   BRIDGE_WELCOME,
+  encodeHeaderValue,
   type BridgeConfig,
   type BridgeHello,
   type BridgeWelcome,
@@ -27,6 +31,9 @@ const PING_INTERVAL_MS = (() => {
   return Number.isSafeInteger(override) && override > 0 ? override : 30_000;
 })();
 
+/** How long a refused bridge keeps answering requests the SDK sent meanwhile before it ends. */
+const REFUSAL_GRACE_MS = 1000;
+
 function fail(message: string): never {
   process.stderr.write(`${PREFIX} ${message}\n`);
   process.exit(1);
@@ -42,10 +49,30 @@ function readConfig(): BridgeConfig {
   } catch {
     fail(`${BRIDGE_ENV} is not valid JSON.`);
   }
-  if (typeof config.url !== "string" || typeof config.token !== "string" || !config.token || typeof config.environment !== "object" || config.environment === null) {
-    fail(`${BRIDGE_ENV} is incomplete (url, token, and environment are required).`);
+  if (
+    typeof config.url !== "string" ||
+    typeof config.environment !== "object" ||
+    config.environment === null ||
+    (config.token !== undefined && (typeof config.token !== "string" || !config.token)) ||
+    (config.appKey !== undefined && (typeof config.appKey !== "string" || !config.appKey)) ||
+    (config.appUser !== undefined && (typeof config.appUser !== "object" || config.appUser === null || typeof config.appUser.id !== "string")) ||
+    (!config.token && !(config.appKey && config.appUser))
+  ) {
+    fail(`${BRIDGE_ENV} is incomplete (url, environment, and a GitHub token or an app key with an app user are required).`);
   }
   return config as BridgeConfig;
+}
+
+/** The upgrade request's credentials: a GitHub token, an app key, and the app user it acts for. */
+function credentialHeaders(config: BridgeConfig): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (config.token) headers["authorization"] = `Bearer ${config.token}`;
+  if (config.appKey) headers[APP_KEY_HEADER] = config.appKey;
+  if (config.appUser) {
+    headers[APP_USER_HEADER] = encodeHeaderValue(config.appUser.id);
+    if (config.appUser.name) headers[APP_USER_NAME_HEADER] = encodeHeaderValue(config.appUser.name);
+  }
+  return headers;
 }
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
@@ -126,7 +153,7 @@ function main(): void {
   const config = readConfig();
   const url = checkUrl(config.url);
   const ws = new WebSocket(url, [BRIDGE_SUBPROTOCOL], {
-    headers: { authorization: `Bearer ${config.token}` },
+    headers: credentialHeaders(config),
     perMessageDeflate: false,
     maxPayload: BRIDGE_MAX_FRAME_BYTES,
     // Longer than the gateway's GitHub verification deadline, so its explicit error wins over a generic timeout.
@@ -136,8 +163,39 @@ function main(): void {
   let ready = false;
   let stdinEnded = false;
 
+  /**
+   * The gateway refused the connection, or could not be reached, before welcoming it (an environment this caller may
+   * not use, for example). The SDK is waiting on requests it already sent (`connect`), or is about to send them: answer
+   * each with the refusal, so the caller gets that explicit error instead of a dropped connection, then end.
+   */
+  let refusal: string | undefined;
+  const answer = (body: string): void => {
+    let request: { id?: unknown; method?: unknown };
+    try {
+      request = JSON.parse(body) as { id?: unknown; method?: unknown };
+    } catch {
+      return;
+    }
+    if ((typeof request.id !== "number" && typeof request.id !== "string") || typeof request.method !== "string") return;
+    writeFrame(JSON.stringify({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: `${PREFIX} ${refusal}` } }));
+  };
+  const refuse = (message: string): void => {
+    // Once, and nothing more from the gateway afterwards (an error is followed by a close).
+    if (refusal !== undefined) return;
+    refusal = message;
+    ws.removeAllListeners();
+    ws.on("error", () => undefined);
+    ws.terminate();
+    process.stderr.write(`${PREFIX} ${message}\n`);
+    if (ready) process.exit(1);
+    for (const body of pending.splice(0)) answer(body);
+    // Requests still on their way get the same answer; then the bridge ends, once its answers are written.
+    setTimeout(() => process.stdout.write("", () => process.exit(1)), REFUSAL_GRACE_MS);
+  };
+
   const send = (body: string) => {
-    if (ready && ws.readyState === WebSocket.OPEN) ws.send(body);
+    if (refusal !== undefined) answer(body);
+    else if (ready && ws.readyState === WebSocket.OPEN) ws.send(body);
     else pending.push(body);
   };
 
@@ -162,7 +220,7 @@ function main(): void {
       } catch {
         // Keep the status-only message.
       }
-      fail(`Managed Copilot rejected the connection: ${message}`);
+      refuse(`Managed Copilot rejected the connection: ${message}`);
     });
   });
 
@@ -192,13 +250,20 @@ function main(): void {
   ws.on("message", (data, isBinary) => {
     const text = isBinary ? Buffer.from(data as Buffer).toString("utf8") : data.toString();
     if (!ready) {
-      let welcome: Partial<BridgeWelcome>;
+      let welcome: Partial<BridgeWelcome> | undefined;
       try {
         welcome = JSON.parse(text) as Partial<BridgeWelcome>;
       } catch {
-        fail("The gateway answered the handshake with an invalid frame.");
+        welcome = undefined;
       }
-      if (welcome.type !== BRIDGE_WELCOME) fail("The gateway answered the handshake with an unexpected frame.");
+      if (!welcome || typeof welcome !== "object") {
+        refuse("The gateway answered the handshake with an invalid frame. (capability_unavailable)");
+        return;
+      }
+      if (welcome.type !== BRIDGE_WELCOME) {
+        refuse("The gateway answered the handshake with an unexpected frame. (capability_unavailable)");
+        return;
+      }
       ready = true;
       for (const body of pending.splice(0)) ws.send(body);
       return;
@@ -208,12 +273,13 @@ function main(): void {
 
   ws.on("close", (code, reasonBuffer) => {
     if (stdinEnded || code === 1000) process.exit(0);
-    fail(describeClose(code, reasonBuffer.toString("utf8")));
+    refuse(describeClose(code, reasonBuffer.toString("utf8")));
   });
 
   ws.on("error", (error: Error & { code?: string }) => {
     if (stdinEnded) process.exit(0);
-    fail(`Cannot reach Managed Copilot at ${url.origin}: ${error.code ?? error.message}`);
+    // Before the welcome, the SDK is waiting on requests it sent: they get this error rather than a dropped connection.
+    refuse(`Cannot reach Managed Copilot at ${url.origin}: ${error.code ?? error.message} (capability_unavailable)`);
   });
 }
 

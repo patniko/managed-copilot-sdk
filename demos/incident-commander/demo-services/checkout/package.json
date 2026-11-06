@@ -1,0 +1,14 @@
+{
+  "name": "checkout-service",
+  "version": "1.4.2",
+  "private": true,
+  "description": "Prices carts and takes orders for the storefront.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

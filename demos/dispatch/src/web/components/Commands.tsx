@@ -158,27 +158,31 @@ function Outcome({ command, now }: { readonly command: Command; readonly now: nu
   }
 }
 
-function CommandRow({ conversationId, view, command, approval, now }: { readonly conversationId: string; readonly view: ConversationView; readonly command: Command; readonly approval?: Approval; readonly now: number }) {
+function CommandRow({ conversationId, view, command, approval, primary, now }: { readonly conversationId: string; readonly view: ConversationView; readonly command: Command; readonly approval?: Approval; readonly primary: boolean; readonly now: number }) {
   const [open, setOpen] = useState(false);
+  const [denying, setDenying] = useState(false);
   const Glyph = KIND_ICON[command.kind];
   const multiline = (command.command ?? "").includes("\n");
   const details = Boolean(command.output || multiline || command.description || (command.outcome && command.status !== "done") || command.shellId);
   return (
     <li className={cx("border-t border-line-muted first:border-t-0", command.status === "asking" && "bg-attention-muted")}>
-      <button
-        type="button"
-        disabled={!details}
-        aria-expanded={details ? open : undefined}
-        onClick={() => setOpen((value) => !value)}
-        className="grid w-full grid-cols-[12px_16px_minmax(0,7.5rem)_minmax(0,1fr)_auto] items-center gap-2 px-3 py-1.5 text-left text-sm enabled:hover:bg-canvas-muted disabled:cursor-default"
-        title={command.description}
-      >
-        {details ? open ? <ChevronDownIcon size={12} className="text-fg-muted" /> : <ChevronRightIcon size={12} className="text-fg-muted" /> : <span />}
-        <Glyph size={14} className={cx(command.status === "failed" ? "text-fg-danger" : command.status === "asking" ? "text-fg-attention" : "text-fg-muted")} />
-        <AgentChip view={view} agentId={command.agentId} />
-        <span className={cx("min-w-0 truncate", command.status === "denied" && "text-fg-muted line-through")}>{describe(command)}</span>
-        <Outcome command={command} now={now} />
-      </button>
+      <div className="flex min-w-0 items-center">
+        <button
+          type="button"
+          disabled={!details}
+          aria-expanded={details ? open : undefined}
+          onClick={() => setOpen((value) => !value)}
+          className="grid min-w-0 flex-1 grid-cols-[12px_16px_minmax(0,7.5rem)_minmax(0,1fr)_auto] items-center gap-2 py-1.5 pr-3 pl-3 text-left text-sm enabled:hover:bg-canvas-muted disabled:cursor-default"
+          title={command.description}
+        >
+          {details ? open ? <ChevronDownIcon size={12} className="text-fg-muted" /> : <ChevronRightIcon size={12} className="text-fg-muted" /> : <span />}
+          <Glyph size={14} className={cx(command.status === "failed" ? "text-fg-danger" : command.status === "asking" ? "text-fg-attention" : "text-fg-muted")} />
+          <AgentChip view={view} agentId={command.agentId} />
+          <span className={cx("min-w-0 truncate", command.status === "denied" && "text-fg-muted line-through")}>{describe(command)}</span>
+          {approval ? <span /> : <Outcome command={command} now={now} />}
+        </button>
+        {approval && !denying ? <CommandApproval conversationId={conversationId} approval={approval} primary={primary} onDeny={() => setDenying(true)} /> : null}
+      </div>
       {open && details ? (
         <div className="flex flex-col gap-1.5 px-3 pb-2 pl-[3.25rem] text-xs">
           {command.description ? <p className="text-fg-muted">{command.description}</p> : null}
@@ -192,62 +196,59 @@ function CommandRow({ conversationId, view, command, approval, now }: { readonly
           {command.shellId ? <p className="font-mono text-fg-muted">shellId {command.shellId}</p> : null}
         </div>
       ) : null}
-      {approval ? <CommandApproval conversationId={conversationId} approval={approval} command={command} /> : null}
+      {approval && denying ? <DenyForm conversationId={conversationId} approval={approval} onCancel={() => setDenying(false)} /> : null}
     </li>
   );
 }
 
-function CommandApproval({ conversationId, approval, command }: { readonly conversationId: string; readonly approval: Approval; readonly command: Command }) {
-  const [denying, setDenying] = useState(false);
-  const [reason, setReason] = useState("");
+/** Approve or deny one command; "the rest of this message" is in the card's header. */
+function CommandApproval({ conversationId, approval, primary, onDeny }: { readonly conversationId: string; readonly approval: Approval; readonly primary: boolean; readonly onDeny: () => void }) {
   const [busy, setBusy] = useState(false);
-  const answer = async (approve: boolean, rest = false): Promise<void> => {
+  const approve = async (): Promise<void> => {
     setBusy(true);
-    await answerApproval(conversationId, approval.id, approve, approve ? undefined : reason, rest);
+    await answerApproval(conversationId, approval.id, true);
     setBusy(false);
   };
-  const what = command.kind === "run" || command.kind === "input" ? "command" : "change";
-  if (denying) {
-    return (
-      <form
-        className="flex flex-wrap items-center gap-2 px-3 pb-2 pl-[3.25rem]"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void answer(false);
-        }}
-      >
-        <input
-          className="form-control input-sm min-w-0 flex-1"
-          value={reason}
-          maxLength={1000}
-          autoFocus
-          onChange={(event) => setReason(event.target.value)}
-          placeholder={`Tell the agent why (optional), for example: don't delete files`}
-          aria-label="Why you're declining (optional)"
-        />
-        <Button size="sm" variant="danger" type="submit" loading={busy}>
-          Deny
-        </Button>
-        <Button size="sm" variant="invisible" onClick={() => setDenying(false)} disabled={busy}>
-          Cancel
-        </Button>
-      </form>
-    );
-  }
   return (
-    <div className="flex flex-wrap items-center gap-2 px-3 pb-2 pl-[3.25rem]">
-      <Button size="sm" variant="primary" loading={busy} onClick={() => void answer(true)}>
-        Approve this {what}
+    <span className="flex shrink-0 items-center gap-1 pr-3">
+      <Button size="sm" variant={primary ? "primary" : "default"} loading={busy} onClick={() => void approve()}>
+        Approve
       </Button>
-      {approval.messageIndex !== undefined ? (
-        <Button size="sm" onClick={() => void answer(true, true)} disabled={busy} title={`Approve this and every later command and file change for message #${approval.messageIndex}`}>
-          Approve the rest of #{approval.messageIndex}
-        </Button>
-      ) : null}
-      <Button size="sm" variant="invisible" onClick={() => setDenying(true)} disabled={busy}>
+      <Button size="sm" variant="invisible" onClick={onDeny} disabled={busy}>
         Deny…
       </Button>
-    </div>
+    </span>
+  );
+}
+
+function DenyForm({ conversationId, approval, onCancel }: { readonly conversationId: string; readonly approval: Approval; readonly onCancel: () => void }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2 px-3 pb-2 pl-[3.25rem]"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setBusy(true);
+        void answerApproval(conversationId, approval.id, false, reason).finally(() => setBusy(false));
+      }}
+    >
+      <input
+        className="form-control input-sm min-w-0 flex-1"
+        value={reason}
+        maxLength={1000}
+        autoFocus
+        onChange={(event) => setReason(event.target.value)}
+        placeholder="Why? (optional) For example: don't delete files"
+        aria-label="Why you're declining (optional)"
+      />
+      <Button size="sm" variant="danger" type="submit" loading={busy}>
+        Deny
+      </Button>
+      <Button size="sm" variant="invisible" onClick={onCancel} disabled={busy}>
+        Cancel
+      </Button>
+    </form>
   );
 }
 
@@ -300,16 +301,21 @@ export function CommandsCard({
     [ran ? plural(ran, "command") : "", changed ? plural(changed, "file changed", "files changed") : "", failed ? `${failed} failed` : "", asking.length ? `${asking.length} asking you` : ""].filter(Boolean).join(" · ") ||
     "nothing run yet";
   return (
-    <section aria-label="What it ran in its sandbox" className={cx("overflow-hidden rounded-lg border bg-canvas", asking.length ? "border-[var(--borderColor-attention-emphasis)]" : "border-line")}>
-      <header className={cx("flex items-center gap-2 px-3 py-1.5 text-xs font-semibold", asking.length ? "bg-attention-muted text-fg-attention" : "bg-canvas-muted text-fg-muted")}>
+    <section aria-label="What it ran in its sandbox" className={cx("overflow-hidden rounded-lg border bg-canvas", asking.length ? "border-line-attention" : "border-line")}>
+      <header className={cx("flex min-h-9 items-center gap-2 px-3 py-1 text-xs font-semibold", asking.length ? "bg-attention-muted text-fg-attention" : "bg-canvas-muted text-fg-muted")}>
         {asking.length ? <ShieldIcon size={14} /> : <TerminalIcon size={14} />}
-        {asking.length ? "Needs your approval" : "What it ran in its sandbox"}
-        <span className="ml-auto font-normal tabular-nums">
+        <span className="truncate">{asking.length ? "Needs your approval" : "What it ran in its sandbox"}</span>
+        <span className="ml-auto shrink-0 font-normal tabular-nums">
           {summary}
           {took ? ` · ${took}` : ""}
         </span>
-        {asking.length > 1 && first?.messageIndex !== undefined ? (
-          <button type="button" className="btn btn-sm btn-primary" onClick={() => void answerApproval(view.id, first.id, true, undefined, true)}>
+        {first?.messageIndex !== undefined ? (
+          <button
+            type="button"
+            className={cx("btn btn-sm", asking.length > 1 && "btn-primary")}
+            onClick={() => void answerApproval(view.id, first.id, true, undefined, true)}
+            title={`Approve these and every later command and file change for message #${first.messageIndex}`}
+          >
             Approve the rest of #{first.messageIndex}
           </button>
         ) : null}
@@ -325,7 +331,7 @@ export function CommandsCard({
             </li>
           ) : null}
           {shown.map((command) => (
-            <CommandRow key={command.id} conversationId={view.id} view={view} command={command} approval={approvals.get(command.id)} now={now} />
+            <CommandRow key={command.id} conversationId={view.id} view={view} command={command} approval={approvals.get(command.id)} primary={asking.length === 1} now={now} />
           ))}
         </ul>
       ) : (
@@ -334,11 +340,7 @@ export function CommandsCard({
           Nothing run yet.
         </p>
       )}
-      {asking.length ? (
-        <footer className="border-t border-line-muted px-3 py-1.5 text-xs text-fg-muted">
-          Commands and file changes ask once each; reading files and output never asks. Denying tells the agent why, if you say.
-        </footer>
-      ) : null}
+      {asking.length ? <footer className="border-t border-line-muted px-3 py-1.5 text-xs text-fg-muted">Each approval covers one command or file change; reading never asks.</footer> : null}
     </section>
   );
 }

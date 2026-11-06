@@ -8,6 +8,7 @@ import type { GatewayModule } from "../../app.js";
 import type { Database } from "../../db.js";
 import { optionalService, type EventsService, type PlatformToolRegistry } from "../core/contracts.js";
 import { EgressHub } from "./egress-api.js";
+import { EgressListener, isLoopbackHost } from "./egress-listener.js";
 import { destinationOptions, egressSettings, GatewayEgress } from "./fetcher.js";
 import { McpAdapter } from "./mcp-adapter.js";
 import { PolicyService, type BlockedEvent, type SandboxEgress, type SandboxRegistrationInput, type SessionBindingInput, type SessionNetwork } from "./policy.js";
@@ -158,15 +159,19 @@ export const networkModule: GatewayModule = {
       log: log.child("mcp"),
     });
 
+    const bridgeListener =
+      (mode === "auto" || mode === "docker") && !env.MANAGED_COPILOT_EGRESS_GATEWAY_URL && isLoopbackHost(app.config.host) ? new EgressListener(app, log.child("egress")) : undefined;
     const supervisor =
       mode === "auto" || mode === "docker"
         ? new EgressSupervisor({
             instance: env.MANAGED_COPILOT_INSTANCE || "mc",
             context: env.MANAGED_COPILOT_EGRESS_CONTEXT ?? fileURLToPath(new URL("../../../../egress/", import.meta.url)),
             gatewayUrl: () => (env.MANAGED_COPILOT_EGRESS_GATEWAY_URL ?? `http://host.docker.internal:${app.config.port}`).replace(/\/+$/, ""),
+            ...(bridgeListener ? { listenOnBridge: (address: string) => bridgeListener.listen(address) } : {}),
             key: egressKey,
             settings,
             ...(env.MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64 ? { upstreamCa: env.MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64 } : {}),
+            ...(env.MANAGED_COPILOT_NETWORK_SUBNET_POOL ? { subnetPool: env.MANAGED_COPILOT_NETWORK_SUBNET_POOL } : {}),
             log: log.child("egress"),
           })
         : undefined;
@@ -252,6 +257,7 @@ export const networkModule: GatewayModule = {
     app.onStop(async () => {
       hub.close();
       if (supervisor && supervising) await supervisor.stop();
+      await bridgeListener?.close();
     });
   },
 };

@@ -1,20 +1,21 @@
 # Dispatch
 
 Talk to one agent, and watch it build the environments your request needs. Dispatch is a chat with an
-**orchestrator** agent on **Managed Copilot** ([spec section 17](../../docs/spec/developer-experience.md)). A switch
-beside the message box picks how the coordinator gets the work done: **Delegate to workers** (it creates worker agents,
+**orchestrator** agent on **Managed Copilot** ([spec section 17](../../docs/spec/developer-experience.md)). A switch in
+the home page's message box picks how the coordinator gets the work done: **Delegate to workers** (it creates worker agents,
 each in a sandbox of its own, or sends work to the ones it has), **Work directly** (it and its sub-agents run commands
 and edit files themselves, in one sandbox with no agent in it), or **Mixed** (either, as it sees fit). Dispatch shows
 each decision, each sandbox, and each command as it happens. The app is ordinary Node code built on the stock
 `@github/copilot-sdk` and `@managed-copilot/sdk`.
 
-![A delegating conversation after two messages: the first created three Python sandboxes in parallel; the second created a fourth for a chart of their errors](docs/screenshots/conversation.png)
+![A delegating conversation after three messages: three Python lab sandboxes, all reused by later messages, and a writer's desk sandbox created by message 3](docs/screenshots/conversation.png)
 
-*Delegate to workers: estimating π three ways. Message #1 started three workers, each in its own Python sandbox
-(**#1 created**). For message #2 the coordinator started `pi-error-chart` to chart all three (**#2 created**); a
-follow-up that needs a worker's files goes to that worker instead (**#2 reused**). Each message's **What the agent
-did** card lists the coordinator's decisions; the right pane groups the sandboxes by the blueprint they were made
-from.*
+*Delegate to workers: estimating π three ways. Message #1 started three workers, each in a Python lab sandbox of its
+own. #2 sent a rerun to `monte-carlo-pi`, which already had the code, and #3 sent follow-ups to all three, created
+`pi-error-report` in a writer's desk, and copied their results into it (the first copies failed while it was still
+starting, so they show as **retried**). Each message's **What the agent did** card lists the coordinator's decisions.
+The right pane shows the coordinator and only the blueprints in use; a tile's green badge is the message that created
+it, and its blue badge the last one that reused it.*
 
 ```mermaid
 flowchart LR
@@ -35,15 +36,16 @@ flowchart LR
   data instead of starting over.
 - **Decisions you can follow.** Each user message gets a card with what the coordinator did for it: sandboxes it
   created (**new**), work it sent to existing ones (**reused**), files it copied between sandboxes, workers it stopped,
-  and how long it waited for them. The coordinator spends no model time while it waits.
+  and how long it waited for them. A step that failed and was then redone shows as **retried**. The coordinator spends
+  no model time while it waits.
 - **Blueprints, not one-off containers.** The AppHost declares four worker environments with their own size and
   network policy: a Python lab (network off), a Node workshop (the npm registry only), web research (a short
   allowlist of documentation sites), and a writer's desk (network off). The coordinator's instructions describe them,
   and it picks one for each part of a request.
-- **You approve each new sandbox.** By default, starting a worker asks first, and approving it also covers what that
-  worker does in its sandbox. Deny with a reason ("this is Node work, use the Node environment") and the coordinator
-  tries again your way. Work sent to existing sandboxes never asks. Switch a conversation to **Create freely** to skip
-  the questions.
+- **You approve each new sandbox.** By default (**Ask first**), starting a worker asks first, and approving it also
+  covers what that worker does in its sandbox. Deny with a reason ("give each method its own sandbox") and the
+  coordinator tries again your way. Work sent to existing sandboxes never asks. Switch a conversation to **Run freely**
+  (the toggle under its message box) to skip the questions.
 - **The same session, from anywhere.** **Open in Copilot CLI** attaches Copilot CLI to the coordinator session (or to
   any worker's). Messages typed there appear in Dispatch, labeled **from Copilot CLI**, and the coordinator answers in
   both. Messages sent while the coordinator works go in right away: it answers between waits, then keeps waiting. While
@@ -51,25 +53,34 @@ flowchart LR
   to the app holding it, so Copilot CLI can't approve it there, but Esc in Copilot CLI cancels its turn, and Dispatch
   drops the request.
 
-<img src="docs/screenshots/approval.png" alt="A follow-up asks for a new web research sandbox: the request shows in the chat with Approve and Deny, and as a dashed card in the dispatch-web row. Message #3, from Copilot CLI, sits above it." width="900">
+<img src="docs/screenshots/approval.png" alt="The coordinator asks for three Python lab sandboxes after the person declined a single one: each request shows in the chat with Approve and Deny, Approve all 3 sits in the card's header, and each waiting sandbox shows as a dashed tile in the Python lab lane" width="900">
 
-*Message #4 needs web access, so the coordinator asks to create a sandbox from the web research blueprint. The request
-appears in the chat and in that blueprint's row. Message #3 above it was typed in Copilot CLI.*
+*Asked first for one sandbox, the person declined with a reason ("give each method its own sandbox so they run in
+parallel"); the coordinator followed it and asked for three. Each request shows in the chat and as a dashed tile in
+its blueprint's lane, where it can be approved or denied too.*
 
 <img src="docs/screenshots/timeline.png" alt="The timeline: the coordinator's waits, and a lane per sandbox showing when it was preparing, working, and idle, with markers for each message" width="900">
 
-*The **Timeline** tab: when each sandbox was preparing, working, or idle, against the messages that drove it.*
+*The **Timeline** tab: when each sandbox was preparing, working, or idle, against the messages that drove it (hover a
+bar for what it means and how long it lasted).*
 
-Select a sandbox to see its blueprint, size, network policy, and sandbox ID; its workspace files (click one to read
-it) and published outputs; every task it was given, with the message it came from; its latest report; and the command
-that opens it in Copilot CLI.
+Select a sandbox to see the work it was given (each task with the message it came from, the first three lines until
+you ask for all), its latest report, and its files (click one to read it; published outputs are marked). Its
+blueprint, size, network policy, sandbox ID, model, and the command that opens it in Copilot CLI are under
+**Details**.
+
+<img src="docs/screenshots/worker-detail.png" alt="The monte-carlo-pi sandbox selected: the work it was given, its report, and its files, with its sandbox facts folded under Details" width="900">
 
 ## Three ways to get the work done
 
 A multi-tenant harness doesn't always want an agent per sandbox: sometimes it wants its own agent and sub-agents to act
-in a sandbox directly. Dispatch shows both, side by side, on the same worker environments. The switch beside the
-message box picks the style of the **next new conversation**; a conversation keeps the style it was created with
-(picking another one in a conversation starts a new conversation with your message).
+in a sandbox directly. Dispatch shows both, side by side, on the same worker environments. On the home page, the switch
+in the message box picks a new conversation's style, and a one-line diagram under it shows that style: the coordinator
+(its brain, on the shared runtime) and the sandboxes it works through (its hands). A conversation keeps the style it was
+created with; its header shows it, and the badge's popover names the coordinator's environment and model. To try
+another style, start a new conversation.
+
+<img src="docs/screenshots/home.png" alt="The home page: the message box with the style switch and the Ask first or Run freely toggle, the selected style's diagram, template cards with the sandboxes each uses, and the blueprints as chips" width="900">
 
 | Style | Environment | What the coordinator does | What a message's card shows |
 | --- | --- | --- | --- |
@@ -77,24 +88,27 @@ message box picks the style of the **next new conversation**; a conversation kee
 | **Work directly** | `dispatch-direct` | Runs `bash`, `create`, `edit`, `view`, … itself in one Python lab sandbox (Python and Node, no network), and starts stock sub-agents with `task` for parallel parts; they share the sandbox | **What it ran in its sandbox**: every command and file change, by the coordinator or a named sub-agent, with exit codes and output |
 | **Mixed** | `dispatch-mixed` | Works in its own Python lab sandbox, and creates workers in any blueprint when a part needs another environment or should run on its own; the model decides | Both cards |
 
-![Working directly: two sub-agents benchmarked sorts in Python and JavaScript in one sandbox; the card lists every command with who ran it and its exit code, and the right pane shows the coordinator's sandbox with the commands the platform recorded](docs/screenshots/direct.png)
+![Working directly: two sub-agents benchmarked sorts in Python and JavaScript in one sandbox; the card lists every command with who ran it and its exit code, and the right pane shows the coordinator with its own sandbox and the commands the platform recorded there](docs/screenshots/direct.png)
 
-*Work directly. The coordinator generated the data, then two sub-agents (**python-benchmark** and **js-benchmark**, each
-with its color) wrote and ran their benchmarks in the same sandbox, and the coordinator wrote the report. Click a row
-for its output. The right pane shows the **coordinator's sandbox**: no agent runs in it, so it has no task or report;
-instead it lists the commands the platform recorded there (`managed.exec.list`), with the agent that ran each one.*
+*Work directly. The coordinator generated the data, then two sub-agents (**python-benchmark** and
+**javascript-benchmark**, each with its color) wrote and ran their benchmarks in the same sandbox, and the coordinator
+wrote the report. Click a row for its output. In the right pane, the coordinator's card holds **its own sandbox**
+(dashed: no agent runs in it, so it has no task or report) with the sub-agents working there; selected, it lists the
+commands the platform recorded (`managed.exec.list`), with the agent that ran each one, and its files.*
 
 In direct and mixed conversations, every `bash`, `write_bash`, `create`, and `edit` asks first (reading files and
-output never asks). There can be many per message, so the request shows inline, in the message's list, with
-**Approve this command**, **Approve the rest of #N** (this one and every later command and file change for the same
-message), and **Deny…** with an optional reason the agent is told. **Run freely** skips the questions.
+output never asks). There can be many per message, so each request shows inline, in the message's list, with
+**Approve** and **Deny…** (with an optional reason the agent is told). **Approve the rest of #N**, in the card's header,
+approves the waiting ones and every later command and file change for the same message. **Run freely** skips the
+questions.
 
-<img src="docs/screenshots/direct-approval.png" alt="Two sub-agents each asking to run a command; each row has Approve this command, Approve the rest of #1, and Deny, and the card's header has Approve the rest of #1" width="900">
+<img src="docs/screenshots/direct-approval.png" alt="Two sub-agents asking to run three commands; each row has Approve and Deny, and the card's header has Approve the rest of #1" width="900">
 
-![Mixed: message 1 started two workers (a Python one and a web research one); message 2 asked the coordinator to work itself, and it ran the command in its own sandbox, which sits next to the worker in the Python lab row](docs/screenshots/mixed.png)
+![Mixed: in one message the coordinator ran a Lucas–Lehmer test in its own Python lab sandbox and created a web research worker to check Wikipedia; the right pane shows its own sandbox inside its card and the worker in the Web research lane](docs/screenshots/mixed.png)
 
-*Mixed. For message #1 the coordinator chose two workers, one with web access; for #2 it ran the longer series itself, in
-its own sandbox, and published `summary.md`.*
+*Mixed, with the **Prime check, with sources** template. In one message the coordinator tested 2^89 − 1 and 2^97 − 1
+itself, in its own Python lab sandbox (no network), and created `wiki-mersenne`, a web research worker, to check
+Wikipedia, since only that blueprint can reach it. Its answer compares the two, with the link.*
 
 ## Run it
 
@@ -107,12 +121,22 @@ pnpm build
 aspire run          # the platform, sandboxes, and the demos; open the "dispatch" resource
 ```
 
-Dispatch opens at <http://localhost:7470>. Pick a style with the switch, pick a template, such as **Estimate π three
-ways**, and send it. Then try its follow-ups to watch the coordinator reuse its sandboxes. Measured live on a local
-deployment: estimating π three ways (three Python sandboxes in parallel) took 49 seconds from message to answer,
-approvals included; its chart follow-up (one sandbox reused, a writer's sandbox created) took 87 seconds; and the
-sorting showdown's insertion sort follow-up, which reused all three of its sandboxes, took 57 seconds. Working directly,
-two sub-agents counting primes and Fibonacci digits in one sandbox took 17 seconds once approved.
+Dispatch opens at <http://localhost:7470>. Pick a style and a template, such as **Estimate π three ways**, and send
+it. Then try its follow-ups to watch the coordinator reuse its sandboxes; **Prime check, with sources** switches to
+Mixed and shows both kinds of hands in one message. Measured live on a local deployment: estimating π three ways (three
+Python sandboxes in parallel) took 49 seconds from message to answer, approvals included; its chart follow-up (one
+sandbox reused, a writer's sandbox created) took 87 seconds; and the sorting showdown's insertion sort follow-up, which
+reused all three of its sandboxes, took 57 seconds. Working directly, two sub-agents counting primes and Fibonacci
+digits in one sandbox took 17 seconds once approved. Mixed, the prime check (its own sandbox and a web research worker,
+running freely) took about 40 seconds.
+
+### Work on the UI without a platform
+
+`pnpm exec vite` in `demos/dispatch` serves the UI alone; open it with `?preview` to run it against fixture data: a
+delegating conversation with four sandboxes (one reused), a direct one with sub-agents, a mixed one, pending sandbox
+and command approvals, and the timeline. New messages play a short simulated run. `?preview=empty`, `azure`,
+`connecting`, `unavailable`, or `offline` shows other states, and `&banner=0` hides the preview's banner. The preview
+exists only in Vite's dev mode (`import.meta.env.DEV`); production builds don't include it.
 
 ### Against another deployment
 
@@ -195,6 +219,6 @@ Copilot CLI reused one of them, and deleting the conversation deleted all three 
 | `apphost.mts` | AppHost fragment: the three orchestrator environments (one per execution style), their four worker environments, and the app resource |
 | `src/server` | Platform connection, conversations (one coordinator session each), the event projection, REST and server-sent events |
 | `src/shared` | Types shared with the UI, blueprint labels, and templates |
-| `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
-| `test` | Unit tests: the projection, conversations and approvals against an in-memory platform, the API, and the fragment |
+| `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS); `src/web/dev` is the fixture preview (`?preview`, Vite dev mode only) |
+| `test` | Unit tests: the projection, conversations and approvals against an in-memory platform, the API, the fragment, and the UI's store and helpers |
 | `Dockerfile` | The container `aspire deploy` publishes |

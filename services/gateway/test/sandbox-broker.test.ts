@@ -238,3 +238,84 @@ describe("InferenceBroker", () => {
     }
   });
 });
+
+describe("InferenceBroker for an Azure AI Foundry session", () => {
+  const ENTRA = "entra_platform_token_for_tests";
+  const HOST = "contoso-foundry.openai.azure.com";
+  const bearer = (value: string) => ["Bearer " + value];
+
+  function foundrySetup(token: () => Promise<string> = async () => ENTRA) {
+    const sent: Sent[] = [];
+    const fetched: { url: string; init: RequestInit }[] = [];
+    const broker = new InferenceBroker({
+      sessionId: SESSION,
+      placeholder: PLACEHOLDER,
+      resolveToken: async () => {
+        throw new Error("a Foundry session never resolves a GitHub token");
+      },
+      githubApiUrl: "https://api.github.test",
+      log,
+      fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+        fetched.push({ url: String(input), init: init ?? {} });
+        return new Response(new Blob(['data: {"ok":true}\n\n']).stream(), { status: 200, headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch,
+      foundry: { account: "contoso-foundry", host: HOST, token },
+    });
+    const send = async (method: string, params: unknown) => {
+      sent.push({ method, params: params as Record<string, unknown> });
+      return method === "llmInference.setProvider" ? { success: true } : { accepted: true };
+    };
+    return { broker, sent, fetched, send };
+  }
+
+  it("installs no GitHub credential and resolves no Copilot identity", async () => {
+    const { broker, sent, fetched, send } = foundrySetup();
+    await broker.initialize(send);
+    await broker.sessionOpened(SESSION);
+    expect(sent.map((entry) => entry.method)).toEqual(["llmInference.setProvider"]);
+    expect(fetched).toHaveLength(0);
+  });
+
+  it("swaps the placeholder for the platform's Entra token on the session's Foundry account only", async () => {
+    const { broker, sent, fetched, send } = foundrySetup();
+    await broker.initialize(send);
+    await request(broker, { sessionId: SESSION, url: `https://${HOST}/openai/v1/chat/completions`, headers: { authorization: bearer(PLACEHOLDER), "content-type": ["application/json"] } }, '{"model":"grok-4.7"}');
+    await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk" && entry.params["end"] === true));
+    expect(fetched).toHaveLength(1);
+    expect(fetched[0]!.url).toBe(`https://${HOST}/openai/v1/chat/completions`);
+    expect((fetched[0]!.init.headers as Record<string, string>)["authorization"]).toBe("Bearer " + ENTRA);
+    expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"]).toBe(200);
+    expect(JSON.stringify(sent)).not.toContain(ENTRA);
+  });
+
+  it("refuses the Copilot API, other hosts, api-key headers, and requests without the placeholder", async () => {
+    for (const [url, headers, status] of [
+      ["https://api.githubcopilot.com/v1/messages", { authorization: bearer(PLACEHOLDER) }, 403],
+      ["https://other-foundry.openai.azure.com/openai/v1/chat/completions", { authorization: bearer(PLACEHOLDER) }, 403],
+      [`https://${HOST}:8443/openai/v1/chat/completions`, { authorization: bearer(PLACEHOLDER) }, 403],
+      [`https://${HOST}/openai/v1/chat/completions`, { authorization: bearer(PLACEHOLDER), "api-key": ["anything"] }, 401],
+      [`https://${HOST}/openai/v1/chat/completions`, { authorization: bearer("some-other-token") }, 401],
+      [`https://${HOST}/openai/v1/chat/completions`, {}, 401],
+    ] as const) {
+      const { broker, sent, fetched, send } = foundrySetup();
+      await broker.initialize(send);
+      await request(broker, { sessionId: SESSION, url, headers });
+      await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk"));
+      expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"], url).toBe(status);
+      expect(fetched, url).toHaveLength(0);
+    }
+  });
+
+  it("fails closed when the platform has no Azure token", async () => {
+    const { ManagedCopilotError } = await import("@managed-copilot/protocol");
+    const { broker, sent, fetched, send } = foundrySetup(async () => {
+      throw new ManagedCopilotError("inference_unavailable", "The platform could not get an Azure token for Azure AI Foundry.");
+    });
+    await broker.initialize(send);
+    await request(broker, { sessionId: SESSION, url: `https://${HOST}/openai/v1/chat/completions`, headers: { authorization: bearer(PLACEHOLDER) } });
+    await waitFor(() => sent.some((entry) => entry.method === "llmInference.httpResponseChunk"));
+    expect(sent.find((entry) => entry.method === "llmInference.httpResponseStart")!.params["status"]).toBe(401);
+    expect(JSON.stringify(sent)).toContain("inference_unavailable");
+    expect(fetched).toHaveLength(0);
+  });
+});

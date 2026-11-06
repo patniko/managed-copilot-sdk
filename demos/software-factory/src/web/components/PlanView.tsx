@@ -16,9 +16,7 @@ export function PlanView({ workOrder }: { readonly workOrder: WorkOrder }) {
     return (
       <div className="Box">
         <EmptyState icon={TasklistIcon} title={planning ? "The planner is still working" : "No plan was submitted"} size="lg">
-          {planning
-            ? "The plan appears here once the planner splits the work order into tasks: files, interfaces, acceptance criteria, and dependencies."
-            : "This work order ended before the planner submitted a plan."}
+          {planning ? "The tasks appear here once the planner submits the plan." : "This work order ended before the planner submitted a plan."}
         </EmptyState>
       </div>
     );
@@ -96,9 +94,8 @@ export function PlanView({ workOrder }: { readonly workOrder: WorkOrder }) {
 
       {plan.integration ? (
         <section className="Box">
-          <div className="Box-header block px-4 py-3">
+          <div className="Box-header px-4 py-3">
             <h2 className="Box-title">Integration notes</h2>
-            <p className="text-xs text-fg-muted">Guidance for the release station: how the pieces fit and what to verify end to end.</p>
           </div>
           <div className="Box-body">
             <MarkdownView source={plan.integration} />

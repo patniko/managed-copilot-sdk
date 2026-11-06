@@ -18,11 +18,13 @@ import type {
   PlatformEventType,
   SandboxInfo,
   SandboxSize,
+  SessionInference,
   SessionInfo,
   SessionState,
   ToolDeclaration,
 } from "@managed-copilot/protocol";
 import type { Principal } from "../../http.js";
+import type { AppRegistry } from "./apps.js";
 import type { AttachedResponder, PlatformToolDefinition, PlatformToolReplay, RuntimeSessionEvent } from "../durable/contract.js";
 
 /** An environment resolved against the deployment for one client connection or internal request. */
@@ -83,6 +85,8 @@ export interface SessionRecord {
    * runtime for it and refuses agent operations (send, resume, CLI attach) with `invalid_request`. Absent: an agent.
    */
   readonly kind?: "workspace";
+  /** Where the session's model calls go, fixed at creation; absent is the owner's Copilot plan. */
+  readonly inference?: SessionInference;
   readonly network: NetworkPolicy;
   readonly environmentRequest: EnvironmentRequest;
   readonly lastTurn?: { readonly turnId: string; readonly status: "running" | "completed" | "failed" | "cancelled"; readonly completedAt?: string };
@@ -143,6 +147,22 @@ export interface SandboxCreateRequest {
   readonly runtime?: boolean;
 }
 
+/**
+ * A session whose model calls go to Azure AI Foundry (spec section 15) instead of its owner's Copilot plan. The sandbox
+ * runtime gets `provider` with a placeholder bearer token and no GitHub credential at all; the broker answers its model
+ * calls only for `host`, with a token from `token()` in place of the placeholder.
+ */
+export interface SandboxInferenceRoute {
+  /** The Foundry account (for logs and errors). */
+  readonly account: string;
+  /** The stock runtime's whole-session BYOK provider, without a credential. */
+  readonly provider: Readonly<Record<string, unknown>>;
+  /** The only host brokered model calls may reach (the account's OpenAI-compatible endpoint). */
+  readonly host: string;
+  /** An Entra ID token for the account, from the platform's own identity. */
+  token(): Promise<string>;
+}
+
 /** A connection to one sandbox runtime. The sandbox module implements credential brokering; core relays. */
 export interface SandboxRuntimeHandle {
   /** LSP-framed JSON-RPC to the sandbox runtime; ends when the sandbox stops. */
@@ -168,7 +188,7 @@ export interface SandboxPlacement {
   /** Starts (or restores) the session's sandbox if it stopped. */
   ensureRunning?(sessionId: string): Promise<unknown>;
   /** Opens a runtime connection to the session's sandbox. */
-  openRuntime(sessionId: string, options: { readonly resolveToken: () => Promise<string> }): Promise<SandboxRuntimeHandle>;
+  openRuntime(sessionId: string, options: { readonly resolveToken: () => Promise<string>; readonly inference?: SandboxInferenceRoute }): Promise<SandboxRuntimeHandle>;
   /** Deletes the sandbox and its storage; reconciliation must finish cleanup after crashes. */
   delete(sessionId: string): Promise<void>;
   /** Sandbox details for `SessionInfo.sandbox`. */
@@ -307,6 +327,8 @@ export interface SessionsService {
   get(sessionId: string): SessionRecord | undefined;
   /** Owner-scoped lookup; throws `not_found` for other accounts (existence is not revealed). */
   getOwned(accountId: number, sessionId: string): SessionRecord;
+  /** Throws `not_found` for the caller's own session outside the app its request came through (spec section 2). */
+  assertAppScope?(principal: Principal, sessionId: string): void;
   /** Owner-scoped `SessionInfo` (REST shape, including sandbox and pending actions). */
   info(accountId: number, sessionId: string): Promise<SessionInfo>;
   list(accountId: number, query?: { readonly environment?: string; readonly state?: SessionState; readonly limit?: number }): SessionRecord[];
@@ -521,6 +543,8 @@ declare module "../../app.js" {
     platformTools: PlatformToolRegistry;
     runtimeRequests: RuntimeRequestRegistry;
     environments: EnvironmentResolver;
+    /** Apps that vouch for their own users (spec section 2): their environments, and their users' accounts. */
+    apps: AppRegistry;
   }
 }
 

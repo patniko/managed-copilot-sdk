@@ -54,7 +54,8 @@ There are no workspace files to carry: a shared session never had a filesystem, 
 
 > [!TIP]
 > **Try it:** [walkthrough 04](../../walkthroughs/04-promotion/README.md) asks a question, then a task that needs Python,
-> and prints where the session runs before and after.
+> and prints where the session runs before and after. [Data Desk](../../demos/data-desk/README.md) shows the same move
+> in an app, with Copilot CLI attached.
 
 <details>
 <summary><strong>Under the hood</strong></summary>

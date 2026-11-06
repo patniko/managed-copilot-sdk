@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -12,18 +12,23 @@ const ENVIRONMENT = "/subscriptions/x/resourceGroups/managed-copilot-dev/provide
 
 interface App {
   name: string;
+  tags?: Record<string, string>;
   properties: { managedEnvironmentId: string; configuration: { ingress: { external: boolean; fqdn: string; ipSecurityRestrictions: { name: string; ipAddressRange: string; action: string }[] } } };
 }
 
-function app(name: string, rules: [string, string][], environment = ENVIRONMENT): App {
+function app(name: string, rules: [string, string][], environment = ENVIRONMENT, tags?: Record<string, string>): App {
   return {
     name,
+    ...(tags ? { tags } : {}),
     properties: {
       managedEnvironmentId: environment,
       configuration: { ingress: { external: true, fqdn: `${name}.bravedesert.westus2.azurecontainerapps.io`, ipSecurityRestrictions: rules.map(([n, ip]) => ({ name: n, ipAddressRange: ip, action: "Allow" })) } },
     },
   };
 }
+
+/** An app published with `publishApp({ public: true })`: no IP rules, tagged by the Azure integration. */
+const publicApp = (name: string) => app(name, [], ENVIRONMENT, { "aspire-resource-name": name, "managed-copilot-access": "public" });
 
 class FakeHost implements HostTools {
   secrets: Record<string, string> = {};
@@ -36,6 +41,18 @@ class FakeHost implements HostTools {
   failList = false;
   failUpdates = false;
   records = "";
+  /** Subscriptions the Azure CLI can use besides its default one: their tenant and signed-in account. */
+  tenants: Record<string, { tenantId: string; user: string }> = {};
+  /** The AppHost's parameters in the manifest `aspire do publish-manifest` writes: name → generated. */
+  manifest: Record<string, boolean> = {};
+  /** How many of the next `aspire do publish-manifest` runs fail. */
+  manifestFailures = 0;
+  /** A future Aspire that runs its parameter step for the manifest, saving the values it's given into its environment's state. */
+  manifestSavesValues = false;
+  /** Another deployment of the same AppHost writes its Production state while the check runs. */
+  concurrentDeployment = false;
+  /** The saved settings the AppHost saw in its configuration during the last check. */
+  checkStateSeen: string[] = [];
   readonly calls: { command: string; args: readonly string[]; env?: Readonly<Record<string, string>> }[] = [];
 
   has(command: string) {
@@ -56,10 +73,52 @@ class FakeHost implements HostTools {
         return ok();
       }
     }
+    if (command === "aspire" && args[0] === "do" && args[1] === "publish-manifest") {
+      // Like Aspire, it makes the AppHost's deployment record directory as the AppHost starts.
+      const appHost = args[args.indexOf("--apphost") + 1]!;
+      const recordDir = join(this.records, createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
+      mkdirSync(recordDir, { recursive: true });
+      // Aspire keeps deployment state per environment: <record>/<environment>.json.
+      const environment = args.includes("--environment") ? args[args.indexOf("--environment") + 1]! : "production";
+      const seen = join(recordDir, `${environment}.json`);
+      // Aspire loads the environment's saved state into the AppHost's configuration.
+      this.checkStateSeen = existsSync(seen) ? Object.keys(JSON.parse(readFileSync(seen, "utf8")) as object) : [];
+      if (this.manifestSavesValues) {
+        // As Aspire's parameter step does in publish mode: every value it resolves goes into the environment's state.
+        const file = join(recordDir, `${environment}.json`);
+        const state = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Record<string, string>) : {};
+        for (const [variable, value] of Object.entries(options?.env ?? {})) if (variable.startsWith("Parameters__")) state[`Parameters:${variable.slice("Parameters__".length)}`] = value;
+        writeFileSync(file, JSON.stringify(state));
+        writeFileSync(join(recordDir, `${environment}.json.migration`), "{}");
+      }
+      if (this.concurrentDeployment) writeFileSync(join(recordDir, "production.json"), JSON.stringify({ "Parameters:copilot-platform-key": "other-deployment-key" }));
+      if (this.manifestFailures > 0) {
+        this.manifestFailures--;
+        // An AppHost's error can repeat a value it was given; only the log path may be shown.
+        return { code: 6, stdout: "Error: google-client-secret google-secret-value was rejected", stderr: "❌ An unexpected error occurred.\n📄 See logs at /home/dev/.aspire/logs/cli_20261104T160709_61ce18a3.log" };
+      }
+      const resources = Object.fromEntries(
+        Object.entries(this.manifest).map(([parameter, generated]) => [
+          parameter,
+          { type: "parameter.v0", value: `{${parameter}.inputs.value}`, inputs: { value: { type: "string", secret: true, ...(generated ? { default: { generate: { minLength: 48 } } } : {}) } } },
+        ]),
+      );
+      writeFileSync(join(args[args.indexOf("-o") + 1]!, "aspire-manifest.json"), JSON.stringify({ resources: { copilot: { type: "container.v1" }, ...resources } }));
+      return ok();
+    }
     if (command === "docker") return this.dockerRunning ? ok("29.0.0") : { code: 1, stdout: "", stderr: "Cannot connect" };
     if (command === "az") {
       const line = args.join(" ");
-      if (line.startsWith("account show")) return this.azSignedIn ? ok(JSON.stringify({ id: SUBSCRIPTION, name: "Demo subscription" })) : { code: 1, stdout: "", stderr: "Please run az login" };
+      if (line.startsWith("account show --subscription")) {
+        const id = args[args.indexOf("--subscription") + 1]!;
+        const found = this.tenants[id];
+        return found ? ok(JSON.stringify({ id, name: "Other subscription", tenantId: found.tenantId, user: { name: found.user, type: "user" } })) : { code: 1, stdout: "", stderr: "Subscription not found" };
+      }
+      if (line.startsWith("account show")) {
+        return this.azSignedIn
+          ? ok(JSON.stringify({ id: SUBSCRIPTION, name: "Demo subscription", tenantId: "tenant-a", user: { name: "dev@contoso.example", type: "user" } }))
+          : { code: 1, stdout: "", stderr: "Please run az login" };
+      }
       if (line.startsWith("containerapp list") && this.failList) return { code: 1, stdout: "", stderr: "AuthorizationFailed" };
       if (line.startsWith("containerapp list")) return this.apps ? ok(JSON.stringify(this.apps)) : { code: 3, stdout: "", stderr: "ResourceGroupNotFound" };
       if (line.startsWith("containerapp show")) {
@@ -95,6 +154,13 @@ class FakeHost implements HostTools {
     return "patniko";
   };
   publicAddress = async () => this.address;
+  /** What each URL answers this machine; unlisted URLs can't be reached. */
+  answers: Record<string, { status: number; body: string }> = {};
+  readonly probed: string[] = [];
+  probe = async (url: string) => {
+    this.probed.push(url);
+    return this.answers[url];
+  };
   deploymentsDirectory = () => this.records;
 }
 
@@ -116,7 +182,16 @@ function writeRecord(host: FakeHost, appHost: string | undefined, resourceGroup:
   const name = appHost ? createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase() : "ABCDEF0123456789";
   const recordDir = join(host.records, name);
   mkdirSync(recordDir, { recursive: true });
-  writeFileSync(join(recordDir, "production.json"), JSON.stringify({ "Parameters:copilot-platform-key": "secret-key", "Azure:SubscriptionId": subscription, "Azure:ResourceGroup": resourceGroup }));
+  writeFileSync(
+    join(recordDir, "production.json"),
+    JSON.stringify({ "Parameters:copilot-platform-key": "secret-key", "Parameters:assistant-webhook-secret": "deployed-hook-secret", "Azure:SubscriptionId": subscription, "Azure:ResourceGroup": resourceGroup }),
+  );
+  // Aspire 13.6's current state, which names the parameters it holds (here one that production.json doesn't), as a JSON
+  // string inside the document, the way Aspire writes it.
+  writeFileSync(
+    join(recordDir, "production.json.migration"),
+    JSON.stringify({ ClaimedSections: JSON.stringify(["Azure", "Parameters:assistant-sealing-key"]), CurrentState: "{}", LegacyFallbackDisabled: false }),
+  );
   return recordDir;
 }
 
@@ -224,14 +299,20 @@ describe("access", () => {
     const declined = harness(host, { confirm: async () => false });
     expect(await run(["access", "ips", "set", "*"], declined.io)).toBe(1);
     expect(host.secrets["Parameters:app-allowed-ips"]).toBeUndefined();
+    expect(host.secrets["Parameters:app-allow-anyone-as-me"]).toBeUndefined();
     expect(declined.err()).toContain("anyone on the Internet");
+    expect(declined.err()).toContain("publish it with public: true instead");
 
     const h = harness(host);
     expect(await run(["access", "ips", "set", "*", "--yes"], h.io)).toBe(0);
     expect(host.secrets["Parameters:app-allowed-ips"]).toBe("*");
+    expect(host.secrets["Parameters:app-allow-anyone-as-me"]).toBe("true");
     expect(h.out()).toContain("any address");
     expect(h.out()).toContain("Takes effect on the next");
     expect(host.calls.some((call) => call.args.includes("access-restriction"))).toBe(false);
+
+    expect(await run(["access", "ips", "set", "203.0.113.7"], harness(host).io)).toBe(0);
+    expect(host.secrets["Parameters:app-allow-anyone-as-me"]).toBeUndefined();
   });
 
   it("updates nothing live when the named gateway isn't there", async () => {
@@ -239,6 +320,37 @@ describe("access", () => {
     const h = harness(host);
     expect(await run(["access", "ips", "add", "203.0.113.50", "--name", "misspelled"], h.io)).toBe(0);
     expect(h.out()).toContain('No gateway named "misspelled"');
+    expect(host.calls.some((call) => call.args.includes("access-restriction"))).toBe(false);
+  });
+
+  it("shows public apps apart from the allowlist and never changes their ingress", async () => {
+    const host = deployedHost();
+    host.apps!.push(publicApp("front-desk"), app("gallery", []));
+    const h = harness(host);
+    expect(await run(["access"], h.io)).toBe(0);
+    expect(h.out()).toContain("                gallery now: any address\nPublic apps     front-desk now: any address\n");
+    expect(h.out()).toContain("publishApp's public: true");
+
+    const json = harness(host);
+    expect(await run(["access", "--json"], json.io)).toBe(0);
+    expect(JSON.parse(json.out())).toMatchObject({ publicApps: [{ name: "front-desk", allowed: [] }], openApps: ["gallery"] });
+
+    const update = harness(host);
+    expect(await run(["access", "ips", "add", "203.0.113.50"], update.io)).toBe(0);
+    expect(update.out()).toContain("Applied now to dispatch, assistant.");
+    expect(update.out()).toContain("front-desk is public: open to any address, whatever this list says.");
+    expect(host.apps!.find((candidate) => candidate.name === "front-desk")!.properties.configuration.ingress.ipSecurityRestrictions).toEqual([]);
+    expect(host.calls.filter((call) => call.args.includes("access-restriction") && call.args.includes("front-desk"))).toEqual([]);
+  });
+
+  it("leaves a public app alone even if someone gave it a platform rule by hand", async () => {
+    const host = deployedHost();
+    const frontDesk = publicApp("front-desk");
+    frontDesk.properties.configuration.ingress.ipSecurityRestrictions.push({ name: "platform", ipAddressRange: "10.42.0.0/23", action: "Allow" });
+    host.apps = [app("copilot", []), frontDesk];
+    const h = harness(host);
+    expect(await run(["access", "ips", "set", "203.0.113.50", "--json"], h.io)).toBe(0);
+    expect(JSON.parse(h.out())).toMatchObject({ live: { status: "deferred", public: ["front-desk"] } });
     expect(host.calls.some((call) => call.args.includes("access-restriction"))).toBe(false);
   });
 
@@ -313,6 +425,226 @@ describe("deploy", () => {
     expect(host.secrets["Parameters:copilot-operator-users"]).toBe("alice");
     expect(h.out()).toContain("updates the deployment there");
     expect(h.out()).not.toContain("Added you");
+  });
+
+  it("says how to let this machine in when an allowlisted app refuses it after deploying", async () => {
+    const host = deployedHost();
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    host.answers["https://dispatch.bravedesert.westus2.azurecontainerapps.io/"] = { status: 403, body: "RBAC: access denied" };
+    host.answers["https://assistant.bravedesert.westus2.azurecontainerapps.io/"] = { status: 200, body: "<!doctype html>" };
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(host.probed.sort()).toEqual(["https://assistant.bravedesert.westus2.azurecontainerapps.io/", "https://dispatch.bravedesert.westus2.azurecontainerapps.io/"]);
+    expect(h.err()).toContain("dispatch refused this machine (403 RBAC: access denied)");
+    expect(h.err()).toContain("198.51.100.9/32, the address api.ipify.org reports for this machine");
+    expect(h.err()).toContain("npx managed-copilot access ips add <address or range>");
+    expect(h.err()).not.toContain("assistant refused");
+  });
+
+  it("stays quiet when the allowlisted apps answer, can't be reached, or refuse for their own reasons", async () => {
+    const host = deployedHost();
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    host.answers["https://dispatch.bravedesert.westus2.azurecontainerapps.io/"] = { status: 403, body: '{"error":"forbidden"}' };
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(h.err()).not.toContain("refused this machine");
+  });
+
+  it("passes the AppHost's own parameters from its user secrets, never the platform's keys or ones the deployment keeps", async () => {
+    const host = deployedHost();
+    Object.assign(host.secrets, {
+      "Parameters:google-client-id": "google-id-value",
+      "Parameters:google-client-secret": "google-secret-value",
+      "Parameters:copilot-durable-key": "local-durable-key",
+      "Parameters:assistant-sealing-key": "local-sealing-key",
+      "Parameters:app-github-token": "stale-token",
+      "Parameters:front-desk-github-client-secret": "from-user-secrets",
+      "Parameters:front-desk-session-secret": "local-session-secret",
+      "Parameters:copilot-app-front-desk-key": "local-app-key",
+      "ConnectionStrings:db": "not-a-parameter",
+    });
+    host.manifest = { "google-client-id": false, "google-client-secret": false, "front-desk-github-client-secret": false, "front-desk-session-secret": true, "copilot-app-front-desk-key": true, "copilot-platform-key": true };
+    const h = harness(host, { env: { NO_COLOR: "1", "Parameters__front-desk-github-client-secret": "from-environment" } });
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(env).toMatchObject({ "Parameters__google-client-id": "google-id-value", "Parameters__google-client-secret": "google-secret-value", "Parameters__app-github-token": TOKEN });
+    // Generated by the platform or the AppHost, kept by the deployment's record, already in the environment, or not a parameter.
+    for (const variable of [
+      "Parameters__copilot-durable-key",
+      "Parameters__copilot-platform-key",
+      "Parameters__assistant-webhook-secret",
+      "Parameters__assistant-sealing-key",
+      "Parameters__front-desk-github-client-secret",
+      "Parameters__front-desk-session-secret",
+      "Parameters__copilot-app-front-desk-key",
+      "ConnectionStrings__db",
+    ]) {
+      expect(env, variable).not.toHaveProperty(variable);
+    }
+    expect(h.out()).toContain("Generated by the AppHost, so the deployment makes its own: front-desk-session-secret");
+    expect(h.out()).toContain("Passing 2 parameters from the AppHost's user secrets: google-client-id, google-client-secret");
+    expect(h.out() + h.err()).not.toMatch(/google-secret-value|local-durable-key|local-sealing-key|local-session-secret|local-app-key|do-not-print-me|from-user-secrets/);
+    expect(host.calls.some((call) => call.args.some((arg) => arg.includes("google-secret-value")))).toBe(false);
+    // The AppHost is asked with the environment variables the deployment gets, so it declares the same parameters, but
+    // never the token, and under an Aspire environment of its own.
+    const asked = host.calls.find((call) => call.command === "aspire" && call.args[0] === "do")!;
+    expect(asked.args.slice(0, 2)).toEqual(["do", "publish-manifest"]);
+    expect(asked.args[asked.args.indexOf("--environment") + 1]).toBe("managed-copilot-parameter-check");
+    expect(asked.env).toMatchObject({ "Parameters__copilot-github-users": "patniko", "Parameters__google-client-secret": "google-secret-value" });
+    expect(Object.keys(asked.env!).filter((variable) => /app-github-token/i.test(variable))).toEqual([]);
+    expect(Object.values(asked.env!)).not.toContain(TOKEN);
+    expect(host.calls.some((call) => call.args.some((arg) => arg.includes("google-secret-value")))).toBe(false);
+
+    // The caller's value wins under any spelling Aspire reads the same: any case, and `_` for `-`.
+    host.calls.length = 0;
+    const aliased = harness(host, { env: { NO_COLOR: "1", Parameters__google_client_secret: "from-environment", "PARAMETERS__GOOGLE-CLIENT-ID": "from-environment" } });
+    expect(await run(["deploy", "--yes"], aliased.io)).toBe(0);
+    const aliasedEnv = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(aliasedEnv).not.toHaveProperty("Parameters__google-client-secret");
+    expect(aliasedEnv).not.toHaveProperty("Parameters__google-client-id");
+    expect(aliased.out()).toContain("Passing 1 parameter from the AppHost's user secrets: front-desk-github-client-secret");
+  });
+
+  it("stops before deploying when it can't tell which parameters the AppHost generates, and asks only when there are any", async () => {
+    const host = deployedHost();
+    host.secrets["Parameters:google-client-secret"] = "google-secret-value";
+    host.manifestFailures = 2;
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    expect(await run(["deploy", "--yes"], h.io)).toBe(1);
+    expect(h.err()).toContain("Couldn't tell which parameters the AppHost generates (`aspire do publish-manifest` failed twice), so nothing was deployed.");
+    // Only the log's path: never the AppHost's output, which can repeat a value it was given.
+    expect(h.err()).toContain("Aspire's log: /home/dev/.aspire/logs/cli_20261104T160709_61ce18a3.log.");
+    expect(h.out() + h.err()).not.toContain("google-secret-value");
+    expect(host.calls.filter((call) => call.command === "aspire" && call.args[0] === "do")).toHaveLength(2);
+    expect(host.calls.some((call) => call.command === "aspire" && (call.args[0] === "deploy" || call.args[1] === "set"))).toBe(false);
+
+    // One failure (Aspire stumbles while other Aspire commands are busy) is tried again.
+    const flaky = deployedHost();
+    flaky.secrets["Parameters:google-client-secret"] = "google-secret-value";
+    flaky.manifestFailures = 1;
+    flaky.manifest = { "google-client-secret": false };
+    const flakyRun = harness(flaky);
+    writeRecord(flaky, thisAppHost(), "managed-copilot-dev");
+    expect(await run(["deploy", "--yes"], flakyRun.io)).toBe(0);
+    expect(flakyRun.out()).toContain("Passing 1 parameter from the AppHost's user secrets: google-client-secret");
+
+    const quiet = new FakeHost();
+    expect(await run(["deploy", "--yes"], harness(quiet).io)).toBe(0);
+    expect(quiet.calls.some((call) => call.command === "aspire" && call.args[0] === "do")).toBe(false);
+  });
+
+  it("doesn't leave behind the empty deployment record Aspire makes while it writes the AppHost's manifest", async () => {
+    const host = new FakeHost();
+    host.secrets = { "Parameters:google-client-id": "google-id-value" };
+    host.manifest = { "google-client-id": false };
+    const h = harness(host);
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(host.calls.some((call) => call.command === "aspire" && call.args[0] === "do")).toBe(true);
+    expect(readdirSync(host.records)).toEqual([]);
+    expect(h.out()).toContain("Passing 1 parameter from the AppHost's user secrets: google-client-id");
+  });
+
+  it("shows the check the deployment's saved state, and passes only parameters the AppHost declares", async () => {
+    const host = deployedHost();
+    Object.assign(host.secrets, { "Parameters:new-client-secret": "new-secret-value", "Parameters:leftover": "leftover-value" });
+    host.manifest = { "new-client-secret": false };
+    const h = harness(host);
+    const recordDir = writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    const files = () => Object.fromEntries(readdirSync(recordDir).map((file) => [file, readFileSync(join(recordDir, file), "utf8")]));
+    const before = files();
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(host.checkStateSeen).toContain("Parameters:copilot-platform-key");
+    expect(files()).toEqual(before);
+    const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(env).toMatchObject({ "Parameters__new-client-secret": "new-secret-value" });
+    expect(env).not.toHaveProperty("Parameters__leftover");
+    expect(h.out()).toContain("Not declared by the AppHost, so not passed: leftover");
+    expect(h.out() + h.err()).not.toMatch(/new-secret-value|leftover-value/);
+  });
+
+  it("keeps what the check might save out of the deployment's state, and leaves other deployments' files alone", async () => {
+    const host = deployedHost();
+    Object.assign(host.secrets, { "Parameters:google-client-secret": "google-secret-value", "Parameters:front-desk-session-secret": "local-session-secret" });
+    host.manifest = { "google-client-secret": false, "front-desk-session-secret": true };
+    host.manifestSavesValues = true;
+    const h = harness(host);
+    const recordDir = writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    const files = () => Object.fromEntries(readdirSync(recordDir).map((file) => [file, readFileSync(join(recordDir, file), "utf8")]));
+    const before = files();
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    // The values it saved went to the check's own environment, which is gone; Production's state is untouched.
+    expect(files()).toEqual(before);
+    const env = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env!;
+    expect(env).toMatchObject({ "Parameters__google-client-secret": "google-secret-value" });
+    expect(env).not.toHaveProperty("Parameters__front-desk-session-secret");
+    expect(h.out() + h.err()).not.toMatch(/google-secret-value|local-session-secret/);
+
+    // A first deployment: the check's files and the directory it made go, but not another deployment's state written meanwhile.
+    for (const concurrentDeployment of [false, true]) {
+      const first = new FakeHost();
+      first.records = join(directory, `first-deployments-${concurrentDeployment}`);
+      first.secrets = { "Parameters:front-desk-session-secret": "local-session-secret", "Parameters:google-client-id": "google-id-value" };
+      first.manifest = { "front-desk-session-secret": true, "google-client-id": false };
+      first.manifestSavesValues = true;
+      first.concurrentDeployment = concurrentDeployment;
+      expect(await run(["deploy", "--yes"], harness(first).io)).toBe(0);
+      const left = readdirSync(first.records).flatMap((name) => readdirSync(join(first.records, name)).map((file) => readFileSync(join(first.records, name, file), "utf8")));
+      expect(left).toEqual(concurrentDeployment ? [JSON.stringify({ "Parameters:copilot-platform-key": "other-deployment-key" })] : []);
+    }
+  });
+
+  it("says public apps are open to any address, and lists them once deployed", async () => {
+    const host = deployedHost();
+    host.apps!.push(publicApp("front-desk"));
+    const h = harness(host);
+    writeRecord(host, thisAppHost(), "managed-copilot-dev");
+    expect(await run(["deploy", "--yes"], h.io)).toBe(0);
+    expect(h.out()).toContain("Apps open to    198.51.100.9/32 (this machine); public apps: any address");
+    expect(h.out()).toContain("Public apps: https://front-desk.bravedesert.westus2.azurecontainerapps.io (any address)");
+  });
+
+  it("deploys to a subscription in another tenant with that tenant, and says how to use another account's", async () => {
+    const other = "99999999-8888-7777-6666-555555555555";
+    const host = new FakeHost();
+    host.tenants[other] = { tenantId: "tenant-b", user: "DEV@contoso.example" };
+    const h = harness(host);
+    expect(await run(["deploy", "--yes", "--subscription", other], h.io)).toBe(0);
+    const deployCall = host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!;
+    expect(deployCall.env).toMatchObject({ Azure__SubscriptionId: other, Azure__TenantId: "tenant-b" });
+
+    // An explicit tenant wins over the subscription's.
+    host.secrets["Azure:TenantId"] = "tenant-explicit";
+    writeRecord(host, thisAppHost(), "managed-copilot-dev", other);
+    host.calls.length = 0;
+    expect(await run(["deploy", "--yes", "--subscription", other], harness(host).io)).toBe(0);
+    expect(host.calls.find((call) => call.command === "aspire" && call.args[0] === "deploy")!.env).toMatchObject({ Azure__TenantId: "tenant-explicit" });
+
+    const elsewhere = new FakeHost();
+    elsewhere.tenants[other] = { tenantId: "tenant-c", user: "someone@fabrikam.example" };
+    const switching = harness(elsewhere);
+    expect(await run(["deploy", "--yes", "--subscription", other], switching.io)).toBe(1);
+    expect(switching.err()).toContain("belongs to another account than the Azure CLI's current one");
+    expect(switching.err()).toContain(`az account set --subscription ${other}`);
+    expect(switching.err()).not.toContain("someone@fabrikam.example");
+    expect(elsewhere.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+
+    // A tenant in the AppHost's settings doesn't skip the account check.
+    elsewhere.secrets["Azure:TenantId"] = "tenant-c";
+    const configured = harness(elsewhere);
+    expect(await run(["deploy", "--yes", "--subscription", other], configured.io)).toBe(1);
+    expect(configured.err()).toContain("belongs to another account than the Azure CLI's current one");
+    expect(elsewhere.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+    expect(elsewhere.secrets["Azure:SubscriptionId"]).toBeUndefined();
+
+    const unknown = new FakeHost();
+    const refused = harness(unknown);
+    expect(await run(["deploy", "--yes", "--subscription", "12345678-1234-1234-1234-123456789012"], refused.io)).toBe(1);
+    expect(refused.err()).toContain("The Azure CLI can't use subscription 12345678-1234-1234-1234-123456789012.");
+    expect(refused.err()).toContain("az login --tenant");
+    expect(unknown.calls.some((call) => call.args[0] === "deploy")).toBe(false);
+    expect(unknown.secrets).toEqual({});
   });
 
   it("asks first in a terminal, and needs --yes otherwise", async () => {

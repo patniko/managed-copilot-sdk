@@ -43,13 +43,13 @@ Each page answers one question, diagram first.
 
 | I want to… | Read | Run |
 | --- | --- | --- |
-| Compare the ways an agent can run: isolated, shared, promotable, direct, delegate, mixed | [Patterns](concepts/patterns.md) | `pnpm gallery` |
+| Compare the ways an agent can run: isolated, shared, promotable, direct, delegate, mixed | [Patterns](concepts/patterns.md) | `pnpm gallery`, [Pattern Race](../demos/pattern-race/README.md) |
 | Run an agent in Azure from a TypeScript script on my laptop | [Local and Azure](concepts/local-and-azure.md) | [10](../walkthroughs/10-azure/README.md) |
-| Build a chat agent that uses my app's data | [The harness](concepts/harness.md) | [02](../walkthroughs/02-your-own-tools/README.md) |
-| Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../walkthroughs/03-sandbox/README.md) |
-| Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../walkthroughs/04-promotion/README.md) |
-| Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../walkthroughs/11-orchestrator/README.md) |
-| Have a coordinator and its sub-agents run commands in a sandbox themselves, or choose between that and workers | [Orchestrator](concepts/orchestrator.md#three-ways-to-get-work-done) | [12](../walkthroughs/12-direct-execution/README.md) |
+| Build a chat agent that uses my app's data | [The harness](concepts/harness.md) | [02](../walkthroughs/02-your-own-tools/README.md), [Help Desk](../demos/help-desk/README.md) |
+| Let an agent write and run code without touching my machine | [Sandboxes](concepts/sandboxes.md) | [03](../walkthroughs/03-sandbox/README.md), [Repo Doctor](../demos/repo-doctor/README.md) |
+| Pay for a sandbox only when a chat needs one | [Promotion](concepts/promotion.md) | [04](../walkthroughs/04-promotion/README.md), [Data Desk](../demos/data-desk/README.md) |
+| Split a job across agents working in parallel, each in its own sandbox | [Orchestrator](concepts/orchestrator.md) | [11](../walkthroughs/11-orchestrator/README.md), [Research Swarm](../demos/research-swarm/README.md) |
+| Have a coordinator and its sub-agents run commands in a sandbox themselves, or choose between that and workers | [Orchestrator](concepts/orchestrator.md#three-ways-to-get-work-done) | [12](../walkthroughs/12-direct-execution/README.md), [Incident Commander](../demos/incident-commander/README.md) |
 | Run my own agent loop with its hands in a sandbox, or run commands in a sandbox from code | [Sandboxes](concepts/sandboxes.md#run-commands-directly) | [13](../walkthroughs/13-your-own-harness/README.md) |
 | Define environments and harnesses together in one app | [Environments](concepts/environments.md), [the harness](concepts/harness.md) | [05](../walkthroughs/05-choose-environments/README.md), [06](../walkthroughs/06-harness/README.md) |
 | Open a session in Copilot CLI | [Copilot CLI](concepts/copilot-cli.md) | [01](../walkthroughs/01-first-agent/README.md), [06](../walkthroughs/06-harness/README.md) |
@@ -99,4 +99,5 @@ Each page answers one question, diagram first.
 | [Deploying to Azure](deployment.md) | Everything `aspire deploy` creates, plus cost, limits, and troubleshooting |
 | [`managed-copilot` CLI](../libraries/cli/README.md) | Every command |
 | [Spec snippets](../tests/snippets/README.md) | Every spec snippet as an automated acceptance check |
-| [AI software factory](../demos/software-factory/README.md), [assistant](../demos/assistant/README.md), and [Dispatch](../demos/dispatch/README.md) | Three complete apps built on the platform |
+| [Quality assurance](qa.md) | Every flow mapped to its checks, the release gate, and `pnpm qa` to run them by tier |
+| [Demos](../README.md#demos) | Nine apps built on the platform, one per use case, from a 25-customer help desk to an on-call incident commander |

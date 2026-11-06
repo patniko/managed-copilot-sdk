@@ -1,4 +1,5 @@
 import { ManagedCopilotError, type ErrorBody } from "@managed-copilot/protocol";
+import { identityHeaders, type Identity } from "./identity.js";
 
 /**
  * How long calls to the gateway may take (internal defaults, not public API; tests change them). A call past its
@@ -79,11 +80,12 @@ class Call {
 /** Minimal authenticated REST client for the gateway. Errors become `ManagedCopilotError`. */
 export class HttpClient {
   readonly baseUrl: string;
-  readonly #token: string;
+  readonly #headers: Readonly<Record<string, string>>;
 
-  constructor(baseUrl: string, token: string) {
+  /** `credential`: a bearer token (a GitHub token or a scoped capability), or a full identity (an app's requests). */
+  constructor(baseUrl: string, credential: string | Identity) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#token = token;
+    this.#headers = identityHeaders(typeof credential === "string" ? { token: credential } : credential);
   }
 
   url(path: string, query?: RequestOptions["query"]): string {
@@ -148,7 +150,7 @@ export class HttpClient {
 
   async #send(method: string, path: string, options: RequestOptions & { rawBody?: RequestInit["body"]; duplex?: "half" }, call: Call): Promise<Response> {
     const answerMs = options.timeoutMs ?? timings.requestMs;
-    const headers: Record<string, string> = { authorization: `Bearer ${this.#token}`, ...options.headers };
+    const headers: Record<string, string> = { ...this.#headers, ...options.headers };
     let body: RequestInit["body"] = options.rawBody;
     if (body === undefined && options.body !== undefined) {
       headers["content-type"] = "application/json";

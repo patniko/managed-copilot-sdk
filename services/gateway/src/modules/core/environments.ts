@@ -173,8 +173,14 @@ export class Environments implements EnvironmentResolver {
         const bundle = pinCustomizations(source, join(options.pinDir, name)) as CustomizationBundle & { unsafe?: readonly string[] };
         const problems: string[] = [];
         if (bundle.unsafe && bundle.unsafe.length > 0 && env.type !== "isolated") problems.push(`include executable configuration: ${bundle.unsafe.join("; ")}`);
-        const outside = env.models ? bundle.agents.filter((agent) => agent.model && !env.models!.includes(agent.model)) : [];
-        if (outside.length > 0) problems.push(`select models the environment does not allow: ${outside.map((agent) => `${agent.name} uses ${agent.model}`).join("; ")}`);
+        // A Foundry environment's models are its account's deployments unless it names fewer.
+        const foundry = env.inference?.foundry;
+        const allowed = env.models ?? (foundry ? options.deployment.foundry?.[foundry]?.deployments : undefined);
+        const outside = allowed ? bundle.agents.filter((agent) => agent.model && !allowed.includes(agent.model)) : [];
+        if (outside.length > 0) {
+          const what = foundry && !env.models ? `models that are not deployments of Azure AI Foundry account "${foundry}"` : "models the environment does not allow";
+          problems.push(`select ${what}: ${outside.map((agent) => `${agent.name} uses ${agent.model}`).join("; ")}`);
+        }
         const problem = problems.length > 0 ? `Customizations for "${name}" ${problems.join(", and ")}` : undefined;
         if (problem) options.log.error("Environment customizations rejected", { environment: name, problem });
         else options.log.info("Pinned environment customizations", { environment: name, digest: bundle.digest, agents: bundle.agents.map((agent) => agent.name) });
@@ -270,11 +276,15 @@ export class Environments implements EnvironmentResolver {
   info(): EnvironmentInfo[] {
     return Object.entries(this.#deployment.environments).map(([name, env]) => {
       const bundle = this.#bundles.get(name)?.bundle;
+      const foundry = env.inference?.foundry;
+      // A Foundry environment's models are its account's deployments unless it narrows them.
+      const models = env.models ?? (foundry ? this.#deployment.foundry?.[foundry]?.deployments : undefined);
       return {
         name,
         type: env.type,
         ...(env.description ? { description: env.description } : {}),
-        ...(env.models ? { models: env.models } : {}),
+        ...(models ? { models: [...models] } : {}),
+        ...(foundry ? { inference: { foundry } } : {}),
         network: this.ceiling(env),
         ...(sandboxedType(env.type) ? { size: env.size ?? "small" } : {}),
         ...(env.promoteTo ? { promoteTo: env.promoteTo } : {}),

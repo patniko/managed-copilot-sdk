@@ -22,9 +22,7 @@ export function ErrorScreen() {
         <div className="Box blankslate blankslate--spacious h-fit w-full max-w-2xl animate-fade-in">
           <CloudOfflineIcon size={24} className="blankslate-icon" />
           <h1 className="blankslate-heading">Can't reach the factory server</h1>
-          <p className="blankslate-description">
-            The factory floor needs its server to show work orders. Check that it's running, then try again.
-          </p>
+          <p className="blankslate-description">Check that the factory server is running, then try again.</p>
           {detail ? (
             <p className="mt-3 max-w-full text-fg-muted">
               <code className="inline-code">{detail}</code>

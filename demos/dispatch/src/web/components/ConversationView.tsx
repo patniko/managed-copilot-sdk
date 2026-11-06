@@ -1,19 +1,24 @@
-import { AlertIcon, ContainerIcon, CopilotIcon, HistoryIcon, SyncIcon, TerminalIcon, TrashIcon } from "@primer/octicons-react";
+import { AlertIcon, CommentIcon, ContainerIcon, HistoryIcon, SyncIcon, TerminalIcon, TrashIcon, TriangleDownIcon } from "@primer/octicons-react";
 import { useEffect, useState } from "react";
-import type { ConversationView as View } from "../../shared/types.js";
+import type { Blueprint, ConversationView as View, StyleInfo } from "../../shared/types.js";
 import { confirmAction } from "../lib/confirm.js";
-import { conversationStats } from "../lib/conversation.js";
+import { conversationStats, type ConversationStats } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { plural } from "../lib/format.js";
-import { conversationHref, type ConversationTab } from "../lib/router.js";
+import { conversationHref, homeHref, type ConversationTab } from "../lib/router.js";
 import { deleteConversation, loadConversation, openInCli, useStore } from "../lib/store.js";
 import { STYLE_META } from "../lib/styles.js";
+import { usePopover } from "../lib/usePopover.js";
 import { Chat } from "./Chat.js";
-import { Environments } from "./Environments.js";
+import { Sandboxes } from "./Sandboxes.js";
+import { SharedRuntime, StyleDiagram } from "./Styles.js";
 import { Timeline } from "./Timeline.js";
 import { Button } from "./ui/Button.js";
 import { CopyButton } from "./ui/CopyButton.js";
 import { EmptyState } from "./ui/Feedback.js";
+import { OverflowMenu } from "./ui/Menu.js";
+import { Spinner } from "./ui/Spinner.js";
+import { Tooltip } from "./ui/Tooltip.js";
 import { WorkerDetail } from "./WorkerDetail.js";
 
 export function ConversationPage({ id, tab, worker }: { readonly id: string; readonly tab: ConversationTab; readonly worker?: string }) {
@@ -44,8 +49,7 @@ export function ConversationPage({ id, tab, worker }: { readonly id: string; rea
     }
     return (
       <div className="p-6" aria-busy="true">
-        <div className="SkeletonBox mb-3 h-8 w-1/3" />
-        <div className="SkeletonBox mb-6 h-4 w-1/2" />
+        <div className="SkeletonBox mb-6 h-7 w-1/3" />
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="SkeletonBox h-80" />
           <div className="SkeletonBox h-80" />
@@ -60,13 +64,11 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
   const allBlueprints = useStore((state) => state.blueprints);
   const styles = useStore((state) => state.styles);
   const canLaunch = useStore((state) => state.canLaunchTerminal);
-  const [pane, setPane] = useState<"chat" | "environments">("chat");
+  const [pane, setPane] = useState<"chat" | "sandboxes">("chat");
   const [deleting, setDeleting] = useState(false);
   const stats = conversationStats(view);
   const selected = view.workers.find((candidate) => candidate.id === worker);
   const style = styles.find((candidate) => candidate.style === view.style);
-  const meta = STYLE_META[view.style];
-  const StyleGlyph = meta.icon;
   // The blueprints this conversation's coordinator can use: its own sandbox's, and (delegate, mixed) its workers'.
   const usable = style?.available ? new Set([...(style.handsEnvironment ? [style.handsEnvironment] : []), ...style.workers]) : undefined;
   const blueprints = usable ? allBlueprints.filter((blueprint) => usable.has(blueprint.name)) : allBlueprints;
@@ -86,64 +88,40 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex flex-wrap items-start gap-3 border-b border-line px-4 py-3 sm:px-6">
-        <div className="min-w-0 flex-1">
-          <h1 className="truncate text-xl font-semibold tracking-tight" title={view.title}>
+      <header className="flex min-h-14 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2 sm:px-6">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <h1 className="min-w-0 truncate text-lg font-semibold tracking-tight" title={view.title}>
             {view.title}
           </h1>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg-muted">
-            <span className="Label Label--secondary" title="One coordinator session handles the whole conversation">
-              <CopilotIcon size={12} />
-              Coordinator · {view.environment}
-              {style?.coordinator ? ` · ${style.coordinator.model}` : ""}
-            </span>
-            <span className="Label Label--accent" title={`${meta.summary} A conversation keeps its style.`}>
-              <StyleGlyph size={12} />
-              {meta.short}
-            </span>
-            <span>{plural(stats.messages, "message")}</span>
-            {view.style !== "delegate" ? (
-              <>
-                <span aria-hidden>·</span>
-                <span>
-                  <strong className="font-semibold text-fg">{stats.commands}</strong> {stats.commands === 1 ? "command" : "commands"}
-                  {stats.subagents > 0 ? `, ${plural(stats.subagents, "sub-agent")}` : ""}
-                </span>
-              </>
-            ) : null}
-            {view.style !== "direct" ? (
-              <>
-                <span aria-hidden>·</span>
-                <span>
-                  <strong className="font-semibold text-fg">{stats.created}</strong> {stats.created === 1 ? "sandbox" : "sandboxes"} created
-                </span>
-                <span aria-hidden>·</span>
-                <span>
-                  <strong className="font-semibold text-fg">{stats.reused}</strong> reused
-                </span>
-              </>
-            ) : null}
-            {stats.stopped > 0 ? (
-              <>
-                <span aria-hidden>·</span>
-                <span>{stats.stopped} stopped</span>
-              </>
-            ) : null}
-          </div>
+          <StyleBadge view={view} info={style} blueprints={allBlueprints} />
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          {canLaunch ? (
-            <Button icon={TerminalIcon} onClick={() => void openInCli(view.id)}>
-              Open in Copilot CLI
-            </Button>
+        <div className="flex shrink-0 items-center gap-3">
+          <Counters view={view} stats={stats} />
+          <span className="inline-flex items-center gap-1">
+            {canLaunch ? (
+              <Button size="sm" icon={TerminalIcon} onClick={() => void openInCli(view.id)} aria-label="Open in Copilot CLI">
+                <span className="max-sm:sr-only">Open in Copilot CLI</span>
+              </Button>
+            ) : null}
+            {canLaunch ? (
+              <CopyButton text={view.attachCommand} label="Copy the command that opens this conversation in Copilot CLI" />
+            ) : (
+              <CopyButton text={view.attachCommand} label="Copy the command that opens this conversation in Copilot CLI" variant="default">
+                Copy CLI command
+              </CopyButton>
+            )}
+          </span>
+          {deleting ? (
+            <span role="status" className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
+              <Spinner size={16} />
+              <span className="max-sm:sr-only">Deleting…</span>
+            </span>
           ) : (
-            <CopyButton text={view.attachCommand} label={`Copy the command that opens this conversation in Copilot CLI: ${view.attachCommand}`} variant="default" size="md">
-              Copy Copilot CLI command
-            </CopyButton>
+            <OverflowMenu
+              label="Conversation actions"
+              items={[{ label: "End and delete sandboxes", icon: TrashIcon, danger: true, onSelect: () => void remove() }]}
+            />
           )}
-          <Button variant="danger" icon={TrashIcon} loading={deleting} onClick={() => void remove()}>
-            End and delete sandboxes
-          </Button>
         </div>
       </header>
 
@@ -152,23 +130,24 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
           <button type="button" className="SegmentedControl-item" aria-current={pane === "chat"} onClick={() => setPane("chat")}>
             Conversation
           </button>
-          <button type="button" className="SegmentedControl-item" aria-current={pane === "environments"} onClick={() => setPane("environments")}>
+          <button type="button" className="SegmentedControl-item" aria-current={pane === "sandboxes"} onClick={() => setPane("sandboxes")}>
             Sandboxes {stats.live > 0 ? <span className="Counter">{stats.live}</span> : null}
           </button>
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
+      <div className="grid min-h-0 flex-1 xl:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
         <div className={cx("flex min-h-0 flex-col border-line xl:border-r", pane !== "chat" && "max-xl:hidden")}>
           <Chat view={view} blueprints={blueprints} />
         </div>
-        <div className={cx("flex min-h-0 flex-col bg-canvas-muted", pane !== "environments" && "max-xl:hidden")}>
-          <nav aria-label="Sandboxes" className="UnderlineNav shrink-0 bg-canvas px-3">
+        <div className={cx("flex min-h-0 flex-col bg-canvas-inset", pane !== "sandboxes" && "max-xl:hidden")}>
+          <nav aria-label="Sandboxes and timeline" className="UnderlineNav shrink-0 bg-canvas px-3">
             <ul className="UnderlineNav-body">
               <li>
-                <a href={conversationHref(view.id, { ...(worker ? { worker } : {}) })} className="UnderlineNav-item" aria-current={tab === "environments" ? "page" : undefined}>
+                <a href={conversationHref(view.id, { ...(worker ? { worker } : {}) })} className="UnderlineNav-item" aria-current={tab === "sandboxes" ? "page" : undefined}>
                   <ContainerIcon size={16} />
-                  Environments
+                  Sandboxes
+                  {stats.live > 0 ? <span className="Counter">{stats.live}</span> : null}
                 </a>
               </li>
               <li>
@@ -178,13 +157,9 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
                 </a>
               </li>
             </ul>
-            <div className="ml-auto flex items-center gap-2 text-xs text-fg-muted max-2xl:hidden">
-              <span className="Label Label--success">#1</span> created by message 1
-              <span className="Label Label--accent">#2</span> {view.style === "direct" ? "used by message 2" : "sent work by message 2"}
-            </div>
           </nav>
           <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
-            {tab === "timeline" ? <Timeline view={view} blueprints={blueprints} selected={worker} /> : <Environments view={view} blueprints={blueprints} selected={worker} />}
+            {tab === "timeline" ? <Timeline view={view} blueprints={blueprints} selected={worker} /> : <Sandboxes view={view} blueprints={blueprints} info={style} selected={worker} />}
             {selected ? (
               <div className="mt-3">
                 <WorkerDetail key={selected.id} view={view} worker={selected} blueprints={blueprints} tab={tab} />
@@ -194,5 +169,84 @@ function Conversation({ view, tab, worker }: { readonly view: View; readonly tab
         </div>
       </div>
     </div>
+  );
+}
+
+/** The conversation's style, read-only: its popover says who coordinates, on what, with which model. */
+function StyleBadge({ view, info, blueprints }: { readonly view: View; readonly info: StyleInfo | undefined; readonly blueprints: readonly Blueprint[] }) {
+  const { open, toggle, container } = usePopover();
+  const meta = STYLE_META[view.style];
+  const Glyph = meta.icon;
+  const hands = info?.handsEnvironment ? blueprints.find((blueprint) => blueprint.name === info.handsEnvironment) : undefined;
+  return (
+    <div ref={container} className="relative shrink-0">
+      <button type="button" className="Label Label--accent cursor-pointer hover:bg-accent-muted" aria-expanded={open} aria-haspopup="dialog" onClick={toggle} title="How this conversation's agent works">
+        <Glyph size={12} />
+        {meta.short}
+        <TriangleDownIcon size={12} />
+      </button>
+      {open ? (
+        <div role="dialog" aria-label={meta.label} className="Overlay absolute top-full left-0 z-40 mt-2 w-80 animate-scale-in max-sm:fixed max-sm:inset-x-4 max-sm:top-28 max-sm:w-auto">
+          <div className="border-b border-line-muted px-4 py-3">
+            <div className="flex items-center gap-1.5 font-semibold">
+              <Glyph size={16} className="text-fg-muted" />
+              {meta.label}
+            </div>
+            <StyleDiagram style={view.style} className="mt-2.5" stacked />
+          </div>
+          <dl className="grid grid-cols-[6.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 px-4 py-3 text-sm">
+            <dt className="text-fg-muted">Coordinator</dt>
+            <dd className="truncate font-mono text-xs leading-5">{view.environment}</dd>
+            <dt className="text-fg-muted">Runs on</dt>
+            <dd>
+              <SharedRuntime />
+            </dd>
+            {info?.coordinator ? (
+              <>
+                <dt className="text-fg-muted">Model</dt>
+                <dd className="truncate">{info.coordinator.model}</dd>
+              </>
+            ) : null}
+            {hands ? (
+              <>
+                <dt className="text-fg-muted">Its sandbox</dt>
+                <dd className="truncate">{hands.label}</dd>
+              </>
+            ) : null}
+          </dl>
+          <p className="border-t border-line-muted px-4 py-2 text-xs text-fg-muted">
+            A conversation keeps its style.{" "}
+            <a href={homeHref()} className="Link">
+              Start a new one
+            </a>{" "}
+            to try another.
+          </p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function Counter({ icon: Glyph, count, label }: { readonly icon: typeof ContainerIcon; readonly count: number; readonly label: string }) {
+  return (
+    <Tooltip content={label}>
+      <span role="img" className="inline-flex items-center gap-1 text-sm text-fg-muted tabular-nums" aria-label={label}>
+        <Glyph size={16} />
+        {count}
+      </span>
+    </Tooltip>
+  );
+}
+
+function Counters({ view, stats }: { readonly view: View; readonly stats: ConversationStats }) {
+  const sandboxes = [plural(stats.created, "sandbox", "sandboxes"), stats.reused ? `${stats.reused} reused` : "", stats.stopped ? `${stats.stopped} deleted` : ""].filter(Boolean).join(" · ");
+  return (
+    <span className="flex items-center gap-3 max-md:hidden">
+      <Counter icon={ContainerIcon} count={stats.created} label={sandboxes} />
+      {view.style !== "delegate" ? (
+        <Counter icon={TerminalIcon} count={stats.commands} label={[plural(stats.commands, "command"), stats.subagents ? plural(stats.subagents, "sub-agent") : ""].filter(Boolean).join(" · ")} />
+      ) : null}
+      <Counter icon={CommentIcon} count={stats.messages} label={plural(stats.messages, "message")} />
+    </span>
   );
 }

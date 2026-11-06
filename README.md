@@ -96,25 +96,33 @@ pnpm gallery                        # every demo and walkthrough on one page
 - **Stuck at "Trusting certificates…".** Run `aspire certs trust` once, or use `aspire run --non-interactive`.
 - **nuget.org is blocked.** Set `ASPIRE_CLI_NUGET_SERVICE_INDEX=<proxy>/v3/index.json` and add an untracked
   `NuGet.config` at the repository root that maps `*` to that proxy.
-- **A port is in use.** The gateway (7400), Dispatch (7470), the factory (7480), and the assistant (7490) use fixed
-  ports. To run a second copy, set `MANAGED_COPILOT_PORT_OFFSET=300` and point tools at it with
+- **A port is in use.** The gateway (7400), the gallery (7460), and the demos (7420 to 7490) use fixed ports. To run a
+  second copy, set `MANAGED_COPILOT_PORT_OFFSET=300` and point tools at it with
   `MANAGED_COPILOT_URL=http://localhost:7700`.
 
 </details>
 
 ## Demos
 
-All three run under `aspire run` with real models and deploy to Azure with the same AppHost.
+Ten apps show the patterns doing real work, each built for its own use case. All of them run under `aspire run` with
+real models and deploy to Azure with the same AppHost; `pnpm gallery` opens every one.
 
 <p align="center">
-  <img src="demos/software-factory/docs/screenshots/floor-building.png" alt="The software factory floor: a coordinator that created two builder sandboxes and reused them for review fixes" width="900">
+  <img src="demos/pattern-race/docs/screenshots/race-finished.png" alt="Pattern Race: one job raced through all six patterns, with where each agent thinks and acts, its time, sandboxes, agents, and premium requests, and a scorecard" width="900">
 </p>
 
-| Demo | What it shows |
-| --- | --- |
-| [AI software factory](demos/software-factory/README.md) | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
-| [Long-running assistant](demos/assistant/README.md) | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
-| [Dispatch](demos/dispatch/README.md) | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
+| Demo | Pattern | What it shows |
+| --- | --- | --- |
+| [Pattern Race](demos/pattern-race/README.md) | All six | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests |
+| [Help Desk](demos/help-desk/README.md) | Shared | 25 customers, each chatting with a private agent bound to their own orders, on one runtime with no sandboxes |
+| [Front Desk](demos/front-desk/README.md) | Shared | An app other people sign in to, with GitHub (their own Copilot plan) or an email (your Azure AI Foundry pays), each with private conversations and memory; published open to the Internet with no GitHub token of its own |
+| [Repo Doctor](demos/repo-doctor/README.md) | Isolated | One sandbox clones a repository and fixes its failing tests, while a live strip shows the hosts its network rules allowed and blocked |
+| [Data Desk](demos/data-desk/README.md) | Promotable | Chat with a spreadsheet: a chart request moves the same session from the shared runtime into a Python sandbox, and Copilot CLI follows it |
+| [Dispatch](demos/dispatch/README.md) | Direct, delegate, mixed | An orchestrator chat that creates a sandbox for each part of a request, or reuses one it has, and can be continued in Copilot CLI |
+| [Research Swarm](demos/research-swarm/README.md) | Delegate | One question fans out to web researchers, each in its own sandbox, and comes back as a report where every claim cites a page they read |
+| [Incident Commander](demos/incident-commander/README.md) | Mixed | An alert opens an incident: triage in its own sandbox, the repro and fix in workers, and a deploy that waits for your approval, even with the tab closed |
+| [AI software factory](demos/software-factory/README.md) | Delegate, isolated | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
+| [Long-running assistant](demos/assistant/README.md) | Shared, delegate | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 
 ## Deploy to Azure
 
@@ -144,6 +152,7 @@ include a single gateway replica and no warm sandbox pools; see [live qualificat
 | [Demo walkthrough](docs/walkthrough.md) | A checklist to run every demo locally and on Azure |
 | [`managed-copilot` CLI](libraries/cli/README.md) | Sign-in, sessions, Copilot CLI attach, artifacts, schedules, and the console |
 | [Spec snippets](tests/snippets/README.md) | Every spec example as a runnable script |
+| [Quality assurance](docs/qa.md) | The checks every change and release is held to, by tier, and `pnpm qa` to run them |
 | [Developer experience spec](docs/spec/developer-experience.md) | The full API contract and design decisions |
 | [Architecture](docs/architecture.md) | Topology, protocol facts, and a code map |
 | [Threat model](docs/threat-model.md) | Trust boundaries and what the platform defends against |
@@ -157,10 +166,10 @@ include a single gateway replica and no warm sandbox pools; see [live qualificat
 | `services/` | The gateway, operator console, sandbox image, and egress proxy |
 | `deployments/azure` | The Azure target for `aspire deploy` (AWS is a [roadmap](deployments/aws/README.md)) |
 | `environments/` | Per-environment agents, skills, and instructions for the root AppHost |
-| `demos/`, `walkthroughs/`, `tests/snippets` | The demo apps, walkthroughs, and spec snippets |
+| `demos/`, `walkthroughs/`, `tests/snippets`, `tests/qa` | The demo apps, walkthroughs, spec snippets, and QA checks |
 | `apphost.mts` | The root AppHost that `aspire run` starts |
 
-To work on the platform: `pnpm install`, `pnpm build`, `pnpm test`.
+To work on the platform: `pnpm install`, `pnpm build`, `pnpm test`. Before a release, run [`pnpm qa all`](docs/qa.md).
 
 ## License
 

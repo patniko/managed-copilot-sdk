@@ -49,10 +49,7 @@
     animation: blink 1.1s steps(1, end) infinite;
   }
 
-  /* A blueprint row: its lane color marks the row and the sandboxes made from it. */
-  .lane {
-    border-left: 4px solid var(--lane, var(--borderColor-default));
-  }
+  /* A blueprint's lane color marks its sandboxes' icons and timeline bars. */
   .lane-icon {
     color: var(--lane, var(--fgColor-muted));
   }

@@ -121,6 +121,19 @@ export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "pl
   }
 }
 
+/** The status in a word or two, for cards: "Starting", "Working", "Changes requested", "Approved". */
+export function stationShortLabel(station: Pick<Station, "status" | "kind" | "placement" | "acceptedWithFindings">): string {
+  if (station.status === "starting") return "Starting";
+  if (station.status === "collecting") return "Collecting";
+  if (station.status === "done" && station.kind === "review" && station.acceptedWithFindings) return "Accepted";
+  return stationStatusMeta(station).label;
+}
+
+/** Agent-led: the coordinator sent this round's work to a worker it created for an earlier round. */
+export function isReusedWorker(station: Pick<Station, "worker" | "round">): boolean {
+  return station.worker !== undefined && station.round > station.worker.createdRound;
+}
+
 export const KIND_ICONS: Readonly<Record<StationKind, Icon>> = {
   plan: TasklistIcon,
   coordinate: CopilotIcon,

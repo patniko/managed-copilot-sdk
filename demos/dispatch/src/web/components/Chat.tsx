@@ -1,20 +1,19 @@
-import { AlertIcon, CopilotIcon, HourglassIcon, ShieldIcon, TerminalIcon, ZapIcon } from "@primer/octicons-react";
+import { AlertIcon, CopilotIcon, HourglassIcon, TerminalIcon } from "@primer/octicons-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { Blueprint, ChatMessage, ConversationView } from "../../shared/types.js";
 import { handlingTime } from "../lib/conversation.js";
 import { cx } from "../lib/cx.js";
 import { between, formatClock, formatDuration } from "../lib/format.js";
-import { homeHref, navigate } from "../lib/router.js";
-import { dismissOutgoing, sendMessage, setApprovals, setDraft, useStore, type Outgoing } from "../lib/store.js";
-import { STYLE_META } from "../lib/styles.js";
+import { dismissOutgoing, sendMessage, setApprovals, useStore, type Outgoing } from "../lib/store.js";
 import { useNow } from "../lib/useNow.js";
 import { CommandsCard } from "./Commands.js";
 import { Composer } from "./Composer.js";
 import { ApprovalCard, DecisionCard } from "./Decisions.js";
-import { StyleChoice } from "./Home.js";
 import { MarkdownView } from "./Markdown.js";
+import { ApprovalChoice } from "./Styles.js";
 import { Callout } from "./ui/Feedback.js";
 import { Spinner } from "./ui/Spinner.js";
+import { Tooltip } from "./ui/Tooltip.js";
 
 const NO_OUTGOING: readonly Outgoing[] = [];
 
@@ -52,7 +51,7 @@ export function Chat({ view, blueprints }: { readonly view: ConversationView; re
           {outgoing.map((item) => (
             <OutgoingItem key={item.key} conversationId={view.id} item={item} />
           ))}
-          <ApprovalCard conversationId={view.id} approvals={sandboxApprovals} blueprints={blueprints} now={now} />
+          <ApprovalCard conversationId={view.id} approvals={sandboxApprovals} now={now} />
           <WorkingRow view={view} now={now} />
         </div>
       </div>
@@ -63,25 +62,26 @@ export function Chat({ view, blueprints }: { readonly view: ConversationView; re
 
 function MessageItem({ view, message, current, now }: { readonly view: ConversationView; readonly message: ChatMessage; readonly current: boolean; readonly now: number }) {
   if (message.role === "user") {
-    const decisions = message.decisions ?? [];
+    const steps = message.decisions ?? [];
+    // New sandboxes waiting for an answer show once, in the approval card below.
+    const pending = new Set(view.approvals.flatMap((approval) => (approval.kind !== "command" && approval.decisionId ? [approval.decisionId] : [])));
+    const decisions = steps.filter((decision) => !(decision.status === "asking" && pending.has(decision.id)));
     const commands = message.commands ?? [];
     const subagents = message.subagents ?? [];
-    const took = formatDuration(handlingTime(message.at, [...decisions, ...commands, ...subagents], now, current));
+    const took = formatDuration(handlingTime(message.at, [...steps, ...commands, ...subagents], now, current));
     return (
       <>
         <div className="flex flex-col items-end gap-1">
           <div className="max-w-[86%] rounded-xl border border-line-muted bg-canvas-muted px-3 py-2 text-sm whitespace-pre-wrap">{message.content}</div>
           <div className="flex items-center gap-1.5 text-xs text-fg-muted">
-            {message.index !== undefined ? <span className="font-semibold">#{message.index}</span> : null}
+            {message.index !== undefined ? <span className="font-semibold tabular-nums">#{message.index}</span> : null}
             <span>{formatClock(message.at)}</span>
             {message.via === "other" ? (
               <span className="Label Label--secondary" title="Sent from another client of this session, such as Copilot CLI">
                 <TerminalIcon size={12} />
                 from Copilot CLI
               </span>
-            ) : (
-              <span>· from Dispatch</span>
-            )}
+            ) : null}
             {message.delivery ? <span title="Sent while the agent was working; it answered between steps">· while it worked</span> : null}
           </div>
         </div>
@@ -143,13 +143,14 @@ function WorkingRow({ view, now }: { readonly view: ConversationView; readonly n
   if (view.waiting) {
     const names = view.waiting.workers.length ? view.waiting.workers.join(", ") : "its workers";
     return (
-      <div role="status" className="flex flex-col gap-0.5 pl-9 text-sm text-fg-muted">
-        <span className="inline-flex flex-wrap items-center gap-x-1.5">
+      <div role="status" className="flex items-center gap-1.5 pl-9 text-sm text-fg-muted">
+        <Tooltip content="No model time while it waits. Ask anything: it answers, then keeps waiting.">
           <HourglassIcon size={14} />
+        </Tooltip>
+        <span className="min-w-0 truncate">
           Waiting for <strong className="font-semibold text-fg">{names}</strong>
-          <span className="font-mono tabular-nums">{formatDuration(between(view.waiting.since, undefined, now))}</span>
         </span>
-        <span className="text-xs">No model time while it waits. Ask anything: it answers right away, then keeps waiting.</span>
+        <span className="font-mono tabular-nums">{formatDuration(between(view.waiting.since, undefined, now))}</span>
       </div>
     );
   }
@@ -165,12 +166,9 @@ function WorkingRow({ view, now }: { readonly view: ConversationView; readonly n
 
 function ChatComposer({ view }: { readonly view: ConversationView }) {
   const platform = useStore((state) => state.platform);
-  const styles = useStore((state) => state.styles);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const unavailable = view.problem ?? (platform?.state !== "connected" ? (platform?.message ?? "Managed Copilot isn't connected.") : undefined);
-  const ask = view.settings.approvals === "ask";
-  const labels = STYLE_META[view.style].approvals;
 
   useEffect(() => setText(""), [view.id]);
 
@@ -196,36 +194,12 @@ function ChatComposer({ view }: { readonly view: ConversationView }) {
           onChange={setText}
           onSubmit={() => void submit()}
           label="Message the agent"
-          placeholder={view.busy ? "Ask while it works: it answers right away, then keeps going…" : "Ask a follow-up…"}
+          placeholder={view.busy ? "Ask while it works…" : "Ask a follow-up…"}
           sending={sending}
           disabled={Boolean(unavailable)}
           minRows={1}
-          footer={
-            <>
-              <StyleChoice
-                value={view.style}
-                styles={styles}
-                onChange={(style) => {
-                  if (style === view.style) return;
-                  // A conversation keeps its style: another style starts a new conversation, with this message.
-                  setDraft({ style, text });
-                  navigate(homeHref());
-                }}
-              />
-              <button
-                type="button"
-                className="btn btn-invisible btn-sm m-0 shrink-0 gap-1 px-1.5 text-xs font-normal whitespace-nowrap text-fg-muted"
-                onClick={() => void setApprovals(view.id, ask ? "auto" : "ask")}
-                title={`${ask ? labels.auto.title : labels.ask.title}. Click to switch.${view.style === "delegate" ? " Work sent to sandboxes it already has never asks." : ""}`}
-                aria-label={`${ask ? labels.ask.state : labels.auto.state}. Switch to: ${ask ? labels.auto.label : labels.ask.label}`}
-              >
-                {ask ? <ShieldIcon size={14} /> : <ZapIcon size={14} className="text-fg-attention" />}
-                {ask ? labels.ask.state : labels.auto.state}
-              </button>
-            </>
-          }
+          footer={<ApprovalChoice value={view.settings.approvals} onChange={(mode) => void (mode !== view.settings.approvals && setApprovals(view.id, mode))} style={view.style} />}
         />
-        <p className="mt-1 px-1 text-xs text-fg-muted">This conversation keeps its style. Picking another starts a new conversation with your message.</p>
       </div>
     </div>
   );

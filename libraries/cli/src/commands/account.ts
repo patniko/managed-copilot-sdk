@@ -1,4 +1,4 @@
-import { isManagedCopilotError, type EnvironmentInfo } from "@managed-copilot/protocol";
+import { accountKindLabel, accountLabel, isManagedCopilotError, type EnvironmentInfo } from "@managed-copilot/protocol";
 import { background, type Context } from "../context.js";
 import { relativeTime } from "../output.js";
 
@@ -6,6 +6,7 @@ function describeEnvironment(environment: EnvironmentInfo, arrow: string): strin
   const details: string[] = [environment.type];
   if (environment.size) details.push(environment.size);
   if (environment.promoteTo) details.push(`${arrow} ${environment.promoteTo}`);
+  if (environment.inference?.foundry) details.push(`Azure AI Foundry ${environment.inference.foundry}`);
   if (environment.network.access === "disabled") details.push("no network");
   if (environment.network.access === "restricted") details.push(`network: ${environment.network.allowedDomains.join(", ")}`);
   return `${environment.name} (${details.join(", ")})`;
@@ -27,7 +28,7 @@ export async function status(ctx: Context): Promise<void> {
   const info = managed.info;
   const rows: [string, string][] = [
     ["Deployment", `${style.bold(info.name)} ${style.dim(`· ${info.mode} · v${info.version} · ${deployment.url}`)}`],
-    ["Signed in", `@${managed.account.login}`],
+    ["Signed in", `${accountLabel(managed.account)}${accountKindLabel(managed.account) ? style.dim(` (${accountKindLabel(managed.account)})`) : ""}`],
     [
       "Background",
       credential === undefined

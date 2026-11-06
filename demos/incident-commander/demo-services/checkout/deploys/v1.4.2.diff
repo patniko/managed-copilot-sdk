@@ -1,0 +1,40 @@
+diff --git a/src/discounts.js b/src/discounts.js
+index 3b9e0c1..a1c9e3f 100644
+--- a/src/discounts.js
++++ b/src/discounts.js
+@@ -1,14 +1,15 @@
+ import { COUPONS } from "./coupons.js";
+ 
+-/** The coupon for a code, if it exists. */
+-export function findCoupon(code) {
+-  return COUPONS[code.toUpperCase()];
++/** The coupon for a code, if it exists and hasn't expired. */
++export function findCoupon(code, now = new Date()) {
++  const coupon = COUPONS[code.toUpperCase()];
++  if (!coupon || Date.parse(coupon.expiresAt) < now.getTime()) return undefined;
++  return coupon;
+ }
+ 
+ /** The subtotal after a coupon, in cents. The cart has already checked that the code exists. */
+ export function applyDiscount(subtotalCents, code, now = new Date()) {
+   if (!code) return subtotalCents;
+-  const coupon = findCoupon(code);
+-  if (Date.parse(coupon.expiresAt) < now.getTime()) return subtotalCents;
++  const coupon = findCoupon(code, now);
+   return subtotalCents - Math.round((subtotalCents * coupon.percent) / 100);
+ }
+diff --git a/test/discounts.test.js b/test/discounts.test.js
+index 5d0b7e2..c4f81aa 100644
+--- a/test/discounts.test.js
++++ b/test/discounts.test.js
+@@ -8,6 +8,10 @@ test("finds a live coupon, in any case", () => {
+   assert.equal(findCoupon("welcome10", NOW)?.percent, 10);
+ });
+ 
++test("doesn't return an expired coupon", () => {
++  assert.equal(findCoupon("SUMMER24", NOW), undefined);
++});
++
+ test("takes a percentage off", () => {
+   assert.equal(applyDiscount(10_000, "LOYAL15", NOW), 8_500);
+ });

@@ -1,5 +1,5 @@
 import type { Icon } from "@primer/octicons-react";
-import type { ButtonHTMLAttributes, ComponentPropsWithRef, ReactNode } from "react";
+import type { ComponentPropsWithRef, ReactNode } from "react";
 import { cx } from "../../lib/cx.js";
 import { Spinner } from "./Spinner.js";
 import { Tooltip } from "./Tooltip.js";
@@ -50,7 +50,7 @@ export function Button({ variant, size = "md", icon: Leading, loading = false, c
   );
 }
 
-export interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
+export interface IconButtonProps extends ComponentPropsWithRef<"button"> {
   readonly icon: Icon;
   /** Accessible name, also shown as a tooltip. */
   readonly label: string;

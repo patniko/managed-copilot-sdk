@@ -14,20 +14,21 @@ environments, created on demand once you approve them and reused for follow-ups.
 | Gmail and Google Calendar | Standard `defineTool` tools whose handlers run in this server, so Google tokens never leave it. Real Google OAuth, or a clearly labeled demo workspace | [Principle 4](../../docs/spec/developer-experience.md#principles), [§3](../../docs/spec/developer-experience.md#3-shared-a-chat-agent-with-your-own-tools) |
 | "Send this email?" cards | Sending mail and creating, changing, or deleting events raise the SDK's native custom-tool permission request; the person approves in chat | [§12](../../docs/spec/developer-experience.md#callback-support-and-disconnection) |
 | "Start a Python sandbox?" cards | The `assistant` environment is an `orchestrator`: its agent can start workers (`start_worker`), and starting one asks the SDK's permission handler first. Only the person answers, in chat; a scheduled run's request waits until they're back | [§17](../../docs/spec/developer-experience.md#17-orchestrator-a-coordinator-with-workers) |
-| "Created a Python sandbox · new", "Sent the follow-up · reused" | Each sandbox is a worker: its own session of an isolated environment (`assistant-python` with no network, `assistant-web` limited to GitHub). Follow-ups go to the same worker (`message_worker`). The app follows them with `managed.workers(session)`, `managed.on("worker.*")`, and `managed.sessions.get(worker.id)` | [§17](../../docs/spec/developer-experience.md#17-orchestrator-a-coordinator-with-workers) |
+| "Created a Python sandbox · New", "Sent the follow-up · Reused" | Each sandbox is a worker: its own session of an isolated environment (`assistant-python` with no network, `assistant-web` limited to GitHub). Follow-ups go to the same worker (`message_worker`). The app follows them with `managed.workers(session)`, `managed.on("worker.*")`, and `managed.sessions.get(worker.id)`; the side panel shows each as a tile with its state and number of tasks | [§17](../../docs/spec/developer-experience.md#17-orchestrator-a-coordinator-with-workers) |
 | Charts under the reply | What a sandbox saves in `/workspace/outputs` publishes as its artifacts (`managed.artifacts(worker.id)`); this server keeps a copy of each image, so charts stay after the sandbox is deleted | [§6](../../docs/spec/developer-experience.md#6-get-results-out) |
 | "Remind me at 4pm to call Sam" | The agent uses the platform's `schedule_task`, `list_schedules`, and `cancel_schedule` tools (`scheduling: true`); the side panel pauses, runs, and deletes them with `managed.schedules` | [§13](../../docs/spec/developer-experience.md#13-run-on-a-schedule) |
 | Proactive messages, unread badges, notifications | Scheduled runs deliver their prompt with `source: "system"`; the reply arrives in the chat as a proactive message | [§13](../../docs/spec/developer-experience.md#13-run-on-a-schedule) |
 | "Handled while you were away" | With no tab open the server detaches; a scheduled run's tool calls reach it through the signed webhook (`verifyWebhook` + `event.handleActions`), with polling as a safety net | [§12](../../docs/spec/developer-experience.md#12-keep-working-while-your-app-is-offline) |
-| "Background work is off · Turn on background work" | The side panel shows whether the platform may run your scheduled work as you, and turns it on with one click after explaining what that means (the platform's background sign-in) | [§2](../../docs/spec/developer-experience.md#work-that-continues-without-you) |
+| "Background work is off · Turn on" | The side panel shows whether the platform may run your scheduled work as you, and turns it on with one click; **What this means** explains it first (the platform's background sign-in) | [§2](../../docs/spec/developer-experience.md#work-that-continues-without-you) |
+| The **Local** pill and **Open in Copilot CLI** in the header | The pill is the connection; its details show where things run: the assistant on the shared runtime, the mail and calendar tools in this app, and the kinds of sandbox. The terminal button gives `npx managed-copilot attach <session>` for this same conversation | [§14](../../docs/spec/developer-experience.md#14-open-a-session-in-copilot-cli-or-the-github-copilot-app) |
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/sandbox-approval.png" alt="The assistant asking to start a Python sandbox, with its size, network, and exact task"></td>
-    <td width="50%"><img src="docs/screenshots/sandbox-reused.png" alt="A follow-up sent to the same sandbox, marked reused, with a breakdown by meeting type"></td>
+    <td width="50%"><img src="docs/screenshots/sandbox-approval.png" alt="The assistant asking to start a Python sandbox: its name and environment, the task clamped to three lines, and what it can reach"></td>
+    <td width="50%"><img src="docs/screenshots/sandbox-reused.png" alt="A follow-up sent to the same sandbox, marked Reused, finding the busiest day of the week"></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/sandbox-research.png" alt="A new web research sandbox for different work, next to the reused Python sandbox in the side panel"></td>
+    <td><img src="docs/screenshots/sandbox-research.png" alt="A new web research sandbox for different work, next to the reused Python sandbox's tile in the side panel"></td>
     <td><img src="docs/screenshots/meeting.png" alt="The assistant booking a meeting after you approve the invite"></td>
   </tr>
   <tr>
@@ -35,7 +36,7 @@ environments, created on demand once you approve them and reused for follow-ups.
     <td><img src="docs/screenshots/offline.png" alt="A scheduled check-in whose calendar lookup was handled while no tab was open"></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/background.png" alt="The side panel asking to turn on background work, with what that means"></td>
+    <td><img src="docs/screenshots/background.png" alt="The side panel's background work notice, with what turning it on means"></td>
     <td><img src="docs/screenshots/dark.png" alt="The assistant in dark mode"></td>
   </tr>
   <tr>
@@ -58,8 +59,9 @@ aspire run                     # the platform plus this assistant (and the other
 
 Open **http://localhost:7490**. The assistant signs in to Managed Copilot as your GitHub account (`gh auth login` or
 `GH_TOKEN`) and starts with the **demo workspace**: a realistic, fictional inbox and calendar, so everything works
-without Google credentials. On a new deployment the side panel first asks you to **Turn on background work**, so
-reminders and briefings can run as you while the tab is closed (or run `npx managed-copilot login` once instead).
+without Google credentials. On a new deployment the side panel first shows **Background work is off**: click **Turn on**
+so reminders and briefings can run as you while the tab is closed (**What this means** explains it), or run
+`npx managed-copilot login` once instead.
 
 The AppHost wiring comes from [`apphost.mts`](apphost.mts): an `orchestrator` environment named `assistant` with
 `scheduling: true` and `network: false` (its tools run here, so the agent needs no Internet access); the two isolated
@@ -137,15 +139,16 @@ state), and production builds leave it out.
 
 The server uses the authorization-code flow with PKCE and offline access. The refresh token is sealed with
 `ASSISTANT_SEALING_KEY` and bound to your account; it is never sent to the platform, the model, or the browser.
-**Disconnect** revokes the grant with Google and deletes the tokens. If Google access expires (testing-mode apps get
-seven-day refresh tokens), the assistant tells you and offers **Reconnect**; it never falls back to the demo data
-while Google is connected.
+**Disconnect Google** (in the account's **⋯** menu) revokes the grant with Google and deletes the tokens. If Google
+access expires (testing-mode apps get seven-day refresh tokens), the assistant tells you and offers **Reconnect**; it
+never falls back to the demo data while Google is connected.
 
 ## Scripted happy path
 
-1. Open http://localhost:7490. If the side panel says **Background work is off**, read what it explains and click
-   **Turn on background work**: reminders and briefings run as you on the platform, so they need it. Until then the
-   scheduling suggestions and buttons wait for it, and the assistant tells you the same if you ask for a reminder.
+1. Open http://localhost:7490. If the side panel says **Background work is off**, open **What this means** and click
+   **Turn on**: reminders and briefings run as you on the platform, so they need it. Until then the scheduling
+   suggestions (marked with a lock) and buttons wait for it, and the assistant tells you the same if you ask for a
+   reminder.
 2. Click **Triage my inbox**. Watch the tool activity, then the triage grouped into *needs a reply*, *FYI*, and
    *can wait*.
 3. Ask: *"Sam asked for 30 minutes to go over the Q3 launch plan. Find a time in the next few days and send the
@@ -162,15 +165,16 @@ while Google is connected.
    calendar and important unread mail."*
 7. Ask *"How did my meeting load change over the last four weeks? A chart would help."* (in a new conversation, it's
    the **Chart my meeting load** suggestion). The assistant reads four weeks of your calendar, then asks **Start a
-   Python sandbox?**, showing the sandbox's name, size, network (off), and the exact task, events included. Click
-   **Start sandbox**: a card shows the new sandbox at work, the chart appears under the reply, and the side panel lists
-   it under **Sandboxes**.
+   Python sandbox?**, showing the sandbox's name and environment, its exact task with the events (three lines;
+   **Show full task** shows all of it), and what it can reach: no network, and not your mail or calendar. Click
+   **Start sandbox**: a card shows the new sandbox at work, the chart appears under the reply, and the side panel shows
+   it as a tile under **Sandboxes**.
 8. Ask *"Which day of the week is the busiest? Chart that too."* The follow-up goes to the same sandbox, marked
-   **reused**, with no new approval: it still has the events.
+   **Reused**, with no new approval: it still has the events.
 9. Ask *"Also check what the candidate in my next interview works on in open source."* That's different work, so the
    assistant asks to start a **web research sandbox**, which can reach only `github.com` and `api.github.com`. The side
-   panel lists both sandboxes with their state and number of tasks. The assistant stops a sandbox once it can't help
-   any more, and the panel keeps listing it as stopped.
+   panel shows both sandboxes with their state and number of tasks. The assistant stops a sandbox once it can't help
+   any more, and the panel keeps its tile, marked **Stopped**.
 
 The same journey runs automatically against the live platform, in your installed Microsoft Edge:
 
@@ -181,8 +185,9 @@ pnpm --filter @managed-copilot/demo-assistant happy-path -- --fresh --reminder -
 ```
 
 `--fresh` starts a new conversation and resets the demo workspace (also available as **Settings → Start over**).
-`--enable-background` clicks **Turn on background work** if it's off: passing it is your consent, as the button's
-explanation describes. Without it, the reminder and offline steps stop with a message when background work is off.
+`--enable-background` opens **What this means** and clicks **Turn on** if background work is off: passing it is your
+consent, as that explanation describes. Without it, the reminder and offline steps stop with a message when background
+work is off.
 `--sandbox` runs steps 7 to 9, approving each sandbox in the chat. `--sandbox-away` starts a new conversation, closes
 the tab while a new sandbox waits for approval, checks that nothing started, reopens the tab to approve it there, and
 asks something else while the sandbox works.
@@ -248,10 +253,11 @@ answers, since follow-ups are common, and stops one (`stop_worker`) once it can'
 after its report, a topic the person moved on from, or the least useful one when it needs room for another.
 
 - **Asking first.** `start_worker` asks for permission, because approving it approves what the sandbox does in its
-  sandbox. This app shows it as an approval card with the sandbox's environment, size, network, and exact task, and
-  only the person answers it: the webhook and the poller never answer permission requests, so a sandbox a scheduled
-  run wants waits until you're back (the platform keeps the request and delivers it again when the app resumes the
-  conversation). The platform then answers the sandbox's own shell and file prompts within that approval.
+  sandbox. This app shows it as an approval card with the sandbox's name, environment, and size, its exact task (three
+  lines until you ask for all of it), and what it can reach, and only the person answers it: the webhook and the poller
+  never answer permission requests, so a sandbox a scheduled run wants waits until you're back (the platform keeps the
+  request and delivers it again when the app resumes the conversation). The platform then answers the sandbox's own
+  shell and file prompts within that approval.
 - **Following them.** The server uses public SDK calls only, and never attaches a client to a sandbox (an attached
   client would answer its prompts): `managed.workers(session).list()`, `managed.on("worker.started" | "worker.idle"
   | "worker.failed" | "worker.stopped")`, `managed.sessions.get(worker.id)` for its sandbox, and
@@ -271,18 +277,19 @@ trigger followed by a proactive reply. The side panel lists them with `managed.s
 runs, or deletes them. Runs act as you through your background sign-in.
 
 **Background work.** Scheduled runs act as you on the platform, so they need the person's background sign-in on the
-deployment (spec section 2). The side panel shows it before it matters: on (with the account it runs as), or off with
-a one-click **Turn on background work** whose explanation is the consent (a sealed copy of your GitHub sign-in stays on
-the deployment for all your scheduled work, and **Settings** turns it off), plus the `npx managed-copilot login`
-alternative and **check again**. The SDK doesn't wrap background sign-in yet, so the server calls the platform's
-documented route, `POST`/`GET`/`DELETE /v1/credentials/background` (the same one the CLI uses), with the token it
-connected with: it resolves that token once (`MANAGED_COPILOT_GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`,
-`GITHUB_TOKEN`, then `gh auth token`, like the SDK) and passes it to `ManagedCopilot.connect({ gitHubToken })`, so the
-route always acts as the connected account. Until it's confirmed on, adding the briefing, resuming, and **Run now** are
-disabled and refused by the server, which checks again first. The scheduling suggestions wait too, pointing to the
-card while it's off. If the agent's `schedule_task` fails for that reason, the chat offers the same button. The status
-is re-checked when a tab opens, after scheduled runs and background-related failures, and every 30 seconds while it's
-off (every 5 minutes while it's on), so a terminal login or a revoked sign-in shows up on its own.
+deployment (spec section 2). The side panel shows it before it matters: on (with the account it runs as, and how many
+tool calls it handled while you were away), or off with a one-click **Turn on** whose explanation, one click away under
+**What this means**, is the consent (a sealed copy of your GitHub sign-in stays on the deployment for all your scheduled
+work, and **Settings** turns it off), plus the `npx managed-copilot login` alternative and **check again**. The SDK
+doesn't wrap background sign-in yet, so the server calls the platform's documented route,
+`POST`/`GET`/`DELETE /v1/credentials/background` (the same one the CLI uses), with the token it connected with: it
+resolves that token once (`MANAGED_COPILOT_GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, then
+`gh auth token`, like the SDK) and passes it to `ManagedCopilot.connect({ gitHubToken })`, so the route always acts as
+the connected account. Until it's confirmed on, adding the briefing, resuming, and **Run now** are disabled and refused
+by the server, which checks again first. The scheduling suggestions wait too (with a lock), leading to the notice while
+it's off. If the agent's `schedule_task` fails for that reason, the chat offers the same button. The status is
+re-checked when a tab opens, after scheduled runs and background-related failures, and every 30 seconds while it's off
+(every 5 minutes while it's on), so a terminal login or a revoked sign-in shows up on its own.
 
 **Work while you're away.** Thirty seconds after the last tab closes, the server detaches (`session.disconnect()`);
 the session keeps running on the platform. When a scheduled run needs your mail or calendar, the tool call becomes a

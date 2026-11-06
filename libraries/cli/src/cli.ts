@@ -219,6 +219,7 @@ export async function run(argv: readonly string[], io: CliIo): Promise<number> {
     confirm: io.confirm ?? confirmOnTerminal,
     openUrl: io.openUrl ?? ((url) => openInBrowser(url)),
     host: io.host ?? systemHost,
+    env: io.env,
     deployment: () => (deployment ??= (io.connect ?? connectDeployment)({ ...(typeof values.url === "string" ? { url: values.url } : {}) })),
   };
   try {

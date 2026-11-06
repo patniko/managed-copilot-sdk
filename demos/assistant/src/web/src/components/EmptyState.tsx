@@ -2,7 +2,7 @@ import { BeakerIcon, BellIcon, CalendarIcon, CopilotIcon, InboxIcon, IterationsI
 import type { BackgroundView } from "../../../shared/protocol";
 import { firstName, greeting } from "../format";
 import { schedulingBlockedReason } from "./Rail";
-import { cx, Spinner } from "./ui";
+import { cx, Spinner, Tooltip } from "./ui";
 
 export const SUGGESTIONS = [
   { icon: CalendarIcon, title: "What's on today?", text: "What's on my calendar today? Anything I should prepare for?" },
@@ -20,28 +20,11 @@ export const SANDBOX_SUGGESTION = {
   scheduling: false,
 };
 
-/** The short note on a scheduling suggestion that waits for background work, or undefined once it's confirmed on. */
-function schedulingNote(background: BackgroundView | undefined): string | undefined {
-  switch (background?.state) {
-    case "on":
-      return undefined;
-    case "off":
-      return "Needs background work · turn it on in the side panel";
-    case "unavailable":
-      return "Not available on this deployment";
-    case "error":
-      return "Couldn't check background work";
-    default:
-      return "Checking background work…";
-  }
-}
-
-/** A new conversation, like Copilot Chat's welcome: the Copilot mark, a greeting, and prompts to start from. */
+/** A new conversation, like Copilot Chat's welcome: the Copilot mark, a greeting, one line, and prompts to start from. */
 export function EmptyState({
   name,
   login,
   timeZone,
-  demo,
   background,
   sandboxes = false,
   onPick,
@@ -50,7 +33,6 @@ export function EmptyState({
   name?: string;
   login?: string;
   timeZone: string;
-  demo: boolean;
   /** Scheduling suggestions wait until background work is confirmed on. */
   background?: BackgroundView;
   /** The assistant can start sandboxes, so a hands-on suggestion is offered too. */
@@ -65,48 +47,46 @@ export function EmptyState({
       <h1 className="mt-4 text-xl font-semibold">
         {greeting(timeZone)}, {firstName(name, login)}
       </h1>
-      <p className="mt-2 max-w-lg text-fg-muted">
-        I keep an eye on your inbox and calendar, and I keep working on a schedule even when this tab is closed.
-        {sandboxes ? " For number crunching, charts, or research, I can start a sandbox (I'll ask you first)." : ""} Ask me anything, or start with one of these.
-      </p>
-      {demo && (
-        <p className="mt-3 max-w-2xl text-xs text-fg-muted">
-          <span className="Label Label--attention mr-1.5 align-middle">Demo data</span>
-          Using the demo inbox and calendar. Connect Google from the side panel to use your own.
-        </p>
-      )}
-      <div className="mt-8 grid w-full gap-2 sm:grid-cols-2">
-        {suggestions.map(({ icon: Icon, title, text, scheduling }, index) => {
-          const note = scheduling ? schedulingNote(background) : undefined;
-          const blocked = note !== undefined;
+      <p className="mt-1 text-fg-muted">I handle your mail and calendar, and keep working while you're away.</p>
+      <div className="mt-8 grid w-full grid-cols-1 gap-2 min-[480px]:grid-cols-2 md:grid-cols-3">
+        {suggestions.map(({ icon: Icon, title, text, scheduling }) => {
+          const blockedReason = scheduling ? schedulingBlockedReason(background) : undefined;
+          const blocked = blockedReason !== undefined;
+          const checking = blocked && (background === undefined || background.state === "unknown");
           // While it's off, the suggestion leads to the consent card; in other states it simply waits.
           const leadsToConsent = blocked && background?.state === "off";
+          // Inactive rather than disabled, so its tooltip still says why.
+          const inactive = blocked && !leadsToConsent;
           return (
-            <button
-              key={title}
-              type="button"
-              onClick={() => (leadsToConsent ? onNeedBackground?.() : onPick(text))}
-              disabled={blocked && !leadsToConsent}
-              data-testid="suggestion"
-              data-blocked={blocked ? "true" : "false"}
-              title={blocked ? schedulingBlockedReason(background) : undefined}
-              className={cx(
-                "flex items-start gap-3 rounded-md border border-line bg-canvas p-3 text-left transition-colors duration-100 enabled:hover:bg-canvas-muted disabled:cursor-not-allowed",
-                index === suggestions.length - 1 && suggestions.length % 2 === 1 && "sm:col-span-2",
-              )}
-            >
-              <Icon className={cx("mt-0.5", blocked ? "text-fg-disabled" : "text-fg-muted")} />
-              <span className="min-w-0">
-                <span className={cx("block font-semibold", blocked ? "text-fg-muted" : "text-fg")}>{title}</span>
-                {blocked ? (
-                  <span className={cx("mt-0.5 inline-flex items-center gap-1 text-xs", leadsToConsent ? "text-fg-attention" : "text-fg-muted")}>
-                    <LockIcon size={12} /> {note}
-                  </span>
-                ) : (
-                  <span className="line-clamp-2 text-xs text-fg-muted">{text}</span>
+            <Tooltip key={title} content={blocked ? blockedReason : text}>
+              <button
+                type="button"
+                onClick={() => {
+                  if (inactive) return;
+                  if (leadsToConsent) onNeedBackground?.();
+                  else onPick(text);
+                }}
+                aria-disabled={inactive || undefined}
+                data-testid="suggestion"
+                data-blocked={blocked ? "true" : "false"}
+                className={cx(
+                  "flex min-h-12 items-center gap-2.5 rounded-lg border border-line bg-canvas px-3 py-2 text-left transition-colors duration-100",
+                  inactive ? "cursor-not-allowed" : "hover:bg-canvas-muted",
+                  blocked ? "text-fg-muted" : "text-fg",
                 )}
-              </span>
-            </button>
+              >
+                <span
+                  className={cx(
+                    "grid size-7 shrink-0 place-items-center rounded-full",
+                    !blocked ? "bg-accent-muted text-fg-accent" : leadsToConsent ? "bg-attention-muted text-fg-attention" : "bg-canvas-muted text-fg-muted",
+                  )}
+                  aria-hidden
+                >
+                  {checking ? <Spinner size={12} /> : blocked ? <LockIcon size={14} /> : <Icon size={14} />}
+                </span>
+                <span className="min-w-0 flex-1 font-semibold">{title}</span>
+              </button>
+            </Tooltip>
           );
         })}
       </div>

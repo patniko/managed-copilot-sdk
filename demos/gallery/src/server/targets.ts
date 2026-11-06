@@ -1,5 +1,5 @@
 import { spawn, type SpawnOptions } from "node:child_process";
-import { APPS, CONSOLE, GATEWAY_APP, GATEWAY_PORT, type Health, type Link } from "../shared/catalog.js";
+import { APPS, CONSOLE, GATEWAY_APP, GATEWAY_PORT, type AppEntry, type Health, type Link } from "../shared/catalog.js";
 
 /** The page's own route that signs a browser in to the operator console and redirects to it. */
 export const consoleRoute = (target: "local" | "cloud"): string => `/open/console?target=${target}`;
@@ -57,13 +57,19 @@ export async function probe(url: string, timeoutMs = 3_000): Promise<Health> {
   }
 }
 
-/** Health-checks every link of a target. The console's health is the gateway's. */
-export async function checkTarget(urls: { readonly gatewayUrl: string; readonly apps: Readonly<Record<string, string>> }): Promise<{ readonly gateway: Health; readonly links: Record<string, Link> }> {
+/**
+ * Health-checks every link of a target. The console's health is the gateway's. `checkAt` gives the address to check an
+ * app at when it differs from its link (a hosted gallery checks apps by their names in the deployment's environment).
+ */
+export async function checkTarget(
+  urls: { readonly gatewayUrl: string; readonly apps: Readonly<Record<string, string>> },
+  checkAt?: (app: AppEntry) => string,
+): Promise<{ readonly gateway: Health; readonly links: Record<string, Link> }> {
   const gatewayCheck = probe(new URL(CONSOLE.healthPath, urls.gatewayUrl).toString());
   const entries = await Promise.all(
     APPS.filter((app) => urls.apps[app.id]).map(async (app): Promise<[string, Link]> => {
       const url = urls.apps[app.id]!;
-      const health = app === CONSOLE ? await gatewayCheck : await probe(new URL(app.healthPath, url).toString());
+      const health = app === CONSOLE ? await gatewayCheck : await probe(new URL(app.healthPath, checkAt?.(app) ?? url).toString());
       return [app.id, { url, health }];
     }),
   );

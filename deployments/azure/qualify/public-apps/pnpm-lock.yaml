@@ -1,0 +1,25 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      '@managed-copilot/aspire':
+        specifier: link:../../../../libraries/aspire
+        version: link:../../../../libraries/aspire
+      '@managed-copilot/cli':
+        specifier: link:../../../../libraries/cli
+        version: link:../../../../libraries/cli
+      '@types/node':
+        specifier: link:../../../../node_modules/@types/node
+        version: link:../../../../node_modules/@types/node
+      tsx:
+        specifier: link:../../../../node_modules/tsx
+        version: link:../../../../node_modules/tsx
+      typescript:
+        specifier: link:../../../../node_modules/typescript
+        version: link:../../../../node_modules/typescript

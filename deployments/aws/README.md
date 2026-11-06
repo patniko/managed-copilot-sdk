@@ -34,7 +34,8 @@ aspire deploy
 
 ```text
 Managed Copilot: https://copilot.<deployment-domain> (ManagedCopilot.connect({ url }), MANAGED_COPILOT_URL, or managed-copilot attach --url)
-Apps open to: 203.0.113.7/32 (change with Parameters:app-allowed-ips)
+Apps open to: 203.0.113.7/32: software-factory, dispatch, assistant, gallery (change with Parameters:app-allowed-ips)
+Public apps: https://front-desk.<deployment-domain> (any address; they sign in their own users)
 ```
 
 Or with the CLI shortcut, which checks the AWS CLI and its sign-in instead of the Azure CLI:
@@ -102,7 +103,7 @@ flowchart LR
 | Public HTTPS/WSS ingress | Container Apps ingress, `*.azurecontainerapps.io` certificate | ALB with an ACM certificate | ACM does not issue certificates for `*.elb.amazonaws.com`, so HTTPS needs a customer domain or CloudFront; see [open question 2](#open-questions) |
 | Idle WebSocket timeout | 240 s (fixed) | ALB idle timeout, configurable up to 4000 s | Existing keepalives still apply |
 | Health and the lease | TCP liveness, HTTP readiness, so a standby supervisor can answer 503 | ECS treats a failing ALB target health check as a failed task | A standby gateway answering 503 would be killed; see [open question 7](#open-questions) |
-| App IP allowlist | Container Apps IP rules | ALB security group (direct ALB), or WAF / `X-Forwarded-For` rules behind CloudFront | `Parameters:app-allowed-ips` keeps its meaning; behind CloudFront the ALB only sees edge addresses |
+| App IP allowlist | Container Apps IP rules per app; none for public apps (`publishApp({ public: true })`, tagged `managed-copilot-access: public`) | ALB security group (direct ALB), or WAF / `X-Forwarded-For` rules behind CloudFront. A security group covers the whole ALB, so public apps need host-scoped WAF rules or an ALB of their own | `Parameters:app-allowed-ips` keeps its meaning and never applies to public apps; behind CloudFront the ALB only sees edge addresses |
 | Gateway → app webhooks | `https://<app>.<environment-domain>`, allowed from the platform subnet | Internal service discovery (ECS Service Connect / Cloud Map), not the public URL | Calling the public URL would leave through the NAT address, which the allowlist does not include |
 | Durable state (`/data`, SQLite + lease) | Azure Files NFS 4.1 | A **platform** EFS file system (NFS 4.1, POSIX advisory locks), mount targets reachable only from the platform and egress security groups | Same lease supervisor; the NFS/lease qualification must be re-run on EFS. Never reachable from sandboxes, as on Azure |
 | Images | ACR | ECR | Tasks pull with their execution role: no registry-token exchange like Azure's `registry.ts`. Sandbox subnets need ECR, S3, and Logs VPC endpoints for that (below) |

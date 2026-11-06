@@ -75,6 +75,8 @@ flowchart LR
 | TB8 | Gateway → your webhooks / your workers → gateway | Events, capability tokens, answers | HMAC-SHA256 signatures; capabilities scoped to one session's pending actions, 15 min, audience-bound |
 | TB9 | Browser → operator console | Ticket, cookie | One-time `mcct_` ticket in URL fragment; HttpOnly `SameSite=Strict` `__Host-` cookie; custom header + Origin check; strict CSP; no content shown |
 | TB10 | Gateway → storage | Ledger, sealed vaults, background tokens | AES-256-GCM with row AAD; keys outside the DB when configured; single-writer lease |
+| TB11 | Your app's server → gateway, for its own users | App key, app user ID, prompts | Key compared by SHA-256 digest in constant time; every request limited to the app's environments; app users own only their own sessions (negative, app-scoped account IDs) and only use Foundry |
+| TB12 | Gateway → Azure AI Foundry | Model requests with an Entra ID token | Token from `az login` (local) or the gateway's managed identity (Azure), with only Cognitive Services OpenAI User on the declared accounts; sandboxes hold a placeholder and reach only their account's host through the gateway |
 
 ### Assets
 
@@ -86,6 +88,9 @@ flowchart LR
 | Conversation content and workspace files | Runtime `COPILOT_HOME`, sandbox disks, artifacts on `/data` | Operators (configuration only), other accounts |
 | Platform, durable, egress, vault keys | Gateway environment / `/data` | Sandboxes, clients |
 | Your Copilot quota | Billed per session owner | Another account (no fallback) |
+| App keys | Aspire secret parameters (`<name>-app-<app>-key`); the app's server environment; digests in gateway memory | Sandboxes, the ledger, logs, any API response |
+| The platform's Azure token (Foundry) | Gateway memory (from `az` or the managed identity) | Sandboxes, disk, logs, runtime env |
+| Your Foundry usage | Billed to the Azure subscription of each declared account | A Copilot plan (app users never use one); an undeclared account |
 
 ## How a local client connects to cloud agents
 
@@ -153,7 +158,7 @@ The CLI's own token is consumed by the relay and gateway; it is never forwarded 
 
 | Control | Local | Azure |
 | --- | --- | --- |
-| Network exposure | Gateway on loopback | Public HTTPS ingress; demo apps IP-allowlisted to the deployer |
+| Network exposure | Gateway on loopback | Public HTTPS ingress; demo apps IP-allowlisted to the deployer; apps published as public (they sign in their own users) open to any address, never with the deployer's token |
 | Who may connect | Any GitHub account on the machine | Only `Parameters:copilot-github-users/orgs`; deploy **refuses** an open gateway |
 | Operators | Every local account | Named operators only |
 | Sandbox isolation | Docker container, own `/28` network, cap-drop | Container Apps Sandboxes microVM, platform egress policy allows only the proxy |
@@ -169,6 +174,7 @@ tests; ⚠️ = partial or depends on operator configuration; ❌ = open.
 | Threat | Category | Mitigation | Status |
 | --- | --- | --- | --- |
 | Attacker with any GitHub account connects to your deployment | Spoofing / EoP | `access` rules required to publish; org membership checked with caller's token | ✅ |
+| Anyone on the Internet uses a deployed app as the deployer | Spoofing / EoP | Apps that hold `app-github-token` open only from `app-allowed-ips`; a public app (`publishApp({ public: true })`) never gets that token (`githubToken: true` is refused at publish) and calls the platform as its own signed-in users; `"*"` with such an app is refused unless `app-allow-anyone-as-me` is `"true"` | ✅ (⚠️ the explicit opt-in; R6) |
 | Stolen GitHub token used against the gateway | Spoofing | Token revocation honored within the 5 min cache; long-lived sockets re-verify each minute; but a stolen token is a full user credential by design | ⚠️ inherent |
 | User A reads/attaches/drives user B's session | Info disclosure / EoP | Ownership bound to stable account ID on every session-scoped RPC and REST route; others see `not_found` | ✅ |
 | Client sends a crafted `session.create` (broader tools, network, BYOK provider, cwd) | Tampering / EoP | Gateway admission rewrites create/resume/options; BYOK refused; network can only narrow; unknown config RPCs denied | ✅ |
@@ -186,6 +192,20 @@ tests; ⚠️ = partial or depends on operator configuration; ❌ = open.
 | CLI opens a host shell on the shared runtime | EoP | Terminals, `!cmd`, resources, changesets, host slash commands refused | ✅ |
 | CLI approves a prompt your app owns, or enables allow-all | Tampering | Ledger claim; approval-mode changes refused; request IDs taken only from runtime frames | ✅ |
 | Host paths/usernames leak to CLI | Info disclosure | `pathScrubber` on every frame; verified on 700+ frames | ✅ |
+
+### TB11/TB12 · Apps acting for their users, and Azure AI Foundry
+
+| Threat | Category | Mitigation | Status |
+| --- | --- | --- | --- |
+| Stolen app key acts for any of the app's users, or any GitHub user via `anyGitHubUser` | Spoofing | Server-side secret like any API key; limited to the app's environments; app users can't use background sign-in, schedules, operators, or Copilot CLI; GitHub users still need their own valid token. A stolen key is a full app credential by design: rotate it by replacing the parameter | ⚠️ inherent |
+| App A reads app B's users, or an app user reads another user's session | Info disclosure / EoP | Accounts keyed by (app, user ID) with distinct negative IDs; every session route checks the owner ID; other apps' environments are `environment_not_found` | ✅ |
+| An app user is confused with a GitHub account (`access`, `operators`, a login that matches) | Spoofing / EoP | Logins are `<app>/<id>` (no GitHub login contains `/`); operator and access checks accept only GitHub principals | ✅ |
+| `anyGitHubUser` opens the deployment to everyone | EoP | Admission through the key only; the same token without it stays `forbidden`; sessions are scoped to the app's environments | ✅ |
+| An app reads a GitHub user's sessions from elsewhere on the deployment (another app's, or their direct ones) | Info disclosure | Through a key, every session route, list, event stream, and bridge call sees only sessions in the app's environments (and the workers of their current incarnations); events are judged by the environment they recorded; schedules are refused and webhook deliveries scoped | ✅ |
+| An app uses a GitHub user's vaults stored through another app | EoP | Vaults are the GitHub account's own, like the token the user gave the app; values never leave the egress proxy. An app's own users' vaults are per app user | ⚠️ by design |
+| An app user's model calls bill a Copilot plan, or silently fall back to one | Repudiation / EoP | App users only in Foundry environments (`inference_unavailable` elsewhere); a session's route is fixed at create and checked on resume and promotion | ✅ |
+| Foundry token leaks into a sandbox or to another host | Info disclosure | Placeholder in the sandbox; the broker forwards only to the session's own account host on 443 and refuses `api-key` headers and other hosts | ✅ |
+| Foundry spend runs away | DoS (cost) | Per-deployment capacity and quotas are set on the Foundry account; the platform adds no per-user limit yet. Front Desk caps each email account (50 a day) and all of them together (1,000 a day), and its deploy with Foundry refuses open sign-up unless an invitation code or `front-desk-open-signup` is set | ⚠️ operator configuration |
 
 ### TB5–TB7 · Sandboxes and egress
 
@@ -232,6 +252,8 @@ For each Azure deployment:
 6. Treat tool arguments from the agent as untrusted input in your `defineTool` handlers; require approval for
    anything with side effects.
 7. Watch the console's attention items: open access, unsigned webhooks, broken background sign-ins.
+8. Keep app keys on your app's server only, give each app the fewest environments it needs, and set
+   `anyGitHubUser` only for apps meant for the public. Size each Foundry deployment's capacity for the spend you accept.
 
 ## Findings from the security review
 
@@ -246,7 +268,7 @@ guard the review could name. The residual risks below are defense-in-depth gaps 
 | R3 | ⚪ Low | `services/gateway/src/modules/sandbox/providers/azure/provider.ts:153` | Sandbox port URLs accept any source address unless `MANAGED_COPILOT_AZURE_INGRESS_CIDRS` is set, which leaves the per-sandbox key as the only gate | Default the CIDR to the gateway's egress range |
 | R4 | ⚪ Low | `services/sandbox/src/relay/main.ts`, `providers/docker/provider.ts:252` | One platform key authorizes both the gateway's platform routes and the sandbox relay | Split into separate keys |
 | R5 | ⚪ Low | `services/gateway/src/modules/attach/index.ts:44-46`, `src/redaction.ts:18` | Generic AHP clients may pass the attach ticket as `?tkn=`, but the redaction patterns don't include the `mcat_` prefix | Add `mcat_` to the redaction patterns |
-| R6 | ⚪ Low | `libraries/aspire/src/publish/index.ts:350-375` | Published apps act as one GitHub account (`app-github-token`) and are gated only by an IP allowlist; `*` removes the gate | Warn or refuse when the allowlist is `*` |
+| R6 | ⚪ Low | `libraries/aspire/src/publish/index.ts` (`publishApp`) | Published apps that act as one GitHub account (`app-github-token`) are gated only by an IP allowlist; `*` removes the gate | Addressed: `access ips set "*"` asks first and records `app-allow-anyone-as-me`; `publishApp` refuses `*` for an app that acts as your account without that opt-in; the deploy summary names those apps; an app meant for anyone is published with `public: true`, which can't hold the token |
 | R7 | ℹ️ By design | `services/gateway/src/modules/network/policy.ts:241-250` | An AppHost vault can be used, by substitution only, by every account admitted to that environment | Use per-user vaults (`managed.vaults.create`) for personal credentials |
 | R8 | ℹ️ By design | `services/gateway/src/modules/operator/access.ts:72-76` | A local gateway with no operators named makes every local GitHub account an operator | Name operators on shared machines |
 | R9 | ℹ️ By design | Gateway memory, sealed background credentials | Users must trust the deployment's operator: it holds their full GitHub tokens (in memory, and sealed at rest for background work) | Document it; prefer narrowly scoped tokens; `managed-copilot logout` when background work isn't needed |

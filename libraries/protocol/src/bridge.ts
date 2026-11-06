@@ -14,6 +14,7 @@
  * headers). The bridge owns LSP-style framing on its stdio side. Credentials travel only in `BRIDGE_ENV` and the
  * upgrade `Authorization` header, never on the command line, in frames, or in logs.
  */
+import type { AppUser } from "./apps.js";
 import type { EnvironmentRequest } from "./config.js";
 
 export const BRIDGE_ENV = "MANAGED_COPILOT_BRIDGE";
@@ -21,10 +22,17 @@ export const BRIDGE_SUBPROTOCOL = "managed-copilot.jsonrpc.v1";
 /** Upper bound for one frame (hello or JSON-RPC message). Large files go through the streamed files API. */
 export const BRIDGE_MAX_FRAME_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Who the bridge connects as: a GitHub user (`token`), one of an app's own users (`appKey` and `appUser`), or a GitHub
+ * user who signed in to an app (`token` and `appKey`). The upgrade request carries them as headers (`Authorization`,
+ * `APP_KEY_HEADER`, `APP_USER_HEADER`, `APP_USER_NAME_HEADER`).
+ */
 export interface BridgeConfig {
   /** ws:// (loopback only) or wss:// URL of `/v1/connect`. */
   readonly url: string;
-  readonly token: string;
+  readonly token?: string;
+  readonly appKey?: string;
+  readonly appUser?: AppUser;
   readonly environment: EnvironmentRequest;
   readonly clientName?: string;
 }

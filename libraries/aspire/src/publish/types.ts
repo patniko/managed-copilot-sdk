@@ -31,6 +31,7 @@ export interface PublishContainer extends PromiseLike<PublishContainerResource> 
     healthPath: string,
     allowedSourceCidrs: string,
   ): PublishContainer;
+  publishAsManagedCopilotPublicApp(environment: PublishEnvironmentResource, subPath: string, mountPath: string, targetPort: number, healthPath: string): PublishContainer;
 }
 
 export interface PublishContainerResource {

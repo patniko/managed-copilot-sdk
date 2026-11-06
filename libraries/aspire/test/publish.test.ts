@@ -7,6 +7,7 @@ import { APPHOST_DIR_IN_IMAGE, AzurePublishError, applyAccessRules, applyOperato
 import { expr } from "../src/publish/expressions.js";
 import { writeGatewayBuildFiles } from "../src/publish/gateway-image.js";
 import { EGRESS_BICEP } from "../src/publish/egress.js";
+import { FOUNDRY_ACCESS_BICEP } from "../src/publish/foundry.js";
 import { appTokenParameterOptions } from "../src/publish/index.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -112,7 +113,7 @@ describe("applyOperators", () => {
 describe("rewriteWebhooks", () => {
   it("points loopback webhooks at the deployed app's HTTPS address and leaves others alone", () => {
     const rewritten = rewriteWebhooks(config(), new Map([[7490, "assistant"]]));
-    expect(rewritten.webhooks?.assistant?.url).toBe("https://assistant.{{CONTAINER_APP_ENV_DNS_SUFFIX}}/api/copilot-events?v=1");
+    expect(rewritten.webhooks?.assistant?.url).toBe("http://assistant/api/copilot-events?v=1");
     expect(rewritten.webhooks?.partner?.url).toBe("https://hooks.example.com/copilot");
   });
 
@@ -151,5 +152,19 @@ describe("writeGatewayBuildFiles", () => {
     expect(ignore.split("\n")).toContain("!customizations/chat/**");
     expect(ignore.split("\n")).toContain("!deployments/azure/**");
     expect(existsSync(join(repoRoot, "services", "gateway", "Dockerfile"))).toBe(true);
+  });
+});
+
+describe("Foundry access", () => {
+  it("grants the gateway identity only Cognitive Services OpenAI User, on the declared account in its own resource group", () => {
+    expect(FOUNDRY_ACCESS_BICEP).toContain("var openAiUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("resourceGroup: accountResourceGroup");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("subscriptionId: subscriptionId");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("scope: 'Microsoft.CognitiveServices/accounts/${accountName}'");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("name: guid(accountId, gatewayPrincipalId, openAiUser)");
+    expect(FOUNDRY_ACCESS_BICEP).toContain("principalType: 'ServicePrincipal'");
+    expect(FOUNDRY_ACCESS_BICEP.match(/Microsoft\.Authorization\/roleAssignments/g)).toHaveLength(1);
+    // Bicep writes a nested template's strings literally: an ARM expression there would never be evaluated.
+    expect(FOUNDRY_ACCESS_BICEP).not.toMatch(/'\[/);
   });
 });

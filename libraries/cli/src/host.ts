@@ -17,6 +17,8 @@ export interface HostTools {
   githubLogin(token: string): Promise<string>;
   /** This machine's public IPv4 address as the Internet sees it (the address `aspire deploy` allows by default). */
   publicAddress(): Promise<string | undefined>;
+  /** Requests a URL from this machine: its status and the start of its body, or undefined when it can't be reached. */
+  probe(url: string): Promise<{ readonly status: number; readonly body: string } | undefined>;
   /** Where the Aspire CLI keeps deployment records (`~/.aspire/deployments`). */
   deploymentsDirectory(): string;
 }
@@ -74,6 +76,14 @@ export const systemHost: HostTools = {
       const response = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(10_000) });
       const { ip } = (await response.json()) as { ip?: unknown };
       return typeof ip === "string" && /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : undefined;
+    } catch {
+      return undefined;
+    }
+  },
+  probe: async (url) => {
+    try {
+      const response = await fetch(url, { redirect: "manual", signal: AbortSignal.timeout(15_000) });
+      return { status: response.status, body: (await response.text()).slice(0, 200) };
     } catch {
       return undefined;
     }

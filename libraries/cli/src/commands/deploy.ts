@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type { Context } from "../context.js";
 import { CommandError, UsageError } from "../errors.js";
-import type { HostTools } from "../host.js";
+import type { CommandResult, HostTools } from "../host.js";
 
 /** Deploy-time settings `access` edits, as `@managed-copilot/aspire` reads them from the AppHost's user secrets. */
 const LISTS = {
@@ -29,6 +30,10 @@ const RESOURCE_NAME = /^[a-z][a-z0-9-]{0,30}$/;
 const DEFAULT_LOCATION = "westus2";
 const DEFAULT_RESOURCE_GROUP = "managed-copilot-dev";
 const TOKEN_PARAMETER_ENV = "Parameters__app-github-token";
+/** `@managed-copilot/aspire` publishes apps acting as the deployer with app-allowed-ips "*" only when this is "true". */
+const ANYONE_AS_ME = "Parameters:app-allow-anyone-as-me";
+/** Keys `@managed-copilot/aspire` generates for a deployment (`Parameters:<name>-<suffix>`); local values must never replace them. */
+const GENERATED_KEYS = ["platform-key", "durable-key", "vault-key", "egress-key"];
 
 const split = (value: string | undefined) => (value ?? "").split(/[\s,]+/).filter(Boolean);
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? "" : "s"}`;
@@ -101,6 +106,11 @@ class AppHostSettings {
     return value ? value : undefined;
   }
 
+  /** Every non-empty setting, for passing the AppHost's own parameters on to `aspire deploy`. */
+  entries(): [string, string][] {
+    return Object.entries(this.values).filter(([, value]) => value.trim() !== "");
+  }
+
   async set(key: string, value: string | undefined): Promise<void> {
     if ((value ?? "") === (this.get(key) ?? "")) return;
     const result = value ? await this.host.capture("aspire", this.args("set", key, value)) : await this.host.capture("aspire", this.args("delete", key));
@@ -116,6 +126,8 @@ function lastLine(text: string): string | undefined {
 
 interface ContainerApp {
   readonly name: string;
+  /** `managed-copilot-access: public` marks an app published with `publishApp({ public: true })`. */
+  readonly tags?: Readonly<Record<string, string>> | null;
   readonly properties?: { readonly managedEnvironmentId?: string; readonly configuration?: { readonly ingress?: { readonly external?: boolean; readonly fqdn?: string; readonly ipSecurityRestrictions?: readonly IpRule[] | null } | null } };
 }
 interface IpRule {
@@ -165,7 +177,12 @@ class Azure {
 
   /** Published apps: external ingress restricted to an allowlist that keeps the platform subnet (rule "platform"). */
   static publishedApps(apps: readonly ContainerApp[], gateway: string): ContainerApp[] {
-    return Azure.siblingApps(apps, gateway).filter((app) => rules(app).some((rule) => rule.name === "platform"));
+    return Azure.siblingApps(apps, gateway).filter((app) => !isPublic(app) && rules(app).some((rule) => rule.name === "platform"));
+  }
+
+  /** Public apps (`publishApp({ public: true })`): open to any address, so the allowlist never applies to them. */
+  static publicApps(apps: readonly ContainerApp[], gateway: string): ContainerApp[] {
+    return Azure.siblingApps(apps, gateway).filter(isPublic);
   }
 
   /**
@@ -191,9 +208,15 @@ class Azure {
 }
 
 const ALLOW_RULE = /^allow-\d+$/;
+/** The tag the Azure integration (`PublishAsManagedCopilotPublicApp`) puts on public apps. */
+const ACCESS_TAG = "managed-copilot-access";
 
 function rules(app: ContainerApp): readonly IpRule[] {
   return app.properties?.configuration?.ingress?.ipSecurityRestrictions ?? [];
+}
+
+function isPublic(app: ContainerApp): boolean {
+  return app.tags?.[ACCESS_TAG] === "public";
 }
 
 function azureFor(ctx: Context, settings: AppHostSettings): Azure | undefined {
@@ -278,7 +301,8 @@ export async function access(ctx: Context): Promise<number | void> {
   if (which === "ips" && next.includes("*") && next.length > 1) next = ["*"];
 
   if (which === "ips" && next.includes("*") && !current.includes("*")) {
-    ctx.err(`${ctx.errStyle.yellow(ctx.errStyle.warn)} The deployed apps act as one GitHub account, so "*" lets anyone on the Internet use them as that account.`);
+    ctx.err(`${ctx.errStyle.yellow(ctx.errStyle.warn)} The deployed apps that aren't public act as one GitHub account, so "*" lets anyone on the Internet use them as that account.`);
+    ctx.err(ctx.errStyle.dim("  To open an app that signs in its own users, publish it with public: true instead."));
     if (!ctx.yes && !(ctx.interactive && (await ctx.confirm("Open the apps to any address?")))) return 1;
   }
   if ((which === "users" || which === "orgs") && next.length === 0) {
@@ -289,6 +313,8 @@ export async function access(ctx: Context): Promise<number | void> {
   }
 
   await settings.set(key, next.join(","));
+  // Confirming "*" above is the deployer's explicit choice; publishing refuses "*" for apps acting as them without it.
+  if (which === "ips") await settings.set(ANYONE_AS_ME, next.includes("*") ? "true" : undefined);
   const live = which === "ips" ? await applyLive(ctx, settings, name, next) : undefined;
   const failed = live?.status === "failed";
   if (ctx.json) {
@@ -298,6 +324,7 @@ export async function access(ctx: Context): Promise<number | void> {
   const { style } = ctx;
   ctx.out(`${style.green(style.ok)} ${LISTS[which].label}: ${describeList(ctx, which, next)}${failed ? style.dim(" (saved)") : ""}`);
   if (live?.applied.length) ctx.out(style.dim(`  Applied now to ${live.applied.join(", ")}.`));
+  if (live?.public?.length) ctx.out(style.dim(`  ${live.public.join(", ")} ${live.public.length === 1 ? "is" : "are"} public: open to any address, whatever this list says.`));
   if (failed) {
     ctx.err(`${ctx.errStyle.red(ctx.errStyle.fail)} ${live.reason}`);
     ctx.err(ctx.errStyle.dim("  The running apps may still admit the old addresses. Run the command again, or `npx managed-copilot deploy`."));
@@ -313,6 +340,8 @@ interface LiveResult {
   readonly applied: string[];
   readonly failed: string[];
   readonly reason?: string;
+  /** Public apps in the deployment, which the list never applies to. */
+  readonly public?: string[];
 }
 
 async function applyLive(ctx: Context, settings: AppHostSettings, name: string, cidrs: readonly string[]): Promise<LiveResult | undefined> {
@@ -326,14 +355,16 @@ async function applyLive(ctx: Context, settings: AppHostSettings, name: string, 
   const apps = await azure.apps();
   if (!apps) return { status: "failed", applied: [], failed: [], reason: `Could not list the apps in ${azure.resourceGroup} (check \`az login\` and your access).` };
   if (!apps.some((app) => app.name === name)) return deferred(`No gateway named "${name}" in ${azure.resourceGroup} yet.`);
+  const publicApps = Azure.publicApps(apps, name).map((app) => app.name);
+  const open = publicApps.length > 0 ? { public: publicApps } : {};
   const published = Azure.publishedApps(apps, name);
-  if (published.length === 0) return deferred(`No running apps with an allowlist in ${azure.resourceGroup}.`);
+  if (published.length === 0) return { ...deferred(`No running apps with an allowlist in ${azure.resourceGroup}.`), ...open };
   if (!ctx.json) ctx.err(ctx.errStyle.dim(`Updating ${plural(published.length, "running app")} in ${azure.resourceGroup}${ctx.errStyle.ellipsis}`));
   const applied: string[] = [];
   const failed: string[] = [];
   for (const app of published) ((await azure.applyAllowlist(app, allowlist)) ? applied : failed).push(app.name);
-  if (failed.length) return { status: "failed", applied, failed, reason: `Could not update ${failed.join(", ")} now.` };
-  return { status: "applied", applied, failed };
+  if (failed.length) return { status: "failed", applied, failed, reason: `Could not update ${failed.join(", ")} now.`, ...open };
+  return { status: "applied", applied, failed, ...open };
 }
 
 async function showAccess(ctx: Context, settings: AppHostSettings, name: string): Promise<void> {
@@ -341,13 +372,21 @@ async function showAccess(ctx: Context, settings: AppHostSettings, name: string)
   const azure = azureFor(ctx, settings);
   const apps = azure ? await azure.apps() : undefined;
   const running = apps ? Azure.publishedApps(apps, name).map((app) => ({ name: app.name, allowed: rules(app).filter((rule) => ALLOW_RULE.test(rule.name)).map((rule) => rule.ipAddressRange) })) : [];
-  const openApps = apps ? Azure.siblingApps(apps, name).filter((app) => rules(app).length === 0).map((app) => app.name) : [];
+  const openApps = apps ? Azure.siblingApps(apps, name).filter((app) => !isPublic(app) && rules(app).length === 0).map((app) => app.name) : [];
+  // A public app has no rules unless someone added them by hand; show them if so.
+  const publicApps = apps ? Azure.publicApps(apps, name).map((app) => ({ name: app.name, allowed: rules(app).map((rule) => rule.ipAddressRange) })) : [];
   const login = await ctx.host
     .githubToken()
     .then((token) => ctx.host.githubLogin(token))
     .catch(() => undefined);
   if (ctx.json) {
-    ctx.out(JSON.stringify({ name, apphost: settings.path, ...lists, appsActAs: login ?? null, deployment: azure ? { subscription: azure.subscription, resourceGroup: azure.resourceGroup } : null, runningApps: running, openApps }, null, 2));
+    ctx.out(
+      JSON.stringify(
+        { name, apphost: settings.path, ...lists, appsActAs: login ?? null, deployment: azure ? { subscription: azure.subscription, resourceGroup: azure.resourceGroup } : null, runningApps: running, openApps, publicApps },
+        null,
+        2,
+      ),
+    );
     return;
   }
   const { style } = ctx;
@@ -356,13 +395,44 @@ async function showAccess(ctx: Context, settings: AppHostSettings, name: string)
     ["Apps act as", login ? `@${login} ${style.dim("(your GitHub sign-in when you deploy)")}` : style.dim("your GitHub sign-in when you deploy"), ""],
     [LISTS.ips.label, describeList(ctx, "ips", lists.ips), "ips"],
   ];
-  const width = Math.max(...rows.map(([label]) => label.length));
+  const publicLabel = "Public apps";
+  const width = Math.max(...rows.map(([label]) => label.length), publicApps.length ? publicLabel.length : 0);
   ctx.out(`${style.bold(name)} ${style.dim(`· ${basename(settings.path)}${azure ? ` · ${azure.resourceGroup}` : ""}`)}`);
   for (const [label, value] of rows) ctx.out(`${style.dim(label.padEnd(width))}  ${value}`);
   for (const app of running) ctx.out(`${style.dim("".padEnd(width))}  ${style.dim(`${app.name} now: ${app.allowed.join(", ") || "platform only"}`)}`);
   for (const app of openApps) ctx.out(`${style.dim("".padEnd(width))}  ${style.dim(`${app} now: any address`)}`);
+  publicApps.forEach((app, index) => {
+    ctx.out(`${style.dim((index === 0 ? publicLabel : "").padEnd(width))}  ${app.name} ${style.dim(`now: ${app.allowed.join(", ") || "any address"}`)}`);
+  });
   ctx.out();
   ctx.out(style.dim("Change with: npx managed-copilot access <users|orgs|operators|operator-orgs|ips> <add|remove|set> <entries>  (\"me\" is you, or this machine for ips)"));
+  if (publicApps.length) ctx.out(style.dim("Public apps sign in their own users and hold no GitHub token; the AppHost makes an app public (publishApp's public: true), not ips."));
+}
+
+/** What a Container Apps ingress answers an address its IP rules don't allow. */
+const INGRESS_REFUSED = /RBAC: access denied/i;
+
+/**
+ * Opens each allowlisted app from this machine after a deploy and, when the ingress refuses it, says how to let it in.
+ * A VPN, proxy, or tunnel can reach Azure from another address than the one `api.ipify.org` reports, which the default
+ * allowlist holds.
+ */
+async function checkAppsReachable(ctx: Context, apps: readonly ContainerApp[], ips: readonly string[], detected: string | undefined): Promise<void> {
+  if (ips.includes("*")) return;
+  const targets = apps.flatMap((app) => {
+    const fqdn = app.properties?.configuration?.ingress?.fqdn;
+    return fqdn ? [{ name: app.name, url: `https://${fqdn}/` }] : [];
+  });
+  if (targets.length === 0) return;
+  const answers = await Promise.all(targets.map(async (target) => ({ ...target, answer: await ctx.host.probe(target.url) })));
+  const refused = answers.filter(({ answer }) => answer?.status === 403 && INGRESS_REFUSED.test(answer.body)).map(({ name }) => name);
+  if (refused.length === 0) return;
+  const allowed = ips.length ? ips.join(", ") : detected ? `${detected}/32, the address api.ipify.org reports for this machine` : "this machine's address";
+  ctx.err(
+    `${ctx.errStyle.yellow(ctx.errStyle.warn)} ${refused.join(", ")} refused this machine (403 RBAC: access denied): its traffic reaches Azure from an address that isn't allowed (${allowed}).`,
+  );
+  ctx.err(ctx.errStyle.dim("  A VPN, proxy, or tunnel usually causes this. Allow the address or range your traffic leaves from; it applies at once:"));
+  ctx.err(ctx.errStyle.dim("  npx managed-copilot access ips add <address or range>"));
 }
 
 interface DeploymentRecord {
@@ -370,6 +440,8 @@ interface DeploymentRecord {
   readonly subscription?: string;
   readonly resourceGroup?: string;
   readonly modified: number;
+  /** The parameters the deployment keeps (`parameters:<name>`, lowercase); their values are never read out. */
+  readonly parameters: ReadonlySet<string>;
 }
 
 /** Aspire keeps an AppHost's deployment state in `~/.aspire/deployments/<SHA-256 of its lowercased path>/<environment>.json`. */
@@ -377,23 +449,196 @@ function recordDirectory(host: HostTools, appHost: string): string {
   return join(host.deploymentsDirectory(), createHash("sha256").update(appHost.toLowerCase()).digest("hex").toUpperCase());
 }
 
-/** Reads only the target of a deployment record; the file also holds secrets, which are never printed. */
+/**
+ * Reads only the target and parameter names of a deployment record; the files also hold secrets, which are never read
+ * out. Aspire 13.6 keeps its current state beside `production.json`, in `production.json.migration`, whose
+ * `ClaimedSections` name the parameters it holds.
+ */
 function readRecord(directory: string): DeploymentRecord | undefined {
   const file = join(directory, "production.json");
   try {
-    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown> & { Azure?: Record<string, unknown> };
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown> & { Azure?: Record<string, unknown>; Parameters?: unknown };
     const value = (key: string) => {
       const found = parsed[`Azure:${key}`] ?? parsed.Azure?.[key];
       return typeof found === "string" ? found : undefined;
     };
-    return { directory, subscription: value("SubscriptionId"), resourceGroup: value("ResourceGroup"), modified: statSync(file).mtimeMs };
+    const parameters = new Set(Object.keys(parsed).filter((key) => /^parameters:/i.test(key)).map((key) => key.toLowerCase()));
+    if (parsed.Parameters && typeof parsed.Parameters === "object") for (const key of Object.keys(parsed.Parameters)) parameters.add(`parameters:${key}`.toLowerCase());
+    for (const section of claimedSections(join(directory, "production.json.migration"))) if (/^parameters:/i.test(section)) parameters.add(section.toLowerCase());
+    return { directory, subscription: value("SubscriptionId"), resourceGroup: value("ResourceGroup"), modified: statSync(file).mtimeMs, parameters };
   } catch {
     return undefined;
   }
 }
 
+function claimedSections(file: string): string[] {
+  try {
+    // Aspire serializes the list as a JSON string inside the JSON document.
+    const { ClaimedSections: raw } = JSON.parse(readFileSync(file, "utf8")) as { ClaimedSections?: unknown };
+    const sections: unknown = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(sections) ? sections.filter((section): section is string => typeof section === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 const targets = (record: DeploymentRecord | undefined, subscription: string, resourceGroup: string) =>
   Boolean(record && record.subscription?.toLowerCase() === subscription.toLowerCase() && record.resourceGroup?.toLowerCase() === resourceGroup.toLowerCase());
+
+/**
+ * The AppHost's own parameters from its user secrets (OAuth clients and the like), as environment variables for
+ * `aspire deploy`, which doesn't load user secrets. Left out: the settings this command passes itself, the apps' token,
+ * the keys the platform generates for a deployment, and every parameter the deployment's record already keeps (Aspire's
+ * saved deployment state wins over the environment, so it keeps its value either way). A value the caller already set in
+ * this process's environment, under any spelling Aspire reads the same, wins over the user secret.
+ */
+function appHostParameters(ctx: Context, settings: AppHostSettings, name: string, kept: ReadonlySet<string>, own: readonly string[]): Record<string, string> {
+  const skip = new Set([...own, "Parameters:app-github-token", ...GENERATED_KEYS.map((suffix) => `Parameters:${name}-${suffix}`), ...kept].map(configKey));
+  // An app's key (`<name>-app-<app>-key`, from addManagedCopilot's `apps`) is generated too: each deployment makes its own.
+  const appKey = new RegExp(`^parameters:${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-app-.+-key$`);
+  const caller = new Set(
+    Object.entries(ctx.env)
+      .filter(([, value]) => value !== undefined)
+      .map(([variable]) => configKey(variable)),
+  );
+  const parameters: Record<string, string> = {};
+  for (const [key, value] of settings.entries()) {
+    if (!/^Parameters:[A-Za-z0-9][A-Za-z0-9_-]*$/.test(key) || skip.has(configKey(key)) || caller.has(configKey(key)) || appKey.test(configKey(key))) continue;
+    parameters[key.replace(":", "__")] = value;
+  }
+  return parameters;
+}
+
+/** How Aspire matches a setting: case-insensitively, `__` for `:`, and `_` for `-` in a parameter's name. */
+function configKey(key: string): string {
+  return key.replace(/__/g, ":").toLowerCase().replace(/_/g, "-");
+}
+
+interface AspireManifest {
+  readonly resources?: Readonly<Record<string, { readonly type?: string; readonly inputs?: { readonly value?: { readonly default?: { readonly generate?: unknown } } } }>>;
+}
+
+/**
+ * The parameters an AppHost declares and those it generates, as `configKey`s, or the Aspire log that says why they
+ * couldn't be read.
+ */
+type GeneratedParameters = { readonly declared: ReadonlySet<string>; readonly generated: ReadonlySet<string> } | { readonly failed: true; readonly log?: string };
+
+/**
+ * The Aspire environment the parameter check runs under. Aspire keeps an AppHost's deployment state per environment
+ * (`<record>/<environment>.json`), and its parameter step saves every value it resolves there in publish mode. Aspire
+ * 13.6 doesn't run that step for the manifest, but if a version did, the local values the check is given would land in
+ * this environment's state, never in the Production state `aspire deploy` uses, and the check deletes it.
+ */
+const PARAMETER_CHECK_ENVIRONMENT = "managed-copilot-parameter-check";
+
+/**
+ * The parameters the AppHost generates (`addParameterWithGeneratedValue`), from the manifest Aspire writes for it
+ * (`aspire do publish-manifest`, which needs no Azure and writes no values). It runs with the environment variables the
+ * deployment gets, minus the apps' token, and with a copy of the Production state Aspire saved (it loads an
+ * environment's state into the AppHost's configuration), so the AppHost sees what `aspire deploy` will and declares the
+ * same parameters. Aspire can fail while other Aspire commands are busy, so a failed check runs once more.
+ */
+async function generatedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<GeneratedParameters> {
+  const record = recordDirectory(ctx.host, appHost);
+  const hadRecord = existsSync(record);
+  try {
+    if (hadRecord) {
+      for (const file of readdirSync(record)) {
+        const lower = file.toLowerCase();
+        if (lower === "production.json" || lower.startsWith("production.json.")) copyFileSync(join(record, file), join(record, `${PARAMETER_CHECK_ENVIRONMENT}${file.slice("production".length)}`));
+      }
+    }
+  } catch {
+    removeCheckState(record, hadRecord);
+    return { failed: true };
+  }
+  try {
+    const first = await manifestGeneratedParameters(ctx, appHost, env);
+    return "generated" in first ? first : await manifestGeneratedParameters(ctx, appHost, env);
+  } finally {
+    removeCheckState(record, hadRecord);
+  }
+}
+
+async function manifestGeneratedParameters(ctx: Context, appHost: string, env: Readonly<Record<string, string>>): Promise<GeneratedParameters> {
+  const directory = mkdtempSync(join(tmpdir(), "managed-copilot-manifest-"));
+  try {
+    const args = ["do", "publish-manifest", "--apphost", appHost, "--environment", PARAMETER_CHECK_ENVIRONMENT, "--non-interactive", "--nologo", "-o", directory];
+    const result = await ctx.host.capture("aspire", args, { env });
+    // Only the log's path is shown: the rest of the output could repeat a value the AppHost was given.
+    if (result.code !== 0) return { failed: true, log: aspireLog(result) };
+    const manifest = JSON.parse(readFileSync(join(directory, "aspire-manifest.json"), "utf8")) as AspireManifest;
+    if (!manifest.resources || typeof manifest.resources !== "object") return { failed: true };
+    const declared = new Set<string>();
+    const generated = new Set<string>();
+    for (const [name, resource] of Object.entries(manifest.resources)) {
+      if (!resource?.type?.startsWith("parameter.")) continue;
+      declared.add(configKey(`Parameters:${name}`));
+      if (resource.inputs?.value?.default?.generate !== undefined) generated.add(configKey(`Parameters:${name}`));
+    }
+    return { declared, generated };
+  } catch {
+    return { failed: true };
+  } finally {
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // A leftover manifest holds no values.
+    }
+  }
+}
+
+/** The log file Aspire names on its last "See logs at <path>" line. */
+function aspireLog(result: CommandResult): string | undefined {
+  const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+  for (const line of lines.reverse()) {
+    const found = /See logs at (\S.*\.log)\s*$/.exec(line);
+    if (found) return found[1];
+  }
+  return undefined;
+}
+
+/** Deletes the check environment's state files, and the record directory if the check made it and it's still empty. */
+function removeCheckState(record: string, hadRecord: boolean): void {
+  let files: string[];
+  try {
+    files = readdirSync(record);
+  } catch {
+    return;
+  }
+  for (const file of files) {
+    if (!file.toLowerCase().startsWith(`${PARAMETER_CHECK_ENVIRONMENT}.`)) continue;
+    try {
+      rmSync(join(record, file), { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // Never read by `aspire deploy`, which uses the Production state.
+    }
+  }
+  if (hadRecord) return;
+  try {
+    // Fails, as it should, once a deployment has written its own files here.
+    rmdirSync(record);
+  } catch {
+    // Left behind.
+  }
+}
+
+/** `az account show` output; the account's name is compared, never printed. */
+interface AzAccount {
+  readonly id: string;
+  readonly name?: string;
+  readonly tenantId?: string;
+  readonly user?: { readonly name?: string };
+}
+
+function parseAccount(text: string): AzAccount | undefined {
+  try {
+    return JSON.parse(text) as AzAccount;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * When the resource group already has a deployment, deploys only if this AppHost's record made it, or, in a terminal,
@@ -448,7 +693,7 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (docker.code !== 0) throw new CommandError("Docker isn't running.", { hint: "Start Docker Desktop, then deploy again." });
   const account = await host.capture("az", ["account", "show", "-o", "json"]);
   if (account.code !== 0) throw new CommandError("The Azure CLI isn't signed in.", { hint: "Run `az login`, then deploy again." });
-  const azAccount = JSON.parse(account.stdout) as { id: string; name?: string };
+  const azAccount = JSON.parse(account.stdout) as AzAccount;
 
   const option = (key: string) => (typeof ctx.options[key] === "string" ? (ctx.options[key] as string) : undefined);
   const subscription = option("subscription") ?? settings.get("Azure:SubscriptionId") ?? azAccount.id;
@@ -457,6 +702,25 @@ export async function deploy(ctx: Context): Promise<number | void> {
   if (!SUBSCRIPTION.test(subscription)) throw new UsageError(`"${subscription}" is not an Azure subscription ID.`);
   if (!LOCATION.test(location)) throw new UsageError(`"${location}" is not an Azure region name, such as westus2.`);
   if (!RESOURCE_GROUP.test(resourceGroup)) throw new UsageError(`"${resourceGroup}" is not a valid resource group name.`);
+  // `aspire deploy` signs in as the Azure CLI's current account, to the tenant of its default subscription unless told
+  // otherwise (Azure:TenantId). Another subscription of that account can be in another tenant; another account's can't
+  // be used without switching the Azure CLI to it, which is the caller's choice, so a configured tenant doesn't skip this.
+  let tenant = settings.get("Azure:TenantId");
+  if (subscription.toLowerCase() !== azAccount.id.toLowerCase()) {
+    const target = await host.capture("az", ["account", "show", "--subscription", subscription, "-o", "json"]);
+    const found = target.code === 0 ? parseAccount(target.stdout) : undefined;
+    if (!found?.tenantId) {
+      throw new CommandError(`The Azure CLI can't use subscription ${subscription}.`, {
+        hint: "Check the ID with `az account list`. If it's in another tenant, sign in to that tenant too (`az login --tenant <tenant-id>`).",
+      });
+    }
+    if (found.user?.name && azAccount.user?.name && found.user.name.toLowerCase() !== azAccount.user.name.toLowerCase()) {
+      throw new CommandError(`Subscription ${subscription} belongs to another account than the Azure CLI's current one, and aspire deploy signs in as the current account.`, {
+        hint: `Switch the Azure CLI to it with \`az account set --subscription ${subscription}\`, then deploy again.`,
+      });
+    }
+    tenant ??= found.tenantId;
+  }
 
   const token = await host.githubToken();
   const login = await host.githubLogin(token);
@@ -486,7 +750,10 @@ export async function deploy(ctx: Context): Promise<number | void> {
     ["Platform users", `${describeList(ctx, "users", users)}${orgs.length ? `, orgs ${orgs.join(", ")}` : ""}`],
     ["Operators", describeList(ctx, "operators", operators)],
     ["Apps act as", `@${login} ${style.dim("(your GitHub sign-in)")}`],
-    ["Apps open to", ips.length ? describeList(ctx, "ips", ips) : address ? `${address}/32 ${style.dim("(this machine)")}` : style.dim("this machine's public address")],
+    [
+      "Apps open to",
+      `${ips.length ? describeList(ctx, "ips", ips) : address ? `${address}/32 ${style.dim("(this machine)")}` : style.dim("this machine's public address")}${style.dim("; public apps: any address")}`,
+    ],
   ];
   const width = Math.max(...rows.map(([label]) => label.length));
   ctx.out(`${style.bold(`Deploying ${basename(settings.path)} to Azure`)}`);
@@ -497,6 +764,45 @@ export async function deploy(ctx: Context): Promise<number | void> {
   // Generated keys (sealing, platform, egress) live in Aspire's deployment record for this AppHost. A deployment made
   // from another checkout has them in that checkout's record, and a gateway given new sealing keys refuses to start.
   if (existing && !(await guardExistingDeployment(ctx, settings.path, subscription, resourceGroup))) return 1;
+
+  // `aspire deploy` runs the AppHost as Production, where user secrets aren't loaded, so the settings this command
+  // manages and the AppHost's own parameters go in as environment variables (`Parameters:x` is `Parameters__x`).
+  const managed = ["Azure:SubscriptionId", "Azure:Location", "Azure:ResourceGroup", ...ACCESS_LISTS.map((list) => LISTS[list].key(name))];
+  const chosen: Record<string, string | undefined> = {
+    "Azure:SubscriptionId": subscription,
+    "Azure:Location": location,
+    "Azure:ResourceGroup": resourceGroup,
+    [usersKey]: users.join(","),
+    [operatorsKey]: operators.join(","),
+  };
+  const settingsEnv: Record<string, string> = {};
+  for (const key of managed) {
+    const value = (key in chosen ? chosen[key] : settings.get(key))?.trim();
+    if (value) settingsEnv[key.replaceAll(":", "__")] = value;
+  }
+  if (tenant) settingsEnv.Azure__TenantId = tenant;
+
+  const parameters = appHostParameters(ctx, settings, name, readRecord(recordDirectory(host, settings.path))?.parameters ?? new Set(), managed);
+  if (Object.keys(parameters).length > 0) {
+    // Values `aspire run` generated and kept in the user secrets (keys, webhook secrets) must never stand in for the
+    // deployment's own, so ask the AppHost which parameters it generates.
+    if (!ctx.json) ctx.err(ctx.errStyle.dim(`Checking which parameters the AppHost generates${ctx.errStyle.ellipsis}`));
+    const generated = await generatedParameters(ctx, settings.path, { ...parameters, ...settingsEnv });
+    if ("failed" in generated) {
+      throw new CommandError("Couldn't tell which parameters the AppHost generates (`aspire do publish-manifest` failed twice), so nothing was deployed.", {
+        hint: `${generated.log ? `Aspire's log: ${generated.log}. ` : ""}Try again; if it keeps failing, \`aspire do publish-manifest --apphost "${settings.path}" -o <folder>\` shows why.`,
+      });
+    }
+    const own = Object.keys(parameters).filter((variable) => generated.generated.has(configKey(variable)));
+    for (const variable of own) delete parameters[variable];
+    if (own.length) ctx.out(style.dim(`  Generated by the AppHost, so the deployment makes its own: ${own.map((variable) => variable.slice("Parameters__".length)).join(", ")}`));
+    // A parameter the check didn't see declared might be one the AppHost generates under other conditions: never guess.
+    const unused = Object.keys(parameters).filter((variable) => !generated.declared.has(configKey(variable)));
+    for (const variable of unused) delete parameters[variable];
+    if (unused.length) ctx.out(style.dim(`  Not declared by the AppHost, so not passed: ${unused.map((variable) => variable.slice("Parameters__".length)).join(", ")}`));
+  }
+  const passed = Object.keys(parameters).map((variable) => variable.slice("Parameters__".length));
+  if (passed.length) ctx.out(style.dim(`  Passing ${plural(passed.length, "parameter")} from the AppHost's user secrets: ${passed.join(", ")}`));
   if (!ctx.yes && !(await ctx.confirm("Deploy?"))) return 1;
 
   await settings.set("Azure:SubscriptionId", subscription);
@@ -505,23 +811,23 @@ export async function deploy(ctx: Context): Promise<number | void> {
   await settings.set(usersKey, users.join(","));
   await settings.set(operatorsKey, operators.join(","));
 
-  // `aspire deploy` runs the AppHost as Production, where user secrets aren't loaded, so the settings this command
-  // manages go in as environment variables (`Parameters:x` is `Parameters__x`). None of them is a secret.
-  const env: Record<string, string> = { [TOKEN_PARAMETER_ENV]: token };
-  const managed = ["Azure:SubscriptionId", "Azure:Location", "Azure:ResourceGroup", ...ACCESS_LISTS.map((list) => LISTS[list].key(name))];
-  for (const key of managed) {
-    const value = settings.get(key);
-    if (value) env[key.replaceAll(":", "__")] = value;
-  }
+  const env: Record<string, string> = { ...parameters, ...settingsEnv, [TOKEN_PARAMETER_ENV]: token };
 
   const code = await host.stream("aspire", ["deploy", "--apphost", settings.path, ...(ctx.interactive ? [] : ["--non-interactive"])], { env });
   if (code !== 0) throw new CommandError(`aspire deploy failed (exit ${code}).`, { hint: "Its output above says why. Fix that, then run `npx managed-copilot deploy` again." });
 
   const url = (await azure.gatewayUrl(name)) ?? existing;
   const gallery = await azure.gatewayUrl("gallery");
+  const deployed = await azure.apps();
+  const publicUrls = (deployed ? Azure.publicApps(deployed, name) : []).flatMap((app) => {
+    const fqdn = app.properties?.configuration?.ingress?.fqdn;
+    return fqdn ? [`https://${fqdn}`] : [];
+  });
   ctx.out();
   ctx.out(`${style.green(style.ok)} Deployed${url ? `: ${style.bold(url)}` : ""}`);
   if (gallery) ctx.out(`  Demo gallery: ${style.bold(gallery)}`);
+  if (publicUrls.length) ctx.out(`  Public apps: ${publicUrls.map((publicUrl) => style.bold(publicUrl)).join(", ")} ${style.dim("(any address)")}`);
+  if (deployed) await checkAppsReachable(ctx, Azure.publishedApps(deployed, name), ips, address);
   if (url) {
     ctx.out(style.dim(`  $env:MANAGED_COPILOT_URL = "${url}"`));
     ctx.out(style.dim("  npx managed-copilot status      # check it, then `npx managed-copilot login` once for background work"));
