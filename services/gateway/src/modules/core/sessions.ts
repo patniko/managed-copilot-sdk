@@ -3709,9 +3709,13 @@ export class SessionManager implements SessionsService {
     }
   }
 
-  /** Shared sessions must not leak platform host paths to clients. */
+  /** Shared sessions must not leak platform host paths to clients, except with `unsafeHostTools`, which work on the host. */
+  #hidesHostPaths(live: LiveSession, placement: Placement): boolean {
+    return placement === "shared" && live.environment.config.unsafeHostTools !== true;
+  }
+
   #sanitizeEvent(live: LiveSession, event: RuntimeSessionEvent, placement: Placement = live.placement): RuntimeSessionEvent {
-    if (placement !== "shared") return event;
+    if (!this.#hidesHostPaths(live, placement)) return event;
     if (event.type === "session.start" && event.data && "context" in event.data) {
       const { context: _context, ...data } = event.data;
       return { ...event, data };
@@ -3724,7 +3728,7 @@ export class SessionManager implements SessionsService {
   }
 
   #sanitizeResponse(live: LiveSession, result: unknown, placement: Placement = live.placement): unknown {
-    if (placement !== "shared" || !result || typeof result !== "object") return result;
+    if (!this.#hidesHostPaths(live, placement) || !result || typeof result !== "object") return result;
     const { workspacePath: _workspacePath, ...rest } = result as Record<string, unknown>;
     return rest;
   }
@@ -3735,7 +3739,7 @@ export class SessionManager implements SessionsService {
    */
   /** `placement`: where the value came from (a cutover may have moved the session since). */
   #scrub<T>(live: LiveSession, value: T, placement: Placement = live.placement): T {
-    if (placement !== "shared") return value;
+    if (!this.#hidesHostPaths(live, placement)) return value;
     const scrubber = this.#scrubber;
     return scrubber ? (scrubber(value) as T) : value;
   }

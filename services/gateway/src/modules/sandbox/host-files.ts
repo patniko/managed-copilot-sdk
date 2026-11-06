@@ -1,15 +1,17 @@
 // Workspace files of a shared session with `unsafeHostTools` live in its working directory on the platform host.
 // The agent's own host tools can already reach anything there, so these do not guard against links.
 import { createReadStream, createWriteStream, promises as fs } from "node:fs";
-import { dirname, join, relative, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { ManagedCopilotError, type FileEntry } from "@managed-copilot/protocol";
 
+// Paths are relative to the working directory, or absolute host paths inside it.
 function resolve(root: string, path: string): string {
-  const segments = path.replace(/\\/g, "/").replace(/^\/workspace(\/|$)/, "").split("/").filter((s) => s && s !== ".");
-  if (segments.includes("..")) throw new ManagedCopilotError("invalid_request", `"${path}" leaves the workspace.`);
-  return join(root, ...segments);
+  const full = resolvePath(root, path);
+  const inside = relative(root, full);
+  if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) throw new ManagedCopilotError("invalid_request", `"${path}" is outside the workspace.`);
+  return full;
 }
 
 async function entry(root: string, full: string): Promise<FileEntry> {

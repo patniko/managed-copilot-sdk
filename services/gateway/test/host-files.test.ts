@@ -17,7 +17,7 @@ describe("host workspace files (unsafeHostTools)", () => {
     const written = await writeHostFile(root, "uploads/a.txt", Readable.from(["hello"]), true);
     expect(written).toMatchObject({ path: "uploads/a.txt", type: "file", size: 5 });
     expect((await listHostFiles(root, "", true)).map((entry) => entry.path).sort()).toEqual(["uploads", "uploads/a.txt"]);
-    expect(await text((await readHostFile(root, "/workspace/uploads/a.txt")).body)).toBe("hello");
+    expect(await text((await readHostFile(root, join(root, "uploads/a.txt"))).body)).toBe("hello");
   });
 
   it("refuses overwrites when asked and paths outside the workspace", async () => {
@@ -25,6 +25,7 @@ describe("host workspace files (unsafeHostTools)", () => {
     await writeHostFile(root, "a.txt", Readable.from(["1"]), true);
     await expect(writeHostFile(root, "a.txt", Readable.from(["2"]), false)).rejects.toMatchObject({ code: "conflict" });
     await expect(readHostFile(root, "../outside.txt")).rejects.toMatchObject({ code: "invalid_request" });
+    await expect(readHostFile(root, join(tmpdir(), "outside.txt"))).rejects.toMatchObject({ code: "invalid_request" });
     await expect(readHostFile(root, "missing.txt")).rejects.toMatchObject({ code: "not_found" });
   });
 });
