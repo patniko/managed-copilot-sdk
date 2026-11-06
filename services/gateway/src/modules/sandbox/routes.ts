@@ -15,11 +15,14 @@ import {
 } from "@managed-copilot/protocol";
 import type { GatewayApp } from "../../app.js";
 import type { Principal, RequestContext } from "../../http.js";
+import type { SessionRecord } from "../core/contracts.js";
 import type { ArtifactService } from "./artifacts.js";
+import { listHostFiles, readHostFile, writeHostFile } from "./host-files.js";
 import type { SandboxService } from "./service.js";
 
 interface OwnedSessions {
-  getOwned(accountId: number, sessionId: string): { readonly placement?: string; readonly id: string; readonly environment?: string };
+  getOwned(accountId: number, sessionId: string): SessionRecord;
+  hostWorkspace(record: SessionRecord): string | undefined;
 }
 
 interface WorkspaceSessions {
@@ -48,6 +51,11 @@ export function registerSandboxRoutes(app: GatewayApp, options: { service: Sandb
     return sessionId;
   };
 
+  const hostWorkspace = (ctx: RequestContext): string | undefined => {
+    const sessions = app.service("sessions") as unknown as OwnedSessions;
+    return sessions.hostWorkspace(sessions.getOwned(ctx.principal!.accountId, ctx.params["id"]!));
+  };
+
   const stream = async (ctx: RequestContext, body: NodeJS.ReadableStream & { destroy(error?: Error): void }, headers: Record<string, string | number>): Promise<void> => {
     ctx.res.writeHead(200, headers);
     ctx.res.on("close", () => {
@@ -61,15 +69,17 @@ export function registerSandboxRoutes(app: GatewayApp, options: { service: Sandb
   };
 
   app.routes.get(pattern(ROUTES.files), async (ctx) => {
+    const host = hostWorkspace(ctx);
+    if (host) return listHostFiles(host, ctx.query.get("path") ?? "", ctx.query.get("recursive") === "true");
     const sessionId = owned(ctx);
     return service.listFiles(sessionId, ctx.query.get("path") ?? "", { recursive: ctx.query.get("recursive") === "true" });
   });
 
   app.routes.get(pattern(ROUTES.fileContent), async (ctx) => {
-    const sessionId = owned(ctx);
+    const host = hostWorkspace(ctx);
     const path = ctx.query.get("path");
     if (!path) throw new ManagedCopilotError("invalid_request", "Pass ?path= with a workspace-relative file path.");
-    const file = await service.readFile(sessionId, path);
+    const file = host ? await readHostFile(host, path) : await service.readFile(owned(ctx), path);
     await stream(ctx, file.body, {
       "content-type": "application/octet-stream",
       "content-length": file.entry.size,
@@ -80,9 +90,14 @@ export function registerSandboxRoutes(app: GatewayApp, options: { service: Sandb
   });
 
   app.routes.put(pattern(ROUTES.fileContent), async (ctx) => {
-    const sessionId = owned(ctx);
     const path = ctx.query.get("path");
     if (!path) throw new ManagedCopilotError("invalid_request", "Pass ?path= with a workspace-relative file path.");
+    const host = hostWorkspace(ctx);
+    if (host) {
+      ctx.status(201);
+      return writeHostFile(host, path, ctx.req, ctx.query.get("overwrite") !== "false");
+    }
+    const sessionId = owned(ctx);
     const declared = ctx.req.headers["content-length"];
     const size = declared === undefined ? undefined : Number(declared);
     if (size !== undefined && (!Number.isFinite(size) || size < 0)) throw new ManagedCopilotError("invalid_request", "Invalid Content-Length.");

@@ -25,6 +25,8 @@ export interface AttachSessions {
   /** The upstream runtime the session is resident on now (shared runtime or its sandbox). */
   runtime(sessionId: string): Promise<SessionRuntime>;
   get?(sessionId: string): AttachSessionRecord | undefined;
+  /** Set for a shared session with `unsafeHostTools`, whose frames keep raw host paths (core). */
+  hostWorkspace?(record: AttachSessionRecord): string | undefined;
   /** Registers an attached Copilot CLI as a `cli` responder and gates its writes and answers (core). */
   attachCli?(accountId: number, sessionId: string, options: CliAttachOptions): Promise<CliAttachment>;
   /** Keeps the owner's verified `principal` serving the session's credential until the returned release (core). */
