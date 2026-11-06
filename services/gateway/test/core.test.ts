@@ -195,6 +195,15 @@ describe("shared admission", () => {
     expect(admitted.optionsPatch).toMatchObject({ skipCustomInstructions: true, installedPlugins: [], includedBuiltinSkills: [] });
   });
 
+  it("leaves the runtime's built-in tools on with unsafeHostTools", () => {
+    const unsafe = environments({ environments: { demo: { type: "shared", unsafeHostTools: true } } });
+    const admitted = admitSession({ sessionId: "s1" }, { ...context(), environment: unsafe.resolve("demo") }, "create");
+    expect(admitted.params["availableTools"]).toBeUndefined();
+    expect(admitted.params["systemMessage"]).toBeUndefined();
+    expect(admitted.params).toMatchObject({ workingDirectory: "/data/workspaces/s1", enableConfigDiscovery: false });
+    expect(() => environments({ environments: { coder: { type: "isolated", unsafeHostTools: true } } })).toThrowError(/only valid on shared/);
+  });
+
   it("intersects caller tool filters with the shared ceiling", () => {
     const filters = sharedToolFilters({ availableTools: ["builtin:*", "bash", "mcp:github-list_issues", "custom:lookup_order"], excludedTools: ["builtin:task"] }, envs.resolve("chat"), NETWORK_ENABLED, false);
     expect(filters.availableTools).toContain("builtin:ask_user");

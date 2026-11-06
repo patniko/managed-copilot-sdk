@@ -1299,6 +1299,11 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
   (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
   else under the data directory (including its resolved form) `/platform`.
+- **`unsafeHostTools`.** A shared environment with it set skips the shared tool filter and the locked environment
+  prompt, so its sessions get the runtime's built-in shell and file tools on the gateway host (as the runtime's user,
+  under its private `HOME`). Every other shared admission rule still applies. It exists to demonstrate cross-session
+  access: verified live, a second session's `bash` read the first session's prompt from
+  `/platform/copilot-home/session-state/<id>/`.
 - **Agents and models.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a
   restore (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent`
   keeps it. Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out

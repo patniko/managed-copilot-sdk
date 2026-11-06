@@ -145,6 +145,12 @@ export const EnvironmentConfigSchema = z
      * this environment's sandboxes (`policy_violation`); a direct or mixed orchestrator's own tools still work in them.
      */
     exec: z.boolean().optional(),
+    /**
+     * Shared only, and deliberately unsafe: turns on the runtime's built-in shell and file tools in the shared runtime.
+     * They run on the shared runtime's host, where every session's state is, so any session can read or change any
+     * other session's data. For demonstrating why shared placement blocks these tools; never for real users.
+     */
+    unsafeHostTools: z.boolean().optional(),
   })
   .strict();
 export type EnvironmentConfig = z.infer<typeof EnvironmentConfigSchema>;
@@ -234,6 +240,9 @@ export const ManagedCopilotConfigSchema = z
     for (const [name, env] of Object.entries(envs)) {
       if (env.type === "promotable" && env.promoteTo === undefined) {
         ctx.addIssue({ code: "custom", path: ["environments", name, "promoteTo"], message: "promotable environments must name an isolated environment in promoteTo" });
+      }
+      if (env.unsafeHostTools && env.type !== "shared") {
+        ctx.addIssue({ code: "custom", path: ["environments", name, "unsafeHostTools"], message: "unsafeHostTools is only valid on shared environments" });
       }
       if (env.promoteTo !== undefined) {
         const target = envs[env.promoteTo];

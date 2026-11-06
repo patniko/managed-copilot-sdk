@@ -255,6 +255,11 @@ and per-session egress attribution. Apply the same validation on create, resume,
 option updates, not only to the first request. SDK callbacks still execute in the customer's app, outside this
 shared-runtime boundary.
 
+For demonstrating why that boundary exists, a shared environment can set `unsafeHostTools: true`. Its sessions
+then get the runtime's built-in shell and file tools and its standard environment prompt; every other shared rule
+still applies. Those tools run on the shared runtime's host, so any session can read and change every other
+session's state. Never use it for real users.
+
 ## 4. Isolated: a coding agent in its own sandbox
 
 ```ts
