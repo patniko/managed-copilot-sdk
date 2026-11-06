@@ -258,7 +258,9 @@ shared-runtime boundary.
 For demonstrating why that boundary exists, a shared environment can set `unsafeHostTools: true`. Its sessions
 then get the runtime's built-in shell and file tools and its standard environment prompt; every other shared rule
 still applies. Those tools run on the shared runtime's host, so any session can read and change every other
-session's state. Never use it for real users.
+session's state. Never use it for real users. `managed.files(session)` also works on these sessions: it reads and
+writes the session's working directory on the host, which the agent sees as `/workspace`. Artifacts stay isolated
+only.
 
 ## 4. Isolated: a coding agent in its own sandbox
 

@@ -558,6 +558,12 @@ export class SessionManager implements SessionsService {
     return record;
   }
 
+  /** The host working directory of a shared session whose environment has `unsafeHostTools`, if it is one. */
+  hostWorkspace(record: SessionRecord): string | undefined {
+    if (record.placement !== "shared" || this.#options.environments.forSession(record).config.unsafeHostTools !== true) return undefined;
+    return this.#workingDirectory("shared", record.id);
+  }
+
   async info(accountId: number, sessionId: string): Promise<SessionInfo> {
     return this.toInfo(this.getOwned(accountId, sessionId));
   }
