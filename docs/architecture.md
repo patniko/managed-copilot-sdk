@@ -477,7 +477,8 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   sandboxes, and the inference stream of a running model call lives in the gateway), so callers resend them. A turn that
   waited on durable actions across a gateway restart can still finish, but its outputs are not published: turns
   running at gateway start are recorded as interrupted.
-- **REST** (owner-scoped, shared sessions answer `invalid_request`): `GET /v1/sessions/:id/files?path=&recursive=`,
+- **REST** (owner-scoped; shared sessions answer `invalid_request`, except that the file routes serve an
+  `unsafeHostTools` session's host working directory): `GET /v1/sessions/:id/files?path=&recursive=`,
   `GET|PUT /v1/sessions/:id/files/content?path=&overwrite=` (streamed, 512 MiB limit, atomic replace by default),
   `GET /v1/sessions/:id/artifacts?versions=latest|all`, `GET .../artifacts/publication?turnId=&timeoutMs=` (≤120 s per
   request; the SDK keeps waiting), and `GET .../artifacts/:artifactId/content`.
@@ -1449,7 +1450,16 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   sends to clients (events, responses, lifecycle, runtime requests such as `hooks.invoke`) has platform host paths
   rewritten: the session directory becomes `/workspace`, a pinned customizations bundle the sandbox mount path
   (`/opt/managed-copilot/customizations/...`, so agent and skill paths read the same in both placements), and anything
-  else under the data directory (including its resolved form) `/platform`.
+  else under the data directory (including its resolved form) `/platform`. `unsafeHostTools` sessions are not
+  rewritten.
+- **`unsafeHostTools`.** A shared environment with it set skips the shared tool filter and the locked environment
+  prompt, so its sessions get the runtime's built-in shell and file tools on the gateway host (as the runtime's user,
+  under its private `HOME`). Every other shared admission rule still applies. It exists to demonstrate cross-session
+  access: verified live, a second session's `bash` read the first session's prompt from
+  `<dataDir>/runtime/shared/copilot-home/session-state/<id>/`. Their events, responses, and attached CLI frames keep
+  raw host paths, which is what the agent itself sees. The REST file routes serve these sessions from their host
+  working directory (`sandbox/host-files.ts`; relative paths, or absolute paths inside it), so an app can upload a file
+  and give the agent its real path.
 - **Agents and models.** `session.agent.select`/`deselect` are persisted with the session's admitted configuration, so a
   restore (shared runtime restart, sandbox idle stop) passes the session's current agent; a resume without `agent`
   keeps it. Sandboxes resolve agents only after their credential is installed, so the sandbox module defers `agent` out

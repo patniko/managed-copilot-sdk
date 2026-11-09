@@ -445,6 +445,8 @@ function sandboxPath(value: unknown, field: string, root: string): string {
 export function admitSession(raw: unknown, context: AdmissionContext, mode: "create" | "resume"): AdmittedSession {
   if (!isRecord(raw)) throw new ManagedCopilotError("invalid_request", `${mode === "create" ? "session.create" : "session.resume"} params must be an object`);
   const shared = context.placement === "shared";
+  // A shared environment with unsafeHostTools keeps the runtime's own tools and environment prompt.
+  const hostTools = shared && context.environment.config.unsafeHostTools === true;
   // Promotable sessions (request_sandbox injected) are told how to get a workspace instead of to do without one, and
   // orchestrator sessions (start_worker or the hands tools injected) how to hand work to their workers or do it in
   // their own sandbox.
@@ -523,7 +525,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
       if (typeof value !== "string") throw new ManagedCopilotError("invalid_request", "agent must be a string");
       return value;
     },
-    systemMessage: (value) => (shared ? lockSystemMessage(value, { promotable, orchestrator: coordinator, style }) : value === undefined ? DROP : value),
+    systemMessage: (value) => (shared && !hostTools ? lockSystemMessage(value, { promotable, orchestrator: coordinator, style }) : value === undefined ? DROP : value),
     largeOutput: (value) => {
       if (value === undefined || value === null) return DROP;
       if (!isRecord(value)) throw new ManagedCopilotError("invalid_request", "largeOutput must be an object");
@@ -646,7 +648,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     params["enableSessionStore"] = false;
     params["memory"] = { enabled: false };
     params["embeddingCacheStorage"] = "in-memory";
-    if (params["systemMessage"] === undefined) params["systemMessage"] = lockSystemMessage(undefined, { promotable, orchestrator: coordinator, style });
+    if (params["systemMessage"] === undefined && !hostTools) params["systemMessage"] = lockSystemMessage(undefined, { promotable, orchestrator: coordinator, style });
     params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(directories.skills);
     if (directories.skills) params["skillDirectories"] = [directories.skills];
     if (directories.agents) params["agentDirectories"] = [directories.agents];
@@ -655,9 +657,11 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     // files. A direct or mixed one's sub-agents act in its sandbox through the hands tools.
     const hasAgents =
       !orchestrator && ((environment.customizations?.agents.length ?? 0) > 0 || (Array.isArray(raw["customAgents"]) && raw["customAgents"].length > 0) || typeof raw["agent"] === "string");
-    const filters = sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0, { hasAgents, hands });
-    params["availableTools"] = filters.availableTools;
-    if (filters.excludedTools) params["excludedTools"] = filters.excludedTools;
+    const filters = hostTools
+      ? { availableTools: stringList(raw["availableTools"], "availableTools"), excludedTools: stringList(raw["excludedTools"], "excludedTools") }
+      : sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0, { hasAgents, hands });
+    if (filters.availableTools) params["availableTools"] = filters.availableTools;
+    if (filters.excludedTools && filters.excludedTools.length > 0) params["excludedTools"] = filters.excludedTools;
     // The runtime's built-in GitHub MCP server would egress directly from the shared runtime host.
     const disabled = stringList(params["disabledMcpServers"], "disabledMcpServers") ?? [];
     params["disabledMcpServers"] = [...new Set([...disabled, ...BUILTIN_MCP_SERVERS])];
@@ -765,7 +769,7 @@ export function admitOptionsUpdate(raw: unknown, context: AdmissionContext): Rec
         break;
       case "availableTools":
       case "excludedTools":
-        if (shared) {
+        if (shared && environment.config.unsafeHostTools !== true) {
           // A direct or mixed coordinator keeps its sub-agent tools (as admitted at create).
           const hands = context.platformTools.some((tool) => tool.name === HANDS_TOOLS.bash && tool.overridesBuiltInTool === true);
           const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, context.allowMcp === true, { hands });
