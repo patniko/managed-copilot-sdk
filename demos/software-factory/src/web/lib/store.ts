@@ -4,6 +4,8 @@ import type {
   ArtifactIndex,
   CreateWorkOrderRequest,
   FactoryState,
+  GitHubStatus,
+  MergeRequest,
   PlatformStatus,
   ServerEvent,
   WorkOrder,
@@ -38,6 +40,8 @@ export interface StoreState {
   readonly templates: readonly WorkOrderTemplate[];
   readonly attachCommand: string;
   readonly canLaunchTerminal: boolean;
+  /** The GitHub account the factory works on repositories with. */
+  readonly github?: GitHubStatus;
   /** Newest first. */
   readonly summaries: readonly WorkOrderSummary[];
   readonly workOrders: Readonly<Record<string, Resource<WorkOrder>>>;
@@ -135,6 +139,14 @@ export function toSummary(workOrder: WorkOrder): WorkOrderSummary {
     taskCount: workOrder.taskCount,
     tests: workOrder.tests,
     error: workOrder.error,
+    github: workOrder.github
+      ? {
+          repository: workOrder.github.repository.fullName,
+          issue: workOrder.github.issue?.number,
+          pullRequest: workOrder.github.pullRequest?.number,
+          pullRequestState: workOrder.github.pullRequest?.state,
+        }
+      : undefined,
   };
 }
 
@@ -235,6 +247,7 @@ function applySnapshot(snapshot: FactoryState, requestedAt: number): void {
       templates: snapshot.templates,
       attachCommand: snapshot.attachCommand,
       canLaunchTerminal: snapshot.canLaunchTerminal,
+      github: snapshot.github,
       summaries: sortSummaries(merged),
     };
   });
@@ -633,6 +646,25 @@ export async function retryWorkOrder(id: string): Promise<WorkOrder> {
       drafts: withoutPrefix(current.drafts, prefix),
     };
   });
+  return workOrder;
+}
+
+/** GitHub work orders: more changes in the same sandbox, pushed to the same pull request. */
+export async function reviseWorkOrder(id: string, request: string): Promise<WorkOrder> {
+  const workOrder = await api.reviseWorkOrder(id, request);
+  applyWorkOrder(workOrder, true);
+  return workOrder;
+}
+
+export async function refreshPullRequest(id: string): Promise<WorkOrder> {
+  const workOrder = await api.refreshPullRequest(id);
+  applyWorkOrder(workOrder, true);
+  return workOrder;
+}
+
+export async function mergePullRequest(id: string, method: MergeRequest["method"] = "squash"): Promise<WorkOrder> {
+  const workOrder = await api.mergePullRequest(id, method);
+  applyWorkOrder(workOrder, true);
   return workOrder;
 }
 

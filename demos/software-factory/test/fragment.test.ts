@@ -10,10 +10,24 @@ describe("AppHost fragment", () => {
 
   it("declares environments the protocol schema accepts", () => {
     const config = parseConfig({ environments: fragment.environments });
-    expect(Object.keys(config.environments).sort()).toEqual(["factory-builder", "factory-coordinator", "factory-planner", "factory-release", "factory-reviewer"]);
+    expect(Object.keys(config.environments).sort()).toEqual(["factory-builder", "factory-coordinator", "factory-planner", "factory-release", "factory-repo", "factory-reviewer"]);
     expect(config.environments["factory-planner"]).toMatchObject({ type: "shared", network: false });
     expect(config.environments["factory-builder"]).toMatchObject({ type: "isolated", size: "small" });
     expect(config.environments["factory-coordinator"]).toMatchObject({ type: "orchestrator", workers: ["factory-builder", "factory-release"], maxWorkers: 6 });
+    expect(config.environments["factory-repo"]).toMatchObject({
+      type: "isolated",
+      size: "medium",
+      packages: { system: expect.arrayContaining(["chromium", "ffmpeg"]), npm: [expect.stringMatching(/^playwright-core@\d/)] },
+      env: expect.objectContaining({ CHROMIUM_PATH: "/usr/bin/chromium" }),
+    });
+  });
+
+  it("lets factory-repo sandboxes reach GitHub, the package registries, and extra hosts only", () => {
+    const repo = softwareFactory({ npmRegistry: "https://packages.example.com/npm/", pipIndexUrl: "", repoExtraHosts: ["Crates.io", " "] }).environments["factory-repo"]!;
+    expect(repo.network).toEqual(["github.com", "*.github.com", "*.githubusercontent.com", "packages.example.com", "pypi.org", "files.pythonhosted.org", "crates.io"]);
+    const pip = softwareFactory({ npmRegistry: "https://packages.example.com/npm/", pipIndexUrl: "https://pip.example.com/simple/", repoExtraHosts: [] }).environments["factory-repo"]!;
+    expect(pip.network).toContain("pip.example.com");
+    expect(pip.network).not.toContain("pypi.org");
   });
 
   it("matches the environment names the server uses", () => {
@@ -58,5 +72,6 @@ describe("AppHost fragment", () => {
     const office = fragment.environments["factory-planner"]!.customizations!;
     expect(readFileSync(join(office, "agents", "planner.agent.md"), "utf8")).toContain('tools: ["submit_plan", "skill"]');
     expect(readFileSync(join(office, "agents", "reviewer.agent.md"), "utf8")).toContain('tools: ["submit_review", "skill"]');
+    expect(readFileSync(join(office, "agents", "pr-reviewer.agent.md"), "utf8")).toMatch(/^---\r?\nname: pr-reviewer\r?\n[\s\S]*tools: \["submit_review"\]/);
   });
 });

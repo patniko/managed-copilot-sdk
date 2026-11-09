@@ -5,12 +5,13 @@ import {
   FileDirectoryIcon,
   FileDirectoryOpenFillIcon,
   FileIcon,
+  FileMediaIcon,
   FileZipIcon,
   LinkExternalIcon,
 } from "@primer/octicons-react";
 import { useMemo, useState, type ReactNode } from "react";
-import type { ArtifactFileView, ArtifactIndex, ArtifactVersionView, WorkOrder } from "../../shared/types.js";
-import { artifactContentUrl } from "../lib/api.js";
+import { mediaTypeOf, type ArtifactFileView, type ArtifactIndex, type ArtifactVersionView, type WorkOrder } from "../../shared/types.js";
+import { artifactContentUrl, mediaUrl } from "../lib/api.js";
 import {
   artifactKey,
   basename,
@@ -245,7 +246,7 @@ function FileItem({
   readonly onSelect: (file: ArtifactFileView) => void;
 }) {
   const versions = file.versions.length;
-  const Glyph = file.viewable ? FileIcon : FileZipIcon;
+  const Glyph = file.media ? FileMediaIcon : file.viewable ? FileIcon : FileZipIcon;
   return (
     <li>
       <button
@@ -291,7 +292,18 @@ function Viewer({
   const url = artifactContentUrl(workOrder.id, file.stationId, file.path, version.version);
 
   let body: ReactNode;
-  if (!version.viewable) {
+  if (file.media && mediaTypeOf(file.path)) {
+    const src = mediaUrl(workOrder.id, file.stationId, file.path, version.version);
+    body = (
+      <div className="flex min-h-full items-center justify-center bg-canvas-inset p-4">
+        {mediaTypeOf(file.path)!.kind === "video" ? (
+          <video key={src} src={src} controls muted playsInline className="max-h-[70vh] max-w-full rounded-md bg-black" />
+        ) : (
+          <img key={src} src={src} alt={file.path} className="max-h-[70vh] max-w-full rounded-md border border-line object-contain" />
+        )}
+      </div>
+    );
+  } else if (!version.viewable) {
     // The factory keeps text files up to 1 MB; it has no bytes to serve for anything else.
     body = (
       <EmptyState icon={FileZipIcon} title="This file can't be previewed" size="lg">
@@ -356,6 +368,12 @@ function Viewer({
               {versionLabel(version, now)}
             </span>
           )}
+          {file.media ? (
+            <a href={mediaUrl(workOrder.id, file.stationId, file.path, version.version)} target="_blank" rel="noreferrer" className={buttonClass("default", "sm")}>
+              <LinkExternalIcon size={16} />
+              Open
+            </a>
+          ) : null}
           {version.viewable ? (
             <>
               <a href={url} target="_blank" rel="noreferrer" className={buttonClass("default", "sm")}>

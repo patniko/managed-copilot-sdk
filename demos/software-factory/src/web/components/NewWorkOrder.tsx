@@ -6,9 +6,12 @@ import {
   CodeReviewIcon,
   CopilotIcon,
   FileCodeIcon,
+  GitPullRequestIcon,
   InfoIcon,
+  MarkGithubIcon,
   PackageIcon,
   PlugIcon,
+  RepoIcon,
   TableIcon,
   TasklistIcon,
   TerminalIcon,
@@ -27,6 +30,7 @@ import { createWorkOrder, useStore } from "../lib/store.js";
 import { toast } from "../lib/toast.js";
 import { Button } from "./ui/Button.js";
 import { Callout } from "./ui/Feedback.js";
+import { GitHubWorkOrderForm } from "./GitHubForm.js";
 
 interface Draft {
   readonly title: string;
@@ -38,6 +42,8 @@ interface Draft {
 const EMPTY_DRAFT: Draft = { title: "", brief: "", rounds: 2, mode: "agent" };
 /** Survives navigating away and back within the session. */
 let savedDraft: Draft = EMPTY_DRAFT;
+/** Whether the form builds a new project or changes a GitHub repository; remembered like the draft. */
+let savedSource: "project" | "github" = "project";
 
 const MAX_TITLE = 120;
 
@@ -47,6 +53,39 @@ const MODES: readonly { readonly mode: WorkOrderMode; readonly icon: Icon; reado
 ];
 
 export function NewWorkOrder() {
+  const [source, setSourceState] = useState(savedSource);
+  const setSource = (next: "project" | "github"): void => {
+    savedSource = next;
+    setSourceState(next);
+  };
+  const github = source === "github";
+  return (
+    <div className="mx-auto w-full max-w-[880px] px-4 py-6 md:px-6 lg:py-10">
+      <header>
+        <h1 className="text-2xl font-semibold">{github ? "What should the factory change?" : "What should the factory build?"}</h1>
+        <p className="mt-1 text-fg-muted">
+          {github ? "A request goes in; a tested, reviewed pull request with screenshots comes out." : "A work order goes in; a tested, reviewed release comes out."}
+        </p>
+        <div className="mt-4 SegmentedControl" role="radiogroup" aria-label="What the work order starts from">
+          <label className="SegmentedControl-item">
+            <input type="radio" name="wo-source" value="project" checked={!github} onChange={() => setSource("project")} className="sr-only" />
+            <PackageIcon size={16} />
+            New project
+          </label>
+          <label className="SegmentedControl-item">
+            <input type="radio" name="wo-source" value="github" checked={github} onChange={() => setSource("github")} className="sr-only" />
+            <MarkGithubIcon size={16} />
+            GitHub repository
+          </label>
+        </div>
+        <Stepper steps={github ? GITHUB_STEPS : STEPS} />
+      </header>
+      {github ? <GitHubWorkOrderForm /> : <ProjectWorkOrder />}
+    </div>
+  );
+}
+
+function ProjectWorkOrder() {
   const templates = useStore((state) => state.templates);
   const platform = useStore((state) => state.platform);
   const [draft, setDraftState] = useState<Draft>(savedDraft);
@@ -111,13 +150,7 @@ export function NewWorkOrder() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-[880px] px-4 py-6 md:px-6 lg:py-10">
-      <header>
-        <h1 className="text-2xl font-semibold">What should the factory build?</h1>
-        <p className="mt-1 text-fg-muted">A work order goes in; a tested, reviewed release comes out.</p>
-        <Stepper />
-      </header>
-
+    <>
       {templates.length > 0 ? (
         <section aria-labelledby="templates-heading" className="mt-8">
           <h2 id="templates-heading" className="text-base font-semibold">
@@ -228,7 +261,7 @@ export function NewWorkOrder() {
           </Callout>
         ) : null}
       </form>
-    </div>
+    </>
   );
 }
 
@@ -239,17 +272,24 @@ const STEPS: readonly { readonly icon: Icon; readonly label: string }[] = [
   { icon: PackageIcon, label: "Release" },
 ];
 
-/** The assembly line every work order runs down, as connected chips. */
-function Stepper() {
+const GITHUB_STEPS: readonly { readonly icon: Icon; readonly label: string }[] = [
+  { icon: RepoIcon, label: "Checkout" },
+  { icon: ToolsIcon, label: "Change" },
+  { icon: CodeReviewIcon, label: "Review" },
+  { icon: GitPullRequestIcon, label: "Pull request" },
+];
+
+/** The assembly line the work order runs down, as connected chips. */
+function Stepper({ steps }: { readonly steps: readonly { readonly icon: Icon; readonly label: string }[] }) {
   return (
-    <ol className="mt-4 flex items-center" aria-label="Every work order runs Plan, Build, Review, Release">
-      {STEPS.map((step, index) => (
-        <li key={step.label} className={cx("flex items-center", index < STEPS.length - 1 && "flex-1 sm:flex-none")}>
+    <ol className="mt-4 flex items-center" aria-label={`The work order runs ${steps.map((step) => step.label).join(", ")}`}>
+      {steps.map((step, index) => (
+        <li key={step.label} className={cx("flex items-center", index < steps.length - 1 && "flex-1 sm:flex-none")}>
           <span className="Label shrink-0 gap-1.5 sm:h-6 sm:px-2.5">
             <step.icon size={14} className="text-fg-muted max-sm:hidden" />
             {step.label}
           </span>
-          {index < STEPS.length - 1 ? <span className="mx-1 h-px min-w-2 flex-1 bg-line-emphasis sm:mx-1.5 sm:w-10 sm:flex-none" aria-hidden /> : null}
+          {index < steps.length - 1 ? <span className="mx-1 h-px min-w-2 flex-1 bg-line-emphasis sm:mx-1.5 sm:w-10 sm:flex-none" aria-hidden /> : null}
         </li>
       ))}
     </ol>

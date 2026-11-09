@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { createRequestHandler, type Middleware } from "./http.js";
+import { GitHubClient } from "./github.js";
 import { EventHub } from "./hub.js";
 import { log } from "./log.js";
 import { Factory } from "./pipeline/factory.js";
@@ -12,14 +13,17 @@ const config = loadConfig();
 const store = new FactoryStore(join(config.dataDir, "factory.db"));
 const hub = new EventHub();
 const platform = new Platform(config);
+// The same GitHub account the factory signs in to Managed Copilot with: it browses repositories and opens pull requests.
+const github = new GitHubClient();
 const factory = new Factory({
   store,
   hub,
   platform,
+  github,
   readiness: (mode) => {
     const status = platform.status;
-    const ready = status.features.runs && (mode !== "agent" || status.features.agentLed);
-    const reason = status.message ?? (mode === "agent" ? status.agentLedHint : undefined);
+    const ready = status.features.runs && (mode !== "agent" || status.features.agentLed) && (mode !== "github" || status.features.github);
+    const reason = status.message ?? (mode === "agent" ? status.agentLedHint : mode === "github" ? status.githubHint : undefined);
     return { ready, ...(reason ? { reason } : {}) };
   },
   account: () => {
@@ -51,7 +55,7 @@ if (config.dev) {
   });
   ui = vite.middlewares as unknown as Middleware;
 }
-server.on("request", createRequestHandler({ factory, platform, hub, config }, ui));
+server.on("request", createRequestHandler({ factory, platform, hub, config, github }, ui));
 
 await new Promise<void>((resolve, reject) => {
   server.once("error", reject);

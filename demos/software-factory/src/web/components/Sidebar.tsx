@@ -1,4 +1,4 @@
-import { CheckIcon, CopilotIcon, PlugIcon, PlusIcon, WorkflowIcon, XIcon } from "@primer/octicons-react";
+import { CheckIcon, CopilotIcon, MarkGithubIcon, PlugIcon, PlusIcon, WorkflowIcon, XIcon } from "@primer/octicons-react";
 import { useEffect, useId, useRef } from "react";
 import { formatWorkOrderNumber, type WorkOrderSummary } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
@@ -156,8 +156,16 @@ function WorkOrderItem({
           </span>
           <span aria-hidden>·</span>
           <span id={`${id}-meta`} className="inline-flex min-w-0 items-center gap-1">
-            <ModeGlyph mode={summary.mode} />
+            {summary.github ? (
+              <span className="inline-flex shrink-0" title={`GitHub: ${summary.github.repository}`}>
+                <MarkGithubIcon size={12} />
+                <span className="sr-only">GitHub</span>
+              </span>
+            ) : (
+              <ModeGlyph mode={summary.mode} />
+            )}
             <span className="truncate">
+              {summary.github ? `${summary.github.repository.split("/")[1] ?? summary.github.repository}${summary.github.pullRequest ? ` #${summary.github.pullRequest}` : ""} · ` : ""}
               {meta.label} · <span title={formatFullDateTime(summary.createdAt)}>{formatRelative(summary.createdAt, now)}</span>
             </span>
           </span>

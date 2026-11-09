@@ -5,7 +5,9 @@ import {
   ChevronRightIcon,
   FileDiffIcon,
   InfoIcon,
+  IssueOpenedIcon,
   NoteIcon,
+  RepoIcon,
   SyncIcon,
   TerminalIcon,
   XIcon,
@@ -624,6 +626,7 @@ export function IntakePanel({ workOrder }: { readonly workOrder: WorkOrder }) {
   const template = useStore((state) =>
     workOrder.source.templateId ? state.templates.find((candidate) => candidate.id === workOrder.source.templateId) : undefined,
   );
+  if (workOrder.github) return <GitHubIntake workOrder={workOrder} />;
   const source = workOrder.source.kind === "template" ? (template?.title ?? workOrder.source.templateId ?? "Template") : "Custom brief";
   return (
     <section aria-label="Work order brief" className={PANEL_CLASS}>
@@ -642,6 +645,67 @@ export function IntakePanel({ workOrder }: { readonly workOrder: WorkOrder }) {
       <div className={SCROLL_CLASS}>
         <div className="p-4">
           <MarkdownView source={workOrder.brief} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/** A GitHub work order's intake: the repository, the issue, and every request (the original and the follow-ups). */
+function GitHubIntake({ workOrder }: { readonly workOrder: WorkOrder }) {
+  const work = workOrder.github!;
+  const now = useNow(60_000);
+  return (
+    <section aria-label="Work order request" className={PANEL_CLASS}>
+      <header className="border-b border-line bg-canvas-muted px-4 py-3">
+        <div className="flex items-start gap-2">
+          <RepoIcon size={16} className="mt-1 shrink-0 text-fg-muted" />
+          <div className="min-w-0">
+            <h2 className="text-base font-semibold break-all">
+              <a href={work.repository.htmlUrl} target="_blank" rel="noreferrer" className="Link--primary">
+                {work.repository.fullName}
+              </a>
+            </h2>
+            <p className="truncate text-xs text-fg-muted" title={formatFullDateTime(workOrder.createdAt)}>
+              {work.repository.defaultBranch}@{work.baseSha.slice(0, 7)} → {work.branch} · {formatDateTime(workOrder.createdAt)}
+              {workOrder.owner ? ` · @${workOrder.owner.login}` : ""}
+            </p>
+          </div>
+        </div>
+      </header>
+      <div className={SCROLL_CLASS}>
+        <div className="space-y-4 p-4">
+          {work.issue ? (
+            <div className="rounded-md border border-line">
+              <div className="flex items-start gap-2 border-b border-line-muted px-3 py-2">
+                <IssueOpenedIcon size={16} className="mt-0.5 shrink-0 text-fg-open" />
+                <a href={work.issue.htmlUrl} target="_blank" rel="noreferrer" className="Link--primary min-w-0 font-semibold break-words">
+                  {work.issue.title} <span className="font-normal text-fg-muted">#{work.issue.number}</span>
+                </a>
+              </div>
+              <div className="max-h-72 overflow-auto px-3 py-2">
+                {work.issue.body.trim() ? <MarkdownView source={work.issue.body} /> : <p className="text-xs text-fg-muted">No description.</p>}
+                {work.issue.recentComments.length > 0 ? (
+                  <p className="mt-2 text-xs text-fg-muted">The developer also got the latest {work.issue.recentComments.length} comments.</p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          <ol className="space-y-3">
+            {work.revisions.map((revision) => (
+              <li key={revision.number}>
+                <p className="mb-1 flex items-center gap-1.5 text-xs text-fg-muted">
+                  <NoteIcon size={12} />
+                  <span className="font-semibold text-fg">{revision.number === 1 ? "Request" : `Revision ${revision.number}`}</span>
+                  {revision.requestedBy ? `@${revision.requestedBy}` : ""}
+                  <span title={formatFullDateTime(revision.requestedAt)}>· {formatRelative(revision.requestedAt, now)}</span>
+                </p>
+                <div className="rounded-md bg-canvas-muted px-3 py-2">
+                  <MarkdownView source={revision.request} />
+                </div>
+              </li>
+            ))}
+          </ol>
         </div>
       </div>
     </section>

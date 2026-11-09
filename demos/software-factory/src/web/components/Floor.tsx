@@ -1,4 +1,20 @@
-import { CheckCircleFillIcon, ClockIcon, ContainerIcon, CpuIcon, LinkIcon, PackageIcon, XCircleFillIcon } from "@primer/octicons-react";
+import {
+  CheckCircleFillIcon,
+  ClockIcon,
+  ContainerIcon,
+  CpuIcon,
+  GitBranchIcon,
+  GitMergeIcon,
+  GitPullRequestClosedIcon,
+  GitPullRequestIcon,
+  IssueOpenedIcon,
+  LinkIcon,
+  LockIcon,
+  NoteIcon,
+  PackageIcon,
+  RepoIcon,
+  XCircleFillIcon,
+} from "@primer/octicons-react";
 import type { ReactNode } from "react";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS } from "../../shared/environments.js";
 import type { EnvironmentView, Station, StationKind, StationRole, WorkOrder } from "../../shared/types.js";
@@ -85,6 +101,40 @@ export function Floor({ workOrder, selectedId, onSelect }: FloorProps) {
         : "idle";
   const delivered: EdgeState =
     workOrder.release && releaseStatus === "done" ? "done" : releaseStatus === "failed" ? "failed" : "idle";
+
+  if (workOrder.github) {
+    const pullDone = releaseStatus === "done" || Boolean(workOrder.github.pullRequest);
+    const githubSpine: EdgeState = builds.some((status) => status !== undefined && isStationActive(status)) ? "active" : builds.every((status) => status === "done") ? "done" : "ready";
+    return (
+      <section aria-label="Factory floor" className="Box @container min-w-0 overflow-auto bg-dot-grid p-4 xl:h-full xl:min-h-0">
+        <div className="max-w-3xl">
+          <Pair left={<RepositoryNode workOrder={workOrder} selected={selectedId === "intake"} onSelect={() => onSelect("intake")} />} state="done" />
+          <div className="relative py-4 pl-10">
+            <span className={cx("pipe pipe-y absolute top-0 bottom-0 left-[19px]", `pipe-${githubSpine}`)} aria-hidden />
+            <ol className="space-y-4" aria-label="The change">
+              {rows.map((row) => (
+                <li key={row.id}>
+                  <LaneTitle row={row} workOrder={workOrder} />
+                  <Pair
+                    lane
+                    left={card(row.build, "build", "Change", row)}
+                    right={card(row.review, "review", "Review", row)}
+                    state={edgeState(row.build?.status === "done", row.review?.status)}
+                    tick={edgeState(true, row.build?.status)}
+                  />
+                </li>
+              ))}
+            </ol>
+          </div>
+          <Pair
+            left={card(release, "release")}
+            right={<PullRequestNode workOrder={workOrder} releaseStatus={releaseStatus} />}
+            state={pullDone ? "done" : releaseStatus === "failed" ? "failed" : "idle"}
+          />
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section aria-label="Factory floor" className="Box @container min-w-0 overflow-auto bg-dot-grid p-4 xl:h-full xl:min-h-0">
@@ -206,6 +256,79 @@ function GhostCard({ label, sandbox = false }: { readonly label: string; readonl
         Waiting
       </span>
     </div>
+  );
+}
+
+/** GitHub work orders start from a repository (and an issue) instead of a plan. */
+function RepositoryNode({ workOrder, selected, onSelect }: { readonly workOrder: WorkOrder; readonly selected: boolean; readonly onSelect: () => void }) {
+  const work = workOrder.github!;
+  return (
+    <button type="button" onClick={onSelect} aria-pressed={selected} className={cx(stationCardClass(selected), "group")}>
+      <span className="flex w-full min-w-0 items-center gap-2">
+        {work.repository.private ? <LockIcon size={16} className="shrink-0 text-fg-muted" /> : <RepoIcon size={16} className="shrink-0 text-fg-muted" />}
+        <span className="min-w-0 truncate font-semibold">{work.repository.fullName}</span>
+        <span className="ml-auto inline-flex shrink-0 items-center gap-1 pl-1 font-mono text-xs text-fg-muted">
+          <GitBranchIcon size={12} />
+          {work.repository.defaultBranch}@{work.baseSha.slice(0, 7)}
+        </span>
+      </span>
+      <span className="mt-1.5 flex w-full min-w-0 items-center gap-1.5 text-xs">
+        {work.issue ? (
+          <>
+            <IssueOpenedIcon size={16} className="shrink-0 text-fg-open" />
+            <span className="min-w-0 truncate">
+              <span className="text-fg-muted">#{work.issue.number}</span> {work.issue.title}
+            </span>
+          </>
+        ) : (
+          <>
+            <NoteIcon size={16} className="shrink-0 text-fg-muted" />
+            <span className="min-w-0 truncate text-fg-muted">{workOrder.brief.split("\n")[0]}</span>
+          </>
+        )}
+        {work.revisions.length > 1 ? <span className="Counter ml-auto shrink-0" title="Requests, follow-ups included">{work.revisions.length}</span> : null}
+      </span>
+    </button>
+  );
+}
+
+/** The product at the end of a GitHub work order's line: its pull request. */
+function PullRequestNode({ workOrder, releaseStatus }: { readonly workOrder: WorkOrder; readonly releaseStatus: Station["status"] }) {
+  const pull = workOrder.github?.pullRequest;
+  if (pull) {
+    const Glyph = pull.state === "merged" ? GitMergeIcon : pull.state === "closed" ? GitPullRequestClosedIcon : GitPullRequestIcon;
+    const tone = pull.state === "merged" ? "text-fg-done" : pull.state === "closed" ? "text-fg-closed" : "text-fg-open";
+    return (
+      <a
+        href={workOrderHref(workOrder.id, "deliverable")}
+        aria-label={`Open pull request #${pull.number}, ${pull.state}`}
+        className={cx(stationCardClass(false), "group text-fg hover:no-underline")}
+      >
+        <span className="flex w-full min-w-0 items-center gap-2">
+          <Glyph size={16} className={cx("shrink-0", tone)} />
+          <span className="min-w-0 truncate font-semibold group-hover:text-fg-accent group-hover:underline">{pull.title}</span>
+        </span>
+        <span className="mt-1.5 flex w-full items-center gap-1.5 text-xs">
+          <span className={cx("font-semibold capitalize", tone)}>{pull.state}</span>
+          <span className="text-fg-muted">#{pull.number}</span>
+          {pull.changedFiles !== undefined ? <span className="ml-auto pl-1 text-fg-muted tabular-nums">{pull.changedFiles} files</span> : null}
+        </span>
+      </a>
+    );
+  }
+  const answered = workOrder.github?.revisions.some((revision) => revision.answer) && releaseStatus === "skipped";
+  const failed = releaseStatus === "failed";
+  return (
+    <a href={answered ? workOrderHref(workOrder.id, "deliverable") : undefined} className={cx(STATIC_NODE, answered && "text-fg hover:no-underline")}>
+      <span className="flex items-center gap-2 text-fg-muted">
+        <GitPullRequestIcon size={16} className="shrink-0" />
+        <span className="font-semibold">Pull request</span>
+      </span>
+      <span className="mt-1.5 flex items-center gap-1.5 text-xs text-fg-muted">
+        {failed ? <XCircleFillIcon size={16} className="text-fg-danger" /> : answered ? <CheckCircleFillIcon size={16} className="text-fg-success" /> : <ClockIcon size={16} />}
+        {failed ? "Not opened" : answered ? "Answered, no changes" : releaseStatus === "skipped" ? "No changes" : "Waiting"}
+      </span>
+    </a>
   );
 }
 

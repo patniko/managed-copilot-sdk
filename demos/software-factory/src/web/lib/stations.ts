@@ -90,7 +90,7 @@ export const STATE_CLASS: Readonly<Record<WorkOrderState, string>> = {
 
 const RUNNING = { tone: "active", icon: DotFillIcon, spin: true } as const;
 
-export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "placement" | "acceptedWithFindings">): StatusMeta {
+export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "placement" | "acceptedWithFindings"> & { readonly role?: StationRole }): StatusMeta {
   switch (station.status) {
     case "waiting":
       return { label: "Waiting", tone: "neutral", icon: ClockIcon, spin: false };
@@ -108,7 +108,7 @@ export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "pl
           ? { label: "Accepted with findings", tone: "warning", icon: CheckCircleFillIcon, spin: false }
           : { label: "Approved", tone: "success", icon: CheckCircleFillIcon, spin: false };
       }
-      if (station.kind === "release") return { label: "Released", tone: "success", icon: CheckCircleFillIcon, spin: false };
+      if (station.kind === "release") return { label: station.role === "developer" ? "Pushed" : "Released", tone: "success", icon: CheckCircleFillIcon, spin: false };
       return { label: "Done", tone: "success", icon: CheckCircleFillIcon, spin: false };
     case "failed":
       return { label: "Failed", tone: "danger", icon: XCircleFillIcon, spin: false };
@@ -122,7 +122,7 @@ export function stationStatusMeta(station: Pick<Station, "status" | "kind" | "pl
 }
 
 /** The status in a word or two, for cards: "Starting", "Working", "Changes requested", "Approved". */
-export function stationShortLabel(station: Pick<Station, "status" | "kind" | "placement" | "acceptedWithFindings">): string {
+export function stationShortLabel(station: Pick<Station, "status" | "kind" | "placement" | "acceptedWithFindings"> & { readonly role?: StationRole }): string {
   if (station.status === "starting") return "Starting";
   if (station.status === "collecting") return "Collecting";
   if (station.status === "done" && station.kind === "review" && station.acceptedWithFindings) return "Accepted";
@@ -156,6 +156,7 @@ export const ROLE_LABELS: Readonly<Record<StationRole, string>> = {
   builder: "Builder",
   reviewer: "Reviewer",
   release: "Release",
+  developer: "Developer",
 };
 
 export function stationTaskId(station: Station): string | undefined {
@@ -194,7 +195,8 @@ export function taskRows(workOrder: WorkOrder): TaskRow[] {
     if (!taskId || rows.some((row) => row.id === taskId)) continue;
     rows.push({
       id: taskId,
-      title: taskId,
+      // GitHub work orders have one lane, the change itself.
+      title: workOrder.github ? workOrder.title : taskId,
       dependsOn: [],
       build: stationFor("build", taskId),
       review: stationFor("review", taskId),

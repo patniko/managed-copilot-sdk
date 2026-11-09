@@ -392,7 +392,8 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   Progress, resolved versions, and file digests are recorded in the gateway ledger (authoritative) and in root-only
   sandboxd state. Installs obey the session's network policy; an offline failure says so. Resume never replays
   setup: an interrupted or failed setup makes the sandbox `state_restore_failed`. System packages are built into a
-  derived image layer at environment preparation, never installed per session.
+  derived image layer at environment preparation, never installed per session. That layer is built `FROM` the
+  environment image's content tag, not its image ID, which BuildKit would resolve as a registry pull.
 - **Images.** The gateway builds the base image from `services/sandbox/image/Dockerfile` (content-hash tag
   `managed-copilot-sandbox:<hash>`, also tagged `ghcr.io/patniko/managed-copilot-sandbox:0.1.0` for customer `FROM`
   lines) with the operator's npm registry and pip index baked in as session defaults. Those URLs reach every
@@ -1112,6 +1113,21 @@ and quickstart snippet 14).
     app-orchestrated pipeline on the four station environments. On Azure (westus2, 2026-10-27), a factory run against
     the deployed gateway completed a work order with three Container Apps sandboxes, one builder reused for two fix
     rounds, and a 47-test release.
+  - *Software factory, GitHub work orders* (`source.kind: "github"`). Not on a coordinator: the factory drives one lane
+    itself. It checks out the repository without giving the sandbox a credential: it downloads the base commit's
+    tarball with its own GitHub token (the same account it connects with; `src/server/github.ts`), uploads it with
+    `managed.files().upload()`, and unpacks it with `managed.exec` into `/workspace/repo` as a git repository whose one
+    commit is tagged `factory-base`. The `developer` agent (`factory-repo`: isolated, medium, Chromium, ffmpeg, fonts,
+    and `playwright-core`; `customizations/repo` with the `pr-media` skill) reports through a `submit_change`
+    `defineTool`. The factory then reads the change through a temporary git index (the developer's index and commits
+    are untouched), re-runs the reported test command with `exec`, keeps `outputs/media/*` bytes in its own store, and
+    sends the diff to `pr-reviewer` on `factory-reviewer`. It pushes with GitHub's Git Data API (a blob per changed
+    file, checked against the snapshot's blob IDs; a tree on the base commit's tree; a commit whose parent is the last
+    one it pushed), refuses a branch that has commits it didn't make, uploads media as GitHub user attachments, and
+    opens the pull request; later revisions resume the same session and sandbox (a replacement sandbox gets the pushed
+    head unpacked over the base), push another commit, and comment on the pull request. Verified live locally
+    (2026-11-06): a private repository's issue went from request to a pull request with two screenshots, an inline MP4,
+    a re-run `npm test`, and a review round; a follow-up revision pushed a second commit to it.
   - *Dispatch* (`demos/dispatch`). A conversation is a session of the `dispatch` orchestrator (four worker
     environments: Python, Node, web research, writer), rediscovered from `sessions.list` after every connection. Its
     view is projected from the coordinator's own events (worker tool calls and the permission events above), so a

@@ -23,6 +23,8 @@ export interface FactoryConfig {
   /** Isolated sessions (sandboxes) the factory runs at once, across all classic work orders. */
   readonly maxSandboxes: number;
   readonly turnTimeoutMs: Readonly<Record<StationRole, number>>;
+  /** GitHub work orders: how long the factory's own re-run of the developer's test command may take. */
+  readonly checkTimeoutMs: number;
   readonly publicationTimeoutMs: number;
   /** How often to verify the platform is still reachable. */
   readonly healthIntervalMs: number;
@@ -62,6 +64,7 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
       ...(env.FACTORY_MODEL_REVIEWER ? { reviewer: env.FACTORY_MODEL_REVIEWER } : {}),
       ...(env.FACTORY_MODEL_RELEASE ? { release: env.FACTORY_MODEL_RELEASE } : {}),
       ...(env.FACTORY_MODEL_COORDINATOR ? { coordinator: env.FACTORY_MODEL_COORDINATOR } : {}),
+      ...(env.FACTORY_MODEL_DEVELOPER ? { developer: env.FACTORY_MODEL_DEVELOPER } : {}),
     },
     maxSandboxes: Number.isInteger(maxSandboxes) && maxSandboxes > 0 ? maxSandboxes : 4,
     turnTimeoutMs: {
@@ -71,7 +74,10 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
       release: minutes(env.FACTORY_RELEASE_TIMEOUT_MINUTES, 20),
       // An agent-led coordinator's turn covers the whole job: every build, review, and the release.
       coordinator: minutes(env.FACTORY_COORDINATE_TIMEOUT_MINUTES, 60),
+      // A change to a real repository: install, build, test, and capture screenshots or a recording.
+      developer: minutes(env.FACTORY_DEVELOP_TIMEOUT_MINUTES, 30),
     },
+    checkTimeoutMs: minutes(env.FACTORY_CHECK_TIMEOUT_MINUTES, 10),
     publicationTimeoutMs: 120_000,
     healthIntervalMs: 10_000,
   };

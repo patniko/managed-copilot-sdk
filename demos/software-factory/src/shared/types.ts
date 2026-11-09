@@ -13,7 +13,8 @@ export interface NetworkView {
   readonly allowedDomains: readonly string[];
 }
 
-export type StationRole = "planner" | "builder" | "reviewer" | "release" | "coordinator";
+/** `developer`: GitHub work orders, which change an existing repository in one `factory-repo` sandbox. */
+export type StationRole = "planner" | "builder" | "reviewer" | "release" | "coordinator" | "developer";
 
 export interface EnvironmentView {
   readonly role: StationRole;
@@ -58,9 +59,13 @@ export interface PlatformStatus {
     readonly artifacts: boolean;
     readonly files: boolean;
     readonly attach: boolean;
+    /** GitHub work orders: the `factory-repo` environment and sandbox commands (`exec`). */
+    readonly github: boolean;
   };
   /** Why agent-led work orders can't run here, when `features.agentLed` is false while classic ones can. */
   readonly agentLedHint?: string;
+  /** Why GitHub work orders can't run on this deployment, when `features.github` is false while classic ones can. */
+  readonly githubHint?: string;
   readonly checkedAt: string;
 }
 
@@ -267,9 +272,167 @@ export interface ReleaseSummary {
   readonly notes?: string;
 }
 
+/** `github`: a change to an existing repository that ends in a pull request (see `WorkOrder.github`). */
 export interface WorkOrderSource {
-  readonly kind: "brief" | "template";
+  readonly kind: "brief" | "template" | "github";
   readonly templateId?: string;
+}
+
+// ─── GitHub work orders ──────────────────────────────────────────────────────────────────────────────────────
+
+/** The factory's own GitHub sign-in (the same account it uses for Managed Copilot), used to browse and open PRs. */
+export interface GitHubStatus {
+  readonly available: boolean;
+  readonly login?: string;
+  readonly name?: string;
+  readonly avatarUrl?: string;
+  /** Why it isn't available, for the form. */
+  readonly message?: string;
+  readonly hint?: string;
+}
+
+export interface RepositorySummary {
+  readonly owner: string;
+  readonly name: string;
+  /** `owner/name`. */
+  readonly fullName: string;
+  readonly private: boolean;
+  readonly defaultBranch: string;
+  readonly htmlUrl: string;
+  readonly description?: string;
+  readonly language?: string;
+  readonly pushedAt?: string;
+  readonly archived?: boolean;
+  /** Whether the signed-in account can push branches (the factory needs it to open a pull request). */
+  readonly canPush: boolean;
+}
+
+export interface IssueLabel {
+  readonly name: string;
+  /** Hex without `#`. */
+  readonly color: string;
+}
+
+export interface IssueSummary {
+  readonly number: number;
+  readonly title: string;
+  readonly state: "open" | "closed";
+  readonly htmlUrl: string;
+  readonly labels: readonly IssueLabel[];
+  readonly author?: string;
+  readonly comments: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface IssueComment {
+  readonly author?: string;
+  readonly body: string;
+  readonly createdAt: string;
+}
+
+export interface IssueDetail extends IssueSummary {
+  readonly body: string;
+  /** The latest comments, oldest first. */
+  readonly recentComments: readonly IssueComment[];
+}
+
+/** A screenshot or recording the developer captured into `outputs/media/`. */
+export interface MediaItem {
+  readonly stationId: string;
+  /** Path relative to `/workspace/outputs`, e.g. `media/home.png`. */
+  readonly path: string;
+  readonly version: number;
+  readonly caption: string;
+  readonly kind: "image" | "video";
+  readonly contentType: string;
+  readonly size: number;
+}
+
+export interface ChangedFile {
+  readonly path: string;
+  readonly status: "added" | "modified" | "deleted" | "type_changed";
+  /** Absent for binary files. */
+  readonly additions?: number;
+  readonly deletions?: number;
+}
+
+/** The factory re-running the developer's test command in the sandbox after a change. */
+export interface ChangeCheck {
+  readonly command: string;
+  readonly passed: boolean;
+  readonly exitCode?: number;
+  readonly durationMs: number;
+  /** The end of the command's output. */
+  readonly output: string;
+  readonly at: string;
+}
+
+/** One request in a GitHub work order: the original (number 1), then each "request changes" after it. */
+export interface ChangeRevision {
+  readonly number: number;
+  readonly request: string;
+  readonly requestedAt: string;
+  readonly requestedBy?: string;
+  /** Build round this revision's request was sent in. */
+  readonly startRound?: number;
+  /** From the developer's `submit_change`. */
+  readonly title?: string;
+  /** What changed and why (markdown); the pull request description or the revision's comment. */
+  readonly summary?: string;
+  /** An answer, when the request asked a question rather than for a change. */
+  readonly answer?: string;
+  readonly testCommand?: string;
+  /** Every change since the base commit, as of this revision. */
+  readonly files?: readonly ChangedFile[];
+  readonly check?: ChangeCheck;
+  readonly media?: readonly MediaItem[];
+  /** What the developer listed in `submit_change`, before the factory matched it to published files. */
+  readonly requestedMedia?: readonly { readonly path: string; readonly caption: string }[];
+  /** The build round whose change the review accepted (or that had nothing to review). */
+  readonly acceptedRound?: number;
+  /** The commit the factory pushed for this revision. */
+  readonly commitSha?: string;
+  /** `commitSha` is on the branch on GitHub. */
+  readonly pushed?: boolean;
+  /** Revisions after the first: the pull request comment describing them. */
+  readonly commentUrl?: string;
+  readonly outcome?: "pull_request" | "pushed" | "no_changes";
+  readonly completedAt?: string;
+}
+
+export interface PullRequestView {
+  readonly number: number;
+  readonly htmlUrl: string;
+  readonly title: string;
+  readonly state: "open" | "closed" | "merged";
+  readonly draft: boolean;
+  readonly headSha: string;
+  readonly headRef: string;
+  readonly baseRef: string;
+  /** GitHub's merge check: `null` while GitHub is still computing it. */
+  readonly mergeable?: boolean | null;
+  readonly mergeableState?: string;
+  readonly commits?: number;
+  readonly additions?: number;
+  readonly deletions?: number;
+  readonly changedFiles?: number;
+  readonly updatedAt?: string;
+  readonly mergedAt?: string;
+  readonly mergedBy?: string;
+}
+
+export interface GitHubWork {
+  readonly repository: RepositorySummary & { readonly id: number };
+  readonly issue?: IssueDetail;
+  /** The default branch's head when the work order was created: the commit every change builds on. */
+  readonly baseSha: string;
+  /** The branch the factory pushes, e.g. `factory/wo-0012-fix-login`. */
+  readonly branch: string;
+  readonly revisions: readonly ChangeRevision[];
+  readonly pullRequest?: PullRequestView;
+  /** Media already uploaded to GitHub, keyed `<stationId>:<path>@<version>`, so a retry doesn't upload twice. */
+  readonly uploads?: Readonly<Record<string, string>>;
 }
 
 export interface WorkOrderSummary {
@@ -287,9 +450,11 @@ export interface WorkOrderSummary {
   readonly taskCount: number;
   readonly tests?: TestSummary;
   readonly error?: FactoryError;
+  /** GitHub work orders: the repository, issue, and pull request, for lists. */
+  readonly github?: { readonly repository: string; readonly issue?: number; readonly pullRequest?: number; readonly pullRequestState?: PullRequestView["state"] };
 }
 
-export interface WorkOrder extends WorkOrderSummary {
+export interface WorkOrder extends Omit<WorkOrderSummary, "github"> {
   readonly brief: string;
   readonly source: WorkOrderSource;
   readonly maxReviewRounds: number;
@@ -299,6 +464,8 @@ export interface WorkOrder extends WorkOrderSummary {
   readonly owner?: { readonly login: string; readonly avatarUrl?: string };
   /** Agent-led: sandboxes (workers) the coordinator created, replacements included. */
   readonly workersStarted?: number;
+  /** GitHub work orders (`source.kind === "github"`). */
+  readonly github?: GitHubWork;
 }
 
 export interface WorkOrderTemplate {
@@ -319,8 +486,28 @@ export interface CreateWorkOrderRequest {
   readonly templateId?: string;
   /** 1-3; defaults to 2. */
   readonly maxReviewRounds?: number;
-  /** Defaults to `agent`. */
+  /** Defaults to `agent`. Ignored for GitHub work orders, which the factory drives itself. */
   readonly mode?: WorkOrderMode;
+  /**
+   * A change to an existing repository instead of a new project: the factory checks out its default branch, makes the
+   * change in a sandbox, and opens a pull request. `title` may be empty (it comes from the issue or the request).
+   */
+  readonly github?: {
+    /** `owner/name`. */
+    readonly repository: string;
+    readonly issue?: number;
+  };
+}
+
+/** `POST /api/work-orders/:id/revisions`: more changes to a GitHub work order's pull request. */
+export interface CreateRevisionRequest {
+  readonly request: string;
+}
+
+/** `POST /api/work-orders/:id/merge`. */
+export interface MergeRequest {
+  /** Defaults to `squash`. */
+  readonly method?: "merge" | "squash" | "rebase";
 }
 
 // ─── Activity ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -418,6 +605,8 @@ export interface ArtifactFileView {
   readonly versions: readonly ArtifactVersionView[];
   /** The newest version's `viewable`. */
   readonly viewable: boolean;
+  /** An image or recording the factory kept: preview it from `/media`. */
+  readonly media?: boolean;
 }
 
 export interface ArtifactIndex {
@@ -480,6 +669,8 @@ export interface FactoryState {
   readonly attachCommand: string;
   /** Whether the server can launch a terminal window on this machine. */
   readonly canLaunchTerminal: boolean;
+  /** The GitHub account the factory browses repositories and opens pull requests with. */
+  readonly github: GitHubStatus;
 }
 
 export interface AttachResponse {
@@ -514,6 +705,28 @@ export const TERMINAL_STATION_STATUSES: readonly StationStatus[] = ["done", "fai
 /** A work order's mode; records from before agent-led mode existed are classic. */
 export function workOrderMode(workOrder: Pick<WorkOrderSummary, "mode">): WorkOrderMode {
   return workOrder.mode ?? "classic";
+}
+
+/** Whether a work order changes an existing GitHub repository (and ends in a pull request) rather than building a project. */
+export function isGitHubWorkOrder(workOrder: { readonly source?: WorkOrderSource; readonly github?: unknown }): boolean {
+  return workOrder.source?.kind === "github" || workOrder.github !== undefined;
+}
+
+/** Media types the factory keeps, serves, and attaches to pull requests (no SVG: it can carry script). */
+export const MEDIA_TYPES: Readonly<Record<string, { readonly contentType: string; readonly kind: "image" | "video" }>> = {
+  png: { contentType: "image/png", kind: "image" },
+  jpg: { contentType: "image/jpeg", kind: "image" },
+  jpeg: { contentType: "image/jpeg", kind: "image" },
+  gif: { contentType: "image/gif", kind: "image" },
+  webp: { contentType: "image/webp", kind: "image" },
+  mp4: { contentType: "video/mp4", kind: "video" },
+  webm: { contentType: "video/webm", kind: "video" },
+  mov: { contentType: "video/quicktime", kind: "video" },
+};
+
+export function mediaTypeOf(path: string): { readonly contentType: string; readonly kind: "image" | "video" } | undefined {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  return Object.hasOwn(MEDIA_TYPES, ext) ? MEDIA_TYPES[ext] : undefined;
 }
 
 export function formatWorkOrderNumber(n: number): string {

@@ -97,7 +97,7 @@ describe("activity mapper", () => {
 describe("model selection", () => {
   it("picks available models and keeps the reviewer on a different family than the builder", () => {
     const available = ["claude-haiku-5.5", "claude-sonnet-5", "gpt-5.6-terra"].map((id) => ({ id, policy: { state: "enabled" } }));
-    expect(chooseModels(available)).toEqual({ planner: "claude-haiku-5.5", builder: "claude-sonnet-5", reviewer: "gpt-5.6-terra", release: "claude-sonnet-5", coordinator: "claude-sonnet-5" });
+    expect(chooseModels(available)).toEqual({ planner: "claude-haiku-5.5", builder: "claude-sonnet-5", reviewer: "gpt-5.6-terra", release: "claude-sonnet-5", coordinator: "claude-sonnet-5", developer: "claude-sonnet-5" });
     expect(chooseModels(available, { reviewer: "claude-sonnet-5" }).reviewer).toBe("claude-sonnet-5");
     expect(chooseModels([{ id: "gpt-5.6-terra", policy: { state: "disabled" } }, { id: "gpt-6-luna" }]).reviewer).toBe("gpt-6-luna");
     expect(chooseModels(undefined).builder).toBe("claude-sonnet-5");
