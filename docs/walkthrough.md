@@ -46,6 +46,7 @@ builds the sandbox image, which takes a few minutes.
 | Resource | Local URL | Pattern |
 | --- | --- | --- |
 | Gateway (`copilot`) | http://localhost:7400 | |
+| Hack the Harness | http://localhost:7415 | Shared by default; its README steps through five |
 | Pattern Race | http://localhost:7420 | All six |
 | Research Swarm | http://localhost:7425 | Delegate |
 | Data Desk | http://localhost:7430 | Promotable |

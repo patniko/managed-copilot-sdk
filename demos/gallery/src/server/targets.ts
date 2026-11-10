@@ -23,7 +23,7 @@ export function cloudUrls(gatewayUrl: string, options: { readonly console?: bool
   for (const app of APPS) {
     if (app === CONSOLE) {
       if (options.console !== false) apps[app.id] = consoleRoute("cloud");
-    } else if (domain) apps[app.id] = `${gateway.protocol}//${app.app}.${domain}`;
+    } else if (domain && !app.localOnly) apps[app.id] = `${gateway.protocol}//${app.app}.${domain}`;
   }
   return { gatewayUrl: gateway.origin, apps };
 }

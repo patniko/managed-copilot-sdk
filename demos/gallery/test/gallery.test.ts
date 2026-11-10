@@ -65,8 +65,9 @@ describe("links", () => {
       assistant: "https://assistant.d.io",
       "front-desk": "https://front-desk.d.io",
     });
-    expect(Object.keys(apps).sort()).toEqual(appIds(withoutConsole));
-    for (const app of withoutConsole) expect(apps[app.id]).toBe(`https://${app.app}.d.io`);
+    const deployed = withoutConsole.filter((app) => !app.localOnly);
+    expect(Object.keys(apps).sort()).toEqual(appIds(deployed));
+    for (const app of deployed) expect(apps[app.id]).toBe(`https://${app.app}.d.io`);
   });
 
   it("offers only the console for a gateway on a custom host", () => {
@@ -151,7 +152,7 @@ describe("public apps", () => {
   };
 
   it("marks Public exactly the apps the root AppHost publishes with public: true", () => {
-    for (const app of APPS.filter((entry) => entry.id !== "console")) {
+    for (const app of APPS.filter((entry) => entry.id !== "console" && !entry.localOnly)) {
       const folder = /^demos\/([^/]+)\//.exec(app.readme)?.[1];
       const call = folder ? publishCall(folder) : undefined;
       expect(call, `${app.id} is published in apphost.mts`).toBeDefined();
@@ -284,7 +285,7 @@ describe("gallery server", () => {
       expect(state.hosted).toBe(true);
       expect(state.local).toBeUndefined();
       expect(state.cloud.gatewayUrl).toBe("https://copilot.d.invalid");
-      expect(Object.keys(state.cloud.links).sort()).toEqual(APPS.filter((app) => app.id !== "console").map((app) => app.id).sort());
+      expect(Object.keys(state.cloud.links).sort()).toEqual(APPS.filter((app) => app.id !== "console" && !app.localOnly).map((app) => app.id).sort());
     });
 
     it("never mints a console sign-in link, and says how to open it", async () => {

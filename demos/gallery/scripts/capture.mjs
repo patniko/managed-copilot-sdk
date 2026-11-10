@@ -116,6 +116,18 @@ const APPS = [
     },
   },
   {
+    id: "hack-the-harness",
+    url: local(7415),
+    async prepare(page) {
+      // Sign in as a demo user and walk into the 3D office.
+      await page.locator('input[name="username"]').fill("steve");
+      await page.locator('input[name="password"]').fill("demo");
+      await Promise.all([page.waitForURL(/:\d+\/(#.*)?$/), page.getByRole("button", { name: "Sign in" }).click()]);
+      await page.getByRole("button", { name: "Office mode" }).click();
+      await page.locator("canvas").first().waitFor({ timeout: 30_000 });
+    },
+  },
+  {
     id: "console",
     // A one-time sign-in link from `managed-copilot console --json`.
     url: () => {
