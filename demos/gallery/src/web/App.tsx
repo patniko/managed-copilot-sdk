@@ -403,7 +403,7 @@ function AppCard({ app, patterns, state }: { readonly app: AppEntry; readonly pa
   const cloud = state?.cloud.links[app.id];
   const best = [local, cloud].find((link) => link?.health === "online");
   // Without a deployment, the header's Azure control says why; the cards leave Azure out.
-  const noCloud = state !== undefined && !state.cloud.searching && !state.cloud.gatewayUrl;
+  const noCloud = app.localOnly === true || (state !== undefined && !state.cloud.searching && !state.cloud.gatewayUrl);
   return (
     <article className="app-card Box flex flex-col overflow-hidden">
       <Shot app={app} href={best?.url} />
@@ -668,7 +668,7 @@ export function Gallery(props: GalleryProps) {
             </h2>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {apps.map((app) => (
+            {apps.filter((app) => !(state?.hosted && app.localOnly)).map((app) => (
               <AppCard key={app.id} app={app} patterns={patterns} state={state} />
             ))}
           </div>

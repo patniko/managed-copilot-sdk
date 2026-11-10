@@ -9,6 +9,7 @@ import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swa
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 import { DATA_DESK_DEFAULT_PORT, dataDesk } from "./demos/data-desk/apphost.mjs";
 import { HELP_DESK_PORT, helpDesk } from "./demos/help-desk/apphost.mjs";
+import { HACK_THE_HARNESS_PORT, hackTheHarness } from "./demos/hack-the-harness/apphost.mjs";
 import { INCIDENT_DEFAULT_PORT, incidentCommander } from "./demos/incident-commander/apphost.mjs";
 import { REPO_DOCTOR_PORT, repoDoctor } from "./demos/repo-doctor/apphost.mjs";
 
@@ -34,6 +35,7 @@ const ports = {
   patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
   dataDesk: DATA_DESK_DEFAULT_PORT + offset,
   helpDesk: HELP_DESK_PORT + offset,
+  hackTheHarness: HACK_THE_HARNESS_PORT + offset,
   incidentCommander: INCIDENT_DEFAULT_PORT + offset,
   repoDoctor: REPO_DOCTOR_PORT + offset,
 };
@@ -73,6 +75,7 @@ const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 const swarm = researchSwarm({ port: ports.researchSwarm });
 const helpDeskDemo = helpDesk({ port: ports.helpDesk });
+const hackTheHarnessDemo = hackTheHarness({ port: ports.hackTheHarness });
 const incidents = incidentCommander({ port: ports.incidentCommander, webhookSecret: await generatedSecret("incident-commander-webhook-secret") });
 const repoDoctorDemo = repoDoctor({ port: ports.repoDoctor });
 const chatEnvironment = {
@@ -110,6 +113,7 @@ const copilot = await addManagedCopilot(builder, "copilot", {
     ...swarm.environments,
     ...dataDeskDemo.environments,
     ...helpDeskDemo.environments,
+    ...(publishing ? {} : hackTheHarnessDemo.environments),
     ...incidents.environments,
     ...repoDoctorDemo.environments,
   },
@@ -146,7 +150,11 @@ type DemoDeployment = { dockerfile: string; publicUrlEnv?: string; allowedHostsE
 
 /** A demo's built Node server on its fixed port, connected to the platform (a container app when publishing). */
 function addDemo(demo: Demo, deployment: DemoDeployment) {
-  if (publishing) return publishApp(builder, copilot, { ...demo, ...deployment });
+  return publishing ? publishApp(builder, copilot, { ...demo, ...deployment }) : runDemo(demo, deployment.app);
+}
+
+/** A demo's built Node server, run locally on its fixed port and connected to the platform. */
+function runDemo(demo: Demo, appName?: string) {
   let app = builder
     .addNodeApp(demo.name, demo.workingDirectory, demo.script)
     .withPnpm({ install: false })
@@ -154,7 +162,7 @@ function addDemo(demo: Demo, deployment: DemoDeployment) {
     .withHttpHealthCheck({ path: demo.healthPath })
     .withEnvironment("MANAGED_COPILOT_URL", copilot.url)
     .waitFor(copilot.gateway);
-  if (deployment.app) app = app.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(deployment.app));
+  if (appName) app = app.withEnvironment("MANAGED_COPILOT_APP_KEY", copilot.appKey(appName));
   for (const [name, value] of Object.entries(demo.env ?? {})) app = app.withEnvironment(name, value);
   return app;
 }
@@ -241,6 +249,10 @@ if (frontDeskTotalDailyLimit) await frontDeskApp.withEnvironment("FRONT_DESK_TOT
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
 // store's tools bound to that customer's orders.
 await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" });
+
+// Hack the Harness: a staff assistant, with a 3D office, that demonstrates five agent deployment architectures. Local
+// only: it accepts any username and password.
+if (!publishing) await runDemo(hackTheHarnessDemo.app);
 
 // Incident Commander: an alert opens an incident; a mixed coordinator triages in its own sandbox, hands the repro and
 // the fix to workers, and waits on the platform for a person to approve the deploy. Alerts carry the generated bearer

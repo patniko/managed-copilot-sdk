@@ -19,6 +19,8 @@ export interface AppEntry {
    * signs in its own users. The others open only from `Parameters:app-allowed-ips`.
    */
   readonly public?: boolean;
+  /** Run by `aspire run` only, never published: no Azure link, and a deployed gallery leaves it out. */
+  readonly localOnly?: boolean;
 }
 
 export interface Walkthrough {
@@ -145,6 +147,19 @@ export const APPS: readonly AppEntry[] = [
     port: 7440,
     healthPath: "/api/health",
     readme: "demos/help-desk/README.md",
+  },
+  {
+    id: "hack-the-harness",
+    title: "Hack the Harness",
+    tagline: "One staff assistant, five agent deployment architectures",
+    description:
+      "A chat app, with a 3D office of colleagues to talk to. Its README steps the same agent through shared, isolated, promotable, direct, and worker architectures, with the small code change for each.",
+    tryIt: "Sign in with any name and switch to the 3D office.",
+    app: "hack-the-harness",
+    port: 7415,
+    healthPath: "/api/health",
+    readme: "demos/hack-the-harness/README.md",
+    localOnly: true,
   },
   {
     id: "incident-commander",
@@ -304,6 +319,7 @@ export const PATTERNS: readonly Pattern[] = [
       { app: "software-factory", where: "Agent-led mode" },
       { app: "assistant", where: "its sandboxes" },
       { app: "research-swarm", where: "its researchers" },
+      { app: "hack-the-harness", where: "its Workers step" },
     ],
   },
   {

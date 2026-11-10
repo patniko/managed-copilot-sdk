@@ -1,0 +1,2 @@
+Models by Kenney (www.kenney.nl): Furniture Kit and Mini Characters. License: Creative Commons Zero (CC0), http://creativecommons.org/publicdomain/zero/1.0/
+The character models have their texture (colormap.png) embedded.

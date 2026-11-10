@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noUncheckedIndexedAccess": false,
+    "allowSyntheticDefaultImports": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["src/app/web-ui/*"] }
+  },
+  "include": ["src/app/web-ui"]
+}

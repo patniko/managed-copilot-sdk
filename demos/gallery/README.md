@@ -35,6 +35,8 @@ It opens http://localhost:7460 in your browser.
   - Green: it answered. Amber: **IP-restricted**: the deployed app refused this network, because its ingress allows
     only `Parameters:app-allowed-ips` ([deploying to Azure](../../docs/deployment.md)). The button still opens it, for
     when you're on an allowed network. Grey: offline. Without an Azure deployment, the cards leave the Azure button out.
+  - A local-only app (Hack the Harness, which signs people in with fixed demo passwords) has no Azure button, and a
+    deployed gallery leaves its card out.
   - A **Public** label marks an app the root AppHost publishes with `publishApp({ public: true })`: it signs in its own
     users, so anyone can open its deployed copy, and the allowlist doesn't apply to it.
   - The operator console buttons sign you in with your GitHub sign-in, like `npx managed-copilot console`: the gallery
@@ -50,7 +52,7 @@ The page checks every link every 15 seconds. When the local platform isn't runni
 
 ## Where the links come from
 
-- **Local**: the AppHost's fixed ports (the gateway on 7400, each app on the port its catalog entry names, 7420 to
+- **Local**: the AppHost's fixed ports (the gateway on 7400, each app on the port its catalog entry names, 7415 to
   7490), shifted by `MANAGED_COPILOT_PORT_OFFSET` like `aspire run`. Start the platform with `aspire run`; the gallery
   doesn't need it to start.
 - **Azure**, the first of:
