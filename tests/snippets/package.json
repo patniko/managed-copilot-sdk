@@ -11,7 +11,7 @@
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@github/copilot-sdk": "1.0.26",
+    "@github/copilot-sdk": "1.0.31",
     "@managed-copilot/protocol": "workspace:*",
     "@managed-copilot/sdk": "workspace:*",
     "ws": "^8.22.0",

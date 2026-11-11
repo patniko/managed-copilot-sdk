@@ -4,6 +4,7 @@ import { SIMULATION_SIZES } from "../../shared/types.js";
 import { chooseSize, endSimulation, simulate, useStore } from "../lib/store.js";
 import { useDismiss } from "../lib/useDismiss.js";
 import { Issues } from "./Issues.js";
+import { Knowledge } from "./Knowledge.js";
 import { Stats } from "./Stats.js";
 import { GhostTile, Tile } from "./Tile.js";
 import { ConfirmDialog } from "./ui/ConfirmDialog.js";
@@ -50,6 +51,7 @@ export function Wall() {
               })}
         </section>
       )}
+      <Knowledge />
     </main>
   );
 }

@@ -1,10 +1,10 @@
-import { ArrowLeftIcon, BugIcon, CheckIcon, ContainerIcon, CopilotIcon, CpuIcon, DotFillIcon, LockIcon, PaperAirplaneIcon, PlugIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { ArrowLeftIcon, BugIcon, CheckIcon, ContainerIcon, CopilotIcon, CpuIcon, DotFillIcon, LightBulbIcon, LockIcon, PaperAirplaneIcon, PlugIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
 import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { BUG_AREA_INFO, type BugReport, type CustomerCard, type Ticket } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { customerLine, inlineMarkdown, money, operatorOutcome, plural, premium, toolArgs } from "../lib/format.js";
 import { wallHref } from "../lib/router.js";
-import { answer, sendAsCustomer, useStore } from "../lib/store.js";
+import { answer, decide, sendAsCustomer, useStore } from "../lib/store.js";
 import { IssueAction } from "./Issues.js";
 import { CustomerAvatar, StatusLabel, TONE_TEXT } from "./ui/Status.js";
 
@@ -209,6 +209,8 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
 
       {ticket.approval ? <Approval customerId={customer.id} ticket={ticket} /> : null}
 
+      {ticket.memory ? <MemoryProposalBox customerId={customer.id} ticket={ticket} /> : null}
+
       {ticket.bug ? <ReportedIssue bug={ticket.bug} /> : null}
 
       <div className="flex min-w-0 items-center gap-2 text-sm">
@@ -240,6 +242,8 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
                     <ShieldLockIcon size={16} className="shrink-0 text-fg-danger" />
                   ) : item.name === "report_bug" ? (
                     <BugIcon size={16} className="shrink-0 text-fg-done" />
+                  ) : item.name === "store_memory" ? (
+                    <LightBulbIcon size={16} className="shrink-0 text-fg-attention" />
                   ) : (
                     <PlugIcon size={16} className="shrink-0 text-fg-muted" />
                   )}
@@ -318,6 +322,35 @@ function Approval({ customerId, ticket }: { readonly customerId: string; readonl
         </div>
       </div>
     </div>
+  );
+}
+
+/** A fact the agent proposed for the team knowledge base: every later conversation is told it once it's added. */
+function MemoryProposalBox({ customerId, ticket }: { readonly customerId: string; readonly ticket: Ticket }) {
+  const memory = ticket.memory!;
+  const busy = useStore((state) => Boolean(state.answering[memory.id]));
+  return (
+    <section aria-label="Proposed team knowledge" className="Box Box--attention animate-fade-in">
+      <div className="flex flex-wrap items-start gap-3 px-4 py-3">
+        <LightBulbIcon size={20} className="mt-0.5 shrink-0 text-fg-attention" />
+        <div className="min-w-0 flex-1 basis-60">
+          <div className="text-xs text-fg-muted">Proposed for the team knowledge base</div>
+          <div className="font-semibold">{memory.subject}</div>
+          <p className="mt-1 text-sm">{memory.fact}</p>
+          {memory.citations ? <p className="mt-1 text-xs text-fg-muted">Source: {memory.citations}</p> : null}
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button type="button" className="btn" disabled={busy} onClick={() => void decide(memory.id, false)}>
+            <XIcon size={16} />
+            Don't add
+          </button>
+          <button type="button" className="btn" disabled={busy} onClick={() => void decide(memory.id, true)}>
+            <CheckIcon size={16} className="text-fg-success!" />
+            Add to knowledge
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 

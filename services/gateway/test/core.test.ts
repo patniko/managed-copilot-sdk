@@ -263,6 +263,21 @@ describe("shared admission", () => {
     expect(ORCHESTRATOR_ENVIRONMENT_CONTEXT).not.toContain("Worker environments");
   });
 
+  it("allows memory in shared placement only when the app stores it", () => {
+    // The runtime's built-in memory backends are state across the shared runtime's sessions.
+    expect(() => admitSession({ sessionId: "s1", memory: { enabled: true } }, context(), "create")).toThrowError(/must be stored by your app/);
+    expect(admitSession({ sessionId: "s1" }, context(), "create").params["memory"]).toEqual({ enabled: false });
+    expect(admitSession({ sessionId: "s1", memory: { enabled: false }, hasMemoryStore: true }, context(), "create").params["memory"]).toEqual({ enabled: false });
+
+    const appMemory = admitSession({ sessionId: "s1", memory: { enabled: true, mode: "system-prompt" }, hasMemoryStore: true, availableTools: ["custom:*", "builtin:store_memory"] }, context(), "create");
+    expect(appMemory.params).toMatchObject({ memory: { enabled: true, mode: "system-prompt" }, hasMemoryStore: true, availableTools: ["custom:*", "builtin:store_memory"] });
+    // The default tool set includes store_memory once the app stores memories, and never without.
+    expect(admitSession({ sessionId: "s1", memory: { enabled: true }, hasMemoryStore: true }, context(), "create").params["availableTools"]).toContain("builtin:store_memory");
+    expect(admitSession({ sessionId: "s1", availableTools: ["builtin:store_memory"] }, context(), "create").params["availableTools"]).toEqual([]);
+    expect(admitOptionsUpdate({ availableTools: ["builtin:store_memory"] }, context())).toEqual({ availableTools: [] });
+    expect(admitOptionsUpdate({ availableTools: ["builtin:store_memory"] }, { ...context(), appMemory: true })).toEqual({ availableTools: ["builtin:store_memory"] });
+  });
+
   it("allows workload capabilities in sandbox placement but keeps credentials and billing platform-owned", () => {
     const admitted = admitSession(
       { sessionId: "s2", mcpServers: { git: { command: "git-mcp" } }, enableFileHooks: true, workingDirectory: "repo", gitHubToken: "ghp_x" },

@@ -174,6 +174,19 @@ function buildRouter(ctx: ApiContext): Router {
   });
   // Sends a software issue to Software Factory as a work order.
   router.add("POST", "/api/issues/:area/route", async (req, res, params) => sendJson(res, 201, await desk.routeIssue(params.area!, appUrl(req))));
+  router.add("GET", "/api/knowledge", (_req, res) => sendJson(res, 200, desk.knowledge.list()));
+  router.add("GET", "/api/knowledge/proposals", (_req, res) => sendJson(res, 200, desk.knowledge.proposals()));
+  // Adds a proposed fact to the team knowledge base ({ approve: true }) or declines it.
+  router.add("POST", "/api/knowledge/proposals/:id", async (req, res, params) => {
+    const body = await readJson<Partial<ApprovalAnswer>>(req);
+    if (typeof body.approve !== "boolean") throw new HelpDeskError("invalid_request", "Pass approve: true or false.");
+    desk.decide(params.id!, body.approve);
+    res.writeHead(204).end();
+  });
+  router.add("DELETE", "/api/knowledge/:id", (_req, res, params) => {
+    desk.forget(params.id!);
+    res.writeHead(204).end();
+  });
   return router;
 }
 

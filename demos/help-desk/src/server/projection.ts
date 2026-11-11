@@ -149,7 +149,10 @@ export class Transcript {
         if (!id || data["parentToolCallId"]) return false;
         const content = text(data["content"])?.trim() ?? "";
         const existing = this.#messages.get(id);
-        if (!content) {
+        // Proposing a fact is internal to the team, so the text the agent writes alongside a store_memory call ("…and
+        // I'll note that for the team") stays out of the customer's conversation; the agent replies after its tools.
+        const proposes = Array.isArray(data["toolRequests"]) && data["toolRequests"].some((request) => record(request)["name"] === "store_memory");
+        if (!content || proposes) {
           // A message that only calls tools: drop the placeholder its deltas may have made.
           if (existing) this.#remove(existing);
           return Boolean(existing);
@@ -170,9 +173,15 @@ export class Transcript {
       case "permission.requested": {
         const request = record(data["permissionRequest"]);
         const id = text(request["toolCallId"]);
-        const name = text(request["toolName"]);
-        if (request["kind"] !== "custom-tool" || !id || !name) return false;
-        const item = this.#tools.get(id) ?? this.#tool(id, name, record(request["args"]), at);
+        // A memory the agent proposed (`store_memory`): Help Desk grants it at once and keeps it for the team to decide
+        // later, so the call shows as running, never waiting for the operator.
+        const memory = request["kind"] === "memory";
+        const name = memory ? "store_memory" : text(request["toolName"]);
+        if ((request["kind"] !== "custom-tool" && !memory) || !id || !name) return false;
+        const args = memory ? { subject: request["subject"], fact: request["fact"], citations: request["citations"] } : record(request["args"]);
+        const known = this.#tools.get(id);
+        const item = known ?? this.#tool(id, name, args, at);
+        if (memory) return !known;
         if (item.status !== "running") return false;
         item.status = "asking";
         return true;

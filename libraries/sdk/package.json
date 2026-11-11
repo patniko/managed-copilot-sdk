@@ -27,14 +27,14 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "peerDependencies": {
-    "@github/copilot-sdk": "^1.0.26"
+    "@github/copilot-sdk": "^1.0.31"
   },
   "dependencies": {
     "@managed-copilot/protocol": "workspace:*",
     "ws": "^8.22.0"
   },
   "devDependencies": {
-    "@github/copilot-sdk": "1.0.26",
+    "@github/copilot-sdk": "1.0.31",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
     "typescript": "^5.9.3",

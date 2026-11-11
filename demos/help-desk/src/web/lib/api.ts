@@ -46,4 +46,6 @@ export const api = {
   send: (customerId: string, text: string) => json<undefined>("POST", `/api/tickets/${enc(customerId)}/messages`, { text }),
   answer: (customerId: string, approvalId: string, approve: boolean) => json<undefined>("POST", `/api/tickets/${enc(customerId)}/approvals/${enc(approvalId)}`, { approve }),
   routeIssue: (area: BugArea) => json<SoftwareIssue>("POST", `/api/issues/${enc(area)}/route`),
+  forget: (id: string) => json<undefined>("DELETE", `/api/knowledge/${enc(id)}`),
+  decide: (id: string, approve: boolean) => json<undefined>("POST", `/api/knowledge/proposals/${enc(id)}`, { approve }),
 };

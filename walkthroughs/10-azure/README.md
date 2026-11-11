@@ -45,7 +45,7 @@ Signed in     @your-login
 Background    on since 2 days ago
 Environments  chat (shared, network: learn.microsoft.com), coder (isolated, medium), helper (promotable, small, -> coder), …
 Capabilities  actions, artifacts, attach.cli, background, events, files, isolated, network.policy, promotion, schedules, shared, vaults, web_fetch, webhooks
-Runtime       Copilot SDK 1.0.26, runtime 1.0.103
+Runtime       Copilot SDK 1.0.31, runtime 1.0.109
 ```
 
 ## 3. Run the samples

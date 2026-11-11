@@ -53,7 +53,7 @@ export function deploymentInfo(app: GatewayApp, environments: Environments, runt
     environments: offered,
     ...(deployment.inline && !throughApp ? { inline: deployment.inline } : {}),
     capabilities: [...capabilities].sort(),
-    sdk: { copilotSdk: "1.0.26", copilotRuntime: runtime?.current()?.version ?? "1.0.103" },
+    sdk: { copilotSdk: "1.0.31", copilotRuntime: runtime?.current()?.version ?? "1.0.109" },
   };
 }
 

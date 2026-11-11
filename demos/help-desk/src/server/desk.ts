@@ -3,6 +3,9 @@
 // latest simulation from the platform, rebuilds each conversation from its history, and deletes older leftovers.
 // Problems with the store's website the agents report are grouped into software issues, which the operator sends to
 // Software Factory; each work order's origin carries the simulation and area, so a restart finds them again.
+// Facts the agents propose wait in the team knowledge base until the operator adds or declines them, outside the agents'
+// turns; added facts outlive simulations and are part of every later session's instructions.
+import type { StoredMemory } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import {
   SIMULATION_SIZES,
@@ -10,6 +13,8 @@ import {
   type Counters,
   type DeskInfo,
   type HelpDeskState,
+  type KnowledgeEntry,
+  type MemoryProposal,
   type RoutedWorkOrder,
   type RunInfo,
   type ServerEvent,
@@ -20,6 +25,7 @@ import {
 import type { HelpDeskConfig } from "./config.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { FACTORY_NOT_CONNECTED, readProject, SoftwareFactory, workOrderName, workOrderUrl, type FactoryClient, type WorkOrderSummary } from "./factory.js";
+import { KnowledgeBase } from "./knowledge.js";
 import { groupIssues, isBugArea, issueKey, issueWorkOrder, type Reported, type ReportedConversation } from "./issues.js";
 import { log } from "./log.js";
 import type { DeskPlatform } from "./platform.js";
@@ -80,6 +86,7 @@ function areaOf(summary: WorkOrderSummary, runId: string): BugArea | undefined {
 export class HelpDesk implements TicketHost {
   readonly platform: DeskPlatform;
   readonly shop = new Shop();
+  readonly knowledge: KnowledgeBase;
   readonly #config: HelpDeskConfig;
   readonly #publish: (event: ServerEvent) => void;
   readonly #factory: FactoryClient;
@@ -117,6 +124,7 @@ export class HelpDesk implements TicketHost {
     this.#config = config;
     this.#publish = publish;
     this.#factory = factory;
+    this.knowledge = new KnowledgeBase(config.dataDir);
   }
 
   start(): void {
@@ -175,6 +183,8 @@ export class HelpDesk implements TicketHost {
       tickets: this.#views(),
       issues: this.issues(),
       counters: this.#counters,
+      knowledge: this.knowledge.list(),
+      proposals: this.knowledge.proposals(),
     };
   }
 
@@ -185,6 +195,7 @@ export class HelpDesk implements TicketHost {
       { type: "platform", platform: this.platform.status, desk: this.desk() },
       { type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues: this.issues() },
       { type: "counters", counters: this.#counters },
+      this.#knowledgeEvent(),
     ];
   }
 
@@ -305,8 +316,38 @@ export class HelpDesk implements TicketHost {
     await this.#require(customerId).send(message);
   }
 
+  /** The operator's answer to a refund, a cancellation, or a fact the customer's agent proposed. */
   answer(customerId: string, approvalId: string, approve: boolean): void {
-    this.#require(customerId).answer(approvalId, approve);
+    const ticket = this.#require(customerId);
+    const proposal = this.knowledge.proposal(approvalId);
+    if (proposal && proposal.source.sessionId === ticket.sessionId) this.decide(approvalId, approve);
+    else ticket.answer(approvalId, approve);
+  }
+
+  /** Adds a proposed fact to the team knowledge base, or declines it. The agent that proposed it is never told. */
+  decide(id: string, add: boolean): void {
+    const proposal = this.knowledge.proposal(id);
+    const entry = this.knowledge.decide(id, add);
+    if (entry === undefined || !proposal) throw new HelpDeskError("not_actionable", "This fact was added or declined already.", 409);
+    log.info(add ? "Added a fact to the team knowledge base" : "Declined a proposed fact", { customer: proposal.source.customerId, subject: proposal.subject });
+    this.#publishKnowledge();
+    const ticket = this.#tickets.get(proposal.source.customerId);
+    if (ticket?.sessionId === proposal.source.sessionId) this.changed(ticket);
+  }
+
+  /** Removes a fact from the team knowledge base: sessions created or reopened from now on aren't told it. */
+  forget(id: string): void {
+    if (!this.knowledge.remove(id)) throw new HelpDeskError("not_found", "That fact isn't in the team knowledge base.", 404);
+    log.info("Removed a fact from the team knowledge base", { id });
+    this.#publishKnowledge();
+  }
+
+  #knowledgeEvent(): ServerEvent {
+    return { type: "knowledge", knowledge: this.knowledge.list(), proposals: this.knowledge.proposals() };
+  }
+
+  #publishKnowledge(): void {
+    this.#publish(this.#knowledgeEvent());
   }
 
   /**
@@ -564,6 +605,29 @@ export class HelpDesk implements TicketHost {
   }
 
   // TicketHost
+
+  knowledgePrompt(): string {
+    return this.knowledge.prompt();
+  }
+
+  async remember(ticket: TicketSession, memory: StoredMemory): Promise<void> {
+    let proposal: MemoryProposal | undefined;
+    try {
+      proposal = this.knowledge.propose({ ...memory, customerId: ticket.customer.id, customerName: ticket.customer.name, sessionId: ticket.sessionId });
+    } catch (error) {
+      // The runtime fails the agent's store_memory call: nothing was kept.
+      log.error("Couldn't keep a proposed fact", { customer: ticket.customer.id, error: errorText(error) });
+      throw error;
+    }
+    if (!proposal) return;
+    log.info("An agent proposed a fact for the team knowledge base", { customer: ticket.customer.id, subject: proposal.subject });
+    this.#publishKnowledge();
+    this.changed(ticket);
+  }
+
+  proposal(ticket: TicketSession): MemoryProposal | undefined {
+    return this.knowledge.proposals().find((proposal) => proposal.source.sessionId === ticket.sessionId);
+  }
 
   changed(ticket: TicketSession): void {
     const id = ticket.customer.id;

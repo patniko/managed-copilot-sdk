@@ -195,7 +195,7 @@ function mcpServer(name: string, config: Record<string, unknown>, original: Reco
 const SHARED_RULES = [
   "No shell, file system, or subprocess tools (shared placement is application isolation)",
   "Configuration, instruction, and hook discovery off; deployed customizations only",
-  "Cross-session store, memory, and host git operations off",
+  "Cross-session store and host git operations off; memory only when the app stores it (memory.storeMemory)",
   "Remote http/sse MCP servers only, through the gateway's MCP adapter",
   "The system prompt's environment section is set by the platform",
   "Model calls use the session owner's GitHub Copilot entitlement",

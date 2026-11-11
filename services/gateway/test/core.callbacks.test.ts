@@ -134,6 +134,30 @@ describe("callback obligations and runtime credentials", () => {
     await waitUntil(() => viewer.events("assistant.message").some((event) => (event["data"] as Record<string, unknown>)["content"] === "echo: hooks withdrawn"));
   });
 
+  it("relays the runtime's memory stores to the client that stores the session's memories", async () => {
+    const stored: Record<string, unknown>[] = [];
+    const team = await connect((method, params) => {
+      if (method === "memoryStore.store") stored.push(params);
+      return method === "memoryStore.store" ? null : {};
+    });
+    const sessionId = crypto.randomUUID();
+    await team.request("session.create", { sessionId, requestPermission: true, hasMemoryStore: true, memory: { enabled: true }, availableTools: ["custom:*", "builtin:store_memory"] });
+    expect(runtime.sessions.get(sessionId)!.createParams).toMatchObject({ hasMemoryStore: true, memory: { enabled: true }, availableTools: ["custom:*", "builtin:store_memory"] });
+    // A viewer without a memory store does not get the callback.
+    const viewer = await connect();
+    await viewer.request("session.resume", { sessionId, requestPermission: true });
+    const memory = { sessionId, subject: "refunds", fact: "Refunds over $100 need a receipt", citations: "ticket", reason: "Policy" };
+    await expect(runtime.requestOn(upstreamOf(sessionId), "memoryStore.store", memory)).resolves.toBeNull();
+    expect(stored).toEqual([memory]);
+    expect(viewer.requests.some((request) => request.method === "memoryStore.store")).toBe(false);
+    // With the storing client gone, a memory store fails explicitly.
+    await team.close();
+    await waitUntil(() => !sessions().attached(sessionId).some((responder) => responder.connectionId === team.welcome.connectionId));
+    await expect(runtime.requestOn(upstreamOf(sessionId), "memoryStore.store", memory)).rejects.toMatchObject({ data: { code: "background_callback_unsupported" } });
+    // Memory stays on only while a client stores it: built-in backends would be state across the shared runtime's sessions.
+    await expect(viewer.request("session.resume", { sessionId, requestPermission: true, memory: { enabled: true } })).rejects.toMatchObject({ data: { code: "policy_violation" } });
+  });
+
   it("restores what clients registered, and scheduled tools' flags, after the gateway restarts", async () => {
     const client = await connect((method) => (method === "hooks.invoke" ? { output: {} } : {}));
     const sessionId = crypto.randomUUID();

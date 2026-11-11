@@ -191,7 +191,7 @@ export class ClientConnection implements ClientPeer {
   }
 
   #runtimeVersion(): string {
-    return this.#runtime?.current()?.version ?? "1.0.103";
+    return this.#runtime?.current()?.version ?? "1.0.109";
   }
 }
 

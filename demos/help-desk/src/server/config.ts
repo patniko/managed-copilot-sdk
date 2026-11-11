@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { baseUrl } from "./factory.js";
 
@@ -32,6 +32,8 @@ export interface HelpDeskConfig {
   readonly storefrontDir: string;
   /** How often the work orders of sent issues are checked while any is still running. */
   readonly factoryPollMs: number;
+  /** Where the team knowledge base is kept (`HELP_DESK_DATA_DIR`). Without it, it lasts as long as the process. */
+  readonly dataDir?: string;
 }
 
 function findPackageRoot(start: string): string {
@@ -63,5 +65,6 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     ...(factoryUrl ? { factoryUrl, ...(factoryPublicUrl ? { factoryPublicUrl } : {}) } : {}),
     storefrontDir: join(packageRoot, "storefront"),
     factoryPollMs: 5_000,
+    dataDir: resolve(packageRoot, env.HELP_DESK_DATA_DIR?.trim() || ".data"),
   };
 }

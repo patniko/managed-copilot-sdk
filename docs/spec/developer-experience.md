@@ -2,7 +2,7 @@
 
 > **Status: built, and qualified within the limits recorded below (2026-10-24; orchestrator environments on
 > 2026-10-26, and on Azure on 2026-10-27).** The SDK, Aspire integration, CLI, gateway, sandbox image, and egress
-> proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime 1.0.103, unmodified. They run
+> proxy are implemented on the published `@github/copilot-sdk` 1.0.31 and runtime 1.0.109, unmodified. They run
 > locally with `aspire run` and on Azure with `aspire deploy`, orchestrator environments included. The 14 customer
 > snippets run as acceptance checks in [`tests/snippets`](../../tests/snippets), and the
 > [software factory](../../demos/software-factory), [assistant](../../demos/assistant), and
@@ -318,6 +318,12 @@ plugins, and equivalent capabilities nested in custom agents. Remote MCP endpoin
 and per-session egress attribution. Apply the same validation on create, resume, tool changes, agent selection, and
 option updates, not only to the first request. SDK callbacks still execute in the customer's app, outside this
 shared-runtime boundary.
+
+The runtime's own memory is cross-session state, so shared admission turns it off. An app that stores memories itself
+can still use them in a shared environment: with the stock SDK's `memory: { enabled: true, storeMemory }`
+(experimental), the session may allow `builtin:store_memory`, the runtime keeps and recalls nothing, and each memory
+the permission handler approves goes to the app's `storeMemory` callback. Recall is the app's job too, for example
+through `systemMessage`. Enabling memory without `storeMemory` in a shared environment fails with `policy_violation`.
 
 For demonstrating why that boundary exists, a shared environment can set `unsafeHostTools: true`. Its sessions
 then get the runtime's built-in shell and file tools and its standard environment prompt; every other shared rule

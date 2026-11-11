@@ -75,7 +75,7 @@ export interface CustomerCard {
 /**
  * - `starting`: its session is being created.
  * - `answering`: the agent is working on the customer's message.
- * - `approval`: a refund or cancellation waits for the operator.
+ * - `approval`: a refund, a cancellation, or a proposed team memory waits for the operator.
  * - `waiting`: the agent answered and waits for the customer.
  * - `resolved`: the agent marked the request handled.
  * - `failed`: the session couldn't start or the platform reported an error.
@@ -129,6 +129,40 @@ export interface ApprovalRequest {
   readonly reason?: string;
 }
 
+/**
+ * A fact an agent proposed for the team knowledge base (`store_memory`), waiting for a team member to add it or not. The
+ * agent's turn doesn't wait for the decision, and the agent never hears it: the customer's conversation is the same
+ * whether the fact is added or not.
+ */
+export interface MemoryProposal {
+  readonly id: string;
+  /** A few words: what the fact is about. */
+  readonly subject: string;
+  readonly fact: string;
+  /** Where it comes from, in the agent's words. */
+  readonly citations?: string;
+  /** Why the agent proposed it. */
+  readonly reason?: string;
+  /** The conversation it was learned in. */
+  readonly source: { readonly customerId: string; readonly name: string; readonly sessionId: string };
+  /** When the agent proposed it. */
+  readonly at: string;
+}
+
+/** A fact in the team knowledge base: an agent proposed it and a team member approved it. */
+export interface KnowledgeEntry {
+  readonly id: string;
+  readonly subject: string;
+  readonly fact: string;
+  readonly citations?: string;
+  /** Why the agent stored it. */
+  readonly reason?: string;
+  /** The conversation it was learned in. */
+  readonly source: { readonly customerId: string; readonly name: string; readonly sessionId: string };
+  /** When it was approved and stored. */
+  readonly at: string;
+}
+
 /** A problem with the store's website that a customer ran into, as their agent reported it with `report_bug`. */
 export interface BugReport {
   readonly area: BugArea;
@@ -150,6 +184,8 @@ export interface Ticket {
   readonly status: TicketStatus;
   readonly items: readonly TranscriptItem[];
   readonly approval?: ApprovalRequest;
+  /** A fact the agent proposed for the team knowledge base. */
+  readonly memory?: MemoryProposal;
   /** Calls that named another customer's order. */
   readonly blocked: number;
   /** The problem with the store's website the agent reported (its latest report). */
@@ -225,6 +261,10 @@ export interface HelpDeskState {
   /** The current simulation's software issues. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
+  /** The team knowledge base, newest first. It outlives simulations. */
+  readonly knowledge: readonly KnowledgeEntry[];
+  /** Facts agents proposed that no one has added or declined yet, oldest first. */
+  readonly proposals: readonly MemoryProposal[];
 }
 
 export type ServerEvent =
@@ -232,7 +272,8 @@ export type ServerEvent =
   | { readonly type: "run"; readonly run?: RunInfo; readonly tickets: readonly Ticket[]; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "ticket"; readonly ticket: Ticket }
   | { readonly type: "issues"; readonly issues: readonly SoftwareIssue[] }
-  | { readonly type: "counters"; readonly counters: Counters };
+  | { readonly type: "counters"; readonly counters: Counters }
+  | { readonly type: "knowledge"; readonly knowledge: readonly KnowledgeEntry[]; readonly proposals: readonly MemoryProposal[] };
 
 export interface SimulateRequest {
   readonly size: number;

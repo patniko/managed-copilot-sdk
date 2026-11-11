@@ -96,6 +96,8 @@ interface Attachment {
   requestAutoModeSwitch: boolean;
   hooks: boolean;
   skillProvider: boolean;
+  /** Stores the session's memories (`memory.storeMemory`): the runtime's `memoryStore.store` goes to this client. */
+  memoryStore: boolean;
   /** Registered `systemMessage` section transform callbacks. */
   transforms: boolean;
   /** Registered canvases or a canvas renderer/provider. */
@@ -109,7 +111,7 @@ interface Attachment {
 }
 
 /** Handler flags the runtime registers per connection; the gateway sends the union across attached clients. */
-const WIRE_FLAGS = ["requestPermission", "requestUserInput", "requestElicitation", "requestExitPlanMode", "requestAutoModeSwitch", "hooks", "hasSkillProvider"] as const;
+const WIRE_FLAGS = ["requestPermission", "requestUserInput", "requestElicitation", "requestExitPlanMode", "requestAutoModeSwitch", "hooks", "hasSkillProvider", "hasMemoryStore"] as const;
 
 /** An attached client as the operator console shows it (never its credential). */
 export interface LiveAttachmentSnapshot {
@@ -151,6 +153,7 @@ function attachmentCallbacks(attachment: Attachment): string[] {
     [attachment.requestAutoModeSwitch, "requestAutoModeSwitch"],
     [attachment.hooks, "hooks"],
     [attachment.skillProvider, "skillProvider"],
+    [attachment.memoryStore, "memoryStore"],
     [attachment.transforms, "systemMessageTransforms"],
     [attachment.canvases, "canvases"],
   ];
@@ -421,6 +424,7 @@ const CLIENT_REQUESTS: Record<string, keyof Attachment | undefined> = {
   "hooks.invoke": "hooks",
   "skillProvider.list": "skillProvider",
   "skillProvider.read": "skillProvider",
+  "memoryStore.store": "memoryStore",
   "systemMessage.transform": "transforms",
   "canvas.open": "canvases",
   "canvas.close": "canvases",
@@ -1619,6 +1623,7 @@ export class SessionManager implements SessionsService {
         workingDirectory: this.#workingDirectory(placement, sessionId),
         tokenRegistrationId: live.tokenRegistrationId,
         allowMcp: hasRemoteMcp(this.#ledger.admitted(sessionId)?.params),
+        appMemory: hasAppMemory(this.#ledger.admitted(sessionId)?.params),
       });
       switch (method) {
         case "session.send":
@@ -2713,7 +2718,7 @@ export class SessionManager implements SessionsService {
   }
 
   async #prepare(live: LiveSession, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const routed = await this.#routeInference(live, params, live.placement);
+    const routed = await this.#routeInference(live, withoutHostMemory(live, params, this.#log), live.placement);
     return live.sandbox?.prepareSessionParams ? await live.sandbox.prepareSessionParams(method, routed) : routed;
   }
 
@@ -3008,6 +3013,7 @@ export class SessionManager implements SessionsService {
       requestAutoModeSwitch: flag("requestAutoModeSwitch"),
       hooks: flag("hooks"),
       skillProvider: flag("hasSkillProvider"),
+      memoryStore: flag("hasMemoryStore"),
       transforms: Object.values(sections).some((section) => section?.action === "transform"),
       canvases: (Array.isArray(forwarded["canvases"]) && forwarded["canvases"].length > 0) || forwarded["requestCanvasRenderer"] !== undefined || forwarded["canvasProvider"] !== undefined,
       declarations: ((forwarded["tools"] as Record<string, unknown>[] | undefined) ?? []).filter((tool) => !this.#options.platformTools.has(String(tool["name"]), live.environment.name)),
@@ -3576,6 +3582,7 @@ export class SessionManager implements SessionsService {
       requestAutoModeSwitch: false,
       hooks: false,
       skillProvider: false,
+      memoryStore: false,
       transforms: false,
       canvases: false,
       declarations: [],
@@ -3873,6 +3880,22 @@ function hasRemoteMcp(params: Record<string, unknown> | undefined): boolean {
   return Array.isArray(agents) && agents.some((agent) => agent && typeof agent === "object" && (agent as { mcpServers?: object }).mcpServers && Object.keys((agent as { mcpServers: object }).mcpServers).length > 0);
 }
 
+/** Whether the session's admitted configuration has memory its app stores (`memory.storeMemory`). */
+function hasAppMemory(params: Record<string, unknown> | undefined): boolean {
+  const memory = params?.["memory"];
+  return Boolean(memory && typeof memory === "object" && (memory as { enabled?: unknown }).enabled === true);
+}
+
+/**
+ * Shared sessions keep memory only while a client stores it: without `hasMemoryStore` the runtime would fall back to
+ * its built-in memory backends, which are state across the shared runtime's sessions. Turned off instead.
+ */
+function withoutHostMemory(live: LiveSession, params: Record<string, unknown>, log: Logger): Record<string, unknown> {
+  if (live.placement !== "shared" || !hasAppMemory(params) || params["hasMemoryStore"] === true) return params;
+  log.warn("Turning memory off: no client stores this shared session's memories", { sessionId: live.id });
+  return { ...params, memory: { enabled: false } };
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -3933,6 +3956,7 @@ function storedParams(params: Record<string, unknown>): Record<string, unknown> 
     requestAutoModeSwitch: _requestAutoModeSwitch,
     hooks: _hooks,
     hasSkillProvider: _hasSkillProvider,
+    hasMemoryStore: _hasMemoryStore,
     gitHubTokenProviderRegistrationId: _registration,
     traceparent: _traceparent,
     tracestate: _tracestate,

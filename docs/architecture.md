@@ -40,7 +40,7 @@ flowchart LR
   SR --> Models
 ```
 
-## Protocol facts (SDK 1.0.26, runtime 1.0.103)
+## Protocol facts (SDK 1.0.31, runtime 1.0.109)
 
 Verified from the published package sources (`dist/client.js`, `dist/session.js`, `dist/generated/rpc.js`):
 
@@ -59,7 +59,21 @@ Verified from the published package sources (`dist/client.js`, `dist/session.js`
   (answered by `session.permissions.handlePendingPermissionRequest`), `elicitation.requested`.
 - Runtime → client requests include `userInput.request`, `exitPlanMode.request`, `autoModeSwitch.request`,
   `systemMessage.transform`, `gitHubToken.getToken`, `providerToken.getToken`, `llmInference.httpRequestStart`/`Chunk`
-  (the experimental public request-handler hook), `sessionFs.*`, `workflow.*`, `tasks.cancel`, and `host.*` (AHP).
+  (the experimental public request-handler hook), `sessionFs.*`, `workflow.*`, `tasks.cancel`, `memoryStore.store`,
+  and `host.*` (AHP).
+- App-owned memory (SDK 1.0.31, experimental; verified live on runtime 1.0.109 with a probe): `memory: { enabled: true,
+  storeMemory }` sends `hasMemoryStore: true` on create/resume. The runtime then keeps no memories and recalls none,
+  and `vote_memory` is unavailable. On `store_memory` it validates the memory, filters secrets, and asks the
+  permission handler (`permission.requested` with `{ kind: "memory", action: "store", subject, fact, citations,
+  toolCallId }`, no `reason`). Approved, it sends the client request `memoryStore.store({ sessionId, subject, fact,
+  citations, reason })` and the tool succeeds ("Memory stored successfully.") only once that answers; an error fails
+  the tool call, and the runtime gives up after 60 s. Rejected, the callback is never called.
+- Rejecting any permission request fails the other permission requests still pending from the same batch of tool
+  calls (`permission.completed` withdraws them), and the model then answers the rejection, often with a reply to the
+  user and a retry (verified live on 1.0.109: declining a `store_memory` failed a pending `cancel_order` and the agent
+  told the customer it would cancel anyway; declining the cancellation withdrew the memory). Approving has no such
+  effect. Help Desk therefore approves memory requests at once and has the operator decide each proposal outside the
+  turn, so a declined fact never reaches the conversation.
 - A whole-session BYOK `provider` (`session.create`/`session.resume` params) works with **no GitHub credential at all**
   (verified live on 1.0.103 against Azure AI Foundry, `docs/design/probes/foundry-inference.mjs`): with
   `hasBearerTokenProvider: true` the runtime asks its client `providerToken.getToken({ sessionId, providerName })`
@@ -249,8 +263,8 @@ denies configuration RPCs it does not understand.
   gets is the platform's own Foundry route, below); when the owner has no usable credential, inference fails with
   `authentication_required` and never falls back to another account.
 - Runtime binary: the stock SDK spawns the dedicated headless runtime shipped in `@github/copilot-sdk-<platform>`;
-  `@github/copilot` is the larger interactive CLI. The sandbox image installs `@github/copilot-sdk@1.0.26` and runs its
-  headless `copilot-runtime` (1.0.103); the shared runtime should use the same binary, resolved through public package
+  `@github/copilot` is the larger interactive CLI. The sandbox image installs `@github/copilot-sdk@1.0.31` and runs its
+  headless `copilot-runtime` (1.0.109); the shared runtime should use the same binary, resolved through public package
   metadata.
 
 ### Apps and Azure AI Foundry
@@ -1612,9 +1626,14 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   still on its way. A client that disconnects while its create or
   resume is in flight is never attached (what it registered stays in the inventory); a deletion waits for queued
   registrations, which then fail with `not_found`.
-  Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, and user-input
-  requests go to the newest connected client that registered that handler, else fail with
-  `background_callback_unsupported` (no fabricated answer).
+  Sessions stored before the inventory existed restore with `requestPermission`. Transform, canvas, user-input, and
+  memory-store (`memoryStore.store`, `hasMemoryStore`) requests go to the newest connected client that registered that
+  handler, else fail with `background_callback_unsupported` (no fabricated answer, and no memory stored).
+- **Memory in shared environments.** The runtime's own memory lives in the shared `COPILOT_HOME`, readable across
+  sessions, so shared admission sends `memory: { enabled: false }` unless the client stores memories itself
+  (`memory.enabled` with `hasMemoryStore`). Then memory stays enabled, `builtin:store_memory` is admitted (no other
+  memory tool), and the runtime stores and recalls nothing. Enabling memory without `hasMemoryStore` is
+  `policy_violation` ("must be stored by your app"). Help Desk uses this for its team knowledge base.
 - **SDK hooks** fail closed. The stock wire says only whether a client has hooks, not which, so a session has one
   hooks handler: the connected client that registered them. Another connected client registering hooks is refused
   with `conflict`; `hooks.invoke` goes to the handler only. Without a connected handler (or its answer), and for a
@@ -2049,7 +2068,7 @@ Where each area of the platform lives.
 | **research-swarm** | `demos/research-swarm/**` | Research Swarm (delegate): a lead on the shared runtime (`research-swarm`, network off) starts web researchers in `research-swarm-web` sandboxes; their `research read` log is the only citable source list, its app tools (`plan_research`, `list_sources`, `submit_report`) refuse other citations, and deleting the lead's session deletes every sandbox |
 | **pattern-race** | `demos/pattern-race/**` | Pattern Race: one job raced through the root AppHost's six pattern environments at once, with a live board of where each agent thinks and acts and a scorecard |
 | **data-desk** | `demos/data-desk/**` | Data Desk: chat with a spreadsheet on a promotable environment; the app's tools answer on the shared runtime, and a request that needs code moves the session into its Python sandbox. Selected rows, Copilot's tables and published files, and its latest answer go to the software factory as a work order's `context`, with what to build |
-| **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()`. Agents file storefront bugs with `report_bug`; the wall groups them by area and sends each to the software factory with its `storefront` codebase as the `project`, finding its work orders again by `origin.key` after a restart |
+| **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*", "builtin:store_memory"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; memory requests are approved at once and `memory.storeMemory` saves each as a pending proposal that the operator adds to or declines from a team knowledge base (`<HELP_DESK_DATA_DIR>/knowledge.json`) outside the turn, so the agent never hears the decision; every later session gets the added facts in its system message; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()`. Agents file storefront bugs with `report_bug`; the wall groups them by area and sends each to the software factory with its `storefront` codebase as the `project`, finding its work orders again by `origin.key` after a restart |
 | **incident-commander** | `demos/incident-commander/**` | Incident Commander: alerts (or the labeled simulation) open incidents run by a mixed coordinator; its deploy approval waits on the platform with the app detached, and the platform's webhook keeps the app informed. With the factory route, `route_fix_to_factory` sends the service as the `project`, the app follows the work order from stored state, and `apply_factory_fix` puts the release's changed files in the coordinator's own sandbox to verify and deploy |
 | **repo-doctor** | `demos/repo-doctor/**` | Repo Doctor: a CI fixer that gives each run one isolated sandbox (checkout, tests, and diff through `managed.exec`; setup and the fix as Copilot turns), deletes it at the end, and shows its allowed hosts and its `network.blocked` events live |
 | **hack-the-harness** | `demos/hack-the-harness/**` | Hack the Harness: a staff assistant (demo sign-in that accepts any username and password, a 3D office of NPC sessions) that demonstrates six deployment architectures side by side: one environment per stage (`hack-the-harness` shared without host tools, then `-isolated`, `-promotable`, `-direct`, `-workers`, and `-mixed`), with `hack-the-harness-worker` sandboxes built from its own image (openpyxl from bundled wheels, since the sandboxes have no network). Each chat is created in the stage the page names with `?stage=` (`src/app/server/stages.ts`), and the server picks that stage's client and file tools (`copy_upload` into the session or its hands sandbox, `send_files` into a named worker, `share_file` from either) and finds an existing chat's stage from its environment. The app moves files in and out with `managed.files`. The gallery's Staff assistant tab links to each stage. Local only: the root AppHost runs it with `runDemo` and never publishes it, and the gallery marks it `localOnly` |

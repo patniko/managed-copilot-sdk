@@ -15,8 +15,8 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@github/copilot": "1.0.103",
-    "@github/copilot-sdk": "1.0.26",
+    "@github/copilot": "1.0.109",
+    "@github/copilot-sdk": "1.0.31",
     "@managed-copilot/protocol": "workspace:*",
     "vscode-jsonrpc": "8.2.1",
     "ws": "^8.22.0",

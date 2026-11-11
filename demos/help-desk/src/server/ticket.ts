@@ -1,7 +1,11 @@
 // One customer's conversation: a session of the help desk's shared environment, created with the store's tools bound to
-// that customer. Refunds and cancellations wait in the permission handler until the operator answers on the wall.
-import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
-import type { ApprovalRequest, BugReport, Ticket, TicketStatus } from "../shared/types.js";
+// that customer. Refunds and cancellations wait in the permission handler until the operator answers on the wall. Facts
+// the agent proposes for the team knowledge base don't: the runtime's memory permission (`kind: "memory"`) is granted
+// at once and `memory.storeMemory` keeps the fact as a proposal for a team member to decide later, outside the agent's
+// turn. Declining in the turn would reach the customer: the runtime fails the other tool calls waiting in the same
+// step and the agent answers the rejection.
+import type { PermissionRequest, PermissionRequestResult, SessionEvent, StoredMemory } from "@github/copilot-sdk";
+import type { ApprovalRequest, BugReport, MemoryProposal, Ticket, TicketStatus } from "../shared/types.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { log } from "./log.js";
 import type { DeskPlatform, SupportSession } from "./platform.js";
@@ -15,6 +19,12 @@ export interface TicketHost {
   readonly shop: Shop;
   /** Something a person would see changed; the host coalesces publishing. */
   changed(ticket: TicketSession): void;
+  /** The team knowledge section of every session's instructions. */
+  knowledgePrompt(): string;
+  /** Keeps a memory the agent stored as a proposal for the team. Rejects when it can't be kept. */
+  remember(ticket: TicketSession, memory: StoredMemory): Promise<void>;
+  /** The oldest fact this conversation's agent proposed that no one has decided yet. */
+  proposal(ticket: TicketSession): MemoryProposal | undefined;
 }
 
 /** What the agent is told when the operator declines a request. */
@@ -99,9 +109,12 @@ export class TicketSession {
     return {
       streaming: true,
       tools: customerTools(this.#host.shop, this.customer.id),
-      // Only the store's tools: no built-in tools, so its hands are exactly what this app gives it.
-      availableTools: ["custom:*"],
-      systemMessage: { content: systemMessage(this.customer, this.#host.shop) },
+      // Only the store's tools, and the runtime's store_memory for proposing team knowledge: its hands are exactly what
+      // this app gives it.
+      availableTools: ["custom:*", "builtin:store_memory"],
+      // Help Desk stores memories itself, as proposals for the team knowledge base.
+      memory: { enabled: true, storeMemory: (memory: StoredMemory) => this.#host.remember(this, memory) },
+      systemMessage: { content: `${systemMessage(this.customer, this.#host.shop)}\n\n${this.#host.knowledgePrompt()}` },
       onEvent,
       onPermissionRequest: (request: PermissionRequest) => this.#onPermission(request, generation),
     };
@@ -229,7 +242,7 @@ export class TicketSession {
     }
   }
 
-  /** The operator's answer to a refund or cancellation. */
+  /** The operator's answer to a refund or a cancellation. */
   answer(approvalId: string, approve: boolean): void {
     const held = this.#approvals.get(approvalId);
     if (!held) throw new HelpDeskError("not_actionable", "This request was answered already.", 409);
@@ -240,6 +253,8 @@ export class TicketSession {
   }
 
   async #onPermission(request: PermissionRequest, generation: number): Promise<PermissionRequestResult> {
+    // The team decides on a proposed fact later, in the knowledge base: the agent's turn never waits for it or hears it.
+    if (request.kind === "memory") return { kind: "approve-once" };
     if (request.kind !== "custom-tool" || !APPROVAL_TOOLS.has(request.toolName)) return { kind: "approve-once" };
     if (generation !== this.#generation) return { kind: "no-result" };
     const tool = request.toolName;
@@ -317,6 +332,7 @@ export class TicketSession {
 
   view(): Ticket {
     const approval = [...this.#approvals.values()][0]?.request;
+    const memory = this.#created ? this.#host.proposal(this) : undefined;
     const problem = this.#problem ?? this.#transcript.problem;
     const bug = this.#transcript.bug;
     return {
@@ -325,6 +341,7 @@ export class TicketSession {
       status: this.status(),
       items: this.#transcript.items,
       ...(approval ? { approval } : {}),
+      ...(memory ? { memory } : {}),
       blocked: this.#transcript.blocked,
       ...(bug ? { bug } : {}),
       ...(this.#premiumRequests !== undefined ? { premiumRequests: this.#premiumRequests } : {}),

@@ -12,7 +12,7 @@ import type { Logger } from "../../log.js";
 import type { UpstreamInfo } from "./contracts.js";
 import { RpcEndpoint, RpcError, streamTransport, type IncomingRequestContext, type MessageTransport, type RequestOptions } from "./rpc.js";
 
-/** Minimum and maximum protocol versions this gateway relays (SDK 1.0.26 speaks version 3). */
+/** Minimum and maximum protocol versions this gateway relays (SDK 1.0.31 speaks version 3). */
 export const MIN_PROTOCOL_VERSION = 3;
 export const MAX_PROTOCOL_VERSION = 3;
 

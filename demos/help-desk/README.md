@@ -30,6 +30,9 @@ cancellations wait for the operator (yellow), and two customers asked about orde
 - **From a support ticket to a fix.** Agents report problems with the store's website with a `report_bug` tool, the
   wall groups the reports into software issues, and **Send to Software Factory** turns one into a work order to fix
   the website's code ([below](#software-issues-fixed-by-software-factory)).
+- **A team that learns.** Agents propose what they learn for the team knowledge base with the runtime's
+  `store_memory` tool. You add each fact or not, and every later conversation starts with what was added
+  ([below](#team-knowledge-agents-learn-you-decide)).
 
 <img src="docs/screenshots/approval.png" alt="Sofia's conversation: her support widget on the left, and on the right where the session runs (shared runtime, tools in Help Desk, no sandbox), a refund of $39.00 waiting with Decline and Approve, the two orders the session can see, and its tool calls" width="900">
 
@@ -114,6 +117,43 @@ Factory keeps the work orders. The work order runs Software Factory's own agents
 Under `aspire run`, the root AppHost points Help Desk at the Software Factory demo. Without `SOFTWARE_FACTORY_URL`, the
 panel still lists the issues, and **Send to Software Factory** says why it's unavailable.
 
+## Team knowledge: agents learn, you decide
+
+The support team keeps a knowledge base, and the agents help write it.
+
+1. **The agent proposes.** Each session has the runtime's built-in `store_memory` tool, and its instructions list the
+   team knowledge base so far. When a customer tells the agent something that would help with other customers and the
+   knowledge base doesn't say it yet (how a product fits, a workaround for a problem with the website), it proposes one
+   short, general fact. It's told to leave out names, email addresses, order numbers, and amounts, and the runtime
+   filters secrets out before asking.
+2. **You decide.** The proposal waits in the **Team knowledge** panel and on the customer's tile with **Add** and
+   **×**; the customer's page shows the whole fact and where it came from. Unlike a refund, it doesn't hold up the
+   conversation: the agent carries on helping the customer and never hears your decision, so adding or declining a
+   fact changes nothing the customer sees.
+3. **Later conversations start from it.** An added fact appears in the **Team knowledge** panel, with the
+   conversation it came from, and every session created or reopened afterwards has it in its instructions, so the
+   agents answer from it instead of rediscovering it, and don't propose it again. Remove a fact with the trash icon;
+   sessions created or reopened from then on aren't told it.
+
+### Try it
+
+Two of the simulated customers are set up for this. Noah, among the first 5, cancels his Ridgeline Hiking Boots and
+mentions in passing that they run a full size small. Emma, among the first 10, asks which size of the same boots to
+order. Nobody asks the agent to remember anything.
+
+1. Start with an empty **Team knowledge** panel (remove any facts in it) and **Simulate 10**. Emma's agent can't
+   help with her size: it points her to the size chart. Within seconds, Noah's tile shows a proposed fact, such as
+   *Ridgeline Hiking Boots run a full size small.*
+2. **Add** the fact, and approve or decline Noah's cancellation, in either order. The fact moves into the **Team
+   knowledge** panel's list, linked to Noah's conversation.
+3. **Simulate 10** again. This time Emma's agent tells her straight away to order a size 9 because the boots run
+   small, and Noah's agent doesn't propose the fact again.
+
+With **Simulate 5**, Noah proposes the fact the same way; Emma joins from **Simulate 10**. The agents choose what to
+propose, so another customer's agent can occasionally propose something too: decline what isn't worth keeping.
+
+The knowledge base outlives simulations and restarts: it's kept in `knowledge.json` in Help Desk's data directory.
+
 ## How it works
 
 - **One shared environment.** [`apphost.mts`](apphost.mts) declares `help-desk`: `type: "shared"` with network off,
@@ -135,6 +175,16 @@ panel still lists the issues, and **Send to Software Factory** says why it's una
   `cancel_order` until the operator answers, then resolves it with `approve-once` or `reject` (the agent is told a team
   member will follow up). If the turn ends some other way, Help Desk lets go when `permission.completed` or the turn's
   end arrives.
+- **Memories are stored by the app.** Sessions set the SDK's `memory.storeMemory` (experimental in SDK 1.0.31) and
+  allow `builtin:store_memory`. The runtime validates a proposed memory, filters secrets, and asks the permission
+  handler (a `memory` request). Help Desk approves it at once and its `storeMemory` saves the fact as a proposal in
+  [`knowledge.ts`](src/server/knowledge.ts); the operator adds or declines it later, outside the turn. The memory
+  isn't held like a refund because on runtime 1.0.109 rejecting one permission request fails the others pending from
+  the same step: declining a fact would also fail a cancellation the agent asked for alongside it, and the agent would
+  reply to the customer about it. With
+  `storeMemory` set, the runtime recalls no memories itself, so Help Desk puts the knowledge base in each session's
+  system message. The gateway allows memory in a shared environment only on these terms: the app stores it, and no
+  session's memory is kept in the shared runtime.
 - **The wall is projected from the sessions' events.** Messages (streamed), tool calls, and approvals come from the
   stock session events; a call refused for an order of another customer is marked **Blocked**. The agent marks a
   conversation **Resolved** with a `resolve_conversation` tool, and a completed `report_bug` call is the ticket's
@@ -159,6 +209,7 @@ panel still lists the issues, and **Send to Software Factory** says why it's una
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
 | `HELP_DESK_ENVIRONMENT` | `help-desk` | The shared environment customers' sessions are created in |
 | `HELP_DESK_MODEL` | first available of Claude Haiku 4.5, Claude Haiku 5.5, GPT-5.6 Luna, Claude Sonnet 5 | The customers' agents' model |
+| `HELP_DESK_DATA_DIR` | `.data` (in `demos/help-desk`); `/data` in the container | Where the team knowledge base (`knowledge.json`) is kept |
 | `HELP_DESK_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 | `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, which Help Desk's server calls to send software issues. Unset: **Send to Software Factory** is unavailable and says why |
 | `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to its work orders |
@@ -168,10 +219,10 @@ panel still lists the issues, and **Send to Software Factory** says why it's una
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the `help-desk` shared environment and the app resource |
-| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, software issues and the Software Factory client, REST and server-sent events |
+| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, the team knowledge base, software issues and the Software Factory client, REST and server-sent events |
 | `src/scripts` | The happy-path script |
 | `src/shared` | Types shared with the UI |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `storefront` | The Contoso Outdoors website's code (Node, no dependencies, `node --test`), with the bugs customers report: the project a software issue's work order asks Software Factory to fix |
-| `test` | Unit tests: the store, the tools, the projection, simulations and approvals against an in-memory platform, software issues against an in-memory Software Factory, the factory client, the API, the storefront, and the fragment |
+| `test` | Unit tests: the store, the tools, the projection, simulations, approvals, and proposed memories against an in-memory platform, the knowledge base, software issues against an in-memory Software Factory, the factory client, the API, the storefront, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

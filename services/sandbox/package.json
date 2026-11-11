@@ -21,8 +21,8 @@
     "ws": "^8.22.0"
   },
   "devDependencies": {
-    "@github/copilot": "1.0.103",
-    "@github/copilot-sdk": "1.0.26",
+    "@github/copilot": "1.0.109",
+    "@github/copilot-sdk": "1.0.31",
     "@managed-copilot/protocol": "workspace:*",
     "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",

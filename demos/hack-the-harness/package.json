@@ -16,7 +16,7 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "@github/copilot-sdk": "1.0.26",
+    "@github/copilot-sdk": "1.0.31",
     "@managed-copilot/sdk": "workspace:*",
     "cookie-parser": "^1.4.7",
     "express": "^5.1.0",

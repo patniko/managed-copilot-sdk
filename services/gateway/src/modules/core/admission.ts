@@ -9,7 +9,7 @@
 import { HANDS_TOOLS, ManagedCopilotError, PLATFORM_TOOLS, type ExecutionStyle, type NetworkPolicy, type Placement, type SubagentSandboxes } from "@managed-copilot/protocol";
 import type { RegisteredPlatformTool, ResolvedEnvironment } from "./contracts.js";
 
-/** `BuiltInTools.Isolated` from @github/copilot-sdk 1.0.26: built-ins that stay inside one session. */
+/** `BuiltInTools.Isolated` from @github/copilot-sdk 1.0.31: built-ins that stay inside one session. */
 export const SESSION_SAFE_BUILTINS = ["ask_user", "task_complete", "exit_plan_mode", "task", "read_agent", "write_agent", "list_agents", "send_inbox", "context_board"] as const;
 
 /**
@@ -38,6 +38,8 @@ export interface AdmissionContext {
   readonly sandboxCustomizations?: string;
   /** Whether the session admitted remote MCP servers (option patches may then allow `mcp:*` tools). */
   readonly allowMcp?: boolean;
+  /** Whether the session admitted app-owned memory (option patches may then allow `store_memory`). */
+  readonly appMemory?: boolean;
   /** An orchestrator session's worker environments, for its coordinator's environment section. */
   readonly orchestrator?: OrchestratorBrief;
 }
@@ -296,11 +298,33 @@ interface ToolFilterInput {
   readonly excludedTools: unknown;
 }
 
-/** Built-in tool names a shared session may use. Web access goes through the gateway's `web_fetch` platform tool. */
-export function sharedBuiltins(environment: ResolvedEnvironment, _network: NetworkPolicy): string[] {
+/** The built-in tool through which the agent proposes a memory; shared sessions get it only with app-owned memory. */
+export const MEMORY_BUILTIN = "store_memory";
+
+/**
+ * Built-in tool names a shared session may use. Web access goes through the gateway's `web_fetch` platform tool.
+ * `store_memory` is there only when the session's memory is stored by its app (`appMemory`).
+ */
+export function sharedBuiltins(environment: ResolvedEnvironment, _network: NetworkPolicy, options: { appMemory?: boolean } = {}): string[] {
   const names: string[] = [...SESSION_SAFE_BUILTINS];
   if (environment.customizations?.skillDirectory) names.push("skill");
+  if (options.appMemory) names.push(MEMORY_BUILTIN);
   return names;
+}
+
+/**
+ * Admits a shared session's `memory`. The runtime's built-in memory backends keep state on the host across sessions,
+ * so shared sessions allow memory only when the app stores it (`memory.storeMemory` in the SDK, `hasMemoryStore` on
+ * the wire): the runtime then reads no memories and calls the app for each one the agent stores.
+ */
+export function admitSharedMemory(value: unknown, hasMemoryStore: boolean): { enabled: boolean; mode?: unknown } {
+  if (value === undefined || value === null) return { enabled: false };
+  if (!isRecord(value)) throw new ManagedCopilotError("invalid_request", "memory must be an object");
+  if (value["enabled"] !== true) return { enabled: false };
+  if (!hasMemoryStore) {
+    throw violation("Memory in shared environments must be stored by your app: set memory.storeMemory (the runtime's built-in memory backends are cross-session state)");
+  }
+  return { enabled: true, ...(value["mode"] !== undefined ? { mode: value["mode"] } : {}) };
 }
 
 /** Intersects the caller's tool filters with the shared environment's allowlist (source-qualified names). */
@@ -309,9 +333,9 @@ export function sharedToolFilters(
   environment: ResolvedEnvironment,
   network: NetworkPolicy,
   allowMcp: boolean,
-  options: { hasAgents?: boolean; hands?: boolean } = {},
+  options: { hasAgents?: boolean; hands?: boolean; appMemory?: boolean } = {},
 ): { availableTools: string[]; excludedTools?: string[] } {
-  const builtins = sharedBuiltins(environment, network);
+  const builtins = sharedBuiltins(environment, network, { appMemory: options.appMemory });
   // A direct or mixed coordinator's sub-agents work in its sandbox: the stock sub-agent tools are on.
   const subagents: readonly string[] = options.hands ? HANDS_SUBAGENT_BUILTINS : options.hasAgents ? SUBAGENT_BUILTINS : [];
   const defaults = builtins.filter((name) => !(SUBAGENT_BUILTINS as readonly string[]).includes(name) || subagents.includes(name));
@@ -519,6 +543,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     openCanvases: pass,
     refreshCustomInstructions: pass,
     hasSkillProvider: pass,
+    hasMemoryStore: pass,
     defaultAgent: pass,
     agent: (value) => {
       if (value === undefined || value === null) return DROP;
@@ -585,7 +610,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     enableHostGitOperations: onlyFalse("Host git operations"),
     enableSessionStore: onlyFalse("The cross-session store"),
     memory: (value) => {
-      if (isRecord(value) && value["enabled"] === true) throw violation("Memory is not available in shared environments (it is cross-session state)");
+      admitSharedMemory(value, raw["hasMemoryStore"] === true);
       return DROP;
     },
     skillDirectories: rejectIfSet("Ship skills in the environment's customizations folder; {key} is not accepted from callers"),
@@ -646,7 +671,8 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
     params["enableFileHooks"] = false;
     params["enableHostGitOperations"] = false;
     params["enableSessionStore"] = false;
-    params["memory"] = { enabled: false };
+    const memory = admitSharedMemory(raw["memory"], raw["hasMemoryStore"] === true);
+    params["memory"] = memory;
     params["embeddingCacheStorage"] = "in-memory";
     if (params["systemMessage"] === undefined && !hostTools) params["systemMessage"] = lockSystemMessage(undefined, { promotable, orchestrator: coordinator, style });
     params["enableSkills"] = params["enableSkills"] === false ? false : Boolean(directories.skills);
@@ -659,7 +685,7 @@ export function admitSession(raw: unknown, context: AdmissionContext, mode: "cre
       !orchestrator && ((environment.customizations?.agents.length ?? 0) > 0 || (Array.isArray(raw["customAgents"]) && raw["customAgents"].length > 0) || typeof raw["agent"] === "string");
     const filters = hostTools
       ? { availableTools: stringList(raw["availableTools"], "availableTools"), excludedTools: stringList(raw["excludedTools"], "excludedTools") }
-      : sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0, { hasAgents, hands });
+      : sharedToolFilters({ availableTools: raw["availableTools"], excludedTools: raw["excludedTools"] }, environment, context.network, remoteMcp.length > 0, { hasAgents, hands, appMemory: memory.enabled });
     if (filters.availableTools) params["availableTools"] = filters.availableTools;
     if (filters.excludedTools && filters.excludedTools.length > 0) params["excludedTools"] = filters.excludedTools;
     // The runtime's built-in GitHub MCP server would egress directly from the shared runtime host.
@@ -772,7 +798,7 @@ export function admitOptionsUpdate(raw: unknown, context: AdmissionContext): Rec
         if (shared && environment.config.unsafeHostTools !== true) {
           // A direct or mixed coordinator keeps its sub-agent tools (as admitted at create).
           const hands = context.platformTools.some((tool) => tool.name === HANDS_TOOLS.bash && tool.overridesBuiltInTool === true);
-          const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, context.allowMcp === true, { hands });
+          const filters = sharedToolFilters({ availableTools: key === "availableTools" ? value : undefined, excludedTools: key === "excludedTools" ? value : undefined }, environment, context.network, context.allowMcp === true, { hands, appMemory: context.appMemory === true });
           if (key === "availableTools") patch[key] = filters.availableTools;
           else patch[key] = filters.excludedTools ?? [];
         } else patch[key] = stringList(value, key);
