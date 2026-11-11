@@ -6,7 +6,7 @@ export async function request<T>(path: string, method = "GET", body?: unknown): 
   });
 
   if (response.status === 401) {
-    window.location.href = "/login";
+    window.location.href = `/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`;
   }
 
   if (!response.ok) {

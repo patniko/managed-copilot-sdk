@@ -5,10 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { APPS, BUILDING_BLOCKS, PATTERNS, WALKTHROUGHS, type BuildingBlock, type GalleryState } from "../src/shared/catalog.js";
+import { APPS, BUILDING_BLOCKS, CONSOLE, HARNESS_APP_ID, HARNESS_STAGES, harnessStageUrl, PATTERNS, WALKTHROUGHS, type BuildingBlock, type GalleryState } from "../src/shared/catalog.js";
 import { createGallery, type CloudLookup, type GalleryOptions } from "../src/server/gallery.js";
 import { capture, checkTarget, cloudUrls, isLocalUrl, localUrls, normalizeGatewayUrl, probe } from "../src/server/targets.js";
-import { appHref, COMPARE_APP_ID, compareApp, patternsOf, SHAPES, walkthroughCommand } from "../src/web/model.js";
+import { appHref, appsOnTab, COMPARE_APP_ID, compareApp, patternsOf, SHAPES, TABS, tabForHash, walkthroughCommand } from "../src/web/model.js";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -133,6 +133,54 @@ describe("patterns", () => {
         expect(declared, pattern.environment).not.toContain("execution:");
       }
     }
+  });
+});
+
+describe("tabs", () => {
+  const apphost = readFileSync(fileURLToPath(new URL("../../../apphost.mts", import.meta.url)), "utf8");
+
+  it("lists the Software Factory and exactly the apps the root AppHost routes to it as connected", () => {
+    // The demo each .withEnvironment("SOFTWARE_FACTORY_URL", …) belongs to: the nearest addDemo Dockerfile above it.
+    const routed = [...apphost.matchAll(/\.withEnvironment\("SOFTWARE_FACTORY_URL"/g)].map((match) => {
+      const before = [...apphost.slice(0, match.index).matchAll(/dockerfile: "demos\/([\w-]+)\/Dockerfile"/g)];
+      return before.at(-1)![1]!;
+    });
+    expect(APPS.filter((app) => app.group === "connected").map((app) => app.id).sort()).toEqual(["software-factory", ...routed].sort());
+    expect(APPS.filter((app) => app.group === "staff").map((app) => app.id)).toEqual([HARNESS_APP_ID]);
+  });
+
+  it("opens the tab holding the section a link names", () => {
+    expect(tabForHash("")).toBe("architectures");
+    for (const tab of TABS) expect(tabForHash(`#${tab}`)).toBe(tab);
+    expect(tabForHash("#patterns")).toBe("architectures");
+    expect(tabForHash("#pattern-mixed")).toBe("architectures");
+    expect(tabForHash("#walkthrough-03")).toBe("walkthroughs");
+    expect(tabForHash("#hack-the-harness")).toBe("staff-assistant");
+    expect(tabForHash("#harness-workers")).toBe("staff-assistant");
+    expect(tabForHash("#nothing")).toBe("architectures");
+  });
+
+  it("leaves local-only apps off a hosted gallery's tabs", () => {
+    expect(appsOnTab(APPS, "staff", false).map((app) => app.id)).toEqual([HARNESS_APP_ID]);
+    expect(appsOnTab(APPS, "staff", true)).toEqual([]);
+    expect(appsOnTab(APPS, "more", false)).toContain(CONSOLE);
+  });
+});
+
+describe("Hack the Harness stages", () => {
+  const stages = readFileSync(fileURLToPath(new URL("../../hack-the-harness/src/app/server/stages.ts", import.meta.url)), "utf8");
+
+  it("lists the app's stages in its order, each showing one of the six patterns", () => {
+    const ids = [...stages.matchAll(/^    id: "(\w+)",$/gm)].map((match) => match[1]);
+    expect(HARNESS_STAGES.map((stage) => stage.id)).toEqual(ids);
+    for (const stage of HARNESS_STAGES) expect(PATTERNS.map((pattern) => pattern.id), stage.id).toContain(stage.pattern);
+    expect(new Set(HARNESS_STAGES.map((stage) => stage.pattern)).size).toBe(PATTERNS.length);
+    expect(APPS.find((app) => app.id === HARNESS_APP_ID)?.localOnly).toBe(true);
+  });
+
+  it("opens each stage with ?stage= on the app's address", () => {
+    expect(harnessStageUrl("http://localhost:7415/", "mixed")).toBe("http://localhost:7415/?stage=mixed");
+    expect(harnessStageUrl("http://localhost:7425", "workers")).toBe("http://localhost:7425/?stage=workers");
   });
 });
 

@@ -1,22 +1,29 @@
 import {
   AlertIcon,
+  AppsIcon,
   BookIcon,
   CloudIcon,
   ColumnsIcon,
+  CommentDiscussionIcon,
   DeviceDesktopIcon,
   DotFillIcon,
   LinkExternalIcon,
   MarkGithubIcon,
   ShieldIcon,
+  StackIcon,
   SyncIcon,
   TerminalIcon,
   TriangleDownIcon,
+  WorkflowIcon,
 } from "@primer/octicons-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   APPS,
   BUILDING_BLOCKS,
   CONSOLE,
+  HARNESS_APP_ID,
+  HARNESS_STAGES,
+  harnessStageUrl,
   PATTERNS,
   shotFile,
   WALKTHROUGHS,
@@ -30,7 +37,7 @@ import {
   type TargetState,
   type Walkthrough,
 } from "../shared/catalog.js";
-import { appHref, COMPARE_APP_ID, compareApp, patternsOf, walkthroughCommand, type Shell } from "./model.js";
+import { appHref, appsOnTab, COMPARE_APP_ID, compareApp, patternsOf, tabForHash, walkthroughCommand, type Shell, type Tab } from "./model.js";
 import { PatternDiagram } from "./PatternDiagram.js";
 import { CopyButton, cx, Spinner, Tooltip, useDismiss } from "./ui.js";
 
@@ -523,6 +530,133 @@ function WalkthroughList({ walkthroughs, state }: { readonly walkthroughs: reado
   );
 }
 
+// ------------------------------------------------------------------------------------------------ Hack the Harness
+
+/**
+ * Hack the Harness's stages, one row each, to flip between architectures during a talk. Each opens the local app at
+ * that stage; every stage runs side by side, so switching needs no rebuild or restart.
+ */
+function HarnessStages({ apps, patterns, state }: { readonly apps: readonly AppEntry[]; readonly patterns: readonly Pattern[]; readonly state?: GalleryState }) {
+  const app = apps.find((entry) => entry.id === HARNESS_APP_ID);
+  // Local only: a hosted gallery can't reach it.
+  if (!app || state?.hosted) return null;
+  const link = state?.local?.links[app.id];
+  const online = link?.health === "online";
+  return (
+    <section id="hack-the-harness" className="scroll-mt-4" aria-labelledby="harness-heading">
+      <div className="Subhead">
+        <h2 id="harness-heading" className="Subhead-heading inline-flex items-center gap-2">
+          {app.title} stages <span className="Counter">{HARNESS_STAGES.length}</span>
+        </h2>
+        <div className="Subhead-actions flex items-center gap-2">
+          {link && !online ? <span className="text-xs text-fg-muted">{state?.local?.gateway === "online" ? "Starting…" : "Needs aspire run"}</span> : null}
+          <ReadmeLink href={`${state?.repoUrl ?? ""}${app.readme}`} name={app.title} />
+        </div>
+      </div>
+      <p className="mb-3 text-sm text-fg-muted">
+        The same staff assistant on six architectures, all running at once. Each stage has its own chats, so open one, start a new chat, and flip to the next.
+      </p>
+      <ol className="Box">
+        {HARNESS_STAGES.map((stage, index) => {
+          const pattern = patterns.find((entry) => entry.id === stage.pattern);
+          const href = link ? harnessStageUrl(link.url, stage.id) : undefined;
+          return (
+            <li key={stage.id} id={`harness-${stage.id}`} className="walkthrough Box-row flex scroll-mt-4 items-center gap-3">
+              <span className="walkthrough-id" aria-hidden>
+                {index + 1}
+              </span>
+              <div className="min-w-0 flex-1 md:flex md:items-baseline md:gap-4">
+                <p className="truncate font-semibold md:w-40 md:shrink-0">
+                  <span className="sr-only">Stage {index + 1}: </span>
+                  {stage.title}
+                </p>
+                <p className="truncate text-sm text-fg-muted" title={stage.summary}>
+                  {stage.summary}
+                </p>
+              </div>
+              {pattern ? (
+                <a className="Label shrink-0 max-sm:hidden" href={`#pattern-${pattern.id}`} title={`The ${pattern.title} pattern`}>
+                  {pattern.title}
+                </a>
+              ) : null}
+              {href ? (
+                <a className={cx("btn btn-sm shrink-0", online && "btn-primary")} href={href} target="_blank" rel="noreferrer" aria-label={`Open stage ${index + 1}, ${stage.title}`}>
+                  <DeviceDesktopIcon size={16} />
+                  Open
+                </a>
+              ) : (
+                <button type="button" className="btn btn-sm shrink-0" disabled aria-label={`Stage ${index + 1}, ${stage.title}: the local platform isn't running`}>
+                  <DeviceDesktopIcon size={16} />
+                  Open
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------------------------------------------ Tabs
+
+/**
+ * The open tab, from the URL hash, and a way to open another. A hash naming a section inside a tab (#pattern-mixed,
+ * #walkthrough-03, #harness-shared) opens that tab and scrolls to the section.
+ */
+function useTab(): readonly [Tab, (tab: Tab) => void] {
+  const [hash, setHash] = useState(() => window.location.hash);
+  useEffect(() => {
+    const changed = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", changed);
+    return () => window.removeEventListener("hashchange", changed);
+  }, []);
+  const tab = tabForHash(hash);
+  useEffect(() => {
+    const id = hash.replace(/^#/, "");
+    if (!id || id === tab) return;
+    requestAnimationFrame(() => document.getElementById(id)?.scrollIntoView({ block: "start" }));
+  }, [hash, tab]);
+  const select = useCallback((next: Tab) => {
+    // Push the tab's hash without the browser's jump to an element, so the page stays where it is.
+    window.history.pushState(null, "", `#${next}`);
+    setHash(`#${next}`);
+  }, []);
+  return [tab, select];
+}
+
+function AppGrid({
+  id,
+  title,
+  intro,
+  apps,
+  patterns,
+  state,
+}: {
+  readonly id: string;
+  readonly title: string;
+  readonly intro: string;
+  readonly apps: readonly AppEntry[];
+  readonly patterns: readonly Pattern[];
+  readonly state?: GalleryState;
+}) {
+  return (
+    <section id={`${id}-apps`} aria-labelledby={`${id}-heading`}>
+      <div className="Subhead">
+        <h2 id={`${id}-heading`} className="Subhead-heading inline-flex items-center gap-2">
+          {title} <span className="Counter">{apps.length}</span>
+        </h2>
+      </div>
+      <p className="mb-4 text-sm text-fg-muted">{intro}</p>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        {apps.map((app) => (
+          <AppCard key={app.id} app={app} patterns={patterns} state={state} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------------------------------------ Page
 
 function Notice({ tone, icon, children, actions }: { readonly tone: "warn" | "error"; readonly icon: ReactNode; readonly children: ReactNode; readonly actions?: ReactNode }) {
@@ -548,6 +682,18 @@ export function Gallery(props: GalleryProps) {
   const localDown = !hosted && state?.local?.gatewayUrl !== undefined && state.local.gateway !== "online";
   const race = compareApp(apps);
   const raceLink = race ? appHref(race, state) : undefined;
+  const connected = appsOnTab(apps, "connected", hosted);
+  const more = appsOnTab(apps, "more", hosted);
+  const staff = appsOnTab(apps, "staff", hosted).length > 0;
+  const tabs: readonly { readonly id: Tab; readonly label: string; readonly icon: typeof StackIcon; readonly count: number }[] = [
+    { id: "architectures", label: "Architectures", icon: StackIcon, count: patterns.length },
+    { id: "connected", label: "Connected demos", icon: WorkflowIcon, count: connected.length },
+    ...(staff ? [{ id: "staff-assistant" as const, label: "Staff assistant", icon: CommentDiscussionIcon, count: HARNESS_STAGES.length }] : []),
+    { id: "demos", label: "More demos", icon: AppsIcon, count: more.length },
+    { id: "walkthroughs", label: "Walkthroughs", icon: TerminalIcon, count: walkthroughs.length },
+  ];
+  const [chosen, selectTab] = useTab();
+  const tab: Tab = tabs.some((entry) => entry.id === chosen) ? chosen : "architectures";
   return (
     <div className="min-h-screen bg-canvas text-fg">
       <header className="AppHeader">
@@ -574,11 +720,34 @@ export function Gallery(props: GalleryProps) {
       </header>
 
       <section className="hero border-b border-line">
-        <div className="mx-auto max-w-[1280px] px-4 py-8 sm:px-6">
+        <div className="mx-auto max-w-[1280px] px-4 pt-8 sm:px-6">
           <h1 className="text-2xl font-semibold">Demo gallery</h1>
           <p className="mt-1 text-base text-fg-muted">
             {hosted ? "Six ways to run an agent, and the apps in this deployment that show them." : "Six ways to run an agent, and the apps and walkthroughs that show them."}
           </p>
+          <nav className="UnderlineNav mt-6 border-b-0" aria-label="Gallery sections">
+            <div className="UnderlineNav-body" role="tablist">
+              {tabs.map(({ id, label, icon: Glyph, count }) => (
+                <a
+                  key={id}
+                  id={`tab-${id}`}
+                  href={`#${id}`}
+                  role="tab"
+                  aria-selected={tab === id}
+                  aria-controls={`panel-${id}`}
+                  className="UnderlineNav-item"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    selectTab(id);
+                  }}
+                >
+                  <Glyph size={16} className="UnderlineNav-octicon" />
+                  <span>{label}</span>
+                  <span className="Counter">{count}</span>
+                </a>
+              ))}
+            </div>
+          </nav>
         </div>
       </section>
 
@@ -637,44 +806,64 @@ export function Gallery(props: GalleryProps) {
           </div>
         ) : null}
 
-        <section id="patterns" className="scroll-mt-4" aria-labelledby="patterns-heading">
-          <div className="Subhead">
-            <h2 id="patterns-heading" className="Subhead-heading inline-flex items-center gap-2">
-              Patterns <span className="Counter">{patterns.length}</span>
-            </h2>
-            {race && raceLink ? (
-              <div className="Subhead-actions">
-                <Tooltip content={raceLink.online ? `${race.title}: one job through every pattern, side by side` : `${race.title} isn't answering, so this opens its README`}>
-                  <a className="btn btn-sm" href={raceLink.href} target="_blank" rel="noreferrer">
-                    <ColumnsIcon size={16} />
-                    Compare all six
-                  </a>
-                </Tooltip>
+        {tab === "architectures" ? (
+          <div role="tabpanel" id="panel-architectures" aria-labelledby="tab-architectures">
+            <section id="patterns" className="scroll-mt-4" aria-labelledby="patterns-heading">
+              <div className="Subhead">
+                <h2 id="patterns-heading" className="Subhead-heading inline-flex items-center gap-2">
+                  Patterns <span className="Counter">{patterns.length}</span>
+                </h2>
+                {race && raceLink ? (
+                  <div className="Subhead-actions">
+                    <Tooltip content={raceLink.online ? `${race.title}: one job through every pattern, side by side` : `${race.title} isn't answering, so this opens its README`}>
+                      <a className="btn btn-sm" href={raceLink.href} target="_blank" rel="noreferrer">
+                        <ColumnsIcon size={16} />
+                        Compare all six
+                      </a>
+                    </Tooltip>
+                  </div>
+                ) : null}
               </div>
-            ) : null}
+              <BuildingBlocks />
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {patterns.map((pattern) => (
+                  <PatternCard key={pattern.id} pattern={pattern} apps={apps} walkthroughs={walkthroughs} state={state} />
+                ))}
+              </div>
+            </section>
           </div>
-          <BuildingBlocks />
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {patterns.map((pattern) => (
-              <PatternCard key={pattern.id} pattern={pattern} apps={apps} walkthroughs={walkthroughs} state={state} />
-            ))}
-          </div>
-        </section>
+        ) : null}
 
-        <section aria-labelledby="apps-heading">
-          <div className="Subhead">
-            <h2 id="apps-heading" className="Subhead-heading inline-flex items-center gap-2">
-              Apps <span className="Counter">{apps.length}</span>
-            </h2>
+        {tab === "connected" ? (
+          <div role="tabpanel" id="panel-connected" aria-labelledby="tab-connected">
+            <AppGrid
+              id="connected"
+              title="Connected demos"
+              intro="Help Desk, Incident Commander, and Data Desk each send work to the Software Factory as a work order: a storefront bug a customer reports, an incident's fix, or something you find in your data. The factory shows where each one came from."
+              apps={connected}
+              patterns={patterns}
+              state={state}
+            />
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {apps.filter((app) => !(state?.hosted && app.localOnly)).map((app) => (
-              <AppCard key={app.id} app={app} patterns={patterns} state={state} />
-            ))}
-          </div>
-        </section>
+        ) : null}
 
-        <WalkthroughList walkthroughs={walkthroughs} state={state} />
+        {tab === "staff-assistant" ? (
+          <div role="tabpanel" id="panel-staff-assistant" aria-labelledby="tab-staff-assistant">
+            <HarnessStages apps={apps} patterns={patterns} state={state} />
+          </div>
+        ) : null}
+
+        {tab === "demos" ? (
+          <div role="tabpanel" id="panel-demos" aria-labelledby="tab-demos">
+            <AppGrid id="demos" title="More demos" intro="Each of these stands on its own: one app, one idea." apps={more} patterns={patterns} state={state} />
+          </div>
+        ) : null}
+
+        {tab === "walkthroughs" ? (
+          <div role="tabpanel" id="panel-walkthroughs" aria-labelledby="tab-walkthroughs">
+            <WalkthroughList walkthroughs={walkthroughs} state={state} />
+          </div>
+        ) : null}
 
         <footer className="flex flex-wrap gap-x-4 gap-y-1 border-t border-line pt-4 pb-8 text-xs text-fg-muted">
           <span>

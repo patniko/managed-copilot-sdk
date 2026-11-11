@@ -11,6 +11,8 @@ import { useSessions } from "./hooks/useSessions";
 import { request } from "./lib/api";
 import { fileElements, timeline } from "./lib/timeline";
 import { toAttachment } from "./lib/attachments";
+import { stage, switchStage } from "./lib/stage";
+import { STAGES } from "../server/stages";
 
 const OfficeView = lazy(() => import("./office/OfficeView"));
 import { cn } from "./lib/utils";
@@ -82,7 +84,7 @@ export function App() {
     setCreating(true);
 
     try {
-      const session = await request<SessionInfo>("/api/sessions", "POST");
+      const session = await request<SessionInfo>("/api/sessions", "POST", { stage: stage.id });
       data.setSessions(previous => [session, ...previous]);
       select(session.id);
     } catch (error) {
@@ -212,10 +214,25 @@ export function App() {
               </Button>
             )}
             <span className="text-base font-medium">Staff assistant</span>
+            {/* Each stage is its own environment with its own chats. The gallery links to each with ?stage=. */}
+            <label className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground" title={stage.summary}>
+              <span className="max-sm:sr-only">Architecture</span>
+              <select
+                className="rounded-md border bg-background px-2 py-1 text-sm text-foreground"
+                value={stage.id}
+                onChange={event => switchStage(event.currentTarget.value)}
+              >
+                {STAGES.map((option, index) => (
+                  <option key={option.id} value={option.id}>
+                    {index + 1}. {option.title}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="flex items-center gap-1">
-            {/* Throws away the agent's workspace sandbox. Change `false` to `true` for the Direct architecture in the README. */}
-            {false && activeId && (
+            {/* Throws away the agent's workspace sandbox, when its commands run in one (Direct and Mixed). */}
+            {stage.workspace === "hands" && activeId && (
               <Button variant="ghost" className="gap-2 text-muted-foreground" onClick={() => void releaseWorkspace()}>
                 <PackageX size={18} /> Release workspace
               </Button>

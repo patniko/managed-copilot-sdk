@@ -1,5 +1,13 @@
 /** Everything the gallery shows. Shared by the server (links, health checks) and the page (copy). */
 
+/**
+ * Which gallery tab lists an app:
+ * - `connected`: the Software Factory and the apps that send it work.
+ * - `staff`: the staff assistant whose stages step through the architectures (Hack the Harness).
+ * - `more`: everything else, the operator console included.
+ */
+export type AppGroup = "connected" | "staff" | "more";
+
 export interface AppEntry {
   readonly id: string;
   readonly title: string;
@@ -7,6 +15,7 @@ export interface AppEntry {
   readonly description: string;
   /** What to try first in a live demo. */
   readonly tryIt: string;
+  readonly group: AppGroup;
   /** Aspire resource and Azure container app name; the deployed URL is https://<app>.<environment-domain>. */
   readonly app: string;
   /** Local port before MANAGED_COPILOT_PORT_OFFSET. */
@@ -45,6 +54,7 @@ export const CONSOLE: AppEntry = {
   tagline: "The platform as operators see it",
   description: "Infrastructure health, environments, every owner's sessions and sandboxes, and harness configuration. Metadata only, never conversation content.",
   tryIt: "Open Sessions while a demo runs and watch sandboxes appear.",
+  group: "more",
   app: GATEWAY_APP,
   port: GATEWAY_PORT,
   healthPath: "/healthz",
@@ -59,6 +69,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "Chat with an orchestrator agent, and pick how it works: delegate each part to a worker in its own sandbox, work directly in a sandbox with its sub-agents, or mix the two. Every decision and every command shows live.",
     tryIt: "Estimate π three ways in parallel, then try the same job with Work directly.",
+    group: "more",
     app: "dispatch",
     port: 7470,
     healthPath: "/api/health",
@@ -71,6 +82,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "A coordinator plans the work, builds tasks in parallel builder sandboxes, reuses them for review fixes, and assembles the release. The factory still checks every gate, and shows which work orders Help Desk, Incident Commander, and Data Desk sent.",
     tryIt: "Start the CSV ⇄ JSON toolkit work order and watch the floor.",
+    group: "connected",
     app: "software-factory",
     port: 7480,
     healthPath: "/api/health",
@@ -83,6 +95,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "Mail, calendar, reminders, and recurring jobs that run on the platform while no browser is open, plus sandboxes it starts for hands-on work once you approve them.",
     tryIt: "Triage my unread email, then chart my meeting load this week.",
+    group: "more",
     app: "assistant",
     port: 7490,
     healthPath: "/healthz",
@@ -95,6 +108,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "Anyone signs in: with GitHub, to chat on their own Copilot plan, or with an email, so the app pays through its Azure AI Foundry. Each person gets conversations and a memory that nobody else can see.",
     tryIt: "Ask it to remember your favorite color, then sign in as someone else and ask for it.",
+    group: "more",
     app: "front-desk",
     port: 7450,
     healthPath: "/api/health",
@@ -108,6 +122,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "A lead on the shared runtime splits your question across web researchers, each in its own sandbox, and writes a report where every claim cites a page they read.",
     tryIt: "Ask how WebAssembly garbage collection works.",
+    group: "more",
     app: "research-swarm",
     port: 7425,
     healthPath: "/api/health",
@@ -120,6 +135,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "Sends the same prompt to six real sessions, one per pattern environment, and compares where each agent thinks and acts, its time, sandboxes, and premium requests.",
     tryIt: "Race Run code, then Split the work, and compare Delegate with Mixed.",
+    group: "more",
     app: "pattern-race",
     port: 7420,
     healthPath: "/api/health",
@@ -132,6 +148,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it. Send what you find to the Software Factory.",
     tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
+    group: "connected",
     app: "data-desk",
     port: 7430,
     healthPath: "/api/health",
@@ -144,6 +161,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "A support rush where every customer chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you, and storefront bugs customers report go to the Software Factory.",
     tryIt: "Simulate 25 customers, then approve a refund.",
+    group: "connected",
     app: "help-desk",
     port: 7440,
     healthPath: "/api/health",
@@ -152,10 +170,11 @@ export const APPS: readonly AppEntry[] = [
   {
     id: "hack-the-harness",
     title: "Hack the Harness",
-    tagline: "One staff assistant, five agent deployment architectures",
+    tagline: "One staff assistant, six agent deployment architectures",
     description:
-      "A chat app, with a 3D office of colleagues to talk to. Its README steps the same agent through shared, isolated, promotable, direct, and worker architectures, with the small code change for each.",
-    tryIt: "Sign in with any name and switch to the 3D office.",
+      "A chat app, with a 3D office of colleagues to talk to. Every architecture runs side by side, from shared and isolated through promotable, direct, and workers to mixed, and the header switches between them.",
+    tryIt: "Open a stage below, attach the leads spreadsheet, and ask for a cleaned-up copy.",
+    group: "staff",
     app: "hack-the-harness",
     port: 7415,
     healthPath: "/api/health",
@@ -169,6 +188,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "An alert opens an incident: Copilot triages in its own sandbox, hands the repro to a worker and the fix to a worker or the Software Factory, and waits for your OK to deploy, even with the tab closed.",
     tryIt: "Simulate an incident, close the tab, then reopen it and deploy.",
+    group: "connected",
     app: "incident-commander",
     port: 7445,
     healthPath: "/api/health",
@@ -181,6 +201,7 @@ export const APPS: readonly AppEntry[] = [
     description:
       "Paste a public GitHub repository: one sandbox clones it, Copilot fixes the failing tests, and Repo Doctor verifies the patch, while a strip shows which hosts the sandbox reached and which were blocked.",
     tryIt: "Run the sample and watch two failing tests turn green.",
+    group: "more",
     app: "repo-doctor",
     port: 7435,
     healthPath: "/api/health",
@@ -267,6 +288,7 @@ export const PATTERNS: readonly Pattern[] = [
     demos: [
       { app: "repo-doctor", where: "every run" },
       { app: "software-factory", where: "App-driven mode" },
+      { app: "hack-the-harness", where: "its Isolated stage" },
     ],
   },
   {
@@ -282,6 +304,7 @@ export const PATTERNS: readonly Pattern[] = [
       { app: "software-factory", where: "its planner and reviewer" },
       { app: "help-desk", where: "25 customers, one runtime" },
       { app: "front-desk", where: "every person's conversations" },
+      { app: "hack-the-harness", where: "its Shared stage" },
     ],
   },
   {
@@ -293,7 +316,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "helper",
     settings: ['type: "promotable"', 'promoteTo: "coder"'],
     walkthrough: "04",
-    demos: [{ app: "data-desk", where: "every analysis" }],
+    demos: [
+      { app: "data-desk", where: "every analysis" },
+      { app: "hack-the-harness", where: "its Promotable stage" },
+    ],
   },
   {
     id: "direct",
@@ -304,7 +330,10 @@ export const PATTERNS: readonly Pattern[] = [
     environment: "operator",
     settings: ['type: "orchestrator"', 'execution: "direct"'],
     walkthrough: "12",
-    demos: [{ app: "dispatch", where: "Work directly" }],
+    demos: [
+      { app: "dispatch", where: "Work directly" },
+      { app: "hack-the-harness", where: "its Direct stage" },
+    ],
   },
   {
     id: "delegate",
@@ -320,7 +349,7 @@ export const PATTERNS: readonly Pattern[] = [
       { app: "software-factory", where: "Agent-led mode" },
       { app: "assistant", where: "its sandboxes" },
       { app: "research-swarm", where: "its researchers" },
-      { app: "hack-the-harness", where: "its Workers step" },
+      { app: "hack-the-harness", where: "its Workers stage" },
     ],
   },
   {
@@ -335,11 +364,39 @@ export const PATTERNS: readonly Pattern[] = [
     demos: [
       { app: "dispatch", where: "Mixed" },
       { app: "incident-commander", where: "every incident" },
+      { app: "hack-the-harness", where: "its Mixed stage" },
     ],
   },
 ];
 
 export type Target = "local" | "cloud";
+
+/** One stage of Hack the Harness: the same staff assistant on a different architecture, side by side. */
+export interface HarnessStage {
+  /** Its `?stage=` in the app (demos/hack-the-harness/src/app/server/stages.ts). */
+  readonly id: string;
+  readonly title: string;
+  /** What changes at this stage. */
+  readonly summary: string;
+  /** The pattern (an entry of PATTERNS) it shows. */
+  readonly pattern: string;
+}
+
+/** The Hack the Harness app, whose stages the gallery links to one by one. */
+export const HARNESS_APP_ID = "hack-the-harness";
+
+/** Hack the Harness's stages, in talk order: from a container per chat to mixed direct and delegated work. */
+export const HARNESS_STAGES: readonly HarnessStage[] = [
+  { id: "shared", title: "Shared", summary: "Every chat on one shared runtime, no sandboxes and no shell.", pattern: "shared" },
+  { id: "isolated", title: "Isolated", summary: "Every chat in its own sandbox, with its runtime, history, and files.", pattern: "isolated" },
+  { id: "promotable", title: "Promotable", summary: "Chats start shared and move into a sandbox when they need to run code.", pattern: "promotable" },
+  { id: "direct", title: "Direct", summary: "The agent stays shared; only its shell and file commands run in a sandbox.", pattern: "direct" },
+  { id: "workers", title: "Workers", summary: "The agent stays shared and hands each job to a worker in its own sandbox.", pattern: "delegate" },
+  { id: "mixed", title: "Mixed", summary: "The agent works directly in its own sandbox, and hands bigger jobs to workers.", pattern: "mixed" },
+];
+
+/** A stage's address in the app at `base`. */
+export const harnessStageUrl = (base: string, stage: string): string => `${base.replace(/\/+$/, "")}/?stage=${encodeURIComponent(stage)}`;
 
 /**
  * - `online`: answered its health check.

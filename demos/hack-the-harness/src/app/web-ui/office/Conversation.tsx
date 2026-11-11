@@ -7,6 +7,7 @@ import { Download, FileText, Loader2, Paperclip, Send, Square } from "lucide-rea
 import { Markdown } from "@/components/ui/markdown";
 import type { useSessions } from "../hooks/useSessions";
 import { request } from "../lib/api";
+import { stage } from "../lib/stage";
 import { toAttachment } from "../lib/attachments";
 import { timeline } from "../lib/timeline";
 import { fileColor } from "./Files";
@@ -14,8 +15,9 @@ import { groupSteps, Steps } from "../components/steps";
 
 export type Sessions = ReturnType<typeof useSessions>;
 
-// Each NPC keeps the same session across visits, so its conversation is also in the normal chat list.
-const STORAGE_KEY = "officeSessions";
+// Each NPC keeps the same session across visits, so its conversation is also in the normal chat list. Each stage has
+// its own chats, so its own NPC sessions too.
+const STORAGE_KEY = `officeSessions:${stage.id}`;
 
 function storedIds(): Record<string, string> {
   return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}");
@@ -30,7 +32,7 @@ export async function npcSession(name: string, data: Sessions): Promise<string> 
     return existing;
   }
 
-  const session = await request<SessionInfo>("/api/sessions", "POST", { npc: name });
+  const session = await request<SessionInfo>("/api/sessions", "POST", { npc: name, stage: stage.id });
   data.setSessions(previous => [session, ...previous]);
   localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...ids, [name]: session.id }));
   return session.id;
