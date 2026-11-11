@@ -154,6 +154,63 @@ propose, so another customer's agent can occasionally propose something too: dec
 
 The knowledge base outlives simulations and restarts: it's kept in `knowledge.json` in Help Desk's data directory.
 
+## Ticket classification (optional)
+
+In a rush you want to see at a glance what people are asking for before any agent has answered. With classification
+turned on, every customer message is classified as a delivery, refund, cancellation, order change, website problem, or
+question, and as urgent or not. The wall then groups tickets by category, urgent ones first with a flame. A
+classification takes a fraction of a second and a few dozen tokens, so it's cheap enough to run on every message,
+while the customers' own sessions answer on a bigger model.
+
+The classifier is [Microsoft-Decision-1](https://learn.microsoft.com/azure/foundry/foundry-models/how-to/use-foundry-models-microsoft-decision)
+on Microsoft Foundry, a decision model rather than a chat model: it takes a text and typed questions, and answers each
+with a choice and its probability. It still runs in stock Copilot sessions:
+
+1. The AppHost declares an OpenAI-compatible endpoint (spec section 15) at Help Desk's own
+   `/api/triage/v1/chat/completions`, and a second shared environment, `help-desk-triage`, routed to it.
+2. For each customer message, Help Desk asks a session in `help-desk-triage` with the SDK's structured output:
+   `session.sendAndWait(message, schema)`, where the schema is `{ category: enum, urgent: boolean }`.
+3. The platform's runtime sends that as a chat completion request. Help Desk's endpoint
+   ([`triage-endpoint.ts`](src/server/triage-endpoint.ts)) turns the schema into the decision model's questions (an
+   enum is a `choice`, a boolean a yes-or-no `noul`), with the instructions from the system message, and the last user
+   message as the state. It calls Foundry's decision API as your Azure CLI sign-in
+   ([`decision.ts`](src/server/decision.ts)) and answers with JSON that matches the schema.
+
+The endpoint accepts nothing else: a streaming request, a request without a JSON schema, or a schema property that
+isn't an enum or a boolean gets a 400. A few classifier sessions (`hdt-…`) are reused, and replaced after 50
+classifications since they keep their history.
+
+To see how fast it is, click **Classify** next to **Simulate**. It classifies the first 5, 10, or 25 customers' first
+messages (whatever is picked for Simulate) without starting their support sessions. The wall groups them by category
+as the results arrive, then shows the total time, for example *25 classified in 1.2s*. Compare that with how long
+the support sessions take to write their first replies. Classify is only there when classification is set up, and
+it's disabled during a simulation; starting a simulation clears its results. A second Classify replaces the first.
+
+Turn it on (local only, with `aspire run`):
+
+1. In the [Foundry portal](https://ai.azure.com), deploy **Microsoft-Decision-1** in a Foundry resource. Note the
+   resource's endpoint (`https://<resource>.services.ai.azure.com`) and the deployment's name.
+2. Give yourself the **Cognitive Services User** role on that Foundry resource (Access control (IAM) in the Azure
+   portal). It can take a few minutes to apply.
+3. Sign in with `az login`. Help Desk gets a token for `https://cognitiveservices.azure.com` from the Azure CLI; no key
+   is used.
+4. In the repository root, tell the AppHost about the deployment, then run `aspire run`:
+
+   ```powershell
+   aspire secret set Parameters:help-desk-decision-endpoint https://<resource>.services.ai.azure.com
+   aspire secret set Parameters:help-desk-decision-deployment <deployment>
+   aspire secret set Parameters:help-desk-decision-subscription <subscription-id>   # when it isn't the Azure CLI's default
+   ```
+
+   None of these are secrets. The AppHost then adds the `help-desk-triage` environment and the endpoint, and generates
+   the key the platform uses to call Help Desk's endpoint.
+
+To turn it off, remove the settings with `aspire secret delete Parameters:help-desk-decision-endpoint` (and the
+others). Without them, Help Desk works exactly as before, and the wall says classification isn't set up. If a
+classification fails (no role yet, a missing deployment, throttling), the wall says why and the tickets carry on
+unclassified; the customers' sessions don't depend on it. `aspire deploy` refuses these settings, because a deployed
+Help Desk has no Azure identity to call Foundry with.
+
 ## How it works
 
 - **One shared environment.** [`apphost.mts`](apphost.mts) declares `help-desk`: `type: "shared"` with network off,
@@ -213,12 +270,17 @@ The knowledge base outlives simulations and restarts: it's kept in `knowledge.js
 | `HELP_DESK_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 | `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, which Help Desk's server calls to send software issues. Unset: **Send to Software Factory** is unavailable and says why |
 | `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to its work orders |
+| `HELP_DESK_TRIAGE_ENVIRONMENT` | none (the root AppHost sets it with classification on) | The shared environment that classifies tickets. Unset: classification is off |
+| `HELP_DESK_TRIAGE_MODEL` | none | The classifier's model in that environment; required with `HELP_DESK_TRIAGE_ENVIRONMENT` |
+| `HELP_DESK_DECISION_ENDPOINT`, `HELP_DESK_DECISION_DEPLOYMENT` | none | The Foundry resource and Microsoft-Decision-1 deployment Help Desk's endpoint calls. Unset, or without `HELP_DESK_TRIAGE_KEY`: the endpoint answers 503 |
+| `HELP_DESK_DECISION_SUBSCRIPTION` | the Azure CLI's default | The subscription the Azure CLI gets its token for |
+| `HELP_DESK_TRIAGE_KEY` | none | The key the platform presents to Help Desk's endpoint (a secret the AppHost generates) |
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `apphost.mts` | AppHost fragment: the `help-desk` shared environment and the app resource |
+| `apphost.mts` | AppHost fragment: the `help-desk` shared environment, the optional `help-desk-triage` environment and its endpoint, and the app resource |
 | `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, the team knowledge base, software issues and the Software Factory client, REST and server-sent events |
 | `src/scripts` | The happy-path script |
 | `src/shared` | Types shared with the UI |

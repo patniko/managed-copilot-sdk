@@ -1,4 +1,4 @@
-import { BugIcon, CopilotIcon, LightBulbIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { BugIcon, CopilotIcon, FlameIcon, LightBulbIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
 import { BUG_AREA_INFO, type BugReport, type CustomerCard, type Ticket, type ToolItem } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { latestMessage, money, plainText, WORK_ORDER_STATUS, workOrderLine } from "../lib/format.js";
@@ -38,6 +38,11 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
         <a href={customerHref(customer.id)} className="tile-link min-w-0 flex-1 truncate text-sm font-semibold text-fg" title={customer.name}>
           {customer.name}
         </a>
+        {ticket.triage?.state === "done" && ticket.triage.urgent ? (
+          <Tooltip content="Urgent, by the decision model" className="relative z-10 shrink-0">
+            <FlameIcon size={14} className="text-fg-severe" aria-label="Urgent" />
+          </Tooltip>
+        ) : null}
         {bug && (ticket.approval || ticket.memory || ticket.blocked > 0) ? (
           // The bar below is taken: the software issue shows as an icon.
           <Tooltip content={`Software issue: ${bug.title}`} className="relative z-10 shrink-0">
@@ -136,7 +141,7 @@ function IssueMarker({ bug }: { readonly bug: BugReport }) {
 }
 
 /** A customer before the simulation reaches them: their question, waiting. */
-export function GhostTile({ customer, queued }: { readonly customer: CustomerCard; readonly queued: boolean }) {
+export function GhostTile({ customer, queued, urgent = false }: { readonly customer: CustomerCard; readonly queued: boolean; readonly urgent?: boolean }) {
   return (
     <article className={cx("flex flex-col rounded-md border border-dashed border-line transition-opacity", TILE, !queued && "opacity-40")}>
       <div className="flex min-w-0 items-center gap-2">
@@ -144,6 +149,11 @@ export function GhostTile({ customer, queued }: { readonly customer: CustomerCar
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-fg-muted" title={customer.name}>
           {customer.name}
         </span>
+        {urgent ? (
+          <Tooltip content="Urgent, by the decision model" className="shrink-0">
+            <FlameIcon size={14} className="text-fg-severe" aria-label="Urgent" />
+          </Tooltip>
+        ) : null}
       </div>
       <p className="mt-2 line-clamp-2 text-sm text-fg-muted" title={customer.opening}>
         {customer.opening}

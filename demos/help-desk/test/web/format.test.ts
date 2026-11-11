@@ -108,6 +108,13 @@ describe("store", () => {
     expect(ended.issues).toEqual([]);
   });
 
+  it("follows Classify's results until a simulation clears them", () => {
+    const classification = { id: "k1", size: 5, startedAt: "", results: { c01: { state: "done" as const, category: "refund" as const, urgent: true } }, elapsedMs: 840 };
+    const classified = reduce(base, { type: "classification", classification });
+    expect(classified.classification).toEqual(classification);
+    expect(reduce(classified, { type: "classification" }).classification).toBeUndefined();
+  });
+
   it("updates a ticket of the current simulation and drops late updates of an ended one", () => {
     const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()], issues: [] });
     expect(reduce(started, { type: "ticket", ticket: ticket({ status: "resolved" }) }).tickets["c01"]?.status).toBe("resolved");

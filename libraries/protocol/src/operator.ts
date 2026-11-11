@@ -384,7 +384,8 @@ export interface OperatorEnvironment {
   readonly subagents?: SubagentSandboxes;
   readonly idleTimeoutSeconds?: number;
   readonly warm?: number;
-  readonly inference?: { readonly foundry: string };
+  /** Where model calls go instead of each user's Copilot plan: a Foundry account or an OpenAI-compatible endpoint (exactly one). */
+  readonly inference?: { readonly foundry?: string; readonly openai?: string };
   readonly customizations?: OperatorCustomizations;
   readonly tools: OperatorToolPolicy;
   /** AppHost webhooks that receive this environment's events. */
@@ -502,7 +503,7 @@ export interface OperatorSessionSummary {
   readonly state: SessionState;
   readonly generation: number;
   readonly model?: string;
-  /** Where its model calls go: each user's Copilot plan, or an Azure AI Foundry account (absent for workspace sandboxes). */
+  /** Where its model calls go: each user's Copilot plan, an Azure AI Foundry account, or an OpenAI-compatible endpoint (absent for workspace sandboxes). */
   readonly inference?: SessionInference;
   readonly agent?: string;
   readonly clientName?: string;

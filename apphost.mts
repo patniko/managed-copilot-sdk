@@ -66,6 +66,28 @@ const foundry = foundryAccount
   ? { [foundryAccount]: { resourceGroup: foundryResourceGroup!, deployments: foundryDeployments, ...(foundrySubscription ? { subscription: foundrySubscription } : {}) } }
   : undefined;
 
+// Optional: Help Desk classifies each customer message with Microsoft-Decision-1 on Microsoft Foundry
+// (demos/help-desk/README.md "Ticket classification"). Name the deployment with `aspire secret set
+// Parameters:help-desk-decision-endpoint <https://<resource>.services.ai.azure.com>` and
+// `Parameters:help-desk-decision-deployment <name>` (and `Parameters:help-desk-decision-subscription <id>` when it isn't
+// the Azure CLI's default). Help Desk calls it as your `az login` identity, so this works with `aspire run` only.
+const helpDeskDecisionEndpoint = await setting("Parameters:help-desk-decision-endpoint");
+const helpDeskDecisionDeployment = await setting("Parameters:help-desk-decision-deployment");
+const helpDeskDecisionSubscription = await setting("Parameters:help-desk-decision-subscription");
+if (Boolean(helpDeskDecisionEndpoint) !== Boolean(helpDeskDecisionDeployment)) {
+  throw new Error("Help Desk's ticket classification needs both Parameters:help-desk-decision-endpoint and Parameters:help-desk-decision-deployment.");
+}
+if (publishing && helpDeskDecisionEndpoint) {
+  throw new Error(
+    "Help Desk's ticket classification (Parameters:help-desk-decision-*) works with `aspire run` only: a deployed Help Desk has no Azure identity to call Microsoft Foundry with. Remove those settings to deploy.",
+  );
+}
+const helpDeskTriage = helpDeskDecisionEndpoint
+  ? { endpoint: helpDeskDecisionEndpoint, deployment: helpDeskDecisionDeployment!, ...(helpDeskDecisionSubscription ? { subscription: helpDeskDecisionSubscription } : {}) }
+  : undefined;
+// The key the platform presents to Help Desk's OpenAI-compatible endpoint, generated once.
+const helpDeskTriageKey = helpDeskTriage ? await generatedSecret("help-desk-triage-key") : undefined;
+
 // The demos bring their own environments (and the assistant its webhook) as plain data.
 const factory = softwareFactory({ port: ports.factory });
 const dispatchDemo = dispatch({ port: ports.dispatch });
@@ -74,7 +96,7 @@ const dataDeskDemo = dataDesk({ port: ports.dataDesk });
 const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret("assistant-webhook-secret") });
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 const swarm = researchSwarm({ port: ports.researchSwarm });
-const helpDeskDemo = helpDesk({ port: ports.helpDesk });
+const helpDeskDemo = helpDesk({ port: ports.helpDesk, ...(helpDeskTriage ? { triage: helpDeskTriage } : {}) });
 const hackTheHarnessDemo = hackTheHarness({ port: ports.hackTheHarness });
 const incidents = incidentCommander({ port: ports.incidentCommander, webhookSecret: await generatedSecret("incident-commander-webhook-secret") });
 const repoDoctorDemo = repoDoctor({ port: ports.repoDoctor });
@@ -93,6 +115,8 @@ const copilot = await addManagedCopilot(builder, "copilot", {
   // The operator console (`npx managed-copilot console`, spec section 16) is open to every account on this machine; a
   // deployment turns it on for the accounts in Parameters:copilot-operator-users (or -operator-orgs).
   ...(foundry ? { foundry } : {}),
+  // OpenAI-compatible endpoints the AppHost routes environments to (spec section 15): Help Desk's ticket classification.
+  ...(helpDeskDemo.triage && helpDeskTriageKey ? { openai: { [helpDeskDemo.triage.endpoint]: { ...helpDeskDemo.triage.declaration, models: [...helpDeskDemo.triage.declaration.models], key: helpDeskTriageKey } } } : {}),
   // Apps that sign in their own users and vouch for them with a key the AppHost issues (spec section 2).
   apps: { ...frontDeskDemo.apps },
   environments: {
@@ -260,9 +284,10 @@ if (frontDeskTotalDailyLimit) await frontDeskApp.withEnvironment("FRONT_DESK_TOT
 
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
 // store's tools bound to that customer's orders. Storefront bugs its customers report go to the factory.
-await (await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" }))
+const helpDeskApp = await (await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" }))
   .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
   .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
+if (helpDeskTriageKey) await helpDeskApp.withEnvironment("HELP_DESK_TRIAGE_KEY", helpDeskTriageKey);
 
 // Hack the Harness: a staff assistant, with a 3D office, that runs six agent deployment architectures side by side.
 // Local only: it accepts any username and password.

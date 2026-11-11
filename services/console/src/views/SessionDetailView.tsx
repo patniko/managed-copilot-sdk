@@ -190,6 +190,8 @@ function OverviewTab({ session }: { readonly session: OperatorSessionDetail }) {
             {session.inference ? (
               session.inference.route === "foundry" ? (
                 <span className="font-mono text-xs">Foundry: {session.inference.foundry}</span>
+              ) : session.inference.route === "openai" ? (
+                <span className="font-mono text-xs">OpenAI-compatible: {session.inference.openai}</span>
               ) : (
                 <span className="text-fg-muted">Through the owner's GitHub Copilot</span>
               )

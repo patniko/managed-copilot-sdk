@@ -22,6 +22,7 @@ type VaultCredentialInput = NonNullable<ConfigInput["vaults"]>[string][number];
 type WebhookInput = NonNullable<ConfigInput["webhooks"]>[string];
 type ScheduleInput = NonNullable<ConfigInput["schedules"]>[string];
 type AppInput = NonNullable<ConfigInput["apps"]>[string];
+type OpenAIEndpointInput = NonNullable<ConfigInput["openai"]>[string];
 
 export type SandboxCredentialOption = Omit<Extract<VaultCredentialInput, { env: string }>, "value"> & { value: AspireSecret };
 export type McpCredentialOption = Omit<Extract<VaultCredentialInput, { mcpServer: string }>, "value"> & { value: AspireSecret };
@@ -32,6 +33,11 @@ export type WebhookOption = Omit<WebhookInput, "secret"> & { secret: AspireSecre
  * `copilot.appKey(name)` to the app as `MANAGED_COPILOT_APP_KEY`.
  */
 export type AppOption = Omit<AppInput, "key">;
+/**
+ * An OpenAI-compatible endpoint shared environments can send model calls to (spec section 15). Its optional key must be
+ * an Aspire secret parameter; the gateway sends it as the bearer token on each model call.
+ */
+export type OpenAIEndpointOption = Omit<OpenAIEndpointInput, "key"> & { key?: AspireSecret };
 
 /**
  * A stock SDK tool (`defineTool(...)`) or a plain declaration. Schedules store only the standard declaration (name,
@@ -51,7 +57,7 @@ export type ScheduleOption = Omit<ScheduleInput, "session"> & {
 };
 
 /** `addManagedCopilot` options: the AppHost declaration from spec section 1 plus local hosting settings. */
-export interface ManagedCopilotOptions extends Omit<ConfigInput, "name" | "vaults" | "webhooks" | "schedules" | "apps"> {
+export interface ManagedCopilotOptions extends Omit<ConfigInput, "name" | "vaults" | "webhooks" | "schedules" | "apps" | "openai"> {
   /** Named vaults (spec section 8). Values must be Aspire secret parameters. */
   vaults?: Record<string, VaultCredentialOption[]>;
   /** Webhook subscribers (spec section 12). Secrets must be Aspire secret parameters. */
@@ -60,6 +66,8 @@ export interface ManagedCopilotOptions extends Omit<ConfigInput, "name" | "vault
   schedules?: Record<string, ScheduleOption>;
   /** Apps that vouch for their own users with a generated key (spec section 2): `copilot.appKey(name)`. */
   apps?: Record<string, AppOption>;
+  /** OpenAI-compatible endpoints for `inference: { openai }` (spec section 15). Keys must be Aspire secret parameters. */
+  openai?: Record<string, OpenAIEndpointOption>;
   /** Gateway port on this machine. Defaults to 7400; `ManagedCopilot.connect()` discovers it either way. */
   port?: number;
   /** Ledger, artifacts, and runtime state. Defaults to `.managed-copilot/data` next to the AppHost. */
@@ -115,7 +123,7 @@ function envSegment(value: string): string {
 }
 
 /** Readable, plus a hash of the exact name, so distinct names (`billing-prod`, `billing--prod`) never share a variable. */
-function secretEnvName(kind: "VAULT" | "WEBHOOK" | "APP", name: string, index?: number): string {
+function secretEnvName(kind: "VAULT" | "WEBHOOK" | "APP" | "OPENAI", name: string, index?: number): string {
   const hash = createHash("sha256").update(name).digest("hex").slice(0, 8).toUpperCase();
   return `MANAGED_COPILOT_SECRET_${kind}_${envSegment(name) || "NAMED"}_${hash}${index === undefined ? "" : `_${index}`}`;
 }
@@ -201,6 +209,14 @@ export function normalizeOptions(name: string, options: ManagedCopilotOptions, {
       Object.entries(options.webhooks).map(([hook, webhook]) => [
         hook,
         { ...webhook, secret: secretRef(`webhooks.${hook}.secret`, webhook.secret, secretEnvName("WEBHOOK", hook)) },
+      ]),
+    );
+  }
+  if (options.openai) {
+    input.openai = Object.fromEntries(
+      Object.entries(options.openai).map(([endpoint, declaration]) => [
+        endpoint,
+        declaration?.key === undefined ? declaration : { ...declaration, key: secretRef(`openai.${endpoint}.key`, declaration.key, secretEnvName("OPENAI", endpoint)) },
       ]),
     );
   }

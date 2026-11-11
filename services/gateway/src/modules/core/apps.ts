@@ -119,14 +119,15 @@ export function appAllows(apps: AppRegistry | undefined, principal: Principal, e
 }
 
 /**
- * An app's own users have no Copilot plan: their agent sessions run only where model calls go to Foundry. Anything
+ * An app's own users have no Copilot plan: their agent sessions run only where model calls go to Foundry or an
+ * OpenAI-compatible endpoint the AppHost declares. Anything
  * else is refused before a session exists (`inference_unavailable`), never billed to someone else.
  */
 export function assertAppUserInference(principal: Principal, environment: string, config: EnvironmentConfig): void {
-  if (principal.kind !== "app-user" || config.inference?.foundry) return;
+  if (principal.kind !== "app-user" || config.inference?.foundry || config.inference?.openai) return;
   throw new ManagedCopilotError(
     "inference_unavailable",
-    `Environment "${environment}" sends model calls to each user's GitHub Copilot plan, and app users have none. Use an environment with inference: { foundry } for the "${principal.app}" app's users.`,
+    `Environment "${environment}" sends model calls to each user's GitHub Copilot plan, and app users have none. Use an environment with inference: { foundry } or { openai } for the "${principal.app}" app's users.`,
     { environment, app: principal.app },
   );
 }

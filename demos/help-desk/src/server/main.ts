@@ -5,14 +5,23 @@ import { HelpDesk } from "./desk.js";
 import { SoftwareFactory } from "./factory.js";
 import { createRequestHandler, type Middleware } from "./http.js";
 import { EventHub } from "./hub.js";
+import { AzureCliTokenSource, DecisionClient } from "./decision.js";
 import { log } from "./log.js";
 import { Platform } from "./platform.js";
+import { Triage } from "./triage.js";
 
 const config = loadConfig();
 const hub = new EventHub();
 const platform = new Platform(config);
 const factory = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl);
-const desk = new HelpDesk(platform, config, (event) => hub.publish(event), factory);
+// Ticket classification, when it's set up: sessions in the triage environment, which the AppHost routes to the
+// decision model through this server's triage endpoint (demos/help-desk/README.md).
+const triagePlatform = config.triage ? new Platform({ ...config, environment: config.triage.environment, model: config.triage.model }) : undefined;
+const triage = new Triage(triagePlatform, config.triage?.environment);
+const decider = config.decision
+  ? new DecisionClient({ endpoint: config.decision.endpoint, deployment: config.decision.deployment, tokens: new AzureCliTokenSource(config.decision.subscription) })
+  : undefined;
+const desk = new HelpDesk(platform, config, (event) => hub.publish(event), factory, triage);
 desk.start();
 
 const server = createServer();
@@ -26,7 +35,7 @@ if (config.dev) {
   });
   ui = vite.middlewares as unknown as Middleware;
 }
-server.on("request", createRequestHandler({ desk, hub, config }, ui));
+server.on("request", createRequestHandler({ desk, hub, config, ...(decider ? { decider } : {}) }, ui));
 
 await new Promise<void>((resolve, reject) => {
   server.once("error", reject);
@@ -37,7 +46,8 @@ await new Promise<void>((resolve, reject) => {
 });
 
 platform.start();
-log.info(`Help Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, { environment: config.environment, softwareFactory: config.factoryUrl ?? "not connected (set SOFTWARE_FACTORY_URL)" });
+triagePlatform?.start();
+log.info(`Help Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, { environment: config.environment, softwareFactory: config.factoryUrl ?? "not connected (set SOFTWARE_FACTORY_URL)", triage: config.triage?.environment ?? "not set up" });
 
 let stopping = false;
 async function shutdown(signal: string): Promise<void> {
@@ -46,7 +56,7 @@ async function shutdown(signal: string): Promise<void> {
   log.info("Shutting down; the simulation's sessions stay on the platform", { signal });
   hub.close();
   desk.close();
-  await platform.stop();
+  await Promise.all([platform.stop(), triagePlatform?.stop()]);
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   process.exit(0);

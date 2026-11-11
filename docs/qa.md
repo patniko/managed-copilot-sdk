@@ -126,6 +126,7 @@ Every user-facing flow, the tests that run in CI, and the live checks that exerc
 | --- | --- | --- | --- | --- | --- |
 | Model calls on each user's own Copilot plan | §15 | `services/gateway/test/core.test.ts` | `e2e.model`, `local.demo-front-desk` | Every `azure` check that calls a model | ✅ Automated |
 | An app acting for its own users, on Azure AI Foundry | §2, §15 | `services/gateway/test/apps-foundry.test.ts`, `libraries/sdk/test/app-identity.test.ts` | `local.demo-front-desk-foundry` | `azure.demo-front-desk-foundry` | 🟡 Partial: needs a Foundry account (`Parameters:foundry-account`) |
+| An environment routed to an OpenAI-compatible endpoint the AppHost declares | §15 | `services/gateway/test/openai-endpoint.test.ts`, `libraries/aspire/test/options.test.ts`, `demos/help-desk/test/triage.test.ts` | `local.help-desk-triage` | None: local only | 🖐 By hand: needs a Microsoft-Decision-1 deployment |
 
 ### Operating the deployment
 
@@ -174,6 +175,21 @@ The steps for `local.factory-routing`, with `aspire run` up (Software Factory, H
 - [ ] Restart Help Desk (`aspire resource help-desk restart --apphost apphost.mts`): the wall still shows its issues'
       work orders.
 
+## Help Desk's ticket classification
+
+The steps for `local.help-desk-triage`, after the setup in [Help Desk's README](../demos/help-desk/README.md#ticket-classification-optional)
+(a Microsoft-Decision-1 deployment, the Cognitive Services User role, `az login`, and the `Parameters:help-desk-decision-*`
+settings), with `aspire run` up.
+
+- [ ] Help Desk shows "Each customer message is classified by `<deployment>` in the `help-desk-triage` environment".
+- [ ] Simulate 10 customers: within a few seconds, before the agents answer, the wall groups the tickets under
+      categories such as **Delivery** and **Refund**, urgent ones first with a flame.
+- [ ] A customer's follow-up message is classified again.
+- [ ] With no simulation, **Classify** 25: the wall groups the 25 customers' first messages as the results arrive,
+      then shows "25 classified in …s", and no support sessions start. Classify is disabled during a simulation.
+- [ ] Without the settings (`aspire secret delete Parameters:help-desk-decision-endpoint` and `-deployment`, then
+      restart), the wall is ungrouped and says classification isn't set up, and the customers' sessions work as before.
+
 ## Known gaps
 
 What the matrix marks 🟡, 🖐, or ⛔, and what would close it:
@@ -187,6 +203,7 @@ What the matrix marks 🟡, 🖐, or ⛔, and what would close it:
 | `managed-copilot` commands other than `new` and `attach` | ⛔ Not covered | A script that runs each command against the local platform |
 | Gateway revisions, deploys, and public apps in Azure | 🖐 By hand | A scheduled deploy into a throwaway resource group |
 | Apps on Azure AI Foundry | 🟡 Partial | A Foundry account for QA runs |
+| Help Desk's ticket classification | 🖐 By hand | A Microsoft-Decision-1 deployment for QA runs, and a `--triage` option on Help Desk's `happy-path` script |
 | Windows and macOS hosts | 🖐 By hand | CI runs on Linux only; add Windows and macOS runners for `ci` |
 
 ## Run log
@@ -290,6 +307,7 @@ By hand:
 | `local.console` | The operator console and `npx managed-copilot operator`: health, sessions, live feed | docs/walkthrough.md 1.14; `npx managed-copilot console`, `npx managed-copilot operator overview` |
 | `local.gallery` | The demo gallery: every card opens its demo or walkthrough | docs/walkthrough.md 1.3; `pnpm gallery` |
 | `local.factory-routing` | Help Desk and Data Desk send work to Software Factory, and its floor shows where each work order came from | docs/qa.md, "Work routed to the software factory" |
+| `local.help-desk-triage` | Help Desk classifies each ticket with Microsoft-Decision-1 through an OpenAI-compatible endpoint, and groups the wall | docs/qa.md, "Help Desk's ticket classification" |
 
 ### `azure`
 

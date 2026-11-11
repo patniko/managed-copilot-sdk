@@ -169,7 +169,15 @@ function PolicyTab({ environment }: { readonly environment: OperatorEnvironment 
                   {environment.idleTimeoutSeconds !== undefined ? formatDuration(environment.idleTimeoutSeconds) : <span className="text-fg-muted">Backend default</span>}
                 </Field>
                 <Field label="Warm instances">{environment.warm !== undefined ? formatNumber(environment.warm) : <span className="text-fg-muted">None</span>}</Field>
-                <Field label="Inference">{environment.inference ? <span className="font-mono text-xs">Foundry: {environment.inference.foundry}</span> : <span className="text-fg-muted">Through GitHub Copilot</span>}</Field>
+                <Field label="Inference">
+                  {environment.inference?.foundry ? (
+                    <span className="font-mono text-xs">Foundry: {environment.inference.foundry}</span>
+                  ) : environment.inference?.openai ? (
+                    <span className="font-mono text-xs">OpenAI-compatible: {environment.inference.openai}</span>
+                  ) : (
+                    <span className="text-fg-muted">Through GitHub Copilot</span>
+                  )}
+                </Field>
                 <Field label="Image" wide>
                   {environment.image ? (
                     <span className="inline-flex max-w-full items-center gap-1">

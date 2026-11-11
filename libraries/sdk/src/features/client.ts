@@ -57,10 +57,10 @@ export function checkEnvironment(info: DeploymentInfo, request: EnvironmentReque
       throw new ManagedCopilotError("environment_not_found", `Unknown environment "${request.name}".${known.length > 0 ? ` This deployment offers: ${known.join(", ")}.` : ""}`);
     }
     // An app's own users have no Copilot plan: the gateway refuses them anywhere model calls would use one.
-    if (identity?.appUser && !declared.inference?.foundry) {
+    if (identity?.appUser && !declared.inference?.foundry && !declared.inference?.openai) {
       throw new ManagedCopilotError(
         "inference_unavailable",
-        `Environment "${request.name}" sends model calls to each user's GitHub Copilot plan, and app users have none. Use an environment with inference: { foundry } for your app's own users.`,
+        `Environment "${request.name}" sends model calls to each user's GitHub Copilot plan, and app users have none. Use an environment with inference: { foundry } or { openai } for your app's own users.`,
       );
     }
     return;

@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import {
   SIMULATION_SIZES,
   type BugArea,
+  type ClassificationRun,
   type Counters,
   type CustomerCard,
   type DeskInfo,
@@ -34,6 +35,8 @@ export interface StoreState {
   readonly run?: RunInfo;
   /** The current simulation's tickets, by customer ID. */
   readonly tickets: Readonly<Record<string, Ticket>>;
+  /** The latest Classify, when there's no simulation since. */
+  readonly classification?: ClassificationRun;
   /** The current simulation's software issues. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
@@ -46,7 +49,7 @@ export interface StoreState {
   /** How many customers the next simulation starts (remembered in this browser). */
   readonly size: SimulationSize;
   /** A simulation is being started or ended from this page. */
-  readonly working?: "simulate" | "end";
+  readonly working?: "simulate" | "end" | "classify";
   /** Approvals being answered from this page, by approval ID. */
   readonly answering: Readonly<Record<string, true>>;
   /** Issues being sent to Software Factory from this page, by area. */
@@ -121,6 +124,10 @@ export function reduce(current: StoreState, event: ServerEvent): StoreState {
       return { ...current, counters: event.counters };
     case "knowledge":
       return { ...current, knowledge: event.knowledge, proposals: event.proposals };
+    case "classification": {
+      const { classification: _previous, ...rest } = current;
+      return event.classification ? { ...rest, classification: event.classification } : rest;
+    }
   }
 }
 
@@ -128,9 +135,10 @@ async function loadState(): Promise<void> {
   try {
     const loaded = await api.state();
     setState((current) => {
-      const { run: _previous, ...rest } = current;
+      const { run: _previous, classification: _classification, ...rest } = current;
       return {
         ...(loaded.run ? { ...rest, run: loaded.run } : rest),
+        ...(loaded.classification ? { classification: loaded.classification } : {}),
         phase: "ready",
         platform: loaded.platform,
         desk: loaded.desk,
@@ -149,7 +157,7 @@ async function loadState(): Promise<void> {
 
 // ─── Server-sent events ──────────────────────────────────────────────────────────────────────────────────────
 
-const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "issues", "counters", "knowledge"];
+const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "issues", "counters", "knowledge", "classification"];
 let source: EventSource | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let backoffMs = 1_000;
@@ -234,6 +242,19 @@ export async function simulate(): Promise<void> {
     await api.simulate(state.size);
   } catch (error) {
     showToast("Couldn't start the simulation", errorMessage(error));
+  } finally {
+    setState((current) => ({ ...current, working: undefined }));
+  }
+}
+
+/** Classifies the chosen number of customers' first messages, without starting their sessions. */
+export async function classify(): Promise<void> {
+  if (state.working) return;
+  setState((current) => ({ ...current, working: "classify" }));
+  try {
+    await api.classify(state.size);
+  } catch (error) {
+    showToast("Couldn't classify the customers' messages", errorMessage(error));
   } finally {
     setState((current) => ({ ...current, working: undefined }));
   }

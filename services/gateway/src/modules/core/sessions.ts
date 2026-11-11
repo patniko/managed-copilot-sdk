@@ -13,6 +13,7 @@ import {
   type NetworkPolicy,
   type PendingAction,
   type Placement,
+  type SessionInference,
   type SessionInfo,
   type SessionState,
 } from "@managed-copilot/protocol";
@@ -67,6 +68,7 @@ import {
   type VaultHeaderSource,
 } from "./contracts.js";
 import type { FoundryService } from "../foundry/service.js";
+import type { OpenAIEndpointService } from "../openai/service.js";
 import type { Environments } from "./environments.js";
 import type { PlatformEvents } from "./events.js";
 import type { AdmittedConfig, CallbackInventory, SessionLedger } from "./ledger.js";
@@ -197,6 +199,24 @@ interface InventoryChange {
 }
 
 /** How long past the runtime's one-hour refresh threshold a GitHub token answer stays valid (the gateway decides again after). */
+/** Where a session's model calls go instead of its owner's Copilot plan: a Foundry account's deployment, or an endpoint's model. */
+interface InferenceRoute {
+  readonly kind: "foundry" | "openai";
+  /** The Foundry account or the OpenAI-compatible endpoint. */
+  readonly name: string;
+  /** The Foundry deployment or the endpoint's model. */
+  readonly model: string;
+}
+
+function describeRoute(route: Pick<InferenceRoute, "kind" | "name"> | undefined): string {
+  if (!route) return "to its owner's Copilot plan";
+  return route.kind === "foundry" ? `to Azure AI Foundry account "${route.name}"` : `to OpenAI-compatible endpoint "${route.name}"`;
+}
+
+function sessionInference(route: InferenceRoute): SessionInference {
+  return route.kind === "foundry" ? { route: "foundry", foundry: route.name, deployment: route.model } : { route: "openai", openai: route.name, model: route.model };
+}
+
 const TOKEN_LEASE_SECONDS = 3600 + 300;
 
 /**
@@ -1458,9 +1478,9 @@ export class SessionManager implements SessionsService {
       const binding = await this.#policy?.session?.(sessionId);
       const network = binding?.policy ?? record.network;
       const admitted = await this.#admit(live.environment, placement, params, "resume", network, sessionId, live.tokenRegistrationId, peer.principal);
-      // A Foundry session keeps its deployment: a resume that names another model fails rather than being rewritten.
+      // A Foundry or OpenAI-compatible session keeps its model: a resume that names another one fails rather than being rewritten.
       if (params["model"] !== undefined) this.#checkModelSwitch(live, params["model"]);
-      const foundry = this.#foundryRoute(sessionId);
+      const routed = this.#inferenceRoute(sessionId);
       await this.#checkRemoteMcp(admitted, sessionId, placement, network);
       if (live.moves !== moves) continue;
       // The session's option changes this resume does not set again stay in effect (as a restore applies them).
@@ -1477,7 +1497,7 @@ export class SessionManager implements SessionsService {
         if (stable["agent"] === undefined && typeof kept === "string" && agentResolves(live.environment, kept, stable)) stable["agent"] = kept;
         // Likewise its model: restores select the model the session last had (a Foundry session, its deployment).
         if (stable["model"] === undefined && typeof stored.params["model"] === "string") stable["model"] = stored.params["model"];
-        if (foundry) stable["model"] = foundry.deployment;
+        if (routed) stable["model"] = routed.model;
         // A resume configures the session again: what it sets replaces earlier option changes, and it is the caller's
         // configuration from now on (restores and placement changes apply the same thing; model and agent come from
         // the ledger).
@@ -1494,7 +1514,7 @@ export class SessionManager implements SessionsService {
       const current = this.get(sessionId) ?? record;
       this.#ledger.update(sessionId, {
         state: current.state === "failed" || current.state === "stopped" ? "ready" : current.state,
-        ...(foundry ? { model: foundry.deployment } : admitted.model ? { model: admitted.model } : {}),
+        ...(routed ? { model: routed.model } : admitted.model ? { model: admitted.model } : {}),
         ...(admitted.agent ? { agent: admitted.agent } : {}),
       });
       return { result: this.#scrub(live, this.#sanitizeResponse(live, outcome.result, placement), placement), after: () => this.#afterAttach(peer, sessionId) };
@@ -1665,7 +1685,10 @@ export class SessionManager implements SessionsService {
           checkModel(live.environment, params["modelId"]);
           break;
         case "session.model.switchAutoTier":
-          if (this.#foundryRoute(live.id)) throw new ManagedCopilotError("capability_unavailable", `Session ${live.id} sends model calls to Azure AI Foundry; Auto model routing is a GitHub Copilot feature`, { sessionId });
+          {
+            const routed = this.#inferenceRoute(live.id);
+            if (routed) throw new ManagedCopilotError("capability_unavailable", `Session ${live.id} sends model calls ${describeRoute(routed)}; Auto model routing is a GitHub Copilot feature`, { sessionId });
+          }
           if (live.environment.config.models) throw new ManagedCopilotError("policy_violation", `Environment "${live.environment.name}" restricts models; Auto routing is not available`);
           break;
         default:
@@ -1860,11 +1883,14 @@ export class SessionManager implements SessionsService {
 
   /**
    * `models.list` for the caller: the owner's entitlement, filtered by the environment's `models`. A Foundry
-   * environment lists its deployments instead, whoever asks; nobody's Copilot plan is consulted.
+   * environment lists its deployments instead (an OpenAI-compatible one, its endpoint's models), whoever asks; nobody's
+   * Copilot plan is consulted.
    */
   async listModels(peer: ClientPeer): Promise<unknown> {
     const foundry = peer.environment.config.inference?.foundry;
     if (foundry) return { models: this.#foundry().models(foundry, peer.environment.config.models) };
+    const openai = peer.environment.config.inference?.openai;
+    if (openai) return { models: this.#openai().modelList(openai, peer.environment.config.models) };
     if (!isGitHubPrincipal(peer.principal)) {
       throw new ManagedCopilotError("inference_unavailable", `Environment "${peer.environment.name}" uses each user's GitHub Copilot plan, and ${peer.principal.login} has none`);
     }
@@ -1980,17 +2006,21 @@ export class SessionManager implements SessionsService {
     if (placement === "sandbox" && !this.#sandboxes) {
       throw new ManagedCopilotError("capability_unavailable", `Environment "${environment.name}" needs isolated sandboxes, which this deployment does not provide yet`);
     }
-    // An app's own users have no Copilot plan: only Foundry environments, refused before anything exists.
+    // An app's own users have no Copilot plan: only Foundry or OpenAI-compatible environments, refused before anything exists.
     assertAppUserInference(principal, environment.name, environment.config);
     // An explicitly selected billing route never falls back to the owner's Copilot plan: the session gets no GitHub
-    // credential, and its deployment is fixed for its life.
-    const foundry = environment.config.inference?.foundry ? await this.#foundryChoice(environment, input.raw["model"]) : undefined;
-    const raw = foundry ? { ...input.raw, model: foundry.deployment } : input.raw;
+    // credential, and its model is fixed for its life.
+    const routed = environment.config.inference?.foundry
+      ? await this.#foundryChoice(environment, input.raw["model"])
+      : environment.config.inference?.openai
+        ? this.#openaiChoice(environment, input.raw["model"])
+        : undefined;
+    const raw = routed ? { ...input.raw, model: routed.model } : input.raw;
     const tokenRegistrationId = `mc-${randomUUID()}`;
     // Taken before admission, which rewrites nested values (remote MCP servers point at the gateway adapter).
     const requested = requestedParams(raw);
     const admitted = await this.#admit(environment, placement, raw, "create", environment.network, sessionId, tokenRegistrationId, principal);
-    if (foundry) admitted.params["allowedModels"] = [foundry.deployment];
+    if (routed) admitted.params["allowedModels"] = [routed.model];
 
     // Bind network policy (validates vaults) before anything is allocated.
     let network: NetworkPolicy = environment.network;
@@ -2027,14 +2057,15 @@ export class SessionManager implements SessionsService {
         network,
         environmentRequest: environment.request,
         admitted: stored,
-        ...(foundry ? { model: foundry.deployment, inference: { route: "foundry" as const, foundry: foundry.account, deployment: foundry.deployment } } : admitted.model ? { model: admitted.model } : {}),
+        ...(routed ? { model: routed.model, inference: sessionInference(routed) } : admitted.model ? { model: admitted.model } : {}),
         ...(admitted.agent ? { agent: admitted.agent } : {}),
         ...(input.clientName ? { clientName: input.clientName } : {}),
         ...(input.scheduleId ? { scheduleId: input.scheduleId } : {}),
         ...(input.webhook ? { webhook: input.webhook } : {}),
         ...(input.parent ? { parentSessionId: input.parent.id, parentIncarnation: input.parent.incarnation } : {}),
       });
-      if (foundry) this.#log.info("Session model calls go to Azure AI Foundry", { sessionId, account: foundry.account, deployment: foundry.deployment, owner: principal.login });
+      if (routed?.kind === "foundry") this.#log.info("Session model calls go to Azure AI Foundry", { sessionId, account: routed.name, deployment: routed.model, owner: principal.login });
+      if (routed?.kind === "openai") this.#log.info("Session model calls go to an OpenAI-compatible endpoint", { sessionId, endpoint: routed.name, model: routed.model, owner: principal.login });
       const created = this.#register(record, environment, tokenRegistrationId);
       live = created;
       // The creating principal's verified credential serves the session while it is created (without a client, the
@@ -2122,9 +2153,15 @@ export class SessionManager implements SessionsService {
     return service;
   }
 
+  #openai(): OpenAIEndpointService {
+    const service = this.#options.app.services.openai;
+    if (!service) throw new ManagedCopilotError("inference_unavailable", "This gateway has no OpenAI-compatible endpoints configured (openai in the AppHost)");
+    return service;
+  }
+
   /** The Foundry account and deployment a new session in a Foundry environment uses (its model, or the first one). */
-  async #foundryChoice(environment: ResolvedEnvironment, requested: unknown): Promise<{ readonly account: string; readonly deployment: string }> {
-    const account = environment.config.inference!.foundry;
+  async #foundryChoice(environment: ResolvedEnvironment, requested: unknown): Promise<InferenceRoute> {
+    const account = environment.config.inference!.foundry!;
     const service = this.#foundry();
     const allowed = service.deployments(account, environment.config.models);
     if (requested !== undefined && requested !== null && typeof requested !== "string") throw new ManagedCopilotError("invalid_request", "model must be a string");
@@ -2138,81 +2175,123 @@ export class SessionManager implements SessionsService {
     }
     const route = await service.route(account);
     if (!route.deployments.has(deployment)) throw new ManagedCopilotError("inference_unavailable", `Azure AI Foundry account "${account}" has no deployment "${deployment}"`, { foundry: account });
-    return { account, deployment };
+    return { kind: "foundry", name: account, model: deployment };
   }
 
-  /** The session's Foundry account and deployment; undefined for a session billed to its owner's Copilot plan. */
-  #foundryRoute(sessionId: string): { readonly account: string; readonly deployment: string } | undefined {
+  /** The endpoint and model a new session in an OpenAI-compatible environment uses (its model, or the first one). */
+  #openaiChoice(environment: ResolvedEnvironment, requested: unknown): InferenceRoute {
+    const endpoint = environment.config.inference!.openai!;
+    const service = this.#openai();
+    const allowed = service.models(endpoint, environment.config.models);
+    if (requested !== undefined && requested !== null && typeof requested !== "string") throw new ManagedCopilotError("invalid_request", "model must be a string");
+    const model = (requested as string | undefined) ?? allowed[0];
+    if (!model || !allowed.includes(model)) {
+      throw new ManagedCopilotError("policy_violation", `Model "${String(requested)}" is not one of environment "${environment.name}"'s models on OpenAI-compatible endpoint "${endpoint}" (${allowed.join(", ")})`, {
+        allowedModels: allowed,
+      });
+    }
+    // Fails now (inference_unavailable) when the endpoint's key did not reach the gateway.
+    service.provider(endpoint, model);
+    return { kind: "openai", name: endpoint, model };
+  }
+
+  /** Where the session's model calls go, fixed at creation; undefined for a session billed to its owner's Copilot plan. */
+  #inferenceRoute(sessionId: string): InferenceRoute | undefined {
     const record = this.get(sessionId);
-    if (record?.inference?.route !== "foundry") return undefined;
+    const inference = record?.inference;
+    if (inference?.route === "openai") return { kind: "openai", name: inference.openai, model: inference.model };
+    if (inference?.route !== "foundry") return undefined;
     // Fixed at creation; `model` (from older records) only stands in for it.
-    const deployment = record.inference.deployment ?? record.model;
+    const deployment = inference.deployment ?? record!.model;
     if (!deployment) throw new ManagedCopilotError("state_restore_failed", `Session ${sessionId} has no recorded Foundry deployment`, { sessionId });
-    return { account: record.inference.foundry, deployment };
+    return { kind: "foundry", name: inference.foundry, model: deployment };
   }
 
   /**
    * Create/resume params for where the session's model calls go. A session keeps the route it was created with: if its
-   * environment now routes elsewhere, resuming it fails rather than switching its billing. A Foundry session gets no
-   * GitHub credential fields, a fixed model, and (shared placement) the provider whose token the gateway answers.
+   * environment now routes elsewhere, resuming it fails rather than switching its billing. A Foundry or
+   * OpenAI-compatible session gets no GitHub credential fields, a fixed model, and (shared placement) the provider
+   * whose token the gateway answers.
    */
   async #routeInference(live: LiveSession, params: Record<string, unknown>, placement: Placement): Promise<Record<string, unknown>> {
-    const route = this.#foundryRoute(live.id);
-    const current = live.environment.config.inference?.foundry;
-    if ((route?.account ?? null) !== (current ?? null)) {
-      const describe = (account: string | undefined) => (account ? `to Azure AI Foundry account "${account}"` : "to its owner's Copilot plan");
+    const route = this.#inferenceRoute(live.id);
+    const inference = live.environment.config.inference;
+    const current: Pick<InferenceRoute, "kind" | "name"> | undefined = inference?.foundry
+      ? { kind: "foundry", name: inference.foundry }
+      : inference?.openai
+        ? { kind: "openai", name: inference.openai }
+        : undefined;
+    if (route?.kind !== current?.kind || route?.name !== current?.name) {
       throw new ManagedCopilotError(
         "capability_unavailable",
-        `Session ${live.id} sends model calls ${describe(route?.account)}, and environment "${live.environment.name}" now sends them ${describe(current)}. A session keeps its billing route: start a new session.`,
+        `Session ${live.id} sends model calls ${describeRoute(route)}, and environment "${live.environment.name}" now sends them ${describeRoute(current)}. A session keeps its billing route: start a new session.`,
         { sessionId: live.id },
       );
     }
     if (!route) return params;
-    const service = this.#foundry();
-    const resolved = await service.route(route.account);
-    if (!resolved.deployments.has(route.deployment)) {
-      throw new ManagedCopilotError("inference_unavailable", `Azure AI Foundry account "${route.account}" no longer declares deployment "${route.deployment}"`, { sessionId: live.id, foundry: route.account });
-    }
     const { gitHubTokenProviderRegistrationId: _registration, gitHubToken: _token, provider: _provider, ...rest } = params;
-    const routed: Record<string, unknown> = { ...rest, model: route.deployment, allowedModels: [route.deployment] };
+    const routed: Record<string, unknown> = { ...rest, model: route.model, allowedModels: [route.model] };
+    if (route.kind === "openai") {
+      // Only shared environments route here (config validation); the endpoint's key is answered per model call.
+      if (placement !== "shared") throw new ManagedCopilotError("capability_unavailable", `Session ${live.id} sends model calls to an OpenAI-compatible endpoint, which only shared environments support`, { sessionId: live.id });
+      const service = this.#openai();
+      if (!service.models(route.name, undefined).includes(route.model)) {
+        throw new ManagedCopilotError("inference_unavailable", `OpenAI-compatible endpoint "${route.name}" no longer declares model "${route.model}"`, { sessionId: live.id, openai: route.name });
+      }
+      routed["provider"] = { ...service.provider(route.name, route.model), ...(service.hasKey(route.name) ? { hasBearerTokenProvider: true } : {}) };
+      return routed;
+    }
+    const service = this.#foundry();
+    const resolved = await service.route(route.name);
+    if (!resolved.deployments.has(route.model)) {
+      throw new ManagedCopilotError("inference_unavailable", `Azure AI Foundry account "${route.name}" no longer declares deployment "${route.model}"`, { sessionId: live.id, foundry: route.name });
+    }
     // In a sandbox the broker adds the provider with its placeholder; the shared runtime asks the gateway for a token.
-    if (placement === "shared") routed["provider"] = { ...service.provider(resolved, route.deployment), hasBearerTokenProvider: true };
+    if (placement === "shared") routed["provider"] = { ...service.provider(resolved, route.model), hasBearerTokenProvider: true };
     return routed;
   }
 
   /** What a sandbox runtime needs to send a Foundry session's model calls to its account through the broker. */
   async #sandboxInference(sessionId: string): Promise<SandboxInferenceRoute | undefined> {
-    const route = this.#foundryRoute(sessionId);
+    const route = this.#inferenceRoute(sessionId);
     if (!route) return undefined;
+    if (route.kind === "openai") throw new ManagedCopilotError("capability_unavailable", `Session ${sessionId} sends model calls to an OpenAI-compatible endpoint, which only shared environments support`, { sessionId });
     const service = this.#foundry();
-    const resolved = await service.route(route.account);
-    return { account: route.account, provider: service.provider(resolved, route.deployment), host: resolved.host, token: () => service.token(route.account) };
+    const resolved = await service.route(route.name);
+    return { account: route.name, provider: service.provider(resolved, route.model), host: resolved.host, token: () => service.token(route.name) };
   }
 
-  /** A Foundry session keeps its deployment for its whole life (its provider is fixed when the runtime opens it). */
+  /** A Foundry or OpenAI-compatible session keeps its model for its whole life (its provider is fixed when the runtime opens it). */
   #checkModelSwitch(live: LiveSession, model: unknown): void {
-    const route = this.#foundryRoute(live.id);
-    if (!route || model === route.deployment) return;
+    const route = this.#inferenceRoute(live.id);
+    if (!route || model === route.model) return;
+    const what = route.kind === "foundry" ? `Azure AI Foundry deployment "${route.model}"` : `model "${route.model}" of OpenAI-compatible endpoint "${route.name}"`;
     throw new ManagedCopilotError(
       "capability_unavailable",
-      `Session ${live.id} sends model calls to Azure AI Foundry deployment "${route.deployment}" and keeps it for its whole life. Start a new session to use another deployment.`,
+      `Session ${live.id} sends model calls to ${what} and keeps it for its whole life. Start a new session to use another model.`,
       { sessionId: live.id },
     );
   }
 
   /**
-   * Answers the shared runtime's `providerToken.getToken` for a Foundry session: an Entra ID token for its account from
-   * the platform's own identity. Never for a session the shared runtime no longer hosts, and never a GitHub token.
+   * Answers the shared runtime's `providerToken.getToken` for a Foundry session (an Entra ID token for its account from
+   * the platform's own identity) or an OpenAI-compatible one (its endpoint's key). Never for a session the shared
+   * runtime no longer hosts, and never a GitHub token.
    */
   async answerProviderTokenRequest(params: unknown): Promise<{ token: string }> {
     const request = (params ?? {}) as { sessionId?: unknown; providerName?: unknown };
     const live = typeof request.sessionId === "string" ? this.#live.get(request.sessionId) : undefined;
     if (!live || live.placement !== "shared" || live.deleting) throw new ManagedCopilotError("forbidden", "No session on the shared runtime asked for this token");
-    const route = this.#foundryRoute(live.id);
-    if (!route) throw new ManagedCopilotError("forbidden", `Session ${live.id} has no Azure AI Foundry route; its model calls use its owner's Copilot plan`);
+    const route = this.#inferenceRoute(live.id);
+    if (!route) throw new ManagedCopilotError("forbidden", `Session ${live.id} has no Azure AI Foundry or OpenAI-compatible route; its model calls use its owner's Copilot plan`);
     if (request.providerName !== undefined && request.providerName !== "default") throw new ManagedCopilotError("forbidden", `Session ${live.id} has no model provider "${String(request.providerName)}"`);
-    const token = await this.#foundry().token(route.account);
-    this.#log.debug("Answered a Foundry token request", { sessionId: live.id, account: route.account });
+    if (route.kind === "openai") {
+      const token = this.#openai().key(route.name);
+      this.#log.debug("Answered an OpenAI-compatible endpoint key request", { sessionId: live.id, endpoint: route.name });
+      return { token };
+    }
+    const token = await this.#foundry().token(route.name);
+    this.#log.debug("Answered a Foundry token request", { sessionId: live.id, account: route.name });
     return { token };
   }
 
@@ -3454,10 +3533,10 @@ export class SessionManager implements SessionsService {
    */
   async #ownerToken(live: LiveSession): Promise<{ token: string; expiresAt?: number; app?: string }> {
     const auth = this.#options.auth;
-    // An app's own users have no GitHub credential at all: their sessions only ever use Foundry (refused at creation
-    // otherwise), so nothing may ask for one.
+    // An app's own users have no GitHub credential at all: their sessions only ever use Foundry or an OpenAI-compatible
+    // endpoint (refused at creation otherwise), so nothing may ask for one.
     if (this.get(live.id)?.owner.kind === "app-user") {
-      throw new ManagedCopilotError("inference_unavailable", `Session ${live.id} belongs to an app user, who has no GitHub Copilot plan; its environment must send model calls to Azure AI Foundry.`, { sessionId: live.id });
+      throw new ManagedCopilotError("inference_unavailable", `Session ${live.id} belongs to an app user, who has no GitHub Copilot plan; its environment must send model calls to Azure AI Foundry or an OpenAI-compatible endpoint.`, { sessionId: live.id });
     }
     const parent = this.#credentialParent(live);
     // Each candidate must still be connected (or present) once its verification finishes.

@@ -140,6 +140,33 @@ describe("normalizeOptions", () => {
     expect(toolDeclaration({ ...lookupOrder, description: "changed" }).revision).not.toBe(tool?.revision);
   });
 
+  it("delivers an OpenAI-compatible endpoint's key as a secret and keeps the endpoint shared-only", () => {
+    const key = new FakeParameter("triage-key");
+    const { config, secrets } = normalizeOptions(
+      "copilot",
+      {
+        openai: { triage: { url: "http://localhost:7440/api/triage/v1", models: ["ms-decision-1"], key } },
+        environments: { "help-desk-triage": { type: "shared", inference: { openai: "triage" } } },
+      },
+      { baseDirectory: base },
+    );
+    const env = (config.openai?.["triage"]?.key as { secretEnv: string }).secretEnv;
+    expect(env).toMatch(/^MANAGED_COPILOT_SECRET_OPENAI_TRIAGE_[0-9A-F]{8}$/);
+    expect(secrets).toEqual([{ env, value: key, source: "openai.triage.key" }]);
+    expect(JSON.stringify(config)).not.toContain("triage-key");
+
+    expect(() =>
+      normalizeOptions(
+        "copilot",
+        {
+          openai: { triage: { url: "http://localhost:7440/v1", models: ["m"], key: "literal" as unknown as object } },
+          environments: { coder: { type: "isolated", inference: { openai: "triage" } }, chat: { type: "shared", inference: { openai: "other" } } },
+        },
+        { baseDirectory: base },
+      ),
+    ).toThrowError(/openai\.triage\.key is a literal string[\s\S]*only valid on shared environments[\s\S]*Unknown OpenAI-compatible endpoint "other"/);
+  });
+
   it("rejects literal secret values and reports every problem at once", () => {
     let error: unknown;
     try {

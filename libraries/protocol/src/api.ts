@@ -28,8 +28,14 @@ export interface AccountInfo {
 export type AccountKind = "github" | "app-user" | "app";
 
 /** Where a session's model calls go, fixed when it is created (spec section 15). */
-/** Where a session's model calls go: its owner's Copilot plan, or an Azure AI Foundry account's deployment. */
-export type SessionInference = { readonly route: "copilot" } | { readonly route: "foundry"; readonly foundry: string; readonly deployment?: string };
+/**
+ * Where a session's model calls go: its owner's Copilot plan, an Azure AI Foundry account's deployment, or a model of an
+ * OpenAI-compatible endpoint the AppHost declares.
+ */
+export type SessionInference =
+  | { readonly route: "copilot" }
+  | { readonly route: "foundry"; readonly foundry: string; readonly deployment?: string }
+  | { readonly route: "openai"; readonly openai: string; readonly model: string };
 
 export interface EnvironmentInfo {
   readonly name: string;
@@ -47,8 +53,11 @@ export interface EnvironmentInfo {
   readonly subagents?: SubagentSandboxes;
   readonly scheduling: boolean;
   readonly agents: readonly string[];
-  /** Present when the environment sends model calls to Azure AI Foundry instead of each user's Copilot plan. */
-  readonly inference?: { readonly foundry: string };
+  /**
+   * Present when the environment sends model calls to an Azure AI Foundry account (`foundry`) or an OpenAI-compatible
+   * endpoint (`openai`) instead of each user's Copilot plan. Exactly one is set.
+   */
+  readonly inference?: { readonly foundry: string; readonly openai?: undefined } | { readonly openai: string; readonly foundry?: undefined };
   /**
    * Isolated environments: whether `managed.exec`, `managed.sandboxes.create`, and the exec routes work in this
    * environment's sandboxes (operators turn them off with `exec: false`).
@@ -130,7 +139,7 @@ export interface SessionInfo {
   readonly title?: string;
   readonly model?: string;
   readonly agent?: string;
-  /** Where the session's model calls go: the owner's Copilot plan, or a Foundry account. */
+  /** Where the session's model calls go: the owner's Copilot plan, a Foundry account, or an OpenAI-compatible endpoint. */
   readonly inference?: SessionInference;
   readonly createdAt: string;
   readonly updatedAt: string;

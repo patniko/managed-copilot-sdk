@@ -173,12 +173,18 @@ export class Environments implements EnvironmentResolver {
         const bundle = pinCustomizations(source, join(options.pinDir, name)) as CustomizationBundle & { unsafe?: readonly string[] };
         const problems: string[] = [];
         if (bundle.unsafe && bundle.unsafe.length > 0 && env.type !== "isolated") problems.push(`include executable configuration: ${bundle.unsafe.join("; ")}`);
-        // A Foundry environment's models are its account's deployments unless it names fewer.
+        // A Foundry or OpenAI-compatible environment's models are its account's deployments (or endpoint's models) unless it names fewer.
         const foundry = env.inference?.foundry;
-        const allowed = env.models ?? (foundry ? options.deployment.foundry?.[foundry]?.deployments : undefined);
+        const openai = env.inference?.openai;
+        const allowed = env.models ?? (foundry ? options.deployment.foundry?.[foundry]?.deployments : openai ? options.deployment.openai?.[openai]?.models : undefined);
         const outside = allowed ? bundle.agents.filter((agent) => agent.model && !allowed.includes(agent.model)) : [];
         if (outside.length > 0) {
-          const what = foundry && !env.models ? `models that are not deployments of Azure AI Foundry account "${foundry}"` : "models the environment does not allow";
+          const what =
+            foundry && !env.models
+              ? `models that are not deployments of Azure AI Foundry account "${foundry}"`
+              : openai && !env.models
+                ? `models that OpenAI-compatible endpoint "${openai}" does not serve`
+                : "models the environment does not allow";
           problems.push(`select ${what}: ${outside.map((agent) => `${agent.name} uses ${agent.model}`).join("; ")}`);
         }
         const problem = problems.length > 0 ? `Customizations for "${name}" ${problems.join(", and ")}` : undefined;
@@ -277,14 +283,15 @@ export class Environments implements EnvironmentResolver {
     return Object.entries(this.#deployment.environments).map(([name, env]) => {
       const bundle = this.#bundles.get(name)?.bundle;
       const foundry = env.inference?.foundry;
-      // A Foundry environment's models are its account's deployments unless it narrows them.
-      const models = env.models ?? (foundry ? this.#deployment.foundry?.[foundry]?.deployments : undefined);
+      const openai = env.inference?.openai;
+      // A Foundry environment's models are its account's deployments unless it narrows them; likewise an endpoint's models.
+      const models = env.models ?? (foundry ? this.#deployment.foundry?.[foundry]?.deployments : openai ? this.#deployment.openai?.[openai]?.models : undefined);
       return {
         name,
         type: env.type,
         ...(env.description ? { description: env.description } : {}),
         ...(models ? { models: [...models] } : {}),
-        ...(foundry ? { inference: { foundry } } : {}),
+        ...(foundry ? { inference: { foundry } } : openai ? { inference: { openai } } : {}),
         network: this.ceiling(env),
         ...(sandboxedType(env.type) ? { size: env.size ?? "small" } : {}),
         ...(env.promoteTo ? { promoteTo: env.promoteTo } : {}),
