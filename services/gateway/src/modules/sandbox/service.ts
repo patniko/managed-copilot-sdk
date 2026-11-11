@@ -56,6 +56,9 @@ const ACTION_REQUESTED = new Set(["external_tool.requested", "permission.request
 const ACTION_COMPLETED = new Set(["external_tool.completed", "permission.completed", "elicitation.completed"]);
 const IDLE_SWEEP_MS = Number(process.env.MANAGED_COPILOT_SANDBOX_IDLE_SWEEP_MS ?? 30_000) || 30_000;
 const RECONCILE_MS = 5 * 60_000;
+/** How often other instances' abandoned resources are swept (`MANAGED_COPILOT_ABANDONED_SWEEP_HOURS`, 0 disables). */
+const ABANDONED_SWEEP_HOURS = Number(process.env.MANAGED_COPILOT_ABANDONED_SWEEP_HOURS ?? 6);
+const ABANDONED_SWEEP_MS = Number.isFinite(ABANDONED_SWEEP_HOURS) && ABANDONED_SWEEP_HOURS > 0 ? Math.min(ABANDONED_SWEEP_HOURS * 3_600_000, 2 ** 31 - 1) : 0;
 /** How long a failed publication waits for sandbox operations already queued for its session before classifying. */
 const SETTLE_MS = 5_000;
 /** How long gateway shutdown lets publications under way finish before it stops sandboxes. */
@@ -1334,6 +1337,12 @@ export class SandboxService implements SandboxesService {
     );
     // Keeps `available` current: a backend that starts later is advertised, one that goes away stops being advertised.
     this.#timers.push(setInterval(() => void this.probe(), PROBE_MS).unref());
+    if (ABANDONED_SWEEP_MS > 0 && this.#options.provider.sweepAbandoned) {
+      const sweep = () =>
+        void this.#options.provider.sweepAbandoned!().catch((error: unknown) => this.#log.debug("Sweep for abandoned Docker resources skipped", { error: (error as Error).message }));
+      sweep();
+      this.#timers.push(setInterval(sweep, ABANDONED_SWEEP_MS).unref());
+    }
     if (this.#options.prepareOnStart) {
       const { provider } = this.#options;
       void this.#ready()

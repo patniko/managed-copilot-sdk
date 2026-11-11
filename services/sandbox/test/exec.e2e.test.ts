@@ -41,6 +41,8 @@ describe.runIf(enabled)("commands run directly in sandboxes, end to end", () => 
         MANAGED_COPILOT_WRITE_DISCOVERY: "0",
         MANAGED_COPILOT_SHARED_RUNTIME: "0",
         MANAGED_COPILOT_INSTANCE: instance,
+        // Lets any gateway remove what this run leaves behind if it dies before its own cleanup.
+        MANAGED_COPILOT_INSTANCE_TTL_SECONDS: "21600",
         MANAGED_COPILOT_CONFIG: JSON.stringify({
           name: "copilot",
           environments: {

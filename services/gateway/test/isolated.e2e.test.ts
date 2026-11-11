@@ -57,6 +57,8 @@ describe.runIf(enabled && built)("G1: isolated sessions through core with the st
         MANAGED_COPILOT_WRITE_DISCOVERY: "0",
         MANAGED_COPILOT_SHARED_RUNTIME: "0",
         MANAGED_COPILOT_INSTANCE: instance,
+        // Lets any gateway remove what this run leaves behind if it dies before its own cleanup.
+        MANAGED_COPILOT_INSTANCE_TTL_SECONDS: "21600",
         MANAGED_COPILOT_APPHOST_DIR: apphost,
         MANAGED_COPILOT_CONFIG: JSON.stringify({ name: "g1", environments: { coder: { type: "isolated", size: "small", customizations: "./customizations" } } }),
       }),

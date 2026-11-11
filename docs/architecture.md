@@ -335,7 +335,8 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   networking, images, and reachability of each sandbox's sandboxd: `ready`/`prepare`, `ensureImage`/`hasImage`,
   `create`/`start` (with cancellation and progress), `stop`/`remove`/`isRunning`, `address` (egress pinning, when
   `capabilities.addressPinning`), `endpoint` (http or https base URL plus headers, also used for WebSocket upgrades),
-  optional `egressProxy` (passed to `policy.registerSandbox`), `reportUnreachable`/`reattach`, and `inventory`.
+  optional `egressProxy` (passed to `policy.registerSandbox`), `reportUnreachable`/`reattach`, `inventory`, and
+  optional `sweepAbandoned`.
   `MANAGED_COPILOT_SANDBOX_PROVIDER` selects `docker` (local, `providers/docker/`, described below) or `azure`
   (`providers/azure/`). Providers must keep: sandboxd as root with only CHOWN, KILL,
   SETGID, and SETUID; the workload as uid 10001; persistent `/workspace`, `/home/agent`, `/var/lib/managed-copilot`; no
@@ -419,6 +420,17 @@ As built (`services/gateway/src/modules/sandbox`, `services/sandbox`; contracts 
   container, then unregister egress and detach the relay and proxy from the sandbox network. `delete` marks
   `deleting`, removes container, volumes, network, and artifacts, and reconciliation finishes after a crash; resources
   labelled with the instance that no current record owns are swept on start.
+- **Abandoned instances.** Every local Docker resource (sandbox containers, volumes, and networks, the relay, the
+  edge and sandboxes networks, the egress proxy, its networks, and its CA volume) also carries ownership labels
+  (`services/gateway/src/docker-ownership.ts`): `managed-copilot.data-dir` (the gateway's data directory),
+  `managed-copilot.host` (platform, host name, and WSL distribution, where that path means something), and, with
+  `MANAGED_COPILOT_INSTANCE_TTL_SECONDS` (set by the Docker e2e tests), `managed-copilot.expires`. At start and every
+  `MANAGED_COPILOT_ABANDONED_SWEEP_HOURS` (default 6; 0 disables), the Docker provider removes every resource of another
+  instance (`providers/docker/abandoned.ts`) when one of them is abandoned (expired, or its data directory on this
+  host is gone, as after a worktree or test directory is deleted) and none is live (its data directory exists) or
+  owned from another host or WSL distribution. Resources created before these labels never decide on their own, and
+  the sweeping gateway's own instance is left to reconciliation. Stopped sandboxes of an existing checkout keep their
+  volumes until their sessions are deleted. Images and build cache are not swept (see the README's Troubleshooting).
 - **Replaced runtimes and interrupted turns.** A turn cut off mid-inference or mid built-in tool does not survive its
   runtime process: when the session is resumed in a new process (a recreated or restarted sandbox, sandboxd's crash
   recovery, or a restart for a held inference provider), stock runtimes neither continue nor end it, with or without
@@ -2008,6 +2020,8 @@ a 9-file, 44-test release. This does not authorize blind replay of uncertain ext
 | `MANAGED_COPILOT_CONSOLE_DIR` | `services/console/dist` beside the gateway | Built operator console the gateway serves at `/console` |
 | Discovery file | `~/.managed-copilot/local.json` | Written by a local gateway (removed only by the writing pid); read and validated by `ManagedCopilot.connect()` |
 | `MANAGED_COPILOT_INSTANCE` | `mc` | Prefix and `managed-copilot.instance` label for Docker networks, containers, and volumes (use a unique value per parallel gateway) |
+| `MANAGED_COPILOT_INSTANCE_TTL_SECONDS` | none | Labels this gateway's Docker resources to expire after this long, so any gateway may remove them afterwards (test runs) |
+| `MANAGED_COPILOT_ABANDONED_SWEEP_HOURS` | `6` | How often the Docker provider removes other instances' abandoned resources (also at start); `0` disables |
 | `MANAGED_COPILOT_NPM_REGISTRY` | `npm config get registry` | Registry for the sandbox image build and session-time npm installs; must not contain credentials, a query, a fragment, or spaces, backslashes, or control characters (refused) |
 | `MANAGED_COPILOT_PIP_INDEX_URL` | `pip config list` `global.index-url` | Optional pip index baked into sandbox images (empty: pip's default index); same restrictions as the npm registry |
 | `MANAGED_COPILOT_SANDBOX_IMAGE` | built from `services/sandbox` | Use a prebuilt base image instead (must carry the base label) |

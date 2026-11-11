@@ -17,6 +17,8 @@ import type { Logger } from "../../log.js";
 export interface EgressSupervisorOptions {
   /** Prefix for Docker resources (`MANAGED_COPILOT_INSTANCE`, default "mc"). */
   readonly instance: string;
+  /** Ownership labels (docker-ownership.ts) put on the container, networks, and CA volume. */
+  readonly labels?: Readonly<Record<string, string>>;
   /** Directory containing the egress Dockerfile and `dist/egress.mjs`. */
   readonly context: string;
   /** Gateway URL as seen from inside the container. */
@@ -82,6 +84,12 @@ export class EgressSupervisor {
     return `${this.#options.instance}-egress-data`;
   }
 
+  /** `--label` arguments for everything the supervisor creates. */
+  get #labelArgs(): string[] {
+    const labels = { ...this.#options.labels, "managed-copilot.instance": this.#options.instance };
+    return Object.entries(labels).flatMap(([key, value]) => ["--label", `${key}=${value}`]);
+  }
+
   #docker(args: readonly string[], env?: NodeJS.ProcessEnv): Promise<Run> {
     return new Promise((resolve, reject) => {
       execFile(this.#options.docker ?? "docker", [...args], { windowsHide: true, maxBuffer: 16 * 1024 * 1024, timeout: 10 * 60_000, ...(env ? { env } : {}) }, (error, stdout, stderr) => {
@@ -130,7 +138,7 @@ export class EgressSupervisor {
     if (await this.#exists(["network", "inspect", name])) return;
     for (const subnet of sharedNetworkSubnets(name, this.#options.subnetPool)) {
       try {
-        await this.#docker(["network", "create", ...(internal ? ["--internal"] : []), "--subnet", subnet, "--label", `managed-copilot.instance=${this.#options.instance}`, name]);
+        await this.#docker(["network", "create", ...(internal ? ["--internal"] : []), "--subnet", subnet, ...this.#labelArgs, name]);
         return;
       } catch (error) {
         const stderr = (error as { stderr?: string }).stderr ?? "";
@@ -200,6 +208,8 @@ export class EgressSupervisor {
     }
     if (current) await this.#docker(["rm", "-f", name]);
     this.#options.log.info("Starting the egress proxy container", { container: name, image });
+    // Created explicitly so the CA volume carries the instance's labels (a no-op when it exists).
+    await this.#docker(["volume", "create", ...this.#labelArgs, this.volume]);
     const inherited = { ...process.env, ...env, EGRESS_GATEWAY_KEY: this.#options.key };
     await this.#docker(
       [
@@ -207,8 +217,7 @@ export class EgressSupervisor {
         "--detach",
         "--name",
         name,
-        "--label",
-        `managed-copilot.instance=${this.#options.instance}`,
+        ...this.#labelArgs,
         "--label",
         `managed-copilot.egress-config=${configHash}`,
         "--network",
