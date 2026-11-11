@@ -1,24 +1,7 @@
 import { useSyncExternalStore } from "react";
+import { parseHash, type Route } from "../../shared/routes.js";
 
-export type Route = { readonly kind: "home" } | { readonly kind: "analysis"; readonly id: string };
-
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-export function parseHash(hash: string): Route {
-  const path = hash.replace(/^#/, "").split("?")[0] ?? "";
-  const [first, id] = path.split("/").filter(Boolean).map(safeDecode);
-  return first === "a" && id ? { kind: "analysis", id } : { kind: "home" };
-}
-
-export const homeHref = (): string => "#/";
-export const analysisHref = (id: string): string => `#/a/${encodeURIComponent(id)}`;
-
+export { analysisHref, homeHref, parseHash, type Route } from "../../shared/routes.js";
 const listeners = new Set<() => void>();
 let cachedHash: string | undefined;
 let cachedRoute: Route = { kind: "home" };

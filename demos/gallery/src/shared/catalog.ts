@@ -69,7 +69,7 @@ export const APPS: readonly AppEntry[] = [
     title: "Software Factory",
     tagline: "A work order in, a tested and reviewed release out",
     description:
-      "A coordinator plans the work, builds tasks in parallel builder sandboxes, reuses them for review fixes, and assembles the release. The factory still checks every gate.",
+      "A coordinator plans the work, builds tasks in parallel builder sandboxes, reuses them for review fixes, and assembles the release. The factory still checks every gate, and shows which work orders Help Desk, Incident Commander, and Data Desk sent.",
     tryIt: "Start the CSV ⇄ JSON toolkit work order and watch the floor.",
     app: "software-factory",
     port: 7480,
@@ -130,7 +130,7 @@ export const APPS: readonly AppEntry[] = [
     title: "Data Desk",
     tagline: "Chat with a spreadsheet; it moves to a sandbox for code",
     description:
-      "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it.",
+      "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it. Send what you find to the Software Factory.",
     tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
     app: "data-desk",
     port: 7430,
@@ -141,7 +141,8 @@ export const APPS: readonly AppEntry[] = [
     id: "help-desk",
     title: "Help Desk",
     tagline: "25 customers, 25 private sessions, one shared runtime",
-    description: "A support rush where every customer chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you.",
+    description:
+      "A support rush where every customer chats with their own agent, bound to their own orders, all on one runtime; refunds wait for you, and storefront bugs customers report go to the Software Factory.",
     tryIt: "Simulate 25 customers, then approve a refund.",
     app: "help-desk",
     port: 7440,
@@ -166,7 +167,7 @@ export const APPS: readonly AppEntry[] = [
     title: "Incident Commander",
     tagline: "On call: triage, fix, and deploy when you say so",
     description:
-      "An alert opens an incident: Copilot triages in its own sandbox, hands the repro and the fix to workers, and waits for your OK to deploy, even with the tab closed.",
+      "An alert opens an incident: Copilot triages in its own sandbox, hands the repro to a worker and the fix to a worker or the Software Factory, and waits for your OK to deploy, even with the tab closed.",
     tryIt: "Simulate an incident, close the tab, then reopen it and deploy.",
     app: "incident-commander",
     port: 7445,

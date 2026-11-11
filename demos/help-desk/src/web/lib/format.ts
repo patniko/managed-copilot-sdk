@@ -1,7 +1,7 @@
 // Words for what the wall and the support widget show. Pure, so tests cover them.
-import type { MessageItem, Ticket, TicketStatus, ToolItem } from "../../shared/types.js";
+import { BUG_AREA_INFO, BUG_AREAS, type BugArea, type MessageItem, type RoutedWorkOrder, type Ticket, type TicketStatus, type ToolItem, type WorkOrderStatus } from "../../shared/types.js";
 
-export type Tone = "accent" | "attention" | "success" | "danger" | "muted";
+export type Tone = "accent" | "attention" | "success" | "danger" | "done" | "muted";
 
 export function money(amount: number): string {
   return amount.toLocaleString("en-US", { style: "currency", currency: "USD" });
@@ -12,6 +12,8 @@ export function premium(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0$/, "");
 }
 
+export const plural = (count: number, one: string): string => `${count} ${one}${count === 1 ? "" : "s"}`;
+
 export const STATUS: Readonly<Record<TicketStatus, { readonly label: string; readonly tone: Tone }>> = {
   starting: { label: "Starting", tone: "muted" },
   answering: { label: "Answering", tone: "accent" },
@@ -20,6 +22,35 @@ export const STATUS: Readonly<Record<TicketStatus, { readonly label: string; rea
   resolved: { label: "Resolved", tone: "success" },
   failed: { label: "Failed", tone: "danger" },
 };
+
+/** Software Factory's words for its work orders' statuses. */
+export const WORK_ORDER_STATUS: Readonly<Record<WorkOrderStatus, { readonly label: string; readonly tone: Tone }>> = {
+  queued: { label: "Queued", tone: "muted" },
+  planning: { label: "Planning", tone: "accent" },
+  building: { label: "Building", tone: "accent" },
+  releasing: { label: "Releasing", tone: "accent" },
+  completed: { label: "Completed", tone: "success" },
+  failed: { label: "Failed", tone: "danger" },
+  cancelled: { label: "Cancelled", tone: "muted" },
+};
+
+/** Software Factory is still working on it. */
+export const workOrderActive = (status: WorkOrderStatus): boolean => status === "queued" || status === "planning" || status === "building" || status === "releasing";
+
+/** How Software Factory names a work order: `WO-0012`. */
+export function workOrderName(number: number): string {
+  return `WO-${String(number).padStart(4, "0")}`;
+}
+
+/** `WO-0012 · Building` */
+export function workOrderLine(routed: RoutedWorkOrder): string {
+  return `${workOrderName(routed.number)} · ${WORK_ORDER_STATUS[routed.status].label}`;
+}
+
+/** The short label of the area a reported problem is about. */
+export function areaLabel(area: unknown): string {
+  return BUG_AREA_INFO[(BUG_AREAS as readonly unknown[]).includes(area) ? (area as BugArea) : "other"].label;
+}
 
 /** The latest message of a conversation, by either side. */
 export function latestMessage(ticket: Ticket | undefined): MessageItem | undefined {
@@ -68,6 +99,9 @@ export function customerLine(item: ToolItem): { readonly text: string; readonly 
           return { text: `${what} not possible`, tone: "muted" };
       }
     }
+    case "report_bug":
+      if (item.status === "running") return { text: "Reporting the problem to our engineering team…", tone: "muted" };
+      return item.status === "done" ? { text: "Reported the problem to our engineering team", tone: "muted" } : undefined;
     default:
       return undefined;
   }
@@ -104,6 +138,8 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
     }
     case "cancel_order":
       return { text: "Cancelled", tone: "success" };
+    case "report_bug":
+      return { text: `Reported: ${areaLabel(item.args["area"])}`, tone: "done" };
     case "resolve_conversation":
       return { text: typeof item.args["summary"] === "string" ? item.args["summary"] : "Resolved", tone: "success" };
     default:

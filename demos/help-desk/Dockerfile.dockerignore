@@ -14,6 +14,8 @@
 **/*.tsbuildinfo
 **/.data
 **/test
+!demos/help-desk/storefront/test
+!demos/help-desk/storefront/test/**
 demos/help-desk/docs
 deployments/azure/hosting
 deployments/azure/sandbox

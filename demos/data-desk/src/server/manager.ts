@@ -1,15 +1,20 @@
 // All of Data Desk's analyses: kept in its records, confirmed against Managed Copilot after every connection, and
-// resumed there so their move requests and progress continue. Platform events reach the analysis they're about.
-import type { DatasetSummary, DeskState, RowsPage, ServerEvent, AnalysisSummary, AnalysisView } from "../shared/types.js";
+// resumed there so their move requests and progress continue. Platform events reach the analysis they're about. An
+// analysis's insight can be sent to Software Factory; the work orders it made are followed until they finish.
+import { FACTORY_NOT_CONNECTED, STATUS_LABEL, workOrderLabel } from "../shared/factory.js";
+import { analysisHref } from "../shared/routes.js";
+import type { DatasetSummary, DeskState, RowsPage, SendToFactoryResponse, ServerEvent, AnalysisSummary, AnalysisView } from "../shared/types.js";
 import { Analysis, type AnalysisHost } from "./analysis.js";
 import { attachCommandTemplate, canLaunchTerminal } from "./attach.js";
 import type { DeskConfig } from "./config.js";
 import type { Datasets } from "./datasets.js";
 import { DeskError, errorText, isMissingSession } from "./errors.js";
+import { createFactory, FactoryTracker, nextRoutingNumber, ORIGIN_APP, ORIGIN_NAME, routingView, workOrderUrl, type FactoryClient } from "./factory.js";
+import { composeHandoff, parseHandoffRequest } from "./handoff.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
 import type { DeskPlatform } from "./platform.js";
-import type { Store } from "./store.js";
+import type { Store, StoredRouting } from "./store.js";
 
 /** Analyses resumed right after connecting; others resume when opened. */
 const ATTACH_ON_CONNECT = 8;
@@ -17,31 +22,53 @@ const MAX_PROMPT = 8_000;
 const PUBLISH_MS = 100;
 const LIST_MS = 300;
 const PAGE_MAX = 500;
+const LABEL_MAX = 120;
+
+/** What a work order says it came from: "<analysis title> · <dataset name>", once when they're the same. */
+export function originLabel(title: string, datasetName: string): string {
+  const label = title === datasetName ? title : `${title} · ${datasetName}`;
+  return label.length > LABEL_MAX ? `${label.slice(0, LABEL_MAX - 1).trimEnd()}…` : label;
+}
 
 export class AnalysisManager implements AnalysisHost {
   readonly platform: DeskPlatform;
   readonly config: DeskConfig;
   readonly store: Store;
   readonly datasets: Datasets;
+  readonly factory: FactoryClient;
   readonly #hub: EventHub;
   readonly #analyses = new Map<string, Analysis>();
   readonly #publishing = new Map<string, NodeJS.Timeout>();
+  readonly #tracker: FactoryTracker;
+  /** Analyses with a hand-off to Software Factory under way. */
+  readonly #sending = new Set<string>();
   #listTimer: NodeJS.Timeout | undefined;
   #syncing: Promise<void> | undefined;
   #syncAgain = false;
   readonly #unsubscribe: (() => void)[] = [];
 
-  constructor(platform: DeskPlatform, config: DeskConfig, store: Store, datasets: Datasets, hub: EventHub) {
+  constructor(platform: DeskPlatform, config: DeskConfig, store: Store, datasets: Datasets, hub: EventHub, factory: FactoryClient = createFactory(config), factoryPollMs?: number) {
     this.platform = platform;
     this.config = config;
     this.store = store;
     this.datasets = datasets;
+    this.factory = factory;
     this.#hub = hub;
+    this.#tracker = new FactoryTracker(
+      factory,
+      store,
+      (id) => {
+        const analysis = this.#analyses.get(id);
+        if (analysis) this.changed(analysis);
+      },
+      factoryPollMs,
+    );
   }
 
   start(): void {
     // Known analyses show right away, from Data Desk's records; the platform confirms them once connected.
     for (const stored of this.store.list()) this.#analyses.set(stored.id, new Analysis(this, stored.id));
+    this.#tracker.start();
     this.#unsubscribe.push(
       this.platform.onConnected(() => void this.sync()),
       this.platform.onStatus(() => {
@@ -57,6 +84,7 @@ export class AnalysisManager implements AnalysisHost {
 
   async close(): Promise<void> {
     for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
+    this.#tracker.close();
     for (const timer of this.#publishing.values()) clearTimeout(timer);
     this.#publishing.clear();
     if (this.#listTimer) clearTimeout(this.#listTimer);
@@ -128,6 +156,7 @@ export class AnalysisManager implements AnalysisHost {
       attachCommand: attachCommandTemplate(this.config.attachUrl),
       canLaunchTerminal: canLaunchTerminal(),
       maxUploadBytes: this.datasets.maxBytes,
+      factory: { configured: this.factory.configured, ...(this.factory.publicUrl ? { url: this.factory.publicUrl } : {}) },
     };
   }
 
@@ -218,6 +247,65 @@ export class AnalysisManager implements AnalysisHost {
   /** Whether a session may be attached from Data Desk: one of its analyses. */
   owns(sessionId: string): boolean {
     return this.#analyses.has(sessionId);
+  }
+
+  /** Sending to Software Factory needs `SOFTWARE_FACTORY_URL`. */
+  requireFactory(): void {
+    if (!this.factory.configured) throw new DeskError("factory_unavailable", FACTORY_NOT_CONNECTED, 503);
+  }
+
+  /**
+   * Sends what the person picked from an analysis to Software Factory as a new work order, with what to build, and
+   * records it on the analysis. `appOrigin` is Data Desk's address as the person's browser sees it, for the link back.
+   */
+  async sendToFactory(id: string, body: unknown, appOrigin: string): Promise<SendToFactoryResponse> {
+    this.requireFactory();
+    const analysis = this.#require(id);
+    const request = parseHandoffRequest(body);
+    if (this.#sending.has(id)) throw new DeskError("busy", "This analysis is already sending something to Software Factory. Wait a moment.", 409);
+    this.#sending.add(id);
+    try {
+      // The tables and the answer come from the session's history: load it first if the analysis isn't open yet.
+      if (this.platform.status.state === "connected") await analysis.attach();
+      const dataset = analysis.dataset;
+      if (!dataset) throw new DeskError("not_found", "This analysis's dataset isn't available anymore, so there's nothing to send.", 404);
+      const material = analysis.handoff();
+      const link = `${appOrigin}/${analysisHref(id)}`;
+      const handoff = await composeHandoff({ ...material, dataset, readOutput: (path) => analysis.readOutput(path), link }, request);
+      const key = `${id}:${nextRoutingNumber(this.store.get(id)?.factory ?? [])}`;
+      const order = await this.factory.create({
+        title: request.title,
+        brief: handoff.brief,
+        maxReviewRounds: 2,
+        origin: { app: ORIGIN_APP, name: ORIGIN_NAME, label: originLabel(analysis.summary().title, dataset.summary.name), url: link, key },
+        context: handoff.files,
+      });
+      const sentAt = new Date().toISOString();
+      const routing: StoredRouting = {
+        workOrderId: order.id,
+        number: order.number,
+        title: order.title || request.title,
+        url: workOrderUrl(this.factory.publicUrl ?? "", order.id),
+        status: order.status,
+        sentAt,
+        items: [...handoff.items],
+        key,
+        ...(material.lastItemId ? { after: material.lastItemId } : {}),
+      };
+      this.store.update(id, (stored) => {
+        // The tracker may have found it already (by its key) while the factory answered.
+        stored.factory = [...(stored.factory ?? []).filter((existing) => existing.workOrderId !== order.id), routing];
+        stored.updatedAt = sentAt;
+      });
+      // Recorded right away: the work order exists now, whatever happens to Data Desk next.
+      this.store.flush();
+      this.#tracker.follow();
+      log.info("Sent an analysis to Software Factory", { sessionId: id, workOrder: workOrderLabel(order.number), status: STATUS_LABEL[order.status], files: handoff.files.length });
+      this.changed(analysis);
+      return { routing: routingView(routing), analysis: analysis.view() };
+    } finally {
+      this.#sending.delete(id);
+    }
   }
 
   // AnalysisHost

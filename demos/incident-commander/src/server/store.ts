@@ -1,5 +1,6 @@
-// Incident Commander's own records: one JSON file of incidents. Sessions, workers, and sandboxes live in the platform;
-// this keeps what the app learned about each incident (notes, approvals, deploys, postmortems) and survives restarts.
+// Incident Commander's own records: one JSON file of incidents and the app's settings. Sessions, workers, and sandboxes
+// live in the platform; this keeps what the app learned about each incident (notes, approvals, deploys, postmortems,
+// Software Factory work orders) and survives restarts.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -7,7 +8,9 @@ import type {
   ApprovalView,
   CoordinatorState,
   DeployView,
+  FactoryWorkView,
   Findings,
+  FixRoute,
   IncidentStatus,
   Milestones,
   PostmortemView,
@@ -16,6 +19,7 @@ import type {
   TimelineKind,
 } from "../shared/types.js";
 import type { DemoSeed } from "./demo.js";
+import type { FixFile } from "./factory.js";
 import { log } from "./log.js";
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
@@ -23,6 +27,12 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 export interface StoredApproval extends Mutable<ApprovalView> {
   /** Exactly what the person reviewed, so exactly that ships. */
   snapshot: { readonly path: string; readonly content: string }[];
+}
+
+/** The incident's fix as a Software Factory work order, followed until Copilot learned how it ended. */
+export interface StoredFactoryWork extends Mutable<Omit<FactoryWorkView, "files">> {
+  /** The fix it released, with the files' contents (what apply_factory_fix copies). */
+  files?: FixFile[];
 }
 
 export interface StoredIncident {
@@ -33,6 +43,8 @@ export interface StoredIncident {
   status: IncidentStatus;
   /** Set for the bundled demo service: how its production logs are generated. */
   readonly demo?: DemoSeed;
+  /** How the fix is made; incidents recorded before routes existed are `workers`. */
+  readonly fixRoute?: FixRoute;
   /** The service's version when the incident opened. */
   serviceVersion?: string;
   sessionId?: string;
@@ -42,6 +54,7 @@ export interface StoredIncident {
   updatedAt: string;
   resolvedAt?: string;
   findings: Mutable<Findings> & { evidence: string[] };
+  factory?: StoredFactoryWork;
   approval?: StoredApproval;
   deploy?: DeployView;
   postmortem?: PostmortemView;
@@ -52,11 +65,18 @@ export interface StoredIncident {
   problem?: string;
 }
 
+/** The app's settings, chosen in its UI. */
+export interface StoredSettings {
+  /** Absent until someone chooses: Software Factory when it's connected, otherwise workers. */
+  fixRoute?: FixRoute;
+}
+
 interface StoreFile {
   readonly version: 1;
   next: number;
   incidents: StoredIncident[];
   webhook: { lastAt?: string; seen: string[] };
+  settings: StoredSettings;
 }
 
 const FILE = "incidents.json";
@@ -80,13 +100,24 @@ export class Store {
 
   #load(): StoreFile {
     try {
-      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as StoreFile;
-      if (parsed.version === 1 && Array.isArray(parsed.incidents)) return { ...parsed, webhook: parsed.webhook ?? { seen: [] } };
+      const parsed = JSON.parse(readFileSync(this.#path, "utf8")) as Partial<StoreFile>;
+      // Files from before settings existed have none: the defaults apply.
+      if (parsed.version === 1 && Array.isArray(parsed.incidents)) return { ...(parsed as StoreFile), webhook: parsed.webhook ?? { seen: [] }, settings: parsed.settings ?? {} };
       log.warn("Ignoring an incidents file in an unknown format", { path: this.#path });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") log.warn("Couldn't read the incidents file; starting empty", { error: (error as Error).message });
     }
-    return { version: 1, next: FIRST_NUMBER, incidents: [], webhook: { seen: [] } };
+    return { version: 1, next: FIRST_NUMBER, incidents: [], webhook: { seen: [] }, settings: {} };
+  }
+
+  get settings(): Readonly<StoredSettings> {
+    return this.#data.settings;
+  }
+
+  /** Changes the app's settings (and saves). */
+  setSettings(change: Partial<StoredSettings>): void {
+    this.#data.settings = { ...this.#data.settings, ...change };
+    this.#save();
   }
 
   /** Newest first. */
@@ -107,7 +138,7 @@ export class Store {
     return this.#data.incidents.find((incident) => incident.status !== "resolved" && incident.alert.fingerprint === fingerprint);
   }
 
-  create(alert: AlertInfo, demo?: DemoSeed, serviceVersion?: string): StoredIncident {
+  create(alert: AlertInfo, demo?: DemoSeed, serviceVersion?: string, fixRoute: FixRoute = "workers"): StoredIncident {
     const now = new Date().toISOString();
     const number = this.#data.next++;
     const incident: StoredIncident = {
@@ -117,6 +148,7 @@ export class Store {
       alert,
       status: "investigating",
       ...(demo ? { demo } : {}),
+      fixRoute,
       ...(serviceVersion ? { serviceVersion } : {}),
       createdAt: now,
       updatedAt: now,

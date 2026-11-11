@@ -1,7 +1,8 @@
 // One customer's conversation, projected from the stock session events: live as they arrive, or from
 // `session.getEvents()` after a restart (history has no `session.idle`, so the last turn is settled from the session's
-// platform record). Pure: no I/O, so tests drive it with plain events.
-import type { MessageItem, ToolCallStatus, ToolItem, TranscriptItem } from "../shared/types.js";
+// platform record). A problem with the store's website the agent reported is a completed `report_bug` call, so it comes
+// back after a restart like everything else. Pure: no I/O, so tests drive it with plain events.
+import { BUG_AREAS, type BugArea, type BugReport, type MessageItem, type ToolCallStatus, type ToolItem, type TranscriptItem } from "../shared/types.js";
 
 /** The parts of a stock `SessionEvent` the projection reads. */
 export interface SessionEventLike {
@@ -22,6 +23,20 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 const record = (value: unknown): Record<string, unknown> => (value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
 const text = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+/** Trimmed text of at most `max` characters, or nothing. */
+const clip = (value: unknown, max: number): string | undefined => text(value)?.trim().slice(0, max) || undefined;
+const AREAS: ReadonlySet<string> = new Set(BUG_AREAS);
+
+/** The report a `report_bug` call made: what the agent wrote, and the order the tool checked was the customer's. */
+function bugReport(item: ToolItem): BugReport | undefined {
+  const title = clip(item.args["title"], 120);
+  const whatHappened = clip(item.args["whatHappened"], 800);
+  const expected = clip(item.args["expected"], 400);
+  if (!title || !whatHappened || !expected) return undefined;
+  const area = text(item.args["area"]) ?? "";
+  const orderId = text(item.result?.["orderId"]);
+  return { area: AREAS.has(area) ? (area as BugArea) : "other", title, whatHappened, expected, ...(orderId ? { orderId } : {}), at: item.at };
+}
 
 /** A tool's result as the agent saw it: our tools return JSON objects. */
 export function parseResult(content: unknown): Record<string, unknown> | undefined {
@@ -82,6 +97,16 @@ export class Transcript {
     return this.#items.flatMap((item) =>
       item.kind === "tool" && item.status === "done" && (item.name === "request_refund" || item.name === "cancel_order") ? [{ id: item.id, tool: item.name, args: item.args }] : [],
     );
+  }
+
+  /** The problem with the store's website the agent reported last (`report_bug`), if any. */
+  get bug(): BugReport | undefined {
+    for (let index = this.#items.length - 1; index >= 0; index--) {
+      const item = this.#items[index]!;
+      const report = item.kind === "tool" && item.name === "report_bug" && item.status === "done" ? bugReport(item) : undefined;
+      if (report) return report;
+    }
+    return undefined;
   }
 
   /** Applies one event. Returns whether anything a person sees changed. */

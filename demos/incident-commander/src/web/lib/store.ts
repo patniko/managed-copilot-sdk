@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { IncidentSummary, IncidentView, IntegrationsView, PlatformStatus, ServerEvent } from "../../shared/types.js";
+import type { AppSettings, IncidentSummary, IncidentView, IntegrationsView, PlatformStatus, ServerEvent } from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
 
 export type Connection = "connecting" | "open" | "reconnecting";
@@ -10,6 +10,7 @@ export interface StoreState {
   readonly connection: Connection;
   readonly platform?: PlatformStatus;
   readonly integrations?: IntegrationsView;
+  readonly settings?: AppSettings;
   /** Newest first. */
   readonly incidents: readonly IncidentSummary[];
   readonly views: Readonly<Record<string, IncidentView>>;
@@ -46,7 +47,7 @@ function without<T>(record: Readonly<Record<string, T>>, key: string): Readonly<
 async function loadState(): Promise<void> {
   try {
     const loaded = await api.state();
-    setState((current) => ({ ...current, phase: "ready", platform: loaded.platform, integrations: loaded.integrations, incidents: loaded.incidents }));
+    setState((current) => ({ ...current, phase: "ready", platform: loaded.platform, integrations: loaded.integrations, settings: loaded.settings, incidents: loaded.incidents }));
   } catch (error) {
     setState((current) => (current.phase === "ready" ? current : { ...current, phase: "error", loadError: errorMessage(error) }));
   }
@@ -69,6 +70,8 @@ function apply(event: ServerEvent): void {
         return { ...current, platform: event.platform };
       case "integrations":
         return { ...current, integrations: event.integrations };
+      case "settings":
+        return { ...current, settings: event.settings };
       case "incidents":
         return { ...current, phase: "ready", incidents: event.incidents };
       case "incident":
@@ -86,7 +89,7 @@ export function connect(): void {
   if (source) return;
   void loadState();
   source = new EventSource("/api/events");
-  for (const type of ["platform", "integrations", "incidents", "incident", "removed"] as const) {
+  for (const type of ["platform", "integrations", "settings", "incidents", "incident", "removed"] as const) {
     source.addEventListener(type, (message) => {
       try {
         apply(JSON.parse((message as MessageEvent<string>).data) as ServerEvent);

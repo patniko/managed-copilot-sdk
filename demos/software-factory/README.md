@@ -12,7 +12,9 @@ gates, built on the stock `@github/copilot-sdk` and `@managed-copilot/sdk` with 
 
 Or point it at one of your GitHub repositories and an issue: the factory makes the change in a sandbox, reviews it, and
 opens a pull request with screenshots and a recording, then takes follow-up requests on the same pull request (see
-[Change a GitHub repository](#change-a-github-repository)).
+[Change a GitHub repository](#change-a-github-repository)). Other demos route work to it too, and the floor shows where
+each work order came from: a storefront bug from Help Desk, an incident's fix from Incident Commander, an insight from
+Data Desk (see [Work routed from other apps](#work-routed-from-other-apps)).
 
 ![The agent-led floor: a coordinator, two builder sandboxes (one reused for review fixes), and a live log of its decisions](docs/screenshots/floor-building.png)
 
@@ -173,6 +175,44 @@ login` or `GH_TOKEN` locally; the deployment's token in Azure). `factory-repo` s
 and pip index, and the hosts in `FACTORY_REPO_EXTRA_HOSTS`: list your registry's download hosts there when it hands out
 links elsewhere (an Azure Artifacts upstream: `*.pkgs.visualstudio.com,*.vsblob.vsassets.io`), and any other package
 source your repositories need.
+
+## Work routed from other apps
+
+Other apps send work here with the same API, and the floor shows where it came from: [Help Desk](../help-desk)
+sends a storefront bug its customers reported, [Incident Commander](../incident-commander) sends an incident's fix,
+and [Data Desk](../data-desk) sends an insight with the data behind it. Such a work order carries:
+
+- **`origin`**: the app, what in it the work came from, and a link back. The work order list marks it (**Help Desk**,
+  **Incident Commander**, **Data Desk**), its header links back, and the floor starts from a **From …** card that opens
+  the brief and what it brought along. The Deliverable says who asked for it.
+- **`context`**: reference material (bug reports, findings, data), up to 12 text files and 512 KB. Every sandbox has it
+  in `.factory/context/`, and the planner reads it.
+- **`project`**: an existing codebase to change instead of starting empty, up to 300 text files and 2 MB. Every builder
+  and the release start from its files, and a task owns the existing files it changes. The factory adds its check
+  scripts to the project's own `package.json` and keeps its package name. Reviewers see each changed file's original,
+  and the release says which of the project's files it added, changed, or removed (files in dot-directories such as
+  `.github/` aren't part of the release, so they're left as they were).
+
+The routed files are the **intake**'s artifacts, first on the Artifacts tab. `GET /api/work-orders` lists each work
+order's `origin`, so an app finds its work orders again after a restart, and `GET /api/work-orders/:id/release` returns
+the released files and the project's `changes` (Incident Commander verifies and deploys a fix from there).
+
+```ts
+await fetch(`${process.env.SOFTWARE_FACTORY_URL}/api/work-orders`, {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({
+    title: "Fix: promo codes rejected at checkout",
+    brief: "Two customers report TRAIL15 is rejected when pasted with a space or typed in lowercase. Fix it, with regression tests.",
+    origin: { app: "help-desk", name: "Help Desk", label: "Promo codes · 2 tickets", url: "http://localhost:7440/#/", key: "run-42:promo-codes" },
+    context: [{ path: "BUG_REPORT.md", content: report, description: "The customers' reports" }],
+    project: { name: "contoso-storefront", files: [{ path: "src/promotions.js", content: source } /* … */] },
+  }),
+});
+```
+
+The root AppHost gives those apps `SOFTWARE_FACTORY_URL` (the API address their servers call; inside the Azure
+environment it is `http://software-factory`) and `SOFTWARE_FACTORY_PUBLIC_URL` (the address people open).
 
 ## How it works
 

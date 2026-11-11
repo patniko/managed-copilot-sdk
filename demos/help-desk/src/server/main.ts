@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { HelpDesk } from "./desk.js";
+import { SoftwareFactory } from "./factory.js";
 import { createRequestHandler, type Middleware } from "./http.js";
 import { EventHub } from "./hub.js";
 import { log } from "./log.js";
@@ -10,7 +11,8 @@ import { Platform } from "./platform.js";
 const config = loadConfig();
 const hub = new EventHub();
 const platform = new Platform(config);
-const desk = new HelpDesk(platform, config, (event) => hub.publish(event));
+const factory = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl);
+const desk = new HelpDesk(platform, config, (event) => hub.publish(event), factory);
 desk.start();
 
 const server = createServer();
@@ -35,7 +37,7 @@ await new Promise<void>((resolve, reject) => {
 });
 
 platform.start();
-log.info(`Help Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, { environment: config.environment });
+log.info(`Help Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, { environment: config.environment, softwareFactory: config.factoryUrl ?? "not connected (set SOFTWARE_FACTORY_URL)" });
 
 let stopping = false;
 async function shutdown(signal: string): Promise<void> {

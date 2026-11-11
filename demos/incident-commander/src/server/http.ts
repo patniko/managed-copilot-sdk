@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
-import type { AlertsAccepted, ApiErrorBody, CreatedIncident, DecisionRequest, NoteRequest } from "../shared/types.js";
+import type { AlertsAccepted, ApiErrorBody, CreatedIncident, DecisionRequest, FixRoute, NoteRequest, SettingsRequest, SimulateRequest } from "../shared/types.js";
 import { authorized, parseAlertPayload } from "./alerts.js";
 import type { Commander } from "./commander.js";
 import { AppError } from "./errors.js";
@@ -63,11 +63,16 @@ async function readRaw(req: IncomingMessage, limit: number): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readJson<T>(req: IncomingMessage, limit = 64 * 1024): Promise<T> {
-  if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) throw new AppError("unsupported_media_type", "Send the request body as application/json.", 415);
+/** A JSON object body. `optional`: a request without a body reads as `{}`. */
+async function readJson<T>(req: IncomingMessage, limit = 64 * 1024, { optional = false } = {}): Promise<T> {
+  const json = /^application\/json\b/i.test(req.headers["content-type"] ?? "");
+  if (!json && !optional) throw new AppError("unsupported_media_type", "Send the request body as application/json.", 415);
   let parsed: unknown;
   try {
-    parsed = JSON.parse((await readRaw(req, limit)).toString("utf8") || "{}");
+    const raw = await readRaw(req, limit);
+    if (optional && raw.length === 0) return {} as T;
+    if (!json) throw new AppError("unsupported_media_type", "Send the request body as application/json.", 415);
+    parsed = JSON.parse(raw.toString("utf8") || "{}");
   } catch (error) {
     if (error instanceof AppError) throw error;
     throw new AppError("invalid_request", "The request body isn't valid JSON.");
@@ -75,6 +80,8 @@ async function readJson<T>(req: IncomingMessage, limit = 64 * 1024): Promise<T> 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new AppError("invalid_request", "The request body must be a JSON object.");
   return parsed as T;
 }
+
+const FIX_ROUTES: readonly FixRoute[] = ["workers", "factory"];
 
 /**
  * Blocks DNS rebinding: only loopback names may address this server. `*.localhost` names always resolve to loopback
@@ -168,9 +175,17 @@ function buildRouter({ commander, hub }: ApiContext): Router {
     await commander.message(params.id!, text);
     res.writeHead(202).end();
   });
-  // The labeled demo: a sample alert for the bundled demo service.
-  router.add("POST", "/api/simulate", async (_req, res) => {
-    const created: CreatedIncident = { id: await commander.simulate() };
+  // How the next incidents' fixes are made: Copilot's workers, or Software Factory.
+  router.add("PUT", "/api/settings", async (req, res) => {
+    const body = await readJson<Partial<SettingsRequest>>(req);
+    if (!FIX_ROUTES.includes(body.fixRoute as FixRoute)) throw new AppError("invalid_request", 'Pass fixRoute: "workers" or "factory".');
+    sendJson(res, 200, commander.setFixRoute(body.fixRoute!));
+  });
+  // The labeled demo: a sample alert for the bundled demo service. An optional { fixRoute } overrides the setting.
+  router.add("POST", "/api/simulate", async (req, res) => {
+    const body = await readJson<Partial<SimulateRequest>>(req, 4 * 1024, { optional: true });
+    if (body.fixRoute !== undefined && !FIX_ROUTES.includes(body.fixRoute)) throw new AppError("invalid_request", 'Pass fixRoute: "workers" or "factory", or no body to use the setting.');
+    const created: CreatedIncident = { id: await commander.simulate(body.fixRoute) };
     sendJson(res, 201, created);
   });
   // Monitoring tools: Alertmanager, Grafana, or { title, service, severity, summary }, with the shared secret.

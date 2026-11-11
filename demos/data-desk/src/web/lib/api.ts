@@ -1,4 +1,4 @@
-import type { AnalysisView, AttachResponse, DatasetSummary, DeskState, RowsPage } from "../../shared/types.js";
+import type { AnalysisView, AttachResponse, DatasetSummary, DeskState, RowsPage, SendToFactoryRequest, SendToFactoryResponse } from "../../shared/types.js";
 
 /** A failed API call with the server's friendly message (never a stack trace). */
 export class ApiError extends Error {
@@ -77,4 +77,5 @@ export const api = {
   stop: (id: string) => json<undefined>("POST", `${analysisUrl(id)}/stop`),
   delete: (id: string) => json<undefined>("DELETE", analysisUrl(id)),
   attach: (id: string) => json<AttachResponse>("POST", `${analysisUrl(id)}/attach`),
+  factory: (id: string, request: SendToFactoryRequest) => json<SendToFactoryResponse>("POST", `${analysisUrl(id)}/factory`, request),
 };

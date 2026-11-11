@@ -3,25 +3,54 @@
 // platform, and lets go: the request waits there (durably, for up to 24 hours) with no browser tab, no live connection,
 // and no app memory involved. A person's decision re-attaches; the platform delivers the request again, and the decision
 // answers it. Without the app attached, the platform's webhook keeps it informed and answers what needs no person.
+// An incident whose fix goes through Software Factory has a work order there: the app follows it (from the store, so
+// across restarts) and, once it ends, re-attaches to tell the agent, exactly once.
 import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import type { VerifiedWebhookEvent } from "@managed-copilot/sdk";
-import type { CoordinatorState, FileChange, IncidentSummary, IncidentView, SandboxView } from "../shared/types.js";
+import type { CoordinatorState, FactoryWorkView, FileChange, FixRoute, IncidentSummary, IncidentView, SandboxView } from "../shared/types.js";
 import type { AppConfig } from "./config.js";
 import { deployDemo, deployWebhook, type DeployOutcome, type DeployRequest } from "./deploy.js";
 import { diffFile } from "./diff.js";
 import { AppError, errorText, isMissingSession } from "./errors.js";
+import {
+  ACTIVE_FACTORY_STATUSES,
+  describeTests,
+  FactoryError,
+  fixWorkOrder,
+  projectFiles,
+  projectTooLarge,
+  releasedFix,
+  workOrderLabel,
+  type FactoryClient,
+  type FixFile,
+  type ReleaseFiles,
+  type WorkOrderInfo,
+} from "./factory.js";
 import { log } from "./log.js";
-import type { CoordinatorSession, IncidentPlatform } from "./platform.js";
-import { alertPrompt, runbook, TOOLS } from "./runbook.js";
+import { reconnectDelay, type CoordinatorSession, type IncidentPlatform } from "./platform.js";
+import { alertPrompt, fixWorkerFallback, runbook, TOOLS } from "./runbook.js";
 import type { ServiceCatalog } from "./services.js";
-import type { StoredApproval, StoredIncident, Store } from "./store.js";
-import { failure, incidentTools, parseDeploy, ToolInputError, type DeployInput, type PostmortemInput, type ToolHost, type ToolOutcome, type UpdateInput } from "./tools.js";
+import type { StoredApproval, StoredFactoryWork, StoredIncident, Store } from "./store.js";
+import {
+  failure,
+  incidentTools,
+  parseDeploy,
+  ToolInputError,
+  type DeployInput,
+  type PostmortemInput,
+  type RouteFixInput,
+  type ToolHost,
+  type ToolOutcome,
+  type UpdateInput,
+} from "./tools.js";
 
 export interface RunHost {
   readonly config: AppConfig;
   readonly platform: IncidentPlatform;
   readonly store: Store;
   readonly catalog: ServiceCatalog;
+  /** Software Factory, when it's connected: fixes routed there go through it. */
+  readonly factory: FactoryClient | undefined;
   /** The environment the repro and fix workers run in. */
   workerEnvironment(): string;
   /** Something the incident page shows changed. */
@@ -34,7 +63,16 @@ const one = (value: unknown, max = 90): string => {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 };
 
+/** Ends with a period (or other closing punctuation). */
+const sentence = (text: string): string => (/[.!?…]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
+
 const base = (path: unknown): string => one(path).split("/").filter(Boolean).at(-1) ?? "";
+
+/** A few of the paths, then how many more. */
+function pathList(files: readonly { readonly path: string }[], shown = 3): string {
+  const paths = files.slice(0, shown).map((file) => file.path);
+  return files.length > shown ? `${paths.join(", ")} and ${files.length - shown} more` : paths.join(", ");
+}
 
 /** What a tool call is doing, in a few words. */
 export function describeTool(name: string, args: Record<string, unknown> | undefined): string {
@@ -75,6 +113,10 @@ export function describeTool(name: string, args: Record<string, unknown> | undef
       return "Opening the service's files";
     case TOOLS.update:
       return "Recording a note";
+    case TOOLS.routeFix:
+      return "Routing the fix to Software Factory";
+    case TOOLS.applyFix:
+      return "Applying Software Factory's fix";
     case TOOLS.deploy:
       return "Asking to deploy";
     case TOOLS.postmortem:
@@ -112,6 +154,12 @@ export class IncidentRun implements ToolHost {
   #refreshTimer: NodeJS.Timeout | undefined;
   #poll: NodeJS.Timeout | undefined;
   #closed = false;
+  /** route_fix_to_factory in flight: a second call waits for it. */
+  #routing: Promise<ToolOutcome> | undefined;
+  #factoryTimer: NodeJS.Timeout | undefined;
+  #factoryCheck: Promise<void> | undefined;
+  /** Consecutive checks that couldn't reach the factory (or Copilot): the next one waits longer. */
+  #factoryFailures = 0;
 
   constructor(host: RunHost, id: string) {
     this.#host = host;
@@ -122,6 +170,10 @@ export class IncidentRun implements ToolHost {
     const incident = this.#host.store.get(this.id);
     if (!incident) throw new AppError("not_found", `${this.id} doesn't exist anymore.`, 404);
     return incident;
+  }
+
+  get #fixRoute(): FixRoute {
+    return this.#incident.fixRoute ?? "workers";
   }
 
   get attached(): boolean {
@@ -138,14 +190,15 @@ export class IncidentRun implements ToolHost {
   }
 
   #handlers(generation: number) {
+    const route = this.#fixRoute;
     return {
       model: this.#host.config.model,
-      tools: incidentTools(this),
+      tools: incidentTools(this, { factory: route === "factory" }),
       onPermissionRequest: (request: PermissionRequest) => this.#permission(request, generation),
       onEvent: (event: SessionEvent) => {
         if (generation === this.#generation) this.#event(event);
       },
-      systemMessage: { content: runbook(this.#host.workerEnvironment()) },
+      systemMessage: { content: runbook(this.#host.workerEnvironment(), route) },
     };
   }
 
@@ -273,6 +326,8 @@ export class IncidentRun implements ToolHost {
   async close(): Promise<void> {
     this.#closed = true;
     if (this.#refreshTimer) clearTimeout(this.#refreshTimer);
+    if (this.#factoryTimer) clearTimeout(this.#factoryTimer);
+    this.#factoryTimer = undefined;
     await this.detach();
   }
 
@@ -286,6 +341,7 @@ export class IncidentRun implements ToolHost {
     } catch (error) {
       if (!isMissingSession(error)) {
         this.#closed = false;
+        this.followFactory();
         throw new AppError("delete_failed", `Couldn't delete the incident's session: ${errorText(error)}`, 502);
       }
     }
@@ -303,6 +359,7 @@ export class IncidentRun implements ToolHost {
   /** After a (re)connection: pick the incident up where it is. */
   async resume(): Promise<void> {
     this.forget();
+    this.followFactory();
     const incident = this.#incident;
     if (incident.status === "resolved" && incident.coordinator.state === "done") return;
     if (!incident.sessionId) return this.start();
@@ -422,6 +479,9 @@ export class IncidentRun implements ToolHost {
     } catch (error) {
       problem = `Couldn't read the changes from Copilot's sandbox: ${errorText(error)}.`;
     }
+    // The fix Software Factory released, copied into Copilot's sandbox: the person sees where it came from.
+    const work = incident.factory;
+    const factory = work?.appliedAt && work.files?.length ? { number: work.number, url: work.url } : undefined;
     const approval: StoredApproval = {
       id,
       state: "waiting",
@@ -430,6 +490,7 @@ export class IncidentRun implements ToolHost {
       files,
       snapshot,
       ...(problem ? { problem } : {}),
+      ...(factory ? { factory } : {}),
       requestedAt: new Date().toISOString(),
     };
     this.#update((stored) => {
@@ -437,7 +498,8 @@ export class IncidentRun implements ToolHost {
       if (stored.status === "investigating") stored.status = "mitigating";
       stored.milestones.mitigatingAt ??= approval.requestedAt;
     });
-    this.#note("approval", `Copilot asked to deploy: ${input.summary}`, input.tests ? `Tests: ${input.tests}` : undefined);
+    const detail = [input.tests ? `Tests: ${input.tests}` : "", factory ? `Built by Software Factory as ${workOrderLabel(factory.number)}` : ""].filter(Boolean).join("\n");
+    this.#note("approval", `Copilot asked to deploy: ${input.summary}`, detail || undefined);
     log.info("Deploy requested; waiting for a person", { incident: this.id, files: files.length });
   }
 
@@ -514,7 +576,7 @@ export class IncidentRun implements ToolHost {
         }
         // While the app is attached, its live session answers. Otherwise answer here: the app's tools and sandbox work.
         if (this.#session) return;
-        await event.handleActions({ tools: incidentTools(this), onPermissionRequest: (request) => this.#webhookPermission(request) });
+        await event.handleActions({ tools: incidentTools(this, { factory: this.#fixRoute === "factory" }), onPermissionRequest: (request) => this.#webhookPermission(request) });
         return;
       }
       case "session.idle":
@@ -682,6 +744,131 @@ export class IncidentRun implements ToolHost {
     return "Recorded on the incident page.";
   }
 
+  /** route_fix_to_factory: one work order per incident. A repeated (or, after a restart, replayed) call answers with it. */
+  routeFix(input: RouteFixInput): Promise<ToolOutcome> {
+    this.#routing ??= this.#routeFix(input).finally(() => {
+      this.#routing = undefined;
+    });
+    return this.#routing;
+  }
+
+  async #routeFix(input: RouteFixInput): Promise<ToolOutcome> {
+    const incident = this.#incident;
+    if (incident.factory) return this.#routed(incident.factory);
+    const factory = this.#host.factory;
+    if (!factory) return this.#routeFailed("Software Factory isn't connected to Incident Commander (SOFTWARE_FACTORY_URL isn't set).");
+    const service = incident.alert.service;
+    const files: string[] = [];
+    for (const raw of input.files) {
+      const path = servicePath(service, raw);
+      if (!path) return failure(`${raw} isn't inside the service's folder. List files relative to it, for example src/discounts.js, and call ${TOOLS.routeFix} again.`);
+      if (!files.includes(path)) files.push(path);
+    }
+    const { files: workspace } = await this.#host.catalog.workspace(service, incident.demo);
+    const project = projectFiles(workspace);
+    if (project.length === 0) {
+      return failure(`No code is on file for the "${service}" service, so Software Factory has nothing to change. Record what you found and what to check next with ${TOOLS.update}, then end your turn.`);
+    }
+    const tooLarge = projectTooLarge(service, project);
+    if (tooLarge) return this.#routeFailed(tooLarge);
+    const order = fixWorkOrder({
+      incidentId: incident.id,
+      alert: incident.alert,
+      ...(incident.serviceVersion ? { serviceVersion: incident.serviceVersion } : {}),
+      evidence: incident.findings.evidence,
+      fix: { ...input, files },
+      workspace,
+      // The incident's page: the UI's hash route (src/web/lib/router.ts).
+      incidentUrl: `${this.#host.config.publicUrl}/#/incidents/${encodeURIComponent(incident.id)}`,
+    });
+    let created: WorkOrderInfo;
+    try {
+      // One created just before a restart, before it was recorded here, is this incident's work order.
+      created = (await this.#recordedByFactory(factory, incident)) ?? (await factory.create(order));
+    } catch (error) {
+      return this.#routeFailed(errorText(error));
+    }
+    const now = new Date().toISOString();
+    const work: StoredFactoryWork = {
+      workOrderId: created.id,
+      number: created.number,
+      title: created.title || order.title,
+      url: factory.link(created.id),
+      status: created.status,
+      routedAt: now,
+      updatedAt: now,
+    };
+    this.#update((stored) => {
+      stored.factory = work;
+      stored.findings.rootCause ??= input.rootCause;
+      stored.milestones.triagedAt ??= now;
+      if (stored.status === "investigating") stored.status = "mitigating";
+      stored.milestones.mitigatingAt ??= now;
+    });
+    this.#note("factory", `Routed the fix to Software Factory as ${workOrderLabel(created.number)}`, `${work.title}\n${work.url}`, now);
+    log.info("Routed a fix to Software Factory", { incident: this.id, workOrder: created.id, number: created.number });
+    this.followFactory();
+    return this.#routed(work);
+  }
+
+  /** The work order the factory has for this incident, if any. Only an unreachable factory is an error here. */
+  async #recordedByFactory(factory: FactoryClient, incident: StoredIncident): Promise<WorkOrderInfo | undefined> {
+    try {
+      return await factory.find(incident.id, incident.createdAt);
+    } catch (error) {
+      if (error instanceof FactoryError && error.status === undefined) throw error;
+      return undefined;
+    }
+  }
+
+  /** What route_fix_to_factory answers for the incident's work order. */
+  #routed(work: StoredFactoryWork): ToolOutcome {
+    const label = workOrderLabel(work.number);
+    const service = this.#incident.alert.service;
+    if (work.files?.length) return `Software Factory already released the fix as ${label}. Call ${TOOLS.applyFix} to copy it into /workspace/${service}.`;
+    if (work.error || work.status === "failed" || work.status === "cancelled") return failure(this.#fallback(work));
+    return `Software Factory took the fix as ${label} (${work.url}). It plans the fix, builds it in its own sandboxes, reviews it, and releases it with tests. Meanwhile, hand the repro to a "repro" worker as the runbook says, then end your turn: Incident Commander messages you when the factory releases the fix.`;
+  }
+
+  #routeFailed(reason: string): ToolOutcome {
+    this.#note("error", `Couldn't route the fix to Software Factory: ${one(reason, 200)}`, 'Copilot fixes it with a "fix" worker instead.');
+    log.warn("Couldn't route a fix to Software Factory", { incident: this.id, error: reason });
+    return failure(`Software Factory couldn't take the work order: ${sentence(reason)} Instead, ${fixWorkerFallback(this.#host.workerEnvironment(), this.#incident.alert.service)}`);
+  }
+
+  /** The work order ended without a fix: what Copilot does instead. */
+  #fallback(work: StoredFactoryWork): string {
+    const why = work.error ?? `${workOrderLabel(work.number)} was ${work.status}.`;
+    return `Software Factory couldn't build the fix (${workOrderLabel(work.number)}): ${sentence(why)} Now ${fixWorkerFallback(this.#host.workerEnvironment(), this.#incident.alert.service)}`;
+  }
+
+  /** apply_factory_fix: copies the released fix into Copilot's own sandbox. */
+  async applyFactoryFix(): Promise<ToolOutcome> {
+    const incident = this.#incident;
+    const work = incident.factory;
+    if (!work) return failure(`Nothing went to Software Factory yet. Call ${TOOLS.routeFix} first.`);
+    const label = workOrderLabel(work.number);
+    if (!work.files?.length) {
+      if (work.error || work.status === "failed" || work.status === "cancelled") return failure(this.#fallback(work));
+      return failure(`Software Factory hasn't finished ${label} yet (it's ${work.status}). Incident Commander messages you when it releases the fix; end your turn until then.`);
+    }
+    const own = await this.#ownSandbox();
+    if (!own) return failure(`Your own sandbox isn't running. Run \`pwd\` with bash first, then call ${TOOLS.applyFix} again.`);
+    const service = incident.alert.service;
+    const fix: readonly FixFile[] = work.files;
+    await inBatches(fix, 4, async (file) => this.#host.platform.writeFile(own.id, `${service}/${file.path}`, file.content));
+    const now = new Date().toISOString();
+    if (!work.appliedAt) {
+      this.#update((stored) => {
+        if (stored.factory) stored.factory.appliedAt ??= now;
+      });
+      this.#note("factory", `Copied ${label}'s fix into Copilot's sandbox (${fix.length} ${fix.length === 1 ? "file" : "files"})`, fix.map((file) => file.path).join("\n"), now);
+    }
+    void this.refresh();
+    const tests = work.tests ? ` Software Factory's own test run: ${describeTests(work.tests)}.` : "";
+    return `Copied Software Factory's fix (${label}) into /workspace/${service}: ${fix.map((file) => `${file.path} (${file.status})`).join(", ")}.${tests} Run the whole test suite now, repro's test included, and record the result with ${TOOLS.update}.`;
+  }
+
   async deploy(input: DeployInput, toolCallId: string): Promise<ToolOutcome> {
     const incident = this.#incident;
     const approval = incident.approval?.id === toolCallId ? incident.approval : undefined;
@@ -745,6 +932,235 @@ export class IncidentRun implements ToolHost {
     return "Published on the incident page.";
   }
 
+  // ─── Software Factory ──────────────────────────────────────────────────────────────────────────────────────
+
+  /** The work order still needs following: the factory works on it, or Copilot hasn't heard how it ended. */
+  #needsFollowing(incident: StoredIncident | undefined): boolean {
+    const work = incident?.factory;
+    if (!incident || !work) return false;
+    if (ACTIVE_FACTORY_STATUSES.includes(work.status)) return true;
+    // Nobody to tell: the incident was resolved some other way, or Copilot's session is gone.
+    return !work.deliveredAt && incident.status !== "resolved" && incident.coordinator.state !== "failed";
+  }
+
+  /** Follows the work order until Copilot learned how it ended. Everything it needs is stored, so it resumes after a restart. */
+  followFactory(): void {
+    if (this.#factoryTimer || this.#closed || !this.#host.factory || !this.#needsFollowing(this.#host.store.get(this.id))) return;
+    const every = this.#host.config.factoryPollMs;
+    const delay = this.#factoryFailures ? Math.max(every, reconnectDelay(this.#factoryFailures)) : every;
+    this.#factoryTimer = setTimeout(() => {
+      this.#factoryTimer = undefined;
+      void this.checkFactory().finally(() => this.followFactory());
+    }, delay);
+    this.#factoryTimer.unref?.();
+  }
+
+  /** Reads the work order once: records what changed, takes the fix from its release, and tells Copilot how it ended. */
+  checkFactory(): Promise<void> {
+    this.#factoryCheck ??= this.#checkFactory()
+      .catch((error: unknown) => log.warn("Couldn't follow a work order", { incident: this.id, error: errorText(error) }))
+      .finally(() => {
+        this.#factoryCheck = undefined;
+      });
+    return this.#factoryCheck;
+  }
+
+  async #checkFactory(): Promise<void> {
+    const factory = this.#host.factory;
+    let work = this.#host.store.get(this.id)?.factory;
+    if (!factory || !work || this.#closed) return;
+    const label = workOrderLabel(work.number);
+    if (ACTIVE_FACTORY_STATUSES.includes(work.status)) {
+      let order: WorkOrderInfo | undefined;
+      try {
+        order = await factory.get(work.workOrderId);
+      } catch (error) {
+        // 404: it was deleted in the factory. Anything else (unreachable, a refusal) may pass: keep the last status, retry.
+        if (!(error instanceof FactoryError && error.status === 404)) return this.#factoryTrouble(`Can't reach Software Factory to follow ${label}: ${sentence(errorText(error))} Incident Commander keeps trying.`);
+      }
+      this.#factoryReached();
+      if (order) this.#factoryStatus(order);
+      else this.#factoryGone(label);
+      work = this.#host.store.get(this.id)?.factory;
+      if (!work) return;
+    }
+    if (work.status === "completed" && !work.files && !work.error) {
+      let release: ReleaseFiles;
+      try {
+        release = await factory.release(work.workOrderId);
+      } catch (error) {
+        const missing = error instanceof FactoryError && error.status === 404;
+        return this.#factoryTrouble(
+          missing
+            ? `Software Factory finished ${label}, but its release isn't available yet. Incident Commander keeps checking.`
+            : `Can't reach Software Factory to read ${label}'s release: ${sentence(errorText(error))} Incident Commander keeps trying.`,
+        );
+      }
+      this.#factoryReached();
+      await this.#takeRelease(release);
+      work = this.#host.store.get(this.id)?.factory;
+      if (!work) return;
+    }
+    const ended = Boolean(work.files?.length) || work.error !== undefined || work.status === "failed" || work.status === "cancelled";
+    if (ended && !work.deliveredAt) await this.#deliverFactory();
+  }
+
+  /** A status the factory reported; a timeline entry for each step it reaches. */
+  #factoryStatus(order: WorkOrderInfo): void {
+    const work = this.#incident.factory;
+    if (!work) return;
+    const label = workOrderLabel(work.number);
+    const changed = order.status !== work.status;
+    const tests = order.tests && JSON.stringify(order.tests) !== JSON.stringify(work.tests) ? order.tests : undefined;
+    if (!changed && !tests) return;
+    const now = new Date().toISOString();
+    const error =
+      order.status === "failed" ? (order.error?.message ?? `${label} failed.`) : order.status === "cancelled" ? `${label} was cancelled in Software Factory.` : undefined;
+    this.#update((stored) => {
+      const current = stored.factory;
+      if (!current) return;
+      if (tests) current.tests = tests;
+      if (!changed) return;
+      current.status = order.status;
+      current.updatedAt = now;
+      if (error) current.error = error;
+    });
+    if (!changed) return;
+    log.info("A work order moved on", { incident: this.id, workOrder: work.workOrderId, status: order.status });
+    if (order.status === "planning") this.#note("factory", `Software Factory is planning ${label}`, undefined, now);
+    else if (order.status === "building") {
+      const tasks = order.taskCount ? ` (${order.taskCount} ${order.taskCount === 1 ? "task" : "tasks"})` : "";
+      this.#note("factory", `Software Factory is building ${label}${tasks}`, undefined, now);
+    } else if (order.status === "releasing") this.#note("factory", `Software Factory is releasing ${label}`, undefined, now);
+    else if (order.status === "failed") this.#note("error", `Software Factory couldn't build ${label}${order.error ? `: ${one(order.error.message, 200)}` : ""}`, undefined, now);
+    else if (order.status === "cancelled") this.#note("error", `${label} was cancelled in Software Factory`, undefined, now);
+  }
+
+  /** The work order disappeared from the factory (deleted there): it won't build the fix. */
+  #factoryGone(label: string): void {
+    const now = new Date().toISOString();
+    this.#update((stored) => {
+      if (!stored.factory) return;
+      stored.factory.status = "failed";
+      stored.factory.updatedAt = now;
+      stored.factory.error = `${label} no longer exists in Software Factory.`;
+    });
+    this.#note("error", `${label} no longer exists in Software Factory`, undefined, now);
+  }
+
+  /** The released files: the fix to hand Copilot, or why there's none. */
+  async #takeRelease(release: ReleaseFiles): Promise<void> {
+    const incident = this.#incident;
+    const work = incident.factory;
+    if (!work) return;
+    const label = workOrderLabel(work.number);
+    let fix: FixFile[] = [];
+    let error: string | undefined;
+    try {
+      const originals = new Map(projectFiles(await this.#host.catalog.originals(incident.alert.service)).map((file) => [file.path, file.content]));
+      fix = releasedFix(release, originals);
+      if (fix.length === 0) error = `Software Factory released ${label} without changing the service's code.`;
+    } catch (failed) {
+      error = `Software Factory released ${label}, but Incident Commander can't use it: ${sentence(errorText(failed))}`;
+    }
+    const tests = release.tests ?? work.tests;
+    this.#update((stored) => {
+      if (!stored.factory) return;
+      if (tests) stored.factory.tests = tests;
+      if (error) stored.factory.error = error;
+      else stored.factory.files = fix;
+    });
+    if (error) {
+      this.#note("error", error);
+      return;
+    }
+    log.info("Software Factory released a fix", { incident: this.id, workOrder: work.workOrderId, files: fix.length });
+    this.#note("factory", `Software Factory released ${label}: ${pathList(fix)}${tests ? `; ${describeTests(tests)}` : ""}`, release.notes?.trim().slice(0, 1_500));
+  }
+
+  #factoryTrouble(problem: string): void {
+    this.#factoryFailures++;
+    const work = this.#host.store.get(this.id)?.factory;
+    if (!work || work.problem === problem) return;
+    log.warn("Can't follow a work order in Software Factory", { incident: this.id, workOrder: work.workOrderId, problem });
+    this.#update((stored) => {
+      if (stored.factory) stored.factory.problem = problem;
+    });
+  }
+
+  #factoryReached(): void {
+    this.#factoryFailures = 0;
+    if (!this.#host.store.get(this.id)?.factory?.problem) return;
+    this.#update((stored) => {
+      if (stored.factory) delete stored.factory.problem;
+    });
+  }
+
+  /** Tells Copilot how the work order ended, once: the fix to verify and deploy, or to fall back to a "fix" worker. */
+  async #deliverFactory(): Promise<void> {
+    const incident = this.#incident;
+    const work = incident.factory;
+    if (!work || work.deliveredAt || !this.#needsFollowing(incident)) return;
+    // A deploy request waits for a person, or their approval is on its way: that goes first.
+    if (incident.approval?.state === "waiting" || incident.approval?.state === "approved") return;
+    if (this.#host.platform.status.state !== "connected") {
+      this.#factoryFailures++;
+      return;
+    }
+    await this.attach();
+    const session = this.#session;
+    if (!session) {
+      this.#factoryFailures++;
+      return;
+    }
+    const fixed = Boolean(work.files?.length);
+    const label = workOrderLabel(work.number);
+    try {
+      // Queued behind a running turn by the platform; otherwise it starts the next one.
+      await session.send({ prompt: fixed ? this.#releasedPrompt(work) : `Incident Commander: ${this.#fallback(work)}` });
+    } catch (error) {
+      this.#factoryFailures++;
+      log.warn("Couldn't tell Copilot how its work order ended", { incident: this.id, workOrder: work.workOrderId, error: errorText(error) });
+      return;
+    }
+    const now = new Date().toISOString();
+    this.#busy = true;
+    this.#update((stored) => {
+      if (stored.factory) stored.factory.deliveredAt = now;
+      if (stored.coordinator.state !== "done") stored.coordinator.state = "working";
+    });
+    this.#startPolling();
+    this.#note("factory", fixed ? `Handed ${label}'s fix to Copilot to verify and deploy` : `Falling back: Copilot fixes it with a "fix" worker`, undefined, now);
+    log.info(fixed ? "Handed a factory fix to Copilot" : "Told Copilot to fall back to a fix worker", { incident: this.id, workOrder: work.workOrderId });
+  }
+
+  #releasedPrompt(work: StoredFactoryWork): string {
+    const service = this.#incident.alert.service;
+    const label = workOrderLabel(work.number);
+    const files = (work.files ?? []).map((file) => `${file.path} (${file.status})`).join(", ");
+    return [
+      `Incident Commander: Software Factory released the fix as ${label} (${work.url}): ${files}.${work.tests ? ` Its own test run: ${describeTests(work.tests)}.` : ""}`,
+      `Call ${TOOLS.applyFix} to copy those files into /workspace/${service}, run the whole test suite (repro's test included), and record the result with ${TOOLS.update}. If something fails, make the smallest change yourself, run the suite again, and record what you changed. Then call ${TOOLS.deploy}, and once it is deployed, ${TOOLS.postmortem} (say that Software Factory built the fix as ${label}).`,
+    ].join("\n");
+  }
+
+  #factoryView(incident: StoredIncident): FactoryWorkView | undefined {
+    const work = incident.factory;
+    if (!work) return undefined;
+    const { files, problem, ...rest } = work;
+    // Configuration changed since the work order was routed: say so instead of going quiet.
+    const shown =
+      problem ??
+      (!this.#host.factory && this.#needsFollowing(incident)
+        ? `Software Factory isn't connected anymore (SOFTWARE_FACTORY_URL isn't set), so ${workOrderLabel(work.number)} can't be followed.`
+        : undefined);
+    return {
+      ...rest,
+      ...(files ? { files: files.map(({ path, status }) => ({ path, status })) } : {}),
+      ...(shown ? { problem: shown } : {}),
+    };
+  }
+
   // ─── Views ─────────────────────────────────────────────────────────────────────────────────────────────────
 
   #coordinatorState(incident: StoredIncident): CoordinatorState {
@@ -757,6 +1173,7 @@ export class IncidentRun implements ToolHost {
     const incident = this.#incident;
     const { snapshot: _snapshot, ...approval } = incident.approval ?? { snapshot: [] };
     const state = this.#coordinatorState(incident);
+    const factory = this.#factoryView(incident);
     return {
       ...summarize(incident),
       alert: incident.alert,
@@ -771,6 +1188,7 @@ export class IncidentRun implements ToolHost {
         attached: this.attached,
       },
       sandboxes: incident.sandboxes,
+      ...(factory ? { factory } : {}),
       findings: incident.findings,
       ...(incident.approval ? { approval: approval as IncidentView["approval"] } : {}),
       ...(incident.deploy ? { deploy: incident.deploy } : {}),
@@ -791,6 +1209,7 @@ export function summarize(incident: StoredIncident): IncidentSummary {
     status: incident.status,
     needsYou: incident.approval?.state === "waiting",
     demo: incident.demo !== undefined,
+    fixRoute: incident.fixRoute ?? "workers",
     createdAt: incident.createdAt,
     updatedAt: incident.updatedAt,
     ...(incident.resolvedAt ? { resolvedAt: incident.resolvedAt } : {}),

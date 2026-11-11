@@ -1,17 +1,18 @@
 import { CalendarIcon, DownloadIcon, FileIcon, GraphIcon, NumberIcon, PlugIcon, TableIcon, TypographyIcon, XIcon, type Icon } from "@primer/octicons-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { AnalysisView, ColumnType, DatasetSummary, OutputFile, ResultView } from "../../shared/types.js";
 import { api, errorMessage, outputUrl } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
 import { fileName, formatCell, formatCount, isNumeric } from "../lib/format.js";
-import { selectResult, useSelectedResult } from "../lib/selection.js";
+import { addRow, clearRows, selectResult, setLoadedRows, tableKey, toggleAllRows, toggleRow, useSelectedResult, useSelectedRows } from "../lib/selection.js";
+import { FactoryButton } from "./Factory.js";
 import { Spinner } from "./ui/Spinner.js";
 
 const TYPE_ICON: Readonly<Record<ColumnType, Icon>> = { number: NumberIcon, date: CalendarIcon, text: TypographyIcon };
 const PAGE = 200;
 
-/** The data side of the workspace: published charts on top, then the grid. */
-export function DataPanel({ view, className }: { readonly view: AnalysisView; readonly className?: string }) {
+/** The data side of the workspace: published charts on top, then the grid. `onSend` opens Send to Software Factory. */
+export function DataPanel({ view, className, onSend }: { readonly view: AnalysisView; readonly className?: string; readonly onSend: () => void }) {
   const selected = useSelectedResult(view.id);
   const latest = view.results.at(-1)?.id;
   // A result that arrives while the analysis is open takes over the grid; opening an analysis shows its dataset.
@@ -21,6 +22,7 @@ export function DataPanel({ view, className }: { readonly view: AnalysisView; re
     seen.current = latest;
   }, [latest, view.id]);
   const result = selected ? view.results.find((candidate) => candidate.id === selected) : undefined;
+  const table = tableKey(result ? { kind: "result", resultId: result.id } : { kind: "dataset" });
   return (
     <section aria-label="Data" className={cx("flex min-h-0 min-w-0 flex-col", className)}>
       {view.outputs.length ? <Outputs view={view} /> : null}
@@ -53,9 +55,56 @@ export function DataPanel({ view, className }: { readonly view: AnalysisView; re
           </>
         )}
       </div>
-      {result ? <ResultGrid key={result.id} result={result} /> : view.dataset ? <DatasetGrid key={view.dataset.id} dataset={view.dataset} /> : <p className="p-4 text-fg-muted">This analysis's dataset isn't available anymore.</p>}
+      <SelectionBar analysisId={view.id} table={table} onSend={onSend} />
+      {result ? (
+        <ResultGrid key={result.id} analysisId={view.id} result={result} />
+      ) : view.dataset ? (
+        <DatasetGrid key={view.dataset.id} analysisId={view.id} dataset={view.dataset} />
+      ) : (
+        <p className="p-4 text-fg-muted">This analysis's dataset isn't available anymore.</p>
+      )}
     </section>
   );
+}
+
+/** "3 rows selected · Clear", and a shortcut to send them. */
+function SelectionBar({ analysisId, table, onSend }: { readonly analysisId: string; readonly table: string; readonly onSend: () => void }) {
+  const rows = useSelectedRows(analysisId, table);
+  if (rows.size === 0) return null;
+  return (
+    <div className="flex min-h-10 shrink-0 animate-fade-in items-center gap-2 border-b border-line bg-accent-muted px-4 py-1 text-sm">
+      <span className="font-semibold tabular-nums" role="status">
+        {formatCount(rows.size, "row")} selected
+      </span>
+      <span aria-hidden className="text-fg-muted">
+        ·
+      </span>
+      <button type="button" className="Link" onClick={() => clearRows(analysisId, table)}>
+        Clear
+      </button>
+      <FactoryButton onOpen={onSend} className="ml-auto" labelClassName="max-sm:sr-only" />
+    </div>
+  );
+}
+
+/** A grid's selected rows and what selecting does. */
+interface GridSelection {
+  readonly rows: ReadonlySet<number>;
+  /** A row's checkbox was clicked; with Shift, every row from the last one clicked. */
+  readonly toggle: (index: number, range: boolean) => void;
+  /** Shift+Arrow reached a row. */
+  readonly add: (index: number) => void;
+  /** The header's checkbox: every row shown, or none. */
+  readonly toggleAll: () => void;
+}
+
+function useGridSelection(analysisId: string, table: string, count: number): GridSelection {
+  return {
+    rows: useSelectedRows(analysisId, table),
+    toggle: (index, range) => toggleRow(analysisId, table, index, range),
+    add: (index) => addRow(analysisId, table, index),
+    toggleAll: () => toggleAllRows(analysisId, table, count),
+  };
 }
 
 interface GridColumn {
@@ -66,13 +115,57 @@ interface GridColumn {
   readonly scale?: number;
 }
 
-function Grid({ columns, rows, format, footer }: { readonly columns: readonly GridColumn[]; readonly rows: readonly (readonly string[])[]; readonly format: boolean; readonly footer?: ReactNode }) {
+function Grid({
+  columns,
+  rows,
+  format,
+  footer,
+  label,
+  selection,
+}: {
+  readonly columns: readonly GridColumn[];
+  readonly rows: readonly (readonly string[])[];
+  readonly format: boolean;
+  readonly footer?: ReactNode;
+  /** What the table is, for assistive technology. */
+  readonly label: string;
+  readonly selection: GridSelection;
+}) {
+  const body = useRef<HTMLTableSectionElement>(null);
+  const header = useRef<HTMLInputElement>(null);
+  const picked = rows.reduce((total, _, index) => total + (selection.rows.has(index) ? 1 : 0), 0);
+  const all = rows.length > 0 && picked === rows.length;
+  useEffect(() => {
+    if (header.current) header.current.indeterminate = picked > 0 && !all;
+  }, [picked, all]);
+  // Up and Down move between rows' checkboxes; with Shift they select along the way.
+  const onKey = (event: KeyboardEvent<HTMLInputElement>, index: number) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const next = index + (event.key === "ArrowDown" ? 1 : -1);
+    if (next < 0 || next >= rows.length) return;
+    event.preventDefault();
+    if (event.shiftKey) {
+      selection.add(index);
+      selection.add(next);
+    }
+    body.current?.querySelector<HTMLInputElement>(`input[data-row="${next}"]`)?.focus();
+  };
   return (
     <div className="min-h-0 flex-1 overflow-auto">
-      <table className="Table Table--sticky Table--condensed">
+      <table className="Table Table--sticky Table--condensed" aria-label={label}>
         <thead>
           <tr>
-            <th className="w-10 text-right tabular-nums" aria-label="Row" />
+            <th className="w-px">
+              <input
+                ref={header}
+                type="checkbox"
+                className="align-middle"
+                checked={all}
+                disabled={rows.length === 0}
+                onChange={selection.toggleAll}
+                aria-label={all ? "Clear the selection" : "Select every row shown"}
+              />
+            </th>
             {columns.map((column) => {
               const Glyph = column.type ? TYPE_ICON[column.type] : undefined;
               return (
@@ -86,26 +179,48 @@ function Grid({ columns, rows, format, footer }: { readonly columns: readonly Gr
             })}
           </tr>
         </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={index}>
-              <td className="text-right text-xs text-fg-muted tabular-nums">{index + 1}</td>
-              {columns.map((column, position) => {
-                const cell = row[position] ?? "";
-                const ratio = column.scale && isNumeric(cell) ? Math.min(1, Math.abs(Number(cell)) / column.scale) : 0;
-                return (
-                  <td
-                    key={column.name}
-                    className={cx("max-w-[18rem] truncate whitespace-nowrap", column.numeric && "text-right tabular-nums", ratio > 0 && "relative")}
-                    title={cell.length > 30 ? cell : undefined}
-                  >
-                    {ratio > 0 ? <span aria-hidden className="absolute inset-y-1.5 right-1 rounded-sm bg-accent-muted" style={{ width: `calc((100% - 0.5rem) * ${ratio})` }} /> : null}
-                    <span className={ratio > 0 ? "relative" : undefined}>{format ? formatCell(cell) : cell}</span>
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
+        <tbody ref={body}>
+          {rows.map((row, index) => {
+            const checked = selection.rows.has(index);
+            return (
+              <tr key={index}>
+                <td className={cx("w-px text-xs text-fg-muted tabular-nums", checked && "bg-accent-muted")}>
+                  <label className="flex items-center gap-1.5 whitespace-nowrap select-none">
+                    <input
+                      type="checkbox"
+                      data-row={index}
+                      checked={checked}
+                      onChange={() => undefined}
+                      onClick={(event) => selection.toggle(index, event.shiftKey)}
+                      onKeyDown={(event) => onKey(event, index)}
+                      aria-label={`Select row ${index + 1}`}
+                    />
+                    {index + 1}
+                  </label>
+                </td>
+                {columns.map((column, position) => {
+                  const cell = row[position] ?? "";
+                  const ratio = column.scale && isNumeric(cell) ? Math.min(1, Math.abs(Number(cell)) / column.scale) : 0;
+                  return (
+                    <td
+                      key={column.name}
+                      className={cx("max-w-[18rem] truncate whitespace-nowrap", column.numeric && "text-right tabular-nums", ratio > 0 && "relative", checked && "bg-accent-muted")}
+                      title={cell.length > 30 ? cell : undefined}
+                    >
+                      {ratio > 0 ? (
+                        <span
+                          aria-hidden
+                          className={cx("absolute inset-y-1.5 right-1 rounded-sm", checked ? "bg-accent-emphasis opacity-25" : "bg-accent-muted")}
+                          style={{ width: `calc((100% - 0.5rem) * ${ratio})` }}
+                        />
+                      ) : null}
+                      <span className={ratio > 0 ? "relative" : undefined}>{format ? formatCell(cell) : cell}</span>
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
         </tbody>
       </table>
       {footer}
@@ -113,10 +228,11 @@ function Grid({ columns, rows, format, footer }: { readonly columns: readonly Gr
   );
 }
 
-function DatasetGrid({ dataset }: { readonly dataset: DatasetSummary }) {
+function DatasetGrid({ analysisId, dataset }: { readonly analysisId: string; readonly dataset: DatasetSummary }) {
   const [rows, setRows] = useState<readonly (readonly string[])[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | undefined>();
+  const selection = useGridSelection(analysisId, tableKey({ kind: "dataset" }), rows.length);
   const load = async (offset: number) => {
     setLoading(true);
     setError(undefined);
@@ -133,6 +249,10 @@ function DatasetGrid({ dataset }: { readonly dataset: DatasetSummary }) {
   useEffect(() => {
     void load(0);
   }, []);
+  // "The current view" sends the rows the grid has loaded.
+  useEffect(() => {
+    setLoadedRows(analysisId, rows.length);
+  }, [analysisId, rows.length]);
   const columns: GridColumn[] = dataset.columns.map((column) => ({ name: column.name, type: column.type, numeric: column.type === "number" }));
   if (error && rows.length === 0) {
     return (
@@ -157,6 +277,8 @@ function DatasetGrid({ dataset }: { readonly dataset: DatasetSummary }) {
       columns={columns}
       rows={rows}
       format={false}
+      label={`${dataset.name}: rows`}
+      selection={selection}
       footer={
         more ? (
           <div className="flex justify-center p-3">
@@ -171,7 +293,8 @@ function DatasetGrid({ dataset }: { readonly dataset: DatasetSummary }) {
   );
 }
 
-function ResultGrid({ result }: { readonly result: ResultView }) {
+function ResultGrid({ analysisId, result }: { readonly analysisId: string; readonly result: ResultView }) {
+  const selection = useGridSelection(analysisId, tableKey({ kind: "result", resultId: result.id }), result.rows.length);
   const columns: GridColumn[] = result.columns.map((name, position) => {
     const cells = result.rows.map((row) => row[position] ?? "").filter((cell) => cell.trim() !== "");
     const numeric = cells.length > 0 && cells.every(isNumeric);
@@ -184,6 +307,8 @@ function ResultGrid({ result }: { readonly result: ResultView }) {
       columns={columns}
       rows={result.rows}
       format
+      label={result.title}
+      selection={selection}
       footer={result.rows.length < result.total ? <p className="p-3 text-center text-xs text-fg-muted">The first {result.rows.length} of {formatCount(result.total, result.unit)}</p> : null}
     />
   );

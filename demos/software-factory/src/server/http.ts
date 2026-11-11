@@ -43,6 +43,9 @@ const STATUS_BY_CODE: Record<string, number> = {
 
 const NO_GITHUB: GitHubStatus = { available: false, message: "This factory isn't set up to work with GitHub." };
 
+/** A routed work order brings up to 512 KB of context and 2 MB of project files; JSON escaping adds to that. */
+const MAX_WORK_ORDER_BODY = 6 * 1024 * 1024;
+
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
@@ -71,13 +74,17 @@ function handleError(res: ServerResponse, error: unknown): void {
     res.end();
     return;
   }
-  if (error instanceof StationError) return sendError(res, STATUS_BY_CODE[error.code] ?? 500, error.code, error.message);
+  if (error instanceof StationError) {
+    // The rest of an oversized body goes unread, so the connection can't carry another request.
+    if (error.code === "payload_too_large") res.setHeader("connection", "close");
+    return sendError(res, STATUS_BY_CODE[error.code] ?? 500, error.code, error.message);
+  }
   if (isManagedCopilotError(error)) return sendError(res, error.status, error.code, error.message);
   log.error("Request failed", { error: (error as Error).message });
   sendError(res, 500, "internal", "Something went wrong in the factory server. Check its log for details.");
 }
 
-async function readJson<T>(req: IncomingMessage, limit = 64 * 1024): Promise<T> {
+async function readJson<T>(req: IncomingMessage, limit = 64 * 1024, tooLarge = "The request body is too large."): Promise<T> {
   if (!/^application\/json\b/i.test(req.headers["content-type"] ?? "")) {
     throw new StationError("unsupported_media_type", "Send the request body as application/json.");
   }
@@ -85,9 +92,15 @@ async function readJson<T>(req: IncomingMessage, limit = 64 * 1024): Promise<T> 
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > limit) throw new StationError("payload_too_large", "The request body is too large.");
+    if (size > limit) {
+      // Read and drop the rest, so the client gets the answer instead of a reset connection; give up on a body many
+      // times over the limit.
+      if (size > limit * 4) throw new StationError("payload_too_large", tooLarge);
+      continue;
+    }
     chunks.push(chunk as Buffer);
   }
+  if (size > limit) throw new StationError("payload_too_large", tooLarge);
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as T;
   } catch {
@@ -207,7 +220,11 @@ function buildRouter(ctx: ApiContext): Router {
   });
   router.add("GET", "/api/work-orders", (_req, res) => sendJson(res, 200, factory.list()));
   router.add("POST", "/api/work-orders", async (req, res) => {
-    const body = await readJson<CreateWorkOrderRequest>(req);
+    const body = await readJson<CreateWorkOrderRequest>(
+      req,
+      MAX_WORK_ORDER_BODY,
+      "The work order is too large: send at most 512 KB of context and 2 MB of project files.",
+    );
     sendJson(res, 201, body && typeof body === "object" && body.github !== undefined ? await factory.createGitHub(body) : factory.create(body));
   });
   router.add("POST", "/api/work-orders/:id/revisions", async (req, res, params) => {
@@ -281,6 +298,15 @@ function buildRouter(ctx: ApiContext): Router {
       "content-disposition": `attachment; filename="${release.projectName.replace(/[^A-Za-z0-9._-]/g, "_")}.zip"`,
     });
     res.end(zip);
+  });
+  // The released project as JSON, for the app that routed the work order (an incident's fix, for example).
+  router.add("GET", "/api/work-orders/:id/release", (_req, res, params) => {
+    const wo = workOrder(params.id!);
+    const release = factory.release(wo.id);
+    if (!release) {
+      throw new StationError("not_found", wo.github ? "GitHub work orders deliver a pull request, not a release." : "This work order has no release yet.");
+    }
+    sendJson(res, 200, release);
   });
   router.add("POST", "/api/sessions/:sessionId/attach", async (_req, res, params) => {
     const sessionId = params.sessionId!;

@@ -102,6 +102,42 @@ describe("transcript", () => {
     expect(transcript.problem).toBe("Rate limited");
   });
 
+  it("projects the problem with the store's website the agent reported", () => {
+    const transcript = new Transcript();
+    const report = { area: "promo-codes", title: " TRAIL15 rejected at checkout ", whatHappened: "Pasted TRAIL15 and got 'invalid code'.", expected: "15% off.", orderId: "co-48224" };
+    transcript.apply(event("user.message", { content: "The code TRAIL15 says 'invalid code'." }));
+    transcript.apply(toolStart("t1", "report_bug", report));
+    expect(transcript.bug).toBeUndefined();
+    transcript.apply(toolDone("t1", { ok: true, area: "promo-codes", orderId: "CO-48224", sentTo: "the store's engineering team" }));
+    expect(transcript.bug).toEqual({ area: "promo-codes", title: "TRAIL15 rejected at checkout", whatHappened: report.whatHappened, expected: "15% off.", orderId: "CO-48224", at: tool(transcript, "t1").at });
+
+    // A report the tool refused isn't one; the latest report that went through is the ticket's.
+    transcript.apply(toolStart("t2", "report_bug", { ...report, orderId: "CO-48177" }));
+    transcript.apply(toolDone("t2", { ok: false, error: "No order CO-48177 on this account." }));
+    expect(transcript.bug?.orderId).toBe("CO-48224");
+    transcript.apply(toolStart("t3", "report_bug", { area: "made-up", title: "Checkout page error", whatHappened: "An error page at checkout.", expected: "The order goes through." }));
+    transcript.apply(toolDone("t3", { ok: true, area: "made-up", sentTo: "the store's engineering team" }));
+    expect(transcript.bug).toMatchObject({ area: "other", title: "Checkout page error" });
+    expect(transcript.bug).not.toHaveProperty("orderId");
+  });
+
+  it("rebuilds a reported problem from the session's history, which keeps no streaming or idle events", () => {
+    const events = [
+      event("user.message", { content: "I changed the bottles from 1 to 2 and got charged for 3." }),
+      toolStart("t1", "report_bug", { area: "cart", title: "Quantity change adds instead of setting", whatHappened: "Changed 1 to 2, charged for 3.", expected: "Charged for 2." }),
+      toolDone("t1", { ok: true, area: "cart", sentTo: "the store's engineering team" }),
+      event("assistant.message_delta", { messageId: "m1", deltaContent: "I reported it" }, { ephemeral: true }),
+      event("assistant.message", { messageId: "m1", content: "I reported it to our engineering team." }),
+      event("session.idle", {}, { ephemeral: true }),
+    ];
+    const live = new Transcript();
+    for (const item of events) live.apply(item);
+    const rebuilt = new Transcript();
+    for (const item of events.filter((candidate) => !(candidate as { ephemeral?: boolean }).ephemeral)) rebuilt.apply(item);
+    expect(rebuilt.bug).toEqual(live.bug);
+    expect(rebuilt.bug).toMatchObject({ area: "cart", title: "Quantity change adds instead of setting", expected: "Charged for 2." });
+  });
+
   it("reads tool results as JSON, and keeps other text", () => {
     expect(parseResult('{"ok":true}')).toEqual({ ok: true });
     expect(parseResult("Permission denied")).toEqual({ text: "Permission denied" });

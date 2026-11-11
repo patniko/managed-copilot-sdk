@@ -1,10 +1,10 @@
-import { CopilotIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
-import type { CustomerCard, Ticket, ToolItem } from "../../shared/types.js";
+import { BugIcon, CopilotIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { BUG_AREA_INFO, type BugReport, type CustomerCard, type Ticket, type ToolItem } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { latestMessage, money, plainText } from "../lib/format.js";
+import { latestMessage, money, plainText, WORK_ORDER_STATUS, workOrderLine } from "../lib/format.js";
 import { customerHref } from "../lib/router.js";
 import { answer, useStore } from "../lib/store.js";
-import { CustomerAvatar, StatusLabel } from "./ui/Status.js";
+import { CustomerAvatar, StatusLabel, TONE_TEXT } from "./ui/Status.js";
 import { Tooltip } from "./ui/Tooltip.js";
 
 /** Every tile has the same height, so the wall never shifts while conversations stream in. */
@@ -13,7 +13,8 @@ const TILE = "h-[112px] min-w-0 p-3";
 /** A customer on the wall: who, how it's going, the latest message, and anything that needs the operator. */
 export function Tile({ customer, ticket }: { readonly customer: CustomerCard; readonly ticket: Ticket }) {
   const latest = latestMessage(ticket);
-  const bar = ticket.approval ? <ApprovalBar customerId={customer.id} ticket={ticket} /> : ticket.blocked > 0 ? <Blocked ticket={ticket} /> : null;
+  const bug = ticket.bug;
+  const bar = ticket.approval ? <ApprovalBar customerId={customer.id} ticket={ticket} /> : ticket.blocked > 0 ? <Blocked ticket={ticket} /> : bug ? <IssueMarker bug={bug} /> : null;
   return (
     <article
       data-ticket={customer.id}
@@ -29,6 +30,12 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
         <a href={customerHref(customer.id)} className="tile-link min-w-0 flex-1 truncate text-sm font-semibold text-fg" title={customer.name}>
           {customer.name}
         </a>
+        {bug && (ticket.approval || ticket.blocked > 0) ? (
+          // The bar below is taken: the software issue shows as an icon.
+          <Tooltip content={`Software issue: ${bug.title}`} className="relative z-10 shrink-0">
+            <BugIcon size={14} className="text-fg-done" aria-label="Software issue" />
+          </Tooltip>
+        ) : null}
         <StatusLabel status={ticket.status} />
       </div>
       <p className={cx("mt-2 text-sm", bar ? "line-clamp-1" : "line-clamp-2", latest?.from === "agent" ? "text-fg" : "text-fg-muted")} title={latest ? plainText(latest.text) : customer.opening}>
@@ -73,6 +80,26 @@ function Blocked({ ticket }: { readonly ticket: Ticket }) {
         <span className="truncate">Blocked: not their order</span>
       </span>
     </Tooltip>
+  );
+}
+
+/** The agent reported a problem with the store's website: what it's about, or the work order it's in. */
+function IssueMarker({ bug }: { readonly bug: BugReport }) {
+  const routed = useStore((state) => state.issues.find((issue) => issue.area === bug.area)?.routed);
+  return (
+    <>
+      <Tooltip content={`Reported to engineering: ${bug.title}`} className="relative z-10">
+        <span className="inline-flex min-w-0 items-center gap-1.5 font-medium text-fg-done">
+          <BugIcon size={14} className="shrink-0" />
+          <span className="truncate">Software issue</span>
+        </span>
+      </Tooltip>
+      {routed ? (
+        <span className={cx("ml-auto min-w-0 truncate", TONE_TEXT[WORK_ORDER_STATUS[routed.status].tone])}>{workOrderLine(routed)}</span>
+      ) : (
+        <span className="ml-auto min-w-0 truncate text-fg-muted">{BUG_AREA_INFO[bug.area].label}</span>
+      )}
+    </>
   );
 }
 

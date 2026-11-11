@@ -9,6 +9,7 @@ export const TONE_TEXT: Readonly<Record<Tone, string>> = {
   attention: "text-fg-attention",
   success: "text-fg-success",
   danger: "text-fg-danger",
+  done: "text-fg-done",
   muted: "text-fg-muted",
 };
 

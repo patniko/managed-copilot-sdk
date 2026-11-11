@@ -263,6 +263,12 @@ export interface Plan {
   readonly integration: string;
 }
 
+/** A file the release added, changed, or removed in the project a work order brought along. */
+export interface ReleaseChange {
+  readonly path: string;
+  readonly status: "added" | "modified" | "deleted";
+}
+
 export interface ReleaseSummary {
   readonly files: number;
   readonly bytes: number;
@@ -270,12 +276,63 @@ export interface ReleaseSummary {
   readonly patchBytes?: number;
   /** Release notes (markdown) from `outputs/RELEASE.md`. */
   readonly notes?: string;
+  /** Work orders with a `project`: what the release changed in it. */
+  readonly changes?: readonly ReleaseChange[];
 }
 
 /** `github`: a change to an existing repository that ends in a pull request (see `WorkOrder.github`). */
 export interface WorkOrderSource {
   readonly kind: "brief" | "template" | "github";
   readonly templateId?: string;
+}
+
+// ─── Routed work orders ──────────────────────────────────────────────────────────────────────────────────────
+
+/** The app that routed a work order to the factory (Help Desk, Incident Commander, Data Desk, or your own). */
+export interface WorkOrderOrigin {
+  /** The app's ID: lowercase letters, digits, and hyphens, e.g. `help-desk`. */
+  readonly app: string;
+  /** Its name for people, e.g. "Help Desk". */
+  readonly name: string;
+  /** What in that app the work came from, e.g. "Promo codes · 2 tickets" or "INC-1004 · checkout". */
+  readonly label?: string;
+  /** A link back to it, for people. */
+  readonly url?: string;
+  /** The app's own key for the item, so it can find this work order again. */
+  readonly key?: string;
+}
+
+/** A text file a routed work order brings along. */
+export interface InputFile {
+  /** Relative POSIX path. */
+  readonly path: string;
+  readonly content: string;
+  /** One line: what it is. */
+  readonly description?: string;
+}
+
+/**
+ * What a routed work order brought along, as the floor lists it. The files themselves are the `intake` station's
+ * artifacts: `context/<path>` and `project/<path>`.
+ */
+export interface WorkOrderInputs {
+  /** Reference material: in every sandbox under `.factory/context/`, and in the planner's prompt. */
+  readonly context: readonly { readonly path: string; readonly size: number; readonly description?: string }[];
+  /** An existing project the work order changes: every builder's and the release's workspace starts from its files. */
+  readonly project?: { readonly name: string; readonly files: number; readonly bytes: number };
+}
+
+/** `GET /api/work-orders/:id/release`: the released project as text, for the app that routed the work order. */
+export interface ReleaseFiles {
+  readonly workOrderId: string;
+  readonly number: number;
+  readonly projectName: string;
+  readonly tests?: TestSummary;
+  readonly notes?: string;
+  /** Every file of the released project. */
+  readonly files: readonly { readonly path: string; readonly content: string }[];
+  /** Work orders with a `project`: what the release changed in it. */
+  readonly changes?: readonly ReleaseChange[];
 }
 
 // ─── GitHub work orders ──────────────────────────────────────────────────────────────────────────────────────
@@ -452,11 +509,15 @@ export interface WorkOrderSummary {
   readonly error?: FactoryError;
   /** GitHub work orders: the repository, issue, and pull request, for lists. */
   readonly github?: { readonly repository: string; readonly issue?: number; readonly pullRequest?: number; readonly pullRequestState?: PullRequestView["state"] };
+  /** Set when another app routed the work order to the factory. */
+  readonly origin?: WorkOrderOrigin;
 }
 
 export interface WorkOrder extends Omit<WorkOrderSummary, "github"> {
   readonly brief: string;
   readonly source: WorkOrderSource;
+  /** Routed work orders: the reference material and project they brought along. */
+  readonly inputs?: WorkOrderInputs;
   readonly maxReviewRounds: number;
   readonly plan?: Plan;
   readonly stations: readonly Station[];
@@ -497,6 +558,19 @@ export interface CreateWorkOrderRequest {
     readonly repository: string;
     readonly issue?: number;
   };
+  /** Set by an app that routes work to the factory: the floor shows where the work order came from, with a link back. */
+  readonly origin?: WorkOrderOrigin;
+  /**
+   * Reference material (bug reports, findings, data): up to 12 text files, 256 KB each and 512 KB together. Every
+   * sandbox gets them under `.factory/context/`, and the planner reads them. Not for GitHub work orders.
+   */
+  readonly context?: readonly InputFile[];
+  /**
+   * An existing project to change instead of starting empty: up to 300 text files, 512 KB each and 2 MB together,
+   * `package.json` included. Every builder's and the release's workspace starts from these files, and the release
+   * reports what changed. Not for GitHub work orders.
+   */
+  readonly project?: { readonly name: string; readonly files: readonly InputFile[] };
 }
 
 /** `POST /api/work-orders/:id/revisions`: more changes to a GitHub work order's pull request. */

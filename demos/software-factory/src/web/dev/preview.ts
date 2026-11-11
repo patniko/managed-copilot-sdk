@@ -32,8 +32,8 @@ function failure(status: number, code: string, message: string): Response {
 }
 
 function toSummary(workOrder: WorkOrder): WorkOrderSummary {
-  const { id, number, title, mode, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error } = workOrder;
-  return { id, number, title, mode, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error };
+  const { id, number, title, mode, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error, origin } = workOrder;
+  return { id, number, title, mode, status, createdAt, updatedAt, startedAt, completedAt, taskCount, tests, error, ...(origin ? { origin } : {}) };
 }
 
 const ACTIVE = new Set(["queued", "planning", "building", "releasing"]);

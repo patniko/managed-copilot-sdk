@@ -1,15 +1,38 @@
 // Data Desk's own records, in one JSON file. Sessions, sandboxes, and published charts live in Managed Copilot; this
 // file only keeps what the platform doesn't: which dataset each analysis works on, which messages Data Desk sent (so
-// messages from Copilot CLI can be told apart), and what Data Desk saw of the move and the session's usage.
+// messages from Copilot CLI can be told apart), what Data Desk saw of the move and the session's usage, and what the
+// person sent to Software Factory.
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { WorkOrderStatus } from "../shared/types.js";
 import { log } from "./log.js";
 
 export interface StoredMove {
   readonly at: string;
   readonly sandboxId: string;
   readonly durationMs?: number;
+}
+
+/** Something the person sent to Software Factory, and the work order's last known status. */
+export interface StoredRouting {
+  workOrderId: string;
+  number: number;
+  title: string;
+  /** The work order's page in Software Factory, for people. */
+  url: string;
+  status: WorkOrderStatus;
+  sentAt: string;
+  /** What was sent, in words. */
+  items: string[];
+  /** The work order's `origin.key`: `<analysis id>:<n>`, how Data Desk finds it again. */
+  key: string;
+  /** The conversation's last item when it was sent: the line showing it goes right after. */
+  after?: string;
+  /** Why the work order failed. */
+  error?: string;
+  /** Software Factory no longer lists it. */
+  gone?: boolean;
 }
 
 export interface StoredAnalysis {
@@ -26,6 +49,8 @@ export interface StoredAnalysis {
   uploadedAt?: string;
   /** Last known premium requests, and how many were counted when the session moved. */
   usage?: { premiumRequests: number; beforeMove?: number };
+  /** What the person sent to Software Factory from this analysis, oldest first. */
+  factory?: StoredRouting[];
 }
 
 interface StoreFile {

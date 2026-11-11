@@ -1,6 +1,6 @@
 import { BugIcon, CheckIcon, NoteIcon } from "@primer/octicons-react";
 import type { IncidentView } from "../../shared/types.js";
-import { between, duration } from "../lib/format.js";
+import { between, duration, workOrderLabel } from "../lib/format.js";
 
 /** What triage found, until the postmortem says it better. While Copilot is still looking, a placeholder holds its place. */
 export function Findings({ incident }: { readonly incident: IncidentView }) {
@@ -71,6 +71,17 @@ export function Postmortem({ incident }: { readonly incident: IncidentView }) {
           <dd>{postmortem.rootCause}</dd>
           <dt className="font-semibold text-fg-muted">Fix</dt>
           <dd>{postmortem.fix}</dd>
+          {incident.approval?.factory ? (
+            <>
+              <dt className="font-semibold text-fg-muted">Built by</dt>
+              <dd>
+                Software Factory,{" "}
+                <a href={incident.approval.factory.url} target="_blank" rel="noreferrer" className="font-mono">
+                  {workOrderLabel(incident.approval.factory.number)}
+                </a>
+              </dd>
+            </>
+          ) : null}
           {postmortem.followUps.length ? (
             <>
               <dt className="font-semibold text-fg-muted">Follow-ups</dt>

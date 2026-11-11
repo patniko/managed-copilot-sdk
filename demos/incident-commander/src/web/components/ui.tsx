@@ -1,7 +1,7 @@
-import { CheckIcon, CopyIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, CheckIcon, ClockIcon, CopyIcon, DotFillIcon, LinkExternalIcon, StopIcon, WorkflowIcon, XCircleFillIcon } from "@primer/octicons-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { IncidentStatus, Severity } from "../../shared/types.js";
+import type { FactoryStatus, IncidentStatus, IncidentView, Severity } from "../../shared/types.js";
 import { cx } from "../lib/format.js";
 import { useDismiss } from "../lib/hooks.js";
 
@@ -125,6 +125,83 @@ export function SeverityBadge({ severity, large = false }: { readonly severity: 
 
 export const STATUS_LABEL: Record<IncidentStatus, string> = { investigating: "Investigating", mitigating: "Mitigating", resolved: "Resolved" };
 export const STATUS_TEXT: Record<IncidentStatus, string> = { investigating: "text-fg-attention", mitigating: "text-fg-accent", resolved: "text-fg-success" };
+
+// ─── Software Factory ────────────────────────────────────────────────────────────────────────────────────────
+
+/** Software Factory's identity color: Primer's indigo display color. */
+export const FACTORY_TONE = "bg-display-indigo-muted text-display-indigo";
+
+/** Why Software Factory can't be chosen: the words every app that routes to it uses. */
+export const FACTORY_UNAVAILABLE = "Software Factory isn't connected. Start it with `aspire run`, or set SOFTWARE_FACTORY_URL.";
+
+export const FACTORY_STATUS_LABEL: Record<FactoryStatus, string> = {
+  queued: "Queued",
+  planning: "Planning",
+  building: "Building",
+  releasing: "Releasing",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+const FACTORY_ACTIVE: readonly FactoryStatus[] = ["queued", "planning", "building", "releasing"];
+
+export const factoryActive = (status: FactoryStatus): boolean => FACTORY_ACTIVE.includes(status);
+
+/** Copilot ended its turn for the factory: the work order runs, or how it ended hasn't reached Copilot yet. */
+export function waitingForFactory(incident: IncidentView): boolean {
+  return incident.factory !== undefined && incident.factory.deliveredAt === undefined && incident.status !== "resolved" && incident.coordinator.state !== "failed";
+}
+
+/** A work order's status, in the map's words and icons. */
+export function FactoryStatusWord({ status }: { readonly status: FactoryStatus }) {
+  const label = FACTORY_STATUS_LABEL[status];
+  if (status === "completed") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-xs text-fg-success">
+        <CheckCircleFillIcon size={12} /> {label}
+      </span>
+    );
+  }
+  if (status === "failed") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-xs text-fg-danger">
+        <XCircleFillIcon size={12} /> {label}
+      </span>
+    );
+  }
+  if (status === "cancelled") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-xs text-fg-muted">
+        <StopIcon size={12} /> {label}
+      </span>
+    );
+  }
+  if (status === "queued") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 text-xs text-fg-muted">
+        <ClockIcon size={12} /> {label}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5 text-xs text-fg-accent">
+      <DotFillIcon size={16} className="animate-pulse" />
+      {label}
+    </span>
+  );
+}
+
+/** **Open in Software Factory**: the work order's page, in a new tab. */
+export function OpenInFactory({ url, className }: { readonly url: string; readonly className?: string }) {
+  return (
+    <a href={url} target="_blank" rel="noreferrer" className={cx("inline-flex items-center gap-1.5", className)}>
+      <WorkflowIcon size={14} />
+      Open in Software Factory
+      <LinkExternalIcon size={12} />
+    </a>
+  );
+}
 
 /** Copies `text`, then shows a check for a moment. */
 export function CopyButton({ text, label }: { readonly text: string; readonly label: string }) {

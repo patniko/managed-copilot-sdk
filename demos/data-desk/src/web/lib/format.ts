@@ -56,3 +56,30 @@ export function initials(name: string): string {
 
 /** A file's name without its folders. */
 export const fileName = (path: string): string => path.split("/").at(-1) ?? path;
+
+/** Markdown's first sentence as plain text, cut to `max` characters at a word. */
+export function firstSentence(markdown: string, max = 120): string | undefined {
+  const text = markdown
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, "")
+    .replace(/[*_`~]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const sentence = (/^(.+?[.!?])(?=\s|$)/.exec(text)?.[1] ?? text).replace(/[.:;,]$/, "").trim();
+  if (sentence.length < 3) return undefined;
+  if (sentence.length <= max) return sentence;
+  const head = sentence.slice(0, max - 1);
+  const space = head.lastIndexOf(" ");
+  return `${head.slice(0, space > max / 2 ? space : head.length).trimEnd()}…`;
+}
+
+/** A title from an answer: its first sentence, and only the first clause of a long one. */
+export function titleFrom(markdown: string, max = 120): string | undefined {
+  const sentence = firstSentence(markdown, 400);
+  if (!sentence || sentence.length <= 80) return sentence;
+  // "Mobile shoppers with $40–$49 carts drop out at the shipping step, where the fee appears: …" keeps its first clause.
+  const clause = /^(.{30,}?)(?:[,:;]\s| [–—]\s)/.exec(sentence)?.[1];
+  return firstSentence(clause ?? sentence, max);
+}

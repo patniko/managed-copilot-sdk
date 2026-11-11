@@ -5,21 +5,22 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { AlertsAccepted, AppState, CreatedIncident, IncidentView } from "../src/shared/types.js";
+import type { AlertsAccepted, AppSettings, AppState, CreatedIncident, IncidentView } from "../src/shared/types.js";
+import type { AppConfig } from "../src/server/config.js";
 import { Commander } from "../src/server/commander.js";
 import { createRequestHandler, hostAllowed } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
 import { ServiceCatalog } from "../src/server/services.js";
 import { Store } from "../src/server/store.js";
-import { FakePlatform, settle, testConfig } from "./fakes.js";
+import { FakeFactory, FakePlatform, settle, testConfig } from "./fakes.js";
 
 let server: Server;
 let base: string;
 let platform: FakePlatform;
 let hub: EventHub;
+let factory: FakeFactory | undefined;
 
-beforeEach(async () => {
-  const config = testConfig();
+async function serve(config: AppConfig): Promise<void> {
   platform = new FakePlatform();
   hub = new EventHub();
   const commander = new Commander(config, platform, new Store(mkdtempSync(join(tmpdir(), "incident-http-"))), new ServiceCatalog(config.demoServicesDir), hub);
@@ -27,16 +28,30 @@ beforeEach(async () => {
   server = createServer(createRequestHandler({ commander, hub }, join(tmpdir(), "no-web-root")));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   base = `http://localhost:${(server.address() as AddressInfo).port}`;
-});
+}
 
-afterEach(async () => {
+async function stop(): Promise<void> {
   hub.close();
   server.closeAllConnections();
   await new Promise((resolve) => server.close(resolve));
+}
+
+beforeEach(async () => {
+  await serve(testConfig());
+});
+
+afterEach(async () => {
+  await stop();
+  await factory?.close();
+  factory = undefined;
 });
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: typeof body === "string" ? body : JSON.stringify(body) });
+}
+
+function put(path: string, body: unknown): Promise<Response> {
+  return fetch(`${base}${path}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 }
 
 const ALERT = { title: "Checkout errors", service: "checkout", severity: "major", summary: "5xx rate is 12%", id: "checkout-5xx" };
@@ -53,7 +68,14 @@ describe("the API", () => {
   it("reports its health and state", async () => {
     expect(await (await fetch(`${base}/api/health`)).json()).toEqual({ status: "ok", platform: "connected" });
     const state = (await (await fetch(`${base}/api/state`)).json()) as AppState;
-    expect(state.integrations).toEqual({ alertsUrl: "http://localhost:7445/api/alerts", alertsConfigured: true, webhookConfigured: true, deployConfigured: false });
+    expect(state.integrations).toEqual({
+      alertsUrl: "http://localhost:7445/api/alerts",
+      alertsConfigured: true,
+      webhookConfigured: true,
+      deployConfigured: false,
+      factory: { configured: false },
+    });
+    expect(state.settings).toEqual({ fixRoute: "workers" });
     expect(state.incidents).toEqual([]);
   });
 
@@ -84,9 +106,54 @@ describe("the API", () => {
     const { id } = (await response.json()) as CreatedIncident;
     await settle();
     const view = (await (await fetch(`${base}/api/incidents/${id}`)).json()) as IncidentView;
-    expect(view).toMatchObject({ demo: true, status: "investigating", alert: { source: "simulated", name: "CheckoutHighErrorRate" } });
+    expect(view).toMatchObject({ demo: true, status: "investigating", fixRoute: "workers", alert: { source: "simulated", name: "CheckoutHighErrorRate" } });
     expect(view.title).toMatch(/^Checkout 5xx error rate is \d+(\.\d)?% \(threshold 2%\)$/);
     expect(platform.session.sent[0]?.prompt).toContain(id);
+  });
+
+  it("simulates without a body, and refuses Software Factory while it isn't connected", async () => {
+    const plain = await fetch(`${base}/api/simulate`, { method: "POST" });
+    expect(plain.status).toBe(201);
+    const { id } = (await plain.json()) as CreatedIncident;
+    expect(((await (await fetch(`${base}/api/incidents/${id}`)).json()) as IncidentView).fixRoute).toBe("workers");
+
+    const refused = await post("/api/simulate", { fixRoute: "factory" });
+    expect(refused.status).toBe(503);
+    expect(await refused.json()).toEqual({ error: { code: "factory_unavailable", message: "Software Factory isn't connected. Start it with `aspire run`, or set SOFTWARE_FACTORY_URL." } });
+    expect((await post("/api/simulate", { fixRoute: "robots" })).status).toBe(400);
+    expect((await post("/api/simulate", "not json", { "content-type": "text/plain" })).status).toBe(415);
+
+    const setting = await put("/api/settings", { fixRoute: "factory" });
+    expect(setting.status).toBe(503);
+    expect(((await setting.json()) as { error: { code: string } }).error.code).toBe("factory_unavailable");
+    expect((await put("/api/settings", { fixRoute: "robots" })).status).toBe(400);
+    expect(await (await put("/api/settings", { fixRoute: "workers" })).json()).toEqual({ fixRoute: "workers" });
+  });
+
+  it("routes fixes to Software Factory by default once it's connected, and lets you choose per incident", async () => {
+    await stop();
+    factory = await new FakeFactory().start();
+    await serve(testConfig({ factory: factory.target }));
+    const state = (await (await fetch(`${base}/api/state`)).json()) as AppState;
+    expect(state.integrations.factory).toEqual({ configured: true, url: "http://factory.test" });
+    expect(state.settings).toEqual({ fixRoute: "factory" });
+
+    const route = async (response: Response) => ((await (await fetch(`${base}/api/incidents/${((await response.json()) as CreatedIncident).id}`)).json()) as IncidentView).fixRoute;
+    expect(await route(await fetch(`${base}/api/simulate`, { method: "POST" }))).toBe("factory");
+    expect(await route(await post("/api/simulate", { fixRoute: "workers" }))).toBe("workers");
+
+    const chosen = await put("/api/settings", { fixRoute: "workers" });
+    expect(chosen.status).toBe(200);
+    expect((await chosen.json()) as AppSettings).toEqual({ fixRoute: "workers" });
+    expect(await route(await post("/api/simulate", {}))).toBe("workers");
+    expect(await route(await post("/api/simulate", { fixRoute: "factory" }))).toBe("factory");
+    // Alerts from monitoring tools follow the setting too.
+    expect((await put("/api/settings", { fixRoute: "factory" })).status).toBe(200);
+    const accepted = (await (await post("/api/alerts", ALERT, { authorization: "Bearer alert-secret" })).json()) as AlertsAccepted;
+    expect(((await (await fetch(`${base}/api/incidents/${accepted.incidents[0]}`)).json()) as IncidentView).fixRoute).toBe("factory");
+    await settle();
+    // A factory incident's coordinator gets the factory's tools.
+    expect(platform.sessions.at(-1)?.config.tools?.map((tool) => tool.name)).toContain("route_fix_to_factory");
   });
 
   it("answers a decision only for a waiting request, and deletes an incident with its session", async () => {

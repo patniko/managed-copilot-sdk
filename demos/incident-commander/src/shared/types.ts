@@ -8,6 +8,16 @@ export type IncidentStatus = "investigating" | "mitigating" | "resolved";
 /** Where an alert came from: the labeled demo button, or a monitoring tool posting to `/api/alerts`. */
 export type AlertSource = "simulated" | "alertmanager" | "grafana" | "generic";
 
+/**
+ * How an incident's fix is made:
+ * - `workers`: Copilot hands the repro and the fix to two workers, each in its own sandbox.
+ * - `factory`: Copilot routes the fix to Software Factory as a work order, and a worker writes the repro meanwhile.
+ */
+export type FixRoute = "workers" | "factory";
+
+/** A Software Factory work order's status. */
+export type FactoryStatus = "queued" | "planning" | "building" | "releasing" | "completed" | "failed" | "cancelled";
+
 export interface AlertLink {
   readonly title: string;
   readonly url: string;
@@ -107,6 +117,8 @@ export interface ApprovalView {
   readonly files: readonly FileChange[];
   /** Why the changes couldn't be shown, if they couldn't. */
   readonly problem?: string;
+  /** The change is the fix Software Factory built: its work order. */
+  readonly factory?: { readonly number: number; readonly url: string };
   readonly requestedAt: string;
   /** When the platform's webhook told this app the request was waiting. */
   readonly announcedAt?: string;
@@ -135,7 +147,39 @@ export interface PostmortemView {
   readonly publishedAt: string;
 }
 
-export type TimelineKind = "alert" | "note" | "sandbox" | "worker" | "approval" | "deploy" | "postmortem" | "person" | "resolved" | "platform" | "error";
+export interface FactoryTests {
+  readonly total: number;
+  readonly passed: number;
+  readonly failed: number;
+  readonly skipped: number;
+}
+
+/** The incident's fix as a Software Factory work order. */
+export interface FactoryWorkView {
+  readonly workOrderId: string;
+  /** Shown as WO-0012. */
+  readonly number: number;
+  readonly title: string;
+  /** Its page in Software Factory. */
+  readonly url: string;
+  readonly status: FactoryStatus;
+  readonly routedAt: string;
+  /** When its status last changed. */
+  readonly updatedAt: string;
+  readonly tests?: FactoryTests;
+  /** Why it couldn't build the fix (in the factory's words), or why its release can't be used. */
+  readonly error?: string;
+  /** The fix it released: the service's files it added or changed. */
+  readonly files?: readonly { readonly path: string; readonly status: "added" | "modified" }[];
+  /** When Copilot was told how it ended: the fix to apply, or to fall back to a "fix" worker. */
+  readonly deliveredAt?: string;
+  /** When Copilot copied the fix into its own sandbox. */
+  readonly appliedAt?: string;
+  /** Software Factory can't be reached to follow the work order right now. */
+  readonly problem?: string;
+}
+
+export type TimelineKind = "alert" | "note" | "sandbox" | "worker" | "factory" | "approval" | "deploy" | "postmortem" | "person" | "resolved" | "platform" | "error";
 
 export interface TimelineEntry {
   readonly id: string;
@@ -168,6 +212,8 @@ export interface IncidentSummary {
   readonly needsYou: boolean;
   /** The incident is about the bundled demo service. */
   readonly demo: boolean;
+  /** How its fix is made, chosen when it opened. */
+  readonly fixRoute: FixRoute;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly resolvedAt?: string;
@@ -179,6 +225,8 @@ export interface IncidentView extends IncidentSummary {
   readonly serviceVersion?: string;
   readonly coordinator: CoordinatorView;
   readonly sandboxes: readonly SandboxView[];
+  /** Fixes routed to Software Factory: the work order. */
+  readonly factory?: FactoryWorkView;
   readonly findings: Findings;
   readonly approval?: ApprovalView;
   readonly deploy?: DeployView;
@@ -219,11 +267,19 @@ export interface IntegrationsView {
   readonly lastWebhookAt?: string;
   /** `INCIDENT_DEPLOY_URL` is set: fixes for your own services go to your deploy pipeline. */
   readonly deployConfigured: boolean;
+  /** `SOFTWARE_FACTORY_URL` is set, so fixes can go to Software Factory. `url` is its address for people. */
+  readonly factory: { readonly configured: boolean; readonly url?: string };
+}
+
+export interface AppSettings {
+  /** How the fixes of the incidents that open next are made. */
+  readonly fixRoute: FixRoute;
 }
 
 export interface AppState {
   readonly platform: PlatformStatus;
   readonly integrations: IntegrationsView;
+  readonly settings: AppSettings;
   /** Newest first. */
   readonly incidents: readonly IncidentSummary[];
 }
@@ -231,6 +287,7 @@ export interface AppState {
 export type ServerEvent =
   | { readonly type: "platform"; readonly platform: PlatformStatus }
   | { readonly type: "integrations"; readonly integrations: IntegrationsView }
+  | { readonly type: "settings"; readonly settings: AppSettings }
   | { readonly type: "incidents"; readonly incidents: readonly IncidentSummary[] }
   | { readonly type: "incident"; readonly incident: IncidentView }
   | { readonly type: "removed"; readonly id: string };
@@ -246,6 +303,17 @@ export interface DecisionRequest {
 
 export interface NoteRequest {
   readonly text: string;
+}
+
+/** `PUT /api/settings`. */
+export interface SettingsRequest {
+  readonly fixRoute: FixRoute;
+}
+
+/** `POST /api/simulate`: the body is optional. */
+export interface SimulateRequest {
+  /** How this incident's fix is made, instead of the app's setting. */
+  readonly fixRoute?: FixRoute;
 }
 
 export interface CreatedIncident {

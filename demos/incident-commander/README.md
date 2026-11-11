@@ -1,9 +1,10 @@
 # Incident Commander
 
 An on-call tool where Copilot takes the pager. An alert opens an incident; Copilot searches the logs in its own
-sandbox, hands the repro and the fix to workers in theirs, and asks you before it deploys. The request waits on the
-platform, not in your browser: close the tab, come back later, and click **Deploy**. Built on the stock
-`@github/copilot-sdk` and `@managed-copilot/sdk` ([spec section 17](../../docs/spec/developer-experience.md)).
+sandbox, hands the repro and the fix to workers in theirs (or routes the fix through Software Factory), and asks you
+before it deploys. The request waits on the platform, not in your browser: close the tab, come back later, and click
+**Deploy**. Built on the stock `@github/copilot-sdk` and `@managed-copilot/sdk`
+([spec section 17](../../docs/spec/developer-experience.md)).
 
 ![A checkout incident waiting for approval: the map shows the alert, Copilot on the shared runtime, its own triage sandbox and two finished workers, and the deploy gate marked Needs you; the approval card shows the verified one-line fix](docs/screenshots/approval.png)
 
@@ -25,26 +26,40 @@ request now waits on the platform, and the app holds no connection to the sessio
 - **Real alerts in, real deploys out.** `/api/alerts` takes Alertmanager and Grafana notifications or a small JSON
   shape, with a shared secret. Approved fixes for your own services go to your deploy pipeline as a signed webhook.
   **Simulate an incident** is the labeled demo: a sample alert for a bundled checkout service.
+- **The fix, routed through Software Factory.** Choose **Fix with: Software Factory** and Copilot triages as usual,
+  then sends the fix to [Software Factory](../software-factory/README.md) as a work order (the service's code as the
+  project, the incident as its context) while a worker writes the repro. The factory plans, builds, reviews, and
+  releases the fix; Incident Commander follows the work order and hands the release back to Copilot, which verifies it
+  and asks you to deploy. Software Factory shows where the work order came from, with a link back to the incident.
 
 ## Try it
 
 1. From the repository root: `pnpm install`, `pnpm build`, then `aspire run`. Open http://localhost:7445 (or the
    card in `pnpm gallery`).
-2. Click **Simulate an incident**. It posts an Alertmanager-shaped alert for the demo checkout service, whose v1.4.2
+2. Choose how the fix is made next to **Simulate an incident**: **Fix with: Copilot's workers** or **Software
+   Factory** (the default when Software Factory is connected).
+3. Click **Simulate an incident**. It posts an Alertmanager-shaped alert for the demo checkout service, whose v1.4.2
    deploy crashes on expired coupon codes.
-3. Watch the map: Copilot triages in **Triage** (its own sandbox), then hands `repro` and `fix` to workers.
-4. When **Deploy the fix to production?** appears, close the tab. Wait as long as you like (or restart the app with
-   `aspire resource incident-commander restart --apphost apphost.mts`). Reopen the incident and click **Deploy**.
-5. Copilot deploys v1.4.3, the alert resolves, and the postmortem appears.
+4. Watch the map: Copilot triages in **Triage** (its own sandbox), then hands `repro` and `fix` to workers. With
+   Software Factory, a **Software Factory** node takes the fix worker's place: `WO-0012`, its status, and **Open in
+   Software Factory**.
+5. When **Deploy the fix to production?** appears, close the tab. Wait as long as you like (or restart the app with
+   `aspire resource incident-commander restart --apphost apphost.mts`). Reopen the incident and click **Deploy**. A fix
+   from the factory says so on the request: **Built by Software Factory · WO-0012**.
+6. Copilot deploys v1.4.3, the alert resolves, and the postmortem appears.
 
-The whole run takes about two minutes plus however long you wait. To run it unattended:
+With Copilot's workers, the whole run takes about two minutes plus however long you wait; through Software Factory it
+takes longer, since the factory plans, builds, and reviews the fix first. To run it unattended:
 
 ```powershell
-pnpm --filter @managed-copilot/demo-incident-commander happy-path   # --url <app>, --keep to keep the incident
+pnpm --filter @managed-copilot/demo-incident-commander happy-path             # --url <app>, --keep to keep the incident
+pnpm --filter @managed-copilot/demo-incident-commander happy-path --factory   # the fix through Software Factory
 ```
 
 It simulates an incident, approves the parked deploy, waits for Resolved, prints a summary, and deletes the incident
-with its sandboxes.
+with its sandboxes. It asks for Copilot's workers whatever the app's setting; `--factory` routes the fix through
+Software Factory instead (it must be running), prints the work order's number and link, waits longer, and fails if the
+deploy request isn't the factory's fix.
 
 | Triage in its own sandbox | Repro and fix in workers |
 | --- | --- |
@@ -71,7 +86,52 @@ flowchart LR
 | **Copilot** (the coordinator) | the shared runtime | Reads the alert, follows the runbook, decides what runs where |
 | **Triage** (its own sandbox) | `incident-commander-triage`: small, no network | Log search, the failing code path, the deploy that caused it, the final test run |
 | **Workers** `repro` and `fix` | `incident-commander-node`: medium, the npm registry only | A failing regression test, and the smallest fix that passes every test |
-| **Incident Commander** (this app) | your server | Alerts, the incident page, the app's tools, the approval, the deploy |
+| **Software Factory** (when it makes the fix) | its own environments and sandboxes | Plans the fix, builds it, reviews it, and releases it with tests, in place of the `fix` worker |
+| **Incident Commander** (this app) | your server | Alerts, the incident page, the app's tools, the work order, the approval, the deploy |
+
+## The factory route
+
+**Fix with** sets how the fix of each incident that opens next is made, simulated or from your alerts; an incident
+keeps the route it opened with (the incident page shows it). The choice is stored with the app's records. It starts as
+**Software Factory** when `SOFTWARE_FACTORY_URL` is set and as **Copilot's workers** otherwise, and Software Factory
+can't be chosen while it isn't connected. `PUT /api/settings { "fixRoute": "workers" | "factory" }` changes it, and
+`POST /api/simulate { "fixRoute": ... }` overrides it for one simulated incident.
+
+```mermaid
+sequenceDiagram
+  participant C as Copilot (shared runtime)
+  participant A as Incident Commander
+  participant F as Software Factory
+  participant R as repro (worker)
+  C->>A: route_fix_to_factory: summary, root cause, failing path, files
+  A->>F: POST /api/work-orders: the service's code as the project, INCIDENT.md as context
+  F-->>A: WO-0012 · Queued
+  C->>R: a failing regression test, in a new file
+  R-->>C: it fails on the current code
+  Note over C,A: Copilot ends its turn, and the app lets go of the session
+  loop about every 5 s, from the app's records (an app restart picks it up again)
+    A->>F: GET /api/work-orders/:id
+  end
+  A->>F: GET /api/work-orders/:id/release (once it's Completed)
+  A->>C: re-attach, once: "Software Factory released the fix as WO-0012"
+  C->>A: apply_factory_fix: the changed files, into its own sandbox
+  Note over C: runs the whole suite (repro's test included)
+  C->>A: deploy_fix: "Built by Software Factory · WO-0012", and a person approves
+```
+
+- **The work order.** Its title is `Fix <service>: <summary>`, in the factory's app-driven (`classic`) mode with two
+  review rounds. Its `project` is the service's folder as it runs in production, without `logs/` and `deploys/`. Its
+  `context` is `INCIDENT.md`: the alert, the root cause and its evidence, the failing path, the expected behavior, the
+  diff of the deploy that caused it, and the newest error lines from the logs. Its `origin` names Incident Commander
+  and the incident (`INC-1004 · checkout`), with a link back to the incident page.
+- **Following it.** The app reads the work order about every 5 seconds while it's active and records each step on the
+  timeline (planning, building, releasing, released or failed). The state is in the app's records, so a restart picks
+  it up again. If Software Factory can't be reached, the incident says so and the app keeps trying, more slowly.
+- **The release.** The fix is what the release added or changed in the service, without `package.json` and
+  `README.md`. Incident Commander tells Copilot exactly once, by re-attaching to its session (the platform queues the
+  message behind a running turn). A release that changes none of the service's code counts as a failure.
+- **When the factory can't.** If Software Factory refuses the work order, isn't reachable, or fails or cancels it,
+  Copilot falls back to a `fix` worker, as in the standard runbook, and the timeline says so.
 
 ## How it works
 
@@ -80,11 +140,15 @@ flowchart LR
   any (`incident-commander-node`). The coordinator itself has no network: alerts are data, never instructions.
 - **The runbook.** The app adds a runbook to the coordinator's instructions: triage in your own sandbox, hand the repro
   and the fix to two workers in parallel (copying the service to each from your sandbox), verify both together, ask to
-  deploy, then write the postmortem.
+  deploy, then write the postmortem. For an incident whose fix goes through Software Factory, the runbook routes the
+  fix there instead, has one worker write the repro meanwhile, and verifies the factory's fix when it arrives.
 - **The app's tools** (stock `defineTool`): `open_workspace` copies the service's code, tests, logs, and deploy history
   into the coordinator's own sandbox (with `managed.files`), `update_incident` records notes and the root cause,
-  `deploy_fix` deploys, and `publish_postmortem` publishes. Only `deploy_fix` asks a person; every other prompt (a
-  shell command in its sandbox, a new worker) is approved, because sandboxes are isolated.
+  `deploy_fix` deploys, and `publish_postmortem` publishes. Incidents whose fix goes through Software Factory also get
+  `route_fix_to_factory`, which creates the incident's work order (one per incident: a repeated or replayed call
+  answers with it), and `apply_factory_fix`, which copies the released fix into the coordinator's own sandbox. Only
+  `deploy_fix` asks a person; every other prompt (a shell command in its sandbox, a new worker) is approved, because
+  sandboxes are isolated.
 - **The approval.** The app holds a live session only while Copilot works:
 
 ```mermaid
@@ -156,6 +220,8 @@ alert says and what to check next.
 | `INCIDENT_SERVICES_DIR` | A folder with one subfolder per service name: its code, tests, and any logs you export there. Copied into Copilot's sandbox for an incident on that service. |
 | `INCIDENT_DEPLOY_URL` | Your deploy pipeline's webhook. An approved fix is POSTed there as `incident.deploy_approved` with the service, the next version, the summary, who approved it, and the files' contents. A 2xx answer (optionally `{ "version", "message" }`) means it deployed; anything else fails the deploy and tells Copilot. Without it, deploys for your own services fail with that explanation. |
 | `INCIDENT_DEPLOY_SECRET` | Signs those requests: `x-incident-commander-signature: t=<seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`, the platform's own webhook scheme. Requests also carry an `idempotency-key`. |
+| `SOFTWARE_FACTORY_URL` | Where this server calls Software Factory's API (locally `http://localhost:7480`). Set, fixes can go through Software Factory, and **Fix with** starts there; unset, the option is off and says why. |
+| `SOFTWARE_FACTORY_PUBLIC_URL` | Software Factory's address for people: the links to work orders (`<url>/#/wo/<id>`). Defaults to `SOFTWARE_FACTORY_URL`. |
 
 Set them on the app in the root AppHost (`.withEnvironment(...)`). Other settings: `INCIDENT_MODEL` (default
 `claude-sonnet-5`), `INCIDENT_ENVIRONMENT` (default `incident-commander`), `INCIDENT_DATA_DIR` (its incident records),
@@ -175,8 +241,9 @@ Set them on the app in the root AppHost (`.withEnvironment(...)`). Other setting
 | --- | --- |
 | `apphost.mts` | Environments, the webhook, and the app, as plain data for the root AppHost |
 | `src/server/commander.ts` | Opens incidents from alerts, routes webhook deliveries, publishes views |
-| `src/server/incident.ts` | One incident's coordinator session: attach while working, the deploy approval, sandboxes, the app's tools |
-| `src/server/runbook.ts`, `tools.ts` | The coordinator's instructions and the app's four tools |
+| `src/server/incident.ts` | One incident's coordinator session: attach while working, the deploy approval, sandboxes, the app's tools, its Software Factory work order |
+| `src/server/runbook.ts`, `tools.ts` | The coordinator's instructions (for each fix route) and the app's tools |
+| `src/server/factory.ts` | Software Factory: the work order for a fix (project, `INCIDENT.md`, origin), its API, and the fix in its release |
 | `src/server/alerts.ts`, `deploy.ts`, `services.ts` | Alert parsing and auth, deploy targets, the service catalog |
 | `src/server/demo.ts`, `demo-services/checkout` | The labeled demo: the checkout service and its generated production logs |
 | `src/web` | The UI (React, Tailwind with `@managed-copilot/github-theme`, Octicons) |

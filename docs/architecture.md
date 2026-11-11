@@ -1194,7 +1194,13 @@ and quickstart snippet 14).
     prompts there, leaving an undecided deploy for a person. Verified live (2026-11-04, local, claude-sonnet-5): a
     simulated incident triaged in the hands sandbox, ran repro and fix workers in parallel, verified, and parked its
     deploy; after an app restart the platform still held it, and approving it deployed the fix and resolved the
-    incident. Not yet on Azure.
+    incident. Not yet on Azure. With the factory route (an app setting, recorded on each incident), the coordinator
+    also gets `route_fix_to_factory` and `apply_factory_fix`: the fix goes to the software factory as a work order with
+    the service as its `project` while a `repro` worker runs, the app follows the work order from its stored state
+    (across restarts) and, once it's released, sends the coordinator one message to apply the release's changed files
+    in its own sandbox, verify, and ask to deploy. Verified live (2026-11-10, local): the factory planned, built,
+    reviewed, and released the checkout fix (18 tests), the coordinator verified it with the repro test (19 of 19),
+    and the approved deploy resolved the incident.
 - **Limits.** Approval is per worker, not per worker prompt; a working worker takes no new message until its run ends
   (no steering mid-run); finished workers' results reach an idle coordinator only when it waits or lists them (no new
   turns are started for it); workers share no disk; workers cannot start workers. On Azure (westus2, 2026-10-27),
@@ -1689,6 +1695,17 @@ artifacts stay readable while the sandbox backend is down, so `artifacts` follow
   person: a GitHub user with their own token (`front-desk`, their Copilot plan), everyone else as one of its app users
   (`front-desk-foundry`, which sends model calls to the AppHost's `Parameters:foundry-*` account). The root AppHost
   declares the Foundry account and environment only when `Parameters:foundry-account` is set.
+- **Work routed to the software factory.** Help Desk, Incident Commander, and Data Desk get `SOFTWARE_FACTORY_URL`
+  (their servers call the factory's API there: the factory's endpoint under `aspire run`, `http://software-factory`
+  in Azure, a call that stays inside the environment so the factory's ingress allowlist and `FACTORY_ALLOWED_HOSTS`
+  admit it) and `SOFTWARE_FACTORY_PUBLIC_URL` (the factory's address for links people open). `POST /api/work-orders`
+  takes `origin` (the routing app, a label, a link back, and the app's own key, shown on the floor and listed in
+  `GET /api/work-orders` so the app finds its work orders again after a restart), `context` (reference files written
+  to `.factory/context/` in every sandbox and shown to the planner), and `project` (an existing codebase every builder
+  and the release start from: the factory merges its check scripts into the project's `package.json`, the planner
+  keeps the project's package name, reviewers see the originals of changed files, and the release reports `changes`).
+  The factory keeps routed files as artifacts of an `intake` station. `GET /api/work-orders/:id/release` returns the
+  released files with those changes, which is how Incident Commander takes a fix back to its coordinator.
 
 ### Copilot CLI attach (spec section 14)
 
@@ -2012,14 +2029,14 @@ Where each area of the platform lives.
 | **network** | `services/egress/**`, gateway `modules/network/**`, SDK `features/vaults.ts` | Network policy enforcement, vaults, SSRF protections |
 | **durable** | gateway `modules/durable/**`, SDK `features/{actions,schedules,webhooks}.ts` | durable actions, webhooks, polling, schedules, agent scheduling, background login |
 | **attach** | `libraries/aspire/**` (except `src/publish/**`, azure), `libraries/cli/**`, root `apphost.mts`, `aspire.config.json`, `tsconfig.apphost.json`, `environments/**`, `tests/snippets/**`, gateway `modules/attach/**`, SDK `features/cli.ts`, `internal.ts` | `aspire run` for the platform and demos, CLI, Copilot CLI attach (mediated: ledger answers, core-gated writes, promotion fencing), runnable spec snippets |
-| **factory** | `demos/software-factory/**` | AI software factory demo |
+| **factory** | `demos/software-factory/**` | AI software factory demo. Takes work other apps route to it (`origin`, `context`, `project` on `POST /api/work-orders`; the routed files are the `intake` station's artifacts, and `GET /api/work-orders/:id/release` returns the released files and the project's changes) |
 | **assistant** | `demos/assistant/**` | Long-running assistant bot with schedules, Gmail, Google Calendar, and sandboxes it starts as an orchestrator |
 | **dispatch** | `demos/dispatch/**` | Dispatch: a chat with an orchestrator agent (delegate, direct, or mixed) that shows each sandbox it creates or reuses and each command it runs |
 | **research-swarm** | `demos/research-swarm/**` | Research Swarm (delegate): a lead on the shared runtime (`research-swarm`, network off) starts web researchers in `research-swarm-web` sandboxes; their `research read` log is the only citable source list, its app tools (`plan_research`, `list_sources`, `submit_report`) refuse other citations, and deleting the lead's session deletes every sandbox |
 | **pattern-race** | `demos/pattern-race/**` | Pattern Race: one job raced through the root AppHost's six pattern environments at once, with a live board of where each agent thinks and acts and a scorecard |
-| **data-desk** | `demos/data-desk/**` | Data Desk: chat with a spreadsheet on a promotable environment; the app's tools answer on the shared runtime, and a request that needs code moves the session into its Python sandbox |
-| **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()` |
-| **incident-commander** | `demos/incident-commander/**` | Incident Commander: alerts (or the labeled simulation) open incidents run by a mixed coordinator; its deploy approval waits on the platform with the app detached, and the platform's webhook keeps the app informed |
+| **data-desk** | `demos/data-desk/**` | Data Desk: chat with a spreadsheet on a promotable environment; the app's tools answer on the shared runtime, and a request that needs code moves the session into its Python sandbox. Selected rows, Copilot's tables and published files, and its latest answer go to the software factory as a work order's `context`, with what to build |
+| **help-desk** | `demos/help-desk/**` | Help Desk: a support rush of simulated customers, one session each in the `help-desk` shared environment (`availableTools: ["custom:*"]`) with the store's `defineTool` tools bound to that customer. Refunds and cancellations wait in the permission handler for the operator; session IDs (`hd-<simulation>-<customer>`) let a restart rebuild the wall from `sessions.list` and history; counters read placement and sandboxes from `sessions.list` and premium requests from `session.rpc.usage.getMetrics()`. Agents file storefront bugs with `report_bug`; the wall groups them by area and sends each to the software factory with its `storefront` codebase as the `project`, finding its work orders again by `origin.key` after a restart |
+| **incident-commander** | `demos/incident-commander/**` | Incident Commander: alerts (or the labeled simulation) open incidents run by a mixed coordinator; its deploy approval waits on the platform with the app detached, and the platform's webhook keeps the app informed. With the factory route, `route_fix_to_factory` sends the service as the `project`, the app follows the work order from stored state, and `apply_factory_fix` puts the release's changed files in the coordinator's own sandbox to verify and deploy |
 | **repo-doctor** | `demos/repo-doctor/**` | Repo Doctor: a CI fixer that gives each run one isolated sandbox (checkout, tests, and diff through `managed.exec`; setup and the fix as Copilot turns), deletes it at the end, and shows its allowed hosts and its `network.blocked` events live |
 | **hack-the-harness** | `demos/hack-the-harness/**` | Hack the Harness: a staff assistant (demo sign-in that accepts any username and password, a 3D office of NPC sessions) that demonstrates five deployment architectures. It defaults to a shared `hack-the-harness` environment without host tools; its README steps through `unsafeHostTools`, isolated, promotable, direct, and orchestrator configurations, using `hack-the-harness-worker` sandboxes built from its own image (openpyxl from bundled wheels, since the sandboxes have no network). The app moves files in and out with `managed.files`. Local only: the root AppHost runs it with `runDemo` and never publishes it, and the gallery marks it `localOnly` |
 | **front-desk** | `demos/front-desk/**` | Front Desk: an app many people sign in to (GitHub, or an email account the app keeps), each with private conversations and memory, published as a public app with no GitHub token |

@@ -4,17 +4,20 @@
  *   pnpm --filter @managed-copilot/demo-incident-commander happy-path                  # http://localhost:7445 + MANAGED_COPILOT_PORT_OFFSET
  *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --url http://localhost:9345
  *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --keep           # keep the incident and its sandbox
+ *   pnpm --filter @managed-copilot/demo-incident-commander happy-path --factory        # route the fix through Software Factory
  *
  * Simulates an incident, waits until Copilot's deploy request waits on the platform (the app let go of the session),
  * approves it, and waits for Resolved and the postmortem. Then deletes the incident, its session, and its sandboxes.
- * Exits 0 when the incident resolved; 1 otherwise.
+ * The fix is made by Copilot's workers, whatever the app's setting; with --factory, Software Factory builds it as a work
+ * order (and the run takes longer). Exits 0 when the incident resolved; 1 otherwise.
  */
 import { parseArgs } from "node:util";
-import type { ApiErrorBody, AppState, CreatedIncident, IncidentView } from "../shared/types.js";
+import type { ApiErrorBody, AppState, CreatedIncident, FixRoute, IncidentView, SimulateRequest } from "../shared/types.js";
 
-const { values } = parseArgs({ options: { url: { type: "string" }, keep: { type: "boolean", default: false } } });
+const { values } = parseArgs({ options: { url: { type: "string" }, keep: { type: "boolean", default: false }, factory: { type: "boolean", default: false } } });
 const offset = Number(process.env.MANAGED_COPILOT_PORT_OFFSET ?? 0);
 const base = (values.url ?? `http://localhost:${7445 + offset}`).replace(/\/+$/, "");
+const fixRoute: FixRoute = values.factory ? "factory" : "workers";
 const started = Date.now();
 
 function elapsed(): string {
@@ -25,6 +28,7 @@ function elapsed(): string {
 const say = (message: string): void => console.log(`[${elapsed()}] ${message}`);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const seconds = (from: string, to: string | undefined) => (to ? `${Math.round((Date.parse(to) - Date.parse(from)) / 1000)} s` : "n/a");
+const workOrder = (number: number): string => `WO-${String(number).padStart(4, "0")}`;
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, { ...init, signal: AbortSignal.timeout(30_000), headers: { ...(init?.body ? { "content-type": "application/json" } : {}) } });
@@ -35,6 +39,9 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (response.status === 204 || response.status === 202 ? undefined : await response.json()) as T;
 }
 
+/** Copilot ended its turn on purpose: Software Factory builds the fix, and the app hands it over once it's released. */
+const waitingForFactory = (incident: IncidentView): boolean => incident.factory !== undefined && incident.factory.deliveredAt === undefined;
+
 /** Polls the incident, printing its new timeline entries, until `done` says so. */
 async function follow(id: string, what: string, timeoutMs: number, done: (incident: IncidentView) => boolean, printed: { count: number }): Promise<IncidentView> {
   const deadline = Date.now() + timeoutMs;
@@ -44,7 +51,9 @@ async function follow(id: string, what: string, timeoutMs: number, done: (incide
     printed.count = incident.timeline.length;
     if (done(incident)) return incident;
     if (incident.coordinator.state === "failed") throw new Error(`Copilot's session failed while ${what}.`);
-    if (incident.coordinator.state === "idle" && incident.approval?.state !== "approved") throw new Error(`Copilot stopped while ${what}: ${incident.coordinator.lastMessage ?? "no message"}`);
+    if (incident.coordinator.state === "idle" && incident.approval?.state !== "approved" && !waitingForFactory(incident)) {
+      throw new Error(`Copilot stopped while ${what}: ${incident.coordinator.lastMessage ?? "no message"}`);
+    }
     if (Date.now() > deadline) throw new Error(`Timed out ${what} after ${Math.round(timeoutMs / 60_000)} minutes.`);
     await sleep(3_000);
   }
@@ -59,17 +68,38 @@ try {
     state = await api<AppState>("/api/state");
   }
   if (state.platform.state !== "connected") throw new Error(`Managed Copilot isn't connected: ${state.platform.message ?? state.platform.state}`);
+  if (values.factory && !state.integrations.factory?.configured) {
+    throw new Error("Software Factory isn't connected to Incident Commander. Start it with `aspire run` (the root AppHost sets SOFTWARE_FACTORY_URL), then try again.");
+  }
 
-  ({ id } = await api<CreatedIncident>("/api/simulate", { method: "POST" }));
-  say(`Simulated ${id}`);
+  const simulate: SimulateRequest = { fixRoute };
+  ({ id } = await api<CreatedIncident>("/api/simulate", { method: "POST", body: JSON.stringify(simulate) }));
+  say(`Simulated ${id}${values.factory ? ": Software Factory builds the fix" : ""}`);
   const printed = { count: 0 };
+  let announcedOrder = false;
   const announced = (incident: IncidentView) => !state.integrations.webhookConfigured || incident.approval?.announcedAt !== undefined;
-  const waiting = await follow(id, "triaging and fixing", 15 * 60_000, (incident) => incident.approval?.state === "waiting" && !incident.coordinator.attached && announced(incident), printed);
+  const ready = (incident: IncidentView) => {
+    if (incident.factory && !announcedOrder) {
+      announcedOrder = true;
+      say(`Software Factory: ${workOrder(incident.factory.number)} ${incident.factory.url}`);
+    }
+    return incident.approval?.state === "waiting" && !incident.coordinator.attached && announced(incident);
+  };
+  // Through the factory: triage, then the factory plans, builds, reviews, and releases the fix before Copilot verifies it.
+  const waiting = await follow(id, values.factory ? "triaging, and while Software Factory built the fix" : "triaging and fixing", (values.factory ? 45 : 15) * 60_000, ready, printed);
   const own = waiting.sandboxes.find((sandbox) => sandbox.role === "own");
   const workers = waiting.sandboxes.filter((sandbox) => sandbox.role === "worker");
   if (!own || workers.length === 0) throw new Error("The incident didn't use both Copilot's own sandbox and workers.");
+  if (values.factory && !waiting.approval?.factory) {
+    const work = waiting.factory;
+    throw new Error(
+      work
+        ? `The fix waiting for approval isn't Software Factory's: ${workOrder(work.number)} is ${work.status}${work.error ? ` (${work.error})` : ""}, and Copilot fell back to a "fix" worker.`
+        : "Copilot didn't route the fix to Software Factory.",
+    );
+  }
   const names = workers.map((worker) => worker.name).join(" and ");
-  say(`Mixed: ${own.commands ?? 0} commands in Copilot's own sandbox; workers ${names}`);
+  say(`Mixed: ${own.commands ?? 0} commands in Copilot's own sandbox; workers ${names}${waiting.approval?.factory ? `; the fix by Software Factory (${workOrder(waiting.approval.factory.number)})` : ""}`);
   say(`The deploy request waits on the platform, and the app holds no session. Approving: ${waiting.approval!.summary}`);
 
   await api<void>(`/api/incidents/${id}/decision`, { method: "POST", body: JSON.stringify({ approve: true }) });
@@ -80,6 +110,10 @@ try {
   console.log(`  Root cause:  ${resolved.postmortem!.rootCause}`);
   console.log(`  Deployed:    ${resolved.deploy?.message ?? "n/a"}`);
   console.log(`  Sandboxes:   Copilot's own (${own.commands ?? 0} commands), workers ${names}`);
+  if (resolved.factory) {
+    const tests = resolved.factory.tests ? `; its tests: ${resolved.factory.tests.passed} passed, ${resolved.factory.tests.failed} failed` : "";
+    console.log(`  Factory:     ${workOrder(resolved.factory.number)} ${resolved.factory.url}${tests}`);
+  }
   console.log(`  Triaged in ${seconds(resolved.createdAt, resolved.milestones.triagedAt)}, fixed in ${seconds(resolved.createdAt, resolved.approval?.requestedAt)}, resolved in ${seconds(resolved.createdAt, resolved.milestones.resolvedAt)}`);
 } catch (error) {
   process.exitCode = 1;

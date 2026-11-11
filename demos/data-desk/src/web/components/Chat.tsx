@@ -20,6 +20,7 @@ import { cx } from "../lib/cx.js";
 import { formatSeconds } from "../lib/format.js";
 import { selectResult, useSelectedResult } from "../lib/selection.js";
 import { answerMove, dismissOutgoing, sendMessage, stopTurn, useStore, type Outgoing } from "../lib/store.js";
+import { FactoryLine } from "./Factory.js";
 import { MarkdownView } from "./Markdown.js";
 import { Spinner } from "./ui/Spinner.js";
 import { Tooltip } from "./ui/Tooltip.js";
@@ -172,6 +173,8 @@ function Item({ item }: { readonly item: Exclude<ChatItem, Step> }) {
           <span className="h-px flex-1 bg-done-muted" />
         </div>
       );
+    case "factory":
+      return <FactoryLine routing={item.routing} />;
     case "error":
       return (
         <div className="flash flash-error flash-sm flex items-start gap-2" role="alert">

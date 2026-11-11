@@ -28,6 +28,8 @@ import {
   type Plan,
   type PlanTask,
   type PullRequestView,
+  type ReleaseChange,
+  type ReleaseFiles,
   type ReleaseSummary,
   type ReviewRecord,
   type Station,
@@ -61,6 +63,17 @@ import {
   type ToolStart,
 } from "./coordinator.js";
 import { CancelledError, isPlatformInterruption, PlatformUnavailableError, StationError, toFactoryError } from "./errors.js";
+import {
+  CONTEXT_PREFIX,
+  describeInputs,
+  digestOf,
+  INTAKE_STATION,
+  parseRoutedInputs,
+  PROJECT_PREFIX,
+  projectChanges,
+  type LoadedInputs,
+  type RoutedInputs,
+} from "./inputs.js";
 import { factoryPermissions } from "./permissions.js";
 import { PlanInputSchema, ReviewInputSchema, topologicalOrder, validatePlan, validateReview, type ValidReview } from "./plan.js";
 import {
@@ -74,8 +87,9 @@ import {
   retryPrompt,
   reviewPrompt,
   reviewRetryPrompt,
+  type WorkspaceNotes,
 } from "./prompts.js";
-import { builderSeed, DEFAULT_SKILLS_ROOT, releaseSeed, sha256, type SeedFile, type TaskOutcome } from "./seed.js";
+import { builderSeed, DEFAULT_SKILLS_ROOT, projectPackageName, releaseSeed, sha256, type SeedFile, type TaskOutcome } from "./seed.js";
 import { Semaphore } from "./semaphore.js";
 import {
   blobScript,
@@ -250,6 +264,8 @@ interface Run {
   workerRevision: number;
   workerSnapshotRevision: number;
   stopCoordinator?: (error: unknown) => void;
+  /** A routed work order's files, loaded on first use. */
+  inputs?: LoadedInputs;
 }
 
 interface CheckOutcome {
@@ -346,7 +362,8 @@ export class Factory {
 
   artifactIndex(id: string): ArtifactIndex {
     const wo = this.get(id);
-    const order = new Map((wo?.stations ?? []).map((station, index) => [station.id, index]));
+    // The intake (what a routed work order brought along) comes first, then the stations in pipeline order.
+    const order = new Map([[INTAKE_STATION, -1], ...(wo?.stations ?? []).map((station, index) => [station.id, index] as const)]);
     const files = new Map<string, Mutable<ArtifactFileView> & { versions: ArtifactFileView["versions"][number][] }>();
     for (const meta of this.#store.listArtifacts(id)) {
       const key = `${meta.stationId}\u0000${meta.path}`;
@@ -393,6 +410,21 @@ export class Factory {
     return { projectName: wo.plan.projectName, files };
   }
 
+  /** The released project's files as text, with what changed in a routed project: for the app that routed the work order. */
+  release(id: string): ReleaseFiles | undefined {
+    const wo = this.get(id);
+    if (!wo?.plan || !wo.release) return undefined;
+    return {
+      workOrderId: wo.id,
+      number: wo.number,
+      projectName: wo.plan.projectName,
+      ...(wo.release.tests ? { tests: wo.release.tests } : {}),
+      ...(wo.release.notes ? { notes: wo.release.notes } : {}),
+      files: [...this.#currentFiles(id, "release", "bundle/")].map(([path, content]) => ({ path, content })),
+      ...(wo.release.changes ? { changes: wo.release.changes } : {}),
+    };
+  }
+
   // ─── Commands ───────────────────────────────────────────────────────────────────────────────────────────────
 
   create(request: CreateWorkOrderRequest): WorkOrder {
@@ -413,6 +445,8 @@ export class Factory {
       throw new StationError("invalid_request", "Choose a reviewer model different from the builder model for independent review.");
     }
     const template = findTemplate(request.templateId);
+    const inputs = parseRoutedInputs(request);
+    const described = describeInputs(inputs);
     const owner = this.#options.account();
     const created = now();
     const wo: MWorkOrder = {
@@ -429,12 +463,77 @@ export class Factory {
       taskCount: 0,
       stations: [this.#newStation("plan"), ...(mode === "agent" ? [this.#newStation("coordinate")] : []), this.#newStation("release")],
       ...(owner ? { owner } : {}),
+      ...(inputs.origin ? { origin: inputs.origin } : {}),
+      ...(described ? { inputs: described } : {}),
     };
     this.#store.saveWorkOrder(wo);
-    log.info("Work order created", { id: wo.id, number: formatWorkOrderNumber(wo.number), title });
+    this.#storeInputs(wo, inputs);
+    log.info("Work order created", {
+      id: wo.id,
+      number: formatWorkOrderNumber(wo.number),
+      title,
+      ...(inputs.origin ? { origin: inputs.origin.app } : {}),
+      ...(described ? { context: described.context.length, projectFiles: described.project?.files ?? 0 } : {}),
+    });
     const snapshot = structuredClone(wo);
     this.#start(wo);
     return snapshot;
+  }
+
+  /** Keeps a routed work order's files as the `intake` station's artifacts: the floor lists them, and the pipeline seeds from them. */
+  #storeInputs(wo: WorkOrder, inputs: RoutedInputs): void {
+    const files = [
+      ...inputs.context.map((file) => ({ path: `${CONTEXT_PREFIX}${file.path}`, content: file.content })),
+      ...(inputs.project?.files ?? []).map((file) => ({ path: `${PROJECT_PREFIX}${file.path}`, content: file.content })),
+    ];
+    if (files.length === 0) return;
+    for (const file of files) {
+      this.#store.putArtifact({
+        workOrderId: wo.id,
+        stationId: INTAKE_STATION,
+        path: file.path,
+        version: 1,
+        round: 0,
+        size: Buffer.byteLength(file.content, "utf8"),
+        digest: digestOf(file.content),
+        contentType: contentTypeFor(file.path),
+        publishedAt: wo.createdAt,
+        content: file.content,
+      });
+    }
+    this.#options.hub.publish({ type: "artifacts", workOrderId: wo.id });
+  }
+
+  /** A routed work order's context and project files, read once per run. */
+  #inputs(run: Run): LoadedInputs | undefined {
+    if (!run.wo.inputs) return undefined;
+    if (run.inputs) return run.inputs;
+    const context = new Map<string, string>();
+    const project = new Map<string, string>();
+    for (const artifact of this.#store.latestArtifacts(run.wo.id, INTAKE_STATION)) {
+      if (artifact.content === undefined) continue;
+      if (artifact.path.startsWith(CONTEXT_PREFIX)) context.set(artifact.path.slice(CONTEXT_PREFIX.length), artifact.content);
+      else if (artifact.path.startsWith(PROJECT_PREFIX)) project.set(artifact.path.slice(PROJECT_PREFIX.length), artifact.content);
+    }
+    // Keep the order the routing app sent them in (the store lists by path).
+    const order = (paths: readonly string[], files: Map<string, string>) => new Map(paths.filter((path) => files.has(path)).map((path) => [path, files.get(path)!]));
+    const name = run.wo.inputs.project?.name;
+    run.inputs = {
+      context: order(run.wo.inputs.context.map((file) => file.path), context),
+      ...(name ? { project: { name, files: new Map([...project].sort(([a], [b]) => a.localeCompare(b))) } } : {}),
+    };
+    return run.inputs;
+  }
+
+  /** What builders and the release are told about a routed work order's project and reference material. */
+  #notes(run: Run): WorkspaceNotes | undefined {
+    const inputs = run.wo.inputs;
+    if (!inputs && !run.wo.origin) return undefined;
+    return {
+      ...(inputs?.project ? { project: inputs.project.name } : {}),
+      ...(inputs && inputs.context.length > 0 ? { context: inputs.context.map((file) => file.path) } : {}),
+      ...(run.wo.origin ? { origin: run.wo.origin } : {}),
+    };
   }
 
   /**
@@ -452,6 +551,10 @@ export class Factory {
     if (!Number.isInteger(rounds) || rounds < 1 || rounds > 3) throw new StationError("invalid_request", "Review rounds must be 1, 2, or 3.");
     const issueNumber = request.github.issue;
     if (issueNumber !== undefined && (!Number.isInteger(issueNumber) || issueNumber < 1)) throw new StationError("invalid_request", "Pick an issue by its number.");
+    if ((request.context !== undefined && request.context !== null) || (request.project !== undefined && request.project !== null)) {
+      throw new StationError("invalid_request", "GitHub work orders change the repository itself: put what the factory needs to know in the brief.");
+    }
+    const origin = parseRoutedInputs({ ...request, context: undefined, project: undefined }).origin;
     const target = parseRepository(request.github.repository);
     if (!target) throw new StationError("invalid_request", "Pick a repository as owner/name.");
     this.#requireReady("github");
@@ -495,6 +598,7 @@ export class Factory {
         revisions: [revision],
       },
       ...(owner ? { owner } : {}),
+      ...(origin ? { origin } : {}),
     };
     this.#store.saveWorkOrder(wo);
     log.info("GitHub work order created", { id: wo.id, number: formatWorkOrderNumber(wo.number), repository: repository.fullName, issue: issue?.number });
@@ -876,6 +980,9 @@ export class Factory {
     this.#setWorkOrder(run, { status: "planning", startedAt: run.wo.startedAt ?? now() });
     try {
       const capture: Capture = {};
+      const inputs = this.#inputs(run);
+      // A plan for an existing project keeps the project's own package name.
+      const projectName = projectPackageName(inputs);
       const submitPlan = defineTool("submit_plan", {
         description: "Submit the work order's build plan to the factory. Returns 'Accepted' or the problems to fix before resubmitting.",
         parameters: PlanInputSchema,
@@ -886,12 +993,12 @@ export class Factory {
             this.#activity(run.wo, station.id, `Plan rejected: ${result.problems.length} problem${result.problems.length === 1 ? "" : "s"} to fix`, "warning");
             return `Rejected. Fix these problems and call submit_plan again:\n${result.problems.map((problem) => `- ${problem}`).join("\n")}`;
           }
-          capture.plan = result.value;
+          capture.plan = projectName ? { ...result.value, projectName } : result.value;
           return `Accepted: ${result.value.tasks.length} task(s). Builders are starting now.`;
         },
       });
       const active = await this.#openSharedSession(run, station, { tools: [submitPlan] }, capture);
-      await this.#turn(run, station, active, planPrompt(run.wo), "work", 1);
+      await this.#turn(run, station, active, planPrompt(run.wo, inputs ? { inputs } : {}), "work", 1);
       if (!capture.plan) await this.#turn(run, station, active, planRetryPrompt(), "nudge", 1);
       const plan = capture.plan;
       if (!plan) throw new StationError("plan_missing", "The planner didn't submit a plan.");
@@ -1005,8 +1112,9 @@ export class Factory {
     const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
     try {
       const dependencyFiles = this.#dependencyFiles(run, task);
-      const active = await this.#openSandboxSession(run, build, () => builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot));
-      await this.#bringTurnCurrent(run, build, active, false, () => buildPrompt(run.wo, task, [...dependencyFiles.keys()]));
+      const inputs = this.#inputs(run);
+      const active = await this.#openSandboxSession(run, build, () => builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot, inputs));
+      await this.#bringTurnCurrent(run, build, active, false, () => buildPrompt(run.wo, task, [...dependencyFiles.keys()], this.#notes(run)));
 
       let nudges = 0;
       for (;;) {
@@ -1097,7 +1205,20 @@ export class Factory {
       .map(([path, content]) => ({ path, content }))
       .sort((a, b) => Number(/\.(test|spec)\./.test(a.path)) - Number(/\.(test|spec)\./.test(b.path)) || a.path.localeCompare(b.path));
     const previous = review.reviews?.at(-1)?.findings;
-    return this.#review(run, review, build, round, () => reviewPrompt(task, round, run.wo.maxReviewRounds, { files, report, builderSummary }, previous));
+    const inputs = this.#inputs(run);
+    // A task that changed an existing project's files is reviewed against their originals.
+    const project = inputs?.project
+      ? {
+          name: inputs.project.name,
+          originals: files.flatMap((file) => {
+            const original = inputs.project!.files.get(file.path);
+            return original !== undefined && file.path !== "package.json" ? [{ path: file.path, content: original }] : [];
+          }),
+        }
+      : undefined;
+    return this.#review(run, review, build, round, () =>
+      reviewPrompt(task, round, run.wo.maxReviewRounds, { files, report, builderSummary, ...(project ? { project } : {}) }, previous),
+    );
   }
 
   /**
@@ -1153,12 +1274,12 @@ export class Factory {
     if (station.status === "done" && run.wo.release) return;
     const plan = run.wo.plan!;
     const outcomes = this.#outcomes(run);
-    const seed = releaseSeed(run.wo, plan, outcomes, this.#skillsRoot);
+    const seed = releaseSeed(run.wo, plan, outcomes, this.#skillsRoot, this.#inputs(run));
     this.#updateStation(run, station, { detail: "Queued for a sandbox" });
     const releaseSlot = await this.#sandboxes.acquire(run.abort.signal);
     try {
       const active = await this.#openSandboxSession(run, station, () => [...seed.files]);
-      await this.#bringTurnCurrent(run, station, active, true, () => releasePrompt(run.wo, plan, seed.conflicts));
+      await this.#bringTurnCurrent(run, station, active, true, () => releasePrompt(run.wo, plan, seed.conflicts, this.#notes(run)));
       let nudges = 0;
       for (;;) {
         const outcome = await this.#collect(run, station, true);
@@ -1196,16 +1317,24 @@ export class Factory {
     const patch = latest.find((artifact) => artifact.path === "project.patch");
     const notes = latest.find((artifact) => artifact.path === "RELEASE.md")?.content;
     const manifest = outcome.manifest!;
+    const project = this.#inputs(run)?.project;
+    let changes: ReleaseChange[] | undefined;
+    if (project) {
+      const bundle = new Map(latest.filter((artifact) => artifact.path.startsWith("bundle/")).map((artifact) => [artifact.path.slice("bundle/".length), artifact.content]));
+      changes = projectChanges(project.files, new Map(manifest.files.map((file) => [file.path, { content: bundle.get(file.path), sha256: file.sha256 }])));
+    }
     const release: ReleaseSummary = {
       files: manifest.files.length,
       bytes: manifest.files.reduce((total, file) => total + file.size, 0),
       tests: summaryOf(outcome.report!),
       ...(patch ? { patchBytes: patch.size } : {}),
       ...(notes ? { notes } : {}),
+      ...(changes ? { changes } : {}),
     };
     run.wo.release = release;
     this.#updateStation(run, station, { status: "done", detail: `Release ready · ${release.tests!.passed} tests passed`, finishedAt: now() });
-    this.#activity(run.wo, station.id, `Release ready: ${release.files} files, ${release.tests!.passed} tests passed`, "success");
+    const changed = changes ? `, ${changes.filter((change) => change.status !== "added").length} of ${project!.name}'s files changed and ${changes.filter((change) => change.status === "added").length} added` : "";
+    this.#activity(run.wo, station.id, `Release ready: ${release.files} files${changed}, ${release.tests!.passed} tests passed`, "success");
   }
 
   // ─── GitHub work orders ─────────────────────────────────────────────────────────────────────────────────────
@@ -2126,12 +2255,12 @@ export class Factory {
     const dependencyFiles = this.#dependencyFiles(run, task);
     if (!station.seeded) {
       if (worker.messages > 1) throw new StationError("conflict", "This builder started work before its inputs were prepared. Stop it and start a fresh builder with the readiness task.");
-      await this.#seedWorker(run, station, builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot));
+      await this.#seedWorker(run, station, builderSeed(run.wo, run.wo.plan!, task, dependencyFiles, this.#skillsRoot, this.#inputs(run)));
     }
     return {
       ok: true, ready: true, summary: `Prepared **${worker.name}** for ${task.title}`,
       worker: worker.name, alreadyWorking: worker.messages > 1,
-      message: buildPrompt(run.wo, task, [...dependencyFiles.keys()]),
+      message: buildPrompt(run.wo, task, [...dependencyFiles.keys()], this.#notes(run)),
     };
   }
 
@@ -2247,7 +2376,8 @@ export class Factory {
     const worker = await this.#workerFor(run, station, ref, true);
     const revision = this.#inputRevision(run);
     const outcomes = this.#outcomes(run);
-    const seed = releaseSeed(run.wo, run.wo.plan!, outcomes, this.#skillsRoot);
+    const inputs = this.#inputs(run);
+    const seed = releaseSeed(run.wo, run.wo.plan!, outcomes, this.#skillsRoot, inputs);
     if (station.seeded && station.inputRevision !== revision) throw new StationError("conflict", "The accepted builder outputs changed. Stop the release worker and start a fresh one.");
     if (!station.seeded) {
       if (worker.messages > 1) throw new StationError("conflict", "The release started before its inputs were prepared. Stop it and start a fresh release worker.");
@@ -2280,12 +2410,12 @@ export class Factory {
       await this.#syncWorkers(run, true);
       this.#requireAcceptedTasks(run);
       if (this.#inputRevision(run) !== revision) throw new StationError("conflict", "A builder changed while the factory prepared the release. Check and review it again.");
-      await this.#seedWorker(run, station, releaseSeed(run.wo, run.wo.plan!, copied, this.#skillsRoot).files, revision);
+      await this.#seedWorker(run, station, releaseSeed(run.wo, run.wo.plan!, copied, this.#skillsRoot, inputs).files, revision);
       this.#setWorkOrder(run, { status: "releasing" });
     }
     return {
       ok: true, ready: true, worker: worker.name, summary: "Verified copied outputs and prepared the **release** sandbox",
-      message: releasePrompt(run.wo, run.wo.plan!, seed.conflicts),
+      message: releasePrompt(run.wo, run.wo.plan!, seed.conflicts, this.#notes(run)),
     };
   }
 
@@ -2722,7 +2852,7 @@ export class Factory {
       const media = info.path.startsWith("media/") ? mediaTypeOf(info.path) : undefined;
       if (media && info.size <= MAX_MEDIA_BYTES) {
         bytes = await this.#readArtifactWith(station, info.path, () => artifacts.readBytes(info.path, { version: info.version }));
-      } else if (isTextPath(info.path) && info.size <= MAX_TEXT_BYTES) {
+      } else if ((isTextPath(info.path) || this.#projectOutput(run, info.path)) && info.size <= MAX_TEXT_BYTES) {
         const text = await this.#readArtifact(artifacts, station, info.path, info.version);
         content = text.includes("\u0000") ? undefined : text;
       }
@@ -2747,6 +2877,15 @@ export class Factory {
       this.#emitItem(run.wo, { stationId: station.id, kind: "artifact", text: `Published ${added} file${added === 1 ? "" : "s"}`, level: "info" });
     }
     return list;
+  }
+
+  /**
+   * A builder's or the release's file in a work order that changes an existing project: kept as text whatever its
+   * extension (a `.vue` or `.hbs` file, `go.mod`), as long as it has no NUL byte, so a fix to it reaches the review, the
+   * release, and the app that routed the work order.
+   */
+  #projectOutput(run: Run, path: string): boolean {
+    return Boolean(run.wo.inputs?.project) && (path.startsWith("files/") || path.startsWith("bundle/"));
   }
 
   /**
@@ -2998,6 +3137,7 @@ export function toSummary(wo: WorkOrder): WorkOrderSummary {
     taskCount: wo.taskCount,
     ...(wo.tests ? { tests: wo.tests } : {}),
     ...(wo.error ? { error: wo.error } : {}),
+    ...(wo.origin ? { origin: wo.origin } : {}),
     ...(wo.github
       ? {
           github: {

@@ -1,12 +1,14 @@
 // Incident Commander's control room: opens incidents from alerts, keeps one IncidentRun per incident, routes the
-// platform's webhook deliveries to them, and publishes what changed to the browsers watching.
+// platform's webhook deliveries to them, follows their Software Factory work orders, and publishes what changed to the
+// browsers watching.
 import { randomInt, randomUUID } from "node:crypto";
 import { isManagedCopilotError, verifyWebhook, type VerifiedWebhookEvent } from "@managed-copilot/sdk";
-import type { AlertInfo, AppState, IncidentSummary, IncidentView, IntegrationsView, ServerEvent } from "../shared/types.js";
+import type { AlertInfo, AppSettings, AppState, FixRoute, IncidentSummary, IncidentView, IntegrationsView, ServerEvent } from "../shared/types.js";
 import { parseAlertPayload, type IncomingAlert } from "./alerts.js";
 import type { AppConfig } from "./config.js";
 import { DEMO_SERVICE, sampleNotification, type DemoSeed } from "./demo.js";
 import { AppError, errorText } from "./errors.js";
+import { SoftwareFactory, type FactoryClient } from "./factory.js";
 import type { EventHub } from "./hub.js";
 import { IncidentRun, summarize } from "./incident.js";
 import { log } from "./log.js";
@@ -24,12 +26,18 @@ const SOURCE_LABEL: Record<AlertInfo["source"], string> = {
   generic: "webhook",
 };
 
+/** Software Factory was chosen but isn't configured: the words every routing app uses. */
+export function factoryUnavailable(): AppError {
+  return new AppError("factory_unavailable", "Software Factory isn't connected. Start it with `aspire run`, or set SOFTWARE_FACTORY_URL.", 503);
+}
+
 export class Commander {
   readonly config: AppConfig;
   readonly platform: IncidentPlatform;
   readonly #store: Store;
   readonly #catalog: ServiceCatalog;
   readonly #hub: EventHub;
+  readonly #factory: FactoryClient | undefined;
   readonly #runs = new Map<string, IncidentRun>();
   readonly #pending = new Set<string>();
   #publishTimer: NodeJS.Timeout | undefined;
@@ -41,6 +49,7 @@ export class Commander {
     this.#store = store;
     this.#catalog = catalog;
     this.#hub = hub;
+    this.#factory = config.factory ? new SoftwareFactory(config.factory) : undefined;
   }
 
   start(): void {
@@ -48,6 +57,8 @@ export class Commander {
     this.platform.onConnected(() => {
       for (const incident of this.#store.list()) void this.#run(incident.id).resume();
     });
+    // Work orders are followed from the store, whether or not the platform is connected yet.
+    for (const incident of this.#store.list()) if (incident.factory) this.#run(incident.id).followFactory();
   }
 
   async close(): Promise<void> {
@@ -65,6 +76,7 @@ export class Commander {
           platform: this.platform,
           store: this.#store,
           catalog: this.#catalog,
+          factory: this.#factory,
           workerEnvironment: () => this.platform.status.environments.find((env) => env.role === "worker")?.name ?? `${this.config.environment}-node`,
           changed: (changed) => this.#changed(changed),
         },
@@ -79,13 +91,35 @@ export class Commander {
 
   integrations(): IntegrationsView {
     const lastWebhookAt = this.#store.lastWebhookAt;
+    const factory = this.config.factory;
     return {
       alertsUrl: `${this.config.publicUrl}/api/alerts`,
       alertsConfigured: this.config.alertSecret !== undefined,
       webhookConfigured: this.config.webhookSecret !== undefined,
       ...(lastWebhookAt ? { lastWebhookAt } : {}),
       deployConfigured: this.config.deploy !== undefined,
+      factory: { configured: factory !== undefined, ...(factory ? { url: factory.publicUrl } : {}) },
     };
+  }
+
+  /** How the next incidents' fixes are made: the chosen route, or Software Factory whenever it's connected. */
+  fixRoute(): FixRoute {
+    const chosen = this.#store.settings.fixRoute ?? (this.config.factory ? "factory" : "workers");
+    return chosen === "factory" && !this.config.factory ? "workers" : chosen;
+  }
+
+  settings(): AppSettings {
+    return { fixRoute: this.fixRoute() };
+  }
+
+  /** Chooses how the next incidents' fixes are made. Incidents already open keep theirs. */
+  setFixRoute(route: FixRoute): AppSettings {
+    if (route === "factory" && !this.config.factory) throw factoryUnavailable();
+    this.#store.setSettings({ fixRoute: route });
+    const settings = this.settings();
+    this.#hub.publish({ type: "settings", settings });
+    log.info("Changed how fixes are made", { fixRoute: route });
+    return settings;
   }
 
   summaries(): IncidentSummary[] {
@@ -93,7 +127,7 @@ export class Commander {
   }
 
   state(): AppState {
-    return { platform: this.platform.status, integrations: this.integrations(), incidents: this.summaries() };
+    return { platform: this.platform.status, integrations: this.integrations(), settings: this.settings(), incidents: this.summaries() };
   }
 
   /** What a browser gets first on the event stream. */
@@ -101,6 +135,7 @@ export class Commander {
     return [
       { type: "platform", platform: this.platform.status },
       { type: "integrations", integrations: this.integrations() },
+      { type: "settings", settings: this.settings() },
       { type: "incidents", incidents: this.summaries() },
     ];
   }
@@ -139,13 +174,17 @@ export class Commander {
     return [...new Set(ids)];
   }
 
-  /** The labeled demo: a sample Alertmanager notification for the bundled demo service, with logs that match it. */
-  async simulate(): Promise<string> {
+  /**
+   * The labeled demo: a sample Alertmanager notification for the bundled demo service, with logs that match it.
+   * `fixRoute` overrides the app's setting for this incident.
+   */
+  async simulate(fixRoute?: FixRoute): Promise<string> {
+    if (fixRoute === "factory" && !this.config.factory) throw factoryUnavailable();
     const demo: DemoSeed = { seed: randomInt(1, 2 ** 31), at: new Date().toISOString() };
     const { stats } = await this.#catalog.workspace(DEMO_SERVICE, demo);
     if (!stats) throw new AppError("demo_unavailable", "The demo service's files are missing from this installation.", 500);
     const [incoming] = parseAlertPayload(sampleNotification(stats, demo, randomUUID().replace(/-/g, "").slice(0, 16)));
-    return this.#open({ ...incoming!.alert, source: "simulated" }, demo);
+    return this.#open({ ...incoming!.alert, source: "simulated" }, demo, undefined, fixRoute ?? this.fixRoute());
   }
 
   async #receive(status: IncomingAlert["status"], alert: AlertInfo): Promise<string> {
@@ -172,11 +211,11 @@ export class Commander {
     return this.#open(alert, demo, service?.version);
   }
 
-  async #open(alert: AlertInfo, demo: DemoSeed | undefined, version?: string): Promise<string> {
+  async #open(alert: AlertInfo, demo: DemoSeed | undefined, version?: string, fixRoute: FixRoute = this.fixRoute()): Promise<string> {
     const resolvedVersion = version ?? (demo ? (await this.#catalog.find(alert.service))?.version : undefined);
-    const incident = this.#store.create(alert, demo, resolvedVersion);
+    const incident = this.#store.create(alert, demo, resolvedVersion, fixRoute);
     this.#store.note(incident.id, "alert", `${alert.name} fired (${SOURCE_LABEL[alert.source]})`, alert.description ?? alert.summary, alert.startsAt);
-    log.info("Opened an incident", { incident: incident.id, service: alert.service, severity: alert.severity, source: alert.source });
+    log.info("Opened an incident", { incident: incident.id, service: alert.service, severity: alert.severity, source: alert.source, fixRoute });
     this.#changed(incident.id);
     if (this.platform.status.state === "connected") void this.#run(incident.id).start();
     else {

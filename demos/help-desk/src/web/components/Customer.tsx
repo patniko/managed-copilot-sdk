@@ -1,10 +1,11 @@
-import { ArrowLeftIcon, CheckIcon, ContainerIcon, CopilotIcon, CpuIcon, DotFillIcon, LockIcon, PaperAirplaneIcon, PlugIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { ArrowLeftIcon, BugIcon, CheckIcon, ContainerIcon, CopilotIcon, CpuIcon, DotFillIcon, LockIcon, PaperAirplaneIcon, PlugIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
 import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { CustomerCard, Ticket } from "../../shared/types.js";
+import { BUG_AREA_INFO, type BugReport, type CustomerCard, type Ticket } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { customerLine, inlineMarkdown, money, operatorOutcome, premium, toolArgs } from "../lib/format.js";
+import { customerLine, inlineMarkdown, money, operatorOutcome, plural, premium, toolArgs } from "../lib/format.js";
 import { wallHref } from "../lib/router.js";
 import { answer, sendAsCustomer, useStore } from "../lib/store.js";
+import { IssueAction } from "./Issues.js";
 import { CustomerAvatar, StatusLabel, TONE_TEXT } from "./ui/Status.js";
 
 /** One customer's conversation: their support widget, and what happened behind it. */
@@ -208,6 +209,8 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
 
       {ticket.approval ? <Approval customerId={customer.id} ticket={ticket} /> : null}
 
+      {ticket.bug ? <ReportedIssue bug={ticket.bug} /> : null}
+
       <div className="flex min-w-0 items-center gap-2 text-sm">
         <LockIcon size={16} className="shrink-0 text-fg-muted" />
         <span className="shrink-0 text-fg-muted">Sees only</span>
@@ -233,7 +236,13 @@ function BehindTheScenes({ customer, ticket }: { readonly customer: CustomerCard
               const outcome = operatorOutcome(item);
               return (
                 <li key={item.id} className="Box-row flex min-w-0 items-center gap-2 py-2 text-sm">
-                  {item.blocked ? <ShieldLockIcon size={16} className="shrink-0 text-fg-danger" /> : <PlugIcon size={16} className="shrink-0 text-fg-muted" />}
+                  {item.blocked ? (
+                    <ShieldLockIcon size={16} className="shrink-0 text-fg-danger" />
+                  ) : item.name === "report_bug" ? (
+                    <BugIcon size={16} className="shrink-0 text-fg-done" />
+                  ) : (
+                    <PlugIcon size={16} className="shrink-0 text-fg-muted" />
+                  )}
                   <span className="shrink-0 font-mono text-xs">{item.name}</span>
                   <span className="shrink-0 text-xs text-fg-muted">{toolArgs(item)}</span>
                   <span className={cx("ml-auto min-w-0 truncate text-right text-xs", TONE_TEXT[outcome.tone])} title={outcome.text}>
@@ -309,5 +318,44 @@ function Approval({ customerId, ticket }: { readonly customerId: string; readonl
         </div>
       </div>
     </div>
+  );
+}
+
+/** The problem with the store's website the agent reported, and the software issue it's part of. */
+function ReportedIssue({ bug }: { readonly bug: BugReport }) {
+  const issue = useStore((state) => state.issues.find((candidate) => candidate.area === bug.area));
+  return (
+    <section aria-label="Software issue" className="Box animate-fade-in">
+      <div className="Box-header py-2">
+        <BugIcon size={16} className="shrink-0 text-fg-done" />
+        <h2 className="Box-title">Software issue reported</h2>
+        <span className="Label Label--done ml-auto">{BUG_AREA_INFO[bug.area].label}</span>
+      </div>
+      <div className="px-4 py-3 text-sm">
+        <p className="font-semibold">{bug.title}</p>
+        <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5">
+          <dt className="text-fg-muted">What happened</dt>
+          <dd>{bug.whatHappened}</dd>
+          <dt className="text-fg-muted">Expected</dt>
+          <dd>{bug.expected}</dd>
+          {bug.orderId ? (
+            <>
+              <dt className="text-fg-muted">Order</dt>
+              <dd>
+                <span className="branch-name">{bug.orderId}</span>
+              </dd>
+            </>
+          ) : null}
+        </dl>
+      </div>
+      {issue ? (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line-muted px-4 py-2.5">
+          <span className="min-w-0 flex-1 basis-72 truncate text-xs text-fg-muted" title={issue.reports.map((report) => report.name).join(", ")}>
+            {issue.title} · {plural(issue.reports.length, "ticket")}
+          </span>
+          <IssueAction issue={issue} />
+        </div>
+      ) : null}
+    </section>
   );
 }

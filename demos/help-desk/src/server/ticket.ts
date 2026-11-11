@@ -1,7 +1,7 @@
 // One customer's conversation: a session of the help desk's shared environment, created with the store's tools bound to
 // that customer. Refunds and cancellations wait in the permission handler until the operator answers on the wall.
 import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
-import type { ApprovalRequest, Ticket, TicketStatus } from "../shared/types.js";
+import type { ApprovalRequest, BugReport, Ticket, TicketStatus } from "../shared/types.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { log } from "./log.js";
 import type { DeskPlatform, SupportSession } from "./platform.js";
@@ -80,6 +80,11 @@ export class TicketSession {
   /** Refunds and cancellations its history records as done. */
   effects(): Effect[] {
     return this.#transcript.effects();
+  }
+
+  /** The problem with the store's website its agent reported, if any. */
+  get bug(): BugReport | undefined {
+    return this.#transcript.bug;
   }
 
   #newTranscript(): Transcript {
@@ -313,6 +318,7 @@ export class TicketSession {
   view(): Ticket {
     const approval = [...this.#approvals.values()][0]?.request;
     const problem = this.#problem ?? this.#transcript.problem;
+    const bug = this.#transcript.bug;
     return {
       customerId: this.customer.id,
       ...(this.#created ? { sessionId: this.sessionId } : {}),
@@ -320,6 +326,7 @@ export class TicketSession {
       items: this.#transcript.items,
       ...(approval ? { approval } : {}),
       blocked: this.#transcript.blocked,
+      ...(bug ? { bug } : {}),
       ...(this.#premiumRequests !== undefined ? { premiumRequests: this.#premiumRequests } : {}),
       ...(problem ? { problem } : {}),
     };

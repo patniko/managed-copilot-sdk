@@ -1,12 +1,13 @@
 // Fakes for Data Desk's platform seam: a stock-shaped session whose events and permission prompts the test drives,
-// and a platform that keeps sessions, written files, and published outputs in memory.
+// a platform that keeps sessions, written files, and published outputs in memory, and Software Factory in memory.
 import type { MessageOptions, PermissionRequest, ResumeSessionConfig, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 import type { ArtifactInfo, PlatformEvent, SessionInfo } from "@managed-copilot/sdk";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { DeskConfig } from "../src/server/config.js";
+import type { FactoryClient, WorkOrderInfo, WorkOrderRequest } from "../src/server/factory.js";
 import type { DeskPlatform, DeskSession } from "../src/server/platform.js";
-import type { EnvironmentView, PlatformStatus } from "../src/shared/types.js";
+import type { EnvironmentView, PlatformStatus, WorkOrderStatus } from "../src/shared/types.js";
 
 let sequence = 0;
 const base = Date.parse("2026-11-04T10:00:00.000Z");
@@ -90,6 +91,8 @@ export class FakePlatform implements DeskPlatform {
   readonly infos = new Map<string, SessionInfo>();
   readonly written: { sessionId: string; path: string; bytes: number }[] = [];
   readonly artifacts = new Map<string, ArtifactInfo[]>();
+  /** Published files' contents by path; others read as a small SVG chart. */
+  readonly outputBytes = new Map<string, Uint8Array>();
   readonly deleted: string[] = [];
   /** Fails the next `writeFile` calls. */
   writeFailures = 0;
@@ -168,7 +171,7 @@ export class FakePlatform implements DeskPlatform {
   }
 
   async readOutput(_sessionId: string, path: string): Promise<Uint8Array> {
-    return new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg"><title>${path}</title></svg>`);
+    return this.outputBytes.get(path) ?? new TextEncoder().encode(`<svg xmlns="http://www.w3.org/2000/svg"><title>${path}</title></svg>`);
   }
 
   /** Moves a session's recorded placement into a sandbox. */
@@ -193,6 +196,41 @@ export function info(id: string, placement: "shared" | "sandbox", sandboxId?: st
 }
 
 export const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+/** Software Factory in memory: it keeps the work orders Data Desk creates, and the test moves them along. */
+export class FakeFactory implements FactoryClient {
+  readonly configured = true;
+  readonly publicUrl = "http://factory.test";
+  /** Every request Data Desk sent, as it sent it. */
+  readonly created: WorkOrderRequest[] = [];
+  /** Newest first, as `GET /api/work-orders` lists them. */
+  orders: WorkOrderInfo[] = [];
+  /** Fails `create` (and `list`) with this until cleared. */
+  failure: Error | undefined;
+  listCalls = 0;
+  #number = 11;
+
+  async create(request: WorkOrderRequest): Promise<WorkOrderInfo> {
+    if (this.failure) throw this.failure;
+    // A copy, as the request crosses the wire.
+    this.created.push(JSON.parse(JSON.stringify(request)) as WorkOrderRequest);
+    const number = ++this.#number;
+    const order: WorkOrderInfo = { id: `wo_${number}`, number, title: request.title, status: "queued", createdAt: new Date().toISOString(), origin: request.origin };
+    this.orders.unshift(order);
+    return order;
+  }
+
+  async list(): Promise<WorkOrderInfo[]> {
+    this.listCalls += 1;
+    if (this.failure) throw this.failure;
+    return [...this.orders];
+  }
+
+  /** Moves a work order along, as the factory does. */
+  set(id: string, status: WorkOrderStatus, error?: string): void {
+    this.orders = this.orders.map((order) => (order.id === id ? { ...order, status, ...(error ? { error: { message: error } } : {}) } : order));
+  }
+}
 
 export function testConfig(dataDir: string): DeskConfig {
   return {

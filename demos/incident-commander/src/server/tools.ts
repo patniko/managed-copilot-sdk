@@ -1,5 +1,6 @@
 // The app's own tools on the coordinator session (stock `defineTool`). They run in this server: live while the app is
-// attached, or through the platform's webhook while it isn't. Only deploy_fix asks a person first.
+// attached, or through the platform's webhook while it isn't. Only deploy_fix asks a person first. Incidents whose fix
+// goes through Software Factory also get route_fix_to_factory and apply_factory_fix.
 import { defineTool, type Tool } from "@github/copilot-sdk";
 import { TOOLS } from "./runbook.js";
 
@@ -7,6 +8,15 @@ export interface UpdateInput {
   readonly note: string;
   readonly rootCause?: string;
   readonly evidence: readonly string[];
+}
+
+export interface RouteFixInput {
+  readonly summary: string;
+  readonly rootCause: string;
+  readonly failingPath: string;
+  readonly expected: string;
+  /** The service files the fix likely touches, as the model gave them. */
+  readonly files: readonly string[];
 }
 
 export interface DeployInput {
@@ -31,6 +41,8 @@ export const failure = (text: string): ToolOutcome => ({ textResultForLlm: text,
 export interface ToolHost {
   openWorkspace(): Promise<ToolOutcome>;
   update(input: UpdateInput): ToolOutcome;
+  routeFix(input: RouteFixInput): Promise<ToolOutcome>;
+  applyFactoryFix(): Promise<ToolOutcome>;
   deploy(input: DeployInput, toolCallId: string): Promise<ToolOutcome>;
   postmortem(input: PostmortemInput): ToolOutcome;
 }
@@ -75,6 +87,17 @@ export function parseUpdate(value: unknown): UpdateInput {
   return { note: text(input, "note", 400, true), ...(rootCause ? { rootCause } : {}), evidence: texts(input, "evidence", 6, 240) };
 }
 
+export function parseRouteFix(value: unknown): RouteFixInput {
+  const input = args(value);
+  return {
+    summary: text(input, "summary", 200, true),
+    rootCause: text(input, "rootCause", 600, true),
+    failingPath: text(input, "failingPath", 400, true),
+    expected: text(input, "expected", 600, true),
+    files: texts(input, "files", 20, 300),
+  };
+}
+
 export function parseDeploy(value: unknown): DeployInput {
   const input = args(value);
   const files = texts(input, "files", 20, 300);
@@ -105,7 +128,38 @@ async function guarded(run: () => ToolOutcome | Promise<ToolOutcome>): Promise<T
 
 const listOf = (description: string) => ({ type: "array", items: { type: "string" }, description });
 
-export function incidentTools(host: ToolHost): Tool<unknown>[] {
+/** Software Factory's tools: only on incidents whose fix goes through it. */
+function factoryTools(host: ToolHost): Tool<unknown>[] {
+  return [
+    defineTool(TOOLS.routeFix, {
+      description:
+        "Routes the incident's fix to Software Factory as a work order, with the service's code and tests and what you found. The factory plans the fix, builds it in its own sandboxes, reviews it, and releases it with tests; Incident Commander messages you when it's released. Call it once, after triage.",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string", description: "One line: what's broken, for example: Checkout crashes on expired coupon codes." },
+          rootCause: { type: "string", description: "The root cause: one or two sentences." },
+          failingPath: { type: "string", description: "The failing code path, with file:line, for example: POST /checkout → priceCart (src/cart.js:21) → applyDiscount (src/discounts.js:14)." },
+          expected: { type: "string", description: "What the code should do instead." },
+          files: listOf("The service files the fix likely touches, relative to the service's folder, for example src/discounts.js."),
+        },
+        required: ["summary", "rootCause", "failingPath", "expected", "files"],
+      },
+      skipPermission: true,
+      handler: (input: unknown) => guarded(() => host.routeFix(parseRouteFix(input))),
+    }),
+    defineTool(TOOLS.applyFix, {
+      description:
+        "Copies the fix Software Factory released (its added and changed files) into /workspace/<service> in your own sandbox, and lists them. Call it when Incident Commander says the factory released the fix.",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+      skipPermission: true,
+      handler: () => guarded(() => host.applyFactoryFix()),
+    }),
+  ];
+}
+
+/** The app's tools for one incident. `factory`: its fix goes through Software Factory. */
+export function incidentTools(host: ToolHost, options: { readonly factory?: boolean } = {}): Tool<unknown>[] {
   return [
     defineTool(TOOLS.openWorkspace, {
       description:
@@ -128,6 +182,7 @@ export function incidentTools(host: ToolHost): Tool<unknown>[] {
       skipPermission: true,
       handler: (input: unknown) => guarded(() => host.update(parseUpdate(input))),
     }),
+    ...(options.factory ? factoryTools(host) : []),
     defineTool(TOOLS.deploy, {
       description:
         "Deploys the verified fix to production from your own sandbox's copy of the service. A person reviews the change and approves it first; that can take hours.",

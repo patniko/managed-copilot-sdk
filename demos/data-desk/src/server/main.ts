@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { Datasets } from "./datasets.js";
+import { createFactory } from "./factory.js";
 import { createRequestHandler, type Middleware } from "./http.js";
 import { EventHub } from "./hub.js";
 import { log } from "./log.js";
@@ -15,7 +16,8 @@ datasets.load();
 const store = new Store(config.dataDir);
 const hub = new EventHub();
 const platform = new Platform(config);
-const analyses = new AnalysisManager(platform, config, store, datasets, hub);
+if (process.env.SOFTWARE_FACTORY_URL?.trim() && !config.factoryUrl) log.warn("SOFTWARE_FACTORY_URL isn't an http(s) address, so sending to Software Factory is off");
+const analyses = new AnalysisManager(platform, config, store, datasets, hub, createFactory(config));
 analyses.start();
 
 const server = createServer();
@@ -40,7 +42,11 @@ await new Promise<void>((resolve, reject) => {
 });
 
 platform.start();
-log.info(`Data Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, { environment: config.environment, model: config.model });
+log.info(`Data Desk: http://localhost:${config.port}${config.dev ? " (dev)" : ""}`, {
+  environment: config.environment,
+  model: config.model,
+  softwareFactory: config.factoryUrl ?? "not set",
+});
 
 let stopping = false;
 async function shutdown(signal: string): Promise<void> {

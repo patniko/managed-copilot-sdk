@@ -9,6 +9,7 @@ import {
   PersonIcon,
   RocketIcon,
   ShieldIcon,
+  WorkflowIcon,
   XCircleFillIcon,
   type Icon,
 } from "@primer/octicons-react";
@@ -21,6 +22,7 @@ const KIND: Record<TimelineKind, { readonly icon: Icon; readonly tone: string }>
   note: { icon: CopilotIcon, tone: "text-fg-done" },
   sandbox: { icon: ContainerIcon, tone: "text-fg-accent" },
   worker: { icon: ContainerIcon, tone: "text-fg-accent" },
+  factory: { icon: WorkflowIcon, tone: "text-display-indigo" },
   approval: { icon: ShieldIcon, tone: "text-fg-attention" },
   deploy: { icon: RocketIcon, tone: "text-fg-success" },
   postmortem: { icon: NoteIcon, tone: "text-fg-done" },

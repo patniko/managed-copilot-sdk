@@ -1,5 +1,17 @@
 import { useSyncExternalStore } from "react";
-import { SIMULATION_SIZES, type Counters, type CustomerCard, type DeskInfo, type PlatformStatus, type RunInfo, type ServerEvent, type SimulationSize, type Ticket } from "../../shared/types.js";
+import {
+  SIMULATION_SIZES,
+  type BugArea,
+  type Counters,
+  type CustomerCard,
+  type DeskInfo,
+  type PlatformStatus,
+  type RunInfo,
+  type ServerEvent,
+  type SimulationSize,
+  type SoftwareIssue,
+  type Ticket,
+} from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
 
 export type Connection = "connecting" | "open" | "reconnecting";
@@ -20,6 +32,8 @@ export interface StoreState {
   readonly run?: RunInfo;
   /** The current simulation's tickets, by customer ID. */
   readonly tickets: Readonly<Record<string, Ticket>>;
+  /** The current simulation's software issues. */
+  readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
   /** How many customers the next simulation starts (remembered in this browser). */
   readonly size: SimulationSize;
@@ -27,6 +41,8 @@ export interface StoreState {
   readonly working?: "simulate" | "end";
   /** Approvals being answered from this page, by approval ID. */
   readonly answering: Readonly<Record<string, true>>;
+  /** Issues being sent to Software Factory from this page, by area. */
+  readonly routing: Readonly<Partial<Record<BugArea, true>>>;
   readonly toasts: readonly Toast[];
 }
 
@@ -47,9 +63,11 @@ let state: StoreState = {
   connection: "connecting",
   customers: [],
   tickets: {},
+  issues: [],
   counters: ZERO,
   size: savedSize(),
   answering: {},
+  routing: {},
   toasts: [],
 };
 const listeners = new Set<() => void>();
@@ -80,12 +98,14 @@ export function reduce(current: StoreState, event: ServerEvent): StoreState {
       return { ...current, platform: event.platform, desk: event.desk };
     case "run": {
       const { run: _previous, ...rest } = current;
-      return { ...(event.run ? { ...rest, run: event.run } : rest), tickets: byCustomer(event.tickets) };
+      return { ...(event.run ? { ...rest, run: event.run } : rest), tickets: byCustomer(event.tickets), issues: event.issues };
     }
     case "ticket":
       // Only the current simulation's customers: a late update of an ended one is dropped.
       if (!current.run || !(event.ticket.customerId in current.tickets)) return current;
       return { ...current, tickets: { ...current.tickets, [event.ticket.customerId]: event.ticket } };
+    case "issues":
+      return current.run ? { ...current, issues: event.issues } : current;
     case "counters":
       return { ...current, counters: event.counters };
   }
@@ -103,6 +123,7 @@ async function loadState(): Promise<void> {
         desk: loaded.desk,
         customers: loaded.customers,
         tickets: byCustomer(loaded.tickets),
+        issues: loaded.issues,
         counters: loaded.counters,
       };
     });
@@ -113,7 +134,7 @@ async function loadState(): Promise<void> {
 
 // ─── Server-sent events ──────────────────────────────────────────────────────────────────────────────────────
 
-const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "counters"];
+const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "issues", "counters"];
 let source: EventSource | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let backoffMs = 1_000;
@@ -237,5 +258,22 @@ export async function sendAsCustomer(customerId: string, text: string): Promise<
   } catch (error) {
     showToast("The message wasn't sent", errorMessage(error));
     return false;
+  }
+}
+
+/** Sends a software issue to Software Factory as a work order. */
+export async function routeIssue(area: BugArea): Promise<void> {
+  if (state.routing[area]) return;
+  setState((current) => ({ ...current, routing: { ...current.routing, [area]: true } }));
+  try {
+    const issue = await api.routeIssue(area);
+    setState((current) => ({ ...current, issues: current.issues.map((candidate) => (candidate.area === issue.area ? issue : candidate)) }));
+  } catch (error) {
+    showToast("Couldn't send the issue to Software Factory", errorMessage(error));
+  } finally {
+    setState((current) => {
+      const { [area]: _done, ...routing } = current.routing;
+      return { ...current, routing };
+    });
   }
 }

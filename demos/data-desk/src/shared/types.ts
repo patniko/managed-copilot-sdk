@@ -118,6 +118,8 @@ export type ChatItem =
       readonly resultId?: string;
     }
   | { readonly kind: "moved"; readonly id: string; readonly at: string; readonly durationMs?: number; readonly sandboxId?: string }
+  /** The person sent something from this analysis to Software Factory: placed where it happened in the conversation. */
+  | { readonly kind: "factory"; readonly id: string; readonly at: string; readonly routing: FactoryRoutingView }
   | { readonly kind: "error"; readonly id: string; readonly text: string; readonly at: string };
 
 /** The agent asked to move into a sandbox and waits for the person. */
@@ -171,8 +173,68 @@ export interface AnalysisView extends AnalysisSummary {
   /** When the move started (approved), while it runs. */
   readonly movingSince?: string;
   readonly usage?: UsageView;
+  /** What this analysis sent to Software Factory, oldest first, with each work order's latest status. */
+  readonly factory?: readonly FactoryRoutingView[];
   /** Something went wrong that the person should know: one line. */
   readonly problem?: string;
+}
+
+// ─── Software Factory ──────────────────────────────────────────────────────────────────────────────────────────
+
+/** A work order's status in Software Factory. */
+export type WorkOrderStatus = "queued" | "planning" | "building" | "releasing" | "completed" | "failed" | "cancelled";
+
+/** Something the person sent from an analysis to Software Factory, and what became of the work order. */
+export interface FactoryRoutingView {
+  readonly workOrderId: string;
+  /** Shown as `WO-0012`. */
+  readonly number: number;
+  readonly title: string;
+  /** The work order's page in Software Factory, for people. */
+  readonly url: string;
+  readonly status: WorkOrderStatus;
+  readonly sentAt: string;
+  /** What was sent, in words: "Revenue by store (3 groups)", "Copilot's answer", ... */
+  readonly items: readonly string[];
+  /** Why the work order failed, when it did. */
+  readonly error?: string;
+  /** Software Factory no longer has the work order (it was deleted there). */
+  readonly gone?: boolean;
+}
+
+/** Whether Data Desk can send work to Software Factory (`SOFTWARE_FACTORY_URL`), and its address for people. */
+export interface FactoryStatus {
+  readonly configured: boolean;
+  readonly url?: string;
+}
+
+/** One of an analysis's tables: the dataset's rows, or a table Copilot made with Data Desk's tools. */
+export type TableRef = { readonly kind: "dataset" } | { readonly kind: "result"; readonly resultId: string };
+
+/** `POST /api/analyses/:id/factory`: what to send to Software Factory, and what it should build. */
+export interface SendToFactoryRequest {
+  readonly title: string;
+  /** What the factory should build: a few sentences. */
+  readonly note: string;
+  readonly include: {
+    /** The table the grid shows; for the dataset, how many of its first rows the grid has loaded. */
+    readonly view?: TableRef & { readonly rows?: number };
+    /** Rows the person selected (positions in the table), per table. */
+    readonly selections?: readonly { readonly table: TableRef; readonly rows: readonly number[] }[];
+    /** Other tables Copilot made, by ID. */
+    readonly results?: readonly string[];
+    /** Published outputs (charts and text files), by path. */
+    readonly outputs?: readonly string[];
+    /** The whole dataset file. */
+    readonly dataset?: boolean;
+    /** Copilot's latest answer: the insight. */
+    readonly answer?: boolean;
+  };
+}
+
+export interface SendToFactoryResponse {
+  readonly routing: FactoryRoutingView;
+  readonly analysis: AnalysisView;
 }
 
 // ─── API ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -186,6 +248,8 @@ export interface DeskState {
   readonly canLaunchTerminal: boolean;
   /** Largest CSV upload, in bytes. */
   readonly maxUploadBytes: number;
+  /** Software Factory, where an analysis's insight can be sent to be built. */
+  readonly factory: FactoryStatus;
 }
 
 export interface CreateAnalysisRequest {

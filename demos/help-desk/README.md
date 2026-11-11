@@ -3,8 +3,9 @@
 A support rush on one shared runtime. **Simulate 25 customers** and Help Desk starts 25 real Copilot sessions at once,
 one per customer of a demo store, Contoso Outdoors. Each session can only reach its own customer's orders through the
 store's tools, refunds and cancellations wait for you on the wall, and the counters show what it took: **25 sessions,
-1 runtime, 0 sandboxes**. The app is ordinary Node code built on the stock `@github/copilot-sdk` and
-`@managed-copilot/sdk`.
+1 runtime, 0 sandboxes**. When the store's website lets a customer down, their agent reports it, and one click sends the
+issue to [Software Factory](../software-factory/README.md) to fix. The app is ordinary Node code built on the stock
+`@github/copilot-sdk` and `@managed-copilot/sdk`.
 
 ![The wall mid-rush: 25 sessions, 1 runtime, 0 sandboxes; six tiles glow yellow with a refund or cancellation to approve, and two show "Blocked: not their order"](docs/screenshots/wall.png)
 
@@ -26,6 +27,9 @@ cancellations wait for the operator (yellow), and two customers asked about orde
 - **The economics, counted.** Sessions and messages come from the conversations; runtimes and sandboxes from the
   platform's session records (`placement`, `sandbox`); premium requests from each session's own usage metrics. A full
   rush on Claude Haiku 4.5 costs 8.25 premium requests: 0.33 per customer.
+- **From a support ticket to a fix.** Agents report problems with the store's website with a `report_bug` tool, the
+  wall groups the reports into software issues, and **Send to Software Factory** turns one into a work order to fix
+  the website's code ([below](#software-issues-fixed-by-software-factory)).
 
 <img src="docs/screenshots/approval.png" alt="Sofia's conversation: her support widget on the left, and on the right where the session runs (shared runtime, tools in Help Desk, no sandbox), a refund of $39.00 waiting with Decline and Approve, the two orders the session can see, and its tool calls" width="900">
 
@@ -54,8 +58,10 @@ Help Desk opens at <http://localhost:7440>. To demo it:
    while runtimes stay at 1 and sandboxes at 0. The first answers arrive within seconds.
 2. Approve a refund on a yellow tile, or decline one with **×**.
 3. Open **Liam O'Brien** to show the blocked lookup, then **Sofia Martinez** to show her refund as she sees it.
-4. Type as a customer in their widget to keep a conversation going.
-5. End the simulation from **⋯**: its sessions are deleted. Simulating again replaces it the same way.
+4. In **Software issues**, click **Send to Software Factory** on *Promo codes rejected at checkout*, then **Open in
+   Software Factory** to follow the work order there (see [below](#software-issues-fixed-by-software-factory)).
+5. Type as a customer in their widget to keep a conversation going.
+6. End the simulation from **⋯**: its sessions are deleted. Simulating again replaces it the same way.
 
 Measured on a local deployment: 25 sessions started in about 3 seconds, and every conversation finished within 35
 seconds, approvals included.
@@ -64,7 +70,8 @@ seconds, approvals included.
 
 The [`happy-path`](src/scripts/happy-path.ts) script does a smaller pass through the HTTP API: 5 customers, one refund
 or cancellation approved and any others declined, checks that each session touched only its customer's orders and that
-the counters read 5 sessions, 1 runtime, and 0 sandboxes, then ends the simulation. It costs about 2 premium requests.
+the counters read 5 sessions, 1 runtime, and 0 sandboxes, lists the software issues the agents reported (it doesn't send
+them to Software Factory), then ends the simulation. It costs about 2 premium requests.
 
 ```powershell
 pnpm --filter @managed-copilot/demo-help-desk happy-path                          # local, MANAGED_COPILOT_PORT_OFFSET applies
@@ -73,6 +80,39 @@ pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk
 
 `aspire deploy` publishes Help Desk with the root AppHost, next to the other demos (see
 [docs/deployment.md](../../docs/deployment.md), including who can open the apps).
+
+## Software issues, fixed by Software Factory
+
+Five of the customers don't just have a question: the store's website let them down. The code `TRAIL15` from the
+newsletter is rejected when Aisha pastes it and when Ben types it in lowercase; Lucas changed his water bottles from 1 to
+2 in his cart and paid for 3; and Hannah's and Arjun's **My orders** pages say Delivered while their packages are still
+out for delivery. Aisha is among the first 5 customers and Lucas among the first 10; simulate 25 to meet all five. The
+website's code is in [`storefront`](storefront): a small Node codebase whose own tests pass, because they don't cover
+these cases.
+
+1. **The agent reports it.** Every session also has a `report_bug` tool, bound to its customer like the others. When a
+   customer describes something the website got wrong, the agent reports it once with the area it's about
+   (`promo-codes`, `cart`, `order-status`, or `other`), tells them, and still helps with the order: it asks to refund
+   Lucas one bottle and Aisha the 15% she missed, and each refund waits for your approval like any other. The store's
+   tools also say what each order's **My orders** label reads (`shownOnMyOrdersPage`, worked out like the storefront's
+   own code), so the agent can see Hannah's and Arjun's pages disagree with the carrier. A product that arrived broken
+   or leaks isn't a software issue, and isn't reported.
+2. **The wall groups the reports.** Their tiles show **Software issue**, and the **Software issues** panel has one row
+   per area, such as *Promo codes rejected at checkout · 2 tickets*. A customer's page shows what the agent reported.
+3. **Send to Software Factory.** One click sends the issue as a work order. Its brief quotes each customer, their order,
+   and what their agent found, then asks for a fix in the storefront with regression tests that reproduce the reports,
+   keeping the existing tests passing. The storefront codebase is the work order's project, and the reports
+   (`BUG_REPORT.md`) and conversations (`transcripts.md`) are its context.
+4. **Follow it.** The row shows the work order, such as `WO-0012 · Building`, until Software Factory finishes, with
+   **Open in Software Factory**. The work order carries its origin: Help Desk, *Promo codes · 2 tickets*, and a link
+   back to the first reporting customer's conversation, so the factory's floor shows where it came from.
+
+Each issue goes to Software Factory once per simulation; a send that failed can be tried again. After a restart, Help
+Desk finds the simulation's work orders again by their origin. Ending the simulation clears the panel, and Software
+Factory keeps the work orders. The work order runs Software Factory's own agents, with their own premium requests.
+
+Under `aspire run`, the root AppHost points Help Desk at the Software Factory demo. Without `SOFTWARE_FACTORY_URL`, the
+panel still lists the issues, and **Send to Software Factory** says why it's unavailable.
 
 ## How it works
 
@@ -97,7 +137,13 @@ pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk
   end arrives.
 - **The wall is projected from the sessions' events.** Messages (streamed), tool calls, and approvals come from the
   stock session events; a call refused for an order of another customer is marked **Blocked**. The agent marks a
-  conversation **Resolved** with a `resolve_conversation` tool.
+  conversation **Resolved** with a `resolve_conversation` tool, and a completed `report_bug` call is the ticket's
+  report of a problem with the website.
+- **Software issues go to Software Factory over its API.** [`factory.ts`](src/server/factory.ts) calls
+  `POST /api/work-orders` server to server, with a 10-second timeout and plain-words errors. The work order's origin
+  carries a key, `<simulation>:<area>`; while a work order is still running, Help Desk reads `GET /api/work-orders`
+  every 5 seconds for its status, and after a restart it finds the simulation's work orders by that key. Before
+  sending, it checks the factory for one already sent, so an issue is never sent twice.
 - **The platform holds the state.** Session IDs carry the simulation and the customer (`hd-<simulation>-<customer>`).
   After a restart, Help Desk lists the environment's sessions, picks up the latest simulation, rebuilds each
   conversation from `session.getEvents()`, replays the refunds and cancellations its history records into the store,
@@ -114,15 +160,18 @@ pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk
 | `HELP_DESK_ENVIRONMENT` | `help-desk` | The shared environment customers' sessions are created in |
 | `HELP_DESK_MODEL` | first available of Claude Haiku 4.5, Claude Haiku 5.5, GPT-5.6 Luna, Claude Sonnet 5 | The customers' agents' model |
 | `HELP_DESK_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
+| `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, which Help Desk's server calls to send software issues. Unset: **Send to Software Factory** is unavailable and says why |
+| `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to its work orders |
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the `help-desk` shared environment and the app resource |
-| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, REST and server-sent events |
+| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, software issues and the Software Factory client, REST and server-sent events |
 | `src/scripts` | The happy-path script |
 | `src/shared` | Types shared with the UI |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
-| `test` | Unit tests: the store, the tools, the projection, simulations and approvals against an in-memory platform, the API, and the fragment |
+| `storefront` | The Contoso Outdoors website's code (Node, no dependencies, `node --test`), with the bugs customers report: the project a software issue's work order asks Software Factory to fix |
+| `test` | Unit tests: the store, the tools, the projection, simulations and approvals against an in-memory platform, software issues against an in-memory Software Factory, the factory client, the API, the storefront, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |
