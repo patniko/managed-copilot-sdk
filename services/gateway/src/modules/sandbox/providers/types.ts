@@ -108,6 +108,8 @@ export interface SandboxProvider {
   reattach?(sandboxId: string): Promise<void>;
   /** IDs of sandboxes with resources for this gateway instance (orphan sweep at start). */
   inventory(): Promise<Set<string>>;
+  /** Removes resources other gateway instances on the same backend abandoned (at start, then periodically). */
+  sweepAbandoned?(): Promise<void>;
   /**
    * Non-secret facts about the backend for the operator console (engine version, region, images, relay). Never keys,
    * tokens, or anything sandboxes hold.

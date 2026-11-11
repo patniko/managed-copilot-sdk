@@ -99,6 +99,16 @@ pnpm gallery                        # every demo and walkthrough on one page
 - **A port is in use.** The gateway (7400), the gallery (7460), and the demos (7420 to 7490) use fixed ports. To run a
   second copy, set `MANAGED_COPILOT_PORT_OFFSET=300` and point tools at it with
   `MANAGED_COPILOT_URL=http://localhost:7700`.
+- **Docker uses a lot of disk.** Each checkout runs its sandboxes under its own prefix (`mc-<hash of the AppHost
+  path>`). A gateway removes another checkout's containers, volumes, and networks once that checkout's
+  `.managed-copilot/data` folder is gone, and keeps them while it exists. Images and build cache are left to you;
+  this keeps images in use and the last week's builds:
+
+  ```powershell
+  docker builder prune -a --filter until=168h -f
+  docker image prune -a --filter until=168h -f
+  docker volume prune -f    # anonymous volumes only (Docker Engine 23 and later)
+  ```
 
 </details>
 

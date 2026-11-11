@@ -2,9 +2,11 @@
 // volumes for /workspace, HOME, and runtime state, and a relay container the host gateway reaches each sandboxd through.
 import { createHash } from "node:crypto";
 import { PLATFORM_KEY_HEADER, SANDBOX_PATHS, SANDBOX_RELAY_PORT, SANDBOX_SIZES, ManagedCopilotError, type EnvironmentConfig, type InfraFact } from "@managed-copilot/protocol";
+import { ownershipLabels } from "../../../../docker-ownership.js";
 import { DEFAULT_NETWORK_SUBNET_POOL, isSubnetOverlap, sharedNetworkSubnets } from "../../../../docker-subnets.js";
 import type { Logger } from "../../../../log.js";
 import type { SandboxEndpoint, SandboxImageRef, SandboxProvider, SandboxProviderDeps, SandboxSpec, SandboxStartResult } from "../types.js";
+import { sweepAbandonedInstances } from "./abandoned.js";
 import { DockerClient, DockerError, discoverDockerEndpoints } from "./docker.js";
 import { SandboxImages, registrySettingProblems } from "./images.js";
 
@@ -38,6 +40,8 @@ export interface ProviderOptions {
   readonly instance: string;
   readonly platformKey: string;
   readonly log: Logger;
+  /** Ownership labels (docker-ownership.ts) put on every resource, so other gateways can tell when they are abandoned. */
+  readonly ownership?: Readonly<Record<string, string>>;
   /** Base of the subnet pool for per-sandbox networks, e.g. 10.213.0.0 (a /16), carved into /28s. */
   readonly subnetPool?: string;
   /** Base of the subnet pool for the instance's edge and sandboxes networks, e.g. 10.214.0.0 (a /16), carved into /24s. */
@@ -69,6 +73,7 @@ export function createDockerSandboxProvider(deps: SandboxProviderDeps): DockerSa
     instance: deps.instance,
     platformKey: deps.platformKey,
     log,
+    ownership: ownershipLabels(deps.dataDir, env),
     ...(env.MANAGED_COPILOT_SANDBOX_SUBNET_POOL ? { subnetPool: env.MANAGED_COPILOT_SANDBOX_SUBNET_POOL } : {}),
     ...(env.MANAGED_COPILOT_NETWORK_SUBNET_POOL ? { networkSubnetPool: env.MANAGED_COPILOT_NETWORK_SUBNET_POOL } : {}),
   });
@@ -204,7 +209,13 @@ export class DockerSandboxProvider implements SandboxProvider {
   }
 
   #labels(component: string, extra: Record<string, string> = {}): Record<string, string> {
-    return { [LABELS.instance]: this.#options.instance, [LABELS.component]: component, ...extra };
+    return { ...this.#options.ownership, [LABELS.instance]: this.#options.instance, [LABELS.component]: component, ...extra };
+  }
+
+  /** Removes other instances' resources once abandoned (deleted worktree or test directory, or expired test run). */
+  async sweepAbandoned(): Promise<void> {
+    await this.ready();
+    await sweepAbandonedInstances({ docker: this.#options.docker, instance: this.#options.instance, log: this.#options.log });
   }
 
   // Infrastructure -----------------------------------------------------------------------------------------------

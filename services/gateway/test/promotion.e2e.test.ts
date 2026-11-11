@@ -117,6 +117,8 @@ describe.skipIf(!token || !built || !docker)("G5: promotion with the stock SDK, 
         MANAGED_COPILOT_WRITE_DISCOVERY: "0",
         MANAGED_COPILOT_GITHUB_API_URL: github.url,
         MANAGED_COPILOT_INSTANCE: instance,
+        // Lets any gateway remove what this run leaves behind if it dies before its own cleanup.
+        MANAGED_COPILOT_INSTANCE_TTL_SECONDS: "21600",
         MANAGED_COPILOT_EGRESS: "off",
         // `network: false` on the promotable environment must stay false in the sandbox.
         MANAGED_COPILOT_CONFIG: JSON.stringify({

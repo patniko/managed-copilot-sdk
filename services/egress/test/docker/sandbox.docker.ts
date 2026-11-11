@@ -121,6 +121,8 @@ describe.skipIf(process.env.MC_SKIP_DOCKER === "1")("egress with real sandboxes 
         MANAGED_COPILOT_WRITE_DISCOVERY: "0",
         MANAGED_COPILOT_SHARED_RUNTIME: "0",
         MANAGED_COPILOT_INSTANCE: RUN,
+        // Lets any gateway remove what this run leaves behind if it dies before its own cleanup.
+        MANAGED_COPILOT_INSTANCE_TTL_SECONDS: "21600",
         MANAGED_COPILOT_EGRESS: "docker",
         MANAGED_COPILOT_EGRESS_PRIVATE_HOSTS: "plain.mc.test,vault.mc.test",
         MANAGED_COPILOT_EGRESS_UPSTREAM_CA_B64: Buffer.from(upstreamCa.certPem).toString("base64"),

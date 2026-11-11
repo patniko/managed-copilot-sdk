@@ -77,6 +77,8 @@ describe.runIf(enabled && built)("gateway replacement mid-turn", { timeout: TIME
       MANAGED_COPILOT_WRITE_DISCOVERY: "0",
       ...(sharedRuntime ? {} : { MANAGED_COPILOT_SHARED_RUNTIME: "0" }),
       MANAGED_COPILOT_INSTANCE: instance,
+      // Lets any gateway remove what this run leaves behind if it dies before its own cleanup.
+      MANAGED_COPILOT_INSTANCE_TTL_SECONDS: "21600",
       MANAGED_COPILOT_APPHOST_DIR: join(temp, "apphost"),
       MANAGED_COPILOT_CONFIG: JSON.stringify(config),
     };

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { NETWORK_BLOCKED_EVENT, PLATFORM_EVENT_TYPES, sandboxedType, type EgressReport, type EgressStatus, type NetworkPolicy, type Placement, type PlatformEventType, type VaultInfo } from "@managed-copilot/protocol";
 import type { GatewayModule } from "../../app.js";
 import type { Database } from "../../db.js";
+import { ownershipLabels } from "../../docker-ownership.js";
 import { optionalService, type EventsService, type PlatformToolRegistry } from "../core/contracts.js";
 import { EgressHub } from "./egress-api.js";
 import { EgressListener, isLoopbackHost } from "./egress-listener.js";
@@ -165,6 +166,7 @@ export const networkModule: GatewayModule = {
       mode === "auto" || mode === "docker"
         ? new EgressSupervisor({
             instance: env.MANAGED_COPILOT_INSTANCE || "mc",
+            labels: ownershipLabels(app.config.dataDir, env),
             context: env.MANAGED_COPILOT_EGRESS_CONTEXT ?? fileURLToPath(new URL("../../../../egress/", import.meta.url)),
             gatewayUrl: () => (env.MANAGED_COPILOT_EGRESS_GATEWAY_URL ?? `http://host.docker.internal:${app.config.port}`).replace(/\/+$/, ""),
             ...(bridgeListener ? { listenOnBridge: (address: string) => bridgeListener.listen(address) } : {}),

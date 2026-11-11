@@ -136,6 +136,8 @@ describe("vault MCP credentials for sandboxes", () => {
         MANAGED_COPILOT_WRITE_DISCOVERY: "0",
         MANAGED_COPILOT_SHARED_RUNTIME: "0",
         MANAGED_COPILOT_INSTANCE: "mcvaultmcptest",
+        // Lets any gateway remove what this run leaves behind if it dies before its own cleanup.
+        MANAGED_COPILOT_INSTANCE_TTL_SECONDS: "21600",
         MANAGED_COPILOT_EGRESS: "external",
         MANAGED_COPILOT_EGRESS_KEY: EGRESS_KEY,
         MANAGED_COPILOT_CONFIG: JSON.stringify(CONFIG),
