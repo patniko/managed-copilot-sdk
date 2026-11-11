@@ -113,6 +113,12 @@ Every user-facing flow, the tests that run in CI, and the live checks that exerc
 | Dispatch: direct, delegate, and mixed work in one chat | §17 | `demos/dispatch/test/conversation.test.ts`, `demos/dispatch/test/platform.test.ts` | `local.dispatch` | `azure.demos-ui` | 🖐 By hand: Dispatch has no script |
 | Run commands directly: `managed.exec` | §18 | `services/gateway/test/sandbox-exec.test.ts`, `services/sandbox/test/execs.test.ts` | `local.walkthrough-13`, `e2e.sandbox-exec` | None | ✅ Automated |
 
+### Demos working together
+
+| Flow | Spec | Tests in CI | Live checks | In Azure | Status |
+| --- | --- | --- | --- | --- | --- |
+| Work routed to the software factory: a storefront bug, an incident's fix, an insight | §3, §17 | `demos/software-factory/test/routing.test.ts`, `demos/help-desk/test/factory.test.ts`, `demos/help-desk/test/issues.test.ts`, `demos/incident-commander/test/factory.test.ts`, `demos/data-desk/test/factory.test.ts` | `local.demo-incident-commander-factory`, `local.factory-routing` | `azure.demo-incident-commander-factory` | 🟡 Partial: Help Desk's and Data Desk's sends are checked by hand |
+
 ### Apps, people, and models
 
 | Flow | Spec | Tests in CI | Live checks | In Azure | Status |
@@ -148,6 +154,25 @@ later (`copilot --version`).
 - [ ] With a Copilot CLI older than 1.0.103 on PATH, `new` stops before creating a session and says to run
       `copilot update`.
 
+## Work routed to the software factory
+
+The steps for `local.factory-routing`, with `aspire run` up (Software Factory, Help Desk, and Data Desk run with it).
+
+- [ ] Help Desk: simulate 25 customers. Aisha's and Ben's agents report promo codes rejected at checkout, Lucas's a cart
+      quantity that changed, and Hannah's and Arjun's an order shown as delivered that is out for delivery. The wall's
+      **Software issues** groups the reports by area.
+- [ ] **Send to Software Factory** on an issue: it shows the work order (`WO-<n>`) and its status, and the factory's
+      work order list marks it **Help Desk**.
+- [ ] On the factory's floor the work order starts from **From Help Desk**: the brief quotes the reports, and it brought
+      `BUG_REPORT.md` and the `contoso-storefront` project. The release fixes the storefront with regression tests, and
+      the Deliverable lists the files it changed.
+- [ ] Data Desk: pick **Storefront checkout funnel** and ask the suggested question. Copilot finds that mobile shoppers
+      with $40–$49 carts drop out at the shipping step.
+- [ ] Select rows in Copilot's table and **Send to Software Factory** with what to build: the conversation shows the
+      work order, and the factory's floor shows **From Data Desk** with `INSIGHT.md` and the data files.
+- [ ] Restart Help Desk (`aspire resource help-desk restart --apphost apphost.mts`): the wall still shows its issues'
+      work orders.
+
 ## Known gaps
 
 What the matrix marks 🟡, 🖐, or ⛔, and what would close it:
@@ -157,6 +182,7 @@ What the matrix marks 🟡, 🖐, or ⛔, and what would close it:
 | The real Copilot CLI in a terminal | 🖐 By hand | A check that drives `managed-copilot new` and `attach` under a pseudo-terminal (node-pty), as the [attach regression](architecture.md#copilot-cli-attach-spec-section-14) was verified by hand |
 | The operator console | 🖐 By hand | A browser check like the assistant's (playwright-core with Microsoft Edge) |
 | Dispatch | 🖐 By hand | A `happy-path` script like the other demos' |
+| Help Desk's and Data Desk's sends to the software factory | 🟡 Partial | A `--factory` option on their `happy-path` scripts, like Incident Commander's |
 | `managed-copilot` commands other than `new` and `attach` | ⛔ Not covered | A script that runs each command against the local platform |
 | Gateway revisions, deploys, and public apps in Azure | 🖐 By hand | A scheduled deploy into a throwaway resource group |
 | Apps on Azure AI Foundry | 🟡 Partial | A Foundry account for QA runs |
@@ -246,6 +272,7 @@ Spec snippets, walkthroughs, and demo scripts against the running local platform
 | `local.demo-data-desk` | Data Desk: answers on the shared runtime, then a move into a Python sandbox | data-desk app | about two premium requests |
 | `local.demo-research-swarm` | Research Swarm: parallel researchers and a cited report | research-swarm app | a handful of premium requests |
 | `local.demo-incident-commander` | Incident Commander: a mixed coordinator and an approval that waits | incident-commander app | a handful of premium requests |
+| `local.demo-incident-commander-factory` | Incident Commander and Software Factory: an incident's fix built by the factory, verified, and deployed | incident-commander app, software-factory app | a dozen or so premium requests |
 | `local.demo-software-factory` | Software Factory: plan, parallel builders, review, release | software-factory app | dozens of premium requests |
 | `local.demo-software-factory-office` | Software Factory: its planner and reviewer agents in shared environments | - | a few premium requests |
 | `local.demo-assistant` | Assistant: inbox triage and an approval in the real UI (Microsoft Edge) | assistant app, Microsoft Edge | a few premium requests |
@@ -261,6 +288,7 @@ By hand:
 | `local.dispatch` | Dispatch: direct, delegate, and mixed work in one chat, then a follow-up from Copilot CLI | docs/walkthrough.md 1.8, at http://localhost:7470 |
 | `local.console` | The operator console and `npx managed-copilot operator`: health, sessions, live feed | docs/walkthrough.md 1.14; `npx managed-copilot console`, `npx managed-copilot operator overview` |
 | `local.gallery` | The demo gallery: every card opens its demo or walkthrough | docs/walkthrough.md 1.3; `pnpm gallery` |
+| `local.factory-routing` | Help Desk and Data Desk send work to Software Factory, and its floor shows where each work order came from | docs/qa.md, "Work routed to the software factory" |
 
 ### `azure`
 
@@ -287,6 +315,7 @@ Spec snippets, demo scripts, and qualification against a deployment in Azure. Ne
 | `azure.demo-data-desk` | Data Desk: answers on the shared runtime, then a move into a Python sandbox | `--apps-domain`, data-desk app | about two premium requests |
 | `azure.demo-research-swarm` | Research Swarm: parallel researchers and a cited report | `--apps-domain`, research-swarm app | a handful of premium requests |
 | `azure.demo-incident-commander` | Incident Commander: a mixed coordinator and an approval that waits | `--apps-domain`, incident-commander app | a handful of premium requests |
+| `azure.demo-incident-commander-factory` | Incident Commander and Software Factory: an incident's fix built by the factory, verified, and deployed | `--apps-domain`, incident-commander app, software-factory app | a dozen or so premium requests |
 | `azure.demo-software-factory` | Software Factory: plan, parallel builders, review, release | `--apps-domain`, software-factory app | dozens of premium requests |
 | `azure.demo-software-factory-office` | Software Factory: its planner and reviewer agents in shared environments | - | a few premium requests |
 | `azure.demo-assistant` | Assistant: inbox triage and an approval in the real UI (Microsoft Edge) | `--apps-domain`, assistant app, Microsoft Edge | a few premium requests |

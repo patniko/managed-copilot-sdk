@@ -271,7 +271,9 @@ function FileItem({
 }
 
 function versionLabel(version: ArtifactVersionView, now: number): string {
-  return `v${version.version} · round ${version.round} · ${formatBytes(version.size)} · ${formatRelative(version.publishedAt, now)}`;
+  // What a routed work order brought along predates every round.
+  const round = version.round > 0 ? ` · round ${version.round}` : "";
+  return `v${version.version}${round} · ${formatBytes(version.size)} · ${formatRelative(version.publishedAt, now)}`;
 }
 
 function Viewer({

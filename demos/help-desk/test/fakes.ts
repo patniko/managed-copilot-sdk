@@ -1,8 +1,10 @@
 // Fakes for Help Desk's platform seam: a stock-shaped session whose events, permission prompts, and tool calls the test
-// drives, and a platform that keeps sessions in memory.
+// drives, and a platform that keeps sessions in memory. Software Factory is faked the same way: work orders in memory.
+import { fileURLToPath } from "node:url";
 import type { MessageOptions, PermissionRequest, ResumeSessionConfig, SessionConfig, SessionEvent, Tool } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import type { HelpDeskConfig } from "../src/server/config.js";
+import type { FactoryClient, WorkOrderRequest, WorkOrderSummary } from "../src/server/factory.js";
 import type { DeskPlatform, SupportSession } from "../src/server/platform.js";
 import type { PlatformStatus } from "../src/shared/types.js";
 
@@ -171,6 +173,9 @@ export function info(id: string, overrides: Partial<SessionInfo> = {}): SessionI
   };
 }
 
+/** The storefront codebase the demo sends to Software Factory. */
+export const STOREFRONT_DIR = fileURLToPath(new URL("../storefront", import.meta.url));
+
 export function testConfig(overrides: Partial<HelpDeskConfig> = {}): HelpDeskConfig {
   return {
     port: 0,
@@ -182,8 +187,55 @@ export function testConfig(overrides: Partial<HelpDeskConfig> = {}): HelpDeskCon
     staggerMs: 0,
     healthIntervalMs: 60_000,
     countersIntervalMs: 60_000,
+    storefrontDir: STOREFRONT_DIR,
+    factoryPollMs: 60_000,
     ...overrides,
   };
+}
+
+/**
+ * A customer tells their agent about a problem with the store's website, and the agent reports it: the session's own
+ * `report_bug` tool runs, and the runtime's events for the call follow.
+ */
+export async function reportBug(session: FakeSession, words: string, args: Record<string, unknown>): Promise<unknown> {
+  const toolCallId = `bug-${++sequence}`;
+  session.emit(event("user.message", { content: words }));
+  session.emit(event("tool.execution_start", { toolCallId, toolName: "report_bug", arguments: args }));
+  const result = await session.call("report_bug", args, toolCallId);
+  session.emit(event("tool.execution_complete", { toolCallId, success: true, result: { content: JSON.stringify(result) } }));
+  return result;
+}
+
+/** A Software Factory that keeps its work orders in memory and records what it was sent. */
+export class FakeFactory implements FactoryClient {
+  configured = true;
+  publicUrl: string | undefined = "http://factory.test";
+  /** Newest first, as Software Factory lists them. */
+  workOrders: WorkOrderSummary[] = [];
+  readonly created: WorkOrderRequest[] = [];
+  lists = 0;
+  /** Fails every call with this error while it's set. */
+  failWith: Error | undefined;
+
+  async create(request: WorkOrderRequest): Promise<WorkOrderSummary> {
+    if (this.failWith) throw this.failWith;
+    this.created.push(request);
+    const number = this.workOrders.length + 1;
+    const order: WorkOrderSummary = { id: `wo_${number}`, number, title: request.title, status: "queued", ...(request.origin ? { origin: request.origin } : {}) };
+    this.workOrders.unshift(order);
+    return order;
+  }
+
+  async list(): Promise<WorkOrderSummary[]> {
+    this.lists += 1;
+    if (this.failWith) throw this.failWith;
+    return this.workOrders.map((order) => ({ ...order }));
+  }
+
+  /** Moves a work order along, as the factory's pipeline does. */
+  update(id: string, changes: Partial<WorkOrderSummary>): void {
+    this.workOrders = this.workOrders.map((order) => (order.id === id ? { ...order, ...changes } : order));
+  }
 }
 
 /** Waits for pending promise callbacks and timers (publishing is coalesced with short timers). */

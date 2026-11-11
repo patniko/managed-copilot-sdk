@@ -274,6 +274,16 @@ const DEMO_SCRIPTS: readonly DemoScript[] = [
   { name: "data-desk", demo: "data-desk", title: "Data Desk: answers on the shared runtime, then a move into a Python sandbox", script: "happy-path", cost: "about two premium requests", timeoutMinutes: 25 },
   { name: "research-swarm", demo: "research-swarm", title: "Research Swarm: parallel researchers and a cited report", script: "happy-path", cost: "a handful of premium requests", timeoutMinutes: 30 },
   { name: "incident-commander", demo: "incident-commander", title: "Incident Commander: a mixed coordinator and an approval that waits", script: "happy-path", cost: "a handful of premium requests", timeoutMinutes: 35 },
+  {
+    name: "incident-commander-factory",
+    demo: "incident-commander",
+    title: "Incident Commander and Software Factory: an incident's fix built by the factory, verified, and deployed",
+    script: "happy-path",
+    args: ["--factory"],
+    requires: ["app:software-factory"],
+    cost: "a dozen or so premium requests",
+    timeoutMinutes: 50,
+  },
   { name: "software-factory", demo: "software-factory", title: "Software Factory: plan, parallel builders, review, release", script: "happy-path", urlEnv: "FACTORY_URL", cost: "dozens of premium requests", timeoutMinutes: 60 },
   { name: "software-factory-office", demo: "software-factory", title: "Software Factory: its planner and reviewer agents in shared environments", script: "smoke:office", platformOnly: true, cost: "a few premium requests", timeoutMinutes: 20 },
   { name: "assistant", demo: "assistant", title: "Assistant: inbox triage and an approval in the real UI (Microsoft Edge)", script: "happy-path", requires: ["edge"], cost: "a few premium requests", timeoutMinutes: 25 },
@@ -336,6 +346,12 @@ const localManual: ManualCheck[] = [
   manual("local.dispatch", "local", "Dispatch: direct, delegate, and mixed work in one chat, then a follow-up from Copilot CLI", "docs/walkthrough.md 1.8, at http://localhost:7470"),
   manual("local.console", "local", "The operator console and `npx managed-copilot operator`: health, sessions, live feed", "docs/walkthrough.md 1.14; `npx managed-copilot console`, `npx managed-copilot operator overview`"),
   manual("local.gallery", "local", "The demo gallery: every card opens its demo or walkthrough", "docs/walkthrough.md 1.3; `pnpm gallery`"),
+  manual(
+    "local.factory-routing",
+    "local",
+    "Help Desk and Data Desk send work to Software Factory, and its floor shows where each work order came from",
+    "docs/qa.md, \"Work routed to the software factory\"",
+  ),
 ];
 
 const azureManual: ManualCheck[] = [

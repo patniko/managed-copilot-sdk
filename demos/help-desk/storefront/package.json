@@ -1,0 +1,13 @@
+{
+  "name": "contoso-storefront",
+  "version": "2.3.0",
+  "private": true,
+  "description": "The Contoso Outdoors web store: the shopping cart, promotion codes at checkout, and the order status on My orders.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

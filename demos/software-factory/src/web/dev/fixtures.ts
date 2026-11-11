@@ -1396,6 +1396,153 @@ function agentLedFixture(fixtures: Fixtures, now: number): void {
   fixtures.activity.set(order.id, [...(fixtures.activity.get(order.id) ?? []), ...decisions]);
 }
 
+/** Work orders other apps routed in: Help Desk's storefront fix (released), an incident's fix, and a data insight. */
+function routed(now: number, fixtures: Fixtures): void {
+  const promotions = `// Promotion codes from the newsletter and the site's banners.\nexport const PROMOTIONS = { TRAIL15: { percent: 15 }, WELCOME10: { percent: 10 } };\n\nexport function applyPromoCode(code, subtotalCents) {\n  const promotion = PROMOTIONS[code];\n  if (!promotion) return { ok: false, error: "That code isn't valid." };\n  return { ok: true, totalCents: subtotalCents - Math.round((subtotalCents * promotion.percent) / 100) };\n}\n`;
+  const fixed = promotions.replace("const promotion = PROMOTIONS[code];", "const promotion = PROMOTIONS[String(code).trim().toUpperCase()];");
+  const regression = `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("accepts a code pasted with a trailing space", () => {\n  assert.equal(applyPromoCode("TRAIL15 ", 10_000).ok, true);\n});\n\ntest("accepts a lowercase code", () => {\n  assert.equal(applyPromoCode("trail15", 10_000).totalCents, 8_500);\n});\n`;
+  const bugReport = `# Promo codes rejected at checkout\n\nTwo Contoso Outdoors customers reported it in one support rush.\n\n## Reports\n\n- **Aisha Khan** (CO-48224): "The code TRAIL15 from your newsletter says 'invalid code' when I paste it at checkout, so I paid full price for my jacket."\n- **Ben Carter**: "Your promo code TRAIL15 doesn't work if I type it in lowercase."\n\n## Expected\n\nCodes work however they're typed or pasted: case and surrounding spaces don't matter.\n`;
+  const project = [
+    { path: "package.json", content: `{\n  "name": "contoso-storefront",\n  "version": "2.3.0",\n  "private": true,\n  "type": "module",\n  "scripts": { "test": "node --test" }\n}\n` },
+    { path: "README.md", content: "# Contoso Outdoors storefront\n\nThe code behind the store's website: promotions, the cart, and order status.\n" },
+    { path: "src/promotions.js", content: promotions },
+    { path: "src/cart.js", content: "// Cart lines and quantities.\nexport function updateQuantity(cart, sku, quantity) {\n  const line = cart.lines.find((item) => item.sku === sku);\n  if (line) line.quantity += quantity;\n  return cart;\n}\n" },
+    { path: "test/promotions.test.js", content: `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("applies TRAIL15", () => {\n  assert.equal(applyPromoCode("TRAIL15", 10_000).totalCents, 8_500);\n});\n` },
+  ];
+  const base = now - 18 * MINUTE;
+  const id = "wo_promo";
+  const releaseTests = tests(9, 0, 0, 640, at(base, 7 * MINUTE));
+  fixtures.workOrders.push(withPreviewCoordinator({
+    id,
+    number: 12,
+    title: "Fix: promo codes rejected at checkout",
+    mode: "agent",
+    status: "completed",
+    createdAt: at(base, 0),
+    updatedAt: at(base, 8 * MINUTE),
+    startedAt: at(base, 1 * SECOND),
+    completedAt: at(base, 8 * MINUTE),
+    taskCount: 1,
+    tests: releaseTests,
+    brief: "Contoso Outdoors support received **2 reports** that promotion codes are rejected at checkout: pasted with a trailing space, or typed in lowercase.\n\nFix it in the attached storefront codebase, add regression tests that reproduce the reports, and keep the existing tests passing. The customers' words are in `.factory/context/BUG_REPORT.md`.",
+    source: { kind: "brief" },
+    origin: { app: "help-desk", name: "Help Desk", label: "Promo codes · 2 tickets", url: "http://localhost:7440/#/", key: "fixture:promo-codes" },
+    inputs: {
+      context: [{ path: "BUG_REPORT.md", size: bugReport.length, description: "The customers' reports, grouped" }],
+      project: { name: "contoso-storefront", files: project.length, bytes: project.reduce((total, file) => total + file.content.length, 0) },
+    },
+    maxReviewRounds: 2,
+    owner: { login: "mona" },
+    plan: {
+      summary: "One focused fix: normalize codes before looking them up.",
+      projectName: "contoso-storefront",
+      packageDescription: "The Contoso Outdoors storefront",
+      bin: {},
+      integration: "Run the whole suite; the existing promotion tests must still pass.",
+      tasks: [
+        {
+          id: "normalize-codes",
+          title: "Normalize promo codes",
+          description: "Trim and uppercase codes before the lookup in src/promotions.js.",
+          files: ["src/promotions.js", "test/normalize-codes.test.js"],
+          acceptance: ["Accepts `TRAIL15 ` with a trailing space", "Accepts `trail15`", "Still rejects unknown codes"],
+          dependsOn: [],
+        },
+      ],
+    },
+    stations: [
+      station({ id: "plan", kind: "plan", title: "Plan", status: "done", role: "planner", startedAt: at(base, 3 * SECOND), finishedAt: at(base, 35 * SECOND), detail: "1 task planned" }, 51),
+      station({ id: "build:normalize-codes", kind: "build", title: "Build · Normalize promo codes", taskId: "normalize-codes", status: "done", role: "builder", startedAt: at(base, 50 * SECOND), finishedAt: at(base, 3 * MINUTE), detail: "7 tests passed", tests: tests(7, 0, 0, 410, at(base, 3 * MINUTE)) }, 52),
+      station({ id: "review:normalize-codes", kind: "review", title: "Review · Normalize promo codes", taskId: "normalize-codes", status: "done", role: "reviewer", startedAt: at(base, 3 * MINUTE + 5 * SECOND), finishedAt: at(base, 3 * MINUTE + 40 * SECOND), detail: "Approved in round 1", reviews: [{ round: 1, verdict: "approve", summary: "The smallest change that fixes both reports; the regression tests reproduce them.", findings: [], at: at(base, 3 * MINUTE + 40 * SECOND) }] }, 53),
+      station({ id: "release", kind: "release", title: "Release", status: "done", role: "release", startedAt: at(base, 3 * MINUTE + 50 * SECOND), finishedAt: at(base, 7 * MINUTE + 50 * SECOND), detail: "Release ready · 9 tests passed", tests: releaseTests }, 54),
+    ],
+    release: {
+      files: 7,
+      bytes: 3_210,
+      tests: releaseTests,
+      notes: "## contoso-storefront 2.3.1\n\nPromotion codes now work however customers type or paste them: `src/promotions.js` trims and uppercases a code before looking it up.\n\n- Fixes the 2 Help Desk reports (Promo codes · 2 tickets).\n- Adds `test/normalize-codes.test.js` with both reported cases.",
+      changes: [
+        { path: "package.json", status: "modified" },
+        { path: "README.md", status: "modified" },
+        { path: "src/promotions.js", status: "modified" },
+        { path: "test/integration.test.js", status: "added" },
+        { path: "test/normalize-codes.test.js", status: "added" },
+      ],
+    },
+  }));
+  const published = at(base, 7 * MINUTE + 45 * SECOND);
+  const file = (stationId: string, path: string, content: string, publishedAt = published): FixtureFile => ({
+    stationId,
+    path,
+    contentType: path.endsWith(".md") ? "text/markdown" : path.endsWith(".json") ? "application/json" : "text/javascript",
+    viewable: true,
+    versions: [{ version: 1, round: stationId === "intake" ? 0 : 1, content, publishedAt }],
+  });
+  fixtures.files.set(id, [
+    file("intake", "context/BUG_REPORT.md", bugReport, at(base, 0)),
+    ...project.map((item) => file("intake", `project/${item.path}`, item.content, at(base, 0))),
+    file("build:normalize-codes", "files/src/promotions.js", fixed, at(base, 3 * MINUTE)),
+    file("build:normalize-codes", "files/test/normalize-codes.test.js", regression, at(base, 3 * MINUTE)),
+    file("release", "bundle/src/promotions.js", fixed),
+    file("release", "bundle/test/normalize-codes.test.js", regression),
+    file("release", "RELEASE.md", "## contoso-storefront 2.3.1\n\nPromotion codes now work however customers type or paste them."),
+  ]);
+  fixtures.activity.set(id, activity(id, "plan", base, [
+    [3, { kind: "status", text: "Session started on `factory-planner` (shared, network off)" }],
+    [30, { kind: "message", text: "One task: normalize codes in `src/promotions.js`, with regression tests for both reports." }],
+  ]));
+
+  const incidentBase = now - 4 * MINUTE;
+  fixtures.workOrders.push({
+    id: "wo_incident",
+    number: 13,
+    title: "Fix checkout: expired coupon codes crash pricing",
+    mode: "classic",
+    status: "building",
+    createdAt: at(incidentBase, 0),
+    updatedAt: at(now, -5 * SECOND),
+    startedAt: at(incidentBase, 1 * SECOND),
+    taskCount: 1,
+    brief: "Production incident INC-1004: `POST /checkout` returns 500 for carts with an expired coupon since v1.4.2. Make the smallest fix in the attached checkout service, with a regression test.",
+    source: { kind: "brief" },
+    origin: { app: "incident-commander", name: "Incident Commander", label: "INC-1004 · checkout", url: "http://localhost:7445/#/incidents/INC-1004", key: "INC-1004" },
+    inputs: { context: [{ path: "INCIDENT.md", size: 2_480, description: "The alert, root cause, evidence, and the bad deploy's diff" }], project: { name: "checkout", files: 7, bytes: 6_140 } },
+    maxReviewRounds: 2,
+    plan: {
+      summary: "One task: treat an expired coupon as no discount.",
+      projectName: "checkout-service",
+      packageDescription: "Prices carts and takes orders",
+      bin: {},
+      integration: "Run the whole suite.",
+      tasks: [{ id: "expired-coupons", title: "Expired coupons price at full price", description: "applyDiscount returns the subtotal for an expired coupon.", files: ["src/discounts.js", "test/expired-coupons.test.js"], acceptance: ["No 500 for SUMMER24"], dependsOn: [] }],
+    },
+    stations: [
+      station({ id: "plan", kind: "plan", title: "Plan", status: "done", role: "planner", startedAt: at(incidentBase, 3 * SECOND), finishedAt: at(incidentBase, 28 * SECOND), detail: "1 task planned" }, 61),
+      station({ id: "build:expired-coupons", kind: "build", title: "Build · Expired coupons price at full price", taskId: "expired-coupons", status: "working", role: "builder", startedAt: at(incidentBase, 35 * SECOND), detail: "Running tests" }, 62),
+      station({ id: "review:expired-coupons", kind: "review", title: "Review · Expired coupons price at full price", taskId: "expired-coupons", status: "waiting", role: "reviewer" }, 63),
+      station({ id: "release", kind: "release", title: "Release", status: "waiting", role: "release" }, 64),
+    ],
+  });
+
+  fixtures.workOrders.push({
+    id: "wo_experiment",
+    number: 14,
+    title: "Free-shipping progress bar experiment for mobile carts",
+    mode: "agent",
+    status: "planning",
+    createdAt: at(now, -50 * SECOND),
+    updatedAt: at(now, -2 * SECOND),
+    startedAt: at(now, -49 * SECOND),
+    taskCount: 0,
+    brief: "Build a free-shipping progress bar experiment for mobile carts under $50: variant assignment, the bar's copy and threshold logic, and the metrics to watch.\n\nMobile shoppers with $40–$49 carts abandon at the shipping step far more than desktop shoppers; the data and Copilot's analysis are in `.factory/context/`.",
+    source: { kind: "brief" },
+    origin: { app: "data-desk", name: "Data Desk", label: "Mobile drop-off · Storefront checkout funnel", url: "http://localhost:7430/#/", key: "fixture:1" },
+    inputs: { context: [{ path: "INSIGHT.md", size: 1_830, description: "What to build, and the insight behind it" }, { path: "data/drop-off-by-cart-value.csv", size: 612, description: "Copilot's table: shipping-step drop-off by device and cart value" }] },
+    maxReviewRounds: 2,
+    stations: [station({ id: "plan", kind: "plan", title: "Plan", status: "working", role: "planner", startedAt: at(now, -45 * SECOND), detail: "Splitting the work order into tasks" }, 71)],
+  });
+}
+
 export function createFixtures(now: number, variant: string): Fixtures {
   const state: PlatformStatus["state"] =
     variant === "platform-down" ? "unavailable" : variant === "misconfigured" ? "misconfigured" : variant === "connecting" ? "connecting" : "connected";
@@ -1408,6 +1555,7 @@ export function createFixtures(now: number, variant: string): Fixtures {
   markdownFormatter(now, fixtures);
   csvCli(now, fixtures);
   agentLedFixture(fixtures, now);
+  routed(now, fixtures);
   return fixtures;
 }
 

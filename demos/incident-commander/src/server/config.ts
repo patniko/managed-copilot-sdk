@@ -9,6 +9,13 @@ export interface DeployTarget {
   readonly secret?: string;
 }
 
+export interface FactoryTarget {
+  /** Where this server calls Software Factory's API (`SOFTWARE_FACTORY_URL`). */
+  readonly url: string;
+  /** Its address for people, for links to work orders (`SOFTWARE_FACTORY_PUBLIC_URL`; defaults to `url`). */
+  readonly publicUrl: string;
+}
+
 export interface AppConfig {
   readonly port: number;
   readonly host: string;
@@ -34,10 +41,14 @@ export interface AppConfig {
   /** Your own services' folders (code, tests, exported logs), one per service name. */
   readonly servicesDir?: string;
   readonly deploy?: DeployTarget;
+  /** Software Factory, when it's connected: incidents can route their fix to it as a work order. */
+  readonly factory?: FactoryTarget;
   /** How often the platform connection is checked. */
   readonly healthIntervalMs: number;
   /** How often a working incident's sandboxes are read. */
   readonly pollIntervalMs: number;
+  /** How often an active work order is read from Software Factory. */
+  readonly factoryPollMs: number;
 }
 
 function findPackageRoot(start: string): string {
@@ -60,6 +71,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
   const alertSecret = nonEmpty(env.INCIDENT_ALERT_SECRET);
   const webhookSecret = nonEmpty(env.INCIDENT_WEBHOOK_SECRET);
   const servicesDir = nonEmpty(env.INCIDENT_SERVICES_DIR);
+  const factoryUrl = nonEmpty(env.SOFTWARE_FACTORY_URL)?.replace(/\/+$/, "");
+  const factoryPublicUrl = nonEmpty(env.SOFTWARE_FACTORY_PUBLIC_URL)?.replace(/\/+$/, "") || factoryUrl;
   return {
     port,
     host: env.HOST ?? "127.0.0.1",
@@ -75,7 +88,9 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     demoServicesDir: join(packageRoot, "demo-services"),
     ...(servicesDir ? { servicesDir: resolve(servicesDir) } : {}),
     ...(deployUrl ? { deploy: { url: deployUrl, ...(deploySecret ? { secret: deploySecret } : {}) } } : {}),
+    ...(factoryUrl ? { factory: { url: factoryUrl, publicUrl: factoryPublicUrl ?? factoryUrl } } : {}),
     healthIntervalMs: 15_000,
     pollIntervalMs: 4_000,
+    factoryPollMs: 5_000,
   };
 }

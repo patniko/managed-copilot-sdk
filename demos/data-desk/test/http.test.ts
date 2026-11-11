@@ -5,22 +5,26 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Datasets } from "../src/server/datasets.js";
+import { DeskError } from "../src/server/errors.js";
+import type { FactoryClient } from "../src/server/factory.js";
 import { createRequestHandler, hostAllowed } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
 import { AnalysisManager } from "../src/server/manager.js";
 import { Store } from "../src/server/store.js";
-import type { AnalysisView, DeskState } from "../src/shared/types.js";
-import { FakePlatform, testConfig } from "./fakes.js";
+import type { AnalysisView, DeskState, SendToFactoryResponse } from "../src/shared/types.js";
+import { event, FakeFactory, FakePlatform, testConfig } from "./fakes.js";
 
 const servers: Server[] = [];
 const hubs: EventHub[] = [];
+const managers: AnalysisManager[] = [];
 
 afterEach(async () => {
   for (const hub of hubs.splice(0)) hub.close();
+  await Promise.all(managers.splice(0).map((manager) => manager.close()));
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
 });
 
-async function serve() {
+async function serve(options: { factory?: FactoryClient } = {}) {
   const dataDir = mkdtempSync(join(tmpdir(), "desk-http-"));
   const config = testConfig(dataDir);
   mkdirSync(config.webRoot, { recursive: true });
@@ -30,7 +34,8 @@ async function serve() {
   const platform = new FakePlatform();
   const hub = new EventHub();
   hubs.push(hub);
-  const analyses = new AnalysisManager(platform, config, new Store(dataDir), datasets, hub);
+  const analyses = new AnalysisManager(platform, config, new Store(dataDir), datasets, hub, options.factory);
+  managers.push(analyses);
   analyses.start();
   const server = createServer(createRequestHandler({ analyses, hub, config }));
   servers.push(server);
@@ -46,9 +51,10 @@ describe("the API", () => {
     const { url } = await serve();
     expect(await (await fetch(`${url}/api/health`)).json()).toEqual({ status: "ok", platform: "connected" });
     const state = (await (await fetch(`${url}/api/state`)).json()) as DeskState;
-    expect(state.datasets.map((dataset) => dataset.id)).toEqual(["sample-coffee-sales", "sample-bike-rides", "sample-support-tickets"]);
+    expect(state.datasets.map((dataset) => dataset.id)).toEqual(["sample-checkout-funnel", "sample-coffee-sales", "sample-bike-rides", "sample-support-tickets"]);
     expect(state.environments.map((environment) => environment.name)).toEqual(["data-desk", "data-desk-python"]);
     expect(state.attachCommand).toBe("npx managed-copilot attach {sessionId}");
+    expect(state.factory).toEqual({ configured: false });
     expect(await (await fetch(`${url}/a/route`)).text()).toContain("Data Desk");
     expect((await fetch(`${url}/api/nope`)).status).toBe(404);
   });
@@ -127,5 +133,102 @@ describe("the API", () => {
     const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-coffee-sales" }) })).json()) as AnalysisView;
     const attach = (await (await fetch(`${url}/api/analyses/${view.id}/attach`, { method: "POST" })).json()) as { command: string; launched: boolean };
     expect(attach).toMatchObject({ command: `npx managed-copilot attach ${view.id}`, launched: false });
+  });
+});
+
+describe("Send to Software Factory", () => {
+  const NOTE = "Build a free-shipping progress bar experiment for mobile carts under $50, and the metrics to watch.";
+  const RESULT = {
+    title: "Funnel by device and cart value",
+    matched: 2,
+    columns: ["device", "cart_value", "sum(reached_shipping)", "sum(reached_payment)"],
+    rows: [
+      ["desktop", "$40–$49", "3434", "2754"],
+      ["mobile", "$40–$49", "4790", "2246"],
+    ],
+  };
+
+  /** An analysis of the checkout funnel in which Copilot answered with a table. */
+  async function analyzed(url: string, platform: FakePlatform): Promise<string> {
+    const view = (await (await json(`${url}/api/analyses`, { method: "POST", body: JSON.stringify({ datasetId: "sample-checkout-funnel" }) })).json()) as AnalysisView;
+    const session = platform.sessions.get(view.id)!;
+    session.emit(event("user.message", { content: "Where do mobile shoppers drop out of checkout, by cart value?" }));
+    session.emit(event("tool.execution_start", { toolCallId: "call-1", toolName: "aggregate", arguments: { title: RESULT.title, groupBy: ["device", "cart_value"] } }));
+    session.emit(event("tool.execution_complete", { toolCallId: "call-1", success: true, result: { content: JSON.stringify(RESULT) } }));
+    session.emit(event("assistant.message", { messageId: "m1", content: "Mobile shoppers with $40–$49 carts drop out at the shipping step." }));
+    session.emit(event("session.idle", {}, { ephemeral: true }));
+    return view.id;
+  }
+
+  const send = (url: string, id: string, body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${url}/api/analyses/${encodeURIComponent(id)}/factory`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const errorOf = async (response: Response) => ((await response.json()) as { error: { code: string; message: string } }).error;
+
+  it("is off, and says why, when Software Factory isn't connected", async () => {
+    const { url, platform } = await serve();
+    const id = await analyzed(url, platform);
+    const response = await send(url, id, { title: "A title", note: NOTE });
+    expect(response.status).toBe(503);
+    expect(await errorOf(response)).toEqual({ code: "factory_unavailable", message: "Software Factory isn't connected. Start it with `aspire run`, or set SOFTWARE_FACTORY_URL." });
+  });
+
+  it("sends the view, the selected rows, the dataset, and the insight, with a link back", async () => {
+    const factory = new FakeFactory();
+    const { url, platform } = await serve({ factory });
+    expect(((await (await fetch(`${url}/api/state`)).json()) as DeskState).factory).toEqual({ configured: true, url: "http://factory.test" });
+    const id = await analyzed(url, platform);
+
+    const invalid = await send(url, id, { title: "Hi", note: NOTE });
+    expect(invalid.status).toBe(400);
+    expect((await errorOf(invalid)).message).toBe("Give it a title of 3 to 120 characters.");
+    expect((await send(url, "missing", { title: "A title", note: NOTE })).status).toBe(404);
+
+    const response = await send(
+      url,
+      id,
+      {
+        title: "Free-shipping progress bar for mobile carts",
+        note: NOTE,
+        include: { view: { kind: "result", resultId: "call-1" }, selections: [{ table: { kind: "result", resultId: "call-1" }, rows: [1] }], dataset: true, answer: true },
+      },
+      { origin: url },
+    );
+    expect(response.status).toBe(201);
+    const sent = (await response.json()) as SendToFactoryResponse;
+    expect(sent.routing).toMatchObject({ workOrderId: "wo_12", number: 12, status: "queued", url: "http://factory.test/#/wo/wo_12" });
+    expect(sent.analysis.items.at(-1)).toMatchObject({ kind: "factory", routing: { number: 12 } });
+
+    const body = factory.created[0]!;
+    expect(body).toMatchObject({
+      title: "Free-shipping progress bar for mobile carts",
+      maxReviewRounds: 2,
+      origin: { app: "data-desk", name: "Data Desk", label: "Storefront checkout funnel", url: `${url}/#/a/${encodeURIComponent(id)}`, key: `${id}:1` },
+    });
+    expect(body).not.toHaveProperty("mode");
+    expect(body).not.toHaveProperty("project");
+    expect(body.context.map((file) => file.path)).toEqual(["INSIGHT.md", "data/funnel-by-device-and-cart-value.csv", "data/funnel-by-device-and-cart-value-selection.csv", "data/checkout-funnel.csv"]);
+    expect(body.context[2]!.content).toBe("device,cart_value,sum(reached_shipping),sum(reached_payment)\nmobile,$40–$49,4790,2246\n");
+    expect(body.brief.startsWith(NOTE)).toBe(true);
+    expect(body.brief).toContain("> Mobile shoppers with $40–$49 carts drop out at the shipping step.");
+
+    // Without an Origin header, the link uses the Host.
+    await send(url, id, { title: "Again", note: NOTE });
+    expect(factory.created[1]!.origin).toMatchObject({ url: `${url}/#/a/${encodeURIComponent(id)}`, key: `${id}:2` });
+    expect(((await (await fetch(`${url}/api/analyses/${id}`)).json()) as AnalysisView).factory?.map((routing) => routing.number)).toEqual([12, 13]);
+  });
+
+  it("passes on what the factory says when it refuses or doesn't answer", async () => {
+    const factory = new FakeFactory();
+    const { url, platform } = await serve({ factory });
+    const id = await analyzed(url, platform);
+    factory.failure = new DeskError("payload_too_large", "The context is larger than 512 KB.", 413);
+    const refused = await send(url, id, { title: "A title", note: NOTE });
+    expect(refused.status).toBe(413);
+    expect(await errorOf(refused)).toEqual({ code: "payload_too_large", message: "The context is larger than 512 KB." });
+    factory.failure = new DeskError("factory_unreachable", "Software Factory didn't answer at http://factory.test.", 502);
+    const down = await send(url, id, { title: "A title", note: NOTE });
+    expect(down.status).toBe(502);
+    expect((await errorOf(down)).message).toBe("Software Factory didn't answer at http://factory.test.");
+    expect(((await (await fetch(`${url}/api/analyses/${id}`)).json()) as AnalysisView).factory).toBeUndefined();
   });
 });

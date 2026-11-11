@@ -9,14 +9,15 @@ import {
   ShieldIcon,
   StopIcon,
   TerminalIcon,
+  WorkflowIcon,
   XCircleFillIcon,
   type Icon,
 } from "@primer/octicons-react";
 import type { ReactNode } from "react";
-import type { CoordinatorState, IncidentView, SandboxView } from "../../shared/types.js";
-import { between, clock, cx, duration } from "../lib/format.js";
+import type { CoordinatorState, FactoryWorkView, IncidentView, SandboxView } from "../../shared/types.js";
+import { between, clock, cx, duration, workOrderLabel } from "../lib/format.js";
 import { useNow } from "../lib/hooks.js";
-import { CopyButton, Popover, Spinner } from "./ui.js";
+import { CopyButton, FACTORY_STATUS_LABEL, FACTORY_TONE, factoryActive, FactoryStatusWord, OpenInFactory, Popover, Spinner, waitingForFactory } from "./ui.js";
 
 /** Activities that run in Copilot's own sandbox. */
 const HANDS_ACTIVITY = /^(\$ |Reading |Searching |Listing |Writing |Editing |Watching )/;
@@ -117,7 +118,16 @@ const COORDINATOR_WORDS: Record<CoordinatorState, string> = {
   failed: "Failed",
 };
 
-function StateWord({ state }: { readonly state: CoordinatorState }) {
+function StateWord({ state, factory = false }: { readonly state: CoordinatorState; readonly factory?: boolean }) {
+  // Its turn ended on purpose: Software Factory builds the fix, and the app tells Copilot when it's released.
+  if (factory && state === "idle") {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
+        <WorkflowIcon size={12} className="text-display-indigo" />
+        Waiting for the factory
+      </span>
+    );
+  }
   const icon =
     state === "starting" ? (
       <Spinner size={12} className="text-fg-muted" />
@@ -165,7 +175,7 @@ function CopilotCard({ incident }: { readonly incident: IncidentView }) {
             </span>
             <div className="min-w-0">
               <div className="font-semibold">Copilot</div>
-              <StateWord state={coordinator.state} />
+              <StateWord state={coordinator.state} factory={waitingForFactory(incident)} />
             </div>
           </div>
           <div className={cx("mt-2 truncate text-xs text-fg-muted", coordinator.state === "working" && coordinator.activity?.startsWith("$") && "font-mono")} title={line}>
@@ -292,13 +302,73 @@ function SandboxCard({ sandbox, busy, now }: { readonly sandbox: SandboxView; re
   );
 }
 
-function GhostSlot({ label, own }: { readonly label: string; readonly own: boolean }) {
+function GhostSlot({ label, own, icon }: { readonly label: string; readonly own: boolean; readonly icon?: Icon }) {
+  const Glyph = icon ?? (own ? TerminalIcon : ContainerIcon);
   return (
     <div className="flex items-center gap-3 rounded-md border border-dashed border-line p-2.5 text-fg-muted">
       <span className="grid size-9 shrink-0 place-items-center rounded-md bg-canvas-muted">
-        {own ? <TerminalIcon size={16} /> : <ContainerIcon size={16} />}
+        <Glyph size={16} />
       </span>
       <span className="text-sm">{label}</span>
+    </div>
+  );
+}
+
+/** The fix's work order in Software Factory, in the fix worker's place. */
+function FactoryCard({ work, now }: { readonly work: FactoryWorkView; readonly now: number }) {
+  const label = workOrderLabel(work.number);
+  const files = work.files ?? [];
+  const subline = work.problem
+    ? "Can't reach it right now"
+    : files.length
+      ? `${label} · ${work.tests ? `${work.tests.passed} passed` : `${files.length} ${files.length === 1 ? "file" : "files"}`}`
+      : factoryActive(work.status)
+        ? `${label} · ${duration(between(work.routedAt, now))}`
+        : label;
+  return (
+    <div className="Box w-full">
+      <Popover
+        label={`Software Factory ${label}`}
+        width="w-96"
+        align="left"
+        trigger={(open, toggle) => (
+          <button
+            type="button"
+            className="flex w-full items-center gap-3 rounded-t-md p-2.5 text-left transition-colors hover:bg-canvas-muted focus-visible:outline-2"
+            aria-expanded={open}
+            onClick={toggle}
+          >
+            <span className={cx("grid size-9 shrink-0 place-items-center rounded-md", FACTORY_TONE)}>
+              <WorkflowIcon size={18} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-sm font-semibold">Software Factory</span>
+              <span className={cx("block truncate text-xs", work.problem ? "text-fg-attention" : "text-fg-muted")}>{subline}</span>
+            </span>
+            <FactoryStatusWord status={work.status} />
+          </button>
+        )}
+      >
+        <div className="flex flex-col gap-3 p-4 text-sm">
+          <div>
+            <div className="font-semibold">Software Factory: {label}</div>
+            <div className="text-xs text-fg-muted">Another app on this platform builds the fix: it plans it, builds it in its own sandboxes, reviews it on a second model, and releases it with tests.</div>
+          </div>
+          <Detail
+            rows={[
+              ["Work order", work.title],
+              ["Status", FACTORY_STATUS_LABEL[work.status]],
+              ["Routed", clock(work.routedAt)],
+              work.tests ? ["Tests", `${work.tests.passed} passed, ${work.tests.failed} failed`] : false,
+              files.length ? ["Fix", <span className="font-mono">{files.map((file) => file.path).join(", ")}</span>] : false,
+              work.appliedAt ? ["Applied", `In Copilot's sandbox at ${clock(work.appliedAt)}`] : false,
+              work.error ? ["Error", <span className="text-fg-danger">{work.error}</span>] : false,
+              work.problem ? ["Problem", <span className="text-fg-attention">{work.problem}</span>] : false,
+            ]}
+          />
+        </div>
+      </Popover>
+      <OpenInFactory url={work.url} className="w-full border-t border-line-muted px-2.5 py-1.5 text-xs" />
     </div>
   );
 }
@@ -359,7 +429,7 @@ function ProductionCard({ incident }: { readonly incident: IncidentView }) {
   );
 }
 
-/** Where the incident's work runs: the alert, Copilot's brain, its hands, and the production gate. */
+/** Where the incident's work runs: the alert, Copilot's brain, its hands (and Software Factory), and the production gate. */
 export function ResponseMap({ incident }: { readonly incident: IncidentView }) {
   const now = useNow();
   const { coordinator, approval } = incident;
@@ -367,9 +437,11 @@ export function ResponseMap({ incident }: { readonly incident: IncidentView }) {
   const own = incident.sandboxes.find((sandbox) => sandbox.role === "own");
   const workers = incident.sandboxes.filter((sandbox) => sandbox.role === "worker");
   const handsBusy = working && HANDS_ACTIVITY.test(coordinator.activity ?? "");
+  // Fixes routed to Software Factory: the factory takes the fix worker's place, and one worker writes the repro.
+  const factoryRoute = incident.fixRoute === "factory";
   // Placeholders for what the runbook brings, so cards don't jump in as sandboxes start.
   const expecting = incident.status !== "resolved" && (coordinator.state === "starting" || coordinator.state === "working");
-  const ghosts = expecting ? Math.max(0, 2 - workers.length) : 0;
+  const ghosts = expecting ? Math.max(0, (factoryRoute ? 1 : 2) - workers.length) : 0;
   const items: ReactNode[] = [];
   if (own) {
     items.push(
@@ -395,6 +467,19 @@ export function ResponseMap({ incident }: { readonly incident: IncidentView }) {
     items.push(
       <li key={`ghost-${index}`}>
         <GhostSlot label="A worker" own={false} />
+      </li>,
+    );
+  }
+  if (factoryRoute && incident.factory) {
+    items.push(
+      <li key="factory" {...(factoryActive(incident.factory.status) ? { "data-active": "" } : {})}>
+        <FactoryCard work={incident.factory} now={now} />
+      </li>,
+    );
+  } else if (factoryRoute && expecting) {
+    items.push(
+      <li key="factory">
+        <GhostSlot label="Software Factory" own={false} icon={WorkflowIcon} />
       </li>,
     );
   }

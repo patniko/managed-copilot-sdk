@@ -1,8 +1,8 @@
-import { CheckCircleFillIcon, FileDiffIcon, InfoIcon, RocketIcon, ShieldIcon, XCircleFillIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, FileDiffIcon, InfoIcon, RocketIcon, ShieldIcon, WorkflowIcon, XCircleFillIcon } from "@primer/octicons-react";
 import { useState } from "react";
 import type { ApprovalView, FileChange, IncidentView } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
-import { between, clock, cx, duration } from "../lib/format.js";
+import { between, clock, cx, duration, workOrderLabel } from "../lib/format.js";
 import { useNow } from "../lib/hooks.js";
 import { Spinner, Tooltip } from "./ui.js";
 
@@ -85,6 +85,15 @@ function Waiting({ incident, approval }: { readonly incident: IncidentView; read
               {approval.files.length} {approval.files.length === 1 ? "file" : "files"}
               <span className="font-mono text-fg-success">+{added}</span>
               <span className="font-mono text-fg-danger">−{removed}</span>
+            </span>
+          ) : null}
+          {approval.factory ? (
+            <span className="inline-flex items-center gap-1.5">
+              <WorkflowIcon size={16} className="text-display-indigo" />
+              Built by Software Factory
+              <a href={approval.factory.url} target="_blank" rel="noreferrer" className="font-mono">
+                {workOrderLabel(approval.factory.number)}
+              </a>
             </span>
           ) : null}
         </div>

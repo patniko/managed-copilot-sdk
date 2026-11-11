@@ -3,6 +3,7 @@ import { useCallback, useRef, useState } from "react";
 import { SIMULATION_SIZES } from "../../shared/types.js";
 import { chooseSize, endSimulation, simulate, useStore } from "../lib/store.js";
 import { useDismiss } from "../lib/useDismiss.js";
+import { Issues } from "./Issues.js";
 import { Stats } from "./Stats.js";
 import { GhostTile, Tile } from "./Tile.js";
 import { ConfirmDialog } from "./ui/ConfirmDialog.js";
@@ -29,6 +30,7 @@ export function Wall() {
       <div className="mt-4">
         <Stats />
       </div>
+      <Issues />
       {phase === "error" ? (
         <div className="blankslate mt-4 rounded-md border border-line">
           <p className="blankslate-description">{loadError ?? "Couldn't load the help desk."}</p>

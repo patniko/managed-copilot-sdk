@@ -20,6 +20,19 @@ export interface Sample {
 /** The bundled datasets (`datasets/*.csv`), each with a question the app's tools answer and one that needs code. */
 export const SAMPLES: readonly Sample[] = [
   {
+    // The cross-demo story: mobile carts just under free shipping drop out at the shipping step, which leads to a UX
+    // experiment Data Desk sends to Software Factory.
+    id: "sample-checkout-funnel",
+    file: "checkout-funnel.csv",
+    name: "Storefront checkout funnel",
+    description: "Contoso Outdoors, 12 weeks",
+    prompts: [
+      // "By cart value" makes the first answer find the $40–$49 band; by device alone, the gap looks like payment friction.
+      { text: "Where do mobile shoppers drop out of checkout, by cart value?", needs: "tools" },
+      { text: "Chart shipping-step drop-off by cart value for each device", needs: "code" },
+    ],
+  },
+  {
     id: "sample-coffee-sales",
     file: "coffee-sales.csv",
     name: "Coffee shop sales",

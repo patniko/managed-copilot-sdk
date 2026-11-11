@@ -39,6 +39,7 @@ log.info(`Incident Commander: http://localhost:${config.port}${config.dev ? " (d
   alerts: config.alertSecret ? "on" : "off (set INCIDENT_ALERT_SECRET)",
   webhook: config.webhookSecret ? "on" : "off (set INCIDENT_WEBHOOK_SECRET)",
   deploys: config.deploy ? "your pipeline" : "demo only",
+  factory: config.factory ? config.factory.url : "off (set SOFTWARE_FACTORY_URL)",
 });
 
 let stopping = false;

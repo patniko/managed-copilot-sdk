@@ -164,6 +164,18 @@ function AlertsButton() {
         <dd className="text-right">{integrations.webhookConfigured ? (integrations.lastWebhookAt ? `Last delivery ${ago(integrations.lastWebhookAt, now)}` : "Waiting for a delivery") : "Off"}</dd>
         <dt className="text-fg-muted">Deploys</dt>
         <dd className="text-right">{integrations.deployConfigured ? "Your pipeline" : "Demo service only"}</dd>
+        <dt className="text-fg-muted">Software Factory</dt>
+        <dd className="min-w-0 truncate text-right">
+          {integrations.factory.url ? (
+            <a href={integrations.factory.url} target="_blank" rel="noreferrer">
+              Connected
+            </a>
+          ) : (
+            <Tooltip content="Start it with `aspire run`, or set SOFTWARE_FACTORY_URL.">
+              <span>Not connected</span>
+            </Tooltip>
+          )}
+        </dd>
       </dl>
     </Popover>
   );

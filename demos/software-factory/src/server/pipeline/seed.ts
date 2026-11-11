@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Plan, PlanTask, ReviewRecord, WorkOrder } from "../../shared/types.js";
 import { formatWorkOrderNumber } from "../../shared/types.js";
+import { CONTEXT_DIR, type LoadedInputs } from "./inputs.js";
 
 /** Where the workshop customizations are mounted inside a sandbox (read-only). */
 export const DEFAULT_SKILLS_ROOT = "/opt/managed-copilot/customizations/skills";
@@ -15,9 +16,37 @@ export function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
-/** The factory owns package.json: builders never fight over it, and the release gets a consistent one. */
-export function packageJson(plan: Plan, skillsRoot = DEFAULT_SKILLS_ROOT): string {
+function objectOf(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function parseObject(text: string | undefined): Record<string, unknown> | undefined {
+  if (!text) return undefined;
+  try {
+    const value: unknown = JSON.parse(text);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The factory owns package.json: builders never fight over it, and the release gets a consistent one. A project the
+ * work order brought keeps its own package.json (name, version, dependencies, scripts) with the factory's check
+ * scripts added.
+ */
+export function packageJson(plan: Plan, skillsRoot = DEFAULT_SKILLS_ROOT, base?: string): string {
   const check = `node ${skillsRoot}/factory-check/check.mjs`;
+  const existing = parseObject(base);
+  if (existing) {
+    const bin = { ...objectOf(existing.bin), ...plan.bin };
+    const merged = {
+      ...existing,
+      ...(Object.keys(bin).length > 0 ? { bin } : {}),
+      scripts: { test: 'node --test "test/**/*.test.*js"', ...objectOf(existing.scripts), check, "check:release": `${check} --release` },
+    };
+    return `${JSON.stringify(merged, null, 2)}\n`;
+  }
   const manifest = {
     name: plan.projectName,
     version: "0.1.0",
@@ -35,8 +64,49 @@ export function packageJson(plan: Plan, skillsRoot = DEFAULT_SKILLS_ROOT): strin
   return `${JSON.stringify(manifest, null, 2)}\n`;
 }
 
-export function workOrderMarkdown(workOrder: Pick<WorkOrder, "number" | "title" | "brief">): string {
-  return `# ${formatWorkOrderNumber(workOrder.number)}: ${workOrder.title}\n\n${workOrder.brief.trim()}\n`;
+/** The project's package name, when the work order brought a project whose package.json names it. */
+export function projectPackageName(inputs: LoadedInputs | undefined): string | undefined {
+  const name = parseObject(inputs?.project?.files.get("package.json"))?.name;
+  return typeof name === "string" && /^[a-z0-9@][a-z0-9._/@-]{0,213}$/.test(name) ? name : undefined;
+}
+
+type BriefOf = Pick<WorkOrder, "number" | "title" | "brief"> & Partial<Pick<WorkOrder, "origin" | "inputs">>;
+
+export function workOrderMarkdown(workOrder: BriefOf): string {
+  const lines = [`# ${formatWorkOrderNumber(workOrder.number)}: ${workOrder.title}`, ""];
+  const origin = workOrder.origin;
+  if (origin) {
+    lines.push(`Routed to the factory by ${origin.name}${origin.label ? ` (${origin.label})` : ""}.`, "");
+  }
+  lines.push(workOrder.brief.trim(), "");
+  const context = workOrder.inputs?.context ?? [];
+  if (context.length > 0) {
+    lines.push(
+      "## Reference material",
+      "",
+      `In \`${CONTEXT_DIR}/\`:`,
+      "",
+      ...context.map((file) => `- \`${file.path}\`${file.description ? `: ${file.description}` : ""}`),
+      "",
+    );
+  }
+  const project = workOrder.inputs?.project;
+  if (project) {
+    lines.push("## The project", "", `This work order changes the existing **${project.name}** project (${project.files} files): its files are the workspace.`, "");
+  }
+  return lines.join("\n");
+}
+
+/** Context files at `.factory/context/<path>`. */
+function contextSeed(inputs: LoadedInputs | undefined): SeedFile[] {
+  return [...(inputs?.context ?? [])].map(([path, content]) => ({ path: `${CONTEXT_DIR}/${path}`, content }));
+}
+
+/** The project's files (package.json aside: the factory writes its own merge of it). */
+function projectFiles(inputs: LoadedInputs | undefined): Map<string, string> {
+  const files = new Map<string, string>();
+  for (const [path, content] of inputs?.project?.files ?? []) if (path !== "package.json") files.set(path, content);
+  return files;
 }
 
 function taskMarkdown(task: PlanTask): string {
@@ -73,17 +143,26 @@ function seedManifest(files: readonly SeedFile[]): SeedFile {
   return { path: ".factory/seed.json", content: `${JSON.stringify({ files: entries }, null, 2)}\n` };
 }
 
-/** Files for a builder's fresh sandbox: the brief, the plan, its task, package.json, and its dependencies' files. */
+/**
+ * Files for a builder's fresh sandbox: the brief, the plan, its task, package.json, and its dependencies' files. A
+ * routed work order adds its context under `.factory/context/`, and its project's files are the workspace's starting
+ * point (a dependency's changes override them). Every workspace file is in `.factory/seed.json`, so the harness
+ * publishes only what the builder added or changed.
+ */
 export function builderSeed(
-  workOrder: Pick<WorkOrder, "number" | "title" | "brief">,
+  workOrder: BriefOf,
   plan: Plan,
   task: PlanTask,
   dependencyFiles: ReadonlyMap<string, string>,
   skillsRoot = DEFAULT_SKILLS_ROOT,
+  inputs?: LoadedInputs,
 ): SeedFile[] {
+  const workspace = projectFiles(inputs);
+  for (const [path, content] of dependencyFiles) workspace.set(path, content);
   const files: SeedFile[] = [
-    { path: "package.json", content: packageJson(plan, skillsRoot) },
-    ...[...dependencyFiles].map(([path, content]) => ({ path, content })),
+    { path: "package.json", content: packageJson(plan, skillsRoot, inputs?.project?.files.get("package.json")) },
+    ...[...workspace].map(([path, content]) => ({ path, content })),
+    ...contextSeed(inputs),
     { path: ".factory/WORK_ORDER.md", content: workOrderMarkdown(workOrder) },
     { path: ".factory/PLAN.md", content: planMarkdown(plan) },
     {
@@ -130,12 +209,16 @@ export interface ReleaseSeed {
   readonly conflicts: readonly string[];
 }
 
-/** Files for the release sandbox: every task's published files merged, with conflicts set aside for the agent. */
+/**
+ * Files for the release sandbox: every task's published files merged (over the project's own files, when the work order
+ * brought one), with conflicts between tasks set aside for the agent.
+ */
 export function releaseSeed(
-  workOrder: Pick<WorkOrder, "number" | "title" | "brief">,
+  workOrder: BriefOf,
   plan: Plan,
   outcomes: readonly TaskOutcome[],
   skillsRoot = DEFAULT_SKILLS_ROOT,
+  inputs?: LoadedInputs,
 ): ReleaseSeed {
   const merged = new Map<string, { content: string; taskId: string }>();
   const conflictVersions = new Map<string, Map<string, string>>();
@@ -152,9 +235,11 @@ export function releaseSeed(
       }
     }
   }
+  const workspace = projectFiles(inputs);
+  for (const [path, { content }] of merged) workspace.set(path, content);
   const files: SeedFile[] = [
-    { path: "package.json", content: packageJson(plan, skillsRoot) },
-    ...[...merged].map(([path, { content }]) => ({ path, content })),
+    { path: "package.json", content: packageJson(plan, skillsRoot, inputs?.project?.files.get("package.json")) },
+    ...[...workspace].map(([path, content]) => ({ path, content })),
   ];
   for (const [path, versions] of conflictVersions) {
     for (const [taskId, content] of versions) files.push({ path: `.factory/conflicts/${taskId}/${path}`, content });
@@ -162,6 +247,7 @@ export function releaseSeed(
   const release = {
     projectName: plan.projectName,
     workOrder: { number: formatWorkOrderNumber(workOrder.number), title: workOrder.title },
+    ...(inputs?.project ? { project: { name: inputs.project.name, files: [...inputs.project.files.keys()] } } : {}),
     bin: plan.bin,
     integration: plan.integration,
     tasks: outcomes.map(({ task, acceptedWithFindings }) => ({
@@ -173,6 +259,7 @@ export function releaseSeed(
     conflicts: [...conflictVersions.keys()],
   };
   files.push(
+    ...contextSeed(inputs),
     { path: ".factory/WORK_ORDER.md", content: workOrderMarkdown(workOrder) },
     { path: ".factory/PLAN.md", content: planMarkdown(plan) },
     { path: ".factory/REVIEWS.md", content: reviewsMarkdown(outcomes) },

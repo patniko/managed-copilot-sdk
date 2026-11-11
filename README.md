@@ -125,6 +125,10 @@ real models and deploy to Azure with the same AppHost; `pnpm gallery` opens ever
 | [AI software factory](demos/software-factory/README.md) | Delegate, isolated | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
 | [Long-running assistant](demos/assistant/README.md) | Shared, delegate | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 
+Three of them hand work to the software factory, which shows where each work order came from: Help Desk sends a
+storefront bug its customers reported, Incident Commander sends an incident's fix (and deploys what comes back), and
+Data Desk sends an insight with the data behind it.
+
 ## Deploy to Azure
 
 ```powershell

@@ -34,3 +34,6 @@ export function initials(name: string): string {
 }
 
 export const cx = (...names: readonly (string | false | null | undefined)[]): string => names.filter(Boolean).join(" ");
+
+/** A Software Factory work order's number: `WO-0012`. */
+export const workOrderLabel = (number: number): string => `WO-${String(number).padStart(4, "0")}`;

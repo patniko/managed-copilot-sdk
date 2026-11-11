@@ -18,11 +18,20 @@ export interface PlatformStatus {
   readonly account?: AccountSummary;
 }
 
-/** The environment every customer's session runs in, and the model and tools each session gets. */
+/** The environment every customer's session runs in, the model and tools each session gets, and where issues go. */
 export interface DeskInfo {
   readonly environment: string;
   readonly model?: string;
   readonly tools: readonly ToolInfo[];
+  readonly factory: FactoryInfo;
+}
+
+/** Software Factory, which fixes the store's website when the operator sends it a software issue. */
+export interface FactoryInfo {
+  /** `SOFTWARE_FACTORY_URL` is set, so issues can be sent. */
+  readonly configured: boolean;
+  /** Where people open Software Factory. */
+  readonly url?: string;
 }
 
 export interface ToolInfo {
@@ -31,8 +40,20 @@ export interface ToolInfo {
   readonly approval: boolean;
 }
 
-export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "resolve_conversation"] as const;
+export const TOOL_NAMES = ["list_my_orders", "get_order", "track_shipment", "request_refund", "cancel_order", "report_bug", "resolve_conversation"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
+
+/** The parts of the store's website an agent reports problems with (`report_bug`). */
+export const BUG_AREAS = ["promo-codes", "cart", "order-status", "other"] as const;
+export type BugArea = (typeof BUG_AREAS)[number];
+
+/** Each area's short label, and the title of the software issue its reports make up. */
+export const BUG_AREA_INFO: Readonly<Record<BugArea, { readonly label: string; readonly issue: string }>> = {
+  "promo-codes": { label: "Promo codes", issue: "Promo codes rejected at checkout" },
+  cart: { label: "Cart", issue: "Wrong quantities in the cart" },
+  "order-status": { label: "Order status", issue: "Wrong order status on My orders" },
+  other: { label: "Other", issue: "Other problems with the website" },
+};
 
 /** Primer display colors for customer avatars. */
 export const AVATAR_COLORS = ["blue", "green", "orange", "purple", "pink", "teal", "indigo", "yellow", "red"] as const;
@@ -108,6 +129,20 @@ export interface ApprovalRequest {
   readonly reason?: string;
 }
 
+/** A problem with the store's website that a customer ran into, as their agent reported it with `report_bug`. */
+export interface BugReport {
+  readonly area: BugArea;
+  /** One line. */
+  readonly title: string;
+  /** The customer's experience. */
+  readonly whatHappened: string;
+  /** What should have happened. */
+  readonly expected: string;
+  readonly orderId?: string;
+  /** When the agent reported it. */
+  readonly at: string;
+}
+
 /** One customer's conversation: a session of the help desk environment. */
 export interface Ticket {
   readonly customerId: string;
@@ -117,8 +152,48 @@ export interface Ticket {
   readonly approval?: ApprovalRequest;
   /** Calls that named another customer's order. */
   readonly blocked: number;
+  /** The problem with the store's website the agent reported (its latest report). */
+  readonly bug?: BugReport;
   readonly premiumRequests?: number;
   readonly problem?: string;
+}
+
+/** One customer's report in a software issue. */
+export interface IssueReport {
+  readonly customerId: string;
+  readonly name: string;
+  readonly whatHappened: string;
+  readonly orderId?: string;
+  readonly at: string;
+}
+
+/** Software Factory's work order statuses. */
+export const WORK_ORDER_STATUSES = ["queued", "planning", "building", "releasing", "completed", "failed", "cancelled"] as const;
+export type WorkOrderStatus = (typeof WORK_ORDER_STATUSES)[number];
+
+/** The work order Software Factory made of an issue. */
+export interface RoutedWorkOrder {
+  /** Software Factory's ID (`wo_…`). */
+  readonly workOrderId: string;
+  /** Shown as `WO-0012`. */
+  readonly number: number;
+  readonly title: string;
+  readonly status: WorkOrderStatus;
+  /** The work order's page in Software Factory. */
+  readonly url: string;
+  /** Why it failed. */
+  readonly error?: string;
+}
+
+/** The current simulation's reports about one area of the website: one issue to send to Software Factory. */
+export interface SoftwareIssue {
+  readonly area: BugArea;
+  /** What's wrong, for example "Promo codes rejected at checkout". */
+  readonly title: string;
+  /** Oldest first. */
+  readonly reports: readonly IssueReport[];
+  /** The work order it was sent as. */
+  readonly routed?: RoutedWorkOrder;
 }
 
 export interface Counters {
@@ -147,13 +222,16 @@ export interface HelpDeskState {
   readonly customers: readonly CustomerCard[];
   readonly run?: RunInfo;
   readonly tickets: readonly Ticket[];
+  /** The current simulation's software issues. */
+  readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
 }
 
 export type ServerEvent =
   | { readonly type: "platform"; readonly platform: PlatformStatus; readonly desk: DeskInfo }
-  | { readonly type: "run"; readonly run?: RunInfo; readonly tickets: readonly Ticket[] }
+  | { readonly type: "run"; readonly run?: RunInfo; readonly tickets: readonly Ticket[]; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "ticket"; readonly ticket: Ticket }
+  | { readonly type: "issues"; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "counters"; readonly counters: Counters };
 
 export interface SimulateRequest {

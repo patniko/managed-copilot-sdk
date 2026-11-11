@@ -1,8 +1,9 @@
 import { CheckIcon, CopilotIcon, MarkGithubIcon, PlugIcon, PlusIcon, WorkflowIcon, XIcon } from "@primer/octicons-react";
 import { useEffect, useId, useRef } from "react";
-import { formatWorkOrderNumber, type WorkOrderSummary } from "../../shared/types.js";
+import { formatWorkOrderNumber, type WorkOrderOrigin, type WorkOrderSummary } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { formatFullDateTime, formatRelative } from "../lib/format.js";
+import { originIcon, originText } from "../lib/origin.js";
 import { modeLabel } from "../lib/platform.js";
 import { workOrderHref } from "../lib/router.js";
 import { workOrderStatusMeta } from "../lib/stations.js";
@@ -120,6 +121,20 @@ function ModeGlyph({ mode }: { readonly mode: WorkOrderSummary["mode"] }) {
   );
 }
 
+/** The app that routed the work order here: its icon and name, the full origin in the tooltip. */
+function OriginGlyph({ origin }: { readonly origin: WorkOrderOrigin }) {
+  const Glyph = originIcon(origin);
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5 font-semibold text-fg-accent" title={originText(origin)}>
+      <Glyph size={12} />
+      {origin.name}
+      <span aria-hidden className="font-normal text-fg-muted">
+        ·
+      </span>
+    </span>
+  );
+}
+
 function WorkOrderItem({
   summary,
   active,
@@ -164,6 +179,7 @@ function WorkOrderItem({
             ) : (
               <ModeGlyph mode={summary.mode} />
             )}
+            {summary.origin ? <OriginGlyph origin={summary.origin} /> : null}
             <span className="truncate">
               {summary.github ? `${summary.github.repository.split("/")[1] ?? summary.github.repository}${summary.github.pullRequest ? ` #${summary.github.pullRequest}` : ""} · ` : ""}
               {meta.label} · <span title={formatFullDateTime(summary.createdAt)}>{formatRelative(summary.createdAt, now)}</span>

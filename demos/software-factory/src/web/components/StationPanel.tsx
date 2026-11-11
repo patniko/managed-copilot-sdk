@@ -6,7 +6,9 @@ import {
   FileDiffIcon,
   InfoIcon,
   IssueOpenedIcon,
+  LinkExternalIcon,
   NoteIcon,
+  PaperclipIcon,
   RepoIcon,
   SyncIcon,
   TerminalIcon,
@@ -17,6 +19,7 @@ import type { AttachResponse, ReviewFinding, ReviewRecord, Station, WorkOrder } 
 import { api, errorMessage } from "../lib/api.js";
 import { cx } from "../lib/cx.js";
 import {
+  formatBytes,
   formatClock,
   formatCount,
   formatDateTime,
@@ -24,10 +27,13 @@ import {
   formatFullDateTime,
   formatRelative,
   formatSandboxSize,
+  pluralize,
   shortId,
   shortImage,
   summarizeNetwork,
 } from "../lib/format.js";
+import { originHref, originIcon } from "../lib/origin.js";
+import { workOrderHref } from "../lib/router.js";
 import { isReusedWorker, isStationActive, stationElapsed, stationStatusMeta } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
 import { useNow } from "../lib/time.js";
@@ -627,27 +633,89 @@ export function IntakePanel({ workOrder }: { readonly workOrder: WorkOrder }) {
     workOrder.source.templateId ? state.templates.find((candidate) => candidate.id === workOrder.source.templateId) : undefined,
   );
   if (workOrder.github) return <GitHubIntake workOrder={workOrder} />;
-  const source = workOrder.source.kind === "template" ? (template?.title ?? workOrder.source.templateId ?? "Template") : "Custom brief";
+  const origin = workOrder.origin;
+  const source = origin ? `From ${origin.name}` : workOrder.source.kind === "template" ? (template?.title ?? workOrder.source.templateId ?? "Template") : "Custom brief";
+  const OriginGlyph = origin ? originIcon(origin) : NoteIcon;
+  const href = origin ? originHref(origin) : undefined;
   return (
     <section aria-label="Work order brief" className={PANEL_CLASS}>
       <header className="border-b border-line bg-canvas-muted px-4 py-3">
         <div className="flex items-start gap-2">
-          <NoteIcon size={16} className="mt-1 shrink-0 text-fg-muted" />
-          <div className="min-w-0">
-            <h2 className="text-base font-semibold">Brief</h2>
+          <OriginGlyph size={16} className={cx("mt-1 shrink-0", origin ? "text-fg-accent" : "text-fg-muted")} />
+          <div className="min-w-0 flex-1">
+            <h2 className="text-base font-semibold">{origin ? `From ${origin.name}` : "Brief"}</h2>
             <p className="truncate text-xs text-fg-muted" title={formatFullDateTime(workOrder.createdAt)}>
-              {source} · {formatDateTime(workOrder.createdAt)}
+              {origin ? (origin.label ?? "Routed in") : source} · {formatDateTime(workOrder.createdAt)}
               {workOrder.owner ? ` · @${workOrder.owner.login}` : ""}
             </p>
           </div>
+          {origin && href ? (
+            <a href={href} target="_blank" rel="noreferrer" className="btn btn-sm shrink-0">
+              <LinkExternalIcon size={16} />
+              Open in {origin.name}
+            </a>
+          ) : null}
         </div>
       </header>
       <div className={SCROLL_CLASS}>
         <div className="p-4">
           <MarkdownView source={workOrder.brief} />
         </div>
+        {workOrder.inputs ? <BroughtAlong workOrder={workOrder} /> : null}
       </div>
     </section>
+  );
+}
+
+/** What a routed work order brought: reference material for every sandbox, and the project the work changes. */
+function BroughtAlong({ workOrder }: { readonly workOrder: WorkOrder }) {
+  const inputs = workOrder.inputs!;
+  const project = inputs.project;
+  return (
+    <div className="border-t border-line-muted p-4">
+      <h3 className="mb-2 text-sm font-semibold">Brought along</h3>
+      <ul className="rounded-md border border-line">
+        {inputs.context.map((file) => (
+          <li key={file.path} className="border-t border-line-muted first:border-t-0">
+            <a
+              href={workOrderHref(workOrder.id, "artifacts", { station: "intake", path: `context/${file.path}` })}
+              className="flex items-start gap-2 px-3 py-2 text-fg hover:bg-canvas-muted hover:no-underline"
+            >
+              <PaperclipIcon size={16} className="mt-0.5 shrink-0 text-fg-muted" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-xs font-semibold" title={file.path}>
+                  {file.path}
+                </span>
+                {file.description ? <span className="block text-xs text-fg-muted">{file.description}</span> : null}
+              </span>
+              <span className="shrink-0 text-xs text-fg-muted tabular-nums">{formatBytes(file.size)}</span>
+            </a>
+          </li>
+        ))}
+        {project ? (
+          <li className="border-t border-line-muted first:border-t-0">
+            <a
+              href={workOrderHref(workOrder.id, "artifacts", { station: "intake" })}
+              className="flex items-start gap-2 px-3 py-2 text-fg hover:bg-canvas-muted hover:no-underline"
+            >
+              <RepoIcon size={16} className="mt-0.5 shrink-0 text-fg-muted" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-semibold">{project.name}</span>
+                <span className="block text-xs text-fg-muted">
+                  The project this work order changes: every builder and the release start from its {pluralize(project.files, "file")}.
+                </span>
+              </span>
+              <span className="shrink-0 text-xs text-fg-muted tabular-nums">{formatBytes(project.bytes)}</span>
+            </a>
+          </li>
+        ) : null}
+      </ul>
+      {inputs.context.length > 0 ? (
+        <p className="mt-2 text-xs text-fg-muted">
+          Every sandbox has the reference material in <code className="inline-code">.factory/context/</code>, and the planner read it.
+        </p>
+      ) : null}
+    </div>
   );
 }
 

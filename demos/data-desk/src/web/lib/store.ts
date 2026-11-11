@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
-import type { AnalysisSummary, AnalysisView, AttachResponse, DatasetSummary, EnvironmentView, PlatformStatus, ServerEvent } from "../../shared/types.js";
+import { STATUS_LABEL, workOrderLabel } from "../../shared/factory.js";
+import type { AnalysisSummary, AnalysisView, AttachResponse, DatasetSummary, EnvironmentView, FactoryStatus, PlatformStatus, SendToFactoryRequest, ServerEvent } from "../../shared/types.js";
 import { api, errorMessage } from "./api.js";
 import { analysisHref, homeHref, navigate, parseHash } from "./router.js";
 import { toast } from "./toast.js";
@@ -30,6 +31,7 @@ export interface StoreState {
   readonly attachCommand: string;
   readonly canLaunchTerminal: boolean;
   readonly maxUploadBytes: number;
+  readonly factory: FactoryStatus;
 }
 
 const initialState: StoreState = {
@@ -44,6 +46,7 @@ const initialState: StoreState = {
   attachCommand: "",
   canLaunchTerminal: false,
   maxUploadBytes: 5 * 1024 * 1024,
+  factory: { configured: false },
 };
 
 let state: StoreState = initialState;
@@ -100,6 +103,7 @@ async function loadState(): Promise<void> {
       attachCommand: loaded.attachCommand,
       canLaunchTerminal: loaded.canLaunchTerminal,
       maxUploadBytes: loaded.maxUploadBytes,
+      factory: loaded.factory ?? { configured: false },
     }));
   } catch (error) {
     setState((current) => (current.phase === "ready" ? current : { ...current, phase: "error", loadError: errorMessage(error) }));
@@ -339,5 +343,17 @@ export async function openInCli(id: string): Promise<AttachResponse | undefined>
   } catch (error) {
     toast.error("Couldn't open Copilot CLI", errorMessage(error));
     return undefined;
+  }
+}
+
+/** Sends what the person picked to Software Factory. Resolves undefined once it's there, or what went wrong. */
+export async function sendToFactory(id: string, request: SendToFactoryRequest): Promise<string | undefined> {
+  try {
+    const { routing, analysis } = await api.factory(id, request);
+    storeView(analysis);
+    toast.success("Sent to Software Factory", `${workOrderLabel(routing.number)} · ${STATUS_LABEL[routing.status]}. Follow it from the conversation.`);
+    return undefined;
+  } catch (error) {
+    return errorMessage(error);
   }
 }

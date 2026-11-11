@@ -1,4 +1,4 @@
-import type { ApiErrorBody, AppState, CreatedIncident, DecisionRequest, IncidentView, NoteRequest } from "../../shared/types.js";
+import type { ApiErrorBody, AppSettings, AppState, CreatedIncident, DecisionRequest, IncidentView, NoteRequest, SettingsRequest } from "../../shared/types.js";
 
 export class ApiError extends Error {
   constructor(
@@ -31,6 +31,7 @@ export const api = {
   state: () => request<AppState>("/api/state"),
   incident: (id: string) => request<IncidentView>(`/api/incidents/${encodeURIComponent(id)}`),
   simulate: () => post<CreatedIncident>("/api/simulate"),
+  settings: (settings: SettingsRequest) => request<AppSettings>("/api/settings", { method: "PUT", body: JSON.stringify(settings) }),
   decide: (id: string, decision: DecisionRequest) => post<void>(`/api/incidents/${encodeURIComponent(id)}/decision`, decision),
   note: (id: string, note: NoteRequest) => post<void>(`/api/incidents/${encodeURIComponent(id)}/notes`, note),
   remove: (id: string) => request<void>(`/api/incidents/${encodeURIComponent(id)}`, { method: "DELETE" }),

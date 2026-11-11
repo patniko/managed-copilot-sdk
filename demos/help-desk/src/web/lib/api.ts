@@ -1,4 +1,4 @@
-import type { HelpDeskState, RunInfo } from "../../shared/types.js";
+import type { BugArea, HelpDeskState, RunInfo, SoftwareIssue } from "../../shared/types.js";
 
 /** A failed API call with the server's friendly message (never a stack trace). */
 export class ApiError extends Error {
@@ -45,4 +45,5 @@ export const api = {
   end: () => json<undefined>("DELETE", "/api/simulation"),
   send: (customerId: string, text: string) => json<undefined>("POST", `/api/tickets/${enc(customerId)}/messages`, { text }),
   answer: (customerId: string, approvalId: string, approve: boolean) => json<undefined>("POST", `/api/tickets/${enc(customerId)}/approvals/${enc(approvalId)}`, { approve }),
+  routeIssue: (area: BugArea) => json<SoftwareIssue>("POST", `/api/issues/${enc(area)}/route`),
 };

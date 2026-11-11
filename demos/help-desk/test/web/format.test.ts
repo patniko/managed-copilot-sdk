@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Ticket, ToolItem } from "../../src/shared/types.js";
-import { customerLine, inlineMarkdown, latestMessage, money, operatorOutcome, plainText, premium, STATUS, toolArgs } from "../../src/web/lib/format.js";
+import type { SoftwareIssue, Ticket, ToolItem } from "../../src/shared/types.js";
+import { customerLine, inlineMarkdown, latestMessage, money, operatorOutcome, plainText, premium, STATUS, toolArgs, WORK_ORDER_STATUS, workOrderLine, workOrderName } from "../../src/web/lib/format.js";
 import { reduce, type StoreState } from "../../src/web/lib/store.js";
 
 const tool = (overrides: Partial<ToolItem>): ToolItem => ({ kind: "tool", id: "t1", name: "get_order", args: { orderId: "co-48177" }, at: "2026-11-03T10:00:00.000Z", status: "done", ...overrides });
@@ -47,6 +47,22 @@ describe("words on the wall", () => {
     expect(toolArgs(tool({ args: { orderId: "co-1", amount: 5 } }))).toBe("CO-1 · $5.00");
   });
 
+  it("shows a reported problem with the website to both: plainly to the customer, by area to the operator", () => {
+    const report = tool({ name: "report_bug", args: { area: "promo-codes", title: "TRAIL15 rejected", orderId: "CO-48224" }, result: { ok: true, area: "promo-codes" } });
+    expect(customerLine(report)).toEqual({ text: "Reported the problem to our engineering team", tone: "muted" });
+    expect(customerLine({ ...report, status: "running" })).toEqual({ text: "Reporting the problem to our engineering team…", tone: "muted" });
+    expect(customerLine({ ...report, status: "failed" })).toBeUndefined();
+    expect(customerLine({ ...report, status: "refused" })).toEqual({ text: "CO-48224 isn't on your account", tone: "muted" });
+    expect(operatorOutcome(report)).toEqual({ text: "Reported: Promo codes", tone: "done" });
+    expect(operatorOutcome({ ...report, args: { area: "made-up" } })).toEqual({ text: "Reported: Other", tone: "done" });
+  });
+
+  it("names work orders and their statuses the way Software Factory does", () => {
+    expect(workOrderName(12)).toBe("WO-0012");
+    expect(workOrderLine({ workOrderId: "wo_12", number: 12, title: "Fix", status: "building", url: "http://factory.test/#/wo/wo_12" })).toBe("WO-0012 · Building");
+    expect(Object.values(WORK_ORDER_STATUS).map((status) => status.label)).toEqual(["Queued", "Planning", "Building", "Releasing", "Completed", "Failed", "Cancelled"]);
+  });
+
   it("applies the Markdown marks agents use, and drops them from previews", () => {
     expect(inlineMarkdown("Yes! **CO-48234** ships *tomorrow*, see `track_shipment`.")).toEqual([
       { kind: "text", text: "Yes! " },
@@ -63,21 +79,42 @@ describe("words on the wall", () => {
 });
 
 describe("store", () => {
-  const base: StoreState = { phase: "ready", connection: "open", customers: [], tickets: {}, counters: { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 }, size: 25, answering: {}, toasts: [] };
+  const base: StoreState = {
+    phase: "ready",
+    connection: "open",
+    customers: [],
+    tickets: {},
+    issues: [],
+    counters: { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 },
+    size: 25,
+    answering: {},
+    routing: {},
+    toasts: [],
+  };
+  const issue: SoftwareIssue = { area: "cart", title: "Wrong quantities in the cart", reports: [{ customerId: "c08", name: "Lucas Silva", whatHappened: "Charged for 3.", at: "" }] };
 
-  it("replaces the tickets when a simulation starts or ends", () => {
-    const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()] });
+  it("replaces the tickets and issues when a simulation starts or ends", () => {
+    const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()], issues: [issue] });
     expect(started.run?.id).toBe("r1");
     expect(Object.keys(started.tickets)).toEqual(["c01"]);
-    const ended = reduce(started, { type: "run", tickets: [] });
+    expect(started.issues).toEqual([issue]);
+    const ended = reduce(started, { type: "run", tickets: [], issues: [] });
     expect(ended.run).toBeUndefined();
     expect(ended.tickets).toEqual({});
+    expect(ended.issues).toEqual([]);
   });
 
   it("updates a ticket of the current simulation and drops late updates of an ended one", () => {
-    const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()] });
+    const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()], issues: [] });
     expect(reduce(started, { type: "ticket", ticket: ticket({ status: "resolved" }) }).tickets["c01"]?.status).toBe("resolved");
     expect(reduce(started, { type: "ticket", ticket: ticket({ customerId: "c09" }) })).toBe(started);
     expect(reduce(base, { type: "ticket", ticket: ticket() })).toBe(base);
+  });
+
+  it("follows the current simulation's issues, and drops late ones of an ended simulation", () => {
+    const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()], issues: [] });
+    const routed = { ...issue, routed: { workOrderId: "wo_1", number: 1, title: "Fix: wrong quantities in the cart", status: "queued" as const, url: "http://factory.test/#/wo/wo_1" } };
+    expect(reduce(started, { type: "issues", issues: [routed] }).issues).toEqual([routed]);
+    expect(reduce(base, { type: "issues", issues: [routed] })).toBe(base);
   });
 });

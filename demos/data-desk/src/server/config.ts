@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseAttachUrl } from "./attach.js";
+import { parseFactoryUrl } from "./factory.js";
 
 export interface DeskConfig {
   readonly port: number;
@@ -26,6 +27,10 @@ export interface DeskConfig {
   readonly maxUploadBytes: number;
   /** How often the platform connection is checked. */
   readonly healthIntervalMs: number;
+  /** Where Data Desk's server reaches Software Factory's API (`SOFTWARE_FACTORY_URL`); unset turns sending off. */
+  readonly factoryUrl?: string;
+  /** Software Factory's address for people, in links (`SOFTWARE_FACTORY_PUBLIC_URL`, else `factoryUrl`). */
+  readonly factoryPublicUrl?: string;
 }
 
 function findPackageRoot(start: string): string {
@@ -41,6 +46,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
   const here = fileURLToPath(import.meta.url);
   const packageRoot = findPackageRoot(dirname(here));
   const attachUrl = parseAttachUrl(env.DATA_DESK_ATTACH_URL);
+  const factoryUrl = parseFactoryUrl(env.SOFTWARE_FACTORY_URL);
+  const factoryPublicUrl = factoryUrl ? (parseFactoryUrl(env.SOFTWARE_FACTORY_PUBLIC_URL) ?? factoryUrl) : undefined;
   return {
     port: Number(env.PORT ?? env.DATA_DESK_PORT ?? 7430),
     host: env.HOST ?? "127.0.0.1",
@@ -55,5 +62,6 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     model: env.DATA_DESK_MODEL?.trim() || "claude-sonnet-5",
     maxUploadBytes: 5 * 1024 * 1024,
     healthIntervalMs: 15_000,
+    ...(factoryUrl ? { factoryUrl, factoryPublicUrl } : {}),
   };
 }

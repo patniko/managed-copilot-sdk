@@ -79,6 +79,84 @@ describe("datasets", () => {
   });
 });
 
+describe("the storefront checkout funnel", () => {
+  const datasets = new Datasets(samples, mkdtempSync(join(tmpdir(), "desk-")), 1024 * 1024);
+  datasets.load();
+  const funnel = datasets.require("sample-checkout-funnel");
+  const table = funnel.table();
+  const BANDS = ["under $25", "$25–$39", "$40–$49", "$50–$74", "$75+"];
+  /** reached_payment / reached_shipping for each device and cart value, with Data Desk's own aggregate tool. */
+  const shippingStep = (filters: { column: string; op: "="; value: string }[] = []) => {
+    const { rows } = table.aggregate({ groupBy: ["device", "cart_value"], metrics: [{ fn: "sum", column: "reached_shipping" }, { fn: "sum", column: "reached_payment" }], filters });
+    return (device: string, band: string): number => {
+      const row = rows.find((candidate) => candidate[0] === device && candidate[1] === band)!;
+      return Number(row[3]) / Number(row[2]);
+    };
+  };
+
+  it("has 12 weeks of checkouts for three devices and five cart values, with counts that add up", () => {
+    expect(funnel.summary).toMatchObject({ name: "Storefront checkout funnel", fileName: "checkout-funnel.csv", rows: 180 });
+    expect(funnel.summary.columns).toEqual([
+      { name: "week", type: "date" },
+      { name: "device", type: "text" },
+      { name: "cart_value", type: "text" },
+      { name: "free_shipping", type: "text" },
+      { name: "checkouts", type: "number" },
+      { name: "reached_shipping", type: "number" },
+      { name: "reached_payment", type: "number" },
+      { name: "orders", type: "number" },
+      { name: "revenue", type: "number" },
+      { name: "conversion", type: "number" },
+    ]);
+    const weeks = [...new Set(table.rows.map((row) => row[0]!))];
+    expect(weeks).toHaveLength(12);
+    expect([weeks[0], weeks.at(-1)]).toEqual(["2025-07-07", "2025-09-22"]);
+    expect(weeks.every((week) => new Date(`${week}T00:00:00Z`).getUTCDay() === 1)).toBe(true);
+    expect([...new Set(table.rows.map((row) => row[1]))].sort()).toEqual(["desktop", "mobile", "tablet"]);
+    expect([...new Set(table.rows.map((row) => row[2]))]).toEqual(BANDS);
+    for (const row of table.rows) {
+      const [checkouts, shipping, payment, orders, revenue, conversion] = row.slice(4).map(Number) as [number, number, number, number, number, number];
+      // Free shipping starts at $50.
+      expect(row[3]).toBe(row[2] === "$50–$74" || row[2] === "$75+" ? "yes" : "no");
+      expect(checkouts >= shipping && shipping >= payment && payment >= orders && orders > 0).toBe(true);
+      expect(conversion).toBeCloseTo(orders / checkouts, 3);
+      const [low, high] = [[5, 25], [25, 40], [40, 50], [50, 75], [75, 250]][BANDS.indexOf(row[2]!)]!;
+      expect(revenue / orders).toBeGreaterThan(low!);
+      expect(revenue / orders).toBeLessThan(high!);
+    }
+  });
+
+  it("shows mobile carts just under free shipping dropping out at the shipping step, week after week", () => {
+    const ratio = shippingStep();
+    expect(ratio("mobile", "$40–$49")).toBeGreaterThanOrEqual(0.45);
+    expect(ratio("mobile", "$40–$49")).toBeLessThanOrEqual(0.5);
+    expect(ratio("desktop", "$40–$49")).toBeCloseTo(0.8, 1);
+    expect(ratio("mobile", "$50–$74")).toBeCloseTo(0.85, 1);
+    for (const band of ["under $25", "$25–$39"]) {
+      expect(ratio("mobile", band)).toBeGreaterThan(0.63);
+      expect(ratio("mobile", band)).toBeLessThan(0.72);
+    }
+    // The clear outlier: every other group keeps at least 15 points more of its shoppers.
+    const others = ["desktop", "mobile", "tablet"].flatMap((device) => BANDS.filter((band) => device !== "mobile" || band !== "$40–$49").map((band) => ratio(device, band)));
+    expect(Math.min(...others) - ratio("mobile", "$40–$49")).toBeGreaterThan(0.15);
+    for (const week of new Set(table.rows.map((row) => row[0]!))) {
+      const weekly = shippingStep([{ column: "week", op: "=", value: week }])("mobile", "$40–$49");
+      expect(weekly).toBeGreaterThanOrEqual(0.45);
+      expect(weekly).toBeLessThanOrEqual(0.5);
+    }
+  });
+
+  it("converts best on desktop and worst on mobile, which has the most checkouts", () => {
+    const { rows } = table.aggregate({ groupBy: ["device"], metrics: [{ fn: "sum", column: "checkouts" }, { fn: "sum", column: "orders" }] });
+    const device = (name: string) => rows.find((row) => row[0] === name)!.slice(1).map(Number) as [number, number];
+    const conversion = (name: string) => device(name)[1] / device(name)[0];
+    expect(conversion("desktop")).toBeCloseTo(0.55, 1);
+    expect(conversion("tablet")).toBeCloseTo(0.45, 1);
+    expect(conversion("mobile")).toBeCloseTo(0.38, 1);
+    expect(device("mobile")[0]).toBeGreaterThan(Math.max(device("desktop")[0], device("tablet")[0]));
+  });
+});
+
 describe("uploads", () => {
   let minute = 0;
 

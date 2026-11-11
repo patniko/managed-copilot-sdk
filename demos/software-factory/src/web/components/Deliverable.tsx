@@ -1,9 +1,22 @@
-import { BeakerIcon, CopilotIcon, DownloadIcon, FileDiffIcon, PackageIcon, type Icon } from "@primer/octicons-react";
+import {
+  BeakerIcon,
+  CopilotIcon,
+  DiffAddedIcon,
+  DiffModifiedIcon,
+  DiffRemovedIcon,
+  DownloadIcon,
+  FileDiffIcon,
+  LinkExternalIcon,
+  PackageIcon,
+  type Icon,
+} from "@primer/octicons-react";
 import type { ReactNode } from "react";
-import type { WorkOrder } from "../../shared/types.js";
+import type { ReleaseChange, WorkOrder } from "../../shared/types.js";
 import { bundleUrl } from "../lib/api.js";
 import { basename, pickReleaseArtifact } from "../lib/artifacts.js";
+import { cx } from "../lib/cx.js";
 import { elapsedBetween, formatBytes, formatDuration, formatFullDateTime, formatRelative, pluralize } from "../lib/format.js";
+import { originHref, originIcon } from "../lib/origin.js";
 import { navigate, workOrderHref } from "../lib/router.js";
 import { isWorkOrderActive, latestReview, stationStatusMeta, taskRows, type TaskRow } from "../lib/stations.js";
 import { useArtifactIndex } from "../lib/store.js";
@@ -137,6 +150,7 @@ export function DeliverableView({ workOrder }: { readonly workOrder: WorkOrder }
       </section>
 
       <aside className="min-w-0 space-y-4" aria-label="Release summary">
+        {workOrder.origin ? <OriginBox workOrder={workOrder} /> : null}
         <section className="Box">
           <div className="Box-header px-4 py-2">
             <h3 className="Box-title">Checks</h3>
@@ -149,9 +163,88 @@ export function DeliverableView({ workOrder }: { readonly workOrder: WorkOrder }
             )}
           </div>
         </section>
+        {release.changes && workOrder.inputs?.project ? <ProjectChanges workOrder={workOrder} changes={release.changes} project={workOrder.inputs.project.name} /> : null}
         <TaskOutcomes workOrder={workOrder} />
       </aside>
     </div>
+  );
+}
+
+/** Who asked for this release: the app that routed the work order here, with a link back. */
+function OriginBox({ workOrder }: { readonly workOrder: WorkOrder }) {
+  const origin = workOrder.origin!;
+  const Glyph = originIcon(origin);
+  const href = originHref(origin);
+  return (
+    <section className="Box">
+      <div className="Box-header px-4 py-2">
+        <h3 className="Box-title">Requested by</h3>
+      </div>
+      <div className="flex items-start gap-2 p-4">
+        <Glyph size={16} className="mt-0.5 shrink-0 text-fg-accent" />
+        <div className="min-w-0 flex-1">
+          <p className="font-semibold">{origin.name}</p>
+          {origin.label ? <p className="text-xs break-words text-fg-muted">{origin.label}</p> : null}
+          {href ? (
+            <a href={href} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 text-xs font-semibold">
+              Open in {origin.name}
+              <LinkExternalIcon size={12} />
+            </a>
+          ) : null}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+const CHANGE_META: Readonly<Record<ReleaseChange["status"], { readonly icon: Icon; readonly className: string; readonly label: string }>> = {
+  added: { icon: DiffAddedIcon, className: "text-fg-success", label: "Added" },
+  modified: { icon: DiffModifiedIcon, className: "text-fg-attention", label: "Changed" },
+  deleted: { icon: DiffRemovedIcon, className: "text-fg-danger", label: "Removed" },
+};
+
+/** What the release changed in the project the work order brought along. */
+function ProjectChanges({ workOrder, changes, project }: { readonly workOrder: WorkOrder; readonly changes: readonly ReleaseChange[]; readonly project: string }) {
+  return (
+    <section className="Box">
+      <div className="Box-header px-4 py-2">
+        <h3 className="Box-title truncate" title={`Changes to ${project}`}>
+          Changes to {project}
+        </h3>
+        <span className="Counter">{changes.length}</span>
+      </div>
+      {changes.length === 0 ? (
+        <p className="p-4 text-fg-muted">The release left the project's files as they were.</p>
+      ) : (
+        <ul className="py-1">
+          {changes.map((change) => {
+            const meta = CHANGE_META[change.status];
+            const content = (
+              <>
+                <meta.icon size={16} className={cx("shrink-0", meta.className)} aria-label={meta.label} />
+                <span className="min-w-0 truncate font-mono text-xs" title={change.path}>
+                  {change.path}
+                </span>
+              </>
+            );
+            return (
+              <li key={change.path}>
+                {change.status === "deleted" ? (
+                  <span className="flex items-center gap-2 px-4 py-1.5">{content}</span>
+                ) : (
+                  <a
+                    href={workOrderHref(workOrder.id, "artifacts", { station: "release", path: `bundle/${change.path}` })}
+                    className="flex items-center gap-2 px-4 py-1.5 text-fg hover:bg-canvas-muted hover:no-underline"
+                  >
+                    {content}
+                  </a>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
   );
 }
 

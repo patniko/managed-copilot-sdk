@@ -41,7 +41,8 @@ RUN mkdir -p /out-azure \
 # A production-only install in its own workspace root (/out) with only the target platform's native packages.
 # Install scripts are skipped because they would probe the build platform; the final stage checks native packages.
 # @github/copilot-sdk is hoisted so @managed-copilot/sdk resolves its peer dependency without dev links.
-# The server locates its package root by apphost.mts and package.json, so both are kept.
+# The server locates its package root by apphost.mts and package.json, so both are kept, and the storefront codebase
+# next to them is what a software issue's work order sends to Software Factory.
 RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; esac)" \
  && mkdir -p /out/libraries/protocol /out/libraries/sdk /out/demos/help-desk \
  && cp package.json pnpm-lock.yaml /out/ \
@@ -49,6 +50,7 @@ RUN cpu="$(case "${TARGETARCH}" in amd64) echo x64;; *) echo "${TARGETARCH}";; e
  && printf 'supportedArchitectures:\n  os: [linux]\n  cpu: [%s]\n  libc: [glibc]\npublicHoistPattern:\n  - "@github/copilot-sdk"\n' "${cpu}" >> /out/pnpm-workspace.yaml \
  && for pkg in libraries/protocol libraries/sdk demos/help-desk; do cp "${pkg}/package.json" "/out/${pkg}/" && cp -r "${pkg}/dist" "/out/${pkg}/"; done \
  && cp demos/help-desk/apphost.mts /out/demos/help-desk/ \
+ && cp -r demos/help-desk/storefront /out/demos/help-desk/ \
  && cd /out \
  && pnpm install --prod --offline --frozen-lockfile --ignore-scripts --filter @managed-copilot/protocol --filter @managed-copilot/sdk --filter @managed-copilot/demo-help-desk \
  && find /out -name '*.map' -delete

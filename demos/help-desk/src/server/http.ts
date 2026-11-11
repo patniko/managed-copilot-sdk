@@ -99,6 +99,11 @@ function originAllowed(req: IncomingMessage): boolean {
   }
 }
 
+/** Help Desk's address as the person uses it: the browser's Origin (it matches the Host), else the Host. */
+function appUrl(req: IncomingMessage): string {
+  return req.headers.origin ?? `http://${req.headers.host ?? "localhost"}`;
+}
+
 function safeDecode(value: string): string | undefined {
   try {
     return decodeURIComponent(value);
@@ -167,6 +172,8 @@ function buildRouter(ctx: ApiContext): Router {
     desk.answer(params.customerId!, params.approvalId!, body.approve);
     res.writeHead(204).end();
   });
+  // Sends a software issue to Software Factory as a work order.
+  router.add("POST", "/api/issues/:area/route", async (req, res, params) => sendJson(res, 201, await desk.routeIssue(params.area!, appUrl(req))));
   return router;
 }
 

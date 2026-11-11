@@ -8,6 +8,7 @@ import { homeHref, navigate } from "../lib/router.js";
 import { deleteAnalysis, loadAnalysis, useStore } from "../lib/store.js";
 import { ChatPanel } from "./Chat.js";
 import { DataPanel } from "./DataPanel.js";
+import { FactoryButton, FactoryDialog } from "./Factory.js";
 import { PlacementTrack, UsageMeter } from "./PlacementTrack.js";
 import { Spinner } from "./ui/Spinner.js";
 
@@ -15,6 +16,8 @@ export function Workspace({ id }: { readonly id: string }) {
   const view = useStore((state) => state.views[id]);
   const error = useStore((state) => state.viewErrors[id]);
   const [panel, setPanel] = useState<"chat" | "data">("chat");
+  const [sending, setSending] = useState(false);
+  const openSend = useCallback(() => setSending(true), []);
 
   useEffect(() => {
     void loadAnalysis(id);
@@ -43,7 +46,7 @@ export function Workspace({ id }: { readonly id: string }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <TopBar view={view} />
+      <TopBar view={view} onSend={openSend} />
       {view.problem ? (
         <div className="flash flash-warn flash-full flex shrink-0 items-center gap-2 py-2" role="status">
           <AlertIcon size={16} />
@@ -63,14 +66,15 @@ export function Workspace({ id }: { readonly id: string }) {
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
-        <DataPanel view={view} className={cx("flex-1 border-line lg:flex lg:border-r", panel === "data" ? "flex" : "hidden")} />
+        <DataPanel view={view} onSend={openSend} className={cx("flex-1 border-line lg:flex lg:border-r", panel === "data" ? "flex" : "hidden")} />
         <ChatPanel view={view} className={cx("w-full shrink-0 lg:flex lg:w-[440px] xl:w-[480px]", panel === "chat" ? "flex" : "hidden")} />
       </div>
+      {sending ? <FactoryDialog view={view} onClose={() => setSending(false)} /> : null}
     </div>
   );
 }
 
-function TopBar({ view }: { readonly view: AnalysisView }) {
+function TopBar({ view, onSend }: { readonly view: AnalysisView; readonly onSend: () => void }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-3 border-b border-line bg-canvas px-4 py-3">
       <div className="flex min-w-0 flex-1 items-center gap-2 lg:w-64 lg:flex-none">
@@ -91,6 +95,7 @@ function TopBar({ view }: { readonly view: AnalysisView }) {
       <PlacementTrack view={view} className="order-last w-full pb-4 md:order-none md:w-auto md:flex-1 md:pb-0 lg:mx-auto lg:max-w-[560px]" />
       <div className="flex shrink-0 items-center gap-2">
         <UsageMeter view={view} />
+        <FactoryButton onOpen={onSend} />
         <Overflow view={view} />
       </div>
     </div>

@@ -168,6 +168,47 @@ describe("factory HTTP API", () => {
     expect((await json(`/api/work-orders/${wo.id}`)).status).toBe(404);
   });
 
+  it("takes a routed work order with its origin and files, and serves its release as JSON", async () => {
+    // Over the 64 KB other routes take: routed work orders bring files.
+    const context = `# INC-1001\n\n${"Checkout errors spiked. ".repeat(4_000)}`;
+    const origin = { app: "incident-commander", name: "Incident Commander", label: "INC-1001 · tiny", url: "http://localhost:7445/#/incidents/INC-1001", key: "INC-1001" };
+    const created = await post("/api/work-orders", {
+      title: "Fix tiny: the wrong answer",
+      brief: "The answer is off by one in production. Fix it in the attached project, with a regression test.",
+      mode: "classic",
+      origin,
+      context: [{ path: "INCIDENT.md", content: context }],
+      project: { name: "tiny", files: [{ path: "src/core.js", content: "export const answer = 41;\n" }] },
+    });
+    expect(created.status).toBe(201);
+    const wo = await waitFor((created.body as WorkOrder).id);
+    expect(wo.status).toBe("completed");
+    expect(wo.origin).toEqual(origin);
+    expect(wo.inputs?.project).toEqual({ name: "tiny", files: 1, bytes: 26 });
+
+    const list = await json<{ id: string; origin?: unknown }[]>("/api/work-orders");
+    expect(list.body.find((summary) => summary.id === wo.id)?.origin).toEqual(origin);
+    const intake = await fetch(`${base}/api/work-orders/${wo.id}/artifacts/content?stationId=intake&path=context/INCIDENT.md`);
+    expect(await intake.text()).toBe(context);
+
+    const release = await json<{ projectName: string; files: { path: string; content: string }[]; changes: unknown[] }>(`/api/work-orders/${wo.id}/release`);
+    expect(release.status).toBe(200);
+    expect(release.body.projectName).toBe("tiny");
+    expect(release.body.files).toEqual(expect.arrayContaining([{ path: "src/core.js", content: "export const answer = 42;\n" }]));
+    expect(release.body.changes).toEqual([
+      { path: "README.md", status: "added" },
+      { path: "src/core.js", status: "modified" },
+    ]);
+    expect((await json(`/api/work-orders/wo_missing/release`)).status).toBe(404);
+
+    const tooBig = await post("/api/work-orders", { title: "Huge", brief: "Far too much project to take at once.", context: [{ path: "a.txt", content: "x".repeat(7 * 1024 * 1024) }] });
+    expect(tooBig.status).toBe(413);
+    expect(tooBig.body).toEqual({ error: { code: "payload_too_large", message: "The work order is too large: send at most 512 KB of context and 2 MB of project files." } });
+    const unsafe = await post("/api/work-orders", { title: "Unsafe", brief: "This one names a file outside the workspace.", context: [{ path: "../../etc/passwd", content: "x" }] });
+    expect(unsafe.status).toBe(400);
+    expect(unsafe.body).toEqual({ error: { code: "invalid_request", message: 'context[0].path "../../etc/passwd" isn\'t a safe relative path.' } });
+  });
+
   it("guards against rebinding, cross-site requests, and bad input", async () => {
     // fetch() can't override Host, so these use node:http directly.
     const withHost = (host: string) =>

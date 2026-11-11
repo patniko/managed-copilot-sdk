@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
-import type { ApiErrorBody, CreateAnalysisRequest, MoveAnswer, SendMessageRequest } from "../shared/types.js";
+import type { ApiErrorBody, CreateAnalysisRequest, MoveAnswer, SendMessageRequest, SendToFactoryRequest } from "../shared/types.js";
 import { isValidSessionId, launchAttach } from "./attach.js";
 import type { DeskConfig } from "./config.js";
 import { DeskError } from "./errors.js";
@@ -112,6 +112,23 @@ function originAllowed(req: IncomingMessage): boolean {
   }
 }
 
+/**
+ * Data Desk's address as the person's browser sees it, for links back to it: the request's Origin (checked to match
+ * the Host above), else its Host.
+ */
+export function appOrigin(req: Pick<IncomingMessage, "headers">): string {
+  const origin = req.headers.origin;
+  if (origin) {
+    try {
+      const url = new URL(origin);
+      if (url.protocol === "http:" || url.protocol === "https:") return url.origin;
+    } catch {
+      // Not a URL ("null" from a sandboxed page): use the Host.
+    }
+  }
+  return `http://${req.headers.host ?? "localhost"}`;
+}
+
 class Router {
   readonly #routes: { method: string; pattern: RegExp; keys: string[]; handler: Handler }[] = [];
 
@@ -216,6 +233,12 @@ function buildRouter(ctx: ApiContext): Router {
     const id = params.id!;
     if (!isValidSessionId(id) || !analyses.owns(id)) throw new DeskError("not_found", "That session isn't one of Data Desk's analyses.", 404);
     sendJson(res, 200, await launchAttach(id, ctx.config.repoRoot, analyses.platform.status.url, ctx.config.attachUrl));
+  });
+  router.add("POST", "/api/analyses/:id/factory", async (req, res, params) => {
+    analyses.requireFactory();
+    // Selected rows are sent as their positions: up to 10,000 of them per table.
+    const body = await readJson<Partial<SendToFactoryRequest>>(req, 256 * 1024);
+    sendJson(res, 201, await analyses.sendToFactory(params.id!, body, appOrigin(req)));
   });
   return router;
 }

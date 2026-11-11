@@ -9,6 +9,7 @@ import {
   GitPullRequestIcon,
   InfoIcon,
   KebabHorizontalIcon,
+  LinkExternalIcon,
   MarkGithubIcon,
   PackageIcon,
   PlugIcon,
@@ -21,11 +22,12 @@ import {
   type Icon,
 } from "@primer/octicons-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { formatWorkOrderNumber, type WorkOrder, type WorkOrderMode } from "../../shared/types.js";
+import { formatWorkOrderNumber, type WorkOrder, type WorkOrderMode, type WorkOrderOrigin } from "../../shared/types.js";
 import { bundleUrl, errorMessage, type ErrorInfo } from "../lib/api.js";
 import { confirmAction } from "../lib/confirm.js";
 import { cx } from "../lib/cx.js";
 import { elapsedBetween, formatClock, formatDuration, formatFullDateTime, pluralize } from "../lib/format.js";
+import { originHref, originIcon, originText } from "../lib/origin.js";
 import { modeLabel } from "../lib/platform.js";
 import { homeHref, navigate, workOrderHref, type Query, type WorkOrderTab } from "../lib/router.js";
 import {
@@ -171,6 +173,26 @@ export function ModeLabel({ mode }: { readonly mode: WorkOrderMode | undefined }
   );
 }
 
+/** The app that routed the work order here, as a Label linking back to it when it can. */
+export function OriginLabel({ origin }: { readonly origin: WorkOrderOrigin }) {
+  const Glyph = originIcon(origin);
+  const href = originHref(origin);
+  const content = (
+    <>
+      <Glyph size={12} />
+      <span className="truncate">{originText(origin)}</span>
+      {href ? <LinkExternalIcon size={12} /> : null}
+    </>
+  );
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" className="Label Label--accent max-w-full min-w-0 hover:no-underline" title={`Open in ${origin.name}`}>
+      {content}
+    </a>
+  ) : (
+    <span className="Label Label--accent max-w-full min-w-0">{content}</span>
+  );
+}
+
 /** An icon and a value; the label is in the tooltip and for screen readers. */
 function Stat({ icon: Glyph, label, title, className, children }: {
   readonly icon: Icon;
@@ -216,6 +238,7 @@ function Header({ workOrder, tab }: { readonly workOrder: WorkOrder; readonly ta
             {meta.label}
           </span>
           {workOrder.github ? <RepositoryLabel workOrder={workOrder} /> : <ModeLabel mode={workOrder.mode} />}
+          {workOrder.origin ? <OriginLabel origin={workOrder.origin} /> : null}
           {elapsed !== undefined ? (
             <Stat icon={ClockIcon} label={active ? "Elapsed" : "Took"} title={`${active ? "Elapsed" : `Took ${formatDuration(elapsed)}`} · ${startedText}`}>
               {active ? formatClock(elapsed) : formatDuration(elapsed)}
@@ -289,9 +312,11 @@ function DetailsPopover({ workOrder, startedText }: { readonly workOrder: WorkOr
   );
   const source = workOrder.github
     ? workOrder.github.repository.fullName
-    : workOrder.source.kind === "template"
-      ? (template?.title ?? "Template")
-      : "Custom brief";
+    : workOrder.origin
+      ? workOrder.origin.name
+      : workOrder.source.kind === "template"
+        ? (template?.title ?? "Template")
+        : "Custom brief";
   return (
     <Popover
       label="Work order details"

@@ -1,10 +1,26 @@
 // The help desk: the current simulation's tickets, one session per customer on the shared runtime, and the counters
 // the wall shows. Sessions are named after their simulation and customer, so after a restart Help Desk adopts the
 // latest simulation from the platform, rebuilds each conversation from its history, and deletes older leftovers.
+// Problems with the store's website the agents report are grouped into software issues, which the operator sends to
+// Software Factory; each work order's origin carries the simulation and area, so a restart finds them again.
 import type { SessionInfo } from "@managed-copilot/sdk";
-import { SIMULATION_SIZES, type Counters, type DeskInfo, type HelpDeskState, type RunInfo, type ServerEvent, type Ticket } from "../shared/types.js";
+import {
+  SIMULATION_SIZES,
+  type BugArea,
+  type Counters,
+  type DeskInfo,
+  type HelpDeskState,
+  type RoutedWorkOrder,
+  type RunInfo,
+  type ServerEvent,
+  type SoftwareIssue,
+  type Ticket,
+  type WorkOrderStatus,
+} from "../shared/types.js";
 import type { HelpDeskConfig } from "./config.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
+import { FACTORY_NOT_CONNECTED, readProject, SoftwareFactory, workOrderName, workOrderUrl, type FactoryClient, type WorkOrderSummary } from "./factory.js";
+import { groupIssues, isBugArea, issueKey, issueWorkOrder, type Reported, type ReportedConversation } from "./issues.js";
 import { log } from "./log.js";
 import type { DeskPlatform } from "./platform.js";
 import { CUSTOMERS } from "./seed.js";
@@ -15,12 +31,21 @@ import { TOOLS } from "./tools.js";
 const PUBLISH_MS = 150;
 const COUNTERS_MS = 300;
 const MAX_MESSAGE = 2_000;
+/** Work orders Software Factory is still working on. */
+const ACTIVE: ReadonlySet<WorkOrderStatus> = new Set(["queued", "planning", "building", "releasing"]);
+const MAX_FACTORY_BACKOFF_MS = 60_000;
 
 interface Run {
   readonly id: string;
   readonly size: number;
   readonly startedAt: Date;
   ending?: boolean;
+}
+
+/** An issue's work order, and the factory poll it was known by (a later poll that doesn't list it means it's gone). */
+interface Routing {
+  readonly workOrder: RoutedWorkOrder;
+  readonly poll: number;
 }
 
 /** A simulation's ID: its start time in base 36, then a little randomness. */
@@ -45,11 +70,19 @@ async function eachLimited<T>(items: readonly T[], limit: number, work: (item: T
 
 const gone = (session: SessionInfo) => session.state === "deleting" || session.state === "deleted";
 
+/** The area of the simulation's issue a work order was made of, if it's one of Help Desk's for that simulation. */
+function areaOf(summary: WorkOrderSummary, runId: string): BugArea | undefined {
+  const key = summary.origin?.app === "help-desk" ? summary.origin.key : undefined;
+  const area = key?.startsWith(`${runId}:`) ? key.slice(runId.length + 1) : undefined;
+  return area && isBugArea(area) ? area : undefined;
+}
+
 export class HelpDesk implements TicketHost {
   readonly platform: DeskPlatform;
   readonly shop = new Shop();
   readonly #config: HelpDeskConfig;
   readonly #publish: (event: ServerEvent) => void;
+  readonly #factory: FactoryClient;
   #run: Run | undefined;
   /** By customer ID, in the store's customer order. */
   readonly #tickets = new Map<string, TicketSession>();
@@ -64,11 +97,26 @@ export class HelpDesk implements TicketHost {
   #syncing: Promise<void> | undefined;
   #syncAgain = false;
   readonly #unsubscribe: (() => void)[] = [];
+  /** The run's issues sent to Software Factory, by area. */
+  readonly #routings = new Map<BugArea, Routing>();
+  /** Issues being sent right now, by issue key. */
+  readonly #sending = new Set<string>();
+  /** The issues as last published. */
+  #issuesJson = "[]";
+  /** Polls of Software Factory started so far. */
+  #factoryPolls = 0;
+  #factoryPolling: Promise<void> | undefined;
+  #factoryTimer: NodeJS.Timeout | undefined;
+  #factoryFailures = 0;
+  /** The run whose work orders were looked up in Software Factory: a new run has none, an adopted one may. */
+  #lookedUp: string | undefined;
+  #closed = false;
 
-  constructor(platform: DeskPlatform, config: HelpDeskConfig, publish: (event: ServerEvent) => void) {
+  constructor(platform: DeskPlatform, config: HelpDeskConfig, publish: (event: ServerEvent) => void, factory: FactoryClient = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl)) {
     this.platform = platform;
     this.#config = config;
     this.#publish = publish;
+    this.#factory = factory;
   }
 
   start(): void {
@@ -82,17 +130,20 @@ export class HelpDesk implements TicketHost {
 
   /** Lets go of every session (Help Desk is shutting down); the sessions stay on the platform. */
   close(): void {
+    this.#closed = true;
     for (const unsubscribe of this.#unsubscribe.splice(0)) unsubscribe();
     for (const timer of [...this.#ticketTimers.values(), ...this.#startTimers]) clearTimeout(timer);
     this.#ticketTimers.clear();
     this.#startTimers.clear();
     if (this.#countersTimer) clearTimeout(this.#countersTimer);
     if (this.#pollTimer) clearInterval(this.#pollTimer);
+    this.#stopFactoryPolls();
     for (const ticket of this.#tickets.values()) ticket.close();
   }
 
   desk(): DeskInfo {
-    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS };
+    const factory = { configured: this.#factory.configured, ...(this.#factory.configured && this.#factory.publicUrl ? { url: this.#factory.publicUrl } : {}) };
+    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, factory };
   }
 
   #runInfo(): RunInfo | undefined {
@@ -104,6 +155,16 @@ export class HelpDesk implements TicketHost {
     return [...this.#tickets.values()].map((ticket) => ticket.view());
   }
 
+  /** The run's software issues: its tickets' bug reports by area, and the work orders sent for them. */
+  issues(): SoftwareIssue[] {
+    const reports: Reported[] = [];
+    for (const ticket of this.#tickets.values()) {
+      const bug = ticket.bug;
+      if (bug) reports.push({ customerId: ticket.customer.id, name: ticket.customer.name, bug });
+    }
+    return groupIssues(reports, new Map([...this.#routings].map(([area, routing]) => [area, routing.workOrder])));
+  }
+
   state(): HelpDeskState {
     const run = this.#runInfo();
     return {
@@ -112,6 +173,7 @@ export class HelpDesk implements TicketHost {
       customers: this.shop.customers(),
       ...(run ? { run } : {}),
       tickets: this.#views(),
+      issues: this.issues(),
       counters: this.#counters,
     };
   }
@@ -121,7 +183,7 @@ export class HelpDesk implements TicketHost {
     const run = this.#runInfo();
     return [
       { type: "platform", platform: this.platform.status, desk: this.desk() },
-      { type: "run", ...(run ? { run } : {}), tickets: this.#views() },
+      { type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues: this.issues() },
       { type: "counters", counters: this.#counters },
     ];
   }
@@ -151,6 +213,8 @@ export class HelpDesk implements TicketHost {
       this.shop.reset(startedAt);
       this.#run = run;
       this.#records = new Map();
+      // A new simulation has no work orders in Software Factory yet.
+      this.#lookedUp = run.id;
       const customers = CUSTOMERS.slice(0, size);
       for (const customer of customers) this.#tickets.set(customer.id, new TicketSession(this, customer, sessionIdFor(run.id, customer.id)));
       this.#publishRun();
@@ -190,6 +254,10 @@ export class HelpDesk implements TicketHost {
     this.#tickets.clear();
     this.#records = new Map();
     this.#run = undefined;
+    // Software Factory keeps the work orders; the next simulation starts with no issues.
+    this.#routings.clear();
+    this.#lookedUp = undefined;
+    this.#stopFactoryPolls();
     log.info("Ended a simulation", { run: run.id, sessions: tickets.length });
     this.#publishRun();
     this.#updateCounters();
@@ -241,6 +309,126 @@ export class HelpDesk implements TicketHost {
     this.#require(customerId).answer(approvalId, approve);
   }
 
+  /**
+   * Sends a software issue to Software Factory: a work order to fix the storefront, once per simulation and area. A
+   * failed send can be tried again. `appUrl` is Help Desk's address as the operator uses it, for the link back.
+   */
+  async routeIssue(area: string, appUrl: string): Promise<SoftwareIssue> {
+    if (!isBugArea(area)) throw new HelpDeskError("not_found", "There's no such software issue.", 404);
+    if (!this.#factory.configured) throw new HelpDeskError("factory_unavailable", FACTORY_NOT_CONNECTED, 503);
+    const run = this.#run;
+    if (!run || run.ending) throw new HelpDeskError("not_found", "No simulation is running: software issues come from its conversations.", 404);
+    const reports = this.#conversations(area);
+    if (reports.length === 0) throw new HelpDeskError("not_found", "No customer of this simulation has reported this problem.", 404);
+    const sent = this.#routings.get(area)?.workOrder;
+    if (sent) throw new HelpDeskError("conflict", `This issue was sent to Software Factory already, as ${workOrderName(sent.number)}.`, 409);
+    const key = issueKey(run.id, area);
+    if (this.#sending.has(key)) throw new HelpDeskError("conflict", "This issue is being sent to Software Factory right now.", 409);
+    this.#sending.add(key);
+    try {
+      // Sent before Help Desk restarted, while Software Factory couldn't be asked: it isn't sent twice.
+      const existing = (await this.#factory.list()).find((summary) => areaOf(summary, run.id) === area);
+      if (existing) {
+        if (this.#run === run) this.#track(area, existing);
+        throw new HelpDeskError("conflict", `This issue was sent to Software Factory already, as ${workOrderName(existing.number)}.`, 409);
+      }
+      const request = issueWorkOrder({ area, runId: run.id, appUrl, reports, project: await readProject(this.#config.storefrontDir) });
+      const created = await this.#factory.create(request);
+      log.info("Sent a software issue to Software Factory", { area, workOrder: workOrderName(created.number), reports: reports.length });
+      if (this.#run !== run) throw new HelpDeskError("conflict", `The simulation ended while the issue was being sent. Software Factory has it as ${workOrderName(created.number)}.`, 409);
+      this.#track(area, created);
+      return this.issues().find((issue) => issue.area === area)!;
+    } finally {
+      this.#sending.delete(key);
+    }
+  }
+
+  /** The run's tickets that reported a problem in `area`, with their conversations. */
+  #conversations(area: string): ReportedConversation[] {
+    return [...this.#tickets.values()].flatMap((ticket) => {
+      const view = ticket.view();
+      return view.bug?.area === area ? [{ customerId: ticket.customer.id, name: ticket.customer.name, bug: view.bug, items: view.items }] : [];
+    });
+  }
+
+  #routed(summary: WorkOrderSummary): RoutedWorkOrder {
+    const url = workOrderUrl(this.#factory.publicUrl ?? "", summary.id);
+    return { workOrderId: summary.id, number: summary.number, title: summary.title, status: summary.status, url, ...(summary.error ? { error: summary.error.message } : {}) };
+  }
+
+  /** Follows an issue's work order from now on. */
+  #track(area: BugArea, summary: WorkOrderSummary): void {
+    this.#routings.set(area, { workOrder: this.#routed(summary), poll: this.#factoryPolls });
+    this.#updateIssues();
+    this.#scheduleFactoryPoll();
+  }
+
+  #anyActive(): boolean {
+    return [...this.#routings.values()].some((routing) => ACTIVE.has(routing.workOrder.status));
+  }
+
+  /** Reads Software Factory's work orders: the status of the run's own, and (after a restart) which issues were sent. */
+  pollFactory(): Promise<void> {
+    this.#factoryPolling ??= this.#pollFactory().finally(() => {
+      this.#factoryPolling = undefined;
+    });
+    return this.#factoryPolling;
+  }
+
+  async #pollFactory(): Promise<void> {
+    const run = this.#run;
+    if (!run || this.#closed || !this.#factory.configured) return;
+    const poll = ++this.#factoryPolls;
+    let summaries: WorkOrderSummary[];
+    try {
+      summaries = await this.#factory.list();
+    } catch (error) {
+      if (this.#factoryFailures++ === 0) log.warn("Couldn't read the work orders in Software Factory; trying again", { error: errorText(error) });
+      if (this.#run === run && (this.#lookedUp !== run.id || this.#anyActive())) {
+        this.#scheduleFactoryPoll(Math.min(MAX_FACTORY_BACKOFF_MS, this.#config.factoryPollMs * 2 ** Math.min(this.#factoryFailures, 4)));
+      }
+      return;
+    }
+    this.#factoryFailures = 0;
+    if (this.#run !== run) return;
+    const byId = new Map(summaries.map((summary) => [summary.id, summary]));
+    for (const [area, routing] of [...this.#routings]) {
+      const summary = byId.get(routing.workOrder.workOrderId);
+      if (summary) this.#routings.set(area, { workOrder: this.#routed(summary), poll });
+      else if (routing.poll < poll) {
+        // Known before this poll started, and not listed: deleted in Software Factory. The issue can be sent again.
+        this.#routings.delete(area);
+        log.info("A software issue's work order is no longer in Software Factory", { area, workOrder: workOrderName(routing.workOrder.number) });
+      }
+    }
+    // Newest first: an area's latest work order wins.
+    for (const summary of summaries) {
+      const area = areaOf(summary, run.id);
+      if (area && !this.#routings.has(area)) this.#routings.set(area, { workOrder: this.#routed(summary), poll });
+    }
+    if (this.#lookedUp !== run.id) {
+      this.#lookedUp = run.id;
+      if (this.#routings.size > 0) log.info("Found the simulation's work orders in Software Factory", { run: run.id, workOrders: this.#routings.size });
+    }
+    this.#updateIssues();
+    if (this.#anyActive()) this.#scheduleFactoryPoll();
+  }
+
+  #scheduleFactoryPoll(delay = this.#config.factoryPollMs): void {
+    if (this.#factoryTimer || this.#closed || !this.#factory.configured || !this.#run) return;
+    this.#factoryTimer = setTimeout(() => {
+      this.#factoryTimer = undefined;
+      void this.pollFactory();
+    }, delay);
+    this.#factoryTimer.unref?.();
+  }
+
+  #stopFactoryPolls(): void {
+    if (this.#factoryTimer) clearTimeout(this.#factoryTimer);
+    this.#factoryTimer = undefined;
+    this.#factoryFailures = 0;
+  }
+
   /** After every (re)connection: sessions on the previous client are gone, and Help Desk may have restarted. */
   sync(): Promise<void> {
     if (this.#syncing) {
@@ -288,6 +476,8 @@ export class HelpDesk implements TicketHost {
       }
     }
     this.#publishRun();
+    // An adopted simulation's issues may have been sent to Software Factory before the restart.
+    if (this.#lookedUp !== run.id) void this.pollFactory();
     await this.#poll();
   }
 
@@ -357,9 +547,20 @@ export class HelpDesk implements TicketHost {
     this.#publish({ type: "counters", counters: next });
   }
 
+  /** Publishes the run's software issues when they changed. */
+  #updateIssues(): void {
+    const issues = this.issues();
+    const json = JSON.stringify(issues);
+    if (json === this.#issuesJson) return;
+    this.#issuesJson = json;
+    this.#publish({ type: "issues", issues });
+  }
+
   #publishRun(): void {
     const run = this.#runInfo();
-    this.#publish({ type: "run", ...(run ? { run } : {}), tickets: this.#views() });
+    const issues = this.issues();
+    this.#issuesJson = JSON.stringify(issues);
+    this.#publish({ type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues });
   }
 
   // TicketHost
@@ -375,9 +576,11 @@ export class HelpDesk implements TicketHost {
       this.#ticketTimers.set(id, timer);
     }
     if (!this.#countersTimer) {
+      // The counters and the issues follow the tickets, a little behind.
       this.#countersTimer = setTimeout(() => {
         this.#countersTimer = undefined;
         this.#updateCounters();
+        this.#updateIssues();
       }, COUNTERS_MS);
       this.#countersTimer.unref?.();
     }

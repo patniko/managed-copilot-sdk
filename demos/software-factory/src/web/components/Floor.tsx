@@ -12,6 +12,7 @@ import {
   LockIcon,
   NoteIcon,
   PackageIcon,
+  PaperclipIcon,
   RepoIcon,
   XCircleFillIcon,
 } from "@primer/octicons-react";
@@ -19,7 +20,8 @@ import type { ReactNode } from "react";
 import { FACTORY_ENVIRONMENTS, ROLE_AGENTS } from "../../shared/environments.js";
 import type { EnvironmentView, Station, StationKind, StationRole, WorkOrder } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
-import { formatBytes } from "../lib/format.js";
+import { formatBytes, pluralize } from "../lib/format.js";
+import { originIcon, originText } from "../lib/origin.js";
 import { workOrderHref } from "../lib/router.js";
 import { edgeState, isStationActive, KIND_LABELS, taskRows, taskTitle, type EdgeState, type TaskRow } from "../lib/stations.js";
 import { useStore } from "../lib/store.js";
@@ -139,6 +141,14 @@ export function Floor({ workOrder, selectedId, onSelect }: FloorProps) {
   return (
     <section aria-label="Factory floor" className="Box @container min-w-0 overflow-auto bg-dot-grid p-4 xl:h-full xl:min-h-0">
       <div className="max-w-3xl">
+        {workOrder.origin ? (
+          <>
+            <Pair left={<OriginNode workOrder={workOrder} selected={selectedId === "intake"} onSelect={() => onSelect("intake")} />} state="done" />
+            <div className="relative h-4" aria-hidden>
+              <span className="pipe pipe-y pipe-done absolute top-0 bottom-0 left-[19px]" />
+            </div>
+          </>
+        ) : null}
         <Pair
           left={card(plan, "plan")}
           right={agentLed ? card(coordinator, "coordinate") : undefined}
@@ -256,6 +266,49 @@ function GhostCard({ label, sandbox = false }: { readonly label: string; readonl
         Waiting
       </span>
     </div>
+  );
+}
+
+/** A routed work order starts from the app that sent it: what it came from and what it brought along. */
+function OriginNode({ workOrder, selected, onSelect }: { readonly workOrder: WorkOrder; readonly selected: boolean; readonly onSelect: () => void }) {
+  const origin = workOrder.origin!;
+  const Glyph = originIcon(origin);
+  const context = workOrder.inputs?.context.length ?? 0;
+  const project = workOrder.inputs?.project;
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      aria-label={`${originText(origin)}: the brief and what it brought along`}
+      className={cx(stationCardClass(selected), "group")}
+    >
+      <span className="flex w-full min-w-0 items-center gap-2">
+        <Glyph size={16} className="shrink-0 text-fg-accent" />
+        <span className="min-w-0 truncate font-semibold">From {origin.name}</span>
+        <span className="ml-auto shrink-0 pl-1 text-xs text-fg-muted">Routed in</span>
+      </span>
+      <span className="mt-1.5 flex w-full min-w-0 items-center gap-1.5 text-xs">
+        <NoteIcon size={16} className="shrink-0 text-fg-muted" />
+        <span className="min-w-0 truncate text-fg-muted">{origin.label ?? workOrder.brief.split("\n")[0]}</span>
+        {context > 0 || project ? (
+          <span className="ml-auto inline-flex shrink-0 items-center gap-2 pl-1 text-fg-muted">
+            {context > 0 ? (
+              <span className="inline-flex items-center gap-0.5" title={`${pluralize(context, "file")} of reference material`}>
+                <PaperclipIcon size={12} />
+                {context}
+              </span>
+            ) : null}
+            {project ? (
+              <span className="inline-flex max-w-40 items-center gap-0.5" title={`Changes the ${project.name} project (${pluralize(project.files, "file")})`}>
+                <RepoIcon size={12} className="shrink-0" />
+                <span className="truncate">{project.name}</span>
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+      </span>
+    </button>
   );
 }
 

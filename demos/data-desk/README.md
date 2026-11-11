@@ -28,6 +28,10 @@ carried across the move.*
 - **Copilot CLI follows.** **Open in Copilot CLI** (the terminal icon in the header) attaches to the same session.
   During the move it says *Connection lost. Reconnecting…*, reconnects to the sandbox by itself, and keeps going;
   messages typed there show in Data Desk, labeled **Copilot CLI**.
+- **An insight becomes a work order.** **Send to Software Factory** hands what you pick (the table on screen, rows you
+  selected, other tables, charts, the dataset, and Copilot's latest answer) to the
+  [Software Factory](../software-factory/README.md) demo with what it should build. The work order shows it came from
+  Data Desk, and the conversation follows its status.
 
 <img src="docs/screenshots/shared.png" alt="On the shared runtime: the aggregate tool's table of revenue by store fills the grid with bars, and the meter shows one premium request" width="900">
 
@@ -55,6 +59,30 @@ carried across the move.*
 
 The other samples work the same way: **City bike rides** (ask for rides against temperature with a trend line) and
 **Support tickets** (does resolution time affect satisfaction?). **Upload a CSV** to bring your own, up to 5 MB.
+
+### From an insight to a UX experiment
+
+**Storefront checkout funnel** is twelve weeks of Contoso Outdoors checkouts by device and cart value, with how many
+shoppers reached the shipping step, the payment step, and an order. Free shipping starts at $50; below that, the
+shipping step adds a $5.99 fee. The story continues in [Software Factory](../software-factory/README.md), which
+`aspire run` starts too.
+
+1. Pick **Storefront checkout funnel** and click **Where do mobile shoppers drop out of checkout, by cart value?** Data
+   Desk's tools answer on the shared runtime, and the table shows in the grid.
+2. The insight: mobile shoppers with $40–$49 carts drop out at the shipping step, where the fee appears. Fewer than half
+   of them go on to payment, against about 80% on desktop in the same band and about 85% for mobile carts at $50–$74,
+   which ship free. It holds every week.
+3. Select the rows that tell it in the grid (click a row's checkbox, shift-click for a range, or use the arrow keys), or
+   keep Copilot's whole table. **Chart shipping-step drop-off by cart value for each device** adds a chart, which goes
+   with the current view.
+4. Click **Send to Software Factory** (the workflow icon in the top bar, or in the bar that counts the selected rows).
+   Keep the current view, the selected rows, and Copilot's latest answer; add the whole dataset if you like. Say what to
+   build, for example: *Build a free-shipping progress bar experiment for mobile carts under $50 ("Add $6.50 for free
+   shipping"): variant assignment, the bar's copy and threshold logic, and the metrics to watch: mobile checkout
+   conversion, with average order value as a guardrail.*
+5. The conversation shows **Sent to Software Factory: WO-0012 · Queued**, and the status follows the work order.
+   **Open in Software Factory**: the factory's floor shows the work order came from Data Desk, with a link back to the
+   analysis, and its planner reads the insight and the data you sent.
 
 ## Run it
 
@@ -106,9 +134,20 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
   `managed.artifacts(session)`; charts are served from there as images with a sandboxing content security policy, so
   an SVG from the sandbox can never run as part of the app.
 - **State is the platform's.** Sessions, sandboxes, and charts live in Managed Copilot. Data Desk's own records
-  (`.data/data-desk.json`) keep each analysis's dataset, the messages it sent, the move it saw, and the last usage it
-  read. Uploaded files are kept in `.data/uploads`: the newest 10, up to 20 MB in all, and another upload drops the
-  oldest. Only the most recently used ones stay parsed in memory (5 MB of files), so memory stays bounded.
+  (`.data/data-desk.json`) keep each analysis's dataset, the messages it sent, the move it saw, the last usage it read,
+  and the work orders it sent to Software Factory. Uploaded files are kept in `.data/uploads`: the newest 10, up to
+  20 MB in all, and another upload drops the oldest. Only the most recently used ones stay parsed in memory (5 MB of
+  files), so memory stays bounded.
+- **Send to Software Factory.** Data Desk's server composes the work order from what the person picked: `INSIGHT.md`
+  (what to build, Copilot's latest answer and the question it answered, the dataset's columns, and how each attached
+  file was made), each table as CSV under `data/` (selected rows as `data/<table>-selection.csv`, the whole dataset as
+  `data/<file>.csv`), and charts and text files under `artifacts/`. It checks the factory's limits first (12 files,
+  256 KB each, 512 KB together) and says what to send less of. Then it calls `POST /api/work-orders` on
+  `SOFTWARE_FACTORY_URL` with a brief (what to build first, then the insight in short), two review rounds, and an
+  `origin`: Data Desk, the analysis and its dataset, a link back to the analysis, and the key `<session ID>:<n>`. The
+  factory writes the files to `.factory/context/` in each of its sandboxes. Data Desk records the work order on the
+  analysis and reads `GET /api/work-orders` every 5 seconds while any of its work orders is active, after a restart
+  too; a work order sent just before a restart is found again by its key.
 
 ## Configuration
 
@@ -122,16 +161,18 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
 | `DATA_DESK_DATA_DIR` | `.data` | Data Desk's records and uploaded files |
 | `DATA_DESK_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 | `DATA_DESK_ATTACH_URL` | none | Gateway URL added to "Open in Copilot CLI" commands (`--url`) when people reach the platform at another address |
+| `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, called from Data Desk's server. Unset, **Send to Software Factory** is off and says why |
+| `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to work orders |
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the promotable environment, its Python sandbox environment, and the app resource |
-| `datasets` | The three sample CSV files |
-| `src/server` | Platform connection, analyses (one session each), the tools and tables, the event projection, REST and server-sent events |
-| `src/shared` | Types shared with the UI |
+| `datasets` | The four sample CSV files |
+| `src/server` | Platform connection, analyses (one session each), the tools and tables, the event projection, the hand-off to Software Factory (`handoff.ts`, `factory.ts`), REST and server-sent events |
+| `src/shared` | Types, routes, and Software Factory's limits, shared with the UI |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `src/scripts/happy-path.ts` | The scripted real run |
-| `test` | Unit tests: tables, datasets, the projection, analyses and the move against an in-memory platform, the API, and the fragment |
+| `test` | Unit tests: tables, datasets (the checkout funnel's insight included), the projection, analyses and the move against an in-memory platform, the hand-off against an in-memory Software Factory, the API, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

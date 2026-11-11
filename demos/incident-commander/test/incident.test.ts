@@ -40,7 +40,7 @@ function harness(options: { demo?: boolean; config?: Partial<AppConfig> } = {}):
   const config = testConfig(options.config);
   const store = new Store(mkdtempSync(join(tmpdir(), "incident-commander-")));
   const platform = new FakePlatform();
-  const host: RunHost = { config, platform, store, catalog: new ServiceCatalog(config.demoServicesDir), workerEnvironment: () => "incident-commander-node", changed: () => undefined };
+  const host: RunHost = { config, platform, store, catalog: new ServiceCatalog(config.demoServicesDir), factory: undefined, workerEnvironment: () => "incident-commander-node", changed: () => undefined };
   const created = store.create(ALERT, options.demo === false ? undefined : { seed: 7, at: "2026-11-04T07:00:00.000Z" }, "1.4.2");
   return { platform, store, run: new IncidentRun(host, created.id), incident: () => store.get(created.id)! };
 }
@@ -79,6 +79,9 @@ describe("an incident's coordinator", () => {
     expect(incident().sessionId).toBe(session.sessionId);
     expect(incident().prompted).toBe(true);
     expect((session.config.tools ?? []).map((tool) => tool.name)).toEqual(["open_workspace", "update_incident", "deploy_fix", "publish_postmortem"]);
+    expect(String(session.config.systemMessage?.content)).not.toContain("route_fix_to_factory");
+    expect(run.view()).toMatchObject({ fixRoute: "workers" });
+    expect(run.view().factory).toBeUndefined();
     expect(run.view().coordinator).toMatchObject({ state: "working", attached: true });
   });
 
@@ -297,5 +300,6 @@ describe("helpers", () => {
     expect(describeTool("start_worker", { name: "repro" })).toBe("Starting repro");
     expect(describeTool("view", { path: "/workspace/checkout/src/discounts.js" })).toBe("Reading discounts.js");
     expect(describeTool("deploy_fix", {})).toBe("Asking to deploy");
+    expect(describeTool("route_fix_to_factory", {})).toBe("Routing the fix to Software Factory");
   });
 });

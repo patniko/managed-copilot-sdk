@@ -4,16 +4,18 @@ import {
   CheckCircleFillIcon,
   CircleIcon,
   ClockIcon,
+  ContainerIcon,
   CopilotIcon,
   KebabHorizontalIcon,
   PaperAirplaneIcon,
   ShieldIcon,
   TrashIcon,
+  WorkflowIcon,
 } from "@primer/octicons-react";
 import { useEffect, useState } from "react";
-import type { IncidentStatus, IncidentView } from "../../shared/types.js";
+import type { FactoryWorkView, IncidentStatus, IncidentView } from "../../shared/types.js";
 import { api, errorMessage } from "../lib/api.js";
-import { between, clock, cx, duration } from "../lib/format.js";
+import { between, clock, cx, duration, workOrderLabel } from "../lib/format.js";
 import { useNow } from "../lib/hooks.js";
 import { boardHref, navigate } from "../lib/router.js";
 import { loadIncident, useStore } from "../lib/store.js";
@@ -21,7 +23,7 @@ import { Approval } from "./Approval.js";
 import { Findings, Postmortem } from "./Report.js";
 import { ResponseMap } from "./ResponseMap.js";
 import { Timeline } from "./Timeline.js";
-import { Popover, SeverityBadge, Spinner, STATUS_LABEL, STATUS_TEXT, Tooltip } from "./ui.js";
+import { FACTORY_STATUS_LABEL, OpenInFactory, Popover, SeverityBadge, Spinner, STATUS_LABEL, STATUS_TEXT, Tooltip, waitingForFactory } from "./ui.js";
 
 const STEPS: readonly IncidentStatus[] = ["investigating", "mitigating", "resolved"];
 
@@ -137,6 +139,8 @@ function Heading({ incident }: { readonly incident: IncidentView }) {
               {incident.service}
               {incident.demo ? " · demo service" : ""}
             </span>
+            <span aria-hidden>·</span>
+            <FixRouteTag incident={incident} />
           </div>
           <h1 className="mt-2 text-xl font-semibold text-balance sm:text-2xl">{incident.title}</h1>
         </div>
@@ -150,6 +154,43 @@ function Heading({ incident }: { readonly incident: IncidentView }) {
         </span>
       </div>
     </div>
+  );
+}
+
+/** How the incident's fix is made, chosen when it opened. */
+function FixRouteTag({ incident }: { readonly incident: IncidentView }) {
+  const factory = incident.fixRoute === "factory";
+  return (
+    <Tooltip
+      content={
+        factory
+          ? "Copilot triages, routes the fix to Software Factory as a work order, and verifies what the factory releases. A worker writes the repro meanwhile."
+          : "Copilot triages, then hands the repro and the fix to two workers, each in its own sandbox."
+      }
+    >
+      <span className="inline-flex items-center gap-1">
+        {factory ? <WorkflowIcon size={14} className="text-display-indigo" /> : <ContainerIcon size={14} className="text-fg-accent" />}
+        {factory ? "Fix by Software Factory" : "Fix by Copilot's workers"}
+      </span>
+    </Tooltip>
+  );
+}
+
+/** Copilot ended its turn on purpose: Software Factory builds the fix, and Incident Commander hands it over once it's released. */
+function WaitingForFactory({ work }: { readonly work: FactoryWorkView }) {
+  return (
+    <section aria-label="Waiting for Software Factory" className="Box flex flex-col gap-3 p-4 sm:flex-row sm:items-start">
+      <WorkflowIcon size={20} className="mt-0.5 shrink-0 text-display-indigo" />
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold">
+          Waiting for Software Factory · <span className="font-mono">{workOrderLabel(work.number)}</span> {FACTORY_STATUS_LABEL[work.status]}
+        </div>
+        <p className="mt-1 text-sm text-fg-muted">
+          Copilot's turn ended. When the factory releases the fix, Incident Commander hands it to Copilot to verify and deploy. Nothing waits on this tab.
+        </p>
+      </div>
+      <OpenInFactory url={work.url} className="btn btn-sm shrink-0" />
+    </section>
   );
 }
 
@@ -262,13 +303,16 @@ export function IncidentPage({ id }: { readonly id: string }) {
     );
   }
 
-  const stopped = incident.coordinator.state === "idle" && incident.status !== "resolved" && incident.approval?.state !== "waiting";
+  const idle = incident.coordinator.state === "idle" && incident.status !== "resolved" && incident.approval?.state !== "waiting";
+  const factoryWait = idle && incident.factory && waitingForFactory(incident) ? incident.factory : undefined;
+  const stopped = idle && !factoryWait;
   const waiting = incident.approval?.state === "waiting";
 
   return (
     <main className="mx-auto flex w-full max-w-[1280px] flex-col gap-4 px-4 py-4 sm:gap-5 sm:px-6 sm:py-6">
       <Heading incident={incident} />
       {incident.problem ? <div className="flash flash-warn">{incident.problem}</div> : null}
+      {incident.factory?.problem ? <div className="flash flash-warn">{incident.factory.problem}</div> : null}
       {waiting ? (
         <button
           type="button"
@@ -284,6 +328,7 @@ export function IncidentPage({ id }: { readonly id: string }) {
       <div className="grid gap-4 sm:gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,24rem)] lg:items-start">
         <div className="flex min-w-0 flex-col gap-4">
           <Approval incident={incident} />
+          {factoryWait ? <WaitingForFactory work={factoryWait} /> : null}
           {stopped ? <Stopped incident={incident} /> : null}
           <Postmortem incident={incident} />
           <Findings incident={incident} />

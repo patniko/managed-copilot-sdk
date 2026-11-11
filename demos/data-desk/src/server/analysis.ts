@@ -4,14 +4,16 @@
 // session into its own sandbox, where this class copies the dataset before the agent's first command runs.
 import type { PermissionRequest, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import type { PlatformEvent, SessionInfo } from "@managed-copilot/sdk";
-import type { AnalysisSummary, AnalysisView, ChatItem, MoveRequest, OutputFile, Placement } from "../shared/types.js";
+import type { AnalysisSummary, AnalysisView, ChatItem, MoveRequest, OutputFile, Placement, ResultView } from "../shared/types.js";
 import type { Dataset, Datasets } from "./datasets.js";
 import type { DeskConfig } from "./config.js";
 import { DeskError, errorText, isMissingSession } from "./errors.js";
+import { routingView } from "./factory.js";
+import type { Insight, TableOrigin } from "./handoff.js";
 import { log } from "./log.js";
 import type { DeskPlatform, DeskSession } from "./platform.js";
 import { mergeHistory, MOVE_TOOL, Transcript, type DeskEvent } from "./projection.js";
-import { digest, type StoredAnalysis, type Store } from "./store.js";
+import { digest, type StoredAnalysis, type Store, type StoredRouting } from "./store.js";
 import { dataTools, systemMessage } from "./tools.js";
 
 /** What the agent is told when the person keeps the session on the shared runtime. */
@@ -528,6 +530,25 @@ export class Analysis {
     if (this.#id && !this.#closed) this.#host.changed(this);
   }
 
+  /**
+   * What a hand-off to Software Factory draws on: the tables Copilot made and how it made them, its latest complete
+   * answer and the question before it, and the conversation's last item (where the hand-off shows).
+   */
+  handoff(): { readonly results: readonly ResultView[]; readonly origins: ReadonlyMap<string, TableOrigin>; readonly answer?: Insight; readonly lastItemId?: string } {
+    const items = this.#transcript.items;
+    const origins = new Map<string, TableOrigin>();
+    for (const item of items) if (item.kind === "step" && item.resultId) origins.set(item.resultId, { tool: item.tool, ...(item.detail ? { detail: item.detail } : {}) });
+    let answer: Insight | undefined;
+    for (let index = items.length - 1; index >= 0 && !answer; index--) {
+      const item = items[index]!;
+      if (item.kind !== "assistant" || item.streaming || !item.text.trim()) continue;
+      const question = items.slice(0, index).findLast((candidate) => candidate.kind === "user");
+      answer = { text: item.text.trim(), ...(question?.kind === "user" ? { question: question.text.trim() } : {}) };
+    }
+    const last = items.at(-1);
+    return { results: this.#transcript.results, origins, ...(answer ? { answer } : {}), ...(last ? { lastItemId: last.id } : {}) };
+  }
+
   summary(): AnalysisSummary {
     const stored = this.#stored;
     return {
@@ -547,11 +568,12 @@ export class Analysis {
     const stored = this.#stored;
     const move = stored?.move;
     const dataset = this.dataset?.summary;
+    const routings = stored?.factory ?? [];
     return {
       ...this.summary(),
       ...(dataset ? { dataset } : {}),
       model: this.#host.config.model,
-      items: withMove(this.#transcript.items, move),
+      items: withRoutings(withMove(this.#transcript.items, move), routings),
       results: this.#transcript.results.slice(-20),
       outputs: this.#outputs,
       ...(this.#pendingMove ? { moveRequest: this.#pendingMove.request } : {}),
@@ -559,6 +581,7 @@ export class Analysis {
       ...(move ? { movedAt: move.at, ...(move.durationMs !== undefined ? { moveMs: move.durationMs } : {}) } : {}),
       ...(this.#movingSince && this.placement === "moving" ? { movingSince: this.#movingSince } : {}),
       ...(stored?.usage ? { usage: stored.usage } : {}),
+      ...(routings.length ? { factory: routings.map(routingView) } : {}),
       ...(this.#problem ? { problem: this.#problem } : {}),
     };
   }
@@ -575,4 +598,25 @@ export function withMove(items: readonly ChatItem[], move: StoredAnalysis["move"
   const marker: ChatItem = { kind: "moved", id: `moved-${move.at}`, at: move.at, ...details };
   const index = items.findIndex((item) => Date.parse(item.at) > Date.parse(move.at));
   return index < 0 ? [...items, marker] : [...items.slice(0, index), marker, ...items.slice(index)];
+}
+
+/**
+ * The transcript with a line for each thing the person sent to Software Factory: right after the item that was last
+ * when it was sent (clocks can differ between Data Desk and the runtime), or at its time when that item isn't there.
+ */
+export function withRoutings(items: readonly ChatItem[], routings: readonly StoredRouting[]): ChatItem[] {
+  const out = [...items];
+  for (const routing of [...routings].sort((a, b) => a.sentAt.localeCompare(b.sentAt))) {
+    const line: ChatItem = { kind: "factory", id: `factory-${routing.workOrderId}`, at: routing.sentAt, routing: routingView(routing) };
+    let index = routing.after ? out.findIndex((item) => item.id === routing.after) : -1;
+    if (index >= 0) {
+      index += 1;
+      while (out[index]?.kind === "factory") index += 1;
+    } else {
+      index = out.findIndex((item) => Date.parse(item.at) > Date.parse(routing.sentAt));
+      if (index < 0) index = out.length;
+    }
+    out.splice(index, 0, line);
+  }
+  return out;
 }

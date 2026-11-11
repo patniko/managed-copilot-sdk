@@ -1,7 +1,9 @@
 /**
  * The scripted happy path: one real pass of Help Desk through its HTTP API. It simulates 5 customers, answers the
  * refunds and cancellations they ask for (approves the first, declines any others), checks that every session stayed
- * on its own customer's orders and on one shared runtime, then ends the simulation, which deletes its sessions.
+ * on its own customer's orders and on one shared runtime, lists the software issues the agents reported (Aisha's promo
+ * code, among the first five; it doesn't send them to Software Factory), then ends the simulation, which deletes its
+ * sessions.
  *
  *   pnpm --filter @managed-copilot/demo-help-desk happy-path                 # http://localhost:7440 + MANAGED_COPILOT_PORT_OFFSET
  *   pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk.<environment-domain>
@@ -135,6 +137,8 @@ async function main(): Promise<boolean> {
   console.log(`Counters         ${counters.sessions} sessions, ${counters.runtimes} runtime, ${counters.sandboxes} sandboxes, ${counters.messages} messages, ${counters.premiumRequests} premium requests`);
   console.log(`Approvals        ${decisions.length ? decisions.join("; ") : "none"}`);
   console.log(`Blocked lookups  ${blocked.length ? blocked.join("; ") : "none (the agent declined without calling a tool)"}`);
+  const issues = state.issues ?? [];
+  console.log(`Software issues  ${issues.length ? issues.map((issue) => `${issue.title} (${issue.reports.map((report) => report.name).join(", ")})`).join("; ") : "none reported"}`);
   for (const problem of problems) console.log(`✗ ${problem}`);
   if (problems.length === 0) console.log("✓ Every check passed");
   return problems.length === 0;

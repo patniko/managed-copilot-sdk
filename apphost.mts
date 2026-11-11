@@ -1,5 +1,5 @@
 // The Managed Copilot AppHost. `aspire run` starts the platform with the spec's example environments, then the demos.
-import { createBuilder } from "./.aspire/modules/aspire.mjs";
+import { createBuilder, type EndpointReference } from "./.aspire/modules/aspire.mjs";
 import { addManagedCopilot, publishApp } from "@managed-copilot/aspire";
 import { ASSISTANT_DEMO, ASSISTANT_PORT, assistantCopilotOptions } from "./demos/assistant/apphost.mjs";
 import { DISPATCH_DEFAULT_PORT, dispatch } from "./demos/dispatch/apphost.mjs";
@@ -168,7 +168,17 @@ function runDemo(demo: Demo, appName?: string) {
 }
 
 // An AI software factory: plans a work order, builds tasks in parallel sandboxes, reviews, and releases.
-await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", allowedHostsEnv: "FACTORY_ALLOWED_HOSTS", gatewayUrlEnv: ["FACTORY_ATTACH_URL"] });
+const factoryApp = await addDemo(factory.app, { dockerfile: "demos/software-factory/Dockerfile", allowedHostsEnv: "FACTORY_ALLOWED_HOSTS", gatewayUrlEnv: ["FACTORY_ATTACH_URL"] });
+
+// Help Desk, Incident Commander, and Data Desk route work to the factory: a storefront bug, an incident's fix, a data
+// insight. Their servers call its API at SOFTWARE_FACTORY_URL (in Azure, its name inside the environment, which stays
+// there and so passes its ingress allowlist) and link people to SOFTWARE_FACTORY_PUBLIC_URL.
+// (`publishApp` types its resource loosely, so the endpoint gets the AppHost's own type here.)
+const factoryPublicUrl = (await factoryApp.getEndpoint("http")) as EndpointReference;
+const factoryRouting: { readonly api: string | EndpointReference; readonly public: EndpointReference } = {
+  api: publishing ? `http://${factory.app.name}` : factoryPublicUrl,
+  public: factoryPublicUrl,
+};
 
 // Dispatch: one conversation with an orchestrator agent that, message by message, creates a sandbox for each part of
 // the work or sends it to a sandbox it already has.
@@ -181,8 +191,10 @@ await addDemo(swarm.app, { dockerfile: "demos/research-swarm/Dockerfile", allowe
 await addDemo(patternRace({ port: ports.patternRace }).app, { dockerfile: "demos/pattern-race/Dockerfile", allowedHostsEnv: "PATTERN_RACE_ALLOWED_HOSTS" });
 
 // Data Desk: chat with a spreadsheet. The session answers on the shared runtime, then moves once into a Python sandbox
-// when a request needs code, and an attached Copilot CLI follows it.
-await addDemo(dataDeskDemo.app, { dockerfile: "demos/data-desk/Dockerfile", allowedHostsEnv: "DATA_DESK_ALLOWED_HOSTS", gatewayUrlEnv: ["DATA_DESK_ATTACH_URL"] });
+// when a request needs code, and an attached Copilot CLI follows it. What it finds can go to the factory.
+await (await addDemo(dataDeskDemo.app, { dockerfile: "demos/data-desk/Dockerfile", allowedHostsEnv: "DATA_DESK_ALLOWED_HOSTS", gatewayUrlEnv: ["DATA_DESK_ATTACH_URL"] }))
+  .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
+  .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
 
 // Repo Doctor: one sandbox per run clones a repository, reproduces its failing tests, fixes them, and returns a verified
 // patch, while a strip shows the hosts its network rules allowed and blocked.
@@ -247,16 +259,18 @@ if (frontDeskTotalDailyLimit && !/^\d+$/.test(frontDeskTotalDailyLimit)) {
 if (frontDeskTotalDailyLimit) await frontDeskApp.withEnvironment("FRONT_DESK_TOTAL_DAILY_LIMIT", frontDeskTotalDailyLimit);
 
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
-// store's tools bound to that customer's orders.
-await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" });
+// store's tools bound to that customer's orders. Storefront bugs its customers report go to the factory.
+await (await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" }))
+  .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
+  .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
 
 // Hack the Harness: a staff assistant, with a 3D office, that demonstrates five agent deployment architectures. Local
 // only: it accepts any username and password.
 if (!publishing) await runDemo(hackTheHarnessDemo.app);
 
 // Incident Commander: an alert opens an incident; a mixed coordinator triages in its own sandbox, hands the repro and
-// the fix to workers, and waits on the platform for a person to approve the deploy. Alerts carry the generated bearer
-// secret; the platform's webhook keeps the app informed while it isn't attached.
+// the fix to workers (or the fix to the factory), and waits on the platform for a person to approve the deploy. Alerts
+// carry the generated bearer secret; the platform's webhook keeps the app informed while it isn't attached.
 await (
   await addDemo(incidents.app, {
     dockerfile: "demos/incident-commander/Dockerfile",
@@ -265,7 +279,9 @@ await (
   })
 )
   .withEnvironment("INCIDENT_WEBHOOK_SECRET", incidents.webhooks["incident-commander"].secret)
-  .withEnvironment("INCIDENT_ALERT_SECRET", await generatedSecret("incident-commander-alert-secret"));
+  .withEnvironment("INCIDENT_ALERT_SECRET", await generatedSecret("incident-commander-alert-secret"))
+  .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
+  .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
 
 // The demo gallery: every demo and walkthrough of this deployment on one page, at https://gallery.<environment-domain>.
 // Deployed only (locally, `pnpm gallery`). It holds no GitHub token, and opens from the same addresses as the demos.

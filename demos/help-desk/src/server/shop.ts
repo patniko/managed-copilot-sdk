@@ -1,7 +1,7 @@
 // The demo store's data for one simulation. Every read and change takes the customer it acts for: tools bound to one
 // customer's session can only ever reach that customer's orders.
 import { AVATAR_COLORS, type CustomerCard } from "../shared/types.js";
-import { CUSTOMERS, ORDERS, REFUND_WINDOW_DAYS, type CustomerSeed, type OrderSeed } from "./seed.js";
+import { CUSTOMERS, ORDERS, PROMOTIONS, REFUND_WINDOW_DAYS, type CustomerSeed, type OrderSeed } from "./seed.js";
 
 const DAY_MS = 86_400_000;
 
@@ -9,6 +9,8 @@ type OrderStatus = "processing" | "in_transit" | "delivered" | "cancelled";
 
 interface OrderState {
   readonly seed: OrderSeed;
+  /** What its promotion code took off, in USD. */
+  readonly discount: number;
   readonly total: number;
   status: OrderStatus;
   refunded: number;
@@ -52,15 +54,20 @@ export class Shop {
     this.#startedAt = startedAt;
     this.#applied = new Map();
     this.#orders = new Map(
-      ORDERS.map((seed) => [
-        seed.id,
-        {
-          seed,
-          total: cents(seed.lines.reduce((sum, line) => sum + line.price * line.quantity, 0)),
-          status: seed.shipment.kind === "processing" ? "processing" : seed.shipment.kind === "transit" ? "in_transit" : "delivered",
-          refunded: 0,
-        },
-      ]),
+      ORDERS.map((seed) => {
+        const subtotal = seed.lines.reduce((sum, line) => sum + line.price * line.quantity, 0);
+        const discount = cents((subtotal * (seed.promoCode ? (PROMOTIONS[seed.promoCode]?.percent ?? 0) : 0)) / 100);
+        return [
+          seed.id,
+          {
+            seed,
+            discount,
+            total: cents(subtotal - discount),
+            status: seed.shipment.kind === "processing" ? "processing" : seed.shipment.kind === "transit" ? "in_transit" : "delivered",
+            refunded: 0,
+          },
+        ];
+      }),
     );
   }
 
@@ -111,13 +118,36 @@ export class Shop {
       case "processing":
         return "processing (not shipped yet)";
       case "in_transit":
-        return order.seed.shipment.kind === "transit" && order.seed.shipment.delay ? "in transit, delayed" : "in transit";
+        if (order.seed.shipment.kind === "transit" && order.seed.shipment.delay) return "in transit, delayed";
+        return this.#outForDelivery(order) ? "out for delivery (not delivered yet)" : "in transit";
       case "cancelled":
         return "cancelled";
       case "delivered":
         if (order.refunded >= order.total) return "delivered, refunded";
         return order.refunded > 0 ? "delivered, partly refunded" : "delivered";
     }
+  }
+
+  /** The carrier's latest scan, today, says the package is on its way to the door. */
+  #outForDelivery(order: OrderState): boolean {
+    const shipment = order.seed.shipment;
+    const latest = shipment.kind === "transit" ? shipment.events.at(-1) : undefined;
+    return latest?.daysAgo === 0 && /^out for delivery$/i.test(latest.description);
+  }
+
+  /**
+   * The label the customer's My orders page shows, worked out the way the storefront's code does it
+   * (`storefront/src/order-status.js`, `statusLabel`), bug included: it matches /deliver/i in the latest scan, so a
+   * package that is out for delivery shows as Delivered. The agent compares it with the order's real status.
+   */
+  #myOrdersLabel(order: OrderState): string {
+    if (order.status === "cancelled") return "Cancelled";
+    const shipment = order.seed.shipment;
+    if (shipment.kind === "processing") return "Processing";
+    const latest = shipment.events.at(-1)?.description ?? "";
+    if (/deliver/i.test(latest)) return "Delivered";
+    if (/delay|exception|held/i.test(latest)) return "Delayed";
+    return "In transit";
   }
 
   #shipping(order: OrderState): ToolResult | undefined {
@@ -143,6 +173,7 @@ export class Shop {
         items: order.seed.lines.map((line) => (line.quantity > 1 ? `${line.product} ×${line.quantity}` : line.product)).join(", "),
         total: order.total,
         status: this.#statusText(order),
+        shownOnMyOrdersPage: this.#myOrdersLabel(order),
       }));
     return { today: this.date(0), orders };
   }
@@ -155,7 +186,9 @@ export class Shop {
       orderId: order.seed.id,
       placed: this.date(-order.seed.placedDaysAgo),
       status: this.#statusText(order),
+      shownOnMyOrdersPage: this.#myOrdersLabel(order),
       items: order.seed.lines.map((line) => ({ product: line.product, quantity: line.quantity, price: line.price })),
+      ...(order.discount > 0 ? { promoCode: order.seed.promoCode, discount: order.discount } : {}),
       total: order.total,
       ...(order.refunded > 0 ? { refunded: order.refunded } : {}),
       ...(shipping ? { shipping } : {}),
@@ -166,7 +199,7 @@ export class Shop {
     const order = this.#own(customerId, orderId);
     if (!order) return this.#missing(orderId);
     const shipment = order.seed.shipment;
-    const base = { orderId: order.seed.id, status: this.#statusText(order) };
+    const base = { orderId: order.seed.id, status: this.#statusText(order), shownOnMyOrdersPage: this.#myOrdersLabel(order) };
     if (order.status === "cancelled") return { ...base, note: "Cancelled before it shipped." };
     if (shipment.kind === "processing") return { ...base, shipsBy: this.date(shipment.shipsInDays), note: "Not shipped yet, so it has no tracking number." };
     const events = shipment.events.map((event) => ({ date: this.date(-event.daysAgo), location: event.location, description: event.description }));
@@ -229,5 +262,15 @@ export class Shop {
     const result = { ok: true, orderId: order.seed.id, status: "cancelled", refunded: check.amount, to: "the original payment method" };
     this.#applied.set(effectId, result);
     return result;
+  }
+
+  /**
+   * A problem with the store's website that the customer reports, for the store's engineering team. The order it names,
+   * if any, must be the customer's own: another customer's order is answered exactly like one that doesn't exist.
+   */
+  reportBug(customerId: string, report: { readonly area: string; readonly orderId?: string | undefined }): ToolResult {
+    const order = report.orderId === undefined ? undefined : this.#own(customerId, report.orderId);
+    if (report.orderId !== undefined && !order) return this.#missing(report.orderId);
+    return { ok: true, area: report.area, ...(order ? { orderId: order.seed.id } : {}), sentTo: "the store's engineering team" };
   }
 }

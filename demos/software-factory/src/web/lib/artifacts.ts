@@ -5,6 +5,9 @@ import { pipelineStations } from "./stations.js";
 
 export type ViewerKind = "diff" | "test-report" | "markdown" | "json" | "code" | "binary";
 
+/** The pseudo-station a routed work order's files are kept under (`context/…` and `project/…`). */
+export const INTAKE_STATION_ID = "intake";
+
 export function basename(path: string): string {
   return path.split("/").pop() ?? path;
 }
@@ -39,6 +42,12 @@ export function groupArtifacts(index: ArtifactIndex, workOrder: WorkOrder): Arti
     byStation.set(file.stationId, list);
   }
   const groups: ArtifactGroup[] = [];
+  // What a routed work order brought along comes first: its reference material and the project it changes.
+  const intake = byStation.get(INTAKE_STATION_ID);
+  if (intake) {
+    groups.push({ stationId: INTAKE_STATION_ID, title: workOrder.origin ? `From ${workOrder.origin.name}` : "Intake", files: sortByPath(intake) });
+    byStation.delete(INTAKE_STATION_ID);
+  }
   for (const station of pipelineStations(workOrder)) {
     const files = byStation.get(station.id);
     if (!files) continue;
