@@ -29,7 +29,7 @@ const SAMPLE_DEMOS: Readonly<Record<string, readonly PatternDemo[]>> = {
 };
 
 function sample(id: string, title: string, tagline: string, tryIt: string): AppEntry {
-  return { id, title, tagline, description: `${tagline}. A sample entry for the gallery's preview.`, tryIt, app: id, port: 7400, healthPath: "/api/health", readme: `demos/${id}/README.md` };
+  return { id, title, tagline, description: `${tagline}. A sample entry for the gallery's preview.`, tryIt, group: "more", app: id, port: 7400, healthPath: "/api/health", readme: `demos/${id}/README.md` };
 }
 
 const withSamples = (patterns: readonly Pattern[]): readonly Pattern[] => patterns.map((pattern) => ({ ...pattern, demos: [...pattern.demos, ...(SAMPLE_DEMOS[pattern.id] ?? [])] }));

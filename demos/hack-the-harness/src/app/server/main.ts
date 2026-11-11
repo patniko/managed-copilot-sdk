@@ -2,15 +2,21 @@ import { randomUUID } from "node:crypto";
 import express, { type ErrorRequestHandler } from "express";
 import { basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { approveAll, defineTool, type CopilotSession, type MessageOptions, type SessionConfig, type SessionEvent } from "@github/copilot-sdk";
+import { approveAll, defineTool, type CopilotClient, type CopilotSession, type MessageOptions, type SessionConfig, type SessionEvent } from "@github/copilot-sdk";
 import { ManagedCopilot } from "@managed-copilot/sdk";
 import { auth, type User } from "./auth.js";
 import { npcPersona, npcSessionId } from "./npcs.js";
+import { DEFAULT_STAGE, findStage, STAGES, type Stage } from "./stages.js";
 
 // The app connects to the platform once, as itself. Users sign in to the app, not to GitHub. The AppHost gives the
 // platform's URL in MANAGED_COPILOT_URL.
 const managed = await ManagedCopilot.connect({ clientName: "hack-the-harness" });
-const client = await managed.client("hack-the-harness");
+
+// One client per stage: each stage is its own environment, so a chat's stage is the environment it's created in.
+const clients = new Map<string, CopilotClient>();
+for (const stage of STAGES) {
+  clients.set(stage.id, await managed.client(stage.environment));
+}
 
 const instructions = `You are a helpful internal staff assistant at Contoso, a software company.
 
@@ -19,11 +25,11 @@ Contoso has 20 offices:
 - Europe: London, Dublin, Berlin, Amsterdam, Paris, Stockholm, Zurich
 - Elsewhere: Tel Aviv, Bangalore, Singapore, Tokyo, Sydney, Toronto, São Paulo, Mexico City`;
 
+// Everything but the tools, which depend on the stage.
 const config: SessionConfig = {
   model: "claude-sonnet-5",
   streaming: true,
   systemMessage: { mode: "append", content: instructions },
-  tools: agentTools(),
   onPermissionRequest: approveAll,
 };
 
@@ -33,7 +39,7 @@ const files = new Map<string, Buffer>();
 // Waits until the named worker has finished its first turn, so its sandbox is ready for files.
 async function waitForWorker(sessionId: string, name: string) {
   for (let attempt = 0; attempt < 120; attempt++) {
-    const worker = (await managed.workers(sessionId).list()).find(w => w.name === name && w.state !== "stopped");
+    const worker = (await managed.workers(sessionId).list()).find(w => w.role !== "hands" && w.name === name && w.state !== "stopped");
     if (worker?.state === "idle") {
       return worker.id;
     }
@@ -45,14 +51,46 @@ async function waitForWorker(sessionId: string, name: string) {
   throw new Error(`Worker ${name} is still busy.`);
 }
 
-// The tools the agent uses to get files in and out of wherever its commands run.
-function agentTools() {
-  // The agent runs its own commands, so these tools move files to and from its workspace. Change this to `true` when it
-  // hands each job to a worker agent in its own sandbox instead (the Workers architecture in the README), so the tools
-  // move files to and from a named worker.
-  if (false) {
-    return [
-      // Uploads stay in the app until the agent sends them to a worker.
+async function findWorker(sessionId: string, name: string) {
+  const worker = (await managed.workers(sessionId).list()).find(w => w.role !== "hands" && w.name === name && w.state !== "stopped");
+  if (!worker) {
+    throw new Error(`There is no running worker named ${name}.`);
+  }
+  return worker.id;
+}
+
+// The tools the agent uses to get files in and out of wherever its commands run. Uploads stay in the app until the
+// agent asks for them, and shared files stay in the app too, so downloads still work once a sandbox is gone.
+function agentTools(stage: Stage) {
+  const tools = [];
+
+  // Its own commands run in its session, or in a workspace sandbox (Direct and Mixed): copy uploads in there.
+  if (stage.workspace) {
+    tools.push(
+      defineTool<{ path: string }>("copy_upload", {
+        description: "Copy a file the user uploaded (a <file> element in their message) into your workspace, at that path, so your shell and file tools can use it.",
+        parameters: { type: "object", properties: { path: { type: "string", description: "The file's path" } }, required: ["path"] },
+        skipPermission: true,
+        defer: "never",
+        handler: async ({ path }, { sessionId }) => {
+          const workspace = await getWorkspace(stage, sessionId);
+          if (!workspace) {
+            return "Your workspace starts at your first shell or file command. Run one, then try again.";
+          }
+          const bytes = files.get(`${sessionId}/${path.replace(/^\/workspace\//, "")}`);
+          if (!bytes) {
+            return `There is no uploaded file ${path}.`;
+          }
+          await managed.files(workspace).write(path, bytes);
+          return `Copied ${path} into your workspace.`;
+        },
+      }),
+    );
+  }
+
+  // It hands jobs to workers (Workers and Mixed): send uploads to a named worker instead.
+  if (stage.workers) {
+    tools.push(
       defineTool<{ worker: string; paths: string[] }>("send_files", {
         description: [
           "Copy files the user uploaded (<file> elements in their message) into a worker's /workspace, at the same paths.",
@@ -76,83 +114,72 @@ function agentTools() {
           return `Copied ${paths.join(", ")} into ${worker}'s /workspace.`;
         },
       }),
-      // The UI shows each shared file as a card the user can download. The app keeps a copy, so the download still
-      // works after the worker is stopped.
-      defineTool<{ worker: string; path: string }>("share_file", {
-        description: "Give the user a file a worker made, as a download in the chat. Call it once the file is final, before stopping the worker.",
-        parameters: {
-          type: "object",
-          properties: {
-            worker: { type: "string", description: "The worker's name" },
-            path: { type: "string", description: "The file's path in the worker's /workspace" },
-          },
-          required: ["worker", "path"],
-        },
-        skipPermission: true,
-        defer: "never",
-        handler: async ({ worker, path }, { sessionId }) => {
-          const workers = await managed.workers(sessionId).list();
-          const id = workers.find(w => w.name === worker && w.state !== "stopped")!.id;
-          const bytes = await managed.files(id).readBytes(path);
-          files.set(`${sessionId}/${worker}/${path}`, Buffer.from(bytes));
-          return `Shared ${basename(path)} (${bytes.length} bytes) with the user.`;
-        },
-      }),
-    ];
-  } else {
-    return [
-      // Uploads stay in the app until the agent asks for them in its workspace.
-      defineTool<{ path: string }>("copy_upload", {
-        description: "Copy a file the user uploaded (a <file> element in their message) into your workspace, at that path, so your shell and file tools can use it.",
-        parameters: { type: "object", properties: { path: { type: "string", description: "The file's path" } }, required: ["path"] },
-        skipPermission: true,
-        defer: "never",
-        handler: async ({ path }, { sessionId }) => {
-          const workspace = await getWorkspace(sessionId);
-          if (!workspace) {
-            return "Your workspace starts at your first shell or file command. Run one, then try again.";
-          }
-          const bytes = files.get(`${sessionId}/${path.replace(/^\/workspace\//, "")}`);
-          if (!bytes) {
-            return `There is no uploaded file ${path}.`;
-          }
-          await managed.files(workspace).write(path, bytes);
-          return `Copied ${path} into your workspace.`;
-        },
-      }),
-      // The UI shows each shared file as a card the user can download. The app keeps a copy, so the download still
-      // works after the workspace is released.
-      defineTool<{ path: string }>("share_file", {
-        description: "Give the user a file you made, as a download in the chat. Call it once the file is final.",
-        parameters: { type: "object", properties: { path: { type: "string", description: "The file's path" } }, required: ["path"] },
-        skipPermission: true,
-        defer: "never",
-        handler: async ({ path }, { sessionId }) => {
-          const bytes = await managed.files((await getWorkspace(sessionId))!).readBytes(path);
-          files.set(`${sessionId}/${path}`, Buffer.from(bytes));
-          return `Shared ${basename(path)} (${bytes.length} bytes) with the user.`;
-        },
-      }),
-    ];
+    );
   }
+
+  // The UI shows each shared file as a card the user can download.
+  const fromWorker = stage.workers;
+  const fromWorkspace = Boolean(stage.workspace);
+  tools.push(
+    defineTool<{ path: string; worker?: string }>("share_file", {
+      description: fromWorker
+        ? fromWorkspace
+          ? "Give the user a file, as a download in the chat. Name the worker that made it, or leave worker out for a file in your own workspace. Call it once the file is final, before stopping any worker."
+          : "Give the user a file a worker made, as a download in the chat. Call it once the file is final, before stopping the worker."
+        : "Give the user a file you made, as a download in the chat. Call it once the file is final.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: fromWorker ? "The file's path in its /workspace" : "The file's path" },
+          ...(fromWorker ? { worker: { type: "string", description: fromWorkspace ? "The worker's name, if a worker made it" : "The worker's name" } } : {}),
+        },
+        required: fromWorker && !fromWorkspace ? ["worker", "path"] : ["path"],
+      },
+      skipPermission: true,
+      defer: "never",
+      handler: async ({ path, worker }, { sessionId }) => {
+        const source = worker ? await findWorker(sessionId, worker) : await getWorkspace(stage, sessionId);
+        if (!source) {
+          return "You have no workspace yet, so there is no file to share.";
+        }
+        const bytes = await managed.files(source).readBytes(path);
+        files.set(worker ? `${sessionId}/${worker}/${path}` : `${sessionId}/${path}`, Buffer.from(bytes));
+        return `Shared ${basename(path)} (${bytes.length} bytes) with the user.`;
+      },
+    }),
+  );
+
+  return tools;
 }
 
 // Finds where the agent's shell and file commands run, as a session ID for managed.files().
-async function getWorkspace(sessionId: string) {
-  // The agent's commands run in its own session. Change this to `false` when they run in a workspace-only sandbox
-  // instead (the Direct architecture in the README).
-  if (true) {
-    return sessionId;
-  } else {
-    return getHands(sessionId);
-  }
+async function getWorkspace(stage: Stage, sessionId: string) {
+  return stage.workspace === "hands" ? getHands(sessionId) : sessionId;
 }
 
-// In the Direct architecture, the agent's shell and file commands run in a workspace-only sandbox (its "hands"), which
-// the platform creates at the first one it uses.
+// In the Direct and Mixed architectures, the agent's shell and file commands run in a workspace-only sandbox (its
+// "hands"), which the platform creates at the first one it uses.
 async function getHands(sessionId: string) {
   const workers = await managed.workers(sessionId).list();
   return workers.find(worker => worker.role === "hands" && worker.state !== "stopped")?.id;
+}
+
+// The stage of an existing chat, from the environment it was created in.
+async function stageOf(sessionId: string) {
+  const { environment } = await managed.sessions.get(sessionId);
+  const stage = STAGES.find(candidate => candidate.environment === environment);
+  if (!stage) {
+    throw Object.assign(new Error(`This chat is in ${environment}, which isn't one of the demo's stages.`), { status: 404 });
+  }
+  return stage;
+}
+
+function requestedStage(value: unknown) {
+  const stage = findStage(value ?? DEFAULT_STAGE);
+  if (!stage) {
+    throw Object.assign(new Error(`Unknown stage: ${String(value)}. Pick one of ${STAGES.map(s => s.id).join(", ")}.`), { status: 400 });
+  }
+  return stage;
 }
 
 // Each session ID starts with its user's ID, so the app knows whose session it is.
@@ -163,10 +190,10 @@ function owns(user: User, sessionId: string) {
 // Browsers listening for session events, and whose events they receive.
 const listeners = new Set<{ user: User; send: (sessionId: string, event: SessionEvent) => void }>();
 
-// Creates or resumes each SDK session once, then reuses it.
+// Creates or resumes each SDK session once, then reuses it. Pass the stage to create it in.
 const sessions = new Map<string, Promise<CopilotSession>>();
 
-function getSession(id: string, create = false): Promise<CopilotSession> {
+function getSession(id: string, createIn?: Stage): Promise<CopilotSession> {
   let session = sessions.get(id);
 
   if (!session) {
@@ -174,8 +201,12 @@ function getSession(id: string, create = false): Promise<CopilotSession> {
     // Office characters also get their persona.
     const persona = npcPersona(id);
     const systemMessage = persona ? { mode: "append" as const, content: `${instructions}\n\n${persona}` } : config.systemMessage;
-    const options = { ...config, systemMessage, onEvent };
-    session = create ? client.createSession({ ...options, sessionId: id }) : client.resumeSession(id, options);
+    session = (async () => {
+      const stage = createIn ?? (await stageOf(id));
+      const client = clients.get(stage.id)!;
+      const options = { ...config, systemMessage, tools: agentTools(stage), onEvent };
+      return createIn ? client.createSession({ ...options, sessionId: id }) : client.resumeSession(id, options);
+    })();
     session.catch(() => sessions.delete(id));
     sessions.set(id, session);
   }
@@ -204,20 +235,23 @@ app.param("id", (req, res, next, id: string) => {
   }
 });
 
-// List, create, and delete sessions.
+// List, create, and delete sessions. Each stage lists only its own chats.
 app.get("/api/sessions", async (req, res) => {
-  const all = await managed.sessions.list({ environment: "hack-the-harness" });
+  const stage = requestedStage(req.query.stage);
+  const all = await managed.sessions.list({ environment: stage.environment });
   res.json(all.filter(session => owns(req.user, session.id)));
 });
 
 app.post("/api/sessions", async (req, res) => {
+  const stage = requestedStage(req.body?.stage);
   const id = req.body?.npc ? npcSessionId(req.user.id, req.body.npc) : `${req.user.id}-${randomUUID()}`;
-  await getSession(id, true);
+  await getSession(id, stage);
   res.status(201).json(await managed.sessions.get(id));
 });
 
 app.delete("/api/sessions/:id", async (req, res) => {
-  await client.deleteSession(req.params.id);
+  const stage = await stageOf(req.params.id);
+  await clients.get(stage.id)!.deleteSession(req.params.id);
   sessions.delete(req.params.id);
   res.status(204).end();
 });
@@ -258,7 +292,8 @@ app.get("/api/sessions/:id/files", async (req, res) => {
   }
 });
 
-// Delete the session's workspace sandbox, in the Direct architecture. Its next shell or file command starts a new one.
+// Delete the session's workspace sandbox, in the Direct and Mixed architectures. Its next shell or file command starts
+// a new one.
 app.post("/api/sessions/:id/release", async (req, res) => {
   const hands = await getHands(req.params.id);
   if (hands) {

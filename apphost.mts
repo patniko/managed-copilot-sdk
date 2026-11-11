@@ -264,8 +264,8 @@ await (await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile
   .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
   .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
 
-// Hack the Harness: a staff assistant, with a 3D office, that demonstrates five agent deployment architectures. Local
-// only: it accepts any username and password.
+// Hack the Harness: a staff assistant, with a 3D office, that runs six agent deployment architectures side by side.
+// Local only: it accepts any username and password.
 if (!publishing) await runDemo(hackTheHarnessDemo.app);
 
 // Incident Commander: an alert opens an incident; a mixed coordinator triages in its own sandbox, hands the repro and

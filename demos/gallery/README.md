@@ -13,23 +13,33 @@ It opens http://localhost:7460 in your browser.
 
 ## What's on it
 
+Below the header and a one-line hero, five tabs split the page. Each tab has its own address (`#architectures`,
+`#connected`, `#staff-assistant`, `#demos`, `#walkthroughs`), and a link to something inside a tab
+(`#pattern-mixed`, `#walkthrough-03`, `#harness-workers`) opens that tab and scrolls to it.
+
 - **Header**: a **Local** and an **Azure** control. The dot is green when that gateway answers, amber when it refuses
   this network, red when it doesn't answer, and grey when there's no deployment; a spinner means the gallery is still
   looking. Each opens the gateway's address, how the gallery found it, what to do next (`aspire run`, or naming a
   deployment with `--cloud`), and **Check now**.
-- **Patterns**: the three building blocks (single container, virtualized multi-tenant, container orchestration), once,
+- **Architectures** tab, **Patterns**: the three building blocks (single container, virtualized multi-tenant, container orchestration), once,
   each with a colored marker, and a card for each of the six patterns made from them: isolated, shared, promotable,
   direct, delegate, and mixed ([patterns](../../docs/concepts/patterns.md)). A card shows:
   - a diagram of where its **brain** (the model loop) runs, the shared runtime or a sandbox, and where its **hands**
     (the tools that act) run: your app, a sandbox, or worker sandboxes with an agent in each. Hover it for the same in
     words.
   - the `managed.client("<environment>")` call that picks it in this repository's AppHost (hover for its settings),
-    its building blocks as markers, its walkthrough (which jumps to the list below), and the apps that show it (opened
+    its building blocks as markers, its walkthrough (which opens it on the Walkthroughs tab), and the apps that show it (opened
     when they're up, their README otherwise; hover for where in the app).
 
   When the catalog lists Pattern Race (`pattern-race`), which runs one job through all six side by side, the section
   links it as **Compare all six**, and its app card says **All six patterns**; no pattern card lists it.
-- **Apps**: a card per demo app and the operator console, with its screenshot (or its initials until one is captured),
+- **Connected demos** tab: the Software Factory and the apps that send it work orders (Help Desk, Incident Commander,
+  and Data Desk; the tests check this against the apps the root AppHost gives `SOFTWARE_FACTORY_URL`).
+- **Staff assistant** tab: Hack the Harness's six stages (shared, isolated, promotable, direct, workers, and mixed),
+  one row each with **Open**, which opens the local app at that stage (`?stage=<id>`). Every stage runs at once, so
+  you can flip between them during a talk. Local only, so a deployed gallery leaves the tab out.
+- **More demos** tab: every other demo app, and the operator console.
+- **App cards**, on the demo tabs: a card per app, with its screenshot (or its initials until one is captured),
   tagline (hover for more), the patterns it shows, what to try first, a **Local** and an **Azure** button with a live
   status dot, and its README.
   - Green: it answered. Amber: **IP-restricted**: the deployed app refused this network, because its ingress allows
@@ -42,7 +52,7 @@ It opens http://localhost:7460 in your browser.
   - The operator console buttons sign you in with your GitHub sign-in, like `npx managed-copilot console`: the gallery
     asks the gateway for a one-time link and redirects to it. A deployment's console stays off until it names operators;
     the gallery says so instead of opening a broken page.
-- **Walkthroughs**: the thirteen [samples](../../walkthroughs/README.md) as a list, with their README. The copy button
+- **Walkthroughs** tab: the thirteen [samples](../../walkthroughs/README.md) as a list, with their README. The copy button
   copies `pnpm walkthrough 01` after setting `MANAGED_COPILOT_URL` to a gateway, in PowerShell on Windows and `sh`
   elsewhere. The variable stays set in that terminal, so each copy names its target. With both gateways known, a
   **Local** | **Azure** switch picks which one.
@@ -108,8 +118,8 @@ with `MANAGED_COPILOT_PORT_OFFSET`; `GALLERY_WEB_PORT` picks another port). Open
 sample data instead (`offline`, `looking`, `hosted`, `error`, and `loading` too; add `&more` for a full grid of sample
 apps). The samples exist only in `dev`: production builds leave them out.
 
-`src/shared/catalog.ts` lists the patterns, apps, and walkthroughs. Add a demo there (with its Aspire resource name,
-local port, and health path, and `public: true` if the root AppHost publishes it as public), then capture its
+`src/shared/catalog.ts` lists the patterns, apps, Hack the Harness's stages, and walkthroughs. Add a demo there (with
+its Aspire resource name, local port, health path, the tab it goes on (`group`), and `public: true` if the root AppHost publishes it as public), then capture its
 screenshot. A pattern names an environment of the root AppHost and the settings that make it that pattern; the tests
 check both against `apphost.mts`, as they check each app's `public` flag. Its diagram is in `src/web/model.ts`
 (`SHAPES`); the tests check that each diagram agrees with the pattern's building blocks.

@@ -45,15 +45,16 @@ export function auth() {
   router.use(cookieParser());
   router.use(express.urlencoded({ extended: false }));
 
-  router.get("/login", (_req, res) => {
-    res.send(loginPage());
+  router.get("/login", (req, res) => {
+    res.send(loginPage(undefined, safeNext(req.query.next)));
   });
 
   router.post("/login", async (req, res) => {
     const name = String(req.body.username ?? "").trim().replace(/\s+/g, " ");
+    const next = safeNext(req.body.next);
 
     if (!name) {
-      return res.status(401).send(loginPage("Enter a username"));
+      return res.status(401).send(loginPage("Enter a username", next));
     }
 
     const user = signIn(name);
@@ -65,7 +66,7 @@ export function auth() {
       .sign(signingKey);
 
     res.cookie("auth", jwt, { httpOnly: true, sameSite: "lax" });
-    res.redirect("/");
+    res.redirect(next);
   });
 
   router.post("/logout", (_req, res) => {
@@ -92,12 +93,21 @@ const requireUser: RequestHandler = async (req, res, next) => {
     if (req.path.startsWith("/api/")) {
       res.status(401).json({ message: "Sign in required" });
     } else {
-      res.redirect("/login");
+      res.redirect(`/login?next=${encodeURIComponent(req.originalUrl)}`);
     }
   }
 };
 
-function loginPage(error?: string) {
+// Where to go after signing in: a path on this app (such as /?stage=workers from the gallery), never another site.
+function safeNext(value: unknown) {
+  return typeof value === "string" && /^\/(?![/\\])/.test(value) ? value : "/";
+}
+
+function escapeAttribute(value: string) {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+function loginPage(error?: string, next = "/") {
   return `<!doctype html>
 <html>
 <head>
@@ -115,6 +125,7 @@ function loginPage(error?: string) {
   <form method="post" action="/login">
     <h1>Staff assistant</h1>
     ${error ? `<p>${error}</p>` : ""}
+    <input type="hidden" name="next" value="${escapeAttribute(next)}">
     <input name="username" placeholder="Demo: any username accepted" autofocus required>
     <input name="password" type="password" placeholder="Demo: any password accepted">
     <button>Sign in</button>

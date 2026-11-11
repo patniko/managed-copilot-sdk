@@ -1,5 +1,5 @@
 // What the page derives from the catalog and the live state. No DOM here, so the tests can import it.
-import type { AppEntry, GalleryState, Pattern } from "../shared/catalog.js";
+import type { AppEntry, AppGroup, GalleryState, Pattern } from "../shared/catalog.js";
 
 /** The app that runs one job through all six patterns side by side. The Patterns section links it once it's listed. */
 export const COMPARE_APP_ID = "pattern-race";
@@ -20,6 +20,24 @@ export function appHref(app: AppEntry, state: GalleryState | undefined): { reado
 }
 
 export type Shell = "powershell" | "posix";
+
+/** The gallery's tabs, in order. */
+export const TABS = ["architectures", "connected", "staff-assistant", "demos", "walkthroughs"] as const;
+export type Tab = (typeof TABS)[number];
+
+/** Which tab a URL hash opens, so links into a section (#pattern-mixed, #walkthrough-03, #harness-shared) still land. */
+export function tabForHash(hash: string): Tab {
+  const id = hash.replace(/^#/, "");
+  if ((TABS as readonly string[]).includes(id)) return id as Tab;
+  if (id === "patterns" || id.startsWith("pattern-")) return "architectures";
+  if (id.startsWith("walkthrough")) return "walkthroughs";
+  if (id === "hack-the-harness" || id.startsWith("harness-")) return "staff-assistant";
+  return "architectures";
+}
+
+/** The apps a tab lists: its group, minus those a hosted gallery can't open. */
+export const appsOnTab = (apps: readonly AppEntry[], group: AppGroup, hosted: boolean): readonly AppEntry[] =>
+  apps.filter((app) => app.group === group && !(hosted && app.localOnly));
 
 /**
  * Runs a walkthrough against one gateway. It sets MANAGED_COPILOT_URL first: the variable outlives the command in that

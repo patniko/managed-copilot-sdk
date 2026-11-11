@@ -3,6 +3,7 @@ import type { SessionEvent } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import { request } from "../lib/api";
 import { mergeEvents } from "../lib/timeline";
+import { stage } from "../lib/stage";
 
 function newestFirst(sessions: SessionInfo[]): SessionInfo[] {
   return [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -29,7 +30,7 @@ export function useSessions() {
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    setSessions(newestFirst(await request<SessionInfo[]>("/api/sessions")));
+    setSessions(newestFirst(await request<SessionInfo[]>(`/api/sessions?stage=${stage.id}`)));
   }, []);
 
   const open = useCallback(async (id: string) => {
