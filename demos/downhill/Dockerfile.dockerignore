@@ -1,0 +1,22 @@
+# Build context for demos/downhill/Dockerfile (the repository root): only what the Downhill build reads.
+**
+!package.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!tsconfig.base.json
+!demos/downhill/**
+!demos/help-desk/storefront/**
+!deployments/azure/**
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/.data
+**/.output
+**/test
+# the storefront's own tests are part of the code Incident Commander reads
+!demos/help-desk/storefront/test
+!demos/help-desk/storefront/test/**
+demos/downhill/docs
+demos/downhill/scripts
+deployments/azure/hosting
+deployments/azure/sandbox

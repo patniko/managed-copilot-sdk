@@ -839,7 +839,7 @@ export function Gallery(props: GalleryProps) {
             <AppGrid
               id="connected"
               title="Connected demos"
-              intro="Help Desk, Incident Commander, and Data Desk each send work to the Software Factory as a work order: a storefront bug a customer reports, an incident's fix, or something you find in your data. The factory shows where each one came from."
+              intro="Contoso Outdoors' launch day, end to end. A Downhill player's launch code fails at checkout and Contact support opens a Help Desk ticket; Help Desk, Data Desk, and Incident Commander each send work to the Software Factory as a work order: a storefront bug its customers and players report, something you find in your data, or an incident's fix. The factory shows where each one came from."
               apps={connected}
               patterns={patterns}
               state={state}

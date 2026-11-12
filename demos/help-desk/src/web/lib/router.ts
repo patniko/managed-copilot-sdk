@@ -1,12 +1,12 @@
 import { useSyncExternalStore } from "react";
 
-export type Route = { readonly kind: "wall" } | { readonly kind: "customer"; readonly id: string };
+export type Route = { readonly kind: "wall" } | { readonly kind: "customer"; readonly id: string } | { readonly kind: "player"; readonly id: string };
 
 export function parseHash(hash: string): Route {
   const [first, id] = (hash.startsWith("#") ? hash.slice(1) : hash).split("/").filter(Boolean);
-  if (first === "c" && id) {
+  if ((first === "c" || first === "p") && id) {
     try {
-      return { kind: "customer", id: decodeURIComponent(id) };
+      return { kind: first === "c" ? "customer" : "player", id: decodeURIComponent(id) };
     } catch {
       return { kind: "wall" };
     }
@@ -16,6 +16,22 @@ export function parseHash(hash: string): Route {
 
 export const wallHref = (): string => "#/";
 export const customerHref = (id: string): string => `#/c/${encodeURIComponent(id)}`;
+/** A player ticket on the wall (the operator's view). */
+export const playerHref = (ticketId: string): string => `#/p/${encodeURIComponent(ticketId)}`;
+
+/**
+ * The ticket of a player's chat page (`/chat/<ticket>`, which the game shows in a frame), or nothing on the wall's pages.
+ * A chat path without a usable ticket gives "" (the page says there's no such chat).
+ */
+export function chatTicketId(pathname: string): string | undefined {
+  const match = /^\/chat(?:\/([^/]*))?\/?$/.exec(pathname);
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1] ?? "");
+  } catch {
+    return "";
+  }
+}
 
 const listeners = new Set<() => void>();
 let cachedHash: string | undefined;

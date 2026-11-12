@@ -3,7 +3,7 @@
 
 /*
  * Help Desk additions: only what Primer has no class for (the tiles' whole-card link, the approval pulse, typing dots,
- * and the streaming caret). Every color is a Primer variable.
+ * the streaming caret, and the live players' marks). Every color is a Primer variable.
  */
 
 @keyframes asking-ring {
@@ -42,6 +42,16 @@
   }
 }
 
+@keyframes live {
+  0% {
+    box-shadow: 0 0 0 0 var(--fgColor-success);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
 @layer components {
   /* The name links the whole tile; buttons inside it sit above the link. */
   .tile-link {
@@ -63,6 +73,20 @@
     border-color: var(--borderColor-attention-emphasis);
     background-color: var(--bgColor-attention-muted);
     animation: asking-ring 2s ease-out infinite;
+  }
+
+  /* A live player from the Downhill Shop: an accent edge, so they stand out from the simulated customers. */
+  .tile-player {
+    box-shadow: inset 3px 0 0 var(--borderColor-accent-emphasis);
+  }
+
+  /* The dot of the Live badge. */
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    background-color: var(--fgColor-success);
+    border-radius: 50%;
+    animation: live 1.6s ease-out infinite;
   }
 
   .typing {
@@ -101,6 +125,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .tile-asking,
+  .live-dot,
   .typing > span,
   .streaming::after {
     animation: none;

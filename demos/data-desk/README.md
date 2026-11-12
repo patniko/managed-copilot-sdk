@@ -32,6 +32,9 @@ carried across the move.*
   selected, other tables, charts, the dataset, and Copilot's latest answer) to the
   [Software Factory](../software-factory/README.md) demo with what it should build. The work order shows it came from
   Data Desk, and the conversation follows its status.
+- **Live data from another app.** With `DOWNHILL_URL`, **Downhill shop sales** comes first among the samples, marked
+  **Live**: each pick fetches the sales from the [Downhill](../downhill/README.md) game's server, and the analysis
+  starts on that copy, which works like an upload: the tools, the move, charts, and Send to Software Factory.
 
 <img src="docs/screenshots/shared.png" alt="On the shared runtime: the aggregate tool's table of revenue by store fills the grid with bars, and the meter shows one premium request" width="900">
 
@@ -84,6 +87,28 @@ shipping step adds a $5.99 fee. The story continues in [Software Factory](../sof
    **Open in Software Factory**: the factory's floor shows the work order came from Data Desk, with a link back to the
    analysis, and its planner reads the insight and the data you sent.
 
+### Launch day: Downhill's shop sales, live
+
+Today [Downhill](../downhill/README.md), Contoso Outdoors' mountain-biking game, launches with a shop. Its launch-week
+banner offers 15% off with code `trail15`, and checkout rejects it: the shop only knows `TRAIL15`. Downhill's server
+keeps every purchase and rejected promo code since launch (`GET /api/sales.csv`): simulated players every 5 minutes,
+from about three hours before Downhill first started, and real ones, you included. The banner went live about 45
+minutes before that first start. Under `aspire run`, Data Desk gets `DOWNHILL_URL` and offers the sales as **Downhill
+shop sales**, first among the samples.
+
+1. In Downhill, open the **Shop**, add **Neon Mona** to the cart, and click **Apply code** on the launch-week banner:
+   checkout says **Invalid code.** That's your failed sale.
+2. In Data Desk, pick **Downhill shop sales** (**Live**). It fetches the sales now, so your attempt is in the data.
+3. Click **How many promo codes were rejected in the last hour? List them, newest first**. Data Desk's tools answer on
+   the shared runtime with the count, and the codes are nearly all `trail15`, the banner's code in lowercase. Your own
+   failed sale is the latest live row (`source` is `live`), at the top of the grid.
+4. Click **Chart promotional sales and rejected promo codes every 10 minutes since launch**, then **Move**. The chart
+   shows the issue starting to appear: promotional sales (`TRAIL15`, applied) until the banner went live, then rejected
+   codes climbing while promotional sales fall away.
+5. Once the fix is deployed to Downhill's shop, pick **Downhill shop sales** again: each pick fetches the sales anew,
+   and the new copy shows promotional sales recovering. An analysis keeps the copy it started with, so the first one
+   still shows the problem.
+
 ## Run it
 
 Everything runs locally against real models. You need the repository's prerequisites (see
@@ -100,7 +125,9 @@ seconds, the move 4 to 8 seconds (about 10 with Copilot CLI attached, which is p
 request about 30 seconds from message to chart, approval included.
 
 `pnpm --filter @managed-copilot/demo-data-desk happy-path` runs one real pass through the API, the move included, and
-deletes what it created (about two premium requests). Pass `--url` for another deployment.
+deletes what it created (about two premium requests). Pass `--url` for another deployment, and
+`--dataset live-downhill-sales` to run Downhill's shop sales and their two prompts (Downhill must be running, and Data
+Desk must have `DOWNHILL_URL`).
 
 To run it against another deployment, set `MANAGED_COPILOT_URL` and run `pnpm dev` in `demos/data-desk`; the
 deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) exports them as plain data).
@@ -138,6 +165,15 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
   and the work orders it sent to Software Factory. Uploaded files are kept in `.data/uploads`: the newest 10, up to
   20 MB in all, and another upload drops the oldest. Only the most recently used ones stay parsed in memory (5 MB of
   files), so memory stays bounded.
+- **Live samples come from another app.** **Downhill shop sales** is fetched from `GET <DOWNHILL_URL>/api/sales.csv`
+  by Data Desk's server each time someone picks it, within 10 seconds and the 5 MB upload limit, and must have the
+  export's columns. The copy becomes a dataset the way an upload does (kept in `.data/uploads` under the same limits,
+  but not listed: picking the sample fetches a new one), so the tools, the move, charts, and Send to Software Factory
+  work unchanged. The sample's notes on its columns (promotional sales are purchases with `promo_result` applied,
+  rejected codes are `promo_rejected` rows, `source` tells real players from simulated ones, and "the last hour" ends
+  at the newest row) join the agent's instructions. When the fetch fails, nothing is kept and no older copy stands in:
+  the sample picker says why, for example *Couldn't load Downhill's sales from http://localhost:7455/api/sales.csv:
+  nothing answered (connection refused).*
 - **Send to Software Factory.** Data Desk's server composes the work order from what the person picked: `INSIGHT.md`
   (what to build, Copilot's latest answer and the question it answered, the dataset's columns, and how each attached
   file was made), each table as CSV under `data/` (selected rows as `data/<table>-selection.csv`, the whole dataset as
@@ -163,6 +199,7 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
 | `DATA_DESK_ATTACH_URL` | none | Gateway URL added to "Open in Copilot CLI" commands (`--url`) when people reach the platform at another address |
 | `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, called from Data Desk's server. Unset, **Send to Software Factory** is off and says why |
 | `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to work orders |
+| `DOWNHILL_URL` | none (the root AppHost sets it) | [Downhill](../downhill/README.md)'s server, called from Data Desk's server, for example `http://localhost:7455`. Set, **Downhill shop sales** comes first among the samples, fetched from `<DOWNHILL_URL>/api/sales.csv` each time it's picked; unset, it isn't offered |
 
 ## Layout
 
@@ -170,9 +207,9 @@ deployment must declare Data Desk's environments ([`apphost.mts`](apphost.mts) e
 | --- | --- |
 | `apphost.mts` | AppHost fragment: the promotable environment, its Python sandbox environment, and the app resource |
 | `datasets` | The four sample CSV files |
-| `src/server` | Platform connection, analyses (one session each), the tools and tables, the event projection, the hand-off to Software Factory (`handoff.ts`, `factory.ts`), REST and server-sent events |
+| `src/server` | Platform connection, analyses (one session each), the tools and tables, the event projection, live samples from other apps (`remote.ts`), the hand-off to Software Factory (`handoff.ts`, `factory.ts`), REST and server-sent events |
 | `src/shared` | Types, routes, and Software Factory's limits, shared with the UI |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `src/scripts/happy-path.ts` | The scripted real run |
-| `test` | Unit tests: tables, datasets (the checkout funnel's insight included), the projection, analyses and the move against an in-memory platform, the hand-off against an in-memory Software Factory, the API, and the fragment |
+| `test` | Unit tests: tables, datasets (the checkout funnel's insight included), Downhill's live sales against a fake `fetch` and a fixture shaped like its export (`test/fixtures/downhill-sales.csv`), the projection, analyses and the move against an in-memory platform, the hand-off against an in-memory Software Factory, the API, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

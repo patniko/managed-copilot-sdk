@@ -1,0 +1,33 @@
+{
+  "name": "@managed-copilot/demo-downhill",
+  "version": "1.0.0",
+  "license": "MIT",
+  "private": true,
+  "description": "Downhill: a painterly 3D mountain-biking game with a shop whose checkout runs Contoso Outdoors' storefront code, and a Contact support button that opens Help Desk's chat.",
+  "type": "module",
+  "exports": {
+    "./apphost": "./apphost.mts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.web.json && tsc -p tsconfig.tooling.json",
+    "dev": "tsx watch --clear-screen=false src/server/main.ts",
+    "start": "node dist/server/main.js",
+    "happy-path": "tsx scripts/happy-path.ts",
+    "test": "vitest run",
+    "playtest": "node scripts/playtest.mjs",
+    "shots": "node scripts/shots.mjs",
+    "uitest": "node scripts/uitest.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/three": "^0.187.0",
+    "playwright-core": "^1.64.1",
+    "three": "^0.187.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "vitest": "^4.0.0"
+  }
+}

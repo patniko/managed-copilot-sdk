@@ -1,13 +1,14 @@
-// Fakes for unit tests: a platform whose coordinator sessions record what the app does with them, and Software Factory's
-// API on a local port, whose work orders the tests move along by hand.
+// Fakes for unit tests: a platform whose coordinator sessions record what the app does with them, Software Factory's
+// API on a local port, whose work orders the tests move along by hand, and a service over HTTP (Downhill's shop).
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { MessageOptions, PermissionRequest, PermissionRequestResult, ResumeSessionConfig, SessionConfig, SessionEvent, Tool } from "@github/copilot-sdk";
 import type { ExecInfo, SessionInfo, WorkerInfo } from "@managed-copilot/sdk";
 import type { FactoryStatus, FactoryTests, PlatformStatus } from "../src/shared/types.js";
-import type { AppConfig, FactoryTarget } from "../src/server/config.js";
+import type { AppConfig, FactoryTarget, RemoteService } from "../src/server/config.js";
 import type { CoordinatorSession, IncidentPlatform } from "../src/server/platform.js";
+import { ServiceCatalog } from "../src/server/services.js";
 
 type Config = SessionConfig | ResumeSessionConfig;
 
@@ -177,6 +178,90 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 
 /** Lets queued callbacks (setImmediate, resolved promises) run. */
 export const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** Downhill's shop as it publishes itself for incidents: the store's promotion code, its tests, logs, and deploys. */
+export const SHOP_PROMOTIONS = `// Promotion codes. Checkout calls applyPromoCode with the code from the Promo code field.
+
+export const PROMOTIONS = {
+  TRAIL15: { percent: 15, description: "15% off everything, from the Contoso Trail newsletter" },
+  WELCOME10: { percent: 10, description: "10% off a first order" },
+};
+
+export class PromoError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "PromoError";
+  }
+}
+
+export function applyPromoCode(code, subtotalCents) {
+  const promotion = Object.hasOwn(PROMOTIONS, code) ? PROMOTIONS[code] : undefined;
+  if (!promotion) throw new PromoError("Invalid code.");
+  const discountCents = Math.round((subtotalCents * promotion.percent) / 100);
+  return { code, percent: promotion.percent, discountCents, totalCents: subtotalCents - discountCents };
+}
+`;
+
+export function shopFiles(): Record<string, string> {
+  return {
+    "package.json": `${JSON.stringify({ name: "downhill-shop", version: "1.0.0", private: true, type: "module", scripts: { test: "node --test" } }, null, 2)}\n`,
+    "README.md": "# downhill-shop\n\nThe Downhill Shop's checkout: promotion codes in src/promotions.js.\n",
+    "src/promotions.js": SHOP_PROMOTIONS,
+    "test/promotions.test.js": `import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { applyPromoCode } from "../src/promotions.js";\n\ntest("TRAIL15 takes 15% off", () => {\n  assert.equal(applyPromoCode("TRAIL15", 499).discountCents, 75);\n});\n`,
+    "logs/shop.log": [
+      '2026-11-12T16:47:03.201Z level=info msg="shop release" version=1.0.0',
+      "2026-11-12T17:02:11.874Z level=info msg=checkout status=200 code=none totalCents=499",
+      '2026-11-12T17:30:40.551Z level=warn msg="promo code rejected" status=400 code=trail15 error="Invalid code."',
+      '2026-11-12T17:31:02.114Z level=warn msg="promo code rejected" status=400 code=trail15 error="Invalid code."',
+      "2026-11-12T17:31:20.002Z level=info msg=checkout status=200 code=TRAIL15 totalCents=424",
+      "",
+    ].join("\n"),
+    "deploys/HISTORY.md": [
+      "# Deploys: downhill-shop",
+      "",
+      "| When (UTC) | Version | Change |",
+      "| --- | --- | --- |",
+      "| 2026-11-12 16:47 | 1.0.0 | Launch-week banner: 15% off with code trail15, and a one-click Apply code button |",
+      "| 2026-11-10 09:12 | 0.9.0 | The shop opens |",
+      "",
+    ].join("\n"),
+  };
+}
+
+/** A service that publishes its folder over HTTP (INCIDENT_SERVICE_URLS), behind a fake `fetch`. Tests change what it answers. */
+export class FakeRemoteService {
+  readonly url: string;
+  version: string | undefined = "1.0.0";
+  files: Record<string, string>;
+  /** Each read: its URL and how it asked. */
+  readonly requests: { readonly url: string; readonly accept: string | null; readonly redirect: string | undefined }[] = [];
+  /** While set, every read gets this answer, or `fetch` throws this error. */
+  answer: (() => Response) | Error | undefined;
+
+  constructor(
+    readonly name = "downhill-shop",
+    files: Record<string, string> = shopFiles(),
+  ) {
+    this.url = `http://${name}.test/api/incident/service`;
+    this.files = files;
+  }
+
+  get service(): RemoteService {
+    return { name: this.name, url: this.url };
+  }
+
+  readonly fetch: typeof fetch = async (input, init) => {
+    this.requests.push({ url: String(input), accept: new Headers(init?.headers).get("accept"), redirect: init?.redirect });
+    if (this.answer instanceof Error) throw this.answer;
+    if (this.answer) return this.answer();
+    return Response.json({ name: this.name, ...(this.version ? { version: this.version } : {}), files: Object.entries(this.files).map(([path, content]) => ({ path, content })) });
+  };
+
+  /** A catalog with this service (and the bundled demo service). */
+  catalog(demoDir = testConfig().demoServicesDir): ServiceCatalog {
+    return new ServiceCatalog(demoDir, undefined, { remote: [this.service], fetch: this.fetch });
+  }
+}
 
 export interface FakeWorkOrder {
   id: string;

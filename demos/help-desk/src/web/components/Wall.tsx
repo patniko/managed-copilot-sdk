@@ -9,6 +9,7 @@ import {
   type ClassificationRun,
   type ClassificationRuns,
   type CustomerCard,
+  type PlayerTicket,
   type Ticket,
   type TicketCategory,
   type TicketTriage,
@@ -19,16 +20,20 @@ import { useDismiss } from "../lib/useDismiss.js";
 import { Issues } from "./Issues.js";
 import { Knowledge } from "./Knowledge.js";
 import { Stats } from "./Stats.js";
-import { GhostTile, Tile } from "./Tile.js";
+import { GhostTile, PlayerTile, Tile } from "./Tile.js";
 import { ConfirmDialog } from "./ui/ConfirmDialog.js";
 import { Spinner } from "./ui/Spinner.js";
 
-/** The operator's wall: every customer of the store, each with a private session on the one shared runtime. */
+/**
+ * The operator's wall: live players of Downhill first, then every customer of the store, each with a private session
+ * on the one shared runtime.
+ */
 export function Wall() {
   const phase = useStore((state) => state.phase);
   const loadError = useStore((state) => state.loadError);
   const customers = useStore((state) => state.customers);
   const tickets = useStore((state) => state.tickets);
+  const players = useStore((state) => state.players);
   const run = useStore((state) => state.run);
   const size = useStore((state) => state.size);
   const classification = useStore((state) => state.classification);
@@ -38,7 +43,11 @@ export function Wall() {
       <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
         <div className="min-w-0">
           <h1 className="text-xl font-semibold">Contoso Outdoors support</h1>
-          <p className="text-sm text-fg-muted">Each customer gets a private agent session. All share one runtime.</p>
+          <p className="text-sm text-fg-muted">
+            {players.length > 0
+              ? "Each customer, and each player of Downhill who contacts support, gets a private agent session. All share one runtime."
+              : "Each customer gets a private agent session. All share one runtime."}
+          </p>
         </div>
         <Controls />
       </div>
@@ -59,17 +68,26 @@ export function Wall() {
           </div>
         </div>
       ) : run && Object.values(tickets).some((ticket) => ticket.triage) ? (
-        <TicketGroups customers={customers} tickets={tickets} />
+        <>
+          <PlayerGroup players={players} />
+          <TicketGroups customers={customers} tickets={tickets} />
+        </>
       ) : !run && classification ? (
-        <ClassificationGroups customers={customers} classification={classification} />
+        <>
+          <PlayerGroup players={players} />
+          <ClassificationGroups customers={customers} classification={classification} />
+        </>
       ) : (
-        <section aria-label="Customers" className={GRID}>
+        <section aria-label="Players and customers" className={GRID}>
           {phase === "loading"
             ? Array.from({ length: 10 }, (_, index) => <div key={index} className="SkeletonBox h-[112px]! rounded-md!" />)
-            : customers.map((customer, index) => {
-                const ticket = tickets[customer.id];
-                return ticket ? <Tile key={customer.id} customer={customer} ticket={ticket} /> : <GhostTile key={customer.id} customer={customer} queued={!run && index < size} />;
-              })}
+            : [
+                ...players.map((player) => <PlayerTile key={player.ticketId} ticket={player} />),
+                ...customers.map((customer, index) => {
+                  const ticket = tickets[customer.id];
+                  return ticket ? <Tile key={customer.id} customer={customer} ticket={ticket} /> : <GhostTile key={customer.id} customer={customer} queued={!run && index < size} />;
+                }),
+              ]}
         </section>
       )}
       <Knowledge />
@@ -83,6 +101,24 @@ interface Entry {
   readonly customer: CustomerCard;
   readonly triage: TicketTriage | undefined;
   readonly tile: ReactNode;
+}
+
+/** Live players of Downhill, above the customers' groups: classification sorts the store's customers only. */
+function PlayerGroup({ players }: { readonly players: readonly PlayerTicket[] }) {
+  if (players.length === 0) return null;
+  return (
+    <section aria-label="Downhill players" className="mt-4">
+      <h2 className="flex items-center gap-2 text-sm font-semibold">
+        Downhill players
+        <span className="Counter">{players.length}</span>
+      </h2>
+      <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+        {players.map((player) => (
+          <PlayerTile key={player.ticketId} ticket={player} />
+        ))}
+      </div>
+    </section>
+  );
 }
 
 /** The simulation's tickets by their classification; the rest of the store's customers after. */
@@ -211,11 +247,13 @@ function Controls() {
   const run = useStore((state) => state.run);
   const working = useStore((state) => state.working);
   const connected = useStore((state) => state.platform?.state === "connected");
+  const players = useStore((state) => state.players.length);
   const [confirm, setConfirm] = useState<"restart" | "end" | undefined>();
   const triage = useStore((state) => state.desk?.triage);
   const llmTriage = useStore((state) => state.desk?.llmTriage);
   const classifying = useStore((state) => Boolean(state.classification && state.classification.elapsedMs === undefined));
   const busy = working !== undefined || Boolean(run?.ending);
+  const playersStay = players > 0 ? " Players' tickets stay." : "";
   return (
     <div className="flex items-center gap-2">
       <div className="SegmentedControl" role="group" aria-label="Customers to simulate">
@@ -252,7 +290,7 @@ function Controls() {
             void simulate();
           }}
         >
-          The current {run?.size} conversations end, and their sessions are deleted.
+          The current {run?.size} conversations end, and their sessions are deleted.{playersStay}
         </ConfirmDialog>
       ) : null}
       {confirm === "end" ? (
@@ -266,7 +304,7 @@ function Controls() {
             void endSimulation();
           }}
         >
-          Its {run?.size} sessions are deleted.
+          Its {run?.size} sessions are deleted.{playersStay}
         </ConfirmDialog>
       ) : null}
     </div>

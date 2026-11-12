@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { mkdtempSync } from "node:fs";
-import { createServer, request, type Server } from "node:http";
+import { createServer, request, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,18 +12,19 @@ import { createRequestHandler, hostAllowed } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
 import { ServiceCatalog } from "../src/server/services.js";
 import { Store } from "../src/server/store.js";
-import { FakeFactory, FakePlatform, settle, testConfig } from "./fakes.js";
+import { deployRequest, FakeFactory, FakePlatform, FakeRemoteService, settle, SHOP_PROMOTIONS, shopFiles, testConfig, worker } from "./fakes.js";
 
 let server: Server;
 let base: string;
 let platform: FakePlatform;
 let hub: EventHub;
 let factory: FakeFactory | undefined;
+const closers: (() => Promise<void>)[] = [];
 
-async function serve(config: AppConfig): Promise<void> {
+async function serve(config: AppConfig, catalog = new ServiceCatalog(config.demoServicesDir)): Promise<void> {
   platform = new FakePlatform();
   hub = new EventHub();
-  const commander = new Commander(config, platform, new Store(mkdtempSync(join(tmpdir(), "incident-http-"))), new ServiceCatalog(config.demoServicesDir), hub);
+  const commander = new Commander(config, platform, new Store(mkdtempSync(join(tmpdir(), "incident-http-"))), catalog, hub);
   commander.start();
   server = createServer(createRequestHandler({ commander, hub }, join(tmpdir(), "no-web-root")));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -44,6 +45,7 @@ afterEach(async () => {
   await stop();
   await factory?.close();
   factory = undefined;
+  await Promise.all(closers.splice(0).map((close) => close()));
 });
 
 function post(path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
@@ -191,5 +193,148 @@ describe("the API", () => {
     });
     expect(page.status).toBe(503);
     expect(page.body).toContain("isn't built yet");
+  });
+});
+
+/** Downhill's shop pages Incident Commander with the generic JSON shape and a stable ID. */
+const SHOP_ALERT = {
+  id: "downhill-promo-rejected",
+  title: "Launch code rejected at checkout",
+  summary: 'Checkout rejected the launch-week code trail15 with "Invalid code."',
+  description: '3 players were told "Invalid code." for trail15 in the last 5 minutes.',
+  service: "downhill-shop",
+  severity: "major",
+  status: "firing",
+  labels: { product: "downhill" },
+};
+const AUTH = { authorization: "Bearer alert-secret" };
+
+/** A deploy pipeline on a local port (as Downhill's /api/deploys): it records what it gets and accepts it. */
+async function deployPipeline(answer: { readonly version: string; readonly message: string }) {
+  const received: { headers: IncomingMessage["headers"]; body: string }[] = [];
+  const pipeline = createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8").on("data", (chunk: string) => (body += chunk));
+    req.on("end", () => {
+      received.push({ headers: req.headers, body });
+      res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(answer));
+    });
+  });
+  await new Promise<void>((resolve) => pipeline.listen(0, "127.0.0.1", resolve));
+  closers.push(
+    () =>
+      new Promise((resolve) => {
+        pipeline.closeAllConnections();
+        pipeline.close(() => resolve());
+      }),
+  );
+  return { url: `http://127.0.0.1:${(pipeline.address() as AddressInfo).port}/api/deploys`, received };
+}
+
+const incident = async (id: string): Promise<IncidentView> => (await (await fetch(`${base}/api/incidents/${id}`)).json()) as IncidentView;
+
+describe("Downhill's shop, a service over HTTP", () => {
+  it("pages an incident, gives Copilot the shop's files, deploys the fix back, and takes the resolved alert", async () => {
+    const shop = new FakeRemoteService();
+    const pipeline = await deployPipeline({ version: "1.0.1", message: "The shop runs v1.0.1." });
+    await stop();
+    await serve(testConfig({ deploy: { url: pipeline.url, secret: "deploy-secret" } }), shop.catalog());
+
+    const accepted = await post("/api/alerts", SHOP_ALERT, AUTH);
+    expect(accepted.status).toBe(202);
+    expect(await accepted.json()).toEqual({ incidents: ["INC-1001"] });
+    await settle();
+    expect(await incident("INC-1001")).toMatchObject({
+      service: "downhill-shop",
+      demo: false,
+      severity: "SEV2",
+      serviceVersion: "1.0.0",
+      alert: { source: "generic", fingerprint: "downhill-promo-rejected" },
+    });
+    expect(platform.session.sent[0]?.prompt).toContain('firing for the "downhill-shop" service');
+
+    // Triage: the shop's code, tests, logs, and deploy history, in Copilot's own sandbox.
+    platform.workerList = [worker({ id: "hands-1", name: "hands", role: "hands", state: "idle", environment: "incident-commander-triage" })];
+    expect(await platform.session.call("open_workspace", {})).toBe(
+      "Copied 6 files into /workspace/downhill-shop: README.md, deploys/, logs/, package.json, src/, test/. Start with /workspace/downhill-shop/README.md.",
+    );
+    expect(platform.files.get("hands-1:downhill-shop/logs/shop.log")).toContain("code=trail15");
+    expect(platform.files.get("hands-1:downhill-shop/deploys/HISTORY.md")).toContain("Launch-week banner");
+
+    // The verified fix, in its sandbox. It also lists package.json, which it didn't change: that doesn't ship.
+    const fixed = SHOP_PROMOTIONS.replace("Object.hasOwn(PROMOTIONS, code) ? PROMOTIONS[code]", "Object.hasOwn(PROMOTIONS, code.trim().toUpperCase()) ? PROMOTIONS[code.trim().toUpperCase()]");
+    const test = `${shopFiles()["test/promotions.test.js"]}\ntest("the banner's lowercase trail15 works", () => {});\n`;
+    platform.files.set("hands-1:downhill-shop/src/promotions.js", fixed);
+    platform.files.set("hands-1:downhill-shop/test/promotions.test.js", test);
+    const args = { summary: "Match promo codes whatever their case", files: ["src/promotions.js", "/workspace/downhill-shop/test/promotions.test.js", "package.json"], tests: "2 passed, 0 failed" };
+    expect(await platform.session.permission(deployRequest(args))).toEqual({ kind: "no-result" });
+    await settle();
+    expect((await incident("INC-1001")).approval?.files.map((file) => [file.path, file.status])).toEqual([
+      ["src/promotions.js", "modified"],
+      ["test/promotions.test.js", "modified"],
+    ]);
+
+    // A person approves: the platform delivers the request again, and the fix goes to the shop's deploy pipeline.
+    platform.onResume = async (session) => void (await session.permission(deployRequest(args)));
+    expect((await post("/api/incidents/INC-1001/decision", { approve: true })).status).toBe(204);
+    expect(await platform.session.call("deploy_fix", args, "deploy-call")).toBe("Your deploy pipeline accepted downhill-shop v1.0.1. The shop runs v1.0.1.");
+    expect(pipeline.received).toHaveLength(1);
+    const [{ headers, body }] = pipeline.received as [(typeof pipeline.received)[number]];
+    expect(JSON.parse(body)).toEqual({
+      type: "incident.deploy_approved",
+      incident: "INC-1001",
+      service: "downhill-shop",
+      version: "1.0.1",
+      previousVersion: "1.0.0",
+      summary: args.summary,
+      tests: args.tests,
+      approvedBy: "octocat",
+      approvedAt: expect.any(String),
+      files: [
+        { path: "src/promotions.js", content: fixed },
+        { path: "test/promotions.test.js", content: test },
+      ],
+    });
+    const [t, v1] = String(headers["x-incident-commander-signature"]).split(",").map((part) => part.split("=")[1]);
+    expect(v1).toBe(createHmac("sha256", "deploy-secret").update(`${t}.${body}`).digest("hex"));
+    expect(await incident("INC-1001")).toMatchObject({ status: "resolved", deploy: { ok: true, target: "webhook", version: "1.0.1", previousVersion: "1.0.0" } });
+
+    // The shop says its alert resolved: recorded on the incident, once, and nothing new opens.
+    const resolved = await post("/api/alerts", { ...SHOP_ALERT, status: "resolved" }, AUTH);
+    expect(resolved.status).toBe(202);
+    expect(await resolved.json()).toEqual({ incidents: ["INC-1001"] });
+    const after = await incident("INC-1001");
+    expect(after.alert.resolvedAt).toBeDefined();
+    expect(after.timeline.filter((entry) => entry.kind === "resolved").map((entry) => entry.text)).toEqual(["Launch code rejected at checkout resolved in webhook"]);
+    expect(await (await post("/api/alerts", { id: "downhill-promo-rejected", status: "resolved" }, AUTH)).json()).toEqual({ incidents: [] });
+    expect(((await (await fetch(`${base}/api/state`)).json()) as AppState).incidents.map((summary) => summary.id)).toEqual(["INC-1001"]);
+  });
+
+  it("opens the incident while the shop can't be loaded, says why, and picks the files up once it can", async () => {
+    const shop = new FakeRemoteService();
+    shop.answer = () => new Response("Service Unavailable", { status: 503 });
+    await stop();
+    await serve(testConfig(), shop.catalog());
+    expect(await (await post("/api/alerts", SHOP_ALERT, AUTH)).json()).toEqual({ incidents: ["INC-1001"] });
+    await settle();
+    const opened = await incident("INC-1001");
+    expect(opened.serviceVersion).toBeUndefined();
+    expect(opened.timeline.find((entry) => entry.kind === "error")?.text).toBe(`Couldn't load downhill-shop from ${shop.url}: it answered HTTP 503.`);
+
+    platform.workerList = [worker({ id: "hands-1", name: "hands", role: "hands", state: "idle" })];
+    expect(await platform.session.call("open_workspace", {})).toMatchObject({ resultType: "failure", textResultForLlm: expect.stringContaining("it answered HTTP 503. Wait half a minute") });
+    shop.answer = undefined;
+    expect(await platform.session.call("open_workspace", {})).toContain("Copied 6 files into /workspace/downhill-shop");
+    expect((await incident("INC-1001")).serviceVersion).toBe("1.0.0");
+
+    // Down again when Copilot asks to deploy: the request says the change can't be shown, and what would ship.
+    shop.answer = new TypeError("fetch failed");
+    expect(await platform.session.permission(deployRequest({ summary: "Fix it", files: ["src/promotions.js"] }))).toEqual({ kind: "no-result" });
+    await settle();
+    expect((await incident("INC-1001")).approval).toMatchObject({
+      state: "waiting",
+      files: [],
+      problem: `Couldn't load downhill-shop from ${shop.url}: it isn't reachable (fetch failed). So the change can't be shown here; what ships is Copilot's copy of src/promotions.js.`,
+    });
   });
 });

@@ -1,6 +1,6 @@
-import { ContainerIcon, CpuIcon, TableIcon, UploadIcon } from "@primer/octicons-react";
+import { ContainerIcon, CpuIcon, PulseIcon, TableIcon, UploadIcon } from "@primer/octicons-react";
 import { useRef, useState, type DragEvent } from "react";
-import type { AnalysisSummary, DatasetSummary, Placement } from "../../shared/types.js";
+import type { AnalysisSummary, DatasetSummary, Placement, RemoteSampleSummary } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { formatCount, relativeTime } from "../lib/format.js";
 import { useNow } from "../lib/hooks.js";
@@ -13,6 +13,7 @@ const TINTS = ["bg-display-blue-muted text-display-blue", "bg-display-green-mute
 
 export function Home() {
   const datasets = useStore((state) => state.datasets);
+  const remoteSamples = useStore((state) => state.remoteSamples);
   const analyses = useStore((state) => state.analyses);
   const platform = useStore((state) => state.platform);
   const [starting, setStarting] = useState<string | undefined>();
@@ -39,6 +40,15 @@ export function Home() {
         </div>
       ) : null}
       <section aria-label="Datasets" className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {remoteSamples.map((sample) => (
+          <RemoteSampleCard
+            key={sample.id}
+            sample={sample}
+            starting={starting === sample.id}
+            disabled={!connected || starting !== undefined}
+            onOpen={() => void start(sample.id, () => createAnalysis(sample.id))}
+          />
+        ))}
         {datasets.map((dataset, index) => (
           <DatasetCard
             key={dataset.id}
@@ -104,8 +114,47 @@ function DatasetCard({
       <span className="mt-2 line-clamp-1 text-sm text-fg-muted" title={dataset.description ?? dataset.fileName}>
         {dataset.description ?? dataset.fileName}
       </span>
-      <span className="mt-3 text-xs text-fg-muted tabular-nums">
+      <span className="mt-auto pt-3 text-xs text-fg-muted tabular-nums">
         {starting ? "Starting…" : `${formatCount(dataset.rows, "row")} · ${formatCount(dataset.columns.length, "column")}`}
+      </span>
+    </button>
+  );
+}
+
+/** A sample another app serves: each pick fetches its latest data, so its size isn't known until then. */
+function RemoteSampleCard({
+  sample,
+  starting,
+  disabled,
+  onOpen,
+}: {
+  readonly sample: RemoteSampleSummary;
+  readonly starting: boolean;
+  readonly disabled: boolean;
+  readonly onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      disabled={disabled}
+      className="Box group flex flex-col p-4 text-left transition-colors hover:border-line-accent focus-visible:border-line-accent disabled:cursor-not-allowed disabled:hover:border-line"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="grid size-8 shrink-0 place-items-center rounded-md bg-display-red-muted text-display-red">{starting ? <Spinner size={16} /> : <PulseIcon size={16} />}</span>
+        <span className="truncate font-semibold" title={sample.name}>
+          {sample.name}
+        </span>
+      </span>
+      <span className="mt-2 line-clamp-2 text-sm text-fg-muted" title={sample.description}>
+        {sample.description}
+      </span>
+      <span className="mt-auto flex items-center gap-2 pt-3 text-xs text-fg-muted">
+        <span className="Label Label--danger shrink-0">
+          <span aria-hidden className="size-1.5 rounded-full bg-current motion-safe:animate-pulse" />
+          Live
+        </span>
+        <span className="truncate">{starting ? "Fetching the latest…" : "Fresh each time you open it"}</span>
       </span>
     </button>
   );

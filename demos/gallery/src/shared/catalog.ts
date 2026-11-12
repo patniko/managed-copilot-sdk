@@ -2,7 +2,7 @@
 
 /**
  * Which gallery tab lists an app:
- * - `connected`: the Software Factory and the apps that send it work.
+ * - `connected`: the Software Factory and the apps that send it work, and Downhill, whose support tickets go to Help Desk.
  * - `staff`: the staff assistant whose stages step through the architectures (Hack the Harness).
  * - `more`: everything else, the operator console included.
  */
@@ -76,19 +76,6 @@ export const APPS: readonly AppEntry[] = [
     readme: "demos/dispatch/README.md",
   },
   {
-    id: "software-factory",
-    title: "Software Factory",
-    tagline: "A work order in, a tested and reviewed release out",
-    description:
-      "A coordinator plans the work, builds tasks in parallel builder sandboxes, reuses them for review fixes, and assembles the release. The factory still checks every gate, and shows which work orders Help Desk, Incident Commander, and Data Desk sent.",
-    tryIt: "Start the CSV ⇄ JSON toolkit work order and watch the floor.",
-    group: "connected",
-    app: "software-factory",
-    port: 7480,
-    healthPath: "/api/health",
-    readme: "demos/software-factory/README.md",
-  },
-  {
     id: "assistant",
     title: "Assistant",
     tagline: "A long-running assistant that keeps working when you leave",
@@ -142,17 +129,17 @@ export const APPS: readonly AppEntry[] = [
     readme: "demos/pattern-race/README.md",
   },
   {
-    id: "data-desk",
-    title: "Data Desk",
-    tagline: "Chat with a spreadsheet; it moves to a sandbox for code",
+    id: "downhill",
+    title: "Downhill",
+    tagline: "Ride, shop, and the launch code fails at checkout",
     description:
-      "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it. Send what you find to the Software Factory.",
-    tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
+      "Contoso Outdoors' painterly mountain-biking game. Ride a run, then buy a new look in its shop: checkout runs the store's own code, which rejects the launch offer's code. Support opens a live Help Desk chat with the checkout attached, the failure alerts Incident Commander, and Data Desk charts the shop's live sales.",
+    tryIt: "Ride a run, open the Shop, press Apply code on the launch offer, then open Support and say what happened.",
     group: "connected",
-    app: "data-desk",
-    port: 7430,
+    app: "downhill",
+    port: 7455,
     healthPath: "/api/health",
-    readme: "demos/data-desk/README.md",
+    readme: "demos/downhill/README.md",
   },
   {
     id: "help-desk",
@@ -166,6 +153,19 @@ export const APPS: readonly AppEntry[] = [
     port: 7440,
     healthPath: "/api/health",
     readme: "demos/help-desk/README.md",
+  },
+  {
+    id: "data-desk",
+    title: "Data Desk",
+    tagline: "Chat with a spreadsheet; it moves to a sandbox for code",
+    description:
+      "Questions the app's own tools can answer run on the shared runtime; a chart request moves the same session into a Python sandbox, and Copilot CLI follows it. Send what you find to the Software Factory.",
+    tryIt: "Pick Coffee shop sales, ask which store sold most, then chart it.",
+    group: "connected",
+    app: "data-desk",
+    port: 7430,
+    healthPath: "/api/health",
+    readme: "demos/data-desk/README.md",
   },
   {
     id: "hack-the-harness",
@@ -193,6 +193,19 @@ export const APPS: readonly AppEntry[] = [
     port: 7445,
     healthPath: "/api/health",
     readme: "demos/incident-commander/README.md",
+  },
+  {
+    id: "software-factory",
+    title: "Software Factory",
+    tagline: "A work order in, a tested and reviewed release out",
+    description:
+      "A coordinator plans the work, builds tasks in parallel builder sandboxes, reuses them for review fixes, and assembles the release. The factory still checks every gate, and shows which work orders Help Desk, Incident Commander, and Data Desk sent.",
+    tryIt: "Start the CSV ⇄ JSON toolkit work order and watch the floor.",
+    group: "connected",
+    app: "software-factory",
+    port: 7480,
+    healthPath: "/api/health",
+    readme: "demos/software-factory/README.md",
   },
   {
     id: "repo-doctor",

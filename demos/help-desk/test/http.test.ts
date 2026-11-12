@@ -1,12 +1,15 @@
 import { createServer, request, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import type { HelpDeskConfig } from "../src/server/config.js";
 import { HelpDesk } from "../src/server/desk.js";
 import { createRequestHandler, hostAllowed } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
+import { playerSessionId } from "../src/server/player.js";
 import { sessionIdFor } from "../src/server/ticket.js";
-import type { ApiErrorBody, HelpDeskState, RunInfo, SoftwareIssue } from "../src/shared/types.js";
-import { FakeFactory, FakePlatform, reportBug, settle, testConfig } from "./fakes.js";
+import type { ApiErrorBody, HelpDeskState, PlayerTicket, PlayerTicketCreated, RunInfo, ServerEvent, SoftwareIssue } from "../src/shared/types.js";
+import { FakeFactory, FakePlatform, MONA, monaWith, reportBug, settle, testConfig } from "./fakes.js";
 
 const servers: Server[] = [];
 const desks: HelpDesk[] = [];
@@ -15,9 +18,11 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve) => server.close(resolve))));
 });
 
-async function start(platform = new FakePlatform(), factory = new FakeFactory()): Promise<string> {
+/** A built UI's stand-in. */
+const WEB_ROOT = fileURLToPath(new URL("./fixtures/web", import.meta.url));
+
+async function start(platform = new FakePlatform(), factory = new FakeFactory(), config: HelpDeskConfig = testConfig()): Promise<string> {
   const hub = new EventHub();
-  const config = testConfig();
   const desk = new HelpDesk(platform, config, (event) => hub.publish(event), factory);
   desks.push(desk);
   const server = createServer(createRequestHandler({ desk, hub, config }));
@@ -37,6 +42,40 @@ function raw(url: string, path: string, init: { method?: string; headers?: Recor
     req.end(init.body);
   });
 }
+
+/** Reads a server-sent event stream until `done`; `act` runs once the first events arrived. */
+function stream(url: string, path: string, done: (events: ServerEvent[]) => boolean, act?: () => void): Promise<ServerEvent[]> {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const req = request(`${url}${path}`, (res) => {
+      let text = "";
+      res.setEncoding("utf8").on("data", (chunk: string) => {
+        text += chunk;
+        const events = text
+          .split("\n")
+          .filter((line) => line.startsWith("data: "))
+          .map((line) => JSON.parse(line.slice(6)) as ServerEvent);
+        if (act && events.length > 0) {
+          const run = act;
+          act = undefined;
+          run();
+        }
+        if (!finished && done(events)) {
+          finished = true;
+          req.destroy();
+          resolve(events);
+        }
+      });
+    });
+    req.once("error", (error) => {
+      if (!finished) reject(error);
+    });
+    req.end();
+  });
+}
+
+const postJson = (url: string, path: string, body: unknown, headers: Record<string, string> = {}) =>
+  raw(url, path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
 
 describe("http", () => {
   it("answers only loopback host names, plus the deployment's own", () => {
@@ -153,5 +192,98 @@ describe("http", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: { code: "factory_unavailable", message: "Software Factory isn't connected. Start it with `aspire run`, or set SOFTWARE_FACTORY_URL." } });
     expect(((await (await fetch(`${url}/api/state`)).json()) as HelpDeskState).desk.factory).toEqual({ configured: false });
+  });
+});
+
+describe("player tickets over http", () => {
+  it("opens a ticket for Downhill's server (201), reopens it by ID (200, the same body), and explains refusals", async () => {
+    const platform = new FakePlatform();
+    const url = await start(platform);
+    const button = monaWith({ checkout: undefined, opener: "support-button" });
+    const created = await postJson(url, "/api/player-tickets", button);
+    expect(created.status).toBe(201);
+    const { ticketId, chatPath } = JSON.parse(created.body) as PlayerTicketCreated;
+    expect(chatPath).toBe(`/chat/${ticketId}`);
+    // Waiting for the player: no session until they write.
+    expect((await (await fetch(`${url}/api/player-tickets/${ticketId}`)).json()) as PlayerTicket).toMatchObject({ ticketId, player: { name: "Mona" }, opener: "support-button", status: "opened", items: [] });
+    expect(platform.created).toEqual([]);
+    expect(((await (await fetch(`${url}/api/state`)).json()) as HelpDeskState).players.map((ticket) => ticket.ticketId)).toEqual([ticketId]);
+
+    const reopened = await postJson(url, "/api/player-tickets", { ...MONA, opener: "promo-error", ticketId, at: "2026-11-12T17:31:00.000Z" });
+    expect(reopened.status).toBe(200);
+    expect(JSON.parse(reopened.body)).toEqual({ ticketId, chatPath });
+    expect((await (await fetch(`${url}/api/player-tickets/${ticketId}`)).json()) as PlayerTicket).toMatchObject({ opener: "promo-error", checkout: { code: "trail15" } });
+    const unknown = await postJson(url, "/api/player-tickets", { ...button, ticketId: "nosuchticket00", at: "2026-11-12T17:32:00.000Z" });
+    expect(unknown.status).toBe(201);
+    expect((JSON.parse(unknown.body) as PlayerTicketCreated).ticketId).not.toBe(ticketId);
+
+    const bad = await postJson(url, "/api/player-tickets", monaWith({ checkout: { subtotalCents: 4.99 } }));
+    expect(bad.status).toBe(400);
+    expect(JSON.parse(bad.body)).toEqual({ error: { code: "invalid_request", message: "checkout.subtotalCents must be a whole number of cents from 0 to 2,000,000." } });
+    expect((await postJson(url, "/api/player-tickets", monaWith({ opener: "title" }))).status).toBe(400);
+    expect((await raw(url, "/api/player-tickets", { method: "POST", body: JSON.stringify(MONA) })).status).toBe(415);
+    // Downhill's server calls it; a page on another origin (the game's) can't.
+    expect((await postJson(url, "/api/player-tickets", MONA, { origin: "http://localhost:7450" })).status).toBe(403);
+
+    platform.setStatus({ state: "unavailable", message: "Managed Copilot isn't reachable yet." });
+    const offline = await postJson(url, "/api/player-tickets", monaWith({ at: "2026-11-12T17:45:00.000Z" }));
+    expect(offline.status).toBe(503);
+    expect(JSON.parse(offline.body)).toEqual({ error: { code: "platform_unavailable", message: "Managed Copilot isn't reachable yet." } });
+  });
+
+  it("lets the player write from their chat page (the first message starts the session), and the operator answer and end it", async () => {
+    const platform = new FakePlatform();
+    const url = await start(platform);
+    const { ticketId } = JSON.parse((await postJson(url, "/api/player-tickets", MONA)).body) as PlayerTicketCreated;
+    const sessionId = playerSessionId(ticketId);
+    expect((await postJson(url, `/api/player-tickets/${ticketId}/messages`, { text: "The discount code isn't working!" })).status).toBe(202);
+    const session = platform.sessions.get(sessionId)!;
+    expect(session.sent).toHaveLength(1);
+    expect(session.sent[0]!.prompt).toMatch(/^The discount code isn't working!\n\n<downhill_checkout>\n/);
+
+    expect((await postJson(url, `/api/player-tickets/${ticketId}/messages`, { text: "Thanks! Will it work next time?" })).status).toBe(202);
+    expect(session.sent.at(-1)).toEqual({ prompt: "Thanks! Will it work next time?" });
+    expect((await postJson(url, `/api/player-tickets/${ticketId}/messages`, { text: " " })).status).toBe(400);
+
+    const pending = session.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r1", args: { orderId: "DH-1042", amount: 0.75, reason: "15% off" } });
+    await settle();
+    expect((await postJson(url, `/api/player-tickets/${ticketId}/approvals/r1`, { approve: true })).status).toBe(204);
+    expect(await pending).toMatchObject({ kind: "approve-once" });
+    expect((await postJson(url, `/api/player-tickets/${ticketId}/approvals/r1`, { approve: true })).status).toBe(409);
+
+    expect((await raw(url, `/api/player-tickets/${ticketId}`, { method: "DELETE" })).status).toBe(204);
+    expect(platform.deleted).toContain(sessionId);
+    const gone = await raw(url, `/api/player-tickets/${ticketId}`);
+    expect(gone.status).toBe(404);
+    expect((JSON.parse(gone.body) as ApiErrorBody).error.message).toBe("There's no such support chat. It may have ended.");
+    expect((await postJson(url, `/api/player-tickets/${ticketId}/messages`, { text: "Hello?" })).status).toBe(404);
+  });
+
+  it("streams a player's chat page only their own ticket", async () => {
+    const platform = new FakePlatform();
+    const url = await start(platform);
+    const { ticketId } = JSON.parse((await postJson(url, "/api/player-tickets", MONA)).body) as PlayerTicketCreated;
+    const ben = monaWith({ player: { name: "Ben", rider: "ben" }, at: "2026-11-12T17:40:00.000Z" });
+    const events = await stream(
+      url,
+      `/api/events?player=${ticketId}`,
+      (seen) => seen.filter((event) => event.type === "players").length >= 2,
+      () => void postJson(url, "/api/player-tickets", ben),
+    );
+    expect(events[0]?.type).toBe("platform");
+    expect(events.some((event) => event.type === "run" || event.type === "counters" || event.type === "issues")).toBe(false);
+    const lists = events.flatMap((event) => (event.type === "players" ? [event.players.map((ticket) => ticket.player.name)] : []));
+    expect(lists).toEqual([["Mona"], ["Mona"]]);
+    expect(events.every((event) => event.type !== "player" || event.ticket.ticketId === ticketId)).toBe(true);
+  });
+
+  it("serves the player's chat page at /chat/<ticket>, which the game may frame", async () => {
+    const url = await start(new FakePlatform(), new FakeFactory(), testConfig({ webRoot: WEB_ROOT }));
+    const page = await fetch(`${url}/chat/mhv3k2a1q9z4f2`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(page.headers.get("x-frame-options")).toBeNull();
+    expect(page.headers.get("content-security-policy")).toBeNull();
+    expect(await page.text()).toContain('<div id="root"></div>');
   });
 });

@@ -1,4 +1,4 @@
-import type { BugArea, ClassificationMethod, ClassificationRun, HelpDeskState, RunInfo, SoftwareIssue } from "../../shared/types.js";
+import type { BugArea, ClassificationMethod, ClassificationRun, HelpDeskState, PlayerTicket, RunInfo, SoftwareIssue } from "../../shared/types.js";
 
 /** A failed API call with the server's friendly message (never a stack trace). */
 export class ApiError extends Error {
@@ -49,4 +49,8 @@ export const api = {
   routeIssue: (area: BugArea) => json<SoftwareIssue>("POST", `/api/issues/${enc(area)}/route`),
   forget: (id: string) => json<undefined>("DELETE", `/api/knowledge/${enc(id)}`),
   decide: (id: string, approve: boolean) => json<undefined>("POST", `/api/knowledge/proposals/${enc(id)}`, { approve }),
+  player: (ticketId: string) => json<PlayerTicket>("GET", `/api/player-tickets/${enc(ticketId)}`),
+  sendAsPlayer: (ticketId: string, text: string) => json<undefined>("POST", `/api/player-tickets/${enc(ticketId)}/messages`, { text }),
+  answerPlayer: (ticketId: string, approvalId: string, approve: boolean) => json<undefined>("POST", `/api/player-tickets/${enc(ticketId)}/approvals/${enc(approvalId)}`, { approve }),
+  endPlayer: (ticketId: string) => json<undefined>("DELETE", `/api/player-tickets/${enc(ticketId)}`),
 };

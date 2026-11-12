@@ -152,6 +152,7 @@ export class AnalysisManager implements AnalysisHost {
       platform: this.platform.status,
       environments: this.platform.environments,
       datasets: this.datasets.list(),
+      remoteSamples: this.datasets.remoteSamples(),
       analyses: this.summaries(),
       attachCommand: attachCommandTemplate(this.config.attachUrl),
       canLaunchTerminal: canLaunchTerminal(),
@@ -192,10 +193,12 @@ export class AnalysisManager implements AnalysisHost {
     return dataset.summary;
   }
 
-  /** Starts an analysis of a dataset: a new session on the shared runtime. */
+  /** Starts an analysis of a dataset, or of a remote sample's fresh copy: a new session on the shared runtime. */
   async create(datasetId: string): Promise<AnalysisView> {
     this.#requireConnected();
-    const dataset = this.datasets.require(datasetId);
+    const dataset = await this.datasets.open(datasetId);
+    // A remote sample's copy is kept the way an upload is, which may have dropped the oldest uploads.
+    if (dataset.summary.id !== datasetId) this.#hub.publish({ type: "datasets", datasets: this.datasets.list() });
     const analysis = new Analysis(this);
     try {
       await analysis.start(dataset, (started) => this.#analyses.set(started.id, started));

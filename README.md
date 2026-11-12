@@ -114,8 +114,9 @@ pnpm gallery                        # every demo and walkthrough on one page
 
 ## Demos
 
-Ten apps show the patterns doing real work, each built for its own use case. All of them run under `aspire run` with
-real models and deploy to Azure with the same AppHost; `pnpm gallery` opens every one.
+These apps show the patterns doing real work, each built for its own use case. All of them run under `aspire run` with
+real models and deploy to Azure with the same AppHost (except Hack the Harness, which is local only); `pnpm gallery`
+opens every one.
 
 <p align="center">
   <img src="demos/pattern-race/docs/screenshots/race-finished.png" alt="Pattern Race: one job raced through all six patterns, with where each agent thinks and acts, its time, sandboxes, agents, and premium requests, and a scorecard" width="900">
@@ -124,7 +125,8 @@ real models and deploy to Azure with the same AppHost; `pnpm gallery` opens ever
 | Demo | Pattern | What it shows |
 | --- | --- | --- |
 | [Pattern Race](demos/pattern-race/README.md) | All six | One job raced through all six patterns at once: where each agent thinks and acts, its time, sandboxes, and premium requests |
-| [Help Desk](demos/help-desk/README.md) | Shared | 25 customers, each chatting with a private agent bound to their own orders, on one runtime with no sandboxes |
+| [Help Desk](demos/help-desk/README.md) | Shared | 25 customers, each chatting with a private agent bound to their own orders, on one runtime with no sandboxes, plus live tickets from Downhill's players |
+| [Downhill](demos/downhill/README.md) | Shared, through Help Desk | Contoso Outdoors' painterly mountain-biking game: ride a run, then buy a new look in its shop, where the launch offer's code fails in the store's real checkout code and **Contact support** opens a live Help Desk chat |
 | [Front Desk](demos/front-desk/README.md) | Shared | An app other people sign in to, with GitHub (their own Copilot plan) or an email (your Azure AI Foundry pays), each with private conversations and memory; published open to the Internet with no GitHub token of its own |
 | [Repo Doctor](demos/repo-doctor/README.md) | Isolated | One sandbox clones a repository and fixes its failing tests, while a live strip shows the hosts its network rules allowed and blocked |
 | [Data Desk](demos/data-desk/README.md) | Promotable | Chat with a spreadsheet: a chart request moves the same session from the shared runtime into a Python sandbox, and Copilot CLI follows it |
@@ -135,9 +137,20 @@ real models and deploy to Azure with the same AppHost; `pnpm gallery` opens ever
 | [AI software factory](demos/software-factory/README.md) | Delegate, isolated | Describe the software you want; a coordinator gives each task a builder in its own sandbox, sends review findings back, and releases once real tests pass |
 | [Long-running assistant](demos/assistant/README.md) | Shared, delegate | A chat bot for your mail and calendar that asks before acting, starts sandboxes for hands-on work, and keeps working with the tab closed |
 
-Three of them hand work to the software factory, which shows where each work order came from: Help Desk sends a
-storefront bug its customers reported, Incident Commander sends an incident's fix (and deploys what comes back), and
-Data Desk sends an insight with the data behind it.
+### One day at Contoso Outdoors
+
+Five of the demos tell one story, in the order the gallery's **Connected demos** tab lists them:
+
+1. **Downhill:** ride a run, then buy a new look in the game's shop. The launch offer's code is rejected at checkout,
+   which runs the store's own code, and **Contact support** opens a live chat.
+2. **Help Desk:** that ticket appears on the wall beside the simulated customers. Its refund waits for your approval,
+   and its report joins the customers' **Promo codes rejected at checkout**, which one click sends to the factory.
+3. **Data Desk:** the **Storefront checkout funnel** shows mobile shoppers with $40 to $49 carts dropping out at the
+   $5.99 shipping fee, and the insight goes to the factory as an experiment to build.
+4. **Incident Commander:** checkout's v1.4.2 crashes on expired coupons. Copilot triages, routes the fix through the
+   factory, and deploys when you say so.
+5. **Software Factory:** the bug, the insight, and the fix arrive as work orders, each showing where it came from, and
+   go back as tested releases.
 
 ## Deploy to Azure
 

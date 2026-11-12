@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>Downhill – character preview</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #8ec5ff;
+      }
+      canvas {
+        display: block;
+      }
+      #hud {
+        position: fixed;
+        left: 8px;
+        top: 6px;
+        font: 12px/1.35 system-ui, sans-serif;
+        color: #10243a;
+        background: rgba(255, 255, 255, 0.6);
+        padding: 4px 8px;
+        border-radius: 6px;
+        white-space: pre;
+        pointer-events: none;
+      }
+      #hud.hidden {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="hud"></div>
+    <script type="module" src="./characters.ts"></script>
+  </body>
+</html>

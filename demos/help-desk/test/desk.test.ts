@@ -1,10 +1,11 @@
 import type { PermissionRequestResult } from "@github/copilot-sdk";
-import { afterEach, describe, expect, it } from "vitest";
-import { HelpDesk, runIdAt, runStartedAt } from "../src/server/desk.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { HelpDesk, MAX_PLAYER_TICKETS, runIdAt, runStartedAt } from "../src/server/desk.js";
 import { HelpDeskError } from "../src/server/errors.js";
+import { contextOf, newTicketId, parsePlayerTicket, playerSessionId, promptFor, readPrompt } from "../src/server/player.js";
 import { parseSessionId, sessionIdFor } from "../src/server/ticket.js";
-import type { ServerEvent } from "../src/shared/types.js";
-import { event, FakeFactory, FakePlatform, reportBug, settle, testConfig } from "./fakes.js";
+import { PLAYER_TOOL_NAMES, type ServerEvent } from "../src/shared/types.js";
+import { event, FakeFactory, FakePlatform, MONA, MONA_REPORT, monaWith, reportBug, settle, testConfig } from "./fakes.js";
 
 const desks: HelpDesk[] = [];
 afterEach(() => {
@@ -27,6 +28,34 @@ async function simulate(desk: HelpDesk, platform: FakePlatform, size = 5) {
 }
 
 const refund = (toolCallId: string, orderId: string) => ({ kind: "custom-tool", toolName: "request_refund", toolCallId, args: { orderId, reason: "broken" }, toolDescription: "Refund" });
+
+/** What Mona writes when she opens support in Downhill. */
+const MONA_WORDS = "The launch code trail15 says “Invalid code.” at checkout, so I paid full price for Neon Mona.";
+
+/**
+ * Mona (or another player) opens support in the game and writes her complaint: her first message starts the session,
+ * and the runtime then delivers it.
+ */
+async function openPlayer(desk: HelpDesk, platform: FakePlatform, body: unknown = MONA, words = MONA_WORDS) {
+  const { ticket } = desk.openPlayerTicket(body);
+  await desk.sendAsPlayer(ticket.ticketId, words);
+  const session = platform.sessions.get(playerSessionId(ticket.ticketId))!;
+  session.emit(event("user.message", { content: session.sent[0]!.prompt }));
+  return { ...ticket, session };
+}
+
+/** A player's report without an order: one more player who hit the launch code. */
+const PLAYER_REPORT = { area: "promo-codes", title: MONA_REPORT.title, whatHappened: MONA_REPORT.whatHappened, expected: MONA_REPORT.expected };
+
+/** What `act` threw. */
+function caught(act: () => unknown): unknown {
+  try {
+    act();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected it to throw.");
+}
 
 describe("session IDs", () => {
   it("carry the simulation and the customer, so a restarted Help Desk finds its tickets", () => {
@@ -485,5 +514,397 @@ describe("software issues", () => {
     factory.configured = true;
     await expect(desk.routeIssue("checkout", APP)).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(desk.routeIssue("cart", APP)).rejects.toMatchObject({ code: "not_found", status: 404, message: "No customer of this simulation has reported this problem." });
+  });
+});
+
+describe("player tickets", () => {
+  it("open without a session or a message: the player's first message starts it, with their context hidden in it", async () => {
+    const { desk, platform, events } = setup();
+    const { ticket, reopened } = desk.openPlayerTicket(monaWith({ opener: "promo-error" }));
+    const { ticketId, chatPath } = ticket;
+    expect(reopened).toBe(false);
+    expect(chatPath).toBe(`/chat/${ticketId}`);
+    // On the wall right away, waiting for the player; no session, so nothing is counted yet.
+    expect(desk.playerTicket(ticketId)).toMatchObject({ ticketId, product: "downhill", player: { name: "Mona", rider: "mona", initials: "M" }, opener: "promo-error", status: "opened", items: [] });
+    expect(desk.playerTicket(ticketId).sessionId).toBeUndefined();
+    expect(events.some((published) => published.type === "players" && published.players[0]?.ticketId === ticketId)).toBe(true);
+    expect(platform.created).toEqual([]);
+    expect(desk.computeCounters().sessions).toBe(0);
+
+    await desk.sendAsPlayer(ticketId, MONA_WORDS);
+    const config = platform.created.at(-1)!;
+    expect(config).toMatchObject({ sessionId: playerSessionId(ticketId), model: "claude-haiku-4.5", streaming: true, availableTools: ["custom:*"] });
+    expect(config.tools?.map((tool) => tool.name)).toEqual([...PLAYER_TOOL_NAMES]);
+    expect(config.systemMessage?.content).toContain("Downhill Shop");
+    // The store customers' team knowledge isn't the player's agent's: it neither stores memories nor is told them.
+    expect(config.memory).toBeUndefined();
+    expect(config.systemMessage?.content).not.toContain("Team knowledge base:");
+    const session = platform.sessions.get(playerSessionId(ticketId))!;
+    // The player's words first; the context the game sent rides along, hidden.
+    expect(readPrompt(session.sent[0]!.prompt)).toEqual({ text: MONA_WORDS, context: contextOf(parsePlayerTicket(monaWith({ opener: "promo-error" }))) });
+    session.emit(event("user.message", { content: session.sent[0]!.prompt }));
+    const view = desk.playerTicket(ticketId);
+    expect(view).toMatchObject({ sessionId: playerSessionId(ticketId), status: "answering", checkout: { code: "trail15", order: { id: "DH-1042", totalCents: 499 } } });
+    expect(view.items).toEqual([{ kind: "message", id: expect.any(String), from: "customer", text: MONA_WORDS, at: expect.any(String), attachment: "Checkout details" }]);
+    expect(JSON.stringify(view)).not.toContain("downhill_checkout");
+
+    // Its tools reach only Mona's checkout and order.
+    expect(await session.call("get_checkout", {})).toMatchObject({ ok: true, player: "Mona", code: "trail15", bought: true });
+    expect(await session.call("request_refund", { orderId: "CO-48224", reason: "code" })).toEqual({ ok: false, error: "No order CO-48224 on this account." });
+    expect(await reportBug(session, undefined, MONA_REPORT)).toEqual({ ok: true, area: "promo-codes", orderId: "DH-1042", sentTo: "the store's engineering team" });
+    expect(desk.playerTicket(ticketId).bug).toMatchObject({ area: "promo-codes", orderId: "DH-1042" });
+
+    // The same opening sent again (the game retried it) gets the same ticket.
+    expect(desk.openPlayerTicket(monaWith({ opener: "promo-error" }))).toEqual({ ticket, reopened: true });
+    expect(platform.created).toHaveLength(1);
+  });
+
+  it("reopen by ticket ID with the latest checkout, which the next message carries only when it changed", async () => {
+    const { desk, platform } = setup();
+    const { ticketId } = desk.openPlayerTicket(monaWith({ checkout: undefined, opener: "support-button" })).ticket;
+    await desk.sendAsPlayer(ticketId, "Hi! The discount code isn't working.");
+    const session = platform.sessions.get(playerSessionId(ticketId))!;
+    const first = readPrompt(session.sent[0]!.prompt);
+    expect(first.text).toBe("Hi! The discount code isn't working.");
+    expect(first.context).toMatchObject({ player: { name: "Mona", rider: "mona" }, opener: "support-button" });
+    expect(first.context?.checkout).toBeUndefined();
+    expect(await session.call("get_checkout", {})).toMatchObject({ ok: true, tried: false });
+
+    // Reopened under the rejected code, with the checkout: get_checkout has it at once.
+    const again = desk.openPlayerTicket({ ...MONA, opener: "promo-error", ticketId, at: "2026-11-12T17:31:00.000Z" });
+    expect(again).toEqual({ ticket: { ticketId, chatPath: `/chat/${ticketId}` }, reopened: true });
+    expect(desk.playerTicket(ticketId)).toMatchObject({ opener: "promo-error", checkout: { code: "trail15" } });
+    expect(await session.call("get_checkout", {})).toMatchObject({ tried: true, code: "trail15", bought: true });
+    await desk.sendAsPlayer(ticketId, "It says Invalid code.");
+    expect(readPrompt(session.sent[1]!.prompt)).toMatchObject({ text: "It says Invalid code.", context: { opener: "promo-error", checkout: { code: "trail15" } } });
+    await desk.sendAsPlayer(ticketId, "Can you help?");
+    expect(session.sent[2]!.prompt).toBe("Can you help?");
+    for (const sent of session.sent) session.emit(event("user.message", { content: sent.prompt }));
+    expect(desk.playerTicket(ticketId).items.map((item) => (item.kind === "message" ? [item.text, item.attachment] : []))).toEqual([
+      ["Hi! The discount code isn't working.", undefined],
+      ["It says Invalid code.", "Checkout details"],
+      ["Can you help?", undefined],
+    ]);
+
+    // Another rider's opening, or one of an ended ticket, opens a new ticket.
+    const copilot = desk.openPlayerTicket({ ...MONA, player: { name: "Copilot", rider: "copilot" }, ticketId, at: "2026-11-12T17:32:00.000Z" });
+    expect(copilot.reopened).toBe(false);
+    expect(copilot.ticket.ticketId).not.toBe(ticketId);
+    await desk.endPlayer(ticketId);
+    const after = desk.openPlayerTicket({ ...MONA, ticketId, at: "2026-11-12T17:33:00.000Z" });
+    expect(after.reopened).toBe(false);
+    expect(after.ticket.ticketId).not.toBe(ticketId);
+  });
+
+  it("drop a ticket that never got a message once it's idle, and end one without a session like any other", async () => {
+    const { desk, platform, events } = setup(new FakePlatform(), new FakeFactory(), testConfig({ playerIdleMs: 60_000 }));
+    const start = Date.parse("2026-11-12T17:30:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(start);
+      const stray = desk.openPlayerTicket(monaWith({ checkout: undefined, opener: "support-button" })).ticket.ticketId;
+      const reopenedLater = desk.openPlayerTicket(monaWith({ checkout: undefined, player: { name: "Ben", rider: "ben" }, at: "2026-11-12T17:30:01.000Z" })).ticket.ticketId;
+      const talking = (await openPlayer(desk, platform, monaWith({ player: { name: "Copilot", rider: "copilot" }, at: "2026-11-12T17:30:02.000Z" }))).ticketId;
+      // Opening it again counts as activity.
+      vi.setSystemTime(start + 50_000);
+      desk.openPlayerTicket(monaWith({ checkout: undefined, player: { name: "Ben", rider: "ben" }, ticketId: reopenedLater, at: "2026-11-12T17:30:50.000Z" }));
+      desk.dropIdlePlayers(start + 59_000);
+      expect(desk.state().players).toHaveLength(3);
+      desk.dropIdlePlayers(start + 61_000);
+      expect(desk.state().players.map((ticket) => ticket.ticketId).sort()).toEqual([reopenedLater, talking].sort());
+      desk.dropIdlePlayers(start + 111_000);
+      expect(desk.state().players.map((ticket) => ticket.ticketId)).toEqual([talking]);
+      expect(desk.state().players.map((ticket) => ticket.ticketId)).not.toContain(stray);
+      expect(events.filter((published) => published.type === "players").at(-1)).toMatchObject({ players: [{ ticketId: talking }] });
+      // A conversation stays however long it's quiet; nothing was on the platform to delete.
+      desk.dropIdlePlayers(start + 10 * 60 * 60_000);
+      expect(desk.state().players.map((ticket) => ticket.ticketId)).toEqual([talking]);
+      expect(platform.deleted).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    const waiting = desk.openPlayerTicket(monaWith({ checkout: undefined, at: "2026-11-12T17:50:00.000Z" })).ticket.ticketId;
+    await desk.endPlayer(waiting);
+    expect(desk.state().players).toHaveLength(1);
+    expect(platform.deleted).toEqual([]);
+  });
+
+  it("hold a refund of the player's order for the operator, then answer the runtime with the decision", async () => {
+    const { desk, platform } = setup();
+    const { ticketId, session } = await openPlayer(desk, platform);
+    const asking = (toolCallId: string, amount: number) => ({
+      kind: "custom-tool",
+      toolName: "request_refund",
+      toolCallId,
+      args: { orderId: "DH-1042", amount, reason: "the 15% TRAIL15 should have taken off" },
+    });
+    const pending = session.ask(asking("r1", 0.75)) as Promise<PermissionRequestResult>;
+    await settle();
+    expect(desk.playerTicket(ticketId)).toMatchObject({
+      status: "approval",
+      approval: { id: "r1", action: "refund", orderId: "DH-1042", amount: 0.75, reason: "the 15% TRAIL15 should have taken off" },
+    });
+    desk.answerPlayer(ticketId, "r1", true);
+    expect(await pending).toEqual({ kind: "approve-once", approvedInteractively: true });
+    expect(await session.call("request_refund", asking("r1", 0.75).args, "r1")).toMatchObject({ ok: true, orderId: "DH-1042", refunded: 0.75 });
+    expect(desk.playerTicket(ticketId).refunded).toBe(0.75);
+
+    const declined = session.ask(asking("r2", 1)) as Promise<PermissionRequestResult>;
+    await settle();
+    desk.answerPlayer(ticketId, "r2", false);
+    expect(await declined).toMatchObject({ kind: "reject", feedback: expect.stringContaining("a team member will follow up") });
+    expect(() => desk.answerPlayer(ticketId, "r2", true)).toThrow(/answered already/);
+    // More than is left on the order needs no one: the tool says why.
+    expect(await session.ask(asking("r3", 4.5))).toEqual({ kind: "approve-once" });
+    expect(desk.playerTicket(ticketId).approval).toBeUndefined();
+  });
+
+  it("stay through simulations: starting, replacing, and ending one leave them; ending one deletes its session", async () => {
+    const { desk, platform, events } = setup();
+    const { ticketId, session } = await openPlayer(desk, platform);
+    const first = await desk.simulate(5);
+    await until(() => platform.created.length === 6 && [...platform.sessions.values()].every((each) => each.sent.length > 0));
+    // Counted with the customers: one runtime for all.
+    session.premium = 0.33;
+    session.emit(event("session.idle", {}, { ephemeral: true }));
+    await until(() => desk.computeCounters().premiumRequests === 0.33);
+    expect(desk.computeCounters()).toMatchObject({ sessions: 6, runtimes: 1, sandboxes: 0, messages: 1 });
+
+    await desk.simulate(10);
+    await desk.end();
+    expect(platform.deleted).toContain(sessionIdFor(first.id, "c01"));
+    expect(platform.deleted).not.toContain(playerSessionId(ticketId));
+    expect(desk.state().players.map((ticket) => ticket.ticketId)).toEqual([ticketId]);
+    expect(desk.computeCounters()).toMatchObject({ sessions: 1, premiumRequests: 0.33 });
+
+    await desk.endPlayer(ticketId);
+    expect(platform.deleted).toContain(playerSessionId(ticketId));
+    expect(desk.state().players).toEqual([]);
+    expect(events.filter((published) => published.type === "players").at(-1)).toEqual({ type: "players", players: [] });
+    expect(() => desk.playerTicket(ticketId)).toThrow(/no such support chat/);
+    expect(desk.computeCounters().sessions).toBe(0);
+  });
+
+  it("are picked up after a restart: the conversation, the checkout read back from it, refunds, and a refund asked again", async () => {
+    const platform = new FakePlatform();
+    const ticketId = newTicketId(new Date("2026-11-12T17:30:05.000Z"));
+    const sessionId = playerSessionId(ticketId);
+    const refundArgs = { orderId: "DH-1042", amount: 0.75, reason: "the 15% TRAIL15 should have taken off" };
+    // Mona wrote first from the Support button, with no checkout yet; she reopened support from her receipt later.
+    const browsing = contextOf(parsePlayerTicket(monaWith({ checkout: undefined, opener: "support-button" })));
+    const bought = contextOf(parsePlayerTicket(monaWith({ opener: "receipt", at: "2026-11-12T17:35:00.000Z" })));
+    const seeded = platform.seed(sessionId, [
+      event("user.message", { content: promptFor("The discount code isn't working!", browsing) }),
+      event("assistant.message", { messageId: "m0", content: "Sorry about that! Which code did you try, and what were you buying?" }),
+      event("user.message", { content: promptFor(MONA_WORDS, bought) }),
+      event("tool.execution_start", { toolCallId: "b1", toolName: "report_bug", arguments: MONA_REPORT }),
+      event("tool.execution_complete", { toolCallId: "b1", success: true, result: { content: JSON.stringify({ ok: true, area: "promo-codes", orderId: "DH-1042" }) } }),
+      event("tool.execution_start", { toolCallId: "r1", toolName: "request_refund", arguments: refundArgs }),
+      event("permission.requested", { permissionRequest: { kind: "custom-tool", toolCallId: "r1", toolName: "request_refund" } }),
+      event("permission.completed", { toolCallId: "r1", result: { kind: "approved" } }),
+      event("tool.execution_complete", { toolCallId: "r1", success: true, result: { content: JSON.stringify({ ok: true, orderId: "DH-1042", refunded: 0.75 }) } }),
+      event("assistant.message", { messageId: "m1", content: "Sorry, Mona! I've refunded $0.75 to you." }),
+    ]);
+    const { desk } = setup(platform);
+    platform.connect();
+    await until(() => platform.resumed.includes(sessionId));
+    await settle(5);
+
+    expect(desk.state().run).toBeUndefined();
+    const view = desk.playerTicket(ticketId);
+    // The latest context the conversation carried: her receipt.
+    expect(view).toMatchObject({
+      player: { name: "Mona" },
+      opener: "receipt",
+      checkout: { code: "trail15", order: { id: "DH-1042" } },
+      refunded: 0.75,
+      bug: { area: "promo-codes", orderId: "DH-1042" },
+      status: "waiting",
+      createdAt: "2026-11-12T17:30:05.000Z",
+    });
+    expect(view.items.flatMap((item) => (item.kind === "message" && item.from === "customer" ? [[item.text, item.attachment]] : []))).toEqual([
+      ["The discount code isn't working!", undefined],
+      [MONA_WORDS, "Checkout details"],
+    ]);
+    expect(JSON.stringify(view)).not.toContain("downhill_checkout");
+    expect(desk.issues()).toEqual([
+      {
+        area: "promo-codes",
+        title: "Promo codes rejected at checkout",
+        reports: [{ ticketId, product: "downhill", name: "Mona", whatHappened: MONA_REPORT.whatHappened, orderId: "DH-1042", at: expect.any(String) }],
+      },
+    ]);
+    expect(await seeded.call("get_checkout", {})).toMatchObject({ openedSupportFrom: "a receipt", order: { orderId: "DH-1042", refunded: 0.75 } });
+    expect(await seeded.call("request_refund", { ...refundArgs, amount: 4.5 })).toEqual({ ok: false, error: "At most $4.24 of this order can be refunded." });
+
+    // The platform asks again for a refund still waiting when the session is resumed.
+    const pending = seeded.ask({ kind: "custom-tool", toolName: "request_refund", toolCallId: "r2", args: { ...refundArgs, amount: 1 } }) as Promise<PermissionRequestResult>;
+    await settle();
+    expect(desk.playerTicket(ticketId).approval).toMatchObject({ id: "r2", amount: 1 });
+    desk.answerPlayer(ticketId, "r2", false);
+    expect(await pending).toMatchObject({ kind: "reject" });
+    expect(platform.deleted).toEqual([]);
+    expect(desk.computeCounters()).toMatchObject({ sessions: 1, runtimes: 1, messages: 4 });
+
+    // Her context reached the session already: her next message carries no block, until the game sends a newer one.
+    await desk.sendAsPlayer(ticketId, "Thanks!");
+    expect(seeded.sent.at(-1)).toEqual({ prompt: "Thanks!" });
+  });
+
+  it("stay open on their chat pages while a restarted Help Desk picks them up, even when another player opens support meanwhile", async () => {
+    const platform = new FakePlatform();
+    const ticketId = newTicketId(new Date("2026-11-12T17:30:05.000Z"));
+    platform.seed(playerSessionId(ticketId), [event("user.message", { content: promptFor(MONA_WORDS, contextOf(parsePlayerTicket(MONA))) })]);
+    platform.status = { state: "connecting" };
+    const { desk, events } = setup(platform);
+
+    // Not connected yet: Mona's chat page hears nothing about her ticket, and asking for it says to try again.
+    expect(desk.playerEvents(ticketId).map((published) => published.type)).toEqual(["platform"]);
+    expect(caught(() => desk.playerTicket(ticketId))).toMatchObject({ code: "platform_unavailable", status: 503, message: "Support is reconnecting. Try again in a moment." });
+
+    // Connected, with the platform's sessions still being listed.
+    const list = platform.listSessions.bind(platform);
+    let release!: () => void;
+    platform.listSessions = () => new Promise((resolve) => (release = () => resolve(list())));
+    platform.setStatus({ state: "connected" });
+    platform.connect();
+    // The game reopening her ticket waits for it rather than open a second one; Ben's new ticket publishes no list
+    // without hers.
+    expect(caught(() => desk.openPlayerTicket(monaWith({ ticketId })))).toMatchObject({ status: 503 });
+    const ben = desk.openPlayerTicket(monaWith({ player: { name: "Ben", rider: "ben" }, at: "2026-11-12T17:40:00.000Z" })).ticket;
+    release();
+    await until(() => platform.resumed.includes(playerSessionId(ticketId)));
+    await settle(5);
+
+    expect(desk.playerEvents(ticketId).at(-1)).toMatchObject({ type: "players", players: [{ ticketId }] });
+    const lists = events.flatMap((published) => (published.type === "players" ? [published.players.map((ticket) => ticket.ticketId)] : []));
+    expect(lists.length).toBeGreaterThan(0);
+    expect(lists.every((ids) => ids.includes(ticketId))).toBe(true);
+    expect(lists.at(-1)).toEqual(expect.arrayContaining([ticketId, ben.ticketId]));
+    // Picked up: a ticket Help Desk doesn't know now is an ended one.
+    expect(desk.playerEvents("zzzzzzzzzzzzzz").at(-1)).toEqual({ type: "players", players: [] });
+    expect(() => desk.playerTicket("zzzzzzzzzzzzzz")).toThrow(/no such support chat/);
+  });
+
+  it("go away when their session was deleted elsewhere", async () => {
+    const { desk, platform } = setup();
+    const { ticketId } = await openPlayer(desk, platform);
+    platform.listed.delete(playerSessionId(ticketId));
+    await desk.sync();
+    expect(desk.state().players).toEqual([]);
+  });
+
+  it("are refused in plain words: an invalid request, no platform, or too many open", async () => {
+    const { desk, platform } = setup();
+    expect(() => desk.openPlayerTicket({ ...MONA, product: "skyline" })).toThrow(/product must be "downhill"/);
+    platform.setStatus({ state: "unavailable", message: "Managed Copilot isn't reachable yet." });
+    expect(() => desk.openPlayerTicket(MONA)).toThrow("Managed Copilot isn't reachable yet.");
+    platform.setStatus({ state: "connected" });
+    for (let index = 0; index < MAX_PLAYER_TICKETS; index++) desk.openPlayerTicket(monaWith({ at: new Date(Date.parse(MONA.at) + index * 1000).toISOString() }));
+    expect(() => desk.openPlayerTicket(monaWith({ at: "2026-11-12T18:00:00.000Z" }))).toThrow(/25 open player tickets already/);
+    await expect(desk.endPlayer("nosuchticket")).rejects.toMatchObject({ code: "not_found", status: 404 });
+    await expect(desk.sendAsPlayer("nosuchticket", "Hello?")).rejects.toMatchObject({ code: "not_found", status: 404 });
+  });
+});
+
+describe("software issues with players", () => {
+  it("count a player's report from the Downhill Shop in the same issue as the customers', and keep it without a simulation", async () => {
+    const { desk, platform } = setup();
+    const run = await simulate(desk, platform, 25);
+    const session = (customerId: string) => platform.sessions.get(sessionIdFor(run.id, customerId))!;
+    await reportBug(session("c05"), AISHA, AISHA_REPORT);
+    await reportBug(session("c18"), BEN, BEN_REPORT);
+    const mona = await openPlayer(desk, platform);
+    await reportBug(mona.session, undefined, MONA_REPORT);
+    const [issue] = desk.issues();
+    expect(issue).toMatchObject({ area: "promo-codes", title: "Promo codes rejected at checkout" });
+    expect(issue!.reports.map((report) => [report.customerId ?? report.ticketId, report.name, report.product])).toEqual([
+      ["c05", "Aisha Khan", undefined],
+      ["c18", "Ben Carter", undefined],
+      [mona.ticketId, "Mona", "downhill"],
+    ]);
+    await desk.end();
+    expect(desk.issues()).toEqual([
+      { area: "promo-codes", title: "Promo codes rejected at checkout", reports: [expect.objectContaining({ ticketId: mona.ticketId, product: "downhill" })] },
+    ]);
+  });
+
+  it("go to Software Factory without a simulation: the storefront, a brief that names the Downhill Shop, once per first player ticket", async () => {
+    const { desk, platform, factory } = setup();
+    const mona = await openPlayer(desk, platform);
+    await reportBug(mona.session, undefined, MONA_REPORT);
+    expect((await desk.routeIssue("promo-codes", APP)).routed).toMatchObject({ workOrderId: "wo_1", status: "queued" });
+    const sent = factory.created[0]!;
+    expect(sent.origin).toEqual({ app: "help-desk", name: "Help Desk", label: "Promo codes · 1 ticket", url: `${APP}/#/p/${mona.ticketId}`, key: `player-${mona.ticketId}:promo-codes` });
+    expect(sent.project?.name).toBe("contoso-storefront");
+    expect(sent.project?.files.map((file) => file.path)).toContain("src/promotions.js");
+    expect(sent.brief).toContain("from 1 player in the Downhill Shop.");
+    expect(sent.brief).toContain("same `applyPromoCode` (`src/promotions.js`) as the store's website");
+    expect(sent.brief).toContain("The shop's offer banner (“Launch week: 15% off everything with code trail15”) applies the code \"trail15\", and checkout said “Invalid code.”");
+    expect(sent.brief).toContain("**Mona** (Downhill Shop), order DH-1042, wrote:");
+    expect(sent.brief).toContain(`> ${MONA_WORDS}`);
+    expect(sent.brief).not.toContain("downhill_checkout");
+    expect(sent.brief).toContain("reproduce what the players reported, with each code exactly as the Downhill Shop sent it");
+    const [bugReport, transcripts] = sent.context!;
+    expect(bugReport!.content).toContain("- Player: Mona, in the Downhill Shop (Downhill 1.0.0)");
+    expect(bugReport!.content).toContain("- Code: \"trail15\", from the shop's offer banner (“Launch week: 15% off everything with code trail15”)");
+    expect(bugReport!.content).toContain("- Checkout said: Invalid code.\n- Cart: Neon Mona (`mona-neon`, $4.99); subtotal $4.99\n- Order: DH-1042, $4.99 paid at full price");
+    expect(transcripts!.content).toContain(`## Mona (Downhill Shop)\n\nPlayer: ${MONA_WORDS}`);
+    expect(bugReport!.content + transcripts!.content).not.toContain("downhill_checkout");
+
+    // A later player's report joins the issue, which stays sent while the first player's ticket is open.
+    const ben = await openPlayer(desk, platform, monaWith({ player: { name: "Ben", rider: "ben" }, at: "2026-11-12T17:40:00.000Z" }));
+    await reportBug(ben.session, undefined, PLAYER_REPORT);
+    expect(desk.issues()[0]).toMatchObject({ reports: [expect.objectContaining({ name: "Mona" }), expect.objectContaining({ name: "Ben" })], routed: { workOrderId: "wo_1" } });
+    await expect(desk.routeIssue("promo-codes", APP)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("WO-0001") });
+
+    // Ending it ends that scope: the next player's report can go to Software Factory as a new work order.
+    await desk.endPlayer(mona.ticketId);
+    expect(desk.issues()[0]?.routed).toBeUndefined();
+    expect((await desk.routeIssue("promo-codes", APP)).routed).toMatchObject({ workOrderId: "wo_2" });
+    expect(factory.created[1]?.origin?.key).toBe(`player-${ben.ticketId}:promo-codes`);
+  });
+
+  it("go with the simulation's issue while one runs, keyed by the simulation", async () => {
+    const { desk, platform, factory } = setup();
+    const run = await simulate(desk, platform, 5);
+    await reportBug(platform.sessions.get(sessionIdFor(run.id, "c05"))!, AISHA, AISHA_REPORT);
+    const mona = await openPlayer(desk, platform);
+    await reportBug(mona.session, undefined, MONA_REPORT);
+    await desk.routeIssue("promo-codes", APP);
+    const sent = factory.created[0]!;
+    expect(sent.origin).toMatchObject({ label: "Promo codes · 2 tickets", url: `${APP}/#/c/c05`, key: `${run.id}:promo-codes` });
+    expect(sent.brief).toContain("received 2 reports of the same problem, promo codes rejected at checkout, from 1 customer of the store's website and 1 player in the Downhill Shop.");
+    expect(sent.brief).toContain("the code behind the store's website and the Downhill Shop's checkout");
+    expect(sent.brief).toContain("reproduce what the customers and players reported");
+    expect(sent.context?.[0]?.content).toContain("- Customer: Aisha Khan\n- Order: CO-48224");
+
+    // Ending the simulation ends its scope: the player's report makes an issue of its own again.
+    await desk.end();
+    expect(desk.issues()).toEqual([{ area: "promo-codes", title: "Promo codes rejected at checkout", reports: [expect.objectContaining({ ticketId: mona.ticketId })] }]);
+  });
+
+  it("are found again in Software Factory after a restart, by the first player ticket's key", async () => {
+    const platform = new FakePlatform();
+    const factory = new FakeFactory();
+    const ticketId = newTicketId(new Date("2026-11-12T17:30:05.000Z"));
+    platform.seed(playerSessionId(ticketId), [
+      event("user.message", { content: promptFor(MONA_WORDS, contextOf(parsePlayerTicket(MONA))) }),
+      event("tool.execution_start", { toolCallId: "b1", toolName: "report_bug", arguments: MONA_REPORT }),
+      event("tool.execution_complete", { toolCallId: "b1", success: true, result: { content: JSON.stringify({ ok: true, area: "promo-codes", orderId: "DH-1042" }) } }),
+    ]);
+    factory.workOrders = [
+      { id: "wo_4", number: 4, title: "Fix: promo codes rejected at checkout", status: "building", origin: { app: "help-desk", name: "Help Desk", key: `player-${ticketId}:promo-codes` } },
+      { id: "wo_3", number: 3, title: "Fix: promo codes rejected at checkout", status: "completed", origin: { app: "help-desk", name: "Help Desk", key: "player-zzzzzzzzzzzzzz:promo-codes" } },
+    ];
+    const { desk } = setup(platform, factory);
+    platform.connect();
+    await until(() => platform.resumed.length === 1);
+    await settle(5);
+    await desk.pollFactory();
+    expect(desk.issues()).toEqual([expect.objectContaining({ area: "promo-codes", routed: expect.objectContaining({ workOrderId: "wo_4", status: "building" }) })]);
+    await expect(desk.routeIssue("promo-codes", APP)).rejects.toMatchObject({ status: 409, message: expect.stringContaining("WO-0004") });
+    expect(factory.created).toEqual([]);
   });
 });

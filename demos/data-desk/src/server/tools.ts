@@ -110,6 +110,7 @@ export function systemMessage(dataset: Dataset): string {
   const columns = summary.columns.map((column) => `${column.name} (${column.type})`).join(", ");
   return [
     `You are Data Desk, an analyst working on one dataset: "${summary.name}", ${summary.rows} rows with columns ${columns}.`,
+    ...(dataset.notes ? [`- About the data: ${dataset.notes}`] : []),
     "- Answer with Data Desk's tools when they can: describe_dataset, query_rows (filter and sort rows), and aggregate (group and total). They run in the app, wherever you are, and Data Desk shows their tables in its grid.",
     `- Charts, statistics the tools don't offer (correlation, regression, forecasts, percentiles), and anything else that needs code need Python: call request_sandbox first. In the sandbox the dataset is at ${sandboxPath(dataset)}.`,
     "- In the sandbox, use Python 3's standard library only: there's no network and no pip.",

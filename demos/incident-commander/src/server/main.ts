@@ -1,7 +1,8 @@
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { Commander } from "./commander.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, type AppConfig } from "./config.js";
+import { errorText } from "./errors.js";
 import { createRequestHandler, type Middleware } from "./http.js";
 import { EventHub } from "./hub.js";
 import { log } from "./log.js";
@@ -9,11 +10,18 @@ import { Platform } from "./platform.js";
 import { ServiceCatalog } from "./services.js";
 import { Store } from "./store.js";
 
-const config = loadConfig();
+let config: AppConfig;
+try {
+  config = loadConfig();
+} catch (error) {
+  log.error(`Incident Commander can't start: ${errorText(error)}`);
+  process.exit(1);
+}
 const store = new Store(config.dataDir);
 const hub = new EventHub();
 const platform = new Platform(config);
-const commander = new Commander(config, platform, store, new ServiceCatalog(config.demoServicesDir, config.servicesDir), hub);
+const catalog = new ServiceCatalog(config.demoServicesDir, config.servicesDir, { remote: config.remoteServices ?? [] });
+const commander = new Commander(config, platform, store, catalog, hub);
 commander.start();
 
 const server = createServer();
@@ -39,6 +47,7 @@ log.info(`Incident Commander: http://localhost:${config.port}${config.dev ? " (d
   alerts: config.alertSecret ? "on" : "off (set INCIDENT_ALERT_SECRET)",
   webhook: config.webhookSecret ? "on" : "off (set INCIDENT_WEBHOOK_SECRET)",
   deploys: config.deploy ? "your pipeline" : "demo only",
+  services: config.remoteServices?.map((service) => service.name).join(", ") || "none over HTTP (set INCIDENT_SERVICE_URLS)",
   factory: config.factory ? config.factory.url : "off (set SOFTWARE_FACTORY_URL)",
 });
 

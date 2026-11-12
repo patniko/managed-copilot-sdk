@@ -11,6 +11,7 @@ import {
   type KnowledgeEntry,
   type MemoryProposal,
   type PlatformStatus,
+  type PlayerTicket,
   type RunInfo,
   type ServerEvent,
   type SimulationSize,
@@ -37,11 +38,13 @@ export interface StoreState {
   readonly run?: RunInfo;
   /** The current simulation's tickets, by customer ID. */
   readonly tickets: Readonly<Record<string, Ticket>>;
+  /** Live players' tickets, newest first. They stay whether or not a simulation runs. */
+  readonly players: readonly PlayerTicket[];
   /** The latest Classify, when there's no simulation since. */
   readonly classification?: ClassificationRun;
   /** The latest Classify of each method, to compare them. */
   readonly classifications: ClassificationRuns;
-  /** The current simulation's software issues. */
+  /** The software issues of the simulation's customers and of the players. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
   /** The team knowledge base, newest first. */
@@ -58,6 +61,8 @@ export interface StoreState {
   readonly answering: Readonly<Record<string, true>>;
   /** Issues being sent to Software Factory from this page, by area. */
   readonly routing: Readonly<Partial<Record<BugArea, true>>>;
+  /** Player tickets being ended from this page, by ticket ID. */
+  readonly ending: Readonly<Record<string, true>>;
   readonly toasts: readonly Toast[];
 }
 
@@ -78,6 +83,7 @@ let state: StoreState = {
   connection: "connecting",
   customers: [],
   tickets: {},
+  players: [],
   classifications: {},
   issues: [],
   counters: ZERO,
@@ -87,6 +93,7 @@ let state: StoreState = {
   size: savedSize(),
   answering: {},
   routing: {},
+  ending: {},
   toasts: [],
 };
 const listeners = new Set<() => void>();
@@ -123,8 +130,17 @@ export function reduce(current: StoreState, event: ServerEvent): StoreState {
       // Only the current simulation's customers: a late update of an ended one is dropped.
       if (!current.run || !(event.ticket.customerId in current.tickets)) return current;
       return { ...current, tickets: { ...current.tickets, [event.ticket.customerId]: event.ticket } };
+    case "players":
+      return { ...current, players: event.players };
+    case "player": {
+      // Only open tickets: a late update of an ended one is dropped.
+      const index = current.players.findIndex((ticket) => ticket.ticketId === event.ticket.ticketId);
+      if (index < 0) return current;
+      return { ...current, players: current.players.map((ticket, at) => (at === index ? event.ticket : ticket)) };
+    }
     case "issues":
-      return current.run ? { ...current, issues: event.issues } : current;
+      // Players' reports make issues too, with or without a simulation.
+      return { ...current, issues: event.issues };
     case "counters":
       return { ...current, counters: event.counters };
     case "knowledge":
@@ -150,6 +166,7 @@ async function loadState(): Promise<void> {
         desk: loaded.desk,
         customers: loaded.customers,
         tickets: byCustomer(loaded.tickets),
+        players: loaded.players,
         issues: loaded.issues,
         counters: loaded.counters,
         knowledge: loaded.knowledge,
@@ -163,7 +180,7 @@ async function loadState(): Promise<void> {
 
 // ─── Server-sent events ──────────────────────────────────────────────────────────────────────────────────────
 
-const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "issues", "counters", "knowledge", "classification"];
+const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "players", "player", "issues", "counters", "knowledge", "classification"];
 let source: EventSource | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let backoffMs = 1_000;
@@ -279,10 +296,19 @@ export async function endSimulation(): Promise<void> {
 }
 
 export async function answer(customerId: string, approvalId: string, approve: boolean): Promise<void> {
+  await answering(approvalId, () => api.answer(customerId, approvalId, approve));
+}
+
+/** The operator's answer to a player's refund. */
+export async function answerPlayer(ticketId: string, approvalId: string, approve: boolean): Promise<void> {
+  await answering(approvalId, () => api.answerPlayer(ticketId, approvalId, approve));
+}
+
+async function answering(approvalId: string, send: () => Promise<unknown>): Promise<void> {
   if (state.answering[approvalId]) return;
   setState((current) => ({ ...current, answering: { ...current.answering, [approvalId]: true } }));
   try {
-    await api.answer(customerId, approvalId, approve);
+    await send();
   } catch (error) {
     showToast("Couldn't answer the request", errorMessage(error));
   } finally {
@@ -332,6 +358,35 @@ export async function forget(id: string): Promise<void> {
     setState((current) => {
       const { [id]: _done, ...forgetting } = current.forgetting;
       return { ...current, forgetting };
+    });
+  }
+}
+
+/** Writes in a player's chat from the wall, as the player. */
+export async function sendAsPlayer(ticketId: string, text: string): Promise<boolean> {
+  try {
+    await api.sendAsPlayer(ticketId, text);
+    return true;
+  } catch (error) {
+    showToast("The message wasn't sent", errorMessage(error));
+    return false;
+  }
+}
+
+/** Ends a player's ticket: its session is deleted, and the player's chat says it ended. */
+export async function endPlayer(ticketId: string): Promise<boolean> {
+  if (state.ending[ticketId]) return false;
+  setState((current) => ({ ...current, ending: { ...current.ending, [ticketId]: true } }));
+  try {
+    await api.endPlayer(ticketId);
+    return true;
+  } catch (error) {
+    showToast("Couldn't end the ticket", errorMessage(error));
+    return false;
+  } finally {
+    setState((current) => {
+      const { [ticketId]: _done, ...ending } = current.ending;
+      return { ...current, ending };
     });
   }
 }

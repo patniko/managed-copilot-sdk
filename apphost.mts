@@ -8,6 +8,7 @@ import { PATTERN_RACE_DEFAULT_PORT, patternRace } from "./demos/pattern-race/app
 import { RESEARCH_SWARM_DEFAULT_PORT, researchSwarm } from "./demos/research-swarm/apphost.mjs";
 import { softwareFactory } from "./demos/software-factory/apphost.mjs";
 import { DATA_DESK_DEFAULT_PORT, dataDesk } from "./demos/data-desk/apphost.mjs";
+import { DOWNHILL_PORT, downhill } from "./demos/downhill/apphost.mjs";
 import { HELP_DESK_PORT, helpDesk } from "./demos/help-desk/apphost.mjs";
 import { HACK_THE_HARNESS_PORT, hackTheHarness } from "./demos/hack-the-harness/apphost.mjs";
 import { INCIDENT_DEFAULT_PORT, incidentCommander } from "./demos/incident-commander/apphost.mjs";
@@ -35,6 +36,7 @@ const ports = {
   patternRace: PATTERN_RACE_DEFAULT_PORT + offset,
   dataDesk: DATA_DESK_DEFAULT_PORT + offset,
   helpDesk: HELP_DESK_PORT + offset,
+  downhill: DOWNHILL_PORT + offset,
   hackTheHarness: HACK_THE_HARNESS_PORT + offset,
   incidentCommander: INCIDENT_DEFAULT_PORT + offset,
   repoDoctor: REPO_DOCTOR_PORT + offset,
@@ -97,8 +99,17 @@ const assistant = assistantCopilotOptions({ webhookSecret: await generatedSecret
 const snippetsWebhook = { port: ports.snippetsWebhook, secret: await generatedSecret("snippets-webhook-secret") };
 const swarm = researchSwarm({ port: ports.researchSwarm });
 const helpDeskDemo = helpDesk({ port: ports.helpDesk, ...(helpDeskTriage ? { triage: helpDeskTriage } : {}) });
+const downhillDemo = downhill({ port: ports.downhill });
 const hackTheHarnessDemo = hackTheHarness({ port: ports.hackTheHarness });
 const incidents = incidentCommander({ port: ports.incidentCommander, webhookSecret: await generatedSecret("incident-commander-webhook-secret") });
+// Downhill's shop pages Incident Commander with its alert secret, and Incident Commander signs the deploys it sends the
+// shop with this one.
+const incidentAlertSecret = await generatedSecret("incident-commander-alert-secret");
+const downhillDeploySecret = await generatedSecret("downhill-deploy-secret");
+// Server-to-server addresses: localhost under `aspire run`, the app's name inside the Azure environment.
+const internalUrl = (name: string, port: number) => (publishing ? `http://${name}` : `http://localhost:${port}`);
+const downhillApi = internalUrl(downhillDemo.app.name, ports.downhill);
+const incidentApi = internalUrl(incidents.app.name, ports.incidentCommander);
 const repoDoctorDemo = repoDoctor({ port: ports.repoDoctor });
 const chatEnvironment = {
   type: "shared" as const,
@@ -167,10 +178,11 @@ const copilot = await addManagedCopilot(builder, "copilot", {
 type Demo = { name: string; workingDirectory: string; script: string; port: number; healthPath: string; env?: Readonly<Record<string, string>> };
 /**
  * How a demo is deployed by `aspire deploy`: its image and the settings that receive its Azure addresses. `public`
- * opens it to any address with no GitHub token, for a demo that signs in its own users; `app` gives it the key of an
- * app declared in `apps` (as MANAGED_COPILOT_APP_KEY, with `aspire run` too).
+ * opens it to any address with no GitHub token, for a demo that signs in its own users; `githubToken: false` keeps it
+ * behind the allowlist without a token, for a demo that never calls the platform; `app` gives it the key of an app
+ * declared in `apps` (as MANAGED_COPILOT_APP_KEY, with `aspire run` too).
  */
-type DemoDeployment = { dockerfile: string; publicUrlEnv?: string; allowedHostsEnv?: string; gatewayUrlEnv?: string[]; public?: boolean; app?: string };
+type DemoDeployment = { dockerfile: string; publicUrlEnv?: string; allowedHostsEnv?: string; gatewayUrlEnv?: string[]; public?: boolean; githubToken?: boolean; app?: string };
 
 /** A demo's built Node server on its fixed port, connected to the platform (a container app when publishing). */
 function addDemo(demo: Demo, deployment: DemoDeployment) {
@@ -215,10 +227,12 @@ await addDemo(swarm.app, { dockerfile: "demos/research-swarm/Dockerfile", allowe
 await addDemo(patternRace({ port: ports.patternRace }).app, { dockerfile: "demos/pattern-race/Dockerfile", allowedHostsEnv: "PATTERN_RACE_ALLOWED_HOSTS" });
 
 // Data Desk: chat with a spreadsheet. The session answers on the shared runtime, then moves once into a Python sandbox
-// when a request needs code, and an attached Copilot CLI follows it. What it finds can go to the factory.
+// when a request needs code, and an attached Copilot CLI follows it. What it finds can go to the factory. With
+// DOWNHILL_URL it also offers Downhill's shop sales, live.
 await (await addDemo(dataDeskDemo.app, { dockerfile: "demos/data-desk/Dockerfile", allowedHostsEnv: "DATA_DESK_ALLOWED_HOSTS", gatewayUrlEnv: ["DATA_DESK_ATTACH_URL"] }))
   .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
-  .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
+  .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public)
+  .withEnvironment("DOWNHILL_URL", downhillApi);
 
 // Repo Doctor: one sandbox per run clones a repository, reproduces its failing tests, fixes them, and returns a verified
 // patch, while a strip shows the hosts its network rules allowed and blocked.
@@ -283,11 +297,25 @@ if (frontDeskTotalDailyLimit && !/^\d+$/.test(frontDeskTotalDailyLimit)) {
 if (frontDeskTotalDailyLimit) await frontDeskApp.withEnvironment("FRONT_DESK_TOTAL_DAILY_LIMIT", frontDeskTotalDailyLimit);
 
 // Help Desk: a support rush of simulated customers, each with a private session on the one shared runtime and the
-// store's tools bound to that customer's orders. Storefront bugs its customers report go to the factory.
+// store's tools bound to that customer's orders, plus live tickets from Downhill's players. Storefront bugs its
+// customers and players report go to the factory.
 const helpDeskApp = await (await addDemo(helpDeskDemo.app, { dockerfile: "demos/help-desk/Dockerfile", allowedHostsEnv: "HELP_DESK_ALLOWED_HOSTS" }))
   .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
   .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
 if (helpDeskTriageKey) await helpDeskApp.withEnvironment("HELP_DESK_TRIAGE_KEY", helpDeskTriageKey);
+
+// Downhill: Contoso Outdoors' browser game, with a shop whose checkout runs the store's own code (the version it was last
+// deployed). Contact support opens a live Help Desk ticket: its server calls Help Desk's API at HELP_DESK_URL (in Azure,
+// its name inside the environment) and shows the chat from HELP_DESK_PUBLIC_URL. Rejected launch codes page Incident
+// Commander, which deploys the fix back to the shop. The game runs no agents of its own, so it's deployed without your
+// GitHub token.
+const helpDeskPublicUrl = (await helpDeskApp.getEndpoint("http")) as EndpointReference;
+await (await addDemo(downhillDemo.app, { dockerfile: "demos/downhill/Dockerfile", allowedHostsEnv: "DOWNHILL_ALLOWED_HOSTS", githubToken: false }))
+  .withEnvironment("HELP_DESK_URL", publishing ? `http://${helpDeskDemo.app.name}` : helpDeskPublicUrl)
+  .withEnvironment("HELP_DESK_PUBLIC_URL", helpDeskPublicUrl)
+  .withEnvironment("INCIDENT_URL", incidentApi)
+  .withEnvironment("INCIDENT_ALERT_SECRET", incidentAlertSecret)
+  .withEnvironment("DOWNHILL_DEPLOY_SECRET", downhillDeploySecret);
 
 // Hack the Harness: a staff assistant, with a 3D office, that runs six agent deployment architectures side by side.
 // Local only: it accepts any username and password.
@@ -295,7 +323,8 @@ if (!publishing) await runDemo(hackTheHarnessDemo.app);
 
 // Incident Commander: an alert opens an incident; a mixed coordinator triages in its own sandbox, hands the repro and
 // the fix to workers (or the fix to the factory), and waits on the platform for a person to approve the deploy. Alerts
-// carry the generated bearer secret; the platform's webhook keeps the app informed while it isn't attached.
+// carry the generated bearer secret; the platform's webhook keeps the app informed while it isn't attached. Downhill's
+// shop is one of its services: it loads the shop's code and logs from Downhill, and deploys approved fixes back there.
 await (
   await addDemo(incidents.app, {
     dockerfile: "demos/incident-commander/Dockerfile",
@@ -304,7 +333,10 @@ await (
   })
 )
   .withEnvironment("INCIDENT_WEBHOOK_SECRET", incidents.webhooks["incident-commander"].secret)
-  .withEnvironment("INCIDENT_ALERT_SECRET", await generatedSecret("incident-commander-alert-secret"))
+  .withEnvironment("INCIDENT_ALERT_SECRET", incidentAlertSecret)
+  .withEnvironment("INCIDENT_SERVICE_URLS", `downhill-shop=${downhillApi}/api/incident/service`)
+  .withEnvironment("INCIDENT_DEPLOY_URL", `${downhillApi}/api/deploys`)
+  .withEnvironment("INCIDENT_DEPLOY_SECRET", downhillDeploySecret)
   .withEnvironment("SOFTWARE_FACTORY_URL", factoryRouting.api)
   .withEnvironment("SOFTWARE_FACTORY_PUBLIC_URL", factoryRouting.public);
 

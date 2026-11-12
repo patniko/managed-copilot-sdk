@@ -26,6 +26,7 @@ export const DEMOS = {
   "help-desk": { pkg: "@managed-copilot/demo-help-desk", port: 7440 },
   "incident-commander": { pkg: "@managed-copilot/demo-incident-commander", port: 7445 },
   "front-desk": { pkg: "@managed-copilot/demo-front-desk", port: 7450 },
+  downhill: { pkg: "@managed-copilot/demo-downhill", port: 7455 },
   "software-factory": { pkg: "@managed-copilot/demo-software-factory", port: 7480 },
   assistant: { pkg: "@managed-copilot/demo-assistant", port: 7490 },
 } as const;
@@ -270,8 +271,28 @@ interface DemoScript {
 const DEMO_SCRIPTS: readonly DemoScript[] = [
   { name: "pattern-race", demo: "pattern-race", title: "Pattern Race: one job in all six patterns", script: "happy-path", cost: "one premium request per lane", timeoutMinutes: 30 },
   { name: "help-desk", demo: "help-desk", title: "Help Desk: five customers on one shared runtime, with approvals", script: "happy-path", cost: "a couple of premium requests", timeoutMinutes: 25 },
+  {
+    name: "downhill",
+    demo: "downhill",
+    title: "Downhill: a ride, the shop's launch code rejected at checkout, and a typed complaint to its support agent in Help Desk (Microsoft Edge)",
+    script: "happy-path",
+    args: ["--reset"],
+    requires: ["edge", "app:help-desk"],
+    cost: "a premium request for Help Desk's agent, plus Incident Commander's response to the alert it fires (a handful of premium requests and sandboxes, more with the Software Factory route)",
+    timeoutMinutes: 20,
+  },
   { name: "repo-doctor", demo: "repo-doctor", title: "Repo Doctor: fix a failing repository in a sandbox with network rules", script: "happy-path", cost: "two turns", timeoutMinutes: 30 },
   { name: "data-desk", demo: "data-desk", title: "Data Desk: answers on the shared runtime, then a move into a Python sandbox", script: "happy-path", cost: "about two premium requests", timeoutMinutes: 25 },
+  {
+    name: "data-desk-downhill",
+    demo: "data-desk",
+    title: "Data Desk: Downhill's live shop sales, the rejected launch codes, and a chart of promotional sales",
+    script: "happy-path",
+    args: ["--dataset", "live-downhill-sales"],
+    requires: ["app:downhill"],
+    cost: "about two premium requests",
+    timeoutMinutes: 25,
+  },
   { name: "research-swarm", demo: "research-swarm", title: "Research Swarm: parallel researchers and a cited report", script: "happy-path", cost: "a handful of premium requests", timeoutMinutes: 30 },
   { name: "incident-commander", demo: "incident-commander", title: "Incident Commander: a mixed coordinator and an approval that waits", script: "happy-path", cost: "a handful of premium requests", timeoutMinutes: 35 },
   {

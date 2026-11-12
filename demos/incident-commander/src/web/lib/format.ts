@@ -37,3 +37,9 @@ export const cx = (...names: readonly (string | false | null | undefined)[]): st
 
 /** A Software Factory work order's number: `WO-0012`. */
 export const workOrderLabel = (number: number): string => `WO-${String(number).padStart(4, "0")}`;
+
+/** The version a deploy asks for, as the server does (deploy.ts): the next patch, `1.4.2` → `1.4.3`. */
+export function nextVersion(version: string | undefined): string | undefined {
+  const match = version?.match(/^(\d+)\.(\d+)\.(\d+)$/);
+  return match ? `${match[1]}.${match[2]}.${Number(match[3]) + 1}` : undefined;
+}

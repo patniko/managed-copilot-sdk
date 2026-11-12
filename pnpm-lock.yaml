@@ -219,6 +219,33 @@ importers:
         specifier: ^4.0.0
         version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
+  demos/downhill:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.19.2
+      '@types/three':
+        specifier: ^0.187.0
+        version: 0.187.0
+      playwright-core:
+        specifier: ^1.64.1
+        version: 1.64.1
+      three:
+        specifier: ^0.187.0
+        version: 0.187.0
+      tsx:
+        specifier: ^4.21.0
+        version: 4.23.15
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vite:
+        specifier: ^8.3.4
+        version: 8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)
+      vitest:
+        specifier: ^4.0.0
+        version: 4.1.12(@types/node@24.19.2)(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   demos/front-desk:
     dependencies:
       '@github/copilot-sdk':

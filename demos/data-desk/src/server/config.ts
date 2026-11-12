@@ -31,6 +31,8 @@ export interface DeskConfig {
   readonly factoryUrl?: string;
   /** Software Factory's address for people, in links (`SOFTWARE_FACTORY_PUBLIC_URL`, else `factoryUrl`). */
   readonly factoryPublicUrl?: string;
+  /** Where Data Desk's server fetches Downhill's shop sales (`DOWNHILL_URL`); unset, that sample isn't offered. */
+  readonly downhillUrl?: string;
 }
 
 function findPackageRoot(start: string): string {
@@ -48,6 +50,8 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
   const attachUrl = parseAttachUrl(env.DATA_DESK_ATTACH_URL);
   const factoryUrl = parseFactoryUrl(env.SOFTWARE_FACTORY_URL);
   const factoryPublicUrl = factoryUrl ? (parseFactoryUrl(env.SOFTWARE_FACTORY_PUBLIC_URL) ?? factoryUrl) : undefined;
+  // The same rules as the factory's address: http or https, no credentials or query, no trailing slash.
+  const downhillUrl = parseFactoryUrl(env.DOWNHILL_URL);
   return {
     port: Number(env.PORT ?? env.DATA_DESK_PORT ?? 7430),
     host: env.HOST ?? "127.0.0.1",
@@ -63,5 +67,6 @@ export function loadConfig(env: Readonly<Record<string, string | undefined>> = p
     maxUploadBytes: 5 * 1024 * 1024,
     healthIntervalMs: 15_000,
     ...(factoryUrl ? { factoryUrl, factoryPublicUrl } : {}),
+    ...(downhillUrl ? { downhillUrl } : {}),
   };
 }

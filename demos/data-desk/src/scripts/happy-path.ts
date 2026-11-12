@@ -4,6 +4,7 @@
  *   pnpm happy-path                                   # http://localhost:7430, shifted by MANAGED_COPILOT_PORT_OFFSET
  *   pnpm happy-path --url https://data-desk.<environment-domain>
  *   pnpm happy-path --keep                             # leave the analysis (and its sandbox) for a look in the UI
+ *   pnpm happy-path --dataset live-downhill-sales      # Downhill's shop sales, fetched now (Data Desk needs DOWNHILL_URL)
  *
  * It starts an analysis of the coffee sales sample, asks a question Data Desk's tools answer on the shared runtime,
  * then asks for a chart: the agent requests a sandbox, the script approves, and the same session moves and draws it.
@@ -74,17 +75,20 @@ async function run(): Promise<string[]> {
   const health = await api<{ status: string; platform: string }>("GET", "/api/health");
   if (health.platform !== "connected") throw new HappyPathError(`Data Desk isn't connected to Managed Copilot yet (${health.platform}).`);
   const state = await api<DeskState>("GET", "/api/state");
-  const dataset = state.datasets.find((candidate) => candidate.id === values.dataset);
-  if (!dataset) throw new HappyPathError(`No dataset "${values.dataset}" (have: ${state.datasets.map((candidate) => candidate.id).join(", ")}).`);
-  const [question, chart] = dataset.prompts;
-  if (!question || !chart) throw new HappyPathError(`The dataset "${dataset.id}" has no starting prompts.`);
-  log(`Data Desk at ${base} · ${dataset.name} (${dataset.rows} rows)`);
+  // A remote sample is fetched fresh when the analysis starts, and its prompts come with that copy.
+  const listed = state.datasets.find((candidate) => candidate.id === values.dataset);
+  const picked = listed ?? state.remoteSamples?.find((candidate) => candidate.id === values.dataset);
+  if (!picked) throw new HappyPathError(`No dataset "${values.dataset}" (have: ${[...(state.remoteSamples ?? []), ...state.datasets].map((candidate) => candidate.id).join(", ")}).`);
+  if (listed && listed.prompts.length < 2) throw new HappyPathError(`The dataset "${listed.id}" has no starting prompts.`);
+  log(`Data Desk at ${base} · ${listed ? `${listed.name} (${listed.rows} rows)` : `${picked.name} (fetched now)`}`);
 
-  const created = await api<AnalysisView>("POST", "/api/analyses", { datasetId: dataset.id });
+  const created = await api<AnalysisView>("POST", "/api/analyses", { datasetId: picked.id });
   const id = created.id;
   const seen = new Set<string>();
   log(`Started session ${id} on the ${created.placement === "shared" ? "shared runtime" : created.placement}`);
   try {
+    const [question, chart] = created.dataset?.prompts ?? [];
+    if (!question || !chart) throw new HappyPathError(`The dataset "${picked.id}" has no starting prompts.`);
     if (created.placement !== "shared") throw new HappyPathError(`A new analysis should start on the shared runtime, not ${created.placement}.`);
     log(`You: ${question.text}`);
     await api("POST", `/api/analyses/${id}/messages`, { prompt: question.text });

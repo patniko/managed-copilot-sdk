@@ -1,0 +1,504 @@
+/* ---------- the Downhill Shop (the game's own look: cream panels, navy outlines, lime and orange) ---------- */
+.screen.shop {
+  display: grid;
+  grid-template-columns: minmax(330px, 400px) minmax(0, 1fr) minmax(290px, 340px);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 24px;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 24px 28px;
+  background: linear-gradient(90deg, rgba(20, 32, 74, 0.62) 0%, rgba(20, 32, 74, 0.18) 32%, rgba(20, 32, 74, 0) 46%, rgba(20, 32, 74, 0) 62%, rgba(20, 32, 74, 0.5) 100%);
+}
+.screen.shop.hidden {
+  display: none;
+}
+.shop button {
+  font-family: inherit;
+}
+.shop-side {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 4px 10px;
+}
+.shop-title {
+  font-family: var(--display);
+  font-size: clamp(30px, 3.2vw, 46px);
+  line-height: 0.95;
+  color: var(--cream);
+  -webkit-text-stroke: 3px var(--navy);
+  paint-order: stroke fill;
+  text-shadow: 0 5px 0 rgba(20, 32, 74, 0.45);
+  transform: rotate(-2deg);
+  transform-origin: left bottom;
+}
+.shop-title small {
+  display: block;
+  margin-top: 6px;
+  font-size: 14px;
+  letter-spacing: 0.22em;
+  color: var(--lime2);
+  -webkit-text-stroke: 0;
+  text-shadow: 0 2px 0 var(--navy);
+}
+
+/* launch-week banner */
+.shop-offer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 10px 16px;
+  color: var(--navy);
+  background: linear-gradient(180deg, #ffd27a 0%, var(--orange) 100%);
+  border: 3px solid var(--navy);
+  border-radius: 16px;
+  box-shadow: 0 5px 0 var(--navy);
+}
+.shop-offer p {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+.shop-offer .tag {
+  display: block;
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  opacity: 0.75;
+}
+.shop-offer .btn {
+  flex: none;
+  color: var(--cream);
+  background: var(--navy);
+  box-shadow: 0 4px 0 rgba(20, 32, 74, 0.45);
+}
+
+/* the looks */
+.shop-items {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.shop-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--navy);
+  background: rgba(255, 246, 224, 0.92);
+  border: 3px solid var(--navy);
+  border-radius: 16px;
+  box-shadow: 0 5px 0 var(--navy);
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s;
+}
+.shop-item:hover,
+.shop-item:focus-visible {
+  transform: translateY(-3px);
+  outline: none;
+}
+.shop-item.sel {
+  background: linear-gradient(180deg, #fffbe8, var(--lime2));
+  transform: translateY(-4px);
+  box-shadow: 0 7px 0 var(--navy), 0 0 0 3px rgba(255, 255, 255, 0.65);
+}
+.shop-item .sw {
+  display: flex;
+  height: 14px;
+  margin-bottom: 6px;
+  overflow: hidden;
+  border: 2px solid var(--navy);
+  border-radius: 7px;
+}
+.shop-item .sw i {
+  flex: 1;
+}
+.shop-item .nm {
+  font-family: var(--display);
+  font-size: 16px;
+  letter-spacing: 0.01em;
+}
+.shop-item .foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.shop-item .who {
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.7;
+}
+.shop-item .st {
+  font-weight: 900;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.shop-item .st[data-status='in-cart'],
+.shop-item .st[data-status='owned'],
+.shop-item .st[data-status='equipped'] {
+  padding: 1px 7px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  border-radius: 8px;
+}
+.shop-item .st[data-status='in-cart'] {
+  color: var(--navy);
+  background: var(--orange);
+}
+.shop-item .st[data-status='owned'] {
+  color: var(--cream);
+  background: var(--navy);
+}
+.shop-item .st[data-status='equipped'] {
+  color: var(--navy);
+  background: var(--lime);
+  box-shadow: inset 0 0 0 2px var(--navy);
+}
+
+/* the stage: the 3D preview shows through; the caption says what it is */
+.shop-stage {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-width: 0;
+  pointer-events: none;
+}
+.shop-caption {
+  width: 100%;
+  max-width: 420px;
+  padding: 12px 16px 14px;
+  color: var(--navy);
+  background: rgba(255, 246, 224, 0.93);
+  border: 3px solid var(--navy);
+  border-radius: 18px;
+  box-shadow: 0 6px 0 var(--navy);
+  pointer-events: auto;
+}
+/* the support chat opens over the stage; Back and Support wait behind it until it closes */
+.shop.support-open .shop-caption,
+.shop.support-open .shop-top .btn.ghost {
+  visibility: hidden;
+}
+.shop-caption .nm {
+  font-family: var(--display);
+  font-size: 24px;
+}
+.shop-caption .who {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+.shop-caption .blurb {
+  margin: 4px 0 2px;
+  font-weight: 600;
+}
+.shop-caption .deal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.shop-caption .price {
+  font-family: var(--display);
+  font-size: 24px;
+  color: var(--sky);
+}
+
+/* cart and checkout */
+.shop-cart {
+  display: flex;
+  flex-direction: column;
+  align-self: start;
+  gap: 10px;
+  max-height: calc(100% - 72px);
+  margin-top: 72px;
+  overflow-y: auto;
+  padding: 16px 18px 18px;
+  color: var(--navy);
+  background: rgba(255, 246, 224, 0.95);
+  border: 4px solid var(--navy);
+  border-radius: 22px;
+  box-shadow: 0 8px 0 var(--navy), 0 24px 48px rgba(0, 0, 0, 0.3);
+}
+.shop-cart h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 22px;
+}
+.shop .lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.shop .lines li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: 'nm pr rm' 'who pr rm';
+  align-items: center;
+  column-gap: 10px;
+  padding: 8px 10px;
+  background: #fff;
+  border: 2px solid rgba(20, 32, 74, 0.18);
+  border-radius: 12px;
+}
+.shop .lines li.empty {
+  display: block;
+  font-weight: 600;
+  opacity: 0.75;
+  background: transparent;
+  border-style: dashed;
+}
+.shop .lines .nm {
+  grid-area: nm;
+  font-weight: 800;
+}
+.shop .lines .who {
+  grid-area: who;
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.65;
+}
+.shop .lines .pr {
+  grid-area: pr;
+  font-weight: 800;
+}
+.shop .lines .rm {
+  grid-area: rm;
+  width: 28px;
+  height: 28px;
+  color: var(--navy);
+  font: 900 16px/1 var(--display);
+  background: var(--cream);
+  border: 2px solid var(--navy);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.shop .promo label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+.shop .promo .field {
+  display: flex;
+  gap: 8px;
+}
+.shop .promo input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  color: var(--navy);
+  font: 700 16px/1.1 'Segoe UI', system-ui, sans-serif;
+  background: #fff;
+  border: 3px solid var(--navy);
+  border-radius: 12px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.shop .promo input:focus {
+  outline: 3px solid var(--sky);
+  outline-offset: 1px;
+}
+.shop .btn:disabled {
+  cursor: default;
+  opacity: 0.5;
+  transform: none;
+  filter: none;
+}
+.promo-note:empty {
+  display: none;
+}
+.promo-note p {
+  margin: 0;
+}
+.promo-note.error {
+  padding: 8px 12px;
+  background: #fff0e6;
+  border: 2px solid #c2410c;
+  border-radius: 12px;
+}
+.promo-note.error .promo-msg {
+  font-weight: 800;
+  color: #b42318;
+}
+.promo-note.ok .promo-msg {
+  font-weight: 800;
+  color: #2f6b12;
+}
+.shop .help {
+  margin: 4px 0 0;
+  font-weight: 600;
+}
+.shop .link {
+  padding: 0;
+  font-weight: 800;
+  color: var(--sky);
+  text-decoration: underline;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.shop .link:focus-visible {
+  outline: 2px solid var(--sky);
+  outline-offset: 2px;
+}
+.shop .sums {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.shop .sum {
+  display: flex;
+  justify-content: space-between;
+  font-weight: 700;
+}
+.shop .sum.discount {
+  color: #2f6b12;
+}
+.shop .sum.total {
+  margin-top: 4px;
+  padding-top: 6px;
+  font-family: var(--display);
+  font-size: 22px;
+  border-top: 2px dashed rgba(20, 32, 74, 0.3);
+}
+.shop .buy {
+  width: 100%;
+}
+.shop .fine {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  opacity: 0.7;
+}
+/* which storefront code checkout runs (it changes when a fix is deployed) */
+.shop .storefront-line {
+  margin: 2px 0 0;
+  padding: 6px 10px;
+  font: 700 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  background: rgba(20, 32, 74, 0.06);
+  border-radius: 10px;
+}
+.shop .storefront-line.problem {
+  color: #b42318;
+}
+.shop .storefront-line.fresh {
+  animation: storefront-fresh 3s ease-out;
+}
+@keyframes storefront-fresh {
+  0%,
+  35% {
+    background: var(--lime2);
+    box-shadow: 0 0 0 3px var(--lime);
+  }
+  100% {
+    background: rgba(20, 32, 74, 0.06);
+    box-shadow: none;
+  }
+}
+.shop .demo-control {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  opacity: 0.6;
+}
+.shop .demo-control:hover,
+.shop .demo-control:focus-within {
+  opacity: 1;
+}
+.shop .demo-control .link {
+  font-size: 11px;
+}
+.shop .demo-control .problem {
+  color: #b42318;
+}
+.promo-note.info .promo-msg {
+  font-weight: 700;
+}
+
+/* leave, or ride in the new look */
+.shop-top {
+  position: absolute;
+  top: 24px;
+  right: 28px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* receipt */
+.shop-receipt {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 32, 74, 0.45);
+  backdrop-filter: blur(3px);
+}
+.shop-receipt.hidden {
+  display: none;
+}
+.shop-receipt .panel {
+  width: min(480px, 92vw);
+  min-width: 0;
+}
+.shop-receipt .lines {
+  margin-bottom: 10px;
+}
+.shop-receipt .lines li {
+  grid-template-areas: 'nm pr';
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.shop-receipt .wearing {
+  margin: 14px 0 0;
+  font-weight: 700;
+}
+
+@media (max-width: 1100px) {
+  .screen.shop {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+  }
+  .shop-stage {
+    display: none;
+  }
+}
+@media (max-width: 720px) {
+  .screen.shop {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    align-content: start;
+    overflow-y: auto;
+  }
+  .shop-side {
+    overflow: visible;
+  }
+  .shop-cart {
+    max-height: none;
+    margin-top: 0;
+  }
+  .shop-top {
+    position: static;
+    justify-content: flex-end;
+  }
+}

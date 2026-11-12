@@ -1,4 +1,4 @@
-import { CheckCircleFillIcon, ClockIcon, DotFillIcon, ShieldIcon, XCircleFillIcon } from "@primer/octicons-react";
+import { CheckCircleFillIcon, ClockIcon, CommentIcon, DotFillIcon, ShieldIcon, XCircleFillIcon } from "@primer/octicons-react";
 import type { AvatarColor, CustomerCard, TicketStatus } from "../../../shared/types.js";
 import { cx } from "../../lib/cx.js";
 import { STATUS, type Tone } from "../../lib/format.js";
@@ -25,8 +25,8 @@ const AVATAR: Readonly<Record<AvatarColor, string>> = {
   red: "bg-display-red-muted text-display-red",
 };
 
-/** A customer's initials on their identity color. */
-export function CustomerAvatar({ customer, size = 24, className }: { readonly customer: CustomerCard; readonly size?: number; readonly className?: string }) {
+/** A customer's or player's initials on their identity color. */
+export function CustomerAvatar({ customer, size = 24, className }: { readonly customer: Pick<CustomerCard, "initials" | "color">; readonly size?: number; readonly className?: string }) {
   return (
     <span
       aria-hidden
@@ -51,6 +51,8 @@ export function StatusLabel({ status, className }: { readonly status: TicketStat
 
 function StatusIcon({ status }: { readonly status: TicketStatus }) {
   switch (status) {
+    case "opened":
+      return <CommentIcon size={12} />;
     case "starting":
       return <Spinner size={12} />;
     case "answering":
@@ -68,6 +70,7 @@ function StatusIcon({ status }: { readonly status: TicketStatus }) {
 
 /** A status as a small dot, for the counters' session strip. */
 export const STATUS_DOT: Readonly<Record<TicketStatus, string>> = {
+  opened: "bg-accent-muted",
   starting: "bg-neutral-muted",
   answering: "bg-accent-emphasis animate-pulse",
   approval: "bg-attention-emphasis",
@@ -75,3 +78,18 @@ export const STATUS_DOT: Readonly<Record<TicketStatus, string>> = {
   resolved: "bg-success-emphasis",
   failed: "bg-danger-emphasis",
 };
+
+/** A live player: a pulsing dot and "Live". */
+export function LiveBadge({ className }: { readonly className?: string }) {
+  return (
+    <span className={cx("Label Label--success shrink-0 gap-1", className)} title="A live player, from the Downhill Shop">
+      <span className="live-dot" aria-hidden />
+      Live
+    </span>
+  );
+}
+
+/** The product a player came from. */
+export function ProductChip({ className }: { readonly className?: string }) {
+  return <span className={cx("Label Label--accent shrink-0", className)}>Downhill</span>;
+}

@@ -1,6 +1,28 @@
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { SoftwareIssue, Ticket, ToolItem } from "../../src/shared/types.js";
-import { customerLine, inlineMarkdown, latestMessage, money, operatorOutcome, plainText, premium, STATUS, toolArgs, WORK_ORDER_STATUS, workOrderLine, workOrderName } from "../../src/web/lib/format.js";
+import type { PlayerTicket, SoftwareIssue, Ticket, ToolItem } from "../../src/shared/types.js";
+import { PlayerConversation } from "../../src/web/components/PlayerChat.js";
+import { reduceChat, type ChatState } from "../../src/web/lib/chat.js";
+import {
+  approvalTitle,
+  checkoutLine,
+  customerLine,
+  inlineMarkdown,
+  latestMessage,
+  money,
+  operatorOutcome,
+  plainText,
+  PLAYER_GREETING,
+  playerLabel,
+  premium,
+  STATUS,
+  toolArgs,
+  WORK_ORDER_STATUS,
+  workOrderLine,
+  workOrderName,
+} from "../../src/web/lib/format.js";
+import { chatTicketId, parseHash } from "../../src/web/lib/router.js";
 import { reduce, type StoreState } from "../../src/web/lib/store.js";
 
 const tool = (overrides: Partial<ToolItem>): ToolItem => ({ kind: "tool", id: "t1", name: "get_order", args: { orderId: "co-48177" }, at: "2026-11-03T10:00:00.000Z", status: "done", ...overrides });
@@ -77,6 +99,30 @@ describe("words on the wall", () => {
     expect(inlineMarkdown("$39 back, 3 * 4 = 12")).toEqual([{ kind: "text", text: "$39 back, 3 * 4 = 12" }]);
     expect(plainText("Yes! **CO-48234** (Merino)\n- ships __tomorrow__")).toBe("Yes! CO-48234 (Merino) ships tomorrow");
   });
+
+  it("shows a player's checkout and refund in plain words", () => {
+    expect(playerLabel("Mona")).toBe("Mona · Downhill");
+    expect(checkoutLine({ code: "trail15 ", error: "Invalid code.", items: [], subtotalCents: 499 })).toBe('Code "trail15 ": Invalid code.');
+    expect(checkoutLine({ items: [], subtotalCents: 499, order: { id: "DH-1042", totalCents: 499, paidAt: "" } })).toBe("Paid full price · DH-1042");
+    expect(checkoutLine({ items: [], subtotalCents: 499 })).toBe("No code applied");
+    const refund = { id: "r1", action: "refund" as const, orderId: "DH-1042", amount: 0.75 };
+    expect(approvalTitle(refund, "Mona")).toBe("Refund $0.75 of DH-1042 to Mona");
+    expect(approvalTitle({ ...refund, orderId: "CO-48177", amount: 39 })).toBe("Refund $39.00 · CO-48177");
+    expect(customerLine(tool({ name: "get_checkout", args: {}, status: "running" }))).toEqual({ text: "Looking at your checkout…", tone: "muted" });
+    expect(customerLine(tool({ name: "get_checkout", args: {} }))).toEqual({ text: "Looked at your checkout", tone: "muted" });
+    expect(operatorOutcome(tool({ name: "get_checkout", args: {}, result: { ok: true, code: "trail15", bought: true } }))).toEqual({ text: 'Code "trail15" · bought anyway', tone: "success" });
+    expect(customerLine(tool({ name: "request_refund", args: { orderId: "DH-1042" }, result: { ok: true, refunded: 0.75 } }))).toEqual({ text: "Refund approved: $0.75 back", tone: "success" });
+  });
+
+  it("routes the wall's pages by hash, and a player's chat by path", () => {
+    expect(parseHash("#/p/mhv3k2a1q9z4f2")).toEqual({ kind: "player", id: "mhv3k2a1q9z4f2" });
+    expect(parseHash("#/c/c05")).toEqual({ kind: "customer", id: "c05" });
+    expect(chatTicketId("/chat/mhv3k2a1q9z4f2")).toBe("mhv3k2a1q9z4f2");
+    expect(chatTicketId("/chat/mhv3k2a1q9z4f2/")).toBe("mhv3k2a1q9z4f2");
+    expect(chatTicketId("/chat")).toBe("");
+    expect(chatTicketId("/")).toBeUndefined();
+    expect(chatTicketId("/chatter")).toBeUndefined();
+  });
 });
 
 describe("store", () => {
@@ -85,6 +131,7 @@ describe("store", () => {
     connection: "open",
     customers: [],
     tickets: {},
+    players: [],
     classifications: {},
     issues: [],
     counters: { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 },
@@ -94,6 +141,7 @@ describe("store", () => {
     size: 25,
     answering: {},
     routing: {},
+    ending: {},
     toasts: [],
   };
   const issue: SoftwareIssue = { area: "cart", title: "Wrong quantities in the cart", reports: [{ customerId: "c08", name: "Lucas Silva", whatHappened: "Charged for 3.", at: "" }] };
@@ -130,10 +178,88 @@ describe("store", () => {
     expect(reduce(base, { type: "ticket", ticket: ticket() })).toBe(base);
   });
 
-  it("follows the current simulation's issues, and drops late ones of an ended simulation", () => {
+  it("follows the software issues, with or without a simulation: players' reports make issues too", () => {
     const started = reduce(base, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()], issues: [] });
     const routed = { ...issue, routed: { workOrderId: "wo_1", number: 1, title: "Fix: wrong quantities in the cart", status: "queued" as const, url: "http://factory.test/#/wo/wo_1" } };
     expect(reduce(started, { type: "issues", issues: [routed] }).issues).toEqual([routed]);
-    expect(reduce(base, { type: "issues", issues: [routed] })).toBe(base);
+    expect(reduce(base, { type: "issues", issues: [routed] }).issues).toEqual([routed]);
+  });
+
+  it("keeps live players' tickets apart from the simulation, and drops late updates of an ended one", () => {
+    const mona = player();
+    const opened = reduce(base, { type: "players", players: [mona] });
+    expect(opened.players).toEqual([mona]);
+    const answering = player({ status: "answering" });
+    expect(reduce(opened, { type: "player", ticket: answering }).players).toEqual([answering]);
+    // A simulation starting or ending doesn't touch them.
+    expect(reduce(opened, { type: "run", run: { id: "r1", size: 5, startedAt: "" }, tickets: [ticket()], issues: [] }).players).toEqual([mona]);
+    expect(reduce(base, { type: "player", ticket: answering })).toBe(base);
+    expect(reduce(opened, { type: "players", players: [] }).players).toEqual([]);
   });
 });
+
+const player = (overrides: Partial<PlayerTicket> = {}): PlayerTicket => ({
+  ticketId: "mhv3k2a1q9z4f2",
+  product: "downhill",
+  player: { name: "Mona", rider: "mona", initials: "M", color: "blue" },
+  createdAt: "2026-11-12T17:30:05.000Z",
+  status: "waiting",
+  items: [],
+  ...overrides,
+});
+
+describe("a player's chat page", () => {
+  const loading: ChatState = { phase: "loading", ended: false, connection: "connecting" };
+  const id = "mhv3k2a1q9z4f2";
+
+  it("shows the ticket and the platform's status as they change, and only that ticket", () => {
+    const ready = reduceChat(loading, { type: "players", players: [player()] }, id);
+    expect(ready).toMatchObject({ phase: "ready", ticket: player(), ended: false });
+    expect(reduceChat(ready, { type: "player", ticket: player({ status: "approval" }) }, id).ticket?.status).toBe("approval");
+    expect(reduceChat(ready, { type: "player", ticket: player({ ticketId: "someoneelse123" }) }, id)).toBe(ready);
+    const offline = reduceChat(ready, { type: "platform", platform: { state: "reconnecting" }, desk: { environment: "help-desk", tools: [], playerTools: [], factory: { configured: false }, triage: { state: "off" }, llmTriage: { state: "off" } } }, id);
+    expect(offline.platform?.state).toBe("reconnecting");
+  });
+
+  it("says the chat ended once the ticket is no longer listed, and stays ended", () => {
+    const ready = reduceChat(loading, { type: "players", players: [player()] }, id);
+    const ended = reduceChat(ready, { type: "players", players: [] }, id);
+    expect(ended.ended).toBe(true);
+    expect(reduceChat(ended, { type: "player", ticket: player() }, id)).toBe(ended);
+    // Not loaded yet: an empty list says nothing.
+    expect(reduceChat(loading, { type: "players", players: [] }, id)).toBe(loading);
+  });
+
+  it("greets the player before anyone writes and lets them write first; the agent types only once they did", () => {
+    const online: ChatState = { phase: "ready", ended: false, connection: "open", platform: { state: "connected" } };
+    const page = (ticket: PlayerTicket, chat = online) => renderToStaticMarkup(createElement(PlayerConversation, { chat: { ...chat, ticket }, ticket, framed: true }));
+    const box = (html: string) => html.match(/<input[^>]*>/)?.[0] ?? "";
+
+    const opened = page(player({ status: "opened" }));
+    expect(textOf(opened)).toContain(PLAYER_GREETING);
+    expect(box(opened)).toContain('placeholder="Tell us what happened…"');
+    expect(box(opened)).not.toContain("disabled");
+    expect(opened).not.toContain('aria-label="Typing"');
+
+    const first = { kind: "message" as const, id: "u1", from: "customer" as const, text: "The discount code isn't working!", attachment: "Checkout details", at: "" };
+    const starting = page(player({ status: "starting", items: [first] }));
+    const words = textOf(starting);
+    expect(words.indexOf(PLAYER_GREETING)).toBeGreaterThanOrEqual(0);
+    expect(words.indexOf(PLAYER_GREETING)).toBeLessThan(words.indexOf(first.text));
+    expect(starting).toContain('aria-label="Typing"');
+    expect(box(starting)).toContain('placeholder="Write a message…"');
+
+    expect(box(page(player({ status: "opened" }), { ...online, platform: { state: "reconnecting" } }))).toContain("disabled");
+  });
+});
+
+/** A page's words, without its markup. */
+function textOf(html: string): string {
+  return html
+    .replace(/<[^>]*>/g, "")
+    .replaceAll("&#x27;", "'")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&amp;", "&");
+}

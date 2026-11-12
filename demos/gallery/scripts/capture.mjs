@@ -116,6 +116,18 @@ const APPS = [
     },
   },
   {
+    id: "downhill",
+    url: `${local(7455)}/?play&autopilot&env=citadel&char=mona&readyMs=1000`,
+    async prepare(page) {
+      // Mona on autopilot, a few seconds into a run on Citadel Coast.
+      await page.waitForFunction(() => globalThis.__ready === true, undefined, { timeout: 90_000 });
+      await page.waitForFunction(() => {
+        const probe = globalThis.__probe?.();
+        return probe?.session === "riding" && (probe.time ?? 0) > 8;
+      }, undefined, { timeout: 60_000 });
+    },
+  },
+  {
     id: "hack-the-harness",
     url: local(7415),
     async prepare(page) {
@@ -143,7 +155,12 @@ const APPS = [
   },
 ];
 
-const browser = await chromium.launch({ channel: process.env.GALLERY_BROWSER_CHANNEL ?? "msedge", headless: true });
+const browser = await chromium.launch({
+  channel: process.env.GALLERY_BROWSER_CHANNEL ?? "msedge",
+  headless: true,
+  // WebGL on the GPU (Downhill, Hack the Harness); a software rasterizer is too slow to play.
+  args: ["--enable-gpu", "--ignore-gpu-blocklist", ...(process.platform === "win32" ? ["--use-angle=d3d11"] : [])],
+});
 const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: 1.5, colorScheme: values.dark ? "dark" : "light" });
 const failures = [];
 

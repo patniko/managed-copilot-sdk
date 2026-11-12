@@ -119,6 +119,8 @@ Every user-facing flow, the tests that run in CI, and the live checks that exerc
 | Flow | Spec | Tests in CI | Live checks | In Azure | Status |
 | --- | --- | --- | --- | --- | --- |
 | Work routed to the software factory: a storefront bug, an incident's fix, an insight | §3, §17 | `demos/software-factory/test/routing.test.ts`, `demos/help-desk/test/factory.test.ts`, `demos/help-desk/test/issues.test.ts`, `demos/incident-commander/test/factory.test.ts`, `demos/data-desk/test/factory.test.ts` | `local.demo-incident-commander-factory`, `local.factory-routing` | `azure.demo-incident-commander-factory` | 🟡 Partial: Help Desk's and Data Desk's sends are checked by hand |
+| A player's support ticket: Downhill's shop rejects the launch code, Contact support opens a live Help Desk chat | §3, §12 | `demos/downhill/test/http.test.ts`, `demos/downhill/test/web/shop.test.ts`, `demos/help-desk/test/player.test.ts` | `local.demo-downhill`, `local.factory-routing` | `azure.demo-downhill` | ✅ Automated |
+| Downhill's shop in analytics: live sales, the rejected launch codes, and a chart of promotional sales | §3, §9 | `demos/data-desk/test/datasets.test.ts`, `demos/data-desk/test/http.test.ts` | `local.demo-data-desk-downhill` | `azure.demo-data-desk-downhill` | ✅ Automated |
 
 ### Apps, people, and models
 
@@ -158,11 +160,16 @@ later (`copilot --version`).
 
 ## Work routed to the software factory
 
-The steps for `local.factory-routing`, with `aspire run` up (Software Factory, Help Desk, and Data Desk run with it).
+The steps for `local.factory-routing`, with `aspire run` up (Software Factory, Help Desk, Data Desk, and Downhill run
+with it).
 
 - [ ] Help Desk: simulate 25 customers. Aisha's and Ben's agents report promo codes rejected at checkout, Lucas's a cart
       quantity that changed, and Hannah's and Arjun's an order shown as delivered that is out for delivery. The wall's
       **Software issues** groups the reports by area.
+- [ ] Downhill: ride a run, open the **Shop**, and press **Apply code** on the launch offer: checkout says **Invalid
+      code.** Buy anyway, then **Contact support**. The chat opens in the game, and the wall shows the player's tile
+      (**Downhill**, **Live**); their report joins **Promo codes rejected at checkout**, and the refund the agent asks
+      for waits on the wall.
 - [ ] **Send to Software Factory** on an issue: it shows the work order (`WO-<n>`) and its status, and the factory's
       work order list marks it **Help Desk**.
 - [ ] On the factory's floor the work order starts from **From Help Desk**: the brief quotes the reports, and it brought
@@ -288,8 +295,10 @@ Spec snippets, walkthroughs, and demo scripts against the running local platform
 | `local.walkthrough-13` | Walkthrough 13: Your own harness | - | a few premium requests |
 | `local.demo-pattern-race` | Pattern Race: one job in all six patterns | pattern-race app | one premium request per lane |
 | `local.demo-help-desk` | Help Desk: five customers on one shared runtime, with approvals | help-desk app | a couple of premium requests |
+| `local.demo-downhill` | Downhill: a ride, the shop's launch code rejected at checkout, and a typed complaint to its support agent in Help Desk (Microsoft Edge) | downhill app, Microsoft Edge, help-desk app | a premium request for Help Desk's agent, plus Incident Commander's response to the alert it fires (a handful of premium requests and sandboxes, more with the Software Factory route) |
 | `local.demo-repo-doctor` | Repo Doctor: fix a failing repository in a sandbox with network rules | repo-doctor app | two turns |
 | `local.demo-data-desk` | Data Desk: answers on the shared runtime, then a move into a Python sandbox | data-desk app | about two premium requests |
+| `local.demo-data-desk-downhill` | Data Desk: Downhill's live shop sales, the rejected launch codes, and a chart of promotional sales | data-desk app, downhill app | about two premium requests |
 | `local.demo-research-swarm` | Research Swarm: parallel researchers and a cited report | research-swarm app | a handful of premium requests |
 | `local.demo-incident-commander` | Incident Commander: a mixed coordinator and an approval that waits | incident-commander app | a handful of premium requests |
 | `local.demo-incident-commander-factory` | Incident Commander and Software Factory: an incident's fix built by the factory, verified, and deployed | incident-commander app, software-factory app | a dozen or so premium requests |
@@ -332,8 +341,10 @@ Spec snippets, demo scripts, and qualification against a deployment in Azure. Ne
 | `azure.snippet-15` | Snippet 15: Execution styles: a direct coordinator's hands (§17) | - | a few premium requests |
 | `azure.demo-pattern-race` | Pattern Race: one job in all six patterns | `--apps-domain`, pattern-race app | one premium request per lane |
 | `azure.demo-help-desk` | Help Desk: five customers on one shared runtime, with approvals | `--apps-domain`, help-desk app | a couple of premium requests |
+| `azure.demo-downhill` | Downhill: a ride, the shop's launch code rejected at checkout, and a typed complaint to its support agent in Help Desk (Microsoft Edge) | `--apps-domain`, downhill app, Microsoft Edge, help-desk app | a premium request for Help Desk's agent, plus Incident Commander's response to the alert it fires (a handful of premium requests and sandboxes, more with the Software Factory route) |
 | `azure.demo-repo-doctor` | Repo Doctor: fix a failing repository in a sandbox with network rules | `--apps-domain`, repo-doctor app | two turns |
 | `azure.demo-data-desk` | Data Desk: answers on the shared runtime, then a move into a Python sandbox | `--apps-domain`, data-desk app | about two premium requests |
+| `azure.demo-data-desk-downhill` | Data Desk: Downhill's live shop sales, the rejected launch codes, and a chart of promotional sales | `--apps-domain`, data-desk app, downhill app | about two premium requests |
 | `azure.demo-research-swarm` | Research Swarm: parallel researchers and a cited report | `--apps-domain`, research-swarm app | a handful of premium requests |
 | `azure.demo-incident-commander` | Incident Commander: a mixed coordinator and an approval that waits | `--apps-domain`, incident-commander app | a handful of premium requests |
 | `azure.demo-incident-commander-factory` | Incident Commander and Software Factory: an incident's fix built by the factory, verified, and deployed | `--apps-domain`, incident-commander app, software-factory app | a dozen or so premium requests |
