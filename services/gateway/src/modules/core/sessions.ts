@@ -199,6 +199,8 @@ interface InventoryChange {
 }
 
 /** How long past the runtime's one-hour refresh threshold a GitHub token answer stays valid (the gateway decides again after). */
+const TOKEN_LEASE_SECONDS = 3600 + 300;
+
 /** Where a session's model calls go instead of its owner's Copilot plan: a Foundry account's deployment, or an endpoint's model. */
 interface InferenceRoute {
   readonly kind: "foundry" | "openai";
@@ -216,8 +218,6 @@ function describeRoute(route: Pick<InferenceRoute, "kind" | "name"> | undefined)
 function sessionInference(route: InferenceRoute): SessionInference {
   return route.kind === "foundry" ? { route: "foundry", foundry: route.name, deployment: route.model } : { route: "openai", openai: route.name, model: route.model };
 }
-
-const TOKEN_LEASE_SECONDS = 3600 + 300;
 
 /**
  * Hook types whose answer can stop the dependent operation, and how they fail closed without their handler (each
