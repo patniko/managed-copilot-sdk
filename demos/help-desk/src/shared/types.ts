@@ -75,7 +75,7 @@ export interface CustomerCard {
 /**
  * - `starting`: its session is being created.
  * - `answering`: the agent is working on the customer's message.
- * - `approval`: a refund, a cancellation, or a proposed team memory waits for the operator.
+ * - `approval`: a refund or a cancellation waits for the operator. A proposed team memory doesn't hold the ticket.
  * - `waiting`: the agent answered and waits for the customer.
  * - `resolved`: the agent marked the request handled.
  * - `failed`: the session couldn't start or the platform reported an error.

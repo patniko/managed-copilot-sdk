@@ -44,6 +44,7 @@ describe("words on the wall", () => {
     expect(operatorOutcome(tool({ name: "track_shipment", result: { carrier: "UPS", status: "in transit" } }))).toEqual({ text: "UPS · in transit", tone: "success" });
     expect(operatorOutcome(tool({ name: "request_refund", result: { refunded: 24 } }))).toEqual({ text: "$24.00 refunded", tone: "success" });
     expect(operatorOutcome(tool({ status: "asking" }))).toEqual({ text: "Needs approval", tone: "attention" });
+    expect(operatorOutcome(tool({ name: "store_memory", args: { subject: "Boots" } }))).toEqual({ text: "Proposed to the team", tone: "muted" });
     expect(toolArgs(tool({ args: { orderId: "co-1", amount: 5 } }))).toBe("CO-1 · $5.00");
   });
 

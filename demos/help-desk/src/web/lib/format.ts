@@ -143,7 +143,8 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
     case "resolve_conversation":
       return { text: typeof item.args["summary"] === "string" ? item.args["summary"] : "Resolved", tone: "success" };
     case "store_memory":
-      return { text: "Added to team knowledge", tone: "success" };
+      // The call only proposes the fact: the operator adds it or not later, in the team knowledge base.
+      return { text: "Proposed to the team", tone: "muted" };
     default:
       return { text: "Done", tone: "success" };
   }

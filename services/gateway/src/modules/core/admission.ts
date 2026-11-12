@@ -9,7 +9,10 @@
 import { HANDS_TOOLS, ManagedCopilotError, PLATFORM_TOOLS, type ExecutionStyle, type NetworkPolicy, type Placement, type SubagentSandboxes } from "@managed-copilot/protocol";
 import type { RegisteredPlatformTool, ResolvedEnvironment } from "./contracts.js";
 
-/** `BuiltInTools.Isolated` from @github/copilot-sdk 1.0.31: built-ins that stay inside one session. */
+/**
+ * `BuiltInTools.Isolated` from @github/copilot-sdk 1.0.31, built-ins that stay inside one session, except `skill`:
+ * `sharedBuiltins` adds it only for an environment that ships skills.
+ */
 export const SESSION_SAFE_BUILTINS = ["ask_user", "task_complete", "exit_plan_mode", "task", "read_agent", "write_agent", "list_agents", "send_inbox", "context_board"] as const;
 
 /**
