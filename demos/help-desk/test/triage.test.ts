@@ -9,7 +9,17 @@ import { HelpDesk } from "../src/server/desk.js";
 import { createRequestHandler } from "../src/server/http.js";
 import { EventHub } from "../src/server/hub.js";
 import { authorized, complete, EndpointError, parseRequest, readAnswers, stripContext } from "../src/server/triage-endpoint.js";
-import { TRIAGE_QUESTIONS, TRIAGE_SESSION_PREFIX, Triage, USES_PER_SESSION, type ClassifierSession, type TriagePlatform } from "../src/server/triage.js";
+import {
+  LLM_TRIAGE_INSTRUCTIONS,
+  LLM_TRIAGE_SESSION_PREFIX,
+  TRIAGE_QUESTIONS,
+  TRIAGE_SESSION_PREFIX,
+  Triage,
+  USES_PER_SESSION,
+  type ClassifierSession,
+  type SessionMetrics,
+  type TriagePlatform,
+} from "../src/server/triage.js";
 import { CUSTOMERS } from "../src/server/seed.js";
 import type { PlatformStatus, ServerEvent } from "../src/shared/types.js";
 import { FakeFactory, FakePlatform, settle, testConfig } from "./fakes.js";
@@ -213,6 +223,14 @@ describe("the triage endpoint over HTTP", () => {
 class FakeClassifierSession implements ClassifierSession {
   readonly prompts: string[] = [];
   disconnected = false;
+  /** Each classification costs this much, as the session's usage metrics report it. */
+  readonly rpc = {
+    usage: {
+      getMetrics: async (): Promise<SessionMetrics> => ({
+        modelMetrics: { [this.config.model ?? "model"]: { usage: { inputTokens: this.prompts.length * 70, outputTokens: this.prompts.length * 2 } } },
+      }),
+    },
+  };
   constructor(
     readonly sessionId: string,
     readonly config: SessionConfig,
@@ -273,12 +291,26 @@ describe("the classifier", () => {
   it("asks a session with the questions as its whole system message, no tools, and structured output", async () => {
     const platform = new FakeTriagePlatform();
     const triage = new Triage(platform, "help-desk-triage");
-    expect(await triage.classify("I want a refund today")).toEqual({ category: "refund", urgent: true });
+    expect(await triage.classify("I want a refund today")).toEqual({ category: "refund", urgent: true, usage: { inputTokens: 70, outputTokens: 2 } });
     const config = platform.sessions[0]!.config;
     expect(config.sessionId!.startsWith(TRIAGE_SESSION_PREFIX)).toBe(true);
     expect(config).toMatchObject({ model: "ms-decision-1", streaming: false, availableTools: [], systemMessage: { mode: "replace" } });
     expect(JSON.parse((config.systemMessage as { content: string }).content)).toEqual(TRIAGE_QUESTIONS);
     expect(triage.status).toEqual({ state: "ready", environment: "help-desk-triage", model: "ms-decision-1" });
+  });
+
+  it("can ask the platform's LLM instead, with the questions in words, and reports each classification's own usage", async () => {
+    const platform = new FakeTriagePlatform();
+    platform.model = "claude-haiku-4.5";
+    const triage = new Triage(platform, "help-desk", "llm");
+    expect(triage.method).toBe("llm");
+    expect(await triage.classify("first")).toMatchObject({ usage: { inputTokens: 70, outputTokens: 2 } });
+    expect(await triage.classify("second")).toMatchObject({ usage: { inputTokens: 70, outputTokens: 2 } });
+    expect(platform.sessions).toHaveLength(1);
+    const config = platform.sessions[0]!.config;
+    expect(config.sessionId!.startsWith(LLM_TRIAGE_SESSION_PREFIX)).toBe(true);
+    expect(config).toMatchObject({ model: "claude-haiku-4.5", availableTools: [], systemMessage: { mode: "replace", content: LLM_TRIAGE_INSTRUCTIONS } });
+    expect(LLM_TRIAGE_INSTRUCTIONS).toContain("website-problem");
   });
 
   it("reuses its sessions, and replaces one after many classifications", async () => {
@@ -307,7 +339,7 @@ describe("the classifier", () => {
 
   it("deletes classification sessions an earlier Help Desk left behind", async () => {
     const platform = new FakeTriagePlatform();
-    platform.listed.push(`${TRIAGE_SESSION_PREFIX}old`, "hd-run-c01");
+    platform.listed.push(`${TRIAGE_SESSION_PREFIX}old`, `${LLM_TRIAGE_SESSION_PREFIX}old`, "hd-run-c01");
     new Triage(platform, "help-desk-triage");
     platform.connect();
     await settle();
@@ -369,6 +401,43 @@ describe("the wall's tickets", () => {
     expect(desk.state().classification).toBeUndefined();
     expect(events.some((event) => event.type === "classification" && !event.classification)).toBe(true);
     expect(() => desk.classifyOpenings(5)).toThrow(/End the simulation first/);
+  });
+
+  it("can be classified with the decision model and then the LLM, keeping each one's time and usage to compare", async () => {
+    const platform = new FakePlatform();
+    const triagePlatform = new FakeTriagePlatform();
+    const llmPlatform = new FakeTriagePlatform();
+    llmPlatform.model = "claude-haiku-4.5";
+    const events: ServerEvent[] = [];
+    const desk = new HelpDesk(platform, testConfig(), (event) => events.push(event), new FakeFactory(), new Triage(triagePlatform, "help-desk-triage"), new Triage(llmPlatform, "help-desk", "llm"));
+    desk.start();
+    desks.push(desk);
+    expect(desk.desk().llmTriage).toEqual({ state: "ready", environment: "help-desk", model: "claude-haiku-4.5" });
+    expect(() => desk.classifyOpenings(5, "magic" as never)).toThrow(/decision or llm/);
+
+    desk.classifyOpenings(5, "decision");
+    expect(() => desk.classifyOpenings(5, "llm")).toThrow(/Wait for the current Classify/);
+    await settle(50);
+    const decision = desk.state().classification!;
+    expect(decision).toMatchObject({ method: "decision", model: "ms-decision-1", elapsedMs: expect.any(Number), usage: { inputTokens: 350, outputTokens: 10, measured: 5 } });
+
+    desk.classifyOpenings(5, "llm");
+    await settle(50);
+    const llm = desk.state().classification!;
+    expect(llm).toMatchObject({ method: "llm", model: "claude-haiku-4.5", elapsedMs: expect.any(Number), usage: { measured: 5 } });
+    expect(llm.usage).toMatchObject({ inputTokens: 350, outputTokens: 10 });
+    expect(desk.state().classifications).toEqual({ decision, llm });
+    expect(llmPlatform.sessions.flatMap((session) => session.prompts).sort()).toEqual(CUSTOMERS.slice(0, 5).map((customer) => customer.opening).sort());
+    expect(events.at(-1)).toEqual({ type: "classification", classification: llm, classifications: { decision, llm } });
+
+    await desk.simulate(5);
+    expect(desk.state().classifications).toEqual({});
+  });
+
+  it("can't be classified with the LLM when it isn't set up", () => {
+    const desk = new HelpDesk(new FakePlatform(), testConfig(), () => undefined, new FakeFactory(), new Triage(new FakeTriagePlatform(), "help-desk-triage"));
+    desks.push(desk);
+    expect(() => desk.classifyOpenings(5, "llm")).toThrow(/LLM isn't set up/);
   });
 
   it("can't be classified on their own when classification isn't set up", () => {

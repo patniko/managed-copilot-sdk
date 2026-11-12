@@ -8,9 +8,12 @@
 import type { StoredMemory } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import {
+  CLASSIFICATION_METHODS,
   SIMULATION_SIZES,
   type BugArea,
+  type ClassificationMethod,
   type ClassificationRun,
+  type ClassificationRuns,
   type Counters,
   type DeskInfo,
   type HelpDeskState,
@@ -134,8 +137,12 @@ export class HelpDesk implements TicketHost {
   readonly #triage: Triage;
   /** The run's classifications, by customer ID. */
   readonly #triaged = new Map<string, TicketTriage>();
+  /** Classification with the support sessions' ordinary LLM, for Classify's comparison. */
+  readonly #llmTriage: Triage;
   /** The latest Classify, until a simulation starts. */
   #classification: ClassificationRun | undefined;
+  /** The latest Classify of each method, until a simulation starts. */
+  #classifications: ClassificationRuns = {};
 
   constructor(
     platform: DeskPlatform,
@@ -143,6 +150,7 @@ export class HelpDesk implements TicketHost {
     publish: (event: ServerEvent) => void,
     factory: FactoryClient = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl),
     triage: Triage = new Triage(),
+    llmTriage: Triage = new Triage(undefined, undefined, "llm"),
   ) {
     this.platform = platform;
     this.#config = config;
@@ -150,6 +158,7 @@ export class HelpDesk implements TicketHost {
     this.#factory = factory;
     this.knowledge = new KnowledgeBase(config.dataDir);
     this.#triage = triage;
+    this.#llmTriage = llmTriage;
   }
 
   start(): void {
@@ -157,6 +166,7 @@ export class HelpDesk implements TicketHost {
       this.platform.onConnected(() => void this.sync()),
       this.platform.onStatus(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
       this.#triage.onChange(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
+      this.#llmTriage.onChange(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
     );
     this.#pollTimer = setInterval(() => void this.#poll(), this.#config.countersIntervalMs);
     this.#pollTimer.unref?.();
@@ -177,7 +187,7 @@ export class HelpDesk implements TicketHost {
 
   desk(): DeskInfo {
     const factory = { configured: this.#factory.configured, ...(this.#factory.configured && this.#factory.publicUrl ? { url: this.#factory.publicUrl } : {}) };
-    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, factory, triage: this.#triage.status };
+    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, factory, triage: this.#triage.status, llmTriage: this.#llmTriage.status };
   }
 
   #runInfo(): RunInfo | undefined {
@@ -237,6 +247,7 @@ export class HelpDesk implements TicketHost {
       ...(run ? { run } : {}),
       tickets: this.#views(),
       ...(this.#classification ? { classification: this.#classification } : {}),
+      classifications: this.#classifications,
       issues: this.issues(),
       counters: this.#counters,
       knowledge: this.knowledge.list(),
@@ -250,7 +261,7 @@ export class HelpDesk implements TicketHost {
     return [
       { type: "platform", platform: this.platform.status, desk: this.desk() },
       { type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues: this.issues() },
-      { type: "classification", ...(this.#classification ? { classification: this.#classification } : {}) },
+      this.#classificationEvent(),
       { type: "counters", counters: this.#counters },
       this.#knowledgeEvent(),
     ];
@@ -270,39 +281,64 @@ export class HelpDesk implements TicketHost {
     return operation;
   }
 
+  #classificationEvent(): ServerEvent {
+    return { type: "classification", ...(this.#classification ? { classification: this.#classification } : {}), classifications: this.#classifications };
+  }
+
+  #setClassification(run: ClassificationRun | undefined): void {
+    this.#classification = run;
+    this.#classifications = run ? { ...this.#classifications, [run.method]: run } : {};
+    this.#publish(this.#classificationEvent());
+  }
+
   /**
    * Classifies the first `size` customers' opening messages without starting their sessions, all at once, publishing
-   * each result as it arrives and the time the whole lot took. Replaces the previous Classify; not during a simulation.
+   * each result as it arrives and the time and usage of the whole lot. `decision` uses the decision model, `llm` the
+   * support sessions' model, so the two can be compared. Replaces that method's previous Classify; not during a
+   * simulation or another Classify.
    */
-  classifyOpenings(size: number): ClassificationRun {
+  classifyOpenings(size: number, method: ClassificationMethod = "decision"): ClassificationRun {
     if (!(SIMULATION_SIZES as readonly number[]).includes(size)) throw new HelpDeskError("invalid_request", `Classify ${SIMULATION_SIZES.join(", ")} customers.`);
-    if (!this.#triage.enabled) throw new HelpDeskError("classification_off", "Ticket classification isn't set up. Help Desk's README shows how to turn it on.", 409);
+    if (!(CLASSIFICATION_METHODS as readonly string[]).includes(method)) throw new HelpDeskError("invalid_request", `Classify with ${CLASSIFICATION_METHODS.join(" or ")}.`);
+    const triage = method === "llm" ? this.#llmTriage : this.#triage;
+    if (!triage.enabled) {
+      throw new HelpDeskError("classification_off", method === "llm" ? "Classification with the LLM isn't set up." : "Ticket classification isn't set up. Help Desk's README shows how to turn it on.", 409);
+    }
     if (this.#run || this.#operation) throw new HelpDeskError("busy", "End the simulation first: Classify reads the customers' first messages without starting their sessions.", 409);
-    if (!this.#triage.connected) throw new HelpDeskError("classification_unavailable", "The triage environment isn't connected yet.", 503);
+    if (this.#classification && this.#classification.elapsedMs === undefined) throw new HelpDeskError("busy", "Wait for the current Classify to finish, so its time isn't shared with another.", 409);
+    if (!triage.connected) throw new HelpDeskError("classification_unavailable", method === "llm" ? "Managed Copilot isn't connected yet." : "The triage environment isn't connected yet.", 503);
     const startedAt = new Date();
     const started = performance.now();
     const customers = CUSTOMERS.slice(0, size);
     let current: ClassificationRun = {
       id: runIdAt(startedAt),
+      method,
+      ...(triage.model ? { model: triage.model } : {}),
       size,
       startedAt: startedAt.toISOString(),
       results: Object.fromEntries(customers.map((customer) => [customer.id, { state: "classifying" } satisfies TicketTriage])),
+      usage: { inputTokens: 0, outputTokens: 0, measured: 0 },
     };
-    this.#classification = current;
-    this.#publish({ type: "classification", classification: current });
+    this.#setClassification(current);
     for (const customer of customers) {
-      void this.#triage.classify(customer.opening).then(
-        (result): TicketTriage => ({ state: "done", category: result.category, urgent: result.urgent }),
-        (error: unknown): TicketTriage => ({ state: "failed", message: errorText(error) }),
-      ).then((triage) => {
+      void triage.classify(customer.opening).then(
+        (result) => ({ triage: { state: "done", category: result.category, urgent: result.urgent } satisfies TicketTriage, usage: result.usage }),
+        (error: unknown) => ({ triage: { state: "failed", message: errorText(error) } satisfies TicketTriage, usage: undefined }),
+      ).then(({ triage: result, usage }) => {
         // A simulation or a newer Classify replaced this one.
         if (this.#classification !== current) return;
-        const results = { ...current.results, [customer.id]: triage };
-        const finished = Object.values(results).every((result) => result.state !== "classifying");
-        current = { ...current, results, ...(finished ? { elapsedMs: Math.round(performance.now() - started) } : {}) };
-        this.#classification = current;
-        if (finished) log.info("Classified the customers' first messages", { customers: size, ms: current.elapsedMs });
-        this.#publish({ type: "classification", classification: current });
+        const results = { ...current.results, [customer.id]: result };
+        const finished = Object.values(results).every((entry) => entry.state !== "classifying");
+        const total = usage
+          ? {
+              inputTokens: current.usage.inputTokens + usage.inputTokens,
+              outputTokens: current.usage.outputTokens + usage.outputTokens,
+              measured: current.usage.measured + 1,
+            }
+          : current.usage;
+        current = { ...current, results, usage: total, ...(finished ? { elapsedMs: Math.round(performance.now() - started) } : {}) };
+        if (finished) log.info("Classified the customers' first messages", { method, model: current.model, customers: size, ms: current.elapsedMs, ...current.usage });
+        this.#setClassification(current);
       });
     }
     return current;
@@ -314,10 +350,7 @@ export class HelpDesk implements TicketHost {
     this.#requireConnected();
     return this.#exclusive(async () => {
       await this.#endRun();
-      if (this.#classification) {
-        this.#classification = undefined;
-        this.#publish({ type: "classification" });
-      }
+      if (this.#classification) this.#setClassification(undefined);
       const startedAt = new Date();
       const run: Run = { id: runIdAt(startedAt), size, startedAt };
       this.shop.reset(startedAt);

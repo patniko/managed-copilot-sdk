@@ -85,6 +85,7 @@ describe("store", () => {
     connection: "open",
     customers: [],
     tickets: {},
+    classifications: {},
     issues: [],
     counters: { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 },
     knowledge: [],
@@ -108,11 +109,18 @@ describe("store", () => {
     expect(ended.issues).toEqual([]);
   });
 
-  it("follows Classify's results until a simulation clears them", () => {
-    const classification = { id: "k1", size: 5, startedAt: "", results: { c01: { state: "done" as const, category: "refund" as const, urgent: true } }, elapsedMs: 840 };
-    const classified = reduce(base, { type: "classification", classification });
-    expect(classified.classification).toEqual(classification);
-    expect(reduce(classified, { type: "classification" }).classification).toBeUndefined();
+  it("follows Classify's results, each method's latest for comparison, until a simulation clears them", () => {
+    const usage = { inputTokens: 70, outputTokens: 2, measured: 1 };
+    const decision = { id: "k1", method: "decision" as const, size: 5, startedAt: "", results: { c01: { state: "done" as const, category: "refund" as const, urgent: true } }, elapsedMs: 840, usage };
+    const llm = { ...decision, id: "k2", method: "llm" as const, elapsedMs: 4200, usage: { ...usage, inputTokens: 900 } };
+    const classified = reduce(base, { type: "classification", classification: decision, classifications: { decision } });
+    expect(classified.classification).toEqual(decision);
+    const compared = reduce(classified, { type: "classification", classification: llm, classifications: { decision, llm } });
+    expect(compared.classification).toEqual(llm);
+    expect(compared.classifications).toEqual({ decision, llm });
+    const cleared = reduce(compared, { type: "classification", classifications: {} });
+    expect(cleared.classification).toBeUndefined();
+    expect(cleared.classifications).toEqual({});
   });
 
   it("updates a ticket of the current simulation and drops late updates of an ended one", () => {

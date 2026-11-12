@@ -355,7 +355,7 @@ const localManual: ManualCheck[] = [
   manual(
     "local.help-desk-triage",
     "local",
-    "Help Desk classifies each ticket with Microsoft-Decision-1 through an OpenAI-compatible endpoint, and groups the wall",
+    "Help Desk classifies each ticket with Microsoft-Decision-1 through an OpenAI-compatible endpoint, groups the wall, and compares it with an LLM",
     "docs/qa.md, \"Help Desk's ticket classification\"",
   ),
 ];

@@ -185,8 +185,10 @@ settings), with `aspire run` up.
 - [ ] Simulate 10 customers: within a few seconds, before the agents answer, the wall groups the tickets under
       categories such as **Delivery** and **Refund**, urgent ones first with a flame.
 - [ ] A customer's follow-up message is classified again.
-- [ ] With no simulation, **Classify** 25: the wall groups the 25 customers' first messages as the results arrive,
-      then shows "25 classified in …s", and no support sessions start. Classify is disabled during a simulation.
+- [ ] With no simulation, **Classify** > **Use decision model** with 25: the wall groups the 25 customers' first
+      messages as the results arrive, then shows "Decision model `<deployment>`: 25 classified in …s · … tokens", and no support sessions start. Classify is disabled during a simulation.
+- [ ] Then **Classify** > **Use LLM**: the same 25 are classified by Help Desk's own model, and the wall shows a
+      second line, "LLM `<model>`: 25 classified in …s · … tokens", under the first, for comparison.
 - [ ] Without the settings (`aspire secret delete Parameters:help-desk-decision-endpoint` and `-deployment`, then
       restart), the wall is ungrouped and says classification isn't set up, and the customers' sessions work as before.
 
@@ -307,7 +309,7 @@ By hand:
 | `local.console` | The operator console and `npx managed-copilot operator`: health, sessions, live feed | docs/walkthrough.md 1.14; `npx managed-copilot console`, `npx managed-copilot operator overview` |
 | `local.gallery` | The demo gallery: every card opens its demo or walkthrough | docs/walkthrough.md 1.3; `pnpm gallery` |
 | `local.factory-routing` | Help Desk and Data Desk send work to Software Factory, and its floor shows where each work order came from | docs/qa.md, "Work routed to the software factory" |
-| `local.help-desk-triage` | Help Desk classifies each ticket with Microsoft-Decision-1 through an OpenAI-compatible endpoint, and groups the wall | docs/qa.md, "Help Desk's ticket classification" |
+| `local.help-desk-triage` | Help Desk classifies each ticket with Microsoft-Decision-1 through an OpenAI-compatible endpoint, groups the wall, and compares it with an LLM | docs/qa.md, "Help Desk's ticket classification" |
 
 ### `azure`
 

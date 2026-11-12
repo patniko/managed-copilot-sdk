@@ -352,7 +352,8 @@ describe("operator API and console", () => {
     const sessionId = crypto.randomUUID();
     await bob.request("session.create", { sessionId });
     const sessions = gateway.gateway.app.service("sessions") as unknown as { runtimeActivity(id: string): { busy?: string; lastRequestAt?: number } | undefined };
-    expect(sessions.runtimeActivity(sessionId)?.busy).toBeUndefined();
+    // Attaching starts a background reconcile of pending actions (two list calls to the runtime): wait for it to settle.
+    await waitUntil(() => sessions.runtimeActivity(sessionId)?.busy === undefined);
     const hold = runtime.holdNext("session.send", sessionId);
     const sending = bob.request("session.send", { sessionId, prompt: "hello" });
     await hold.held;

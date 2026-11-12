@@ -180,11 +180,26 @@ The endpoint accepts nothing else: a streaming request, a request without a JSON
 isn't an enum or a boolean gets a 400. A few classifier sessions (`hdt-…`) are reused, and replaced after 50
 classifications since they keep their history.
 
-To see how fast it is, click **Classify** next to **Simulate**. It classifies the first 5, 10, or 25 customers' first
-messages (whatever is picked for Simulate) without starting their support sessions. The wall groups them by category
-as the results arrive, then shows the total time, for example *25 classified in 1.2s*. Compare that with how long
-the support sessions take to write their first replies. Classify is only there when classification is set up, and
-it's disabled during a simulation; starting a simulation clears its results. A second Classify replaces the first.
+To see how fast and cheap it is, open the **Classify** menu next to **Simulate**. It classifies the first 5, 10, or 25
+customers' first messages (whatever is picked for Simulate) without starting their support sessions, in one of two
+ways:
+
+- **Use decision model**: Microsoft-Decision-1, as above.
+- **Use LLM**: the same schema and the same structured output, but in Help Desk's own `help-desk` environment on the
+  model the support sessions use (for example `claude-haiku-4.5`), so it's an ordinary chat model doing the job. Its
+  sessions are `hdl-…`, pooled the same way. This option is always there, even without the decision model.
+
+The wall groups the customers by category as the results arrive, then shows a line for each way you've run, so you
+can compare them, for example:
+
+> **Decision model** `ms-decision-1`: 25 classified in 2.6s · 5,756 tokens
+>
+> **LLM** `claude-haiku-4.5`: 25 classified in 28.0s · 24,511 tokens
+
+The time is from the click to the last answer. The tokens are what the classifier sessions report from
+`session.rpc.usage.getMetrics()`, the difference before and after each classification. Help Desk doesn't show a price
+for either option, since it can't read what Foundry charges for the decision model. Classify is disabled during a simulation, and while another Classify is running;
+starting a simulation clears the results. Running the same option again replaces its line.
 
 Turn it on (local only, with `aspire run`):
 
