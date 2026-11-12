@@ -24,7 +24,47 @@ export interface DeskInfo {
   readonly model?: string;
   readonly tools: readonly ToolInfo[];
   readonly factory: FactoryInfo;
+  readonly triage: TriageInfo;
 }
+
+/**
+ * Ticket classification: a session in a second environment, whose model is a decision model, sorts each customer's
+ * message into a category before the support agent answers. Optional (demos/help-desk/README.md).
+ * - `off`: not set up.
+ * - `connecting`: set up; its environment isn't connected yet.
+ * - `ready`: classifying.
+ * - `unavailable`: set up, but it can't classify right now (`message` says why).
+ */
+export interface TriageInfo {
+  readonly state: "off" | "connecting" | "ready" | "unavailable";
+  readonly environment?: string;
+  readonly model?: string;
+  readonly message?: string;
+}
+
+/** What a customer's message is about, as the decision model classifies it. */
+export const TICKET_CATEGORIES = ["delivery", "refund", "cancellation", "order-change", "website-problem", "question"] as const;
+export type TicketCategory = (typeof TICKET_CATEGORIES)[number];
+
+export const TICKET_CATEGORY_INFO: Readonly<Record<TicketCategory, { readonly label: string; readonly description: string }>> = {
+  delivery: { label: "Delivery", description: "Where an order is: tracking, delivery dates, or a parcel shown as delivered that didn't arrive" },
+  refund: { label: "Refunds", description: "Money back for a broken, faulty, or unwanted item" },
+  cancellation: { label: "Cancellations", description: "Cancelling an order" },
+  "order-change": { label: "Order changes", description: "Changing an order before it ships: the address, the items, or the quantities" },
+  "website-problem": { label: "Website problems", description: "The store's website misbehaves: promo codes, the cart, or order pages showing the wrong thing" },
+  question: { label: "Questions", description: "Store policies, order history, or anything else" },
+};
+
+/**
+ * A ticket's classification, from its customer's latest message.
+ * - `classifying`: the decision model is reading it.
+ * - `done`: `category` and `urgent` are set.
+ * - `failed`: `message` says why.
+ */
+export type TicketTriage =
+  | { readonly state: "classifying" }
+  | { readonly state: "done"; readonly category: TicketCategory; readonly urgent: boolean }
+  | { readonly state: "failed"; readonly message: string };
 
 /** Software Factory, which fixes the store's website when the operator sends it a software issue. */
 export interface FactoryInfo {
@@ -75,7 +115,7 @@ export interface CustomerCard {
 /**
  * - `starting`: its session is being created.
  * - `answering`: the agent is working on the customer's message.
- * - `approval`: a refund or cancellation waits for the operator.
+ * - `approval`: a refund or a cancellation waits for the operator. A proposed team memory doesn't hold the ticket.
  * - `waiting`: the agent answered and waits for the customer.
  * - `resolved`: the agent marked the request handled.
  * - `failed`: the session couldn't start or the platform reported an error.
@@ -129,6 +169,40 @@ export interface ApprovalRequest {
   readonly reason?: string;
 }
 
+/**
+ * A fact an agent proposed for the team knowledge base (`store_memory`), waiting for a team member to add it or not. The
+ * agent's turn doesn't wait for the decision, and the agent never hears it: the customer's conversation is the same
+ * whether the fact is added or not.
+ */
+export interface MemoryProposal {
+  readonly id: string;
+  /** A few words: what the fact is about. */
+  readonly subject: string;
+  readonly fact: string;
+  /** Where it comes from, in the agent's words. */
+  readonly citations?: string;
+  /** Why the agent proposed it. */
+  readonly reason?: string;
+  /** The conversation it was learned in. */
+  readonly source: { readonly customerId: string; readonly name: string; readonly sessionId: string };
+  /** When the agent proposed it. */
+  readonly at: string;
+}
+
+/** A fact in the team knowledge base: an agent proposed it and a team member approved it. */
+export interface KnowledgeEntry {
+  readonly id: string;
+  readonly subject: string;
+  readonly fact: string;
+  readonly citations?: string;
+  /** Why the agent stored it. */
+  readonly reason?: string;
+  /** The conversation it was learned in. */
+  readonly source: { readonly customerId: string; readonly name: string; readonly sessionId: string };
+  /** When it was approved and stored. */
+  readonly at: string;
+}
+
 /** A problem with the store's website that a customer ran into, as their agent reported it with `report_bug`. */
 export interface BugReport {
   readonly area: BugArea;
@@ -150,12 +224,16 @@ export interface Ticket {
   readonly status: TicketStatus;
   readonly items: readonly TranscriptItem[];
   readonly approval?: ApprovalRequest;
+  /** A fact the agent proposed for the team knowledge base. */
+  readonly memory?: MemoryProposal;
   /** Calls that named another customer's order. */
   readonly blocked: number;
   /** The problem with the store's website the agent reported (its latest report). */
   readonly bug?: BugReport;
   readonly premiumRequests?: number;
   readonly problem?: string;
+  /** Its classification, when classification is set up. */
+  readonly triage?: TicketTriage;
 }
 
 /** One customer's report in a software issue. */
@@ -213,6 +291,20 @@ export interface RunInfo {
   readonly ending?: boolean;
 }
 
+/**
+ * Classify on its own: the first `size` customers' opening messages, classified without starting their sessions, to
+ * show how fast the decision model is. Ends when a simulation starts.
+ */
+export interface ClassificationRun {
+  readonly id: string;
+  readonly size: number;
+  readonly startedAt: string;
+  /** Each message's classification so far, by customer ID. */
+  readonly results: Readonly<Record<string, TicketTriage>>;
+  /** From the start to the last result, once every message has one. */
+  readonly elapsedMs?: number;
+}
+
 export const SIMULATION_SIZES = [5, 10, 25] as const;
 export type SimulationSize = (typeof SIMULATION_SIZES)[number];
 
@@ -222,9 +314,15 @@ export interface HelpDeskState {
   readonly customers: readonly CustomerCard[];
   readonly run?: RunInfo;
   readonly tickets: readonly Ticket[];
+  /** The latest Classify, when there's no simulation since. */
+  readonly classification?: ClassificationRun;
   /** The current simulation's software issues. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
+  /** The team knowledge base, newest first. It outlives simulations. */
+  readonly knowledge: readonly KnowledgeEntry[];
+  /** Facts agents proposed that no one has added or declined yet, oldest first. */
+  readonly proposals: readonly MemoryProposal[];
 }
 
 export type ServerEvent =
@@ -232,7 +330,9 @@ export type ServerEvent =
   | { readonly type: "run"; readonly run?: RunInfo; readonly tickets: readonly Ticket[]; readonly issues: readonly SoftwareIssue[] }
   | { readonly type: "ticket"; readonly ticket: Ticket }
   | { readonly type: "issues"; readonly issues: readonly SoftwareIssue[] }
-  | { readonly type: "counters"; readonly counters: Counters };
+  | { readonly type: "counters"; readonly counters: Counters }
+  | { readonly type: "knowledge"; readonly knowledge: readonly KnowledgeEntry[]; readonly proposals: readonly MemoryProposal[] }
+  | { readonly type: "classification"; readonly classification?: ClassificationRun };
 
 export interface SimulateRequest {
   readonly size: number;

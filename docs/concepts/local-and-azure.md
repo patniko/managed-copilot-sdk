@@ -31,7 +31,7 @@ Signed in     @your-login
 Background    off · Not signed in for background work. Sign in once with `npx managed-copilot login` so work can continue while you're away.
 Environments  chat (shared, network: learn.microsoft.com), coder (isolated, medium), helper (promotable, small, -> coder), …
 Capabilities  actions, artifacts, attach.cli, background, events, files, isolated, network.policy, operator, promotion, schedules, shared, vaults, web_fetch, webhooks
-Runtime       Copilot SDK 1.0.26, runtime 1.0.103
+Runtime       Copilot SDK 1.0.31, runtime 1.0.109
 ```
 
 `isolated`, `files`, and `promotion` appear once Docker is running and the sandbox backend is ready. If `aspire run`

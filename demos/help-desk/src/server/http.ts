@@ -4,15 +4,42 @@ import { extname, join, resolve, sep } from "node:path";
 import { isManagedCopilotError } from "@managed-copilot/sdk";
 import type { ApiErrorBody, ApprovalAnswer, SendRequest, SimulateRequest } from "../shared/types.js";
 import type { HelpDeskConfig } from "./config.js";
+import type { Decider } from "./decision.js";
 import type { HelpDesk } from "./desk.js";
 import { HelpDeskError } from "./errors.js";
 import type { EventHub } from "./hub.js";
 import { log } from "./log.js";
+import { authorized, complete, EndpointError } from "./triage-endpoint.js";
 
 export interface ApiContext {
   readonly desk: HelpDesk;
   readonly hub: EventHub;
   readonly config: HelpDeskConfig;
+  /** The decision model, when the triage endpoint is set up: only the platform, with the key, calls it. */
+  readonly decider?: Decider;
+}
+
+/** The OpenAI-compatible endpoint the platform calls for the triage environment's sessions (triage-endpoint.ts). */
+async function triageCompletion(ctx: ApiContext, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const key = ctx.config.decision?.key;
+    if (!ctx.decider || !key) throw new EndpointError(503, "Help Desk's triage endpoint isn't set up (demos/help-desk/README.md).");
+    if (!authorized(req.headers.authorization, key)) throw new EndpointError(401, "Present the triage endpoint's key as a bearer token.");
+    let body: unknown;
+    try {
+      body = await readJson<unknown>(req, 1024 * 1024);
+    } catch (error) {
+      throw new EndpointError(error instanceof HelpDeskError ? error.status : 400, (error as Error).message);
+    }
+    sendJson(res, 200, await complete(body, ctx.decider));
+  } catch (error) {
+    if (error instanceof EndpointError) {
+      if (error.status >= 500 || error.status === 403 || error.status === 429) log.warn("The triage endpoint failed", { status: error.status, error: error.message });
+      return sendJson(res, error.status, error.body());
+    }
+    log.error("The triage endpoint failed", { error: (error as Error).message });
+    sendJson(res, 500, new EndpointError(500, "Help Desk's triage endpoint failed. Check its log for details.").body());
+  }
 }
 
 type Next = () => void;
@@ -156,6 +183,10 @@ function buildRouter(ctx: ApiContext): Router {
     const body = await readJson<Partial<SimulateRequest>>(req);
     sendJson(res, 202, await desk.simulate(Number(body.size)));
   });
+  router.add("POST", "/api/classification", async (req, res) => {
+    const body = await readJson<Partial<SimulateRequest>>(req);
+    sendJson(res, 202, desk.classifyOpenings(Number(body.size)));
+  });
   router.add("DELETE", "/api/simulation", async (_req, res) => {
     await desk.end();
     res.writeHead(204).end();
@@ -172,8 +203,22 @@ function buildRouter(ctx: ApiContext): Router {
     desk.answer(params.customerId!, params.approvalId!, body.approve);
     res.writeHead(204).end();
   });
+  router.add("POST", "/api/triage/v1/chat/completions", (req, res) => triageCompletion(ctx, req, res));
   // Sends a software issue to Software Factory as a work order.
   router.add("POST", "/api/issues/:area/route", async (req, res, params) => sendJson(res, 201, await desk.routeIssue(params.area!, appUrl(req))));
+  router.add("GET", "/api/knowledge", (_req, res) => sendJson(res, 200, desk.knowledge.list()));
+  router.add("GET", "/api/knowledge/proposals", (_req, res) => sendJson(res, 200, desk.knowledge.proposals()));
+  // Adds a proposed fact to the team knowledge base ({ approve: true }) or declines it.
+  router.add("POST", "/api/knowledge/proposals/:id", async (req, res, params) => {
+    const body = await readJson<Partial<ApprovalAnswer>>(req);
+    if (typeof body.approve !== "boolean") throw new HelpDeskError("invalid_request", "Pass approve: true or false.");
+    desk.decide(params.id!, body.approve);
+    res.writeHead(204).end();
+  });
+  router.add("DELETE", "/api/knowledge/:id", (_req, res, params) => {
+    desk.forget(params.id!);
+    res.writeHead(204).end();
+  });
   return router;
 }
 

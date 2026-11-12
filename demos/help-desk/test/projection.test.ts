@@ -10,6 +10,25 @@ const answered = (id: string, kind: string) => event("permission.completed", { r
 const tool = (transcript: Transcript, id: string) => transcript.items.find((item): item is ToolItem => item.kind === "tool" && item.id === id)!;
 
 describe("transcript", () => {
+  it("shows a proposed memory as a store_memory call that never waits for the operator", () => {
+    const transcript = new Transcript();
+    transcript.apply(event("permission.requested", { requestId: "r-m1", permissionRequest: { kind: "memory", action: "store", toolCallId: "m1", subject: "Returns", fact: "Return labels expire after 30 days.", citations: "Order help" } }));
+    expect(tool(transcript, "m1")).toMatchObject({ name: "store_memory", status: "running", args: { subject: "Returns", fact: "Return labels expire after 30 days.", citations: "Order help" } });
+    expect(transcript.asking).toEqual([]);
+    transcript.apply(answered("m1", "approved"));
+    transcript.apply(event("tool.execution_complete", { toolCallId: "m1", success: true, result: { content: "Memory stored successfully." } }));
+    expect(tool(transcript, "m1").status).toBe("done");
+  });
+
+  it("keeps the text the agent writes alongside a store_memory call out of the customer's conversation", () => {
+    const transcript = new Transcript();
+    transcript.apply(event("user.message", { content: "Cancel my boots. They run small, by the way." }));
+    transcript.apply(event("assistant.message_delta", { messageId: "a1", deltaContent: "I'll cancel it and note the sizing for the team." }, { ephemeral: true }));
+    transcript.apply(event("assistant.message", { messageId: "a1", content: "I'll cancel it and note the sizing for the team.", toolRequests: [{ toolCallId: "t1", name: "cancel_order" }, { toolCallId: "m1", name: "store_memory" }] }));
+    transcript.apply(event("assistant.message", { messageId: "a2", content: "I've found your order.", toolRequests: [{ toolCallId: "t2", name: "get_order" }] }));
+    expect(transcript.items.filter((item): item is MessageItem => item.kind === "message").map((item) => item.text)).toEqual(["Cancel my boots. They run small, by the way.", "I've found your order."]);
+  });
+
   it("shows the customer's message, then the agent's answer as it streams in", () => {
     const transcript = new Transcript();
     expect(transcript.apply(event("user.message", { content: "Where's my tent?" }))).toBe(true);

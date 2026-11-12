@@ -3,23 +3,31 @@
 // latest simulation from the platform, rebuilds each conversation from its history, and deletes older leftovers.
 // Problems with the store's website the agents report are grouped into software issues, which the operator sends to
 // Software Factory; each work order's origin carries the simulation and area, so a restart finds them again.
+// Facts the agents propose wait in the team knowledge base until the operator adds or declines them, outside the agents'
+// turns; added facts outlive simulations and are part of every later session's instructions.
+import type { StoredMemory } from "@github/copilot-sdk";
 import type { SessionInfo } from "@managed-copilot/sdk";
 import {
   SIMULATION_SIZES,
   type BugArea,
+  type ClassificationRun,
   type Counters,
   type DeskInfo,
   type HelpDeskState,
+  type KnowledgeEntry,
+  type MemoryProposal,
   type RoutedWorkOrder,
   type RunInfo,
   type ServerEvent,
   type SoftwareIssue,
   type Ticket,
+  type TicketTriage,
   type WorkOrderStatus,
 } from "../shared/types.js";
 import type { HelpDeskConfig } from "./config.js";
 import { HelpDeskError, errorText, isMissingSession } from "./errors.js";
 import { FACTORY_NOT_CONNECTED, readProject, SoftwareFactory, workOrderName, workOrderUrl, type FactoryClient, type WorkOrderSummary } from "./factory.js";
+import { KnowledgeBase } from "./knowledge.js";
 import { groupIssues, isBugArea, issueKey, issueWorkOrder, type Reported, type ReportedConversation } from "./issues.js";
 import { log } from "./log.js";
 import type { DeskPlatform } from "./platform.js";
@@ -27,10 +35,13 @@ import { CUSTOMERS } from "./seed.js";
 import { Shop } from "./shop.js";
 import { parseSessionId, sessionIdFor, TicketSession, type TicketHost } from "./ticket.js";
 import { TOOLS } from "./tools.js";
+import { Triage } from "./triage.js";
 
 const PUBLISH_MS = 150;
 const COUNTERS_MS = 300;
 const MAX_MESSAGE = 2_000;
+/** What classification reads of a conversation: the customer's messages, the latest last, up to this many characters. */
+const MAX_TRIAGE_TEXT = 4_000;
 /** Work orders Software Factory is still working on. */
 const ACTIVE: ReadonlySet<WorkOrderStatus> = new Set(["queued", "planning", "building", "releasing"]);
 const MAX_FACTORY_BACKOFF_MS = 60_000;
@@ -68,6 +79,14 @@ async function eachLimited<T>(items: readonly T[], limit: number, work: (item: T
   await Promise.all(lanes);
 }
 
+/** The customer's messages in a ticket's conversation, oldest first. */
+function customerText(ticket: TicketSession): string {
+  return ticket
+    .view()
+    .items.flatMap((item) => (item.kind === "message" && item.from === "customer" ? [item.text] : []))
+    .join("\n\n");
+}
+
 const gone = (session: SessionInfo) => session.state === "deleting" || session.state === "deleted";
 
 /** The area of the simulation's issue a work order was made of, if it's one of Help Desk's for that simulation. */
@@ -80,6 +99,7 @@ function areaOf(summary: WorkOrderSummary, runId: string): BugArea | undefined {
 export class HelpDesk implements TicketHost {
   readonly platform: DeskPlatform;
   readonly shop = new Shop();
+  readonly knowledge: KnowledgeBase;
   readonly #config: HelpDeskConfig;
   readonly #publish: (event: ServerEvent) => void;
   readonly #factory: FactoryClient;
@@ -111,18 +131,32 @@ export class HelpDesk implements TicketHost {
   /** The run whose work orders were looked up in Software Factory: a new run has none, an adopted one may. */
   #lookedUp: string | undefined;
   #closed = false;
+  readonly #triage: Triage;
+  /** The run's classifications, by customer ID. */
+  readonly #triaged = new Map<string, TicketTriage>();
+  /** The latest Classify, until a simulation starts. */
+  #classification: ClassificationRun | undefined;
 
-  constructor(platform: DeskPlatform, config: HelpDeskConfig, publish: (event: ServerEvent) => void, factory: FactoryClient = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl)) {
+  constructor(
+    platform: DeskPlatform,
+    config: HelpDeskConfig,
+    publish: (event: ServerEvent) => void,
+    factory: FactoryClient = new SoftwareFactory(config.factoryUrl, config.factoryPublicUrl),
+    triage: Triage = new Triage(),
+  ) {
     this.platform = platform;
     this.#config = config;
     this.#publish = publish;
     this.#factory = factory;
+    this.knowledge = new KnowledgeBase(config.dataDir);
+    this.#triage = triage;
   }
 
   start(): void {
     this.#unsubscribe.push(
       this.platform.onConnected(() => void this.sync()),
       this.platform.onStatus(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
+      this.#triage.onChange(() => this.#publish({ type: "platform", platform: this.platform.status, desk: this.desk() })),
     );
     this.#pollTimer = setInterval(() => void this.#poll(), this.#config.countersIntervalMs);
     this.#pollTimer.unref?.();
@@ -143,7 +177,7 @@ export class HelpDesk implements TicketHost {
 
   desk(): DeskInfo {
     const factory = { configured: this.#factory.configured, ...(this.#factory.configured && this.#factory.publicUrl ? { url: this.#factory.publicUrl } : {}) };
-    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, factory };
+    return { environment: this.#config.environment, ...(this.platform.model ? { model: this.platform.model } : {}), tools: TOOLS, factory, triage: this.#triage.status };
   }
 
   #runInfo(): RunInfo | undefined {
@@ -152,7 +186,36 @@ export class HelpDesk implements TicketHost {
   }
 
   #views(): Ticket[] {
-    return [...this.#tickets.values()].map((ticket) => ticket.view());
+    return [...this.#tickets.values()].map((ticket) => this.#view(ticket));
+  }
+
+  /** A ticket as the wall shows it: its conversation, and its classification. */
+  #view(ticket: TicketSession): Ticket {
+    const triage = this.#triaged.get(ticket.customer.id);
+    return { ...ticket.view(), ...(triage ? { triage } : {}) };
+  }
+
+  /** Classifies a customer's conversation (`text`: the customer's messages), when classification is set up. */
+  #classify(ticket: TicketSession, text: string): void {
+    const run = this.#run;
+    // Not connected to the triage environment: the wall says why, rather than every ticket.
+    if (!this.#triage.connected || !run) return;
+    const id = ticket.customer.id;
+    const current = this.#triaged.get(id);
+    // A reclassification keeps showing the last category until the new one arrives.
+    if (current?.state !== "done") this.#triaged.set(id, { state: "classifying" });
+    this.changed(ticket);
+    const state = text.length > MAX_TRIAGE_TEXT ? text.slice(-MAX_TRIAGE_TEXT) : text;
+    void this.#triage.classify(state).then(
+      (result): TicketTriage => ({ state: "done", category: result.category, urgent: result.urgent }),
+      (error: unknown): TicketTriage => ({ state: "failed", message: errorText(error) }),
+    ).then((triage) => {
+      if (this.#run !== run || this.#tickets.get(id) !== ticket) return;
+      // A failed reclassification keeps the earlier category.
+      if (triage.state === "failed" && this.#triaged.get(id)?.state === "done") return;
+      this.#triaged.set(id, triage);
+      this.changed(ticket);
+    });
   }
 
   /** The run's software issues: its tickets' bug reports by area, and the work orders sent for them. */
@@ -173,8 +236,11 @@ export class HelpDesk implements TicketHost {
       customers: this.shop.customers(),
       ...(run ? { run } : {}),
       tickets: this.#views(),
+      ...(this.#classification ? { classification: this.#classification } : {}),
       issues: this.issues(),
       counters: this.#counters,
+      knowledge: this.knowledge.list(),
+      proposals: this.knowledge.proposals(),
     };
   }
 
@@ -184,7 +250,9 @@ export class HelpDesk implements TicketHost {
     return [
       { type: "platform", platform: this.platform.status, desk: this.desk() },
       { type: "run", ...(run ? { run } : {}), tickets: this.#views(), issues: this.issues() },
+      { type: "classification", ...(this.#classification ? { classification: this.#classification } : {}) },
       { type: "counters", counters: this.#counters },
+      this.#knowledgeEvent(),
     ];
   }
 
@@ -202,12 +270,54 @@ export class HelpDesk implements TicketHost {
     return operation;
   }
 
+  /**
+   * Classifies the first `size` customers' opening messages without starting their sessions, all at once, publishing
+   * each result as it arrives and the time the whole lot took. Replaces the previous Classify; not during a simulation.
+   */
+  classifyOpenings(size: number): ClassificationRun {
+    if (!(SIMULATION_SIZES as readonly number[]).includes(size)) throw new HelpDeskError("invalid_request", `Classify ${SIMULATION_SIZES.join(", ")} customers.`);
+    if (!this.#triage.enabled) throw new HelpDeskError("classification_off", "Ticket classification isn't set up. Help Desk's README shows how to turn it on.", 409);
+    if (this.#run || this.#operation) throw new HelpDeskError("busy", "End the simulation first: Classify reads the customers' first messages without starting their sessions.", 409);
+    if (!this.#triage.connected) throw new HelpDeskError("classification_unavailable", "The triage environment isn't connected yet.", 503);
+    const startedAt = new Date();
+    const started = performance.now();
+    const customers = CUSTOMERS.slice(0, size);
+    let current: ClassificationRun = {
+      id: runIdAt(startedAt),
+      size,
+      startedAt: startedAt.toISOString(),
+      results: Object.fromEntries(customers.map((customer) => [customer.id, { state: "classifying" } satisfies TicketTriage])),
+    };
+    this.#classification = current;
+    this.#publish({ type: "classification", classification: current });
+    for (const customer of customers) {
+      void this.#triage.classify(customer.opening).then(
+        (result): TicketTriage => ({ state: "done", category: result.category, urgent: result.urgent }),
+        (error: unknown): TicketTriage => ({ state: "failed", message: errorText(error) }),
+      ).then((triage) => {
+        // A simulation or a newer Classify replaced this one.
+        if (this.#classification !== current) return;
+        const results = { ...current.results, [customer.id]: triage };
+        const finished = Object.values(results).every((result) => result.state !== "classifying");
+        current = { ...current, results, ...(finished ? { elapsedMs: Math.round(performance.now() - started) } : {}) };
+        this.#classification = current;
+        if (finished) log.info("Classified the customers' first messages", { customers: size, ms: current.elapsedMs });
+        this.#publish({ type: "classification", classification: current });
+      });
+    }
+    return current;
+  }
+
   /** Ends the current simulation, then starts `size` customers' sessions in a quick wave. */
   simulate(size: number): Promise<RunInfo> {
     if (!(SIMULATION_SIZES as readonly number[]).includes(size)) throw new HelpDeskError("invalid_request", `Simulate ${SIMULATION_SIZES.join(", ")} customers.`);
     this.#requireConnected();
     return this.#exclusive(async () => {
       await this.#endRun();
+      if (this.#classification) {
+        this.#classification = undefined;
+        this.#publish({ type: "classification" });
+      }
       const startedAt = new Date();
       const run: Run = { id: runIdAt(startedAt), size, startedAt };
       this.shop.reset(startedAt);
@@ -218,6 +328,7 @@ export class HelpDesk implements TicketHost {
       const customers = CUSTOMERS.slice(0, size);
       for (const customer of customers) this.#tickets.set(customer.id, new TicketSession(this, customer, sessionIdFor(run.id, customer.id)));
       this.#publishRun();
+      for (const customer of customers) this.#classify(this.#tickets.get(customer.id)!, customer.opening);
       customers.forEach((customer, index) => {
         const timer = setTimeout(() => {
           this.#startTimers.delete(timer);
@@ -252,6 +363,7 @@ export class HelpDesk implements TicketHost {
     for (const timer of this.#ticketTimers.values()) clearTimeout(timer);
     this.#ticketTimers.clear();
     this.#tickets.clear();
+    this.#triaged.clear();
     this.#records = new Map();
     this.#run = undefined;
     // Software Factory keeps the work orders; the next simulation starts with no issues.
@@ -294,7 +406,7 @@ export class HelpDesk implements TicketHost {
   }
 
   ticket(customerId: string): Ticket {
-    return this.#require(customerId).view();
+    return this.#view(this.#require(customerId));
   }
 
   async send(customerId: string, text: unknown): Promise<void> {
@@ -302,11 +414,44 @@ export class HelpDesk implements TicketHost {
     const message = typeof text === "string" ? text.trim() : "";
     if (!message) throw new HelpDeskError("invalid_request", "Write a message first.");
     if (message.length > MAX_MESSAGE) throw new HelpDeskError("invalid_request", `Keep messages under ${MAX_MESSAGE.toLocaleString("en-US")} characters.`);
-    await this.#require(customerId).send(message);
+    const ticket = this.#require(customerId);
+    const said = customerText(ticket);
+    await ticket.send(message);
+    this.#classify(ticket, said ? `${said}\n\n${message}` : message);
   }
 
+  /** The operator's answer to a refund, a cancellation, or a fact the customer's agent proposed. */
   answer(customerId: string, approvalId: string, approve: boolean): void {
-    this.#require(customerId).answer(approvalId, approve);
+    const ticket = this.#require(customerId);
+    const proposal = this.knowledge.proposal(approvalId);
+    if (proposal && proposal.source.sessionId === ticket.sessionId) this.decide(approvalId, approve);
+    else ticket.answer(approvalId, approve);
+  }
+
+  /** Adds a proposed fact to the team knowledge base, or declines it. The agent that proposed it is never told. */
+  decide(id: string, add: boolean): void {
+    const proposal = this.knowledge.proposal(id);
+    const entry = this.knowledge.decide(id, add);
+    if (entry === undefined || !proposal) throw new HelpDeskError("not_actionable", "This fact was added or declined already.", 409);
+    log.info(add ? "Added a fact to the team knowledge base" : "Declined a proposed fact", { customer: proposal.source.customerId, subject: proposal.subject });
+    this.#publishKnowledge();
+    const ticket = this.#tickets.get(proposal.source.customerId);
+    if (ticket?.sessionId === proposal.source.sessionId) this.changed(ticket);
+  }
+
+  /** Removes a fact from the team knowledge base: sessions created or reopened from now on aren't told it. */
+  forget(id: string): void {
+    if (!this.knowledge.remove(id)) throw new HelpDeskError("not_found", "That fact isn't in the team knowledge base.", 404);
+    log.info("Removed a fact from the team knowledge base", { id });
+    this.#publishKnowledge();
+  }
+
+  #knowledgeEvent(): ServerEvent {
+    return { type: "knowledge", knowledge: this.knowledge.list(), proposals: this.knowledge.proposals() };
+  }
+
+  #publishKnowledge(): void {
+    this.#publish(this.#knowledgeEvent());
   }
 
   /**
@@ -454,7 +599,8 @@ export class HelpDesk implements TicketHost {
     } catch (error) {
       return log.warn("Couldn't list the help desk's sessions", { error: errorText(error) });
     }
-    if (!this.#run) this.#adopt(sessions);
+    const adopting = !this.#run;
+    if (adopting) this.#adopt(sessions);
     const run = this.#run;
     void this.#deleteLeftovers(sessions);
     if (!run) return;
@@ -476,6 +622,7 @@ export class HelpDesk implements TicketHost {
       }
     }
     this.#publishRun();
+    if (adopting) for (const ticket of this.#tickets.values()) this.#classify(ticket, customerText(ticket) || ticket.customer.opening);
     // An adopted simulation's issues may have been sent to Software Factory before the restart.
     if (this.#lookedUp !== run.id) void this.pollFactory();
     await this.#poll();
@@ -565,12 +712,35 @@ export class HelpDesk implements TicketHost {
 
   // TicketHost
 
+  knowledgePrompt(): string {
+    return this.knowledge.prompt();
+  }
+
+  async remember(ticket: TicketSession, memory: StoredMemory): Promise<void> {
+    let proposal: MemoryProposal | undefined;
+    try {
+      proposal = this.knowledge.propose({ ...memory, customerId: ticket.customer.id, customerName: ticket.customer.name, sessionId: ticket.sessionId });
+    } catch (error) {
+      // The runtime fails the agent's store_memory call: nothing was kept.
+      log.error("Couldn't keep a proposed fact", { customer: ticket.customer.id, error: errorText(error) });
+      throw error;
+    }
+    if (!proposal) return;
+    log.info("An agent proposed a fact for the team knowledge base", { customer: ticket.customer.id, subject: proposal.subject });
+    this.#publishKnowledge();
+    this.changed(ticket);
+  }
+
+  proposal(ticket: TicketSession): MemoryProposal | undefined {
+    return this.knowledge.proposals().find((proposal) => proposal.source.sessionId === ticket.sessionId);
+  }
+
   changed(ticket: TicketSession): void {
     const id = ticket.customer.id;
     if (!this.#ticketTimers.has(id)) {
       const timer = setTimeout(() => {
         this.#ticketTimers.delete(id);
-        if (this.#tickets.get(id) === ticket) this.#publish({ type: "ticket", ticket: ticket.view() });
+        if (this.#tickets.get(id) === ticket) this.#publish({ type: "ticket", ticket: this.#view(ticket) });
       }, PUBLISH_MS);
       timer.unref?.();
       this.#ticketTimers.set(id, timer);

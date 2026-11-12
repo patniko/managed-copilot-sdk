@@ -6,6 +6,7 @@ export {
   toolDeclaration,
   type AppKeyBinding,
   type AppOption,
+  type OpenAIEndpointOption,
   type AspireSecret,
   type ManagedCopilotOptions,
   type McpCredentialOption,

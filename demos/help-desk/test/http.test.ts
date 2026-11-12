@@ -79,6 +79,24 @@ describe("http", () => {
     expect((await fetch(`${url}/api/state`, { method: "PUT" })).status).toBe(405);
   });
 
+  it("lists the team knowledge base and its proposals, decides a proposal, and removes a fact", async () => {
+    const url = await start();
+    expect(await (await fetch(`${url}/api/knowledge`)).json()).toEqual([]);
+    const missing = await fetch(`${url}/api/knowledge/nope`, { method: "DELETE" });
+    expect(missing.status).toBe(404);
+    expect(((await missing.json()) as ApiErrorBody).error.message).toMatch(/isn't in the team knowledge base/);
+    const desk = desks.at(-1)!;
+    const proposal = desk.knowledge.propose({ subject: "Returns", fact: "Return labels expire after 30 days.", customerId: "c01", customerName: "Maya Chen", sessionId: "s1" })!;
+    expect(await (await fetch(`${url}/api/knowledge/proposals`)).json()).toMatchObject([{ id: proposal.id, subject: "Returns" }]);
+    const decide = (approve: unknown) => fetch(`${url}/api/knowledge/proposals/${proposal.id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approve }) });
+    expect((await decide("yes")).status).toBe(400);
+    expect((await decide(true)).status).toBe(204);
+    expect((await decide(true)).status).toBe(409);
+    expect(await (await fetch(`${url}/api/knowledge`)).json()).toMatchObject([{ id: proposal.id, subject: "Returns" }]);
+    expect((await fetch(`${url}/api/knowledge/${proposal.id}`, { method: "DELETE" })).status).toBe(204);
+    expect(desk.knowledge.list()).toEqual([]);
+  });
+
   it("refuses other host names and cross-site requests", async () => {
     const url = await start();
     expect((await raw(url, "/api/state", { headers: { host: "attacker.example" } })).status).toBe(403);

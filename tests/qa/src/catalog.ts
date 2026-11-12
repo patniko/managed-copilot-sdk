@@ -352,6 +352,12 @@ const localManual: ManualCheck[] = [
     "Help Desk and Data Desk send work to Software Factory, and its floor shows where each work order came from",
     "docs/qa.md, \"Work routed to the software factory\"",
   ),
+  manual(
+    "local.help-desk-triage",
+    "local",
+    "Help Desk classifies each ticket with Microsoft-Decision-1 through an OpenAI-compatible endpoint, and groups the wall",
+    "docs/qa.md, \"Help Desk's ticket classification\"",
+  ),
 ];
 
 const azureManual: ManualCheck[] = [

@@ -1,6 +1,6 @@
 // The connection to Managed Copilot: one stock CopilotClient for the help desk's shared environment, kept healthy.
 // Every customer's session is created on this one client. Everything here is the public SDK.
-import type { CopilotClient, MessageOptions, ModelInfo, ResumeSessionConfig, SessionConfig, SessionEvent } from "@github/copilot-sdk";
+import type { CopilotClient, CopilotSession, MessageOptions, ModelInfo, ResumeSessionConfig, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 import { isManagedCopilotError, ManagedCopilot, type DeploymentInfo, type SessionInfo } from "@managed-copilot/sdk";
 import type { PlatformStatus } from "../shared/types.js";
 import { MODEL_PREFERENCES, type HelpDeskConfig } from "./config.js";
@@ -130,7 +130,7 @@ export class Platform implements DeskPlatform {
     await this.#managed?.close().catch(() => undefined);
   }
 
-  async createSession(config: SessionConfig): Promise<SupportSession> {
+  async createSession(config: SessionConfig): Promise<CopilotSession> {
     return this.#requireClient().createSession(config);
   }
 

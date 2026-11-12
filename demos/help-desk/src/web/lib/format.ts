@@ -116,7 +116,7 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
     case "asking":
       return { text: "Needs approval", tone: "attention" };
     case "declined":
-      return { text: "Declined", tone: "danger" };
+      return item.name === "store_memory" ? { text: "Not added", tone: "muted" } : { text: "Declined", tone: "danger" };
     case "failed":
       return { text: "Failed", tone: "danger" };
     case "refused":
@@ -142,6 +142,9 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
       return { text: `Reported: ${areaLabel(item.args["area"])}`, tone: "done" };
     case "resolve_conversation":
       return { text: typeof item.args["summary"] === "string" ? item.args["summary"] : "Resolved", tone: "success" };
+    case "store_memory":
+      // The call only proposes the fact: the operator adds it or not later, in the team knowledge base.
+      return { text: "Proposed to the team", tone: "muted" };
     default:
       return { text: "Done", tone: "success" };
   }
@@ -150,6 +153,7 @@ export function operatorOutcome(item: ToolItem): { readonly text: string; readon
 /** The arguments worth showing next to a tool's name. */
 export function toolArgs(item: ToolItem): string {
   const parts: string[] = [];
+  if (item.name === "store_memory" && typeof item.args["subject"] === "string") parts.push(item.args["subject"]);
   if (typeof item.args["orderId"] === "string") parts.push(item.args["orderId"].toUpperCase());
   if (typeof item.args["amount"] === "number") parts.push(money(item.args["amount"]));
   return parts.join(" · ");

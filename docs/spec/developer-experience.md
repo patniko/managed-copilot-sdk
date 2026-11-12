@@ -2,7 +2,7 @@
 
 > **Status: built, and qualified within the limits recorded below (2026-10-24; orchestrator environments on
 > 2026-10-26, and on Azure on 2026-10-27).** The SDK, Aspire integration, CLI, gateway, sandbox image, and egress
-> proxy are implemented on the published `@github/copilot-sdk` 1.0.26 and runtime 1.0.103, unmodified. They run
+> proxy are implemented on the published `@github/copilot-sdk` 1.0.31 and runtime 1.0.109, unmodified. They run
 > locally with `aspire run` and on Azure with `aspire deploy`, orchestrator environments included. The 14 customer
 > snippets run as acceptance checks in [`tests/snippets`](../../tests/snippets), and the
 > [software factory](../../demos/software-factory), [assistant](../../demos/assistant), and
@@ -133,8 +133,8 @@ aspire deploy   # target: deploy modes supported by the qualified Azure backend
   broaden them. Defaults and policy ceilings are different; a top-level network default is not a hard deny that the
   operator cannot override in a named environment.
 - **`models`** lists the models its sessions may use.
-- **`inference`** sends the environment's model calls to Azure AI Foundry instead of each user's Copilot plan
-  ([section 15](#15-models-and-billing)).
+- **`inference`** sends the environment's model calls to Azure AI Foundry, or to an OpenAI-compatible endpoint the
+  AppHost declares, instead of each user's Copilot plan ([section 15](#15-models-and-billing)).
 - **`network`** controls outbound access. It's on unless you turn it off with `network: false`, here or for every
   environment at once ([section 7](#7-control-network-access)).
 - **`size`** is `small` (1 vCPU, 2 GiB), `medium` (2 vCPU, 4 GiB), or `large` (4 vCPU, 8 GiB).
@@ -318,6 +318,12 @@ plugins, and equivalent capabilities nested in custom agents. Remote MCP endpoin
 and per-session egress attribution. Apply the same validation on create, resume, tool changes, agent selection, and
 option updates, not only to the first request. SDK callbacks still execute in the customer's app, outside this
 shared-runtime boundary.
+
+The runtime's own memory is cross-session state, so shared admission turns it off. An app that stores memories itself
+can still use them in a shared environment: with the stock SDK's `memory: { enabled: true, storeMemory }`
+(experimental), the session may allow `builtin:store_memory`, the runtime keeps and recalls nothing, and each memory
+the permission handler approves goes to the app's `storeMemory` callback. Recall is the app's job too, for example
+through `systemMessage`. Enabling memory without `storeMemory` in a shared environment fails with `policy_violation`.
 
 For demonstrating why that boundary exists, a shared environment can set `unsafeHostTools: true`. Its sessions
 then get the runtime's built-in shell and file tools and its standard environment prompt; every other shared rule
@@ -1293,6 +1299,37 @@ await addManagedCopilot(builder, "copilot", {
 - **Explicit failures.** A missing account or deployment, or an identity without access, fails with
   `inference_unavailable` and the reason. Switching billing/provider is never recovery from a failure.
 
+A shared environment can also send its model calls to any OpenAI-compatible chat completions endpoint the AppHost
+declares, such as a model server you run or an adapter in front of a model with its own API:
+
+```ts
+const classifierKey = await builder.addParameter("classifier-key", { secret: true });
+
+await addManagedCopilot(builder, "copilot", {
+  openai: {
+    // The base URL serves POST <url>/chat/completions. The key is optional and must be an Aspire secret parameter.
+    classifier: { url: "http://localhost:7440/api/triage/v1", models: ["ms-decision-1"], key: classifierKey },
+  },
+  environments: {
+    triage: { type: "shared", network: false, inference: { openai: "classifier" } },
+  },
+});
+```
+
+- **Declared by the platform only.** As with Foundry, the endpoint lives in the AppHost; a client's own `provider`
+  is still refused. The shared runtime calls the endpoint with the stock runtime's BYOK provider and asks the gateway
+  for the key before each call, so the key never reaches the client, the session's config, or a sandbox.
+- **Shared environments only.** A sandbox only reaches the hosts the gateway brokers, so `inference: { openai }` on
+  another environment type is a configuration error, and a session that would be placed in a sandbox fails with
+  `capability_unavailable`.
+- **Models, route, and failures** work as for Foundry: `models` names the endpoint's models (default: all of them), a
+  session keeps its model and its route (`{ route: "openai", openai: "classifier", model: "ms-decision-1" }`), and an
+  undeclared model or a key that didn't reach the gateway fails with `inference_unavailable`. The endpoint's own
+  errors reach the session as model errors; nothing falls back to a Copilot plan.
+
+The [Help Desk](../../demos/help-desk) demo uses this route to classify each ticket with Microsoft-Decision-1, through
+an endpoint the app hosts.
+
 ## 16. Operate your deployment
 
 Name the people who run the platform in the AppHost:
@@ -1840,6 +1877,7 @@ The Delivery column records what is built as of 2026-10-24; the [delivery gates]
 | 42 | GitHub users of a public app | `anyGitHubUser: true` on an app admits any GitHub account that comes through that app's key; `access` still decides who may use the deployment directly. Such sessions are the GitHub account's own; a request through an app reaches only those in its environments | Proposed | Built; verified on Azure with a GitHub account outside `access` |
 | 43 | Declaring Foundry | AppHost `foundry` names existing AIServices accounts (resource group, optional subscription, deployments). The platform's Azure identity calls them: `az login` locally, the gateway's managed identity in Azure with a role `aspire deploy` assigns. Stock runtime BYOK provider: a token the gateway answers per call on the shared runtime, a placeholder the gateway swaps in sandboxes. A session's route is fixed at creation | Proposed | Built: shared runtime and sandboxes (Docker and Container Apps Sandboxes), `az login` locally and the gateway's managed identity on Azure |
 | 44 | Public apps | `publishApp({ public: true })` opens an app that signs in its own users to any address. It never holds the deployer's GitHub token (`githubToken: true` is refused); every other app keeps the deploy-time address allowlist, which only an explicit `"*"` opens, and an app that acts as the deployer becomes public only in two deploys (section 16) | Proposed | Built and verified on Azure (2026-11-04): a public app answered from outside the allowlist while an app acting as the deployer refused it; a one-step switch to public was refused |
+| 45 | OpenAI-compatible endpoints | AppHost `openai` names endpoints (base URL, models, optional key as an Aspire secret); a shared environment routes to one with `inference: { openai }`. Stock runtime BYOK provider on the shared runtime, with the key answered per call by the gateway; a client-supplied `provider` stays refused, and sandbox placement is refused | Proposed | Built: shared runtime, verified locally with Help Desk's ticket classification (Microsoft-Decision-1 through an app-hosted adapter) |
 
 ## Platform contracts
 
@@ -2005,6 +2043,8 @@ not silent fallbacks. Diagnostic output must be redacted and scoped to the owner
 | An app key is wrong, or an app user is sent without one | `authentication_required`; an app user never falls back to the app's or another identity |
 | An app user's session needs a GitHub entitlement (a Copilot-billed environment) | `inference_unavailable`; background sign-in, schedules, and Copilot CLI attach are `capability_unavailable` |
 | A Foundry account or deployment is missing, or the platform's Azure identity cannot call it | `inference_unavailable` with the reason; never a Copilot plan instead |
+| An OpenAI-compatible endpoint's model isn't declared, or its key didn't reach the gateway | `inference_unavailable` with the reason; never a Copilot plan instead |
+| A session routed to an OpenAI-compatible endpoint would run in a sandbox | `capability_unavailable` |
 | A platform dependency (GitHub) is briefly unreachable or rate-limited | `upstream_unavailable` (HTTP 503, `Retry-After`); a recent successful verification may stand in briefly, a rejected credential never does |
 | App/relay attachment lacks safe owner scoping | `transport_unsupported`; keep the explicitly supported direct path |
 

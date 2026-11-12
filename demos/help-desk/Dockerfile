@@ -5,11 +5,11 @@
 #   docker buildx build -f demos/help-desk/Dockerfile --platform linux/amd64 \
 #     --build-arg NPM_REGISTRY="$(npm config get registry)" -t managed-copilot-help-desk .
 #
-# The deployment supplies MANAGED_COPILOT_URL and the GitHub identity Help Desk acts as. Help Desk keeps no records of
-# its own: each simulation's sessions live in Managed Copilot, named after the simulation and customer. The entrypoint
-# is the lease supervisor from deployments/azure, so only one replica at a time runs the server and answers the
-# sessions' tool calls and approvals (MANAGED_COPILOT_DATA_DIR holds the lease; MANAGED_COPILOT_LEASE_STAMP orders
-# deployments).
+# The deployment supplies MANAGED_COPILOT_URL, the GitHub identity Help Desk acts as, and a persistent data directory
+# (HELP_DESK_DATA_DIR, default /data) for the team knowledge base. Each simulation's sessions live in Managed Copilot,
+# named after the simulation and customer. The entrypoint is the lease supervisor from deployments/azure, so only one
+# replica at a time runs the server and answers the sessions' tool calls, approvals, and memory stores
+# (MANAGED_COPILOT_DATA_DIR holds the lease; MANAGED_COPILOT_LEASE_STAMP orders deployments).
 ARG NODE_IMAGE=node:24-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
@@ -67,7 +67,8 @@ WORKDIR /opt/managed-copilot/app/demos/help-desk
 RUN node --input-type=module -e "import { createRequire } from 'node:module'; await import('@managed-copilot/sdk'); await import('zod'); createRequire(import.meta.resolve('@github/copilot-sdk'))('koffi'); console.log('packages ok')"
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
-    PORT=7440
+    PORT=7440 \
+    HELP_DESK_DATA_DIR=/data
 EXPOSE 7440
 # Container Apps can briefly run an old and a new revision together; only the lease holder runs the app (the other
 # answers 503 on PORT until it takes over), so each session's tool calls and approvals have one answerer.

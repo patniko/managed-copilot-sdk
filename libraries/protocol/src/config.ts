@@ -147,7 +147,18 @@ export const EnvironmentConfigSchema = z
      * Sends the environment's model calls to an Azure AI Foundry account declared in `foundry`, billed to your Azure
      * subscription, instead of each user's GitHub Copilot plan (spec section 15). `models` then names deployments.
      */
-    inference: z.object({ foundry: z.string().regex(FOUNDRY_ACCOUNT_NAME, "Expected a Foundry account name declared in foundry") }).strict().optional(),
+    inference: z
+      .object({
+        foundry: z.string().regex(FOUNDRY_ACCOUNT_NAME, "Expected a Foundry account name declared in foundry").optional(),
+        /**
+         * Shared only. Sends the environment's model calls to an OpenAI-compatible endpoint declared in `openai`
+         * instead, with the endpoint's key (spec section 15). `models` then names models the endpoint serves.
+         */
+        openai: z.string().regex(RESOURCE_NAME, "Expected an OpenAI-compatible endpoint name declared in openai").optional(),
+      })
+      .strict()
+      .refine((inference) => (inference.foundry === undefined) !== (inference.openai === undefined), "Name exactly one of foundry or openai")
+      .optional(),
     github: z.object({ publish: z.boolean().optional() }).strict().optional(),
     /** Idle seconds before a sandbox may stop compute (after pending work drains). */
     idleTimeoutSeconds: z.number().int().positive().optional(),
@@ -245,6 +256,26 @@ export const FoundryAccountSchema = z
 export type FoundryAccount = z.infer<typeof FoundryAccountSchema>;
 
 /**
+ * An OpenAI-compatible chat completions endpoint the platform calls for a shared environment's sessions (spec section
+ * 15), such as a model server or an adapter your app hosts. The platform, not the app's session config, holds its
+ * address and key. The record key is the endpoint's name.
+ */
+export const OpenAIEndpointSchema = z
+  .object({
+    /** The API's base URL: the runtime calls `<url>/chat/completions`. */
+    url: z
+      .string()
+      .url()
+      .refine((url) => /^https?:$/.test(new URL(url).protocol), "Expected an http or https URL"),
+    /** Models the endpoint serves that sessions may use. The first is the default. */
+    models: z.array(z.string().min(1).max(128)).min(1),
+    /** Sent as the bearer token on every model call, delivered to the gateway in this environment variable. */
+    key: SecretRefSchema.optional(),
+  })
+  .strict();
+export type OpenAIEndpoint = z.infer<typeof OpenAIEndpointSchema>;
+
+/**
  * An app that signs in its own users and vouches for them with its key (spec section 2). Requests carrying the key act
  * for one of the app's users (model calls go to Foundry), a GitHub user who signed in to it, or the app itself.
  */
@@ -278,6 +309,8 @@ export const ManagedCopilotConfigSchema = z
     inline: InlineSchema.optional(),
     /** Azure AI Foundry accounts environments can send model calls to (`inference: { foundry }`), by account name. */
     foundry: z.record(z.string().regex(FOUNDRY_ACCOUNT_NAME, "Expected an Azure AI Foundry account name"), FoundryAccountSchema).optional(),
+    /** OpenAI-compatible endpoints shared environments can send model calls to (`inference: { openai }`), by name. */
+    openai: z.record(z.string().regex(RESOURCE_NAME, "Expected an endpoint name (lowercase letters, digits, and hyphens)"), OpenAIEndpointSchema).optional(),
     /** Apps that vouch for their own users with an app key (spec section 2), by name. */
     apps: z.record(z.string().regex(RESOURCE_NAME), AppSchema).optional(),
     vaults: z.record(z.string().regex(RESOURCE_NAME), z.array(VaultCredentialSchema).min(1)).optional(),
@@ -349,6 +382,30 @@ export const ManagedCopilotConfigSchema = z
                 code: "custom",
                 path: ["environments", name, "models", index],
                 message: `"${model}" is not a deployment of Foundry account "${foundry}" (${account.deployments.join(", ")})`,
+              });
+            }
+          }
+        }
+      }
+      const openai = env.inference?.openai;
+      if (openai !== undefined) {
+        const endpoint = config.openai?.[openai];
+        if (env.type !== "shared") {
+          ctx.addIssue({
+            code: "custom",
+            path: ["environments", name, "inference", "openai"],
+            message: `inference: { openai } is only valid on shared environments (environment "${name}" is ${env.type})`,
+          });
+        }
+        if (!endpoint) {
+          ctx.addIssue({ code: "custom", path: ["environments", name, "inference", "openai"], message: `Unknown OpenAI-compatible endpoint "${openai}": declare it in openai` });
+        } else {
+          for (const [index, model] of (env.models ?? []).entries()) {
+            if (!endpoint.models.includes(model)) {
+              ctx.addIssue({
+                code: "custom",
+                path: ["environments", name, "models", index],
+                message: `"${model}" is not one of OpenAI-compatible endpoint "${openai}"'s models (${endpoint.models.join(", ")})`,
               });
             }
           }

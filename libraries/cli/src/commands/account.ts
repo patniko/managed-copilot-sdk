@@ -7,6 +7,7 @@ function describeEnvironment(environment: EnvironmentInfo, arrow: string): strin
   if (environment.size) details.push(environment.size);
   if (environment.promoteTo) details.push(`${arrow} ${environment.promoteTo}`);
   if (environment.inference?.foundry) details.push(`Azure AI Foundry ${environment.inference.foundry}`);
+  if (environment.inference?.openai) details.push(`OpenAI-compatible endpoint ${environment.inference.openai}`);
   if (environment.network.access === "disabled") details.push("no network");
   if (environment.network.access === "restricted") details.push(`network: ${environment.network.allowedDomains.join(", ")}`);
   return `${environment.name} (${details.join(", ")})`;

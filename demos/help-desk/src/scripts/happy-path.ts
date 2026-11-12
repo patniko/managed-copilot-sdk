@@ -3,7 +3,9 @@
  * refunds and cancellations they ask for (approves the first, declines any others), checks that every session stayed
  * on its own customer's orders and on one shared runtime, lists the software issues the agents reported (Aisha's promo
  * code, among the first five; it doesn't send them to Software Factory), then ends the simulation, which deletes its
- * sessions.
+ * sessions. When an agent proposes a fact for the team knowledge base (Noah's usually does: his boots run small), it
+ * adds the first (checking the app stored it) and declines the others, then removes the one it added, so the
+ * knowledge base is left as it was.
  *
  *   pnpm --filter @managed-copilot/demo-help-desk happy-path                 # http://localhost:7440 + MANAGED_COPILOT_PORT_OFFSET
  *   pnpm --filter @managed-copilot/demo-help-desk happy-path --url https://help-desk.<environment-domain>
@@ -77,6 +79,8 @@ async function main(): Promise<boolean> {
   const statuses = new Map<string, string>();
   const answered = new Set<string>();
   const decisions: string[] = [];
+  const memories: string[] = [];
+  let added: { readonly subject: string; readonly fact: string } | undefined;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     state = await api<HelpDeskState>("GET", "/api/state");
@@ -88,6 +92,16 @@ async function main(): Promise<boolean> {
       if (statuses.get(ticket.customerId) !== ticket.status) {
         statuses.set(ticket.customerId, ticket.status);
         log(`${name(ticket.customerId).padEnd(16)} ${ticket.status}${ticket.problem ? ` (${ticket.problem})` : ""}`);
+      }
+      const memory = ticket.memory;
+      if (memory && !answered.has(memory.id)) {
+        answered.add(memory.id);
+        const approve = added === undefined;
+        await api("POST", `/api/tickets/${ticket.customerId}/approvals/${encodeURIComponent(memory.id)}`, { approve });
+        if (approve) added = memory;
+        const decision = `${approve ? "Added" : "Didn't add"} ${name(ticket.customerId)}'s agent's fact "${memory.subject}: ${memory.fact}"`;
+        memories.push(decision);
+        log(decision);
       }
       const approval = ticket.approval;
       if (approval && !answered.has(approval.id)) {
@@ -106,6 +120,14 @@ async function main(): Promise<boolean> {
   // The counters follow the platform's session records, which Help Desk lists every few seconds.
   await sleep(5_000);
   state = await api<HelpDeskState>("GET", "/api/state");
+  // Proposals don't hold up a conversation, so a second one from the same agent can still be waiting.
+  for (const proposal of state.proposals.filter((proposal) => proposal.source.sessionId.startsWith(`hd-${run.id}-`) && !answered.has(proposal.id))) {
+    answered.add(proposal.id);
+    await api("POST", `/api/knowledge/proposals/${encodeURIComponent(proposal.id)}`, { approve: false });
+    const decision = `Didn't add ${proposal.source.name}'s agent's fact "${proposal.subject}: ${proposal.fact}"`;
+    memories.push(decision);
+    log(decision);
+  }
 
   const problems: string[] = [];
   const { counters } = state;
@@ -126,6 +148,15 @@ async function main(): Promise<boolean> {
     ticket.items.filter((item): item is ToolItem => item.kind === "tool" && item.blocked === true).map((item) => `${name(ticket.customerId)} asked for ${String(item.args["orderId"])}`),
   );
 
+  if (added) {
+    const stored = state.knowledge.find((entry) => entry.subject === added!.subject && entry.fact === added!.fact);
+    if (!stored) problems.push(`The added fact "${added.subject}" isn't in the team knowledge base.`);
+    else {
+      await api("DELETE", `/api/knowledge/${encodeURIComponent(stored.id)}`);
+      log(`Removed "${stored.subject}" from the team knowledge base again`);
+    }
+  }
+
   log("Ending the simulation");
   await api("DELETE", "/api/simulation");
   ours = false;
@@ -136,6 +167,7 @@ async function main(): Promise<boolean> {
   console.log(`Customers        ${state.tickets.map((ticket) => `${name(ticket.customerId)} (${ticket.status})`).join(", ")}`);
   console.log(`Counters         ${counters.sessions} sessions, ${counters.runtimes} runtime, ${counters.sandboxes} sandboxes, ${counters.messages} messages, ${counters.premiumRequests} premium requests`);
   console.log(`Approvals        ${decisions.length ? decisions.join("; ") : "none"}`);
+  console.log(`Team knowledge   ${memories.length ? memories.join("; ") : "no facts proposed"}`);
   console.log(`Blocked lookups  ${blocked.length ? blocked.join("; ") : "none (the agent declined without calling a tool)"}`);
   const issues = state.issues ?? [];
   console.log(`Software issues  ${issues.length ? issues.map((issue) => `${issue.title} (${issue.reports.map((report) => report.name).join(", ")})`).join("; ") : "none reported"}`);

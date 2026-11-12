@@ -43,6 +43,7 @@ export function deploymentInfo(app: GatewayApp, environments: Environments, runt
   for (const capability of app.capabilities) if (sandboxesWork || !SANDBOX_BACKED_CAPABILITIES.has(capability)) capabilities.add(capability);
   const deployment = app.config.deployment;
   if (deployment.foundry && Object.keys(deployment.foundry).length > 0 && (app.services as Record<string, unknown>)["foundry"]) capabilities.add("foundry");
+  if (deployment.openai && Object.keys(deployment.openai).length > 0 && (app.services as Record<string, unknown>)["openai"]) capabilities.add("openai");
   if ((app.services.apps?.size ?? 0) > 0) capabilities.add("apps");
   const throughApp = principal?.app !== undefined;
   const offered = environments.info().filter((environment) => !principal || appAllows(app.services.apps, principal, environment.name));
@@ -53,7 +54,7 @@ export function deploymentInfo(app: GatewayApp, environments: Environments, runt
     environments: offered,
     ...(deployment.inline && !throughApp ? { inline: deployment.inline } : {}),
     capabilities: [...capabilities].sort(),
-    sdk: { copilotSdk: "1.0.26", copilotRuntime: runtime?.current()?.version ?? "1.0.103" },
+    sdk: { copilotSdk: "1.0.31", copilotRuntime: runtime?.current()?.version ?? "1.0.109" },
   };
 }
 

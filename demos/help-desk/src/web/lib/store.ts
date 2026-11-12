@@ -2,9 +2,12 @@ import { useSyncExternalStore } from "react";
 import {
   SIMULATION_SIZES,
   type BugArea,
+  type ClassificationRun,
   type Counters,
   type CustomerCard,
   type DeskInfo,
+  type KnowledgeEntry,
+  type MemoryProposal,
   type PlatformStatus,
   type RunInfo,
   type ServerEvent,
@@ -32,13 +35,21 @@ export interface StoreState {
   readonly run?: RunInfo;
   /** The current simulation's tickets, by customer ID. */
   readonly tickets: Readonly<Record<string, Ticket>>;
+  /** The latest Classify, when there's no simulation since. */
+  readonly classification?: ClassificationRun;
   /** The current simulation's software issues. */
   readonly issues: readonly SoftwareIssue[];
   readonly counters: Counters;
+  /** The team knowledge base, newest first. */
+  readonly knowledge: readonly KnowledgeEntry[];
+  /** Facts agents proposed that no one has decided yet, oldest first. */
+  readonly proposals: readonly MemoryProposal[];
+  /** Facts being removed from the knowledge base from this page, by ID. */
+  readonly forgetting: Readonly<Record<string, true>>;
   /** How many customers the next simulation starts (remembered in this browser). */
   readonly size: SimulationSize;
   /** A simulation is being started or ended from this page. */
-  readonly working?: "simulate" | "end";
+  readonly working?: "simulate" | "end" | "classify";
   /** Approvals being answered from this page, by approval ID. */
   readonly answering: Readonly<Record<string, true>>;
   /** Issues being sent to Software Factory from this page, by area. */
@@ -65,6 +76,9 @@ let state: StoreState = {
   tickets: {},
   issues: [],
   counters: ZERO,
+  knowledge: [],
+  proposals: [],
+  forgetting: {},
   size: savedSize(),
   answering: {},
   routing: {},
@@ -108,6 +122,12 @@ export function reduce(current: StoreState, event: ServerEvent): StoreState {
       return current.run ? { ...current, issues: event.issues } : current;
     case "counters":
       return { ...current, counters: event.counters };
+    case "knowledge":
+      return { ...current, knowledge: event.knowledge, proposals: event.proposals };
+    case "classification": {
+      const { classification: _previous, ...rest } = current;
+      return event.classification ? { ...rest, classification: event.classification } : rest;
+    }
   }
 }
 
@@ -115,9 +135,10 @@ async function loadState(): Promise<void> {
   try {
     const loaded = await api.state();
     setState((current) => {
-      const { run: _previous, ...rest } = current;
+      const { run: _previous, classification: _classification, ...rest } = current;
       return {
         ...(loaded.run ? { ...rest, run: loaded.run } : rest),
+        ...(loaded.classification ? { classification: loaded.classification } : {}),
         phase: "ready",
         platform: loaded.platform,
         desk: loaded.desk,
@@ -125,6 +146,8 @@ async function loadState(): Promise<void> {
         tickets: byCustomer(loaded.tickets),
         issues: loaded.issues,
         counters: loaded.counters,
+        knowledge: loaded.knowledge,
+        proposals: loaded.proposals,
       };
     });
   } catch (error) {
@@ -134,7 +157,7 @@ async function loadState(): Promise<void> {
 
 // ─── Server-sent events ──────────────────────────────────────────────────────────────────────────────────────
 
-const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "issues", "counters"];
+const EVENT_TYPES: readonly ServerEvent["type"][] = ["platform", "run", "ticket", "issues", "counters", "knowledge", "classification"];
 let source: EventSource | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let backoffMs = 1_000;
@@ -224,6 +247,19 @@ export async function simulate(): Promise<void> {
   }
 }
 
+/** Classifies the chosen number of customers' first messages, without starting their sessions. */
+export async function classify(): Promise<void> {
+  if (state.working) return;
+  setState((current) => ({ ...current, working: "classify" }));
+  try {
+    await api.classify(state.size);
+  } catch (error) {
+    showToast("Couldn't classify the customers' messages", errorMessage(error));
+  } finally {
+    setState((current) => ({ ...current, working: undefined }));
+  }
+}
+
 export async function endSimulation(): Promise<void> {
   if (state.working) return;
   setState((current) => ({ ...current, working: "end" }));
@@ -258,6 +294,39 @@ export async function sendAsCustomer(customerId: string, text: string): Promise<
   } catch (error) {
     showToast("The message wasn't sent", errorMessage(error));
     return false;
+  }
+}
+
+/** Adds a fact an agent proposed to the team knowledge base, or declines it. */
+export async function decide(id: string, approve: boolean): Promise<void> {
+  if (state.answering[id]) return;
+  setState((current) => ({ ...current, answering: { ...current.answering, [id]: true } }));
+  try {
+    await api.decide(id, approve);
+  } catch (error) {
+    showToast(approve ? "Couldn't add the fact" : "Couldn't decline the fact", errorMessage(error));
+  } finally {
+    setState((current) => {
+      const { [id]: _done, ...answering } = current.answering;
+      return { ...current, answering };
+    });
+  }
+}
+
+/** Removes a fact from the team knowledge base. */
+export async function forget(id: string): Promise<void> {
+  if (state.forgetting[id]) return;
+  setState((current) => ({ ...current, forgetting: { ...current.forgetting, [id]: true } }));
+  try {
+    await api.forget(id);
+    setState((current) => ({ ...current, knowledge: current.knowledge.filter((entry) => entry.id !== id) }));
+  } catch (error) {
+    showToast("Couldn't remove the fact", errorMessage(error));
+  } finally {
+    setState((current) => {
+      const { [id]: _done, ...forgetting } = current.forgetting;
+      return { ...current, forgetting };
+    });
   }
 }
 

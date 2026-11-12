@@ -30,6 +30,9 @@ cancellations wait for the operator (yellow), and two customers asked about orde
 - **From a support ticket to a fix.** Agents report problems with the store's website with a `report_bug` tool, the
   wall groups the reports into software issues, and **Send to Software Factory** turns one into a work order to fix
   the website's code ([below](#software-issues-fixed-by-software-factory)).
+- **A team that learns.** Agents propose what they learn for the team knowledge base with the runtime's
+  `store_memory` tool. You add each fact or not, and every later conversation starts with what was added
+  ([below](#team-knowledge-agents-learn-you-decide)).
 
 <img src="docs/screenshots/approval.png" alt="Sofia's conversation: her support widget on the left, and on the right where the session runs (shared runtime, tools in Help Desk, no sandbox), a refund of $39.00 waiting with Decline and Approve, the two orders the session can see, and its tool calls" width="900">
 
@@ -114,6 +117,100 @@ Factory keeps the work orders. The work order runs Software Factory's own agents
 Under `aspire run`, the root AppHost points Help Desk at the Software Factory demo. Without `SOFTWARE_FACTORY_URL`, the
 panel still lists the issues, and **Send to Software Factory** says why it's unavailable.
 
+## Team knowledge: agents learn, you decide
+
+The support team keeps a knowledge base, and the agents help write it.
+
+1. **The agent proposes.** Each session has the runtime's built-in `store_memory` tool, and its instructions list the
+   team knowledge base so far. When a customer tells the agent something that would help with other customers and the
+   knowledge base doesn't say it yet (how a product fits, a workaround for a problem with the website), it proposes one
+   short, general fact. It's told to leave out names, email addresses, order numbers, and amounts, and the runtime
+   filters secrets out before asking.
+2. **You decide.** The proposal waits in the **Team knowledge** panel and on the customer's tile with **Add** and
+   **×**; the customer's page shows the whole fact and where it came from. Unlike a refund, it doesn't hold up the
+   conversation: the agent carries on helping the customer and never hears your decision, so adding or declining a
+   fact changes nothing the customer sees.
+3. **Later conversations start from it.** An added fact appears in the **Team knowledge** panel, with the
+   conversation it came from, and every session created or reopened afterwards has it in its instructions, so the
+   agents answer from it instead of rediscovering it, and don't propose it again. Remove a fact with the trash icon;
+   sessions created or reopened from then on aren't told it.
+
+### Try it
+
+Two of the simulated customers are set up for this. Noah, among the first 5, cancels his Ridgeline Hiking Boots and
+mentions in passing that they run a full size small. Emma, among the first 10, asks which size of the same boots to
+order. Nobody asks the agent to remember anything.
+
+1. Start with an empty **Team knowledge** panel (remove any facts in it) and **Simulate 10**. Emma's agent can't
+   help with her size: it points her to the size chart. Within seconds, Noah's tile shows a proposed fact, such as
+   *Ridgeline Hiking Boots run a full size small.*
+2. **Add** the fact, and approve or decline Noah's cancellation, in either order. The fact moves into the **Team
+   knowledge** panel's list, linked to Noah's conversation.
+3. **Simulate 10** again. This time Emma's agent tells her straight away to order a size 9 because the boots run
+   small, and Noah's agent doesn't propose the fact again.
+
+With **Simulate 5**, Noah proposes the fact the same way; Emma joins from **Simulate 10**. The agents choose what to
+propose, so another customer's agent can occasionally propose something too: decline what isn't worth keeping.
+
+The knowledge base outlives simulations and restarts: it's kept in `knowledge.json` in Help Desk's data directory.
+
+## Ticket classification (optional)
+
+In a rush you want to see at a glance what people are asking for before any agent has answered. With classification
+turned on, every customer message is classified as a delivery, refund, cancellation, order change, website problem, or
+question, and as urgent or not. The wall then groups tickets by category, urgent ones first with a flame. A
+classification takes a fraction of a second and a few dozen tokens, so it's cheap enough to run on every message,
+while the customers' own sessions answer on a bigger model.
+
+The classifier is [Microsoft-Decision-1](https://learn.microsoft.com/azure/foundry/foundry-models/how-to/use-foundry-models-microsoft-decision)
+on Microsoft Foundry, a decision model rather than a chat model: it takes a text and typed questions, and answers each
+with a choice and its probability. It still runs in stock Copilot sessions:
+
+1. The AppHost declares an OpenAI-compatible endpoint (spec section 15) at Help Desk's own
+   `/api/triage/v1/chat/completions`, and a second shared environment, `help-desk-triage`, routed to it.
+2. For each customer message, Help Desk asks a session in `help-desk-triage` with the SDK's structured output:
+   `session.sendAndWait(message, schema)`, where the schema is `{ category: enum, urgent: boolean }`.
+3. The platform's runtime sends that as a chat completion request. Help Desk's endpoint
+   ([`triage-endpoint.ts`](src/server/triage-endpoint.ts)) turns the schema into the decision model's questions (an
+   enum is a `choice`, a boolean a yes-or-no `noul`), with the instructions from the system message, and the last user
+   message as the state. It calls Foundry's decision API as your Azure CLI sign-in
+   ([`decision.ts`](src/server/decision.ts)) and answers with JSON that matches the schema.
+
+The endpoint accepts nothing else: a streaming request, a request without a JSON schema, or a schema property that
+isn't an enum or a boolean gets a 400. A few classifier sessions (`hdt-…`) are reused, and replaced after 50
+classifications since they keep their history.
+
+To see how fast it is, click **Classify** next to **Simulate**. It classifies the first 5, 10, or 25 customers' first
+messages (whatever is picked for Simulate) without starting their support sessions. The wall groups them by category
+as the results arrive, then shows the total time, for example *25 classified in 1.2s*. Compare that with how long
+the support sessions take to write their first replies. Classify is only there when classification is set up, and
+it's disabled during a simulation; starting a simulation clears its results. A second Classify replaces the first.
+
+Turn it on (local only, with `aspire run`):
+
+1. In the [Foundry portal](https://ai.azure.com), deploy **Microsoft-Decision-1** in a Foundry resource. Note the
+   resource's endpoint (`https://<resource>.services.ai.azure.com`) and the deployment's name.
+2. Give yourself the **Cognitive Services User** role on that Foundry resource (Access control (IAM) in the Azure
+   portal). It can take a few minutes to apply.
+3. Sign in with `az login`. Help Desk gets a token for `https://cognitiveservices.azure.com` from the Azure CLI; no key
+   is used.
+4. In the repository root, tell the AppHost about the deployment, then run `aspire run`:
+
+   ```powershell
+   aspire secret set Parameters:help-desk-decision-endpoint https://<resource>.services.ai.azure.com
+   aspire secret set Parameters:help-desk-decision-deployment <deployment>
+   aspire secret set Parameters:help-desk-decision-subscription <subscription-id>   # when it isn't the Azure CLI's default
+   ```
+
+   None of these are secrets. The AppHost then adds the `help-desk-triage` environment and the endpoint, and generates
+   the key the platform uses to call Help Desk's endpoint.
+
+To turn it off, remove the settings with `aspire secret delete Parameters:help-desk-decision-endpoint` (and the
+others). Without them, Help Desk works exactly as before, and the wall says classification isn't set up. If a
+classification fails (no role yet, a missing deployment, throttling), the wall says why and the tickets carry on
+unclassified; the customers' sessions don't depend on it. `aspire deploy` refuses these settings, because a deployed
+Help Desk has no Azure identity to call Foundry with.
+
 ## How it works
 
 - **One shared environment.** [`apphost.mts`](apphost.mts) declares `help-desk`: `type: "shared"` with network off,
@@ -135,6 +232,16 @@ panel still lists the issues, and **Send to Software Factory** says why it's una
   `cancel_order` until the operator answers, then resolves it with `approve-once` or `reject` (the agent is told a team
   member will follow up). If the turn ends some other way, Help Desk lets go when `permission.completed` or the turn's
   end arrives.
+- **Memories are stored by the app.** Sessions set the SDK's `memory.storeMemory` (experimental in SDK 1.0.31) and
+  allow `builtin:store_memory`. The runtime validates a proposed memory, filters secrets, and asks the permission
+  handler (a `memory` request). Help Desk approves it at once and its `storeMemory` saves the fact as a proposal in
+  [`knowledge.ts`](src/server/knowledge.ts); the operator adds or declines it later, outside the turn. The memory
+  isn't held like a refund because on runtime 1.0.109 rejecting one permission request fails the others pending from
+  the same step: declining a fact would also fail a cancellation the agent asked for alongside it, and the agent would
+  reply to the customer about it. With
+  `storeMemory` set, the runtime recalls no memories itself, so Help Desk puts the knowledge base in each session's
+  system message. The gateway allows memory in a shared environment only on these terms: the app stores it, and no
+  session's memory is kept in the shared runtime.
 - **The wall is projected from the sessions' events.** Messages (streamed), tool calls, and approvals come from the
   stock session events; a call refused for an order of another customer is marked **Blocked**. The agent marks a
   conversation **Resolved** with a `resolve_conversation` tool, and a completed `report_bug` call is the ticket's
@@ -159,19 +266,25 @@ panel still lists the issues, and **Send to Software Factory** says why it's una
 | `MANAGED_COPILOT_URL` | local discovery | Gateway URL (Aspire sets it) |
 | `HELP_DESK_ENVIRONMENT` | `help-desk` | The shared environment customers' sessions are created in |
 | `HELP_DESK_MODEL` | first available of Claude Haiku 4.5, Claude Haiku 5.5, GPT-5.6 Luna, Claude Sonnet 5 | The customers' agents' model |
+| `HELP_DESK_DATA_DIR` | `.data` (in `demos/help-desk`); `/data` in the container | Where the team knowledge base (`knowledge.json`) is kept |
 | `HELP_DESK_ALLOWED_HOSTS` | none | Extra host names allowed to address the server (it accepts loopback names only by default) |
 | `SOFTWARE_FACTORY_URL` | none (the root AppHost sets it) | Software Factory's API, which Help Desk's server calls to send software issues. Unset: **Send to Software Factory** is unavailable and says why |
 | `SOFTWARE_FACTORY_PUBLIC_URL` | `SOFTWARE_FACTORY_URL` | Software Factory's address for people: the links to its work orders |
+| `HELP_DESK_TRIAGE_ENVIRONMENT` | none (the root AppHost sets it with classification on) | The shared environment that classifies tickets. Unset: classification is off |
+| `HELP_DESK_TRIAGE_MODEL` | none | The classifier's model in that environment; required with `HELP_DESK_TRIAGE_ENVIRONMENT` |
+| `HELP_DESK_DECISION_ENDPOINT`, `HELP_DESK_DECISION_DEPLOYMENT` | none | The Foundry resource and Microsoft-Decision-1 deployment Help Desk's endpoint calls. Unset, or without `HELP_DESK_TRIAGE_KEY`: the endpoint answers 503 |
+| `HELP_DESK_DECISION_SUBSCRIPTION` | the Azure CLI's default | The subscription the Azure CLI gets its token for |
+| `HELP_DESK_TRIAGE_KEY` | none | The key the platform presents to Help Desk's endpoint (a secret the AppHost generates) |
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `apphost.mts` | AppHost fragment: the `help-desk` shared environment and the app resource |
-| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, software issues and the Software Factory client, REST and server-sent events |
+| `apphost.mts` | AppHost fragment: the `help-desk` shared environment, the optional `help-desk-triage` environment and its endpoint, and the app resource |
+| `src/server` | Platform connection, the store and its tools, one ticket (session) per customer, the event projection, the team knowledge base, software issues and the Software Factory client, REST and server-sent events |
 | `src/scripts` | The happy-path script |
 | `src/shared` | Types shared with the UI |
 | `src/web` | The UI (React, Tailwind, and GitHub's Primer look from [`libraries/github-theme`](../../libraries/github-theme); light and dark follow the OS) |
 | `storefront` | The Contoso Outdoors website's code (Node, no dependencies, `node --test`), with the bugs customers report: the project a software issue's work order asks Software Factory to fix |
-| `test` | Unit tests: the store, the tools, the projection, simulations and approvals against an in-memory platform, software issues against an in-memory Software Factory, the factory client, the API, the storefront, and the fragment |
+| `test` | Unit tests: the store, the tools, the projection, simulations, approvals, and proposed memories against an in-memory platform, the knowledge base, software issues against an in-memory Software Factory, the factory client, the API, the storefront, and the fragment |
 | `Dockerfile` | The container `aspire deploy` publishes |

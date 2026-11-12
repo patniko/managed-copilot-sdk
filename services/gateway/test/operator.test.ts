@@ -241,7 +241,7 @@ describe("operator API and console", () => {
 
     const infrastructure = (await call(OPERATOR_ROUTES.infrastructure, { token: ALICE })).json as unknown as OperatorInfrastructure;
     expect(infrastructure.gateway).toMatchObject({ mode: "local", operators: { githubUsers: ["alice"], githubOrgs: ["ops-team"], localDefault: false }, access: { open: true } });
-    expect(infrastructure.gateway.modules).toEqual(["core", "foundry", "sandbox", "network", "durable", "attach", "promotion", "orchestrator", "operator"]);
+    expect(infrastructure.gateway.modules).toEqual(["core", "foundry", "openai", "sandbox", "network", "durable", "attach", "promotion", "orchestrator", "operator"]);
     expect(infrastructure.runtime).toMatchObject({ state: "running", external: true, version: expect.any(String) });
     expect(infrastructure.sandboxes).toMatchObject({ provider: "docker", available: false, lastError: expect.stringMatching(/Docker/) });
     expect(infrastructure.egress).toMatchObject({ mode: "off", connected: false, registrations: 0 });

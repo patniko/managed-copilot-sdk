@@ -45,7 +45,9 @@ describe("a simulation", () => {
     expect(run.size).toBe(5);
     expect(platform.created.map((config) => config.sessionId)).toEqual(["c01", "c02", "c03", "c04", "c05"].map((id) => sessionIdFor(run.id, id)));
     const liam = platform.created[1]!;
-    expect(liam).toMatchObject({ model: "claude-haiku-4.5", streaming: true, availableTools: ["custom:*"] });
+    expect(liam).toMatchObject({ model: "claude-haiku-4.5", streaming: true, availableTools: ["custom:*", "builtin:store_memory"], memory: { enabled: true } });
+    expect(liam.memory?.storeMemory).toBeTypeOf("function");
+    expect(liam.systemMessage?.content).toContain("Team knowledge base:");
     expect(liam.tools?.map((tool) => tool.name)).toHaveLength(7);
     expect(liam.systemMessage?.content).toContain("chatting with Liam");
     expect(platform.sessions.get(sessionIdFor(run.id, "c02"))?.sent).toEqual([{ prompt: "Can you check the status of order CO-48177?" }]);
@@ -96,6 +98,63 @@ describe("a simulation", () => {
     await settle();
     desk.answer("c04", "call-2", false);
     expect(await cancel).toMatchObject({ kind: "reject", feedback: expect.stringContaining("declined") });
+  });
+
+  it("keeps a proposed memory for the operator without holding the turn, and adds an approved one to the team knowledge every later session gets", async () => {
+    const { desk, platform, events } = setup();
+    const run = await simulate(desk, platform);
+    const maya = platform.sessions.get(sessionIdFor(run.id, "c01"))!;
+    const proposal = { subject: "Weather holds", fact: "UPS weather holds in Denver usually clear within 48 hours.", citations: "Tracking for a delayed tent" };
+    // The runtime's permission is granted at once: the agent's turn never waits for the team's decision.
+    expect(await maya.ask({ kind: "memory", action: "store", toolCallId: "mem-1", ...proposal })).toEqual({ kind: "approve-once" });
+    await maya.config.memory!.storeMemory!({ sessionId: maya.sessionId, ...proposal, reason: "Saves a lookup" }, { signal: new AbortController().signal });
+    await settle();
+    const memory = desk.ticket("c01").memory!;
+    expect(memory).toMatchObject({ ...proposal, reason: "Saves a lookup", source: { customerId: "c01", name: "Maya Chen", sessionId: maya.sessionId } });
+    expect(desk.ticket("c01").status).not.toBe("approval");
+    expect(desk.knowledge.list()).toEqual([]);
+    expect(events.filter((published) => published.type === "knowledge").at(-1)).toMatchObject({ knowledge: [], proposals: [{ id: memory.id }] });
+
+    desk.answer("c01", memory.id, true);
+    expect(desk.ticket("c01").memory).toBeUndefined();
+    expect(desk.knowledge.list()).toMatchObject([{ subject: "Weather holds", fact: proposal.fact, reason: "Saves a lookup", source: { customerId: "c01" } }]);
+    expect(events.filter((published) => published.type === "knowledge").at(-1)).toMatchObject({ knowledge: [{ subject: "Weather holds" }], proposals: [] });
+    expect(() => desk.answer("c01", memory.id, true)).toThrow(HelpDeskError);
+
+    const next = await simulate(desk, platform, 5);
+    const later = () => platform.created.find((config) => config.sessionId === sessionIdFor(next.id, "c05"));
+    for (let tries = 0; tries < 50 && !later(); tries++) await settle(5);
+    expect(later()?.systemMessage?.content).toContain("Weather holds: UPS weather holds in Denver usually clear within 48 hours.");
+
+    const id = desk.knowledge.list()[0]!.id;
+    desk.forget(id);
+    expect(desk.knowledge.list()).toEqual([]);
+    expect(() => desk.forget(id)).toThrow(HelpDeskError);
+  });
+
+  it("declines a proposed memory without the agent's session hearing anything", async () => {
+    const { desk, platform } = setup();
+    const run = await simulate(desk, platform);
+    const noah = platform.sessions.get(sessionIdFor(run.id, "c04"))!;
+    // The cancellation and the memory come in the same step; the cancellation waits for the operator.
+    const cancel = noah.ask({ kind: "custom-tool", toolName: "cancel_order", toolCallId: "call-1", args: { orderId: "CO-48231" } }) as Promise<PermissionRequestResult>;
+    expect(await noah.ask({ kind: "memory", action: "store", toolCallId: "mem-1", subject: "Boots", fact: "Ridgeline boots run small." })).toEqual({ kind: "approve-once" });
+    await noah.config.memory!.storeMemory!({ sessionId: noah.sessionId, subject: "Boots", fact: "Ridgeline boots run small.", citations: "", reason: "" }, { signal: new AbortController().signal });
+    await settle();
+    const ticket = desk.ticket("c04");
+    expect(ticket).toMatchObject({ status: "approval", approval: { id: "call-1", action: "cancel" }, memory: { subject: "Boots" } });
+
+    desk.answer("c04", ticket.memory!.id, false);
+    expect(desk.ticket("c04")).toMatchObject({ status: "approval", approval: { id: "call-1" } });
+    expect(desk.ticket("c04").memory).toBeUndefined();
+    expect(desk.knowledge.list()).toEqual([]);
+    let settled = false;
+    void cancel.then(() => (settled = true));
+    await settle();
+    expect(settled).toBe(false);
+    desk.answer("c04", "call-1", true);
+    expect(await cancel).toEqual({ kind: "approve-once", approvedInteractively: true });
+    await expect(noah.config.memory!.storeMemory!({ sessionId: noah.sessionId, subject: " ", fact: "x", citations: "", reason: "" }, { signal: new AbortController().signal })).rejects.toThrow();
   });
 
   it("lets the store refuse a request no one needs to see", async () => {

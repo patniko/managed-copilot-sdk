@@ -71,12 +71,13 @@ export type EnvironmentSelector = string | EnvironmentDescriptor;
 
 /**
  * Options for `managed.client(...)`. These are defaults for every session the client creates; callers can add
- * permitted setup and narrow permissions, never broaden them.
+ * permitted setup and narrow permissions, never broaden them. `network` is the environment's network rules here, not
+ * the stock client's proxy callbacks: the platform owns the runtime's networking.
  */
 export interface ManagedClientOptions
   extends Omit<
     CopilotClientOptions,
-    "connection" | "gitHubToken" | "useLoggedInUser" | "baseDirectory" | "workingDirectory" | "sessionFs" | "requestHandler" | "env" | "mode"
+    "connection" | "gitHubToken" | "useLoggedInUser" | "baseDirectory" | "workingDirectory" | "sessionFs" | "requestHandler" | "env" | "mode" | "network"
   > {
   /** Act as this GitHub user, e.g. a backend serving signed-in users. Ownership binds to that account. */
   gitHubToken?: string;

@@ -18,7 +18,7 @@ const execAsync = promisify(exec);
 export const CANONICAL_BASE_IMAGE = "ghcr.io/patniko/managed-copilot-sandbox:0.1.0";
 /** Label present on every image derived from the base (inherited by `FROM`). */
 export const BASE_LABEL = "managed-copilot.copilot-sdk";
-const COPILOT_SDK_VERSION = "1.0.26";
+const COPILOT_SDK_VERSION = "1.0.31";
 const SYSTEM_PACKAGE = /^[a-z0-9][a-z0-9+.-]*(=[A-Za-z0-9.+:~-]+)?$/;
 
 export interface ImageRef {

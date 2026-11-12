@@ -1,9 +1,9 @@
-import { BugIcon, CopilotIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
+import { BugIcon, CopilotIcon, FlameIcon, LightBulbIcon, ShieldIcon, ShieldLockIcon, XIcon } from "@primer/octicons-react";
 import { BUG_AREA_INFO, type BugReport, type CustomerCard, type Ticket, type ToolItem } from "../../shared/types.js";
 import { cx } from "../lib/cx.js";
 import { latestMessage, money, plainText, WORK_ORDER_STATUS, workOrderLine } from "../lib/format.js";
 import { customerHref } from "../lib/router.js";
-import { answer, useStore } from "../lib/store.js";
+import { answer, decide, useStore } from "../lib/store.js";
 import { CustomerAvatar, StatusLabel, TONE_TEXT } from "./ui/Status.js";
 import { Tooltip } from "./ui/Tooltip.js";
 
@@ -14,7 +14,15 @@ const TILE = "h-[112px] min-w-0 p-3";
 export function Tile({ customer, ticket }: { readonly customer: CustomerCard; readonly ticket: Ticket }) {
   const latest = latestMessage(ticket);
   const bug = ticket.bug;
-  const bar = ticket.approval ? <ApprovalBar customerId={customer.id} ticket={ticket} /> : ticket.blocked > 0 ? <Blocked ticket={ticket} /> : bug ? <IssueMarker bug={bug} /> : null;
+  const bar = ticket.approval ? (
+    <ApprovalBar customerId={customer.id} ticket={ticket} />
+  ) : ticket.memory ? (
+    <MemoryBar customerId={customer.id} ticket={ticket} />
+  ) : ticket.blocked > 0 ? (
+    <Blocked ticket={ticket} />
+  ) : bug ? (
+    <IssueMarker bug={bug} />
+  ) : null;
   return (
     <article
       data-ticket={customer.id}
@@ -30,7 +38,12 @@ export function Tile({ customer, ticket }: { readonly customer: CustomerCard; re
         <a href={customerHref(customer.id)} className="tile-link min-w-0 flex-1 truncate text-sm font-semibold text-fg" title={customer.name}>
           {customer.name}
         </a>
-        {bug && (ticket.approval || ticket.blocked > 0) ? (
+        {ticket.triage?.state === "done" && ticket.triage.urgent ? (
+          <Tooltip content="Urgent, by the decision model" className="relative z-10 shrink-0">
+            <FlameIcon size={14} className="text-fg-severe" aria-label="Urgent" />
+          </Tooltip>
+        ) : null}
+        {bug && (ticket.approval || ticket.memory || ticket.blocked > 0) ? (
           // The bar below is taken: the software issue shows as an icon.
           <Tooltip content={`Software issue: ${bug.title}`} className="relative z-10 shrink-0">
             <BugIcon size={14} className="text-fg-done" aria-label="Software issue" />
@@ -63,6 +76,30 @@ function ApprovalBar({ customerId, ticket }: { readonly customerId: string; read
         </button>
         <Tooltip content="Decline">
           <button type="button" className="btn btn-sm btn-icon" aria-label={`Decline ${what.toLowerCase()} of ${approval.orderId}`} disabled={busy} onClick={() => void answer(customerId, approval.id, false)}>
+            <XIcon size={16} />
+          </button>
+        </Tooltip>
+      </span>
+    </>
+  );
+}
+
+/** The agent proposed a fact for the team knowledge base: the operator adds it or not. */
+function MemoryBar({ customerId, ticket }: { readonly customerId: string; readonly ticket: Ticket }) {
+  const memory = ticket.memory!;
+  const busy = useStore((state) => Boolean(state.answering[memory.id]));
+  return (
+    <>
+      <LightBulbIcon size={14} className="shrink-0 text-fg-attention" />
+      <span className="min-w-0 truncate font-semibold" title={`Proposed for team knowledge: ${memory.subject}: ${memory.fact}`}>
+        {memory.subject}
+      </span>
+      <span className="relative z-10 ml-auto flex shrink-0 items-center gap-1">
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void decide(memory.id, true)}>
+          Add
+        </button>
+        <Tooltip content="Don't add">
+          <button type="button" className="btn btn-sm btn-icon" aria-label={`Don't add "${memory.subject}" to team knowledge`} disabled={busy} onClick={() => void decide(memory.id, false)}>
             <XIcon size={16} />
           </button>
         </Tooltip>
@@ -104,7 +141,7 @@ function IssueMarker({ bug }: { readonly bug: BugReport }) {
 }
 
 /** A customer before the simulation reaches them: their question, waiting. */
-export function GhostTile({ customer, queued }: { readonly customer: CustomerCard; readonly queued: boolean }) {
+export function GhostTile({ customer, queued, urgent = false }: { readonly customer: CustomerCard; readonly queued: boolean; readonly urgent?: boolean }) {
   return (
     <article className={cx("flex flex-col rounded-md border border-dashed border-line transition-opacity", TILE, !queued && "opacity-40")}>
       <div className="flex min-w-0 items-center gap-2">
@@ -112,6 +149,11 @@ export function GhostTile({ customer, queued }: { readonly customer: CustomerCar
         <span className="min-w-0 flex-1 truncate text-sm font-semibold text-fg-muted" title={customer.name}>
           {customer.name}
         </span>
+        {urgent ? (
+          <Tooltip content="Urgent, by the decision model" className="shrink-0">
+            <FlameIcon size={14} className="text-fg-severe" aria-label="Urgent" />
+          </Tooltip>
+        ) : null}
       </div>
       <p className="mt-2 line-clamp-2 text-sm text-fg-muted" title={customer.opening}>
         {customer.opening}

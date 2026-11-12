@@ -44,6 +44,7 @@ describe("words on the wall", () => {
     expect(operatorOutcome(tool({ name: "track_shipment", result: { carrier: "UPS", status: "in transit" } }))).toEqual({ text: "UPS · in transit", tone: "success" });
     expect(operatorOutcome(tool({ name: "request_refund", result: { refunded: 24 } }))).toEqual({ text: "$24.00 refunded", tone: "success" });
     expect(operatorOutcome(tool({ status: "asking" }))).toEqual({ text: "Needs approval", tone: "attention" });
+    expect(operatorOutcome(tool({ name: "store_memory", args: { subject: "Boots" } }))).toEqual({ text: "Proposed to the team", tone: "muted" });
     expect(toolArgs(tool({ args: { orderId: "co-1", amount: 5 } }))).toBe("CO-1 · $5.00");
   });
 
@@ -86,6 +87,9 @@ describe("store", () => {
     tickets: {},
     issues: [],
     counters: { sessions: 0, runtimes: 0, sandboxes: 0, messages: 0, premiumRequests: 0 },
+    knowledge: [],
+    proposals: [],
+    forgetting: {},
     size: 25,
     answering: {},
     routing: {},
@@ -102,6 +106,13 @@ describe("store", () => {
     expect(ended.run).toBeUndefined();
     expect(ended.tickets).toEqual({});
     expect(ended.issues).toEqual([]);
+  });
+
+  it("follows Classify's results until a simulation clears them", () => {
+    const classification = { id: "k1", size: 5, startedAt: "", results: { c01: { state: "done" as const, category: "refund" as const, urgent: true } }, elapsedMs: 840 };
+    const classified = reduce(base, { type: "classification", classification });
+    expect(classified.classification).toEqual(classification);
+    expect(reduce(classified, { type: "classification" }).classification).toBeUndefined();
   });
 
   it("updates a ticket of the current simulation and drops late updates of an ended one", () => {
